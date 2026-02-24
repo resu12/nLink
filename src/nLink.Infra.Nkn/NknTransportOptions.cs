@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 
@@ -51,7 +52,58 @@ internal sealed class NknTransportOptions
         }
 
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        return Path.Combine(localAppData, "nLink", "identity.json");
+        var defaultPath = Path.Combine(localAppData, "nLink", "identity.json");
+
+        if (!ShouldUsePerProcessLocalIdentity())
+        {
+            return defaultPath;
+        }
+
+        var directory = Path.GetDirectoryName(defaultPath)!;
+        var fileName = $"identity.instance-{Environment.ProcessId}.json";
+        return Path.Combine(directory, fileName);
+    }
+
+    private static bool ShouldUsePerProcessLocalIdentity()
+    {
+        try
+        {
+            using var current = Process.GetCurrentProcess();
+            var processName = current.ProcessName;
+            if (string.IsNullOrWhiteSpace(processName))
+            {
+                return false;
+            }
+
+            var others = Process.GetProcessesByName(processName);
+            try
+            {
+                foreach (var process in others)
+                {
+                    try
+                    {
+                        if (process.Id != current.Id)
+                        {
+                            return true;
+                        }
+                    }
+                    finally
+                    {
+                        process.Dispose();
+                    }
+                }
+            }
+            finally
+            {
+                Array.Clear(others, 0, others.Length);
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static string? FirstNonEmpty(params string?[] values)

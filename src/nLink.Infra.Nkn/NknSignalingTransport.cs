@@ -80,6 +80,10 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
     public event EventHandler? Disconnected;
 
+    public event EventHandler? RemoteSessionEnded;
+
+    public bool CanSendSessionEnd => !disposed && currentCode is not null && !string.IsNullOrWhiteSpace(remoteEndpoint);
+
     public void Dispose()
     {
         if (disposed)
@@ -263,6 +267,31 @@ public sealed class NknSignalingTransport : ISignalingTransport
         Log($"SendChatMessageAsync sent Chat with Ack (payload_len={payload.Length}, msg_id={envelope.MessageId})");
     }
 
+    public async Task SendSessionEndAsync(CancellationToken ct)
+    {
+        ThrowIfDisposed();
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        if (currentCode is null || string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            return;
+        }
+
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new SessionEndPayload
+        {
+            reason = "user_exit",
+        });
+
+        var envelope = CreateEnvelope(currentCode.Value.Digits, MsgType.SessionEnd, payload, replyTo: null);
+        await SendEnvelopeAsync(remoteEndpoint, envelope, ct);
+        Log($"SendSessionEndAsync sent SessionEnd (msg_id={envelope.MessageId})");
+    }
+
     private void SubscribeClientEvents()
     {
         client.MessageReceived += OnClientMessageReceived;
@@ -358,6 +387,9 @@ public sealed class NknSignalingTransport : ISignalingTransport
                     break;
                 case MsgType.Ack:
                     HandleAck(e.Source, env);
+                    break;
+                case MsgType.SessionEnd:
+                    HandleSessionEnd(e.Source, env);
                     break;
                 default:
                     NknRuntimeDiagnostics.SetLastError("unexpected_message_type");
@@ -578,6 +610,17 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
         ChatMessageReceived?.Invoke(this, new TransportChatMessageEventArgs(env.Payload));
         Log($"Chat dispatched (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+    }
+
+    private void HandleSessionEnd(string source, Envelope env)
+    {
+        if (!string.IsNullOrWhiteSpace(source))
+        {
+            SendAckFireAndForget(source, env.Code, env.MessageId);
+        }
+
+        Log($"SessionEnd dispatched (msg_id={env.MessageId})");
+        RemoteSessionEnded?.Invoke(this, EventArgs.Empty);
     }
 
     private void HandleAck(string source, Envelope env)
@@ -1343,6 +1386,11 @@ public sealed class NknSignalingTransport : ISignalingTransport
     private sealed class ApprovePayload
     {
         public string? helpeeEcdhPublicKey { get; set; }
+    }
+
+    private sealed class SessionEndPayload
+    {
+        public string? reason { get; set; }
     }
 
     private sealed class PendingJoinRequestState

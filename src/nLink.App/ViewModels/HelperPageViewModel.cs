@@ -12,12 +12,14 @@ using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
 
-public sealed class HelperPageViewModel : ViewModelBase, IDisposable
+public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanelBindings
 {
+    private static readonly TimeSpan DefaultConnectFailureCooldown = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan DefaultApprovalTimeout = TimeSpan.FromSeconds(20);
+
     private readonly Action cancelAction;
     private readonly TransportRuntimeConfig transportConfig;
-    private readonly Func<ISignalingTransport> signalingTransportFactory;
-    private readonly SessionChatService chatService = new();
+    private readonly SessionRuntime sessionRuntime;
     private readonly IClipboardService? clipboardService;
     private readonly ShareMessageConfig shareMessageConfig;
 
@@ -27,38 +29,55 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
     private string chatDraft = string.Empty;
     private bool isConnecting;
     private bool showChatNotice;
+    private bool showCopyFeedback;
+    private string copyFeedbackText = string.Empty;
     private CancellationTokenSource? connectCts;
-    private ISignalingTransport? joinTransport;
+    private CancellationTokenSource? copyFeedbackResetCts;
+    private readonly Func<DateTimeOffset> nowProvider;
+    private readonly TimeSpan connectFailureCooldown;
+    private readonly TimeSpan approvalTimeout;
+    private DateTimeOffset lastFailedAttemptUtc = DateTimeOffset.MinValue;
+    private TaskCompletionSource<HelperConnectOutcome>? connectOutcome;
     private SessionReliabilityAttempt? reliabilityAttempt;
     private bool disposed;
 
     public HelperPageViewModel(
         Action cancelAction,
         TransportRuntimeConfig transportConfig,
+        SessionRuntime sessionRuntime,
         IClipboardService? clipboardService = null,
-        ShareMessageConfig? shareMessageConfig = null)
+        ShareMessageConfig? shareMessageConfig = null,
+        TimeSpan? approvalTimeout = null,
+        TimeSpan? connectFailureCooldown = null,
+        Func<DateTimeOffset>? nowProvider = null)
     {
         this.cancelAction = cancelAction;
         this.transportConfig = transportConfig;
+        this.sessionRuntime = sessionRuntime;
         this.clipboardService = clipboardService;
         this.shareMessageConfig = shareMessageConfig ?? new ShareMessageConfig(null);
-        signalingTransportFactory = transportConfig.CreateTransport;
+        this.approvalTimeout = approvalTimeout ?? DefaultApprovalTimeout;
+        this.connectFailureCooldown = connectFailureCooldown ?? DefaultConnectFailureCooldown;
+        this.nowProvider = nowProvider ?? (() => DateTimeOffset.UtcNow);
 
         ChatMessages = new ObservableCollection<ChatLineViewModel>();
 
-        chatService.MessageReceived += OnChatMessageReceived;
-        chatService.MessageReceivedBeforeApproved += OnChatMessageReceivedBeforeApproved;
-        chatService.StateChanged += OnChatStateChanged;
+        sessionRuntime.StateChanged += OnSessionRuntimeStateChanged;
+        sessionRuntime.Approved += OnApproved;
+        sessionRuntime.Rejected += OnRejected;
+        sessionRuntime.Disconnected += OnDisconnected;
+        sessionRuntime.ChatMessageReceived += OnChatMessageReceived;
+        sessionRuntime.ChatMessageReceivedBeforeApproved += OnChatMessageReceivedBeforeApproved;
+        sessionRuntime.ChatStateChanged += OnChatStateChanged;
 
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
-        ShowShareOptionsCommand = new RelayCommand(RequestShareOptionsDialog);
         CopyInstallMessageCommand = new AsyncRelayCommand(CopyInstallMessageAsync);
         SendFileCommand = new RelayCommand(RequestSendFileWindow);
         SendChatCommand = new AsyncRelayCommand(SendChatAsync, CanSendChat);
         CancelCommand = new RelayCommand(CancelAndGoBack);
     }
 
-    public string PageTitle => "I want to help someone";
+    public string PageTitle => "Enter the 6-digit code";
 
     public string CodeInput
     {
@@ -91,7 +110,15 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
     public string ConnectionState
     {
         get => connectionState;
-        private set => SetProperty(ref connectionState, value);
+        private set
+        {
+            if (SetProperty(ref connectionState, value))
+            {
+                OnPropertyChanged(nameof(IsConnectedView));
+                OnPropertyChanged(nameof(ShowChatPanel));
+                OnPropertyChanged(nameof(ShowChatConnectionHint));
+            }
+        }
     }
 
     public bool IsConnecting
@@ -112,13 +139,15 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
 
     public ObservableCollection<ChatLineViewModel> ChatMessages { get; }
 
-    public bool ShowChatPanel => SessionCode.TryParse(CodeInput, out _) || ChatMessages.Count > 0;
+    public bool IsConnectedView => ConnectionState == "Connected";
+
+    public bool ShowChatPanel => IsConnectedView;
 
     public bool ShowStatusText => !string.IsNullOrWhiteSpace(StatusText);
 
     public string ChatPanelTitle => "Message";
 
-    public bool ShowChatConnectionHint => ShowChatPanel && ConnectionState != "Connected";
+    public bool ShowChatConnectionHint => false;
 
     public string ChatConnectionHintText => "Waiting for connection...";
 
@@ -142,11 +171,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
 
     public string ChatNoticeText => "You received a message";
 
-    public bool IsChatReady => chatService.CanSend;
+    public bool IsChatReady => sessionRuntime.CanSendChat;
 
     public IAsyncRelayCommand ConnectCommand { get; }
-
-    public IRelayCommand ShowShareOptionsCommand { get; }
 
     public IAsyncRelayCommand CopyInstallMessageCommand { get; }
 
@@ -158,7 +185,17 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
 
     public event EventHandler? SendFileRequested;
 
-    public event EventHandler? ShareOptionsRequested;
+    public bool ShowCopyFeedback
+    {
+        get => showCopyFeedback;
+        private set => SetProperty(ref showCopyFeedback, value);
+    }
+
+    public string CopyFeedbackText
+    {
+        get => copyFeedbackText;
+        private set => SetProperty(ref copyFeedbackText, value);
+    }
 
     public void Dispose()
     {
@@ -169,17 +206,22 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
 
         disposed = true;
 
-        chatService.MessageReceived -= OnChatMessageReceived;
-        chatService.MessageReceivedBeforeApproved -= OnChatMessageReceivedBeforeApproved;
-        chatService.StateChanged -= OnChatStateChanged;
-        chatService.SetReliabilityAttempt(null);
-        chatService.Dispose();
-
-        CleanupJoinTransport();
+        sessionRuntime.StateChanged -= OnSessionRuntimeStateChanged;
+        sessionRuntime.Approved -= OnApproved;
+        sessionRuntime.Rejected -= OnRejected;
+        sessionRuntime.Disconnected -= OnDisconnected;
+        sessionRuntime.ChatMessageReceived -= OnChatMessageReceived;
+        sessionRuntime.ChatMessageReceivedBeforeApproved -= OnChatMessageReceivedBeforeApproved;
+        sessionRuntime.ChatStateChanged -= OnChatStateChanged;
+        sessionRuntime.SetReliabilityAttempt(null);
+        _ = sessionRuntime.ResetAsync();
 
         connectCts?.Cancel();
         connectCts?.Dispose();
         connectCts = null;
+        copyFeedbackResetCts?.Cancel();
+        copyFeedbackResetCts?.Dispose();
+        copyFeedbackResetCts = null;
     }
 
     private bool CanConnect()
@@ -189,14 +231,19 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
 
     private bool CanSendChat()
     {
-        return !string.IsNullOrWhiteSpace(ChatDraft) && chatService.CanSend;
+        return !string.IsNullOrWhiteSpace(ChatDraft) && sessionRuntime.CanSendChat;
     }
 
     private async Task ConnectAsync()
     {
+        if (IsInFailureCooldown())
+        {
+            return;
+        }
+
         if (!SessionCode.TryParse(CodeInput, out var code))
         {
-            StatusText = "Enter a valid 6-digit code.";
+            StatusText = UserErrorMapper.HelperInvalidCode();
             ConnectionState = "InvalidCode";
             OnPropertyChanged(nameof(ShowChatConnectionHint));
             return;
@@ -206,15 +253,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
         connectCts?.Dispose();
         connectCts = new CancellationTokenSource();
         reliabilityAttempt = SessionReliabilityLog.StartAttempt("Helper", transportConfig.Key);
-        chatService.SetReliabilityAttempt(reliabilityAttempt);
+        sessionRuntime.SetReliabilityAttempt(reliabilityAttempt);
         LogReliability(SessionReliabilityStage.DiscoveryStarted);
 
-        CleanupJoinTransport();
-        joinTransport = signalingTransportFactory();
-        chatService.AttachTransport(joinTransport);
-        joinTransport.Approved += OnApproved;
-        joinTransport.Rejected += OnRejected;
-        joinTransport.Disconnected += OnDisconnected;
+        await sessionRuntime.ResetAsync();
 
         AppLog.Info($"Helper join requested using {transportConfig.Key} with code {code.Digits}");
 
@@ -222,45 +264,52 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
         StatusText = "Waiting for permission...";
         ConnectionState = "Connecting";
         OnPropertyChanged(nameof(ShowChatConnectionHint));
+        connectOutcome = new TaskCompletionSource<HelperConnectOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         try
         {
-            await joinTransport.JoinAsync(code, connectCts.Token);
+            await sessionRuntime.StartHelperAsync(code, connectCts.Token);
             // NKN transport logs these stages after JoinRequest Ack to avoid optimistic duplicates.
             if (!string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase))
             {
                 LogReliability(SessionReliabilityStage.DiscoveryFoundHost);
                 LogReliability(SessionReliabilityStage.JoinRequestSent);
             }
+
+            var outcome = await WaitForConnectOutcomeAsync(connectCts.Token);
+            if (outcome == HelperConnectOutcome.PendingTimeout)
+            {
+                LogReliability(SessionReliabilityStage.Disconnected, "approval_timeout", "No response yet. Try again.");
+                await sessionRuntime.FailAsync(UserErrorMapper.HelperApprovalTimeout());
+                OnPropertyChanged(nameof(ShowChatConnectionHint));
+            }
         }
         catch (OperationCanceledException)
         {
             // User navigated away or a new connect attempt replaced this one.
         }
-        catch (TimeoutException)
+        catch (TimeoutException ex)
         {
-            LogReliability(SessionReliabilityStage.DiscoveryTimeout, "timeout", "Could not find that code. Ask them to try a new code.");
-            StatusText = "Could not find that code. Ask them to try a new code.";
-            if (ConnectionState != "Connected")
-            {
-                ConnectionState = "Disconnected";
-            }
+            LogReliability(SessionReliabilityStage.DiscoveryTimeout, "timeout", "No one found with that code.");
+            await sessionRuntime.FailAsync(UserErrorMapper.FromHelperTimeoutException(ex));
+            MarkFailedAttemptNow();
             OnPropertyChanged(nameof(ShowChatConnectionHint));
         }
         catch (Exception)
         {
             var (errorCode, errorHint) = GetReliabilityError();
             LogReliability(SessionReliabilityStage.Disconnected, errorCode, errorHint);
-            StatusText = "Could not connect. Please try again.";
-            if (ConnectionState != "Connected")
-            {
-                ConnectionState = "Disconnected";
-            }
+            var uiMessage = UserErrorMapper.IsNknStartFailure(NknRuntimeDiagnostics.Snapshot().LastError)
+                ? UserErrorMapper.NknStartFailedReinstall()
+                : UserErrorMapper.HelperGenericConnectFailure();
+            await sessionRuntime.FailAsync(uiMessage);
+            MarkFailedAttemptNow();
             OnPropertyChanged(nameof(ShowChatConnectionHint));
         }
         finally
         {
             IsConnecting = false;
+            ConnectCommand.NotifyCanExecuteChanged();
         }
     }
 
@@ -271,12 +320,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
             return;
         }
 
-        if (!chatService.CanSend && !IsConnecting && SessionCode.TryParse(CodeInput, out _))
+        if (!sessionRuntime.CanSendChat && !IsConnecting && SessionCode.TryParse(CodeInput, out _))
         {
             await ConnectAsync();
         }
 
-        var message = await chatService.TrySendTextAsync(ChatDraft, CancellationToken.None);
+        var message = await sessionRuntime.TrySendChatTextAsync(ChatDraft, CancellationToken.None);
         if (message is null)
         {
             return;
@@ -297,55 +346,38 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
         SendFileRequested?.Invoke(this, EventArgs.Empty);
     }
 
-    private void RequestShareOptionsDialog()
-    {
-        ShareOptionsRequested?.Invoke(this, EventArgs.Empty);
-    }
-
     private async Task CopyInstallMessageAsync()
     {
         if (clipboardService is null)
         {
+            _ = ShowTransientCopyFeedbackAsync("Could not copy. Please try again.");
             return;
         }
 
-        var text = ShareMessageBuilder.BuildInstallMessage(code: null, shareMessageConfig.DownloadUrl);
-        await clipboardService.SetTextAsync(text);
-    }
-
-    private void CleanupJoinTransport()
-    {
-        chatService.DetachTransport();
-
-        if (joinTransport is null)
+        try
         {
-            return;
+            var text = BuildHelperInstallMessage();
+            await clipboardService.SetTextAsync(text);
+            _ = ShowTransientCopyFeedbackAsync("Copied. Paste it in your chat.");
         }
-
-        joinTransport.Approved -= OnApproved;
-        joinTransport.Rejected -= OnRejected;
-        joinTransport.Disconnected -= OnDisconnected;
-        DisposeTransportInBackground(joinTransport);
-        joinTransport = null;
+        catch
+        {
+            _ = ShowTransientCopyFeedbackAsync("Could not copy. Please try again.");
+        }
     }
 
-    private static void DisposeTransportInBackground(ISignalingTransport transport)
+    private string BuildHelperInstallMessage()
     {
-        _ = Task.Run(() =>
-        {
-            try
-            {
-                transport.Dispose();
-            }
-            catch
-            {
-                // Best-effort cleanup. UI should not block on transport shutdown.
-            }
-        });
+        const string releasesUrl = "https://github.com/resu12/nLink/releases";
+        var url = string.IsNullOrWhiteSpace(shareMessageConfig.DownloadUrl)
+            ? releasesUrl
+            : shareMessageConfig.DownloadUrl;
+        return ShareMessageBuilder.BuildHelperInstallMessage(url);
     }
 
     private void OnApproved(object? sender, EventArgs e)
     {
+        connectOutcome?.TrySetResult(HelperConnectOutcome.Approved);
         _ = UiThreadDispatch.RunAsync(() =>
         {
             StatusText = transportConfig.ApprovedStatusText;
@@ -359,9 +391,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
 
     private void OnRejected(object? sender, EventArgs e)
     {
+        connectOutcome?.TrySetResult(HelperConnectOutcome.Rejected);
         _ = UiThreadDispatch.RunAsync(() =>
         {
-            StatusText = "Permission was declined.";
+            StatusText = UserErrorMapper.HelperRejected();
             ConnectionState = "Rejected";
             LogReliability(SessionReliabilityStage.Rejected, "rejected", "They did not allow the connection.");
             OnPropertyChanged(nameof(ShowChatConnectionHint));
@@ -374,6 +407,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
         {
             return;
         }
+
+        connectOutcome?.TrySetResult(HelperConnectOutcome.Disconnected);
 
         _ = UiThreadDispatch.RunAsync(() =>
         {
@@ -413,6 +448,19 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
         {
             OnPropertyChanged(nameof(IsChatReady));
             SendChatCommand.NotifyCanExecuteChanged();
+        });
+    }
+
+    private void OnSessionRuntimeStateChanged(object? sender, SessionRuntimeStateChangedEventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(() =>
+        {
+            SyncFromRuntime();
         });
     }
 
@@ -457,5 +505,137 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable
         }
 
         return (lastError, "Connection did not complete. Try again or use a new code.");
+    }
+
+    private void SyncFromRuntime()
+    {
+        switch (sessionRuntime.State)
+        {
+            case SessionRuntimeState.Connecting:
+                StatusText = "Waiting for permission...";
+                ConnectionState = "Connecting";
+                break;
+            case SessionRuntimeState.Connected:
+                StatusText = transportConfig.ApprovedStatusText;
+                ConnectionState = "Connected";
+                ShowChatNotice = false;
+                break;
+            case SessionRuntimeState.Rejected:
+                StatusText = UserErrorMapper.HelperRejected();
+                ConnectionState = "Rejected";
+                break;
+            case SessionRuntimeState.Failed:
+                StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
+                    ? UserErrorMapper.HelperGenericConnectFailure()
+                    : sessionRuntime.StatusText;
+                ConnectionState = "Failed";
+                break;
+            case SessionRuntimeState.Disconnected:
+                StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
+                    ? transportConfig.HelperDisconnectedText
+                    : sessionRuntime.StatusText;
+                if (ConnectionState != "Connected")
+                {
+                    ConnectionState = "Disconnected";
+                }
+                break;
+        }
+
+        OnPropertyChanged(nameof(ShowChatConnectionHint));
+        OnPropertyChanged(nameof(IsChatReady));
+        SendChatCommand.NotifyCanExecuteChanged();
+    }
+
+    private bool IsInFailureCooldown()
+    {
+        return nowProvider() - lastFailedAttemptUtc < connectFailureCooldown;
+    }
+
+    private void MarkFailedAttemptNow()
+    {
+        lastFailedAttemptUtc = nowProvider();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(connectFailureCooldown);
+            }
+            catch
+            {
+                return;
+            }
+
+            if (disposed)
+            {
+                return;
+            }
+
+            await UiThreadDispatch.RunAsync(() => ConnectCommand.NotifyCanExecuteChanged());
+        });
+    }
+
+    private async Task<HelperConnectOutcome> WaitForConnectOutcomeAsync(CancellationToken ct)
+    {
+        var pending = connectOutcome;
+        if (pending is null)
+        {
+            return HelperConnectOutcome.None;
+        }
+
+        try
+        {
+            return await pending.Task.WaitAsync(approvalTimeout, ct);
+        }
+        catch (TimeoutException)
+        {
+            return HelperConnectOutcome.PendingTimeout;
+        }
+        catch (OperationCanceledException)
+        {
+            return HelperConnectOutcome.None;
+        }
+    }
+
+    private enum HelperConnectOutcome
+    {
+        None,
+        Approved,
+        Rejected,
+        Disconnected,
+        PendingTimeout,
+    }
+
+    private async Task ShowTransientCopyFeedbackAsync(string text)
+    {
+        copyFeedbackResetCts?.Cancel();
+        copyFeedbackResetCts?.Dispose();
+        copyFeedbackResetCts = new CancellationTokenSource();
+        var ct = copyFeedbackResetCts.Token;
+
+        await UiThreadDispatch.RunAsync(() =>
+        {
+            CopyFeedbackText = text;
+            ShowCopyFeedback = true;
+        });
+
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(2), ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (ct.IsCancellationRequested)
+        {
+            return;
+        }
+
+        await UiThreadDispatch.RunAsync(() =>
+        {
+            ShowCopyFeedback = false;
+            CopyFeedbackText = string.Empty;
+        });
     }
 }

@@ -8,4 +8,5 @@ internal enum MsgType
     Reject = 3,
     Chat = 4,
     Ack = 5,
+    SessionEnd = 6,
 }

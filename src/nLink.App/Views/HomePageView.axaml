@@ -9,10 +9,12 @@
 
     <UserControl.Styles>
         <Style Selector="Border.choiceCard">
-            <Setter Property="Background" Value="#111827"/>
-            <Setter Property="BorderThickness" Value="2"/>
-            <Setter Property="CornerRadius" Value="16"/>
             <Setter Property="Padding" Value="20"/>
+        </Style>
+
+        <Style Selector="Border.helperChoiceCard">
+            <Setter Property="BorderBrush" Value="#F2C94C"/>
+            <Setter Property="BorderThickness" Value="1"/>
         </Style>
 
         <Style Selector="Button.choiceButton">
@@ -24,9 +26,16 @@
             <Setter Property="VerticalContentAlignment" Value="Center"/>
             <Setter Property="Padding" Value="18,0"/>
         </Style>
+
+        <Style Selector="Button.helperChoiceButton">
+            <Setter Property="Background" Value="#F2C94C"/>
+            <Setter Property="Foreground" Value="#0B0F16"/>
+            <Setter Property="BorderBrush" Value="#EAB308"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
     </UserControl.Styles>
 
-    <Grid Background="#0B0F16">
+    <Grid Background="{StaticResource AppBackgroundBrush}">
         <ScrollViewer HorizontalScrollBarVisibility="Disabled"
                       VerticalScrollBarVisibility="Auto"
                       Margin="28">
@@ -34,63 +43,57 @@
                         VerticalAlignment="Center"
                         MaxWidth="720"
                         Spacing="16">
-                <TextBlock Text="{Binding AppTitle}"
+                <TextBlock Classes="appTitle"
+                           Text="{Binding AppTitle}"
                            HorizontalAlignment="Center"
-                           Foreground="White"
                            FontSize="40"
-                           FontWeight="Bold"
                            TextAlignment="Center"/>
 
-                <TextBlock Text="{Binding Subtitle}"
+                <TextBlock Classes="appBody"
+                           Text="{Binding Subtitle}"
                            HorizontalAlignment="Center"
-                           Foreground="#E5E7EB"
-                           FontSize="18"
                            TextAlignment="Center"
-                           TextWrapping="Wrap"
                            MaxWidth="620"
                            Margin="0,0,0,6"/>
 
-                <Border Background="#0F172A"
-                        BorderBrush="#334155"
+                <Border Classes="appPanel"
                         BorderThickness="1"
+                        CornerRadius="12"
+                        Padding="12"
+                        IsVisible="{Binding ShowStartupWarning}">
+                    <TextBlock Text="{Binding StartupWarningText}"
+                               Classes="appBody"
+                               FontSize="16"
+                               TextAlignment="Center"/>
+                </Border>
+
+                <Border Classes="appPanel"
                         CornerRadius="18"
                         Padding="14">
                     <StackPanel Spacing="14">
-                        <Border Classes="choiceCard"
-                                BorderBrush="White">
+                        <Border Classes="appCard choiceCard">
                             <StackPanel Spacing="10">
-                                <Button Classes="choiceButton"
+                                <Button Classes="appButton choiceButton primaryButton"
                                         Content="{Binding NeedHelpLabel}"
-                                        Command="{Binding NeedHelpCommand}"
-                                        Background="White"
-                                        Foreground="Black"
-                                        BorderBrush="#D1D5DB"/>
+                                        Command="{Binding NeedHelpCommand}"/>
 
-                                <TextBlock Text="{Binding NeedHelpDescription}"
-                                           Foreground="#E5E7EB"
-                                           FontSize="18"
+                                <TextBlock Classes="appBody"
+                                           Text="{Binding NeedHelpDescription}"
                                            TextAlignment="Center"
-                                           TextWrapping="Wrap"
                                            HorizontalAlignment="Center"
                                            MaxWidth="560"/>
                             </StackPanel>
                         </Border>
 
-                        <Border Classes="choiceCard"
-                                BorderBrush="#FFD34D">
+                        <Border Classes="appCard choiceCard helperChoiceCard">
                             <StackPanel Spacing="10">
-                                <Button Classes="choiceButton"
+                                <Button Classes="appButton choiceButton helperChoiceButton"
                                         Content="{Binding WantToHelpLabel}"
-                                        Command="{Binding WantToHelpCommand}"
-                                        Background="#FFD34D"
-                                        Foreground="Black"
-                                        BorderBrush="#EAB308"/>
+                                        Command="{Binding WantToHelpCommand}"/>
 
-                                <TextBlock Text="{Binding WantToHelpDescription}"
-                                           Foreground="#E5E7EB"
-                                           FontSize="18"
+                                <TextBlock Classes="appBody"
+                                           Text="{Binding WantToHelpDescription}"
                                            TextAlignment="Center"
-                                           TextWrapping="Wrap"
                                            HorizontalAlignment="Center"
                                            MaxWidth="560"/>
                             </StackPanel>
@@ -98,12 +101,10 @@
                     </StackPanel>
                 </Border>
 
-                <Button Content="Diagnostics"
+                <Button Classes="linkButton"
+                        Content="Diagnostics"
                         Command="{Binding DiagnosticsCommand}"
                         HorizontalAlignment="Center"
-                        Background="Transparent"
-                        Foreground="#93C5FD"
-                        BorderBrush="Transparent"
                         FontSize="16"
                         Padding="10,6"/>
             </StackPanel>

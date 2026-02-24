@@ -7,36 +7,30 @@
              x:Class="NLink.App.Views.RolePageView"
              x:DataType="vm:RolePageViewModel">
 
-    <Grid Background="#0B0F16">
-        <Border HorizontalAlignment="Center"
+    <Grid Background="{StaticResource AppBackgroundBrush}">
+        <Border Classes="appCard"
+                HorizontalAlignment="Center"
                 VerticalAlignment="Center"
                 MaxWidth="760"
                 Margin="32"
-                Background="#111827"
-                BorderBrush="White"
-                BorderThickness="2"
                 CornerRadius="16"
                 Padding="28">
             <StackPanel Spacing="18">
-                <TextBlock Text="{Binding Title}"
-                           Foreground="White"
+                <TextBlock Classes="appTitle"
+                           Text="{Binding Title}"
                            FontSize="34"
-                           FontWeight="Bold"
                            TextAlignment="Center"/>
 
-                <TextBlock Text="{Binding Message}"
-                           Foreground="#E5E7EB"
+                <TextBlock Classes="appBody"
+                           Text="{Binding Message}"
                            FontSize="19"
-                           TextWrapping="Wrap"
                            TextAlignment="Center"/>
 
-                <Button Content="Back"
+                <Button Classes="appButton secondaryButton"
+                        Content="Back"
                         Command="{Binding BackCommand}"
                         Height="64"
                         FontSize="22"
-                        FontWeight="SemiBold"
-                        Background="White"
-                        Foreground="Black"
                         HorizontalAlignment="Center"
                         Width="180"/>
             </StackPanel>

@@ -6,5 +6,9 @@ public sealed class ChatLineViewModel
 
     public required bool IsLocal { get; init; }
 
+    public string SenderLabel => IsLocal ? "You" : "Them";
+
+    public bool IsRemote => !IsLocal;
+
     public string DisplayText => (IsLocal ? "You: " : "Them: ") + Text;
 }

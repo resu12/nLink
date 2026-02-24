@@ -1,70 +1,64 @@
 # Releasing (Windows Alpha)
 
-Simple checklist for a Windows alpha release.
+Follow this checklist for every Windows alpha release.
 
-## 1. Build bridge bundle
+## 1. Bump version and push
 
-Run:
+1. Update `VERSION` (example: `0.1.0-alpha.2`).
+2. Commit and push.
+
+## 2. Run smoke tests
+
+```powershell
+dotnet test -c Release --filter Category=Smoke
+```
+
+## 3. Build release artifacts
+
+Run in this order:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\installer\Build-BridgeBundle.ps1
-```
-
-## 2. Build portable ZIP
-
-Run:
-
-```powershell
 powershell -ExecutionPolicy Bypass -File .\installer\Build-Portable.ps1
-```
-
-Output:
-- `artifacts/portable/nLink-Portable-win-x64-<version>.zip`
-
-## 3. Build installer
-
-Run:
-
-```powershell
 powershell -ExecutionPolicy Bypass -File .\installer\Build-Installer.ps1
 ```
 
-Output:
-- `artifacts/installer/nLink-Setup-win-x64-<version>.exe`
+## 4. Verify bridge is bundled
 
-## 4. Verify bridge runtime is bundled
+Check `bridge/win-x64` exists in outputs:
 
-Check that `bridge/win-x64` exists in both outputs:
+- `artifacts/portable/nLink/win-x64/bridge/win-x64`
+- `artifacts/portable/helper/win-x64/bridge/win-x64`
 
-- Portable folder:
-  - `artifacts/portable/nLink/win-x64/bridge/win-x64`
-- Installer staging folder:
-  - `artifacts/portable/helper/win-x64/bridge/win-x64`
+## 5. Verify final release files
 
-## 5. Smoke test (manual, two PCs)
+Confirm final files are in:
 
-On two PCs:
+- `artifacts/releases/<version>/`
 
-1. Start `nLink` on both.
-2. On helpee PC: click `I need help`.
-3. On helper PC: click `I want to help someone`, enter the code, click `Connect`.
-4. On helpee PC: click `Allow`.
-5. Send chat messages both directions.
+Expected files:
 
-Expected:
-- Connect succeeds
-- `Allow` appears on helpee
-- Chat works both ways
+- `nLink-Portable-win-x64-<version>.zip`
+- `nLink-Setup-win-x64-<version>.exe`
+- `SHA256SUMS.txt` (if present)
 
-## 6. Create GitHub Release (manual)
+## 6. Manual smoke test (two PCs)
 
-Create a GitHub Release and upload these files as release assets:
+1. Start `nLink` on both PCs.
+2. Helpee: `I need help`.
+3. Helper: `I want to help someone` -> enter code -> `Connect`.
+4. Helpee: `Allow`.
+5. Send chat messages both ways.
 
-- Installer EXE: `artifacts/installer/nLink-Setup-win-x64-<version>.exe`
-- Portable ZIP: `artifacts/portable/nLink-Portable-win-x64-<version>.zip`
+## 7. Draft GitHub Release (manual)
 
-## 7. Do not commit build outputs
+1. Create tag `v<version>`.
+2. Mark as **pre-release**.
+3. Upload:
+   - installer EXE
+   - portable ZIP
+   - `SHA256SUMS.txt` (if present)
 
-Do **not** commit `artifacts/` or generated binaries to git.
+## 8. Do not commit build outputs
 
-Upload the installer/ZIP as GitHub Release assets instead.
+Do **not** commit `artifacts/` or generated binaries to git. Upload them as GitHub Release assets.

@@ -246,6 +246,7 @@ New-Item -ItemType Directory -Force -Path $releasesRootAbs | Out-Null
 
 Write-Host "[nLink] Publishing canonical portable app folder..." -ForegroundColor Cyan
 dotnet publish $projectPath -c $Configuration -r $Runtime --self-contained true `
+    /p:NLinkVersion=$resolvedVersion `
     /p:PublishSingleFile=true `
     /p:IncludeNativeLibrariesForSelfExtract=true `
     -o $canonicalOutAbs
@@ -294,6 +295,11 @@ $releasePublish = Publish-ReleaseAssets `
 
 Write-Host "[nLink] Release assets folder: $($releasePublish.ReleaseDir)" -ForegroundColor Green
 Write-Host "[nLink] SHA256SUMS: $($releasePublish.ChecksumsPath)" -ForegroundColor Green
+foreach ($asset in @($releasePublish.Assets)) {
+    if (-not [string]::IsNullOrWhiteSpace($asset)) {
+        Write-Host "[nLink] Release asset: $asset" -ForegroundColor Green
+    }
+}
 
 $bridgeRootAbs = Join-Path $canonicalOutAbs "bridge"
 $bridgeRidAbs = Join-Path $bridgeRootAbs $Runtime

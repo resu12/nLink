@@ -5,6 +5,23 @@ namespace NLink.Core;
 
 public static class ShareMessageBuilder
 {
+    public static string BuildHelperInstallMessage(string releasesUrl)
+    {
+        var url = string.IsNullOrWhiteSpace(releasesUrl) ? string.Empty : releasesUrl.Trim();
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return "Install nLink and open it." + Environment.NewLine;
+        }
+
+        var sb = new StringBuilder(url.Length + 48);
+        sb.Append("Install nLink and open it.")
+          .Append(Environment.NewLine)
+          .Append("Download: ")
+          .Append(url)
+          .Append(Environment.NewLine);
+        return sb.ToString();
+    }
+
     public static string BuildInstallMessage(string? code, string? downloadUrl)
     {
         var hasCode = !string.IsNullOrWhiteSpace(code);

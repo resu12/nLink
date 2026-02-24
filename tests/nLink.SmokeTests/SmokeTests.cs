@@ -1,6 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -58,6 +62,160 @@ public class SmokeTests
         Assert.Equal(
             "Install nLink" + Environment.NewLine + "https://example.com/nlink",
             text);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void ShareMessageBuilder_HelperInstallMessage_IncludesConfiguredUrl_AndTrailingNewline()
+    {
+        var text = ShareMessageBuilder.BuildHelperInstallMessage("https://example.com/releases");
+
+        Assert.Equal(
+            "Install nLink and open it." + Environment.NewLine +
+            "Download: https://example.com/releases" + Environment.NewLine,
+            text);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void ShareMessageBuilder_HelperInstallMessage_DoesNotIncludeInternalDiagnosticsText()
+    {
+        var text = ShareMessageBuilder.BuildHelperInstallMessage("https://example.com/releases");
+
+        Assert.DoesNotContain("Bridge PID", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("NKN", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("last_error", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("identifier", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void AppAssembly_InformationalVersion_Matches_VERSION_File()
+    {
+        var assembly = typeof(DiagnosticsPageViewModel).Assembly;
+        var infoVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+
+        Assert.False(string.IsNullOrWhiteSpace(infoVersion));
+
+        var versionPath = FindFileUpwards("VERSION");
+        Assert.True(versionPath is not null, "VERSION file not found when walking parent directories from test output.");
+
+        var expected = File.ReadAllText(versionPath!).Trim();
+        Assert.Equal(expected, infoVersion);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void TransportRuntimeConfig_ReleaseDefault_SelectsNkn_WhenBridgeBundled()
+    {
+        var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
+        var bridgeRid = GetCurrentBridgeRidForTests();
+        var bridgeRoot = Path.Combine(AppContext.BaseDirectory, "bridge", bridgeRid);
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", null);
+            PrepareFakeBridgeBundle(bridgeRoot);
+
+            var config = TransportRuntimeConfig.Select();
+
+            Assert.Equal("NKN", config.Key);
+            Assert.True(config.AutoSelected);
+            Assert.False(config.ForcedByEnvironment);
+            Assert.False(config.HasStartupWarning);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
+            CleanupDirectoryIfExists(bridgeRoot);
+            CleanupDirectoryIfExists(Path.Combine(AppContext.BaseDirectory, "bridge"));
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void TransportRuntimeConfig_ReleaseDefault_SelectsDevLocal_WithWarning_WhenBridgeMissing()
+    {
+        var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
+        var bridgeRid = GetCurrentBridgeRidForTests();
+        var bridgeRoot = Path.Combine(AppContext.BaseDirectory, "bridge", bridgeRid);
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", null);
+            CleanupDirectoryIfExists(Path.Combine(AppContext.BaseDirectory, "bridge"));
+
+            var config = TransportRuntimeConfig.Select();
+
+            Assert.Equal("DevLocal", config.Key);
+            Assert.False(config.AutoSelected);
+            Assert.False(config.ForcedByEnvironment);
+            Assert.True(config.HasStartupWarning);
+            Assert.Contains("missing the bridge runtime", config.StartupWarningText, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
+            CleanupDirectoryIfExists(bridgeRoot);
+            CleanupDirectoryIfExists(Path.Combine(AppContext.BaseDirectory, "bridge"));
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task TransportRuntimeConfig_EnvNkn_SelectsNkn_AndHelperFailsLoudlyOnStartFailure()
+    {
+        var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "NKN");
+            CleanupDirectoryIfExists(Path.Combine(AppContext.BaseDirectory, "bridge"));
+
+            var config = TransportRuntimeConfig.Select();
+            Assert.Equal("NKN", config.Key);
+            Assert.True(config.ForcedByEnvironment);
+
+            NknRuntimeDiagnostics.SetLastError("NKN_START_FAILED: bridge_missing");
+
+            using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(
+                onJoinAsync: static (_, __) => throw new InvalidOperationException("bridge missing")));
+            using var helper = new HelperPageViewModel(
+                cancelAction: static () => { },
+                config,
+                runtime,
+                approvalTimeout: TimeSpan.FromMilliseconds(100),
+                connectFailureCooldown: TimeSpan.Zero);
+
+            helper.CodeInput = "123456";
+            await helper.ConnectCommand.ExecuteAsync(null);
+
+            Assert.Equal(SessionRuntimeState.Failed, runtime.State);
+            Assert.Equal("Couldn't start the connection. Please reinstall.", helper.StatusText);
+            Assert.True(helper.ConnectCommand.CanExecute(null));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void TransportRuntimeConfig_EnvDevLocal_SelectsDevLocal()
+    {
+        var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            var config = TransportRuntimeConfig.Select();
+            Assert.Equal("DevLocal", config.Key);
+            Assert.True(config.ForcedByEnvironment);
+            Assert.False(config.AutoSelected);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
+        }
     }
 
     [Trait("Category", "Smoke")]
@@ -383,9 +541,11 @@ public class SmokeTests
     public async Task ViewModelFlow_HelpeeApproves_HelperAndHelpeeReachConnectedState()
     {
         var transportConfig = CreateDevLocalTestConfig();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
 
-        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig);
-        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig);
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
 
         helper.CodeInput = helpee.ShareCode;
 
@@ -469,23 +629,234 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task SessionRuntime_RepeatCycle_ResetAndRetry_FiveIterations_ReturnsToIdle()
+    {
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-" + Guid.NewGuid().ToString("N")));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var helperChatReceived = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var helpeeChatReceived = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        for (var i = 0; i < 5; i++)
+        {
+            helperChatReceived = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            helpeeChatReceived = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            void OnHelperChat(object? _, ChatMessageEventArgs e) => helperChatReceived.TrySetResult(e.Message.Text);
+            void OnHelpeeChat(object? _, ChatMessageEventArgs e) => helpeeChatReceived.TrySetResult(e.Message.Text);
+
+            helperRuntime.ChatMessageReceived += OnHelperChat;
+            helpeeRuntime.ChatMessageReceived += OnHelpeeChat;
+
+            var code = new SessionCode((100000 + i).ToString("D6"));
+
+            await helpeeRuntime.StartHelpeeAsync(code, cts.Token);
+            await helperRuntime.StartHelperAsync(code, cts.Token);
+
+            await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(1));
+
+            await helpeeRuntime.ApproveAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                      helperRuntime.State == SessionRuntimeState.Connected &&
+                      helpeeRuntime.HasSessionKey &&
+                      helperRuntime.HasSessionKey,
+                TimeSpan.FromSeconds(1));
+
+            var helperText = $"hello-{i}";
+            var helpeeText = $"reply-{i}";
+
+            var helperSent = await helperRuntime.TrySendChatTextAsync(helperText, cts.Token);
+            Assert.NotNull(helperSent);
+            Assert.Equal(helperText, await helpeeChatReceived.Task.WaitAsync(TimeSpan.FromSeconds(1), cts.Token));
+
+            helpeeChatReceived = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            helperRuntime.ChatMessageReceived -= OnHelperChat;
+            helpeeRuntime.ChatMessageReceived -= OnHelpeeChat;
+            helperRuntime.ChatMessageReceived += OnHelperChat;
+            helpeeRuntime.ChatMessageReceived += OnHelpeeChat;
+
+            var helpeeSent = await helpeeRuntime.TrySendChatTextAsync(helpeeText, cts.Token);
+            Assert.NotNull(helpeeSent);
+            Assert.Equal(helpeeText, await helperChatReceived.Task.WaitAsync(TimeSpan.FromSeconds(1), cts.Token));
+
+            helperRuntime.ChatMessageReceived -= OnHelperChat;
+            helpeeRuntime.ChatMessageReceived -= OnHelpeeChat;
+
+            await helperRuntime.ResetAsync();
+            await helpeeRuntime.ResetAsync();
+
+            Assert.Equal(SessionRuntimeState.Idle, helperRuntime.State);
+            Assert.Equal(SessionRuntimeState.Idle, helpeeRuntime.State);
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_NknRemoteSessionEnd_ShowsFriendlyMessage_AndCanReset()
+    {
+        FakeNknClient.ResetNetwork();
+
+        try
+        {
+            var options = NknTransportOptions.Load();
+            using var helpeeTransport = new NknSignalingTransport(
+                new FakeNknClient("helpee.addr." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helpee-test", "helpee.test.fake"));
+            using var helperTransport = new NknSignalingTransport(
+                new FakeNknClient("helper.addr." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helper-test", "helper.test.fake"));
+            using var helpeeRuntime = new SessionRuntime(() => helpeeTransport);
+            using var helperRuntime = new SessionRuntime(() => helperTransport);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var code = new SessionCode("345678");
+
+            await helpeeRuntime.StartHelpeeAsync(code, cts.Token);
+            await helperRuntime.StartHelperAsync(code, cts.Token);
+
+            await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(2));
+            await helpeeRuntime.ApproveAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                      helperRuntime.State == SessionRuntimeState.Connected,
+                TimeSpan.FromSeconds(2));
+
+            await helperRuntime.DisconnectAsync();
+
+            await WaitUntilAsync(
+                () => helpeeRuntime.State == SessionRuntimeState.Failed &&
+                      string.Equals(helpeeRuntime.StatusText, "The helper ended the session.", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+
+            Assert.Equal(SessionRuntimeState.Idle, helperRuntime.State);
+            Assert.Equal("The helper ended the session.", helpeeRuntime.StatusText);
+
+            await helpeeRuntime.ResetAsync();
+            Assert.Equal(SessionRuntimeState.Idle, helpeeRuntime.State);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task HelperViewModel_CopyInstallMessageCommand_UsesClipboardService()
     {
         var fakeClipboard = new FakeClipboardService();
         var transportConfig = CreateDevLocalTestConfig();
         var shareConfig = new ShareMessageConfig("https://example.com/nlink");
+        using var runtime = new SessionRuntime(() => new FakeSignalingTransport());
 
         using var helper = new HelperPageViewModel(
             cancelAction: static () => { },
             transportConfig,
+            runtime,
             fakeClipboard,
             shareConfig);
 
         await helper.CopyInstallMessageCommand.ExecuteAsync(null);
 
         Assert.Equal(
-            "Install nLink" + Environment.NewLine + "https://example.com/nlink",
+            "Install nLink and open it." + Environment.NewLine +
+            "Download: https://example.com/nlink" + Environment.NewLine,
             fakeClipboard.LastText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperViewModel_WrongCode_TransitionsToFailed_WithMappedMessage_AndReconnectEnabled()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(
+            onJoinAsync: static (_, __) => throw new TimeoutException("Could not find session for code")));
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            approvalTimeout: TimeSpan.FromMilliseconds(100),
+            connectFailureCooldown: TimeSpan.Zero);
+
+        helper.CodeInput = "123456";
+        await helper.ConnectCommand.ExecuteAsync(null);
+
+        Assert.Equal(SessionRuntimeState.Failed, runtime.State);
+        Assert.Equal("No one found with that code.", helper.StatusText);
+        Assert.True(helper.ConnectCommand.CanExecute(null));
+        Assert.Equal("Failed", helper.ConnectionState);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperViewModel_ApprovalTimeout_TransitionsToFailed_WithMappedMessage()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(
+            onJoinAsync: static (_, __) => Task.CompletedTask));
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            approvalTimeout: TimeSpan.FromMilliseconds(100),
+            connectFailureCooldown: TimeSpan.Zero);
+
+        helper.CodeInput = "123456";
+        await helper.ConnectCommand.ExecuteAsync(null);
+
+        Assert.Equal(SessionRuntimeState.Failed, runtime.State);
+        Assert.Equal("No response yet. Try again.", helper.StatusText);
+        Assert.True(helper.ConnectCommand.CanExecute(null));
+        Assert.Equal("Failed", helper.ConnectionState);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperViewModel_Cooldown_PreventsRapidSecondConnectAttempt()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var factory = new CountingTransportFactory(() => new ScriptedSignalingTransport(
+            onJoinAsync: static (_, __) => throw new TimeoutException("Could not find session for code")));
+        using var runtime = new SessionRuntime(factory.Create);
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            approvalTimeout: TimeSpan.FromMilliseconds(100),
+            connectFailureCooldown: TimeSpan.FromSeconds(2));
+
+        helper.CodeInput = "123456";
+
+        await helper.ConnectCommand.ExecuteAsync(null);
+        await helper.ConnectCommand.ExecuteAsync(null);
+
+        Assert.Equal(1, factory.CreateCount);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_TransportDisconnect_ShowsConnectionLostTryAgain()
+    {
+        var scripted = new ScriptedSignalingTransport(onJoinAsync: static (_, __) => Task.CompletedTask);
+        using var runtime = new SessionRuntime(() => scripted);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
+        await runtime.StartHelperAsync(new SessionCode("123456"), cts.Token);
+        scripted.RaiseDisconnected();
+
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Disconnected &&
+                  string.Equals(runtime.StatusText, "Connection lost. Try again.", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(2));
+
+        Assert.Equal("Connection lost. Try again.", runtime.StatusText);
     }
 
     [Trait("Category", "Smoke")]
@@ -802,6 +1173,69 @@ public class SmokeTests
         return new SessionCode(value.ToString("D6"));
     }
 
+    private static string? FindFileUpwards(string fileName)
+    {
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 12 && current is not null; i++, current = current.Parent)
+        {
+            var candidate = Path.Combine(current.FullName, fileName);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private static string GetCurrentBridgeRidForTests()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) &&
+            RuntimeInformation.OSArchitecture == Architecture.X64)
+        {
+            return "win-x64";
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux) &&
+            RuntimeInformation.OSArchitecture == Architecture.X64)
+        {
+            return "linux-x64";
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            return RuntimeInformation.OSArchitecture switch
+            {
+                Architecture.X64 => "osx-x64",
+                Architecture.Arm64 => "osx-arm64",
+                _ => throw new NotSupportedException("Unsupported macOS architecture for bridge RID test.")
+            };
+        }
+
+        throw new NotSupportedException("Unsupported platform for bridge RID test.");
+    }
+
+    private static void PrepareFakeBridgeBundle(string bridgeRoot)
+    {
+        CleanupDirectoryIfExists(bridgeRoot);
+        Directory.CreateDirectory(bridgeRoot);
+
+        var nodeFileName = OperatingSystem.IsWindows() ? "node.exe" : "node";
+        File.WriteAllText(Path.Combine(bridgeRoot, "index.js"), "// fake");
+        File.WriteAllText(Path.Combine(bridgeRoot, nodeFileName), "fake");
+        Directory.CreateDirectory(Path.Combine(bridgeRoot, "node_modules"));
+    }
+
+    private static void CleanupDirectoryIfExists(string path)
+    {
+        if (!Directory.Exists(path))
+        {
+            return;
+        }
+
+        Directory.Delete(path, recursive: true);
+    }
+
     private static TransportRuntimeConfig CreateDevLocalTestConfig()
     {
         var previous = Environment.GetEnvironmentVariable("FRH_TRANSPORT");
@@ -933,6 +1367,196 @@ public class SmokeTests
         {
             LastText = text;
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class CountingTransportFactory
+    {
+        private readonly Func<ISignalingTransport> factory;
+
+        public CountingTransportFactory(Func<ISignalingTransport> factory)
+        {
+            this.factory = factory;
+        }
+
+        public int CreateCount { get; private set; }
+
+        public ISignalingTransport Create()
+        {
+            CreateCount++;
+            return factory();
+        }
+    }
+
+    private sealed class ScriptedSignalingTransport : ISignalingTransport
+    {
+        private readonly Func<SessionCode, CancellationToken, Task> onJoinAsync;
+        private readonly Func<SessionCode, CancellationToken, Task> onHostAsync;
+        private readonly Func<ReadOnlyMemory<byte>, CancellationToken, Task> onSendChatAsync;
+
+        public ScriptedSignalingTransport(
+            Func<SessionCode, CancellationToken, Task>? onJoinAsync = null,
+            Func<SessionCode, CancellationToken, Task>? onHostAsync = null,
+            Func<ReadOnlyMemory<byte>, CancellationToken, Task>? onSendChatAsync = null)
+        {
+            this.onJoinAsync = onJoinAsync ?? ((_, ct) => Task.Delay(Timeout.Infinite, ct));
+            this.onHostAsync = onHostAsync ?? ((_, ct) => Task.Delay(Timeout.Infinite, ct));
+            this.onSendChatAsync = onSendChatAsync ?? ((_, _) => Task.CompletedTask);
+        }
+
+        public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
+        public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
+        public event EventHandler<TransportChatMessageEventArgs>? ChatMessageReceived;
+        public event EventHandler? Approved;
+        public event EventHandler? Rejected;
+        public event EventHandler? Disconnected;
+
+        public void Dispose()
+        {
+        }
+
+        public Task HostAsync(SessionCode code, CancellationToken ct) => onHostAsync(code, ct);
+
+        public Task JoinAsync(SessionCode code, CancellationToken ct) => onJoinAsync(code, ct);
+
+        public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => onSendChatAsync(payload, ct);
+
+        public void RaiseDisconnected()
+        {
+            Disconnected?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    private sealed class FakeSessionTransportNetwork
+    {
+        private readonly object gate = new();
+        private readonly Dictionary<string, FakeSessionTransport> hostsByCode = new(StringComparer.Ordinal);
+
+        public FakeSessionTransport CreateTransport(string address)
+        {
+            return new FakeSessionTransport(this, address);
+        }
+
+        public void RegisterHost(string code, FakeSessionTransport host)
+        {
+            lock (gate)
+            {
+                hostsByCode[code] = host;
+            }
+        }
+
+        public void UnregisterHost(FakeSessionTransport transport)
+        {
+            lock (gate)
+            {
+                foreach (var pair in hostsByCode.ToArray())
+                {
+                    if (ReferenceEquals(pair.Value, transport))
+                    {
+                        hostsByCode.Remove(pair.Key);
+                    }
+                }
+            }
+        }
+
+        public FakeSessionTransport? TryFindHost(string code)
+        {
+            lock (gate)
+            {
+                return hostsByCode.TryGetValue(code, out var host) ? host : null;
+            }
+        }
+    }
+
+    private sealed class FakeSessionTransport : ISignalingTransport
+    {
+        private readonly FakeSessionTransportNetwork network;
+        private readonly byte[] sharedKey = SmokeTests.SHA256LikeDeterministicBytes("session-runtime-repeat-key", 32);
+        private FakeSessionTransport? peer;
+        private bool disposed;
+        private string? hostedCode;
+
+        public FakeSessionTransport(FakeSessionTransportNetwork network, string address)
+        {
+            this.network = network;
+            Address = address;
+        }
+
+        public string Address { get; }
+
+        public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
+        public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
+        public event EventHandler<TransportChatMessageEventArgs>? ChatMessageReceived;
+        public event EventHandler? Approved;
+        public event EventHandler? Rejected;
+        public event EventHandler? Disconnected;
+
+        public Task HostAsync(SessionCode code, CancellationToken ct)
+        {
+            ThrowIfDisposed();
+            hostedCode = code.Digits;
+            network.RegisterHost(code.Digits, this);
+            return Task.Delay(Timeout.Infinite, ct);
+        }
+
+        public Task JoinAsync(SessionCode code, CancellationToken ct)
+        {
+            ThrowIfDisposed();
+            var host = network.TryFindHost(code.Digits) ?? throw new TimeoutException("Host not found.");
+            peer = host;
+            host.peer = this;
+
+            var joinRequest = new IncomingJoinRequestEventArgs(
+                approveAsync: _ =>
+                {
+                    host.SessionKeyReady?.Invoke(host, new TransportSessionKeyReadyEventArgs(host.sharedKey));
+                    SessionKeyReady?.Invoke(this, new TransportSessionKeyReadyEventArgs(sharedKey));
+                    host.Approved?.Invoke(host, EventArgs.Empty);
+                    Approved?.Invoke(this, EventArgs.Empty);
+                    return Task.CompletedTask;
+                },
+                rejectAsync: _ =>
+                {
+                    Rejected?.Invoke(this, EventArgs.Empty);
+                    return Task.CompletedTask;
+                });
+
+            host.IncomingJoinRequest?.Invoke(host, joinRequest);
+            return Task.CompletedTask;
+        }
+
+        public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
+        {
+            ThrowIfDisposed();
+            var target = peer ?? throw new InvalidOperationException("No peer connected.");
+            target.ChatMessageReceived?.Invoke(target, new TransportChatMessageEventArgs(payload.ToArray()));
+            return Task.CompletedTask;
+        }
+
+        public void Dispose()
+        {
+            if (disposed)
+            {
+                return;
+            }
+
+            disposed = true;
+            network.UnregisterHost(this);
+
+            if (peer is { } target)
+            {
+                peer = null;
+                target.peer = null;
+                target.Disconnected?.Invoke(target, EventArgs.Empty);
+            }
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (disposed)
+            {
+                throw new ObjectDisposedException(nameof(FakeSessionTransport));
+            }
         }
     }
 }

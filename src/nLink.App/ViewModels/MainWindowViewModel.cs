@@ -5,14 +5,16 @@ using NLink.Core;
 
 namespace NLink.App.ViewModels;
 
-public class MainWindowViewModel : ViewModelBase
+public class MainWindowViewModel : ViewModelBase, IDisposable
 {
     private readonly AppServiceRegistry services;
     private readonly TransportRuntimeConfig transportConfig;
     private readonly ShareMessageConfig shareMessageConfig;
     private readonly IClipboardService clipboardService;
+    private readonly SessionRuntime sessionRuntime;
     private readonly HomePageViewModel homePage;
     private ViewModelBase currentPage;
+    private bool disposed;
 
     public MainWindowViewModel(AppServiceRegistry services)
     {
@@ -20,7 +22,8 @@ public class MainWindowViewModel : ViewModelBase
         transportConfig = TransportRuntimeConfig.Select();
         shareMessageConfig = this.services.GetRequired<ShareMessageConfig>();
         clipboardService = this.services.GetRequired<IClipboardService>();
-        homePage = new HomePageViewModel(ShowHelpeePage, ShowHelperPage, ShowDiagnosticsPage);
+        sessionRuntime = new SessionRuntime(transportConfig.CreateTransport);
+        homePage = new HomePageViewModel(ShowHelpeePage, ShowHelperPage, ShowDiagnosticsPage, transportConfig);
         currentPage = homePage;
     }
 
@@ -32,12 +35,12 @@ public class MainWindowViewModel : ViewModelBase
 
     private void ShowHelpeePage()
     {
-        NavigateTo(new HelpeePageViewModel(ShowHomePage, transportConfig, clipboardService, shareMessageConfig));
+        NavigateTo(new HelpeePageViewModel(ShowHomePage, transportConfig, sessionRuntime, clipboardService, shareMessageConfig));
     }
 
     private void ShowHelperPage()
     {
-        NavigateTo(new HelperPageViewModel(ShowHomePage, transportConfig, clipboardService, shareMessageConfig));
+        NavigateTo(new HelperPageViewModel(ShowHomePage, transportConfig, sessionRuntime, clipboardService, shareMessageConfig));
     }
 
     private void ShowDiagnosticsPage()
@@ -63,5 +66,22 @@ public class MainWindowViewModel : ViewModelBase
         }
 
         CurrentPage = nextPage;
+    }
+
+    public void Dispose()
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        disposed = true;
+
+        if (CurrentPage is IDisposable disposablePage)
+        {
+            disposablePage.Dispose();
+        }
+
+        sessionRuntime.Dispose();
     }
 }

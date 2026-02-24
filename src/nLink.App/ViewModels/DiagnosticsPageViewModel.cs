@@ -1,7 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.Input;
 using NLink.App.Configuration;
+using NLink.App.Threading;
 using NLink.Core.Chat;
 using NLink.Core;
 using NLink.Infra.Nkn;
@@ -10,16 +15,24 @@ namespace NLink.App.ViewModels;
 
 public sealed class DiagnosticsPageViewModel : ViewModelBase
 {
+    private CancellationTokenSource? copyFeedbackCts;
+    private string copyFeedbackText = string.Empty;
+    private bool showCopyFeedback;
+
     public DiagnosticsPageViewModel(Action backAction, TransportRuntimeConfig transportConfig)
     {
         BackCommand = new RelayCommand(backAction);
 
         ActiveTransport = transportConfig.DisplayName;
         TransportKey = transportConfig.Key;
+        TransportSummary = transportConfig.Key;
         BuildMode = transportConfig.BuildMode;
         EnvironmentValue = transportConfig.EnvironmentVariableValue;
         SelectionReason = transportConfig.SelectionReason;
+        AutoSelected = transportConfig.AutoSelected ? "Yes" : "No";
+        ForcedByEnvironment = transportConfig.ForcedByEnvironment ? "Yes" : "No";
         EmbeddedWebViewDefault = AppFeatureFlags.UseEmbeddedWebView ? "Enabled by default" : "Disabled by default";
+        AppVersion = ResolveAppVersion();
 
         if (string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase))
         {
@@ -64,13 +77,21 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
 
     public string TransportKey { get; }
 
+    public string TransportSummary { get; }
+
     public string BuildMode { get; }
 
     public string EnvironmentValue { get; }
 
     public string SelectionReason { get; }
 
+    public string AutoSelected { get; }
+
+    public string ForcedByEnvironment { get; }
+
     public string EmbeddedWebViewDefault { get; }
+
+    public string AppVersion { get; }
 
     public string NknAddress { get; }
 
@@ -120,11 +141,33 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
 
     public string RecentConnectionAttemptsText { get; }
 
+    public bool ShowCopyFeedback
+    {
+        get => showCopyFeedback;
+        private set => SetProperty(ref showCopyFeedback, value);
+    }
+
+    public string CopyFeedbackText
+    {
+        get => copyFeedbackText;
+        private set => SetProperty(ref copyFeedbackText, value);
+    }
+
     public IRelayCommand CopyReliabilityLogCommand { get; }
 
     public IRelayCommand BackCommand { get; }
 
     public event EventHandler<string>? CopyReliabilityLogRequested;
+
+    public void NotifyCopySucceeded()
+    {
+        _ = ShowCopyFeedbackAsync("Copied", success: true);
+    }
+
+    public void NotifyCopyFailed()
+    {
+        _ = ShowCopyFeedbackAsync("Could not copy", success: false);
+    }
 
     private static string BuildLastBridgeExitText(int exitCode, string reason)
     {
@@ -143,6 +186,39 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
         CopyReliabilityLogRequested?.Invoke(this, text);
     }
 
+    private async Task ShowCopyFeedbackAsync(string text, bool success)
+    {
+        copyFeedbackCts?.Cancel();
+        copyFeedbackCts?.Dispose();
+        copyFeedbackCts = new CancellationTokenSource();
+        var ct = copyFeedbackCts.Token;
+
+        await UiThreadDispatch.RunAsync(() =>
+        {
+            CopyFeedbackText = text;
+            ShowCopyFeedback = true;
+        });
+
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(2), ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (ct.IsCancellationRequested)
+        {
+            return;
+        }
+
+        await UiThreadDispatch.RunAsync(() =>
+        {
+            ShowCopyFeedback = false;
+        });
+    }
+
     private string BuildDiagnosticsCopyText()
     {
         var lines = new List<string>
@@ -151,9 +227,13 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
             PageSubtitle,
             string.Empty,
             $"Connection method: {ActiveTransport}",
+            $"Transport: {TransportSummary}",
             $"Method code: {TransportKey}",
             $"Build type: {BuildMode}",
+            $"App version: {AppVersion}",
             $"App setting: {EnvironmentValue}",
+            $"Auto-selected: {AutoSelected}",
+            $"Forced by environment: {ForcedByEnvironment}",
             $"Why this was chosen: {SelectionReason}",
             $"Built-in web page view: {EmbeddedWebViewDefault}",
             string.Empty,
@@ -221,5 +301,25 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
             false => "direct",
             null => "(none)"
         };
+    }
+
+    private static string ResolveAppVersion()
+    {
+        try
+        {
+            var assembly = typeof(DiagnosticsPageViewModel).Assembly;
+            var info = assembly.GetCustomAttributes<AssemblyInformationalVersionAttribute>()
+                .FirstOrDefault()?.InformationalVersion;
+            if (!string.IsNullOrWhiteSpace(info))
+            {
+                return info!;
+            }
+
+            return assembly.GetName().Version?.ToString() ?? "(unknown)";
+        }
+        catch
+        {
+            return "(unknown)";
+        }
     }
 }

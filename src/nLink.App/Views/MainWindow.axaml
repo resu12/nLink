@@ -15,16 +15,16 @@
         MinWidth="860"
         MinHeight="640"
         WindowStartupLocation="CenterScreen"
-        Background="#0B0F16">
+        Background="{StaticResource AppBackgroundBrush}">
 
     <Design.DataContext>
         <vm:MainWindowViewModel/>
     </Design.DataContext>
 
-    <Grid Background="#0B0F16">
+    <Grid Background="{StaticResource AppBackgroundBrush}">
         <Border Margin="8"
-                Background="#0B0F16"
-                BorderBrush="#111827"
+                Background="{StaticResource AppBackgroundBrush}"
+                BorderBrush="{StaticResource AppCardBorderBrush}"
                 BorderThickness="1"
                 CornerRadius="12"
                 ClipToBounds="True">

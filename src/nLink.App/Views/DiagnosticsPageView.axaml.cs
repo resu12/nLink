@@ -46,10 +46,14 @@ public partial class DiagnosticsPageView : UserControl
 
             BindClipboardTopLevel();
             await clipboardService.SetTextAsync(text);
+            if (subscribedViewModel is not null)
+            {
+                subscribedViewModel.NotifyCopySucceeded();
+            }
         }
         catch
         {
-            // Best-effort diagnostics copy.
+            subscribedViewModel?.NotifyCopyFailed();
         }
     }
 

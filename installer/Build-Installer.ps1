@@ -146,12 +146,15 @@ function Publish-ReleaseAssets {
     $releaseDir = Join-Path (Join-Path $RepoRoot $ReleasesRootDir) $Version
     New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
 
+    $copiedAssets = @()
     foreach ($assetPath in $AssetPaths) {
         if ([string]::IsNullOrWhiteSpace($assetPath) -or -not (Test-Path $assetPath)) {
             continue
         }
 
-        Copy-Item -Force $assetPath (Join-Path $releaseDir (Split-Path -Leaf $assetPath))
+        $destPath = Join-Path $releaseDir (Split-Path -Leaf $assetPath)
+        Copy-Item -Force $assetPath $destPath
+        $copiedAssets += $destPath
     }
 
     $checksumsPath = Join-Path $releaseDir "SHA256SUMS.txt"
@@ -171,6 +174,7 @@ function Publish-ReleaseAssets {
     return [pscustomobject]@{
         ReleaseDir = $releaseDir
         ChecksumsPath = $checksumsPath
+        Assets = $copiedAssets
     }
 }
 
@@ -237,6 +241,7 @@ Write-Host "[nLink] Building canonical portable app output + ZIP..." -Foreground
     -Runtime $Runtime `
     -CanonicalOutDir $CanonicalPortableOutDir `
     -ZipOutPath $PortableZipPath `
+    -Version $resolvedVersion `
     -HelperAliasOutDir $HelperPortableOutDir `
     -CopyHelperAlias
 if ($LASTEXITCODE -ne 0) {
@@ -280,3 +285,8 @@ Write-Host "[nLink] Installer output folder: $installerOutAbs" -ForegroundColor 
 Write-Host "[nLink] Release version: $resolvedVersion" -ForegroundColor Green
 Write-Host "[nLink] Release assets folder: $($releasePublish.ReleaseDir)" -ForegroundColor Green
 Write-Host "[nLink] SHA256SUMS: $($releasePublish.ChecksumsPath)" -ForegroundColor Green
+foreach ($asset in @($releasePublish.Assets)) {
+    if (-not [string]::IsNullOrWhiteSpace($asset)) {
+        Write-Host "[nLink] Release asset: $asset" -ForegroundColor Green
+    }
+}

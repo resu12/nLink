@@ -1,0 +1,107 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:NLink.App.ViewModels"
+             mc:Ignorable="d"
+             x:Class="NLink.App.Views.ChatView"
+             x:DataType="vm:IChatPanelBindings">
+
+    <UserControl.Styles>
+        <Style Selector="Border.chatShell">
+            <Setter Property="Background" Value="{StaticResource AppMutedPanelBrush}"/>
+            <Setter Property="CornerRadius" Value="16"/>
+            <Setter Property="BorderThickness" Value="0"/>
+        </Style>
+
+        <Style Selector="Border.chatBubbleBase">
+            <Setter Property="CornerRadius" Value="14"/>
+            <Setter Property="Padding" Value="12,10"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="HorizontalAlignment" Value="Left"/>
+        </Style>
+
+        <Style Selector="Border.chatBubbleBase.remoteBubble">
+            <Setter Property="Background" Value="#172133"/>
+        </Style>
+
+        <Style Selector="Border.chatBubbleBase.localBubble">
+            <Setter Property="Background" Value="#21344D"/>
+            <Setter Property="HorizontalAlignment" Value="Right"/>
+        </Style>
+
+        <Style Selector="TextBox.chatInput">
+            <Setter Property="Background" Value="{StaticResource AppPanelBrush}"/>
+            <Setter Property="Foreground" Value="{StaticResource AppTextBrush}"/>
+            <Setter Property="CaretBrush" Value="{StaticResource AppTextBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource AppInputBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="Padding" Value="10"/>
+            <Setter Property="MinHeight" Value="46"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+    </UserControl.Styles>
+
+    <Grid RowDefinitions="*,72"
+          RowSpacing="16"
+          MinHeight="320">
+        <Border Grid.Row="0"
+                Classes="chatShell"
+                MinHeight="360">
+            <ScrollViewer x:Name="MessagesScrollViewer"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled"
+                          Padding="18,16">
+                <Grid RowDefinitions="Auto,*"
+                      RowSpacing="10">
+                    <TextBlock Grid.Row="0"
+                               Classes="appMuted"
+                               Text="{Binding ChatNoticeText}"
+                               FontSize="14"
+                               IsVisible="{Binding ShowChatNotice}"/>
+
+                    <ItemsControl Grid.Row="1"
+                                  ItemsSource="{Binding ChatMessages}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:ChatLineViewModel">
+                                <Grid HorizontalAlignment="Stretch"
+                                      Margin="0,0,0,12">
+                                    <Border Classes="chatBubbleBase"
+                                            MaxWidth="{Binding Bounds.Width, ElementName=MessagesScrollViewer, Converter={StaticResource MultiplyConverter}, ConverterParameter=0.65}"
+                                            Classes.remoteBubble="{Binding IsRemote}"
+                                            Classes.localBubble="{Binding IsLocal}">
+                                        <TextBlock Text="{Binding Text}"
+                                                   Foreground="{StaticResource AppTextBrush}"
+                                                   FontSize="16"
+                                                   TextWrapping="Wrap"/>
+                                    </Border>
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </Grid>
+            </ScrollViewer>
+        </Border>
+
+        <Grid Grid.Row="1"
+              ColumnDefinitions="*,Auto"
+              ColumnSpacing="12"
+              VerticalAlignment="Center">
+            <TextBox Grid.Column="0"
+                     Classes="chatInput"
+                     Text="{Binding ChatDraft, Mode=TwoWay}"
+                     Watermark="Type a message"
+                     KeyDown="ChatDraftTextBox_KeyDown"
+                     HorizontalAlignment="Stretch"
+                     FontSize="16"/>
+
+            <Button Grid.Column="1"
+                    Classes="appButton primaryButton"
+                    Content="Send"
+                    Command="{Binding SendChatCommand}"
+                    Width="100"
+                    Height="46"/>
+        </Grid>
+    </Grid>
+</UserControl>

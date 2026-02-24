@@ -85,8 +85,16 @@ internal sealed class RealNknClientAdapter : INknClient
     internal async Task StartBridgeAsync(CancellationToken ct)
     {
         ThrowIfDisposed();
-        await EnsureProcessStartedAsync(ct);
-        await EnsureHelloHandshakeAsync(ct);
+        try
+        {
+            await EnsureProcessStartedAsync(ct);
+            await EnsureHelloHandshakeAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            SetNknStartFailed("bridge_start", ex.Message);
+            throw;
+        }
     }
 
     internal Task PingBridgeAsync(CancellationToken ct)
@@ -124,8 +132,16 @@ internal sealed class RealNknClientAdapter : INknClient
             }
         }
 
-        await EnsureProcessStartedAsync(ct);
-        await EnsureHelloHandshakeAsync(ct);
+        try
+        {
+            await EnsureProcessStartedAsync(ct);
+            await EnsureHelloHandshakeAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            SetNknStartFailed("bridge_start", ex.Message);
+            throw;
+        }
 
         lock (gate)
         {
@@ -152,6 +168,7 @@ internal sealed class RealNknClientAdapter : INknClient
         catch (TimeoutException ex)
         {
             NknRuntimeDiagnostics.SetLastError("bridge_connect_ready_timeout");
+            SetNknStartFailed("ready_timeout", "Timed out waiting for bridge ready.");
             RecordBridgeFailure("bridge_connect_ready_timeout", "The local helper process did not become ready.");
             throw new TimeoutException("Timed out waiting for NKN bridge ready(address) after connect.", ex);
         }
@@ -402,6 +419,7 @@ internal sealed class RealNknClientAdapter : INknClient
         catch (Exception ex)
         {
             NknRuntimeDiagnostics.SetLastError("bridge_hello_failed");
+            SetNknStartFailed("hello_failed", ex.Message);
             RecordBridgeFailure("bridge_hello_failed", "Could not start the local helper process.");
             throw new InvalidOperationException($"NKN bridge hello failed: {ex.Message}", ex);
         }
@@ -1295,6 +1313,23 @@ internal sealed class RealNknClientAdapter : INknClient
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(disposed, this);
+    }
+
+    private static void SetNknStartFailed(string shortReason, string? detail)
+    {
+        var safeDetail = (detail ?? string.Empty).Trim();
+        if (safeDetail.Length > 120)
+        {
+            safeDetail = safeDetail[..120];
+        }
+
+        if (string.IsNullOrWhiteSpace(safeDetail))
+        {
+            NknRuntimeDiagnostics.SetLastError($"NKN_START_FAILED: {shortReason}");
+            return;
+        }
+
+        NknRuntimeDiagnostics.SetLastError($"NKN_START_FAILED: {shortReason} ({safeDetail})");
     }
 
     private static void Log(string message)

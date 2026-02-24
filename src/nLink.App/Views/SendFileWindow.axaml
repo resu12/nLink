@@ -9,7 +9,7 @@
         Height="760"
         MinWidth="760"
         MinHeight="560"
-        Background="#0B0F16">
+        Background="{StaticResource AppBackgroundBrush}">
 
     <Window.Styles>
         <Style Selector="Button.action">
@@ -23,36 +23,34 @@
         </Style>
     </Window.Styles>
 
-    <Grid Background="#0B0F16" RowDefinitions="Auto,*,Auto">
+    <Grid Background="{StaticResource AppBackgroundBrush}" RowDefinitions="Auto,*,Auto">
         <Border Grid.Row="0"
                 Margin="20,20,20,12"
                 Padding="16"
-                Background="#111827"
-                BorderBrush="White"
-                BorderThickness="1"
+                Classes="appCard"
                 CornerRadius="12">
             <StackPanel Spacing="4"
                         HorizontalAlignment="Center"
                         MaxWidth="620">
                 <TextBlock Text="Send file"
-                           Foreground="White"
+                           Foreground="{StaticResource AppTextBrush}"
                            FontSize="22"
                            FontWeight="Bold"
                            TextAlignment="Center"
                            HorizontalAlignment="Center"/>
 
                 <TextBlock Text="1) Choose the helpee file"
-                           Foreground="#E5E7EB"
+                           Foreground="{StaticResource AppBodyTextBrush}"
                            FontSize="16"
                            FontWeight="SemiBold"
                            TextAlignment="Center"/>
                 <TextBlock Text="2) Send"
-                           Foreground="#E5E7EB"
+                           Foreground="{StaticResource AppBodyTextBrush}"
                            FontSize="16"
                            FontWeight="SemiBold"
                            TextAlignment="Center"/>
                 <TextBlock Text="3) Copy the link and send it to them"
-                           Foreground="#E5E7EB"
+                           Foreground="{StaticResource AppBodyTextBrush}"
                            FontSize="16"
                            FontWeight="SemiBold"
                            TextAlignment="Center"
@@ -62,9 +60,7 @@
 
         <Grid Grid.Row="1" Margin="20,0,20,12">
             <Border x:Name="SurfaceBorder"
-                    Background="#0F172A"
-                    BorderBrush="#334155"
-                    BorderThickness="1"
+                    Classes="appPanel"
                     CornerRadius="12"
                     Padding="6">
                 <ContentControl x:Name="WebContentHost"/>
@@ -72,9 +68,7 @@
 
             <Border x:Name="FallbackOverlay"
                     IsVisible="False"
-                    Background="#111827"
-                    BorderBrush="#334155"
-                    BorderThickness="1"
+                    Classes="appCard"
                     CornerRadius="12"
                     Padding="24">
                 <StackPanel HorizontalAlignment="Center"
@@ -83,58 +77,49 @@
                             Spacing="12">
                     <TextBlock x:Name="FallbackTitleText"
                                Text="Opening nFTP in your browser..."
-                               Foreground="White"
+                               Foreground="{StaticResource AppTextBrush}"
                                FontSize="22"
                                FontWeight="Bold"
                                TextAlignment="Center"/>
 
                     <TextBlock x:Name="FallbackMessageText"
                                Text="Embedded web view is not available."
-                               Foreground="#E5E7EB"
+                               Foreground="{StaticResource AppBodyTextBrush}"
                                FontSize="16"
                                TextWrapping="Wrap"
                                TextAlignment="Center"/>
 
-                    <Border Background="#0F172A"
-                            BorderBrush="#334155"
-                            BorderThickness="1"
+                    <Border Classes="appPanel"
                             CornerRadius="10"
                             Padding="10,8">
                         <TextBlock Text="https://nftp.nkn.org"
-                                   Foreground="#93C5FD"
+                                   Foreground="{StaticResource AppBodyTextBrush}"
                                    FontSize="16"
                                    FontWeight="SemiBold"
                                    TextAlignment="Center"
                                    HorizontalAlignment="Center"/>
                     </Border>
 
-                    <Button Classes="action"
+                    <Button Classes="appButton secondaryButton action"
                             Content="Open nFTP in browser"
                             Click="OpenInBrowser_Click"
                             Width="420"
-                            Background="#E5E7EB"
-                            Foreground="Black"
-                            BorderBrush="#CBD5E1"/>
+                            />
                 </StackPanel>
             </Border>
         </Grid>
 
         <Border Grid.Row="2"
                 Margin="20,0,20,20"
-                Background="#0F172A"
-                BorderBrush="#334155"
-                BorderThickness="1"
+                Classes="appPanel"
                 CornerRadius="12"
                 Padding="12">
-            <Button Classes="action"
+            <Button Classes="appButton secondaryButton action"
                     Content="Back"
                     Click="Back_Click"
                     Width="220"
                     Height="48"
-                    FontSize="18"
-                    Background="#1F2937"
-                    Foreground="White"
-                    BorderBrush="#475569"/>
+                    FontSize="18"/>
         </Border>
     </Grid>
 </Window>

@@ -12,64 +12,63 @@ using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
 
-public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
+public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanelBindings
 {
     private readonly Action cancelAction;
     private readonly TransportRuntimeConfig transportConfig;
-    private readonly Func<ISignalingTransport> signalingTransportFactory;
-    private readonly SessionChatService chatService = new();
+    private readonly SessionRuntime sessionRuntime;
     private readonly IClipboardService? clipboardService;
-    private readonly ShareMessageConfig shareMessageConfig;
-
     private SessionCode sessionCode = SessionCode.CreateRandom();
     private bool hasIncomingRequest;
     private bool isRequestAllowed;
     private bool showTroubleshooting;
     private bool showChatNotice;
-    private bool showShareCopyBanner;
-    private string codeCopyStatusText = "Click the code to copy it.";
-    private string shareCopyBannerText = string.Empty;
+    private string codeCopyStatusText = "Tell this code to your helper.";
     private string connectionStatus = "Waiting for your helper to connect.";
     private string connectionState = "Waiting";
     private string chatDraft = string.Empty;
-    private CancellationTokenSource? hostCts;
-    private ISignalingTransport? hostTransport;
-    private IncomingJoinRequestEventArgs? pendingJoinRequest;
+    private bool simulatedIncomingRequest;
     private SessionReliabilityAttempt? reliabilityAttempt;
+    private CancellationTokenSource? codeCopyStatusResetCts;
     private bool disposed;
 
     public HelpeePageViewModel(
         Action cancelAction,
         TransportRuntimeConfig transportConfig,
+        SessionRuntime sessionRuntime,
         IClipboardService? clipboardService = null,
         ShareMessageConfig? shareMessageConfig = null)
     {
         this.cancelAction = cancelAction;
         this.transportConfig = transportConfig;
+        this.sessionRuntime = sessionRuntime;
         this.clipboardService = clipboardService;
-        this.shareMessageConfig = shareMessageConfig ?? new ShareMessageConfig(null);
-        signalingTransportFactory = transportConfig.CreateTransport;
+        _ = shareMessageConfig;
 
         ChatMessages = new ObservableCollection<ChatLineViewModel>();
 
-        chatService.MessageReceived += OnChatMessageReceived;
-        chatService.MessageReceivedBeforeApproved += OnChatMessageReceivedBeforeApproved;
-        chatService.StateChanged += OnChatStateChanged;
+        sessionRuntime.StateChanged += OnSessionRuntimeStateChanged;
+        sessionRuntime.IncomingJoinRequestAvailable += OnIncomingJoinRequestAvailable;
+        sessionRuntime.Disconnected += OnRuntimeDisconnected;
+        sessionRuntime.ChatMessageReceived += OnChatMessageReceived;
+        sessionRuntime.ChatMessageReceivedBeforeApproved += OnChatMessageReceivedBeforeApproved;
+        sessionRuntime.ChatStateChanged += OnChatStateChanged;
 
         RegenerateCodeCommand = new RelayCommand(RegenerateCode);
-        ShareInviteCommand = new AsyncRelayCommand(ShareInviteAsync);
+        CopyCodeCommand = new AsyncRelayCommand(CopyCodeAsync);
         SimulateIncomingRequestCommand = new RelayCommand(SimulateIncomingRequest);
         ToggleTroubleshootingCommand = new RelayCommand(ToggleTroubleshooting);
         AllowCommand = new RelayCommand(AllowIncomingRequest, CanAllowIncomingRequest);
+        DeclineCommand = new AsyncRelayCommand(DeclineIncomingRequestAsync, CanDeclineIncomingRequest);
         SendChatCommand = new AsyncRelayCommand(SendChatAsync, CanSendChat);
         CancelCommand = new RelayCommand(CancelAndGoBack);
 
         StartHosting();
     }
 
-    public string PageTitle => "I need help";
+    public string PageTitle => IsIncomingRequestView ? "Helper wants to connect." : "Your code";
 
-    public string PageSubtitle => "Share the code below with the person helping you.";
+    public string PageSubtitle => IsIncomingRequestView ? string.Empty : CodeCopyStatusText;
 
     public string ShareCode => sessionCode.Digits;
 
@@ -81,18 +80,6 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
         private set => SetProperty(ref codeCopyStatusText, value);
     }
 
-    public bool ShowShareCopyBanner
-    {
-        get => showShareCopyBanner;
-        private set => SetProperty(ref showShareCopyBanner, value);
-    }
-
-    public string ShareCopyBannerText
-    {
-        get => shareCopyBannerText;
-        private set => SetProperty(ref shareCopyBannerText, value);
-    }
-
     public bool HasIncomingRequest
     {
         get => hasIncomingRequest;
@@ -100,8 +87,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
         {
             if (SetProperty(ref hasIncomingRequest, value))
             {
-                OnPropertyChanged(nameof(ShowPreConnectActions));
                 AllowCommand.NotifyCanExecuteChanged();
+                DeclineCommand.NotifyCanExecuteChanged();
             }
         }
     }
@@ -114,6 +101,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
             if (SetProperty(ref isRequestAllowed, value))
             {
                 AllowCommand.NotifyCanExecuteChanged();
+                DeclineCommand.NotifyCanExecuteChanged();
             }
         }
     }
@@ -126,8 +114,6 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
 
     public bool ShowDevTroubleshooting => transportConfig.IsDevLocal;
 
-    public bool ShowPreConnectActions => !HasIncomingRequest;
-
     public string ConnectionStatus
     {
         get => connectionStatus;
@@ -137,8 +123,40 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
     public string ConnectionState
     {
         get => connectionState;
-        private set => SetProperty(ref connectionState, value);
+        private set
+        {
+            if (SetProperty(ref connectionState, value))
+            {
+                OnPropertyChanged(nameof(IsWaitingView));
+                OnPropertyChanged(nameof(IsIncomingRequestView));
+                OnPropertyChanged(nameof(IsConnectedView));
+                OnPropertyChanged(nameof(ShowBackButton));
+                OnPropertyChanged(nameof(PageTitle));
+                OnPropertyChanged(nameof(PageSubtitle));
+                OnPropertyChanged(nameof(StatusLineText));
+                OnPropertyChanged(nameof(SecondaryActionText));
+                OnPropertyChanged(nameof(ShowChatSection));
+            }
+        }
     }
+
+    public bool IsWaitingView => ConnectionState is "Waiting" or "Disconnected" or "Failed";
+
+    public bool IsIncomingRequestView => ConnectionState == "IncomingRequest";
+
+    public bool IsConnectedView => ConnectionState == "Connected";
+
+    public bool ShowChatSection => IsConnectedView;
+
+    public bool ShowBackButton => !IsConnectedView;
+
+    public string StatusLineText => IsIncomingRequestView
+        ? "Waiting for you to allow."
+        : IsConnectedView
+            ? ConnectionStatus
+            : "Waiting for helper...";
+
+    public string SecondaryActionText => IsConnectedView ? "Disconnect" : "New code";
 
     public ObservableCollection<ChatLineViewModel> ChatMessages { get; }
 
@@ -156,7 +174,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
         }
     }
 
-    public bool IsChatReady => chatService.CanSend;
+    public bool IsChatReady => sessionRuntime.CanSendChat;
 
     public bool ShowChatNotice
     {
@@ -168,13 +186,15 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
 
     public IRelayCommand RegenerateCodeCommand { get; }
 
-    public IAsyncRelayCommand ShareInviteCommand { get; }
+    public IAsyncRelayCommand CopyCodeCommand { get; }
 
     public IRelayCommand SimulateIncomingRequestCommand { get; }
 
     public IRelayCommand ToggleTroubleshootingCommand { get; }
 
     public RelayCommand AllowCommand { get; }
+
+    public IAsyncRelayCommand DeclineCommand { get; }
 
     public IAsyncRelayCommand SendChatCommand { get; }
 
@@ -189,23 +209,16 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
 
         disposed = true;
 
-        chatService.MessageReceived -= OnChatMessageReceived;
-        chatService.MessageReceivedBeforeApproved -= OnChatMessageReceivedBeforeApproved;
-        chatService.StateChanged -= OnChatStateChanged;
-        chatService.SetReliabilityAttempt(null);
-        chatService.Dispose();
-
-        if (hostTransport is not null)
-        {
-            hostTransport.IncomingJoinRequest -= OnIncomingJoinRequest;
-            hostTransport.Disconnected -= OnTransportDisconnected;
-            DisposeTransportInBackground(hostTransport);
-            hostTransport = null;
-        }
-
-        hostCts?.Cancel();
-        hostCts?.Dispose();
-        hostCts = null;
+        sessionRuntime.StateChanged -= OnSessionRuntimeStateChanged;
+        sessionRuntime.IncomingJoinRequestAvailable -= OnIncomingJoinRequestAvailable;
+        sessionRuntime.Disconnected -= OnRuntimeDisconnected;
+        sessionRuntime.ChatMessageReceived -= OnChatMessageReceived;
+        sessionRuntime.ChatMessageReceivedBeforeApproved -= OnChatMessageReceivedBeforeApproved;
+        sessionRuntime.ChatStateChanged -= OnChatStateChanged;
+        sessionRuntime.SetReliabilityAttempt(null);
+        codeCopyStatusResetCts?.Cancel();
+        codeCopyStatusResetCts?.Dispose();
+        _ = sessionRuntime.ResetAsync();
     }
 
     private void RegenerateCode()
@@ -213,15 +226,13 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
         sessionCode = SessionCode.CreateRandom();
         OnPropertyChanged(nameof(ShareCode));
 
-        pendingJoinRequest = null;
+        simulatedIncomingRequest = false;
         HasIncomingRequest = false;
         IsRequestAllowed = false;
         ShowChatNotice = false;
         ChatDraft = string.Empty;
         ChatMessages.Clear();
-        CodeCopyStatusText = "Click the code to copy it.";
-        ShowShareCopyBanner = false;
-        ShareCopyBannerText = string.Empty;
+        CodeCopyStatusText = "Tell this code to your helper.";
         ConnectionStatus = "Waiting for your helper to connect.";
         ConnectionState = "Waiting";
 
@@ -230,7 +241,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
 
     private void SimulateIncomingRequest()
     {
-        pendingJoinRequest = null;
+        simulatedIncomingRequest = true;
         HasIncomingRequest = true;
         IsRequestAllowed = false;
         ConnectionStatus = "Helper on this PC wants to connect. Click Allow.";
@@ -244,36 +255,30 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
 
     public void NotifyCodeCopied()
     {
-        CodeCopyStatusText = $"Copied code: {ShareCode}";
-        ShowShareCopyBanner = false;
+        _ = ShowTransientCodeCopyStatusAsync("Copied. Tell this code to your helper.");
     }
 
     public void NotifyCodeCopyFailed()
     {
-        CodeCopyStatusText = "Could not copy the code. Please read it to your helper.";
-        ShowShareCopyBanner = false;
+        _ = ShowTransientCodeCopyStatusAsync("Could not copy the code. Please read it to your helper.");
     }
 
-    private async Task ShareInviteAsync()
+    private async Task CopyCodeAsync()
     {
         if (clipboardService is null)
         {
-            ShareCopyBannerText = "Could not copy. Please read the code to your helper.";
-            ShowShareCopyBanner = true;
+            NotifyCodeCopyFailed();
             return;
         }
 
         try
         {
-            var message = ShareMessageBuilder.BuildInstallMessage(ShareCode, shareMessageConfig.DownloadUrl);
-            await clipboardService.SetTextAsync(message);
-            ShareCopyBannerText = "Copied. Paste it into your chat.";
-            ShowShareCopyBanner = true;
+            await clipboardService.SetTextAsync(ShareCode);
+            NotifyCodeCopied();
         }
         catch
         {
-            ShareCopyBannerText = "Could not copy. Please try again.";
-            ShowShareCopyBanner = true;
+            NotifyCodeCopyFailed();
         }
     }
 
@@ -282,9 +287,14 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
         return HasIncomingRequest && !IsRequestAllowed;
     }
 
+    private bool CanDeclineIncomingRequest()
+    {
+        return HasIncomingRequest && !IsRequestAllowed;
+    }
+
     private bool CanSendChat()
     {
-        return !string.IsNullOrWhiteSpace(ChatDraft) && chatService.CanSend;
+        return !string.IsNullOrWhiteSpace(ChatDraft) && sessionRuntime.CanSendChat;
     }
 
     private void AllowIncomingRequest()
@@ -293,27 +303,26 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
         {
             return;
         }
-
-        var request = pendingJoinRequest;
-        pendingJoinRequest = null;
-
-        HasIncomingRequest = false;
-        IsRequestAllowed = true;
-        ShowChatNotice = false;
-        ConnectionStatus = transportConfig.AllowStatusText;
-        ConnectionState = "Connected";
         LogReliability(SessionReliabilityStage.Approved);
         LogReliability(SessionReliabilityStage.Completed);
 
-        if (request is not null)
+        if (simulatedIncomingRequest)
         {
-            _ = CompleteJoinRequestAsync(request);
+            simulatedIncomingRequest = false;
+            HasIncomingRequest = false;
+            IsRequestAllowed = true;
+            ShowChatNotice = false;
+            ConnectionStatus = transportConfig.AllowStatusText;
+            ConnectionState = "Connected";
+            return;
         }
+
+        _ = ApproveIncomingRequestAsync();
     }
 
     private async Task SendChatAsync()
     {
-        var sent = await chatService.TrySendTextAsync(ChatDraft, CancellationToken.None);
+        var sent = await sessionRuntime.TrySendChatTextAsync(ChatDraft, CancellationToken.None);
         if (sent is null)
         {
             return;
@@ -329,107 +338,82 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
         cancelAction();
     }
 
-    private void StartHosting()
+    private async Task DeclineIncomingRequestAsync()
     {
-        hostCts?.Cancel();
-        hostCts?.Dispose();
-        hostCts = new CancellationTokenSource();
-        reliabilityAttempt = SessionReliabilityLog.StartAttempt("Helpee", transportConfig.Key);
-        chatService.SetReliabilityAttempt(reliabilityAttempt);
-        LogReliability(SessionReliabilityStage.CodeGenerated);
-        LogReliability(SessionReliabilityStage.DiscoveryStarted);
-
-        chatService.DetachTransport();
-
-        if (hostTransport is not null)
+        if (!CanDeclineIncomingRequest())
         {
-            hostTransport.IncomingJoinRequest -= OnIncomingJoinRequest;
-            hostTransport.Disconnected -= OnTransportDisconnected;
-            DisposeTransportInBackground(hostTransport);
+            return;
         }
 
-        hostTransport = signalingTransportFactory();
-        chatService.AttachTransport(hostTransport);
-        hostTransport.IncomingJoinRequest += OnIncomingJoinRequest;
-        hostTransport.Disconnected += OnTransportDisconnected;
-
-        AppLog.Info($"Helpee hosting using {transportConfig.Key} with code {sessionCode.Digits}");
-
-        _ = RunHostAsync(hostTransport, sessionCode, hostCts.Token);
-    }
-
-    private static void DisposeTransportInBackground(ISignalingTransport transport)
-    {
-        _ = Task.Run(() =>
-        {
-            try
-            {
-                transport.Dispose();
-            }
-            catch
-            {
-                // Best-effort cleanup. UI should not block on transport shutdown.
-            }
-        });
-    }
-
-    private async Task RunHostAsync(ISignalingTransport transport, SessionCode code, CancellationToken ct)
-    {
         try
         {
-            await transport.HostAsync(code, ct);
-        }
-        catch (OperationCanceledException)
-        {
-            // Normal when generating a new code or leaving the page.
+            await sessionRuntime.RejectAsync(CancellationToken.None);
         }
         catch
         {
-            if (disposed || ct.IsCancellationRequested || !ReferenceEquals(hostTransport, transport))
-            {
-                return;
-            }
+            // Best-effort. Runtime disconnect/reject events will reconcile state.
+        }
 
-            await UiThreadDispatch.RunAsync(() =>
+        HasIncomingRequest = false;
+        IsRequestAllowed = false;
+        ConnectionStatus = "Waiting for your helper to connect.";
+        ConnectionState = "Waiting";
+    }
+
+    private void StartHosting()
+    {
+        simulatedIncomingRequest = false;
+        reliabilityAttempt = SessionReliabilityLog.StartAttempt("Helpee", transportConfig.Key);
+        sessionRuntime.SetReliabilityAttempt(reliabilityAttempt);
+        LogReliability(SessionReliabilityStage.CodeGenerated);
+        LogReliability(SessionReliabilityStage.DiscoveryStarted);
+
+        AppLog.Info($"Helpee hosting using {transportConfig.Key} with code {sessionCode.Digits}");
+        _ = StartHostingAsync();
+    }
+
+    private async Task StartHostingAsync()
+    {
+        try
+        {
+            await sessionRuntime.ResetAsync();
+            await sessionRuntime.StartHelpeeAsync(sessionCode, CancellationToken.None);
+        }
+        catch (OperationCanceledException)
+        {
+            // No-op.
+        }
+        catch
+        {
+            if (!HasIncomingRequest && !IsRequestAllowed)
             {
-                if (!HasIncomingRequest && !IsRequestAllowed)
+                await UiThreadDispatch.RunAsync(() =>
                 {
                     ConnectionStatus = "Could not start. Try a new code.";
                     ConnectionState = "Disconnected";
-                }
-            });
+                });
+            }
         }
     }
 
-    private void OnIncomingJoinRequest(object? sender, IncomingJoinRequestEventArgs e)
+    private async Task ApproveIncomingRequestAsync()
     {
-        if (disposed)
+        await sessionRuntime.ApproveAsync(CancellationToken.None);
+        await UiThreadDispatch.RunAsync(() =>
         {
-            _ = e.RejectAsync();
-            return;
-        }
-
-        if (HasIncomingRequest)
-        {
-            _ = e.RejectAsync();
-            return;
-        }
-
-        pendingJoinRequest = e;
-        LogReliability(SessionReliabilityStage.IncomingJoinRequest);
-
-        _ = UiThreadDispatch.RunAsync(() =>
-        {
-            HasIncomingRequest = true;
-            IsRequestAllowed = false;
-            ConnectionStatus = "Helper on this PC wants to connect. Click Allow.";
-            ConnectionState = "IncomingRequest";
+            ShowChatNotice = false;
+            SyncFromRuntime();
         });
     }
 
-    private void OnTransportDisconnected(object? sender, EventArgs e)
+    private void OnIncomingJoinRequestAvailable(object? sender, EventArgs e)
     {
-        if (disposed || hostCts?.IsCancellationRequested == true)
+        LogReliability(SessionReliabilityStage.IncomingJoinRequest);
+    }
+
+    private void OnRuntimeDisconnected(object? sender, EventArgs e)
+    {
+        if (disposed)
         {
             return;
         }
@@ -438,14 +422,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
         {
             if (!HasIncomingRequest && !IsRequestAllowed)
             {
-                ConnectionStatus = transportConfig.HelpeeDisconnectedText;
                 var (errorCode, errorHint) = GetReliabilityError();
                 LogReliability(SessionReliabilityStage.Disconnected, errorCode, errorHint);
-                if (ConnectionState != "Connected")
-                {
-                    ConnectionState = "Disconnected";
-                }
             }
+
+            SyncFromRuntime();
         });
     }
 
@@ -491,18 +472,6 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
         }
     }
 
-    private static async Task CompleteJoinRequestAsync(IncomingJoinRequestEventArgs request)
-    {
-        try
-        {
-            await request.ApproveAsync(CancellationToken.None);
-        }
-        catch
-        {
-            // UI state already reflects approval.
-        }
-    }
-
     private void LogReliability(SessionReliabilityStage stage, string? errorCode = null, string? errorHint = null)
     {
         if (reliabilityAttempt is null)
@@ -527,5 +496,104 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable
         }
 
         return (lastError, "The connection stopped. Try a new code.");
+    }
+
+    private void OnSessionRuntimeStateChanged(object? sender, SessionRuntimeStateChangedEventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(SyncFromRuntime);
+    }
+
+    private void SyncFromRuntime()
+    {
+        switch (sessionRuntime.State)
+        {
+            case SessionRuntimeState.IncomingJoinRequest:
+                HasIncomingRequest = true;
+                IsRequestAllowed = false;
+                ConnectionStatus = sessionRuntime.StatusText;
+                ConnectionState = "IncomingRequest";
+                break;
+
+            case SessionRuntimeState.Connected:
+                HasIncomingRequest = false;
+                IsRequestAllowed = true;
+                ConnectionStatus = transportConfig.AllowStatusText;
+                ConnectionState = "Connected";
+                break;
+
+            case SessionRuntimeState.Disconnected:
+                if (!HasIncomingRequest && !IsRequestAllowed)
+                {
+                    ConnectionStatus = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
+                        ? transportConfig.HelpeeDisconnectedText
+                        : sessionRuntime.StatusText;
+                    if (ConnectionState != "Connected")
+                    {
+                        ConnectionState = "Disconnected";
+                    }
+                }
+                break;
+
+            case SessionRuntimeState.Waiting:
+                if (!HasIncomingRequest && !IsRequestAllowed)
+                {
+                    ConnectionStatus = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
+                        ? "Waiting for your helper to connect."
+                        : sessionRuntime.StatusText;
+                    ConnectionState = "Waiting";
+                }
+                break;
+
+            case SessionRuntimeState.Failed:
+                HasIncomingRequest = false;
+                IsRequestAllowed = false;
+                ConnectionStatus = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
+                    ? "The session ended."
+                    : sessionRuntime.StatusText;
+                ConnectionState = "Failed";
+                break;
+        }
+
+        OnPropertyChanged(nameof(IsChatReady));
+        SendChatCommand.NotifyCanExecuteChanged();
+        AllowCommand.NotifyCanExecuteChanged();
+        DeclineCommand.NotifyCanExecuteChanged();
+    }
+
+    private async Task ShowTransientCodeCopyStatusAsync(string text)
+    {
+        codeCopyStatusResetCts?.Cancel();
+        codeCopyStatusResetCts?.Dispose();
+        codeCopyStatusResetCts = new CancellationTokenSource();
+        var ct = codeCopyStatusResetCts.Token;
+
+        await UiThreadDispatch.RunAsync(() =>
+        {
+            CodeCopyStatusText = text;
+        });
+
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(2), ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (ct.IsCancellationRequested)
+        {
+            return;
+        }
+
+        await UiThreadDispatch.RunAsync(() =>
+        {
+            CodeCopyStatusText = "Tell this code to your helper.";
+        });
     }
 }

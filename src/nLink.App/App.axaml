@@ -1,15 +1,117 @@
-﻿<Application xmlns="https://github.com/avaloniaui"
+<Application xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="NLink.App.App"
              xmlns:local="using:NLink.App"
+             xmlns:converters="using:NLink.App.Converters"
              RequestedThemeVariant="Default">
              <!-- "Default" ThemeVariant follows system theme variant. "Dark" or "Light" are other available options. -->
 
     <Application.DataTemplates>
         <local:ViewLocator/>
     </Application.DataTemplates>
-  
+
+    <Application.Resources>
+        <converters:MultiplyConverter x:Key="MultiplyConverter"/>
+        <SolidColorBrush x:Key="AppBackgroundBrush">#0B0F16</SolidColorBrush>
+        <SolidColorBrush x:Key="AppSurfaceBrush">#111827</SolidColorBrush>
+        <SolidColorBrush x:Key="AppPanelBrush">#0F172A</SolidColorBrush>
+        <SolidColorBrush x:Key="AppCardBorderBrush">#2A3445</SolidColorBrush>
+        <SolidColorBrush x:Key="AppSeparatorBrush">#243046</SolidColorBrush>
+        <SolidColorBrush x:Key="AppTextBrush">#FFFFFF</SolidColorBrush>
+        <SolidColorBrush x:Key="AppBodyTextBrush">#E5E7EB</SolidColorBrush>
+        <SolidColorBrush x:Key="AppMutedTextBrush">#94A3B8</SolidColorBrush>
+        <SolidColorBrush x:Key="AppAccentBrush">#93C5FD</SolidColorBrush>
+        <SolidColorBrush x:Key="AppAccentBorderBrush">#60A5FA</SolidColorBrush>
+        <SolidColorBrush x:Key="AppAccentTextOnBrush">#0B0F16</SolidColorBrush>
+        <SolidColorBrush x:Key="AppSecondaryButtonBrush">#1F2937</SolidColorBrush>
+        <SolidColorBrush x:Key="AppSecondaryButtonBorderBrush">#475569</SolidColorBrush>
+        <SolidColorBrush x:Key="AppMutedPanelBrush">#0B1220</SolidColorBrush>
+        <SolidColorBrush x:Key="AppInputBorderBrush">#475569</SolidColorBrush>
+        <SolidColorBrush x:Key="AppWarningBgBrush">#2A1C12</SolidColorBrush>
+        <SolidColorBrush x:Key="AppWarningBorderBrush">#7C5A2E</SolidColorBrush>
+        <SolidColorBrush x:Key="AppWarningTextBrush">#FDE68A</SolidColorBrush>
+    </Application.Resources>
+
     <Application.Styles>
         <FluentTheme />
+
+        <Style Selector="TextBlock.appTitle">
+            <Setter Property="Foreground" Value="{StaticResource AppTextBrush}"/>
+            <Setter Property="FontSize" Value="32"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+        </Style>
+
+        <Style Selector="TextBlock.appBody">
+            <Setter Property="Foreground" Value="{StaticResource AppBodyTextBrush}"/>
+            <Setter Property="FontSize" Value="18"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+
+        <Style Selector="TextBlock.appMuted">
+            <Setter Property="Foreground" Value="{StaticResource AppMutedTextBrush}"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+
+        <Style Selector="TextBlock.appLabel">
+            <Setter Property="Foreground" Value="{StaticResource AppMutedTextBrush}"/>
+            <Setter Property="FontSize" Value="14"/>
+        </Style>
+
+        <Style Selector="Border.appCard">
+            <Setter Property="Background" Value="{StaticResource AppSurfaceBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource AppCardBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="16"/>
+            <Setter Property="Padding" Value="20"/>
+        </Style>
+
+        <Style Selector="Border.appPanel">
+            <Setter Property="Background" Value="{StaticResource AppPanelBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource AppCardBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="Padding" Value="12"/>
+        </Style>
+
+        <Style Selector="Separator.appSeparator">
+            <Setter Property="Background" Value="{StaticResource AppSeparatorBrush}"/>
+        </Style>
+
+        <Style Selector="Button.appButton">
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Padding" Value="16,0"/>
+        </Style>
+
+        <Style Selector="Button.primaryButton">
+            <Setter Property="Background" Value="{StaticResource AppAccentBrush}"/>
+            <Setter Property="Foreground" Value="{StaticResource AppAccentTextOnBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource AppAccentBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+
+        <Style Selector="Button.secondaryButton">
+            <Setter Property="Background" Value="{StaticResource AppSecondaryButtonBrush}"/>
+            <Setter Property="Foreground" Value="{StaticResource AppTextBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource AppSecondaryButtonBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+
+        <Style Selector="Button.linkButton">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{StaticResource AppMutedTextBrush}"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="Padding" Value="8,4"/>
+        </Style>
+
+        <Style Selector="TextBox.appInput">
+            <Setter Property="Background" Value="{StaticResource AppPanelBrush}"/>
+            <Setter Property="Foreground" Value="{StaticResource AppTextBrush}"/>
+            <Setter Property="CaretBrush" Value="{StaticResource AppTextBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource AppInputBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
     </Application.Styles>
 </Application>
