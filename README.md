@@ -4,28 +4,28 @@ Simple help for family and friends.
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
-## Quick start (Windows)
+## Quick Start (Windows)
 
-Requirements:
-- Windows x64
-- Pre-release alpha
+1. Go to the GitHub Releases page.
+2. Download:
+   - Installer (recommended), or
+   - Portable ZIP.
+3. Helpee:
+   - Open nLink.
+   - Click `I need help`.
+   - Share the 6-digit code.
+4. Helper:
+   - Open nLink.
+   - Click `I want to help`.
+   - Enter the code and click Connect.
+5. Helpee clicks Allow.
 
-1. Go to **Releases** and download the installer or portable ZIP.
-2. Open `nLink`.
-3. Choose your role and follow the on-screen steps.
+If connection fails:
+Open Diagnostics -> Copy diagnostics and include it when reporting issues.
 
-Helpee (`I need help`)
-- Click `I need help`
-- Tell the 6-digit code to your helper
-- Click `Allow` when asked
-
-Helper (`I want to help someone`)
-- Click `I want to help someone`
-- Enter the 6-digit code and click `Connect`
-- Chat and continue helping after connection
-
-If it fails:
-- Open `Diagnostics` -> `Copy diagnostics`, then share the text
+Notes:
+- Windows x64 only
+- Alpha pre-release
 
 Versioning:
 - Release version uses SemVer (for example: `0.1.0-alpha.2`)

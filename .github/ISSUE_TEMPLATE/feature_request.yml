@@ -1,0 +1,12 @@
+name: Feature Request
+description: Suggest an improvement
+body:
+  - type: textarea
+    attributes:
+      label: Problem
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Proposed solution

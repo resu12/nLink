@@ -1,0 +1,47 @@
+name: Bug Report
+description: Report a problem with nLink
+body:
+  - type: input
+    attributes:
+      label: Version
+      description: Example: v0.1.0-alpha.2
+    validations:
+      required: true
+
+  - type: dropdown
+    attributes:
+      label: Install Type
+      options:
+        - Installer
+        - Portable
+    validations:
+      required: true
+
+  - type: dropdown
+    attributes:
+      label: Transport
+      options:
+        - NKN
+        - DEVLOCAL
+        - Not sure
+
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Expected behavior
+
+  - type: textarea
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Diagnostics output
+      description: Paste from Diagnostics -> Copy diagnostics

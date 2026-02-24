@@ -18,7 +18,14 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-          cache: true
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/*.props', '**/*.targets', 'global.json') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
 
       - name: Restore
         run: dotnet restore
@@ -27,4 +34,11 @@ jobs:
         run: dotnet build nLink.sln -c Release --no-restore
 
       - name: Smoke tests
-        run: dotnet test -c Release --filter Category=Smoke --no-build
+        run: dotnet test -c Release --filter Category=Smoke --no-build --logger "trx;LogFileName=test-results.trx"
+
+      - name: Upload smoke test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-test-results
+          path: '**/test-results.trx'
