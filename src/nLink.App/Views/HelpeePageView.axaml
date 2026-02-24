@@ -1,0 +1,269 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:NLink.App.ViewModels"
+             mc:Ignorable="d"
+             x:Class="NLink.App.Views.HelpeePageView"
+             x:DataType="vm:HelpeePageViewModel">
+
+    <UserControl.Styles>
+        <Style Selector="TextBox.highContrastInput">
+            <Setter Property="Background" Value="#0F172A"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="CaretBrush" Value="White"/>
+            <Setter Property="BorderBrush" Value="#475569"/>
+        </Style>
+
+        <Style Selector="Button.action">
+            <Setter Property="Height" Value="64"/>
+            <Setter Property="FontSize" Value="20"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="HorizontalAlignment" Value="Stretch"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Padding" Value="16,0"/>
+        </Style>
+
+        <Style Selector="Button.secondaryAction">
+            <Setter Property="Background" Value="#E5E7EB"/>
+            <Setter Property="Foreground" Value="Black"/>
+            <Setter Property="BorderBrush" Value="#CBD5E1"/>
+        </Style>
+
+        <Style Selector="Button.primaryAction">
+            <Setter Property="Background" Value="#93C5FD"/>
+            <Setter Property="Foreground" Value="Black"/>
+            <Setter Property="BorderBrush" Value="#60A5FA"/>
+        </Style>
+
+        <Style Selector="Button.successAction">
+            <Setter Property="Background" Value="#22C55E"/>
+            <Setter Property="Foreground" Value="Black"/>
+            <Setter Property="BorderBrush" Value="#16A34A"/>
+        </Style>
+    </UserControl.Styles>
+
+    <Grid Background="#0B0F16">
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+                      VerticalScrollBarVisibility="Auto"
+                      Margin="24">
+            <StackPanel HorizontalAlignment="Center"
+                        MaxWidth="720"
+                        Spacing="16">
+                <TextBlock Text="{Binding PageTitle}"
+                           Foreground="White"
+                           FontSize="32"
+                           FontWeight="Bold"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center"/>
+
+                <TextBlock Text="{Binding PageSubtitle}"
+                           Foreground="#E5E7EB"
+                           FontSize="18"
+                           MaxWidth="620"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"/>
+
+                <Border Background="#111827"
+                        BorderBrush="White"
+                        BorderThickness="2"
+                        CornerRadius="16"
+                        Padding="24">
+                    <StackPanel Spacing="22">
+                        <StackPanel Spacing="14">
+                            <TextBlock Text="Step 1: Share this code with your helper"
+                                       Foreground="White"
+                                       FontSize="22"
+                                       FontWeight="SemiBold"
+                                       TextWrapping="Wrap"/>
+
+                            <Border Background="#05070B"
+                                    BorderBrush="#FFD34D"
+                                    BorderThickness="2"
+                                    CornerRadius="12"
+                                    Padding="20"
+                                    Cursor="Hand"
+                                    PointerPressed="ShareCodeBorder_PointerPressed">
+                                <TextBlock Text="{Binding ShareCode}"
+                                           HorizontalAlignment="Center"
+                                           Foreground="White"
+                                           FontSize="42"
+                                           FontWeight="Bold"
+                                           LetterSpacing="6"
+                                           TextAlignment="Center"/>
+                            </Border>
+
+                            <TextBlock Text="{Binding CodeCopyStatusText}"
+                                       Foreground="#BFDBFE"
+                                       FontSize="15"
+                                       TextAlignment="Center"
+                                       HorizontalAlignment="Center"
+                                       TextWrapping="Wrap"/>
+
+                            <StackPanel Spacing="10"
+                                        IsVisible="{Binding ShowPreConnectActions}">
+                                <Button Classes="action primaryAction"
+                                        Content="Share"
+                                        Command="{Binding ShareInviteCommand}"/>
+
+                                <Border Background="#0F172A"
+                                        BorderBrush="#334155"
+                                        BorderThickness="1"
+                                        CornerRadius="10"
+                                        Padding="10"
+                                        IsVisible="{Binding ShowShareCopyBanner}">
+                                    <TextBlock Text="{Binding ShareCopyBannerText}"
+                                               Foreground="#BFDBFE"
+                                               FontSize="15"
+                                               TextAlignment="Center"
+                                               HorizontalAlignment="Center"
+                                               TextWrapping="Wrap"/>
+                                </Border>
+
+                                <Button Classes="action secondaryAction"
+                                        Content="Use a new code"
+                                        Command="{Binding RegenerateCodeCommand}"/>
+                            </StackPanel>
+                        </StackPanel>
+
+                        <Border Height="1"
+                                Background="#243046"
+                                Opacity="0.8"/>
+
+                        <StackPanel Spacing="14">
+                            <TextBlock Text="Step 2: When your helper connects, click Allow"
+                                       Foreground="White"
+                                       FontSize="22"
+                                       FontWeight="SemiBold"
+                                       TextWrapping="Wrap"/>
+
+                            <Border Background="#0F172A"
+                                    BorderBrush="#334155"
+                                    BorderThickness="1"
+                                    CornerRadius="10"
+                                    Padding="14">
+                                <StackPanel Spacing="8">
+                                    <TextBlock Text="{Binding ConnectionStatus}"
+                                               Foreground="#E5E7EB"
+                                               FontSize="18"
+                                               TextWrapping="Wrap"
+                                               TextAlignment="Center"
+                                               HorizontalAlignment="Center"/>
+
+                                    <TextBlock Text="{Binding IncomingHelperName}"
+                                               Foreground="#BFDBFE"
+                                               FontSize="18"
+                                               FontWeight="SemiBold"
+                                               TextAlignment="Center"
+                                               HorizontalAlignment="Center"
+                                               IsVisible="{Binding HasIncomingRequest}"/>
+                                </StackPanel>
+                            </Border>
+
+                            <StackPanel Spacing="10">
+                                <Button Classes="action successAction"
+                                        Content="Allow"
+                                        Command="{Binding AllowCommand}"
+                                        IsEnabled="{Binding HasIncomingRequest}"/>
+
+                                <Button Classes="action secondaryAction"
+                                        Content="Cancel"
+                                        Command="{Binding CancelCommand}"/>
+                            </StackPanel>
+
+                            <StackPanel Spacing="10">
+                                <TextBlock Text="{Binding ChatPanelTitle}"
+                                           Foreground="White"
+                                           FontSize="20"
+                                           FontWeight="SemiBold"/>
+
+                                <TextBlock Text="{Binding ChatNoticeText}"
+                                           Foreground="#BFDBFE"
+                                           FontSize="16"
+                                           FontWeight="SemiBold"
+                                           IsVisible="{Binding ShowChatNotice}"/>
+
+                                <Border Background="#0F172A"
+                                        BorderBrush="#334155"
+                                        BorderThickness="1"
+                                        CornerRadius="10"
+                                        Padding="10">
+                                    <ScrollViewer MaxHeight="180"
+                                                  VerticalScrollBarVisibility="Auto"
+                                                  HorizontalScrollBarVisibility="Disabled">
+                                        <ItemsControl ItemsSource="{Binding ChatMessages}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate x:DataType="vm:ChatLineViewModel">
+                                                    <Border Background="#111827"
+                                                            BorderBrush="#243046"
+                                                            BorderThickness="1"
+                                                            CornerRadius="8"
+                                                            Margin="0,0,0,8"
+                                                            Padding="10,8">
+                                                        <TextBlock Text="{Binding DisplayText}"
+                                                                   Foreground="White"
+                                                                   FontSize="16"
+                                                                   TextWrapping="Wrap"/>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </ScrollViewer>
+                                </Border>
+
+                                <TextBox Classes="highContrastInput"
+                                         Text="{Binding ChatDraft, Mode=TwoWay}"
+                                         Watermark="Type a message"
+                                         KeyDown="ChatDraftTextBox_KeyDown"
+                                         HorizontalAlignment="Stretch"
+                                         FontSize="16"/>
+
+                                <Button Classes="action primaryAction"
+                                        Content="Send"
+                                        Command="{Binding SendChatCommand}"
+                                        IsEnabled="{Binding IsChatReady}"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <StackPanel Spacing="8"
+                            HorizontalAlignment="Center"
+                            MaxWidth="720"
+                            IsVisible="{Binding ShowDevTroubleshooting}">
+                    <Button Content="Troubleshooting"
+                            Command="{Binding ToggleTroubleshootingCommand}"
+                            Background="Transparent"
+                            BorderBrush="Transparent"
+                            Foreground="#93C5FD"
+                            HorizontalContentAlignment="Center"
+                            Padding="4"
+                            FontSize="14"
+                            HorizontalAlignment="Center"/>
+
+                    <Border Background="#111827"
+                            BorderBrush="#334155"
+                            BorderThickness="1"
+                            CornerRadius="10"
+                            Padding="12"
+                            IsVisible="{Binding ShowTroubleshooting}">
+                        <Button Content="Test incoming request"
+                                Command="{Binding SimulateIncomingRequestCommand}"
+                                Height="40"
+                                MinWidth="240"
+                                FontSize="15"
+                                Background="#1F2937"
+                                Foreground="White"
+                                BorderBrush="#475569"
+                                HorizontalAlignment="Center"
+                                HorizontalContentAlignment="Center"
+                                VerticalContentAlignment="Center"
+                                Padding="16,6"/>
+                    </Border>
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

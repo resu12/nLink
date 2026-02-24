@@ -1,0 +1,34 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>NLink.SmokeTests</AssemblyName>
+    <RootNamespace>NLink.SmokeTests</RootNamespace>
+    <Product>nLink</Product>
+
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
+    <PackageReference Include="xunit" Version="2.5.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\nLink.App\nLink.App.csproj" />
+    <ProjectReference Include="..\..\src\nLink.Core\nLink.Core.csproj" />
+    <ProjectReference Include="..\..\src\nLink.Infra.DevLocal\nLink.Infra.DevLocal.csproj" />
+    <ProjectReference Include="..\..\src\nLink.Infra.Nkn\nLink.Infra.Nkn.csproj" />
+  </ItemGroup>
+
+</Project>
+

@@ -1,0 +1,294 @@
+﻿<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:NLink.App.ViewModels"
+             mc:Ignorable="d"
+             x:Class="NLink.App.Views.DiagnosticsPageView"
+             x:DataType="vm:DiagnosticsPageViewModel">
+
+    <Grid Background="#0B0F16">
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+                      VerticalScrollBarVisibility="Auto"
+                      Margin="24">
+            <StackPanel HorizontalAlignment="Center"
+                        MaxWidth="760"
+                        Spacing="16">
+                <TextBlock Text="{Binding PageTitle}"
+                           Foreground="White"
+                           FontSize="34"
+                           FontWeight="Bold"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center"/>
+
+                <TextBlock Text="{Binding PageSubtitle}"
+                           Foreground="#E5E7EB"
+                           FontSize="18"
+                           TextWrapping="Wrap"
+                           TextAlignment="Center"
+                           HorizontalAlignment="Center"/>
+
+                <Border Background="#111827"
+                        BorderBrush="White"
+                        BorderThickness="2"
+                        CornerRadius="16"
+                        Padding="20">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="Connection method"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding ActiveTransport}"
+                                   Foreground="White"
+                                   FontSize="20"
+                                   FontWeight="SemiBold"
+                                   TextWrapping="Wrap"/>
+
+                        <Separator Background="#334155"/>
+
+                        <TextBlock Text="Method code"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding TransportKey}"
+                                   Foreground="White"
+                                   FontSize="18"/>
+
+                        <TextBlock Text="Build type"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding BuildMode}"
+                                   Foreground="White"
+                                   FontSize="18"/>
+
+                        <TextBlock Text="App setting"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding EnvironmentValue}"
+                                   Foreground="White"
+                                   FontSize="18"
+                                   TextWrapping="Wrap"/>
+
+                        <TextBlock Text="Why this was chosen"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding SelectionReason}"
+                                   Foreground="White"
+                                   FontSize="18"
+                                   TextWrapping="Wrap"/>
+
+                        <TextBlock Text="Built-in web page view"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding EmbeddedWebViewDefault}"
+                                   Foreground="White"
+                                   FontSize="18"/>
+
+                        <Separator Background="#334155"/>
+
+                        <TextBlock Text="NKN address"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding NknAddress}"
+                                   Foreground="White"
+                                   FontSize="18"
+                                   TextWrapping="Wrap"/>
+
+                        <TextBlock Text="Bridge PID"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding BridgePid}"
+                                   Foreground="White"
+                                   FontSize="18"
+                                   TextWrapping="Wrap"/>
+
+                        <TextBlock Text="Node/SDK"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding NodeSdk}"
+                                   Foreground="White"
+                                   FontSize="18"
+                                   TextWrapping="Wrap"/>
+
+                        <TextBlock Text="Last heartbeat"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding LastHeartbeat}"
+                                   Foreground="White"
+                                   FontSize="18"
+                                   TextWrapping="Wrap"/>
+
+                        <TextBlock Text="Bridge restarts"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding BridgeRestarts}"
+                                   Foreground="White"
+                                   FontSize="18"/>
+
+                        <TextBlock Text="Last bridge exit"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding LastBridgeExit}"
+                                   Foreground="White"
+                                   FontSize="18"
+                                   TextWrapping="Wrap"/>
+
+                        <TextBlock Text="bridge_raw_messages_received"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding BridgeRawMessagesReceived}"
+                                   Foreground="White"
+                                   FontSize="18"/>
+
+                        <TextBlock Text="last_bridge_message_kind"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding LastBridgeMessageKind}"
+                                   Foreground="White"
+                                   FontSize="18"
+                                   TextWrapping="Wrap"/>
+
+                        <TextBlock Text="last_bridge_message_source"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding LastBridgeMessageSource}"
+                                   Foreground="White"
+                                   FontSize="18"
+                                   TextWrapping="Wrap"/>
+
+                        <TextBlock Text="last_envelope_type"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding LastEnvelopeType}"
+                                   Foreground="White"
+                                   FontSize="18"
+                                   TextWrapping="Wrap"/>
+
+                        <TextBlock Text="last_envelope_drop_reason"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding LastEnvelopeDropReason}"
+                                   Foreground="White"
+                                   FontSize="18"
+                                   TextWrapping="Wrap"/>
+
+                        <TextBlock Text="join_requests_received"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding JoinRequestsReceived}"
+                                   Foreground="White"
+                                   FontSize="18"/>
+
+                        <TextBlock Text="incoming_join_request_raised"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding IncomingJoinRequestRaisedCount}"
+                                   Foreground="White"
+                                   FontSize="18"/>
+
+                        <TextBlock Text="acks_received"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding AcksReceived}"
+                                   Foreground="White"
+                                   FontSize="18"/>
+
+                        <TextBlock Text="acks_ignored_source_mismatch"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding AcksIgnoredSourceMismatch}"
+                                   Foreground="White"
+                                   FontSize="18"/>
+
+                        <TextBlock Text="last_disconnect_reason"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding LastDisconnectReason}"
+                                   Foreground="White"
+                                   FontSize="18"
+                                   TextWrapping="Wrap"/>
+
+                        <TextBlock Text="messages_sent"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding MessagesSent}"
+                                   Foreground="White"
+                                   FontSize="18"/>
+
+                        <TextBlock Text="messages_received"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding MessagesReceived}"
+                                   Foreground="White"
+                                   FontSize="18"/>
+
+                        <TextBlock Text="chat_sent"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding ChatSent}"
+                                   Foreground="White"
+                                   FontSize="18"/>
+
+                        <TextBlock Text="chat_received"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding ChatReceived}"
+                                   Foreground="White"
+                                   FontSize="18"/>
+
+                        <TextBlock Text="decrypt_failed"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding DecryptFailed}"
+                                   Foreground="White"
+                                   FontSize="18"/>
+
+                        <TextBlock Text="last_error"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <TextBlock Text="{Binding LastError}"
+                                   Foreground="White"
+                                   FontSize="18"
+                                   TextWrapping="Wrap"/>
+
+                        <Separator Background="#334155"/>
+
+                        <TextBlock Text="{Binding RecentConnectionAttemptsTitle}"
+                                   Foreground="#93C5FD"
+                                   FontSize="14"/>
+                        <Border Background="#0B1220"
+                                BorderBrush="#334155"
+                                BorderThickness="1"
+                                CornerRadius="10"
+                                Padding="12">
+                            <TextBlock Text="{Binding RecentConnectionAttemptsText}"
+                                       Foreground="White"
+                                       FontFamily="Cascadia Mono,Consolas,Monaco,monospace"
+                                       FontSize="14"
+                                       TextWrapping="Wrap"/>
+                        </Border>
+
+                        <Button Content="Copy diagnostics"
+                                Command="{Binding CopyReliabilityLogCommand}"
+                                HorizontalAlignment="Left"
+                                MinWidth="220"
+                                Height="44"
+                                FontSize="18"
+                                FontWeight="SemiBold"
+                                Background="#1F2937"
+                                Foreground="White"/>
+                    </StackPanel>
+                </Border>
+
+                <Button Content="Back"
+                        Command="{Binding BackCommand}"
+                        Width="420"
+                        Height="72"
+                        HorizontalAlignment="Center"
+                        FontSize="22"
+                        FontWeight="SemiBold"
+                        Background="#E5E7EB"
+                        Foreground="Black"/>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>
+

@@ -1,0 +1,225 @@
+using System;
+using System.Collections.Generic;
+using CommunityToolkit.Mvvm.Input;
+using NLink.App.Configuration;
+using NLink.Core.Chat;
+using NLink.Core;
+using NLink.Infra.Nkn;
+
+namespace NLink.App.ViewModels;
+
+public sealed class DiagnosticsPageViewModel : ViewModelBase
+{
+    public DiagnosticsPageViewModel(Action backAction, TransportRuntimeConfig transportConfig)
+    {
+        BackCommand = new RelayCommand(backAction);
+
+        ActiveTransport = transportConfig.DisplayName;
+        TransportKey = transportConfig.Key;
+        BuildMode = transportConfig.BuildMode;
+        EnvironmentValue = transportConfig.EnvironmentVariableValue;
+        SelectionReason = transportConfig.SelectionReason;
+        EmbeddedWebViewDefault = AppFeatureFlags.UseEmbeddedWebView ? "Enabled by default" : "Disabled by default";
+
+        if (string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase))
+        {
+            NknRuntimeDiagnostics.EnsureInitialized();
+        }
+
+        var counters = ChatRuntimeCounters.Snapshot();
+        var nknDiagnostics = NknRuntimeDiagnostics.Snapshot();
+        NknAddress = nknDiagnostics.Address;
+        MessagesSent = nknDiagnostics.MessagesSent.ToString();
+        MessagesReceived = nknDiagnostics.MessagesReceived.ToString();
+        LastError = nknDiagnostics.LastError;
+        BridgePid = nknDiagnostics.BridgePid > 0 ? nknDiagnostics.BridgePid.ToString() : "(not running)";
+        NodeSdk = string.IsNullOrWhiteSpace(nknDiagnostics.NodeVersion) ? "(unknown)" : nknDiagnostics.NodeVersion;
+        LastHeartbeat = nknDiagnostics.BridgeLastPongUtcTicks > 0
+            ? new DateTimeOffset(nknDiagnostics.BridgeLastPongUtcTicks, TimeSpan.Zero).ToString("u")
+            : "(none)";
+        BridgeRestarts = nknDiagnostics.BridgeRestartCount.ToString();
+        LastBridgeExit = BuildLastBridgeExitText(nknDiagnostics.BridgeLastExitCode, nknDiagnostics.BridgeLastExitReason);
+        BridgeRawMessagesReceived = nknDiagnostics.BridgeRawMessagesReceived.ToString();
+        LastBridgeMessageSource = nknDiagnostics.LastBridgeMessageSource;
+        LastBridgeMessageKind = BuildBridgeMessageKind(nknDiagnostics.LastBridgeMessageIsTopic);
+        LastEnvelopeType = nknDiagnostics.LastEnvelopeType;
+        LastEnvelopeDropReason = nknDiagnostics.LastEnvelopeDropReason;
+        JoinRequestsReceived = nknDiagnostics.JoinRequestsReceived.ToString();
+        IncomingJoinRequestRaisedCount = nknDiagnostics.IncomingJoinRequestRaisedCount.ToString();
+        AcksReceived = nknDiagnostics.AcksReceived.ToString();
+        AcksIgnoredSourceMismatch = nknDiagnostics.AcksIgnoredSourceMismatch.ToString();
+        LastDisconnectReason = nknDiagnostics.LastDisconnectReason;
+        ChatSent = counters.ChatSent.ToString();
+        ChatReceived = counters.ChatReceived.ToString();
+        DecryptFailed = counters.ChatDecryptFailed.ToString();
+        RecentConnectionAttemptsText = BuildRecentConnectionAttemptsText(SessionReliabilityLog.SnapshotRecent(10));
+        CopyReliabilityLogCommand = new RelayCommand(RequestCopyReliabilityLog);
+    }
+
+    public string PageTitle => "App info";
+
+    public string PageSubtitle => "Current app settings and connection method.";
+
+    public string ActiveTransport { get; }
+
+    public string TransportKey { get; }
+
+    public string BuildMode { get; }
+
+    public string EnvironmentValue { get; }
+
+    public string SelectionReason { get; }
+
+    public string EmbeddedWebViewDefault { get; }
+
+    public string NknAddress { get; }
+
+    public string MessagesSent { get; }
+
+    public string MessagesReceived { get; }
+
+    public string ChatSent { get; }
+
+    public string ChatReceived { get; }
+
+    public string DecryptFailed { get; }
+
+    public string LastError { get; }
+
+    public string BridgePid { get; }
+
+    public string NodeSdk { get; }
+
+    public string LastHeartbeat { get; }
+
+    public string BridgeRestarts { get; }
+
+    public string LastBridgeExit { get; }
+
+    public string BridgeRawMessagesReceived { get; }
+
+    public string LastBridgeMessageSource { get; }
+
+    public string LastBridgeMessageKind { get; }
+
+    public string LastEnvelopeType { get; }
+
+    public string LastEnvelopeDropReason { get; }
+
+    public string JoinRequestsReceived { get; }
+
+    public string IncomingJoinRequestRaisedCount { get; }
+
+    public string AcksReceived { get; }
+
+    public string AcksIgnoredSourceMismatch { get; }
+
+    public string LastDisconnectReason { get; }
+
+    public string RecentConnectionAttemptsTitle => "Recent connection attempts";
+
+    public string RecentConnectionAttemptsText { get; }
+
+    public IRelayCommand CopyReliabilityLogCommand { get; }
+
+    public IRelayCommand BackCommand { get; }
+
+    public event EventHandler<string>? CopyReliabilityLogRequested;
+
+    private static string BuildLastBridgeExitText(int exitCode, string reason)
+    {
+        var safeReason = string.IsNullOrWhiteSpace(reason) ? "(none)" : reason;
+        if (exitCode < 0)
+        {
+            return safeReason;
+        }
+
+        return $"Code {exitCode}: {safeReason}";
+    }
+
+    private void RequestCopyReliabilityLog()
+    {
+        var text = BuildDiagnosticsCopyText();
+        CopyReliabilityLogRequested?.Invoke(this, text);
+    }
+
+    private string BuildDiagnosticsCopyText()
+    {
+        var lines = new List<string>
+        {
+            PageTitle,
+            PageSubtitle,
+            string.Empty,
+            $"Connection method: {ActiveTransport}",
+            $"Method code: {TransportKey}",
+            $"Build type: {BuildMode}",
+            $"App setting: {EnvironmentValue}",
+            $"Why this was chosen: {SelectionReason}",
+            $"Built-in web page view: {EmbeddedWebViewDefault}",
+            string.Empty,
+            $"NKN address: {NknAddress}",
+            $"Bridge PID: {BridgePid}",
+            $"Node/SDK: {NodeSdk}",
+            $"Last heartbeat: {LastHeartbeat}",
+            $"Bridge restarts: {BridgeRestarts}",
+            $"Last bridge exit: {LastBridgeExit}",
+            $"bridge_raw_messages_received: {BridgeRawMessagesReceived}",
+            $"last_bridge_message_kind: {LastBridgeMessageKind}",
+            $"last_bridge_message_source: {LastBridgeMessageSource}",
+            $"last_envelope_type: {LastEnvelopeType}",
+            $"last_envelope_drop_reason: {LastEnvelopeDropReason}",
+            $"join_requests_received: {JoinRequestsReceived}",
+            $"incoming_join_request_raised: {IncomingJoinRequestRaisedCount}",
+            $"acks_received: {AcksReceived}",
+            $"acks_ignored_source_mismatch: {AcksIgnoredSourceMismatch}",
+            $"last_disconnect_reason: {LastDisconnectReason}",
+            $"messages_sent: {MessagesSent}",
+            $"messages_received: {MessagesReceived}",
+            $"chat_sent: {ChatSent}",
+            $"chat_received: {ChatReceived}",
+            $"decrypt_failed: {DecryptFailed}",
+            $"last_error: {LastError}",
+            string.Empty,
+            $"{RecentConnectionAttemptsTitle}:",
+            RecentConnectionAttemptsText
+        };
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private static string BuildRecentConnectionAttemptsText(IReadOnlyList<SessionReliabilityRecord> rows)
+    {
+        if (rows.Count == 0)
+        {
+            return "No recent entries yet.";
+        }
+
+        var lines = new List<string>(rows.Count);
+        foreach (var row in rows)
+        {
+            var result = string.Equals(row.Stage, SessionReliabilityStage.Completed.ToString(), StringComparison.Ordinal)
+                ? "Completed"
+                : (string.IsNullOrWhiteSpace(row.ErrorCode) ? "In progress" : "Failed");
+
+            var line = $"{row.TimestampUtc:HH:mm:ss} | {row.Mode} | {result} | {row.Stage}";
+            if (!string.IsNullOrWhiteSpace(row.ErrorCode))
+            {
+                line += $" | {row.ErrorCode}";
+            }
+
+            lines.Add(line);
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private static string BuildBridgeMessageKind(bool? isTopic)
+    {
+        return isTopic switch
+        {
+            true => "topic",
+            false => "direct",
+            null => "(none)"
+        };
+    }
+}

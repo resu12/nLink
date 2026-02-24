@@ -1,0 +1,112 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:NLink.App.ViewModels"
+             mc:Ignorable="d"
+             x:Class="NLink.App.Views.HomePageView"
+             x:DataType="vm:HomePageViewModel">
+
+    <UserControl.Styles>
+        <Style Selector="Border.choiceCard">
+            <Setter Property="Background" Value="#111827"/>
+            <Setter Property="BorderThickness" Value="2"/>
+            <Setter Property="CornerRadius" Value="16"/>
+            <Setter Property="Padding" Value="20"/>
+        </Style>
+
+        <Style Selector="Button.choiceButton">
+            <Setter Property="Height" Value="72"/>
+            <Setter Property="FontSize" Value="26"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="HorizontalAlignment" Value="Stretch"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Padding" Value="18,0"/>
+        </Style>
+    </UserControl.Styles>
+
+    <Grid Background="#0B0F16">
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+                      VerticalScrollBarVisibility="Auto"
+                      Margin="28">
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        MaxWidth="720"
+                        Spacing="16">
+                <TextBlock Text="{Binding AppTitle}"
+                           HorizontalAlignment="Center"
+                           Foreground="White"
+                           FontSize="40"
+                           FontWeight="Bold"
+                           TextAlignment="Center"/>
+
+                <TextBlock Text="{Binding Subtitle}"
+                           HorizontalAlignment="Center"
+                           Foreground="#E5E7EB"
+                           FontSize="18"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"
+                           MaxWidth="620"
+                           Margin="0,0,0,6"/>
+
+                <Border Background="#0F172A"
+                        BorderBrush="#334155"
+                        BorderThickness="1"
+                        CornerRadius="18"
+                        Padding="14">
+                    <StackPanel Spacing="14">
+                        <Border Classes="choiceCard"
+                                BorderBrush="White">
+                            <StackPanel Spacing="10">
+                                <Button Classes="choiceButton"
+                                        Content="{Binding NeedHelpLabel}"
+                                        Command="{Binding NeedHelpCommand}"
+                                        Background="White"
+                                        Foreground="Black"
+                                        BorderBrush="#D1D5DB"/>
+
+                                <TextBlock Text="{Binding NeedHelpDescription}"
+                                           Foreground="#E5E7EB"
+                                           FontSize="18"
+                                           TextAlignment="Center"
+                                           TextWrapping="Wrap"
+                                           HorizontalAlignment="Center"
+                                           MaxWidth="560"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Classes="choiceCard"
+                                BorderBrush="#FFD34D">
+                            <StackPanel Spacing="10">
+                                <Button Classes="choiceButton"
+                                        Content="{Binding WantToHelpLabel}"
+                                        Command="{Binding WantToHelpCommand}"
+                                        Background="#FFD34D"
+                                        Foreground="Black"
+                                        BorderBrush="#EAB308"/>
+
+                                <TextBlock Text="{Binding WantToHelpDescription}"
+                                           Foreground="#E5E7EB"
+                                           FontSize="18"
+                                           TextAlignment="Center"
+                                           TextWrapping="Wrap"
+                                           HorizontalAlignment="Center"
+                                           MaxWidth="560"/>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+                <Button Content="Diagnostics"
+                        Command="{Binding DiagnosticsCommand}"
+                        HorizontalAlignment="Center"
+                        Background="Transparent"
+                        Foreground="#93C5FD"
+                        BorderBrush="Transparent"
+                        FontSize="16"
+                        Padding="10,6"/>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

@@ -1,0 +1,14 @@
+{
+  "name": "nlink-nkn-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stdin/stdout JSONL bridge for NKN (official JS SDK) used by nLink",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "nkn-sdk": "1.3.6"
+  }
+}

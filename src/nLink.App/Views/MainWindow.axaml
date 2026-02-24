@@ -1,0 +1,52 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:NLink.App.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        d:DesignWidth="1080"
+        d:DesignHeight="760"
+        x:Class="NLink.App.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Icon="/Assets/avalonia-logo.ico"
+        Title="nLink"
+        Width="1080"
+        Height="760"
+        MinWidth="860"
+        MinHeight="640"
+        WindowStartupLocation="CenterScreen"
+        Background="#0B0F16">
+
+    <Design.DataContext>
+        <vm:MainWindowViewModel/>
+    </Design.DataContext>
+
+    <Grid Background="#0B0F16">
+        <Border Margin="8"
+                Background="#0B0F16"
+                BorderBrush="#111827"
+                BorderThickness="1"
+                CornerRadius="12"
+                ClipToBounds="True">
+            <Grid>
+                <ContentControl Content="{Binding CurrentPage}"/>
+
+                <Image x:Name="NarwhalPeekImage"
+                       Width="900"
+                       Height="900"
+                       HorizontalAlignment="Left"
+                       VerticalAlignment="Top"
+                       Margin="-365,-470,0,0"
+                       Opacity="0.95"
+                       IsVisible="False"
+                       IsHitTestVisible="False"
+                       RenderTransformOrigin="50%,50%">
+                    <Image.RenderTransform>
+                        <RotateTransform Angle="180"/>
+                    </Image.RenderTransform>
+                </Image>
+            </Grid>
+        </Border>
+    </Grid>
+
+</Window>

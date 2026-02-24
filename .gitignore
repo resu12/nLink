@@ -1,0 +1,33 @@
+# Build outputs / packaged artifacts
+artifacts/
+**/bin/
+**/obj/
+
+# Archives / installers / logs
+*.zip
+*.exe
+*.msi
+*.log
+
+# Visual Studio / Rider / VS Code (safe subset)
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.rsuser
+
+# Test results / coverage
+TestResults/
+*.trx
+coverage/
+*.coverage
+*.coveragexml
+
+# NuGet / local package caches (repo-local)
+packages/
+*.nupkg
+
+# OS files
+.DS_Store
+Thumbs.db
