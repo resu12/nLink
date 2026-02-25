@@ -18,6 +18,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private static readonly TimeSpan DefaultApprovalTimeout = TimeSpan.FromSeconds(20);
 
     private readonly Action cancelAction;
+    private readonly Action? openDiagnosticsAction;
     private readonly TransportRuntimeConfig transportConfig;
     private readonly SessionRuntime sessionRuntime;
     private readonly IClipboardService? clipboardService;
@@ -31,6 +32,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool showChatNotice;
     private bool showCopyFeedback;
     private string copyFeedbackText = string.Empty;
+    private bool startupBlocked;
     private CancellationTokenSource? connectCts;
     private CancellationTokenSource? copyFeedbackResetCts;
     private readonly Func<DateTimeOffset> nowProvider;
@@ -45,6 +47,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         Action cancelAction,
         TransportRuntimeConfig transportConfig,
         SessionRuntime sessionRuntime,
+        Action? openDiagnosticsAction = null,
         IClipboardService? clipboardService = null,
         ShareMessageConfig? shareMessageConfig = null,
         TimeSpan? approvalTimeout = null,
@@ -52,6 +55,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         Func<DateTimeOffset>? nowProvider = null)
     {
         this.cancelAction = cancelAction;
+        this.openDiagnosticsAction = openDiagnosticsAction;
         this.transportConfig = transportConfig;
         this.sessionRuntime = sessionRuntime;
         this.clipboardService = clipboardService;
@@ -74,23 +78,41 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         CopyInstallMessageCommand = new AsyncRelayCommand(CopyInstallMessageAsync);
         SendFileCommand = new RelayCommand(RequestSendFileWindow);
         SendChatCommand = new AsyncRelayCommand(SendChatAsync, CanSendChat);
+        RetryCommand = new AsyncRelayCommand(RetryAsync, CanRetry);
+        OpenDiagnosticsCommand = new RelayCommand(OpenDiagnostics, CanOpenDiagnostics);
         CancelCommand = new RelayCommand(CancelAndGoBack);
+
+        InitializeStartupAvailabilityState();
     }
 
     public string PageTitle => "Enter the 6-digit code";
+    public bool ShowPageHeader => !IsConnectedView;
 
     public string CodeInput
     {
         get => codeInput;
         set
         {
-            var formatted = SessionCode.FormatPartial(value);
+            var incoming = value ?? string.Empty;
+            var digits = SessionCode.NormalizeDigits(value);
+            if (digits.Length > 6)
+            {
+                digits = digits[..6];
+            }
+
+            var formatted = SessionCode.FormatPartial(digits);
             if (SetProperty(ref codeInput, formatted))
             {
                 ConnectCommand.NotifyCanExecuteChanged();
                 SendChatCommand.NotifyCanExecuteChanged();
                 OnPropertyChanged(nameof(ShowChatPanel));
                 OnPropertyChanged(nameof(ShowChatConnectionHint));
+            }
+            else if (!string.Equals(incoming, formatted, StringComparison.Ordinal))
+            {
+                // Force the TextBox to rebind to the canonical 6-digit formatted value
+                // when the user types/pastes extra digits that normalize to the same text.
+                OnPropertyChanged(nameof(CodeInput));
             }
         }
     }
@@ -115,8 +137,15 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref connectionState, value))
             {
                 OnPropertyChanged(nameof(IsConnectedView));
+                OnPropertyChanged(nameof(ShowConnectedPanel));
                 OnPropertyChanged(nameof(ShowChatPanel));
                 OnPropertyChanged(nameof(ShowChatConnectionHint));
+                OnPropertyChanged(nameof(ShowMainControls));
+                OnPropertyChanged(nameof(ShowConnectAction));
+                OnPropertyChanged(nameof(ShowInlineStatusText));
+                OnPropertyChanged(nameof(ShowCopyFeedbackInline));
+                OnPropertyChanged(nameof(ShowBackButton));
+                OnPropertyChanged(nameof(ShowPageHeader));
             }
         }
     }
@@ -141,11 +170,40 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public bool IsConnectedView => ConnectionState == "Connected";
 
+    public bool ShowConnectedPanel => IsConnectedView;
+
     public bool ShowChatPanel => IsConnectedView;
 
     public bool ShowStatusText => !string.IsNullOrWhiteSpace(StatusText);
+    public bool ShowInlineStatusText => ShowStatusText && !IsStartupBlocked && !IsConnectedView;
+
+    public bool IsStartupBlocked
+    {
+        get => startupBlocked;
+        private set
+        {
+            if (SetProperty(ref startupBlocked, value))
+            {
+                OnPropertyChanged(nameof(ShowMainControls));
+                OnPropertyChanged(nameof(ShowConnectAction));
+                OnPropertyChanged(nameof(ShowRetryAction));
+                OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
+                OnPropertyChanged(nameof(ShowInlineStatusText));
+                OnPropertyChanged(nameof(ShowCopyFeedbackInline));
+                ConnectCommand.NotifyCanExecuteChanged();
+                RetryCommand.NotifyCanExecuteChanged();
+                OpenDiagnosticsCommand.NotifyCanExecuteChanged();
+            }
+        }
+    }
+
+    public bool ShowMainControls => !IsStartupBlocked && !ShowRetryAction && !IsConnectedView;
+
+    public bool ShowConnectAction => ShowMainControls && !ShowRetryAction;
 
     public string ChatPanelTitle => "Message";
+    public bool HasChatMessages => ChatMessages.Count > 0;
+    public bool ShowNoMessagesPlaceholder => !HasChatMessages;
 
     public bool ShowChatConnectionHint => false;
 
@@ -181,15 +239,38 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public IAsyncRelayCommand SendChatCommand { get; }
 
+    public IAsyncRelayCommand RetryCommand { get; }
+
+    public IRelayCommand OpenDiagnosticsCommand { get; }
+
     public IRelayCommand CancelCommand { get; }
+    public IRelayCommand EndSessionCommand => CancelCommand;
 
     public event EventHandler? SendFileRequested;
+
+    public bool ShowRetryAction => !IsStartupBlocked &&
+                                   string.Equals(ConnectionState, "Failed", StringComparison.Ordinal) &&
+                                   string.Equals(StatusText, "Connection lost.", StringComparison.Ordinal);
+
+    public bool ShowOpenDiagnosticsLink =>
+        openDiagnosticsAction is not null &&
+        (IsStartupBlocked || string.Equals(StatusText, UserErrorMapper.NknStartFailedReinstall(), StringComparison.Ordinal));
 
     public bool ShowCopyFeedback
     {
         get => showCopyFeedback;
-        private set => SetProperty(ref showCopyFeedback, value);
+        private set
+        {
+            if (SetProperty(ref showCopyFeedback, value))
+            {
+                OnPropertyChanged(nameof(ShowCopyFeedbackInline));
+            }
+        }
     }
+
+    public bool ShowCopyFeedbackInline => ShowMainControls && ShowCopyFeedback;
+
+    public bool ShowBackButton => !IsConnectedView;
 
     public string CopyFeedbackText
     {
@@ -226,7 +307,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private bool CanConnect()
     {
-        return !IsConnecting && SessionCode.TryParse(CodeInput, out _);
+        return !IsStartupBlocked && !IsConnecting && SessionCode.TryParse(CodeInput, out _);
     }
 
     private bool CanSendChat()
@@ -234,8 +315,23 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         return !string.IsNullOrWhiteSpace(ChatDraft) && sessionRuntime.CanSendChat;
     }
 
+    private bool CanRetry()
+    {
+        return !IsConnecting;
+    }
+
+    private bool CanOpenDiagnostics()
+    {
+        return openDiagnosticsAction is not null;
+    }
+
     private async Task ConnectAsync()
     {
+        if (IsStartupBlocked)
+        {
+            return;
+        }
+
         if (IsInFailureCooldown())
         {
             return;
@@ -261,7 +357,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         AppLog.Info($"Helper join requested using {transportConfig.Key} with code {code.Digits}");
 
         IsConnecting = true;
-        StatusText = "Waiting for permission...";
+        StatusText = "Connecting…";
         ConnectionState = "Connecting";
         OnPropertyChanged(nameof(ShowChatConnectionHint));
         connectOutcome = new TaskCompletionSource<HelperConnectOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -279,7 +375,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             var outcome = await WaitForConnectOutcomeAsync(connectCts.Token);
             if (outcome == HelperConnectOutcome.PendingTimeout)
             {
-                LogReliability(SessionReliabilityStage.Disconnected, "approval_timeout", "No response yet. Try again.");
+                LogReliability(SessionReliabilityStage.Disconnected, "approval_timeout", "No response yet.");
                 await sessionRuntime.FailAsync(UserErrorMapper.HelperApprovalTimeout());
                 OnPropertyChanged(nameof(ShowChatConnectionHint));
             }
@@ -313,6 +409,30 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
+    private async Task RetryAsync()
+    {
+        connectCts?.Cancel();
+        connectCts?.Dispose();
+        connectCts = null;
+        connectOutcome = null;
+
+        await sessionRuntime.ResetAsync();
+
+        await UiThreadDispatch.RunAsync(() =>
+        {
+            IsConnecting = false;
+            StatusText = string.Empty;
+            ConnectionState = "Idle";
+            ShowChatNotice = false;
+            OnPropertyChanged(nameof(ShowMainControls));
+            OnPropertyChanged(nameof(ShowConnectAction));
+            OnPropertyChanged(nameof(ShowRetryAction));
+            OnPropertyChanged(nameof(ShowCopyFeedbackInline));
+            ConnectCommand.NotifyCanExecuteChanged();
+            RetryCommand.NotifyCanExecuteChanged();
+        });
+    }
+
     private async Task SendChatAsync()
     {
         if (disposed)
@@ -344,6 +464,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private void RequestSendFileWindow()
     {
         SendFileRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OpenDiagnostics()
+    {
+        openDiagnosticsAction?.Invoke();
     }
 
     private async Task CopyInstallMessageAsync()
@@ -412,14 +537,25 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         _ = UiThreadDispatch.RunAsync(() =>
         {
-            StatusText = transportConfig.HelperDisconnectedText;
+            StatusText = string.Equals(sessionRuntime.StatusText, "Connection lost.", StringComparison.Ordinal)
+                ? "Connection lost."
+                : transportConfig.HelperDisconnectedText;
             var (errorCode, errorHint) = GetReliabilityError();
             LogReliability(SessionReliabilityStage.Disconnected, errorCode, errorHint);
-            if (ConnectionState != "Connected")
+            if (string.Equals(sessionRuntime.StatusText, "Connection lost.", StringComparison.Ordinal))
+            {
+                ConnectionState = "Failed";
+            }
+            else if (ConnectionState != "Connected")
             {
                 ConnectionState = "Disconnected";
             }
             OnPropertyChanged(nameof(ShowChatConnectionHint));
+            OnPropertyChanged(nameof(ShowMainControls));
+            OnPropertyChanged(nameof(ShowConnectAction));
+            OnPropertyChanged(nameof(ShowRetryAction));
+            OnPropertyChanged(nameof(ShowInlineStatusText));
+            OnPropertyChanged(nameof(ShowCopyFeedbackInline));
         });
     }
 
@@ -477,6 +613,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             ChatMessages.RemoveAt(0);
         }
 
+        OnPropertyChanged(nameof(HasChatMessages));
+        OnPropertyChanged(nameof(ShowNoMessagesPlaceholder));
         OnPropertyChanged(nameof(ShowChatPanel));
         OnPropertyChanged(nameof(ShowChatConnectionHint));
     }
@@ -512,7 +650,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         switch (sessionRuntime.State)
         {
             case SessionRuntimeState.Connecting:
-                StatusText = "Waiting for permission...";
+                StatusText = "Connecting…";
                 ConnectionState = "Connecting";
                 break;
             case SessionRuntimeState.Connected:
@@ -532,18 +670,23 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 break;
             case SessionRuntimeState.Disconnected:
                 StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
-                    ? transportConfig.HelperDisconnectedText
+                    ? "Connection lost."
                     : sessionRuntime.StatusText;
-                if (ConnectionState != "Connected")
-                {
-                    ConnectionState = "Disconnected";
-                }
+                ConnectionState = "Failed";
                 break;
         }
 
         OnPropertyChanged(nameof(ShowChatConnectionHint));
         OnPropertyChanged(nameof(IsChatReady));
+        OnPropertyChanged(nameof(ShowConnectAction));
+        OnPropertyChanged(nameof(ShowRetryAction));
+        OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
+        OnPropertyChanged(nameof(ShowInlineStatusText));
+        OnPropertyChanged(nameof(ShowMainControls));
+        OnPropertyChanged(nameof(ShowCopyFeedbackInline));
         SendChatCommand.NotifyCanExecuteChanged();
+        RetryCommand.NotifyCanExecuteChanged();
+        OpenDiagnosticsCommand.NotifyCanExecuteChanged();
     }
 
     private bool IsInFailureCooldown()
@@ -637,5 +780,20 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             ShowCopyFeedback = false;
             CopyFeedbackText = string.Empty;
         });
+    }
+
+    private void InitializeStartupAvailabilityState()
+    {
+        if (!string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (transportConfig.HasStartupWarning || UserErrorMapper.IsNknStartFailure(NknRuntimeDiagnostics.Snapshot().LastError))
+        {
+            IsStartupBlocked = true;
+            StatusText = UserErrorMapper.NknStartFailedReinstall();
+            ConnectionState = "Failed";
+        }
     }
 }

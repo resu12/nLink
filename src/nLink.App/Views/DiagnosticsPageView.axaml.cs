@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using Avalonia.Controls;
 using NLink.App.Services;
 using NLink.App.ViewModels;
@@ -21,6 +22,8 @@ public partial class DiagnosticsPageView : UserControl
         if (subscribedViewModel is not null)
         {
             subscribedViewModel.CopyReliabilityLogRequested -= OnCopyReliabilityLogRequested;
+            subscribedViewModel.OpenLogsFolderRequested -= OnOpenLogsFolderRequested;
+            subscribedViewModel.OpenBugReportRequested -= OnOpenBugReportRequested;
             subscribedViewModel = null;
         }
 
@@ -31,6 +34,8 @@ public partial class DiagnosticsPageView : UserControl
 
         subscribedViewModel = vm;
         subscribedViewModel.CopyReliabilityLogRequested += OnCopyReliabilityLogRequested;
+        subscribedViewModel.OpenLogsFolderRequested += OnOpenLogsFolderRequested;
+        subscribedViewModel.OpenBugReportRequested += OnOpenBugReportRequested;
     }
 
     private async void OnCopyReliabilityLogRequested(object? sender, string text)
@@ -54,6 +59,45 @@ public partial class DiagnosticsPageView : UserControl
         catch
         {
             subscribedViewModel?.NotifyCopyFailed();
+        }
+    }
+
+    private void OnOpenLogsFolderRequested(object? sender, string path)
+    {
+        try
+        {
+            var fullPath = System.IO.Path.GetFullPath(path);
+            System.IO.Directory.CreateDirectory(fullPath);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = fullPath,
+                UseShellExecute = true,
+            });
+        }
+        catch
+        {
+            // Best-effort helper action only.
+        }
+    }
+
+    private void OnOpenBugReportRequested(object? sender, string url)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                return;
+            }
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = url,
+                UseShellExecute = true,
+            });
+        }
+        catch
+        {
+            // Best-effort helper action only.
         }
     }
 

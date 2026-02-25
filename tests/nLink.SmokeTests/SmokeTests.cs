@@ -13,6 +13,7 @@ using NLink.App.Services;
 using NLink.App.ViewModels;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.Logging;
 using NLink.Infra.DevLocal;
 using NLink.Infra.Nkn;
 
@@ -90,6 +91,17 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void UserErrorMapper_KeyMessages_AreShortAndUserFriendly()
+    {
+        Assert.Equal("No one found with that code.", UserErrorMapper.HelperDiscoveryTimeout());
+        Assert.Equal("No response yet.", UserErrorMapper.HelperApprovalTimeout());
+        Assert.Equal("Connection lost.", UserErrorMapper.HelperDisconnected());
+        Assert.Equal("Connection lost.", UserErrorMapper.HelperGenericConnectFailure());
+        Assert.Equal("Please reinstall.", UserErrorMapper.NknStartFailedReinstall());
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void AppAssembly_InformationalVersion_Matches_VERSION_File()
     {
         var assembly = typeof(DiagnosticsPageViewModel).Assembly;
@@ -102,6 +114,168 @@ public class SmokeTests
 
         var expected = File.ReadAllText(versionPath!).Trim();
         Assert.Equal(expected, infoVersion);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void Program_Parses_SelfTest_Argument()
+    {
+        var programType = typeof(NLink.App.App).Assembly.GetType("NLink.App.Program");
+        Assert.NotNull(programType);
+
+        var method = programType!.GetMethod("HasSelfTestArgument", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var hasSelfTest = (bool)method!.Invoke(null, new object[] { new[] { "--self-test" } })!;
+        var noSelfTest = (bool)method.Invoke(null, new object[] { new[] { "--something-else" } })!;
+
+        Assert.True(hasSelfTest);
+        Assert.False(noSelfTest);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void Diagnostics_CopyExport_IncludesRuntimeBasics_AndNoPayloadOrChatHistory()
+    {
+        var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
+        try
+        {
+            SessionTimeline.Clear();
+            SessionTimeline.Record("Started");
+            SessionTimeline.Record("Disconnected", "timeout");
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            var config = TransportRuntimeConfig.Select();
+            var vm = new DiagnosticsPageViewModel(static () => { }, config);
+
+            string? copied = null;
+            vm.CopyReliabilityLogRequested += (_, text) => copied = text;
+
+            vm.CopyReliabilityLogCommand.Execute(null);
+
+            Assert.False(string.IsNullOrWhiteSpace(copied));
+            Assert.Contains("App version:", copied!, StringComparison.Ordinal);
+            Assert.Contains("OS:", copied!, StringComparison.Ordinal);
+            Assert.Contains("Process architecture:", copied!, StringComparison.Ordinal);
+            Assert.Contains("OS architecture:", copied!, StringComparison.Ordinal);
+            Assert.Contains("Bridge RID:", copied!, StringComparison.Ordinal);
+            Assert.Contains("Transport:", copied!, StringComparison.Ordinal);
+            Assert.Contains("Forced by environment:", copied!, StringComparison.Ordinal);
+            Assert.Contains("Session timeline (last 30)", copied!, StringComparison.Ordinal);
+            Assert.Contains("Started", copied!, StringComparison.Ordinal);
+            Assert.Contains("Disconnected | timeout", copied!, StringComparison.Ordinal);
+
+            Assert.DoesNotContain("payloadBase64", copied!, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("hello from helper", copied!, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("sharedKey", copied!, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            SessionTimeline.Clear();
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void Diagnostics_And_OperationalLog_Redact_Sensitive_Content()
+    {
+        var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
+        var uniqueChatText = "hello-from-helper-" + Guid.NewGuid().ToString("N");
+        var sensitive = string.Join(' ', new[]
+        {
+            "payloadBase64=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/==",
+            "sharedKey=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "seedBase64=QkFTRTY0U0VFRA==",
+            "seed=supersecretseedvalue",
+            "identifier=nlink-private-identifier",
+            $"chat={uniqueChatText}"
+        });
+
+        try
+        {
+            SessionTimeline.Clear();
+            SessionTimeline.Record("ChatReceived", sensitive);
+            NknRuntimeDiagnostics.SetLastDisconnectReason(sensitive);
+            NknRuntimeDiagnostics.SetLastError("NKN_START_FAILED: " + sensitive);
+
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            var config = TransportRuntimeConfig.Select();
+            var vm = new DiagnosticsPageViewModel(static () => { }, config);
+            string? diagnostics = null;
+            vm.CopyReliabilityLogRequested += (_, text) => diagnostics = text;
+            vm.CopyReliabilityLogCommand.Execute(null);
+
+            Assert.NotNull(diagnostics);
+            Assert.DoesNotContain("payloadBase64", diagnostics!, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("sharedKey", diagnostics!, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("seedBase64", diagnostics!, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("identifier=", diagnostics!, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(uniqueChatText, diagnostics!, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("[redacted]", diagnostics!, StringComparison.OrdinalIgnoreCase);
+
+            var source = "UnitTestPrivacy" + Guid.NewGuid().ToString("N")[..8];
+            LocalOperationalLog.Info(source, sensitive);
+
+            var logText = File.ReadAllText(LocalOperationalLog.LogFilePath);
+            var matchingLine = logText
+                .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+                .LastOrDefault(line => line.Contains($"[{source}]", StringComparison.Ordinal));
+
+            Assert.False(string.IsNullOrWhiteSpace(matchingLine));
+            Assert.DoesNotContain("payloadBase64", matchingLine!, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("sharedKey", matchingLine!, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("seedBase64", matchingLine!, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("identifier=", matchingLine!, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(uniqueChatText, matchingLine!, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("[redacted]", matchingLine!, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            SessionTimeline.Clear();
+            NknRuntimeDiagnostics.SetLastDisconnectReason("(none)");
+            NknRuntimeDiagnostics.SetLastError("(none)");
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionTimeline_IsCappedAt30_AndDiagnosticsExportUsesLatestEntries()
+    {
+        var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
+        try
+        {
+            SessionTimeline.Clear();
+            for (var i = 0; i < 35; i++)
+            {
+                SessionTimeline.Record("Event" + i.ToString("D2"));
+            }
+
+            var snapshot = SessionTimeline.SnapshotRecent(100);
+            Assert.Equal(30, snapshot.Count);
+            Assert.Equal("Event05", snapshot[0].EventName);
+            Assert.Equal("Event34", snapshot[^1].EventName);
+
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            var config = TransportRuntimeConfig.Select();
+            var vm = new DiagnosticsPageViewModel(static () => { }, config);
+            string? export = null;
+            vm.CopyReliabilityLogRequested += (_, text) => export = text;
+            vm.CopyReliabilityLogCommand.Execute(null);
+
+            Assert.NotNull(export);
+            Assert.Contains("Event34", export!, StringComparison.Ordinal);
+            Assert.DoesNotContain("Event00", export!, StringComparison.Ordinal);
+            Assert.DoesNotContain("Event01", export!, StringComparison.Ordinal);
+            Assert.DoesNotContain("Event02", export!, StringComparison.Ordinal);
+            Assert.DoesNotContain("Event03", export!, StringComparison.Ordinal);
+            Assert.DoesNotContain("Event04", export!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            SessionTimeline.Clear();
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
+        }
     }
 
     [Trait("Category", "Smoke")]
@@ -163,7 +337,7 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
-    public async Task TransportRuntimeConfig_EnvNkn_SelectsNkn_AndHelperFailsLoudlyOnStartFailure()
+    public void TransportRuntimeConfig_EnvNkn_SelectsNkn_AndHelperFailsLoudlyBeforeConnect_WhenBridgeMissing()
     {
         var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
         try
@@ -175,23 +349,21 @@ public class SmokeTests
             Assert.Equal("NKN", config.Key);
             Assert.True(config.ForcedByEnvironment);
 
-            NknRuntimeDiagnostics.SetLastError("NKN_START_FAILED: bridge_missing");
-
             using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(
                 onJoinAsync: static (_, __) => throw new InvalidOperationException("bridge missing")));
             using var helper = new HelperPageViewModel(
                 cancelAction: static () => { },
                 config,
                 runtime,
+                openDiagnosticsAction: static () => { },
                 approvalTimeout: TimeSpan.FromMilliseconds(100),
                 connectFailureCooldown: TimeSpan.Zero);
 
-            helper.CodeInput = "123456";
-            await helper.ConnectCommand.ExecuteAsync(null);
-
-            Assert.Equal(SessionRuntimeState.Failed, runtime.State);
-            Assert.Equal("Couldn't start the connection. Please reinstall.", helper.StatusText);
-            Assert.True(helper.ConnectCommand.CanExecute(null));
+            Assert.True(helper.IsStartupBlocked);
+            Assert.Equal("Please reinstall.", helper.StatusText);
+            Assert.False(helper.ConnectCommand.CanExecute(null));
+            Assert.True(helper.ShowOpenDiagnosticsLink);
+            Assert.Equal(SessionRuntimeState.Idle, runtime.State);
         }
         finally
         {
@@ -254,6 +426,83 @@ public class SmokeTests
             {
                 Directory.Delete(tempDir, recursive: true);
             }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void RollingFileLogger_CreatesLogFile_AndContainsAppStart()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-smoke-logs", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var logPath = Path.Combine(tempDir, "nlink.log");
+
+        try
+        {
+            var logger = new RollingFileLogger(logPath, maxFileBytes: 1024 * 1024);
+            logger.WriteLine("app start | version=0.1.0-alpha.test");
+
+            Assert.True(File.Exists(logPath));
+            var text = File.ReadAllText(logPath);
+            Assert.Contains("app start", text, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            CleanupDirectoryIfExists(tempDir);
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void RollingFileLogger_Rotates_WhenSizeLimitExceeded()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-smoke-logs", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var logPath = Path.Combine(tempDir, "nlink.log");
+
+        try
+        {
+            var logger = new RollingFileLogger(logPath, maxFileBytes: 80);
+            logger.WriteLine(new string('A', 120));
+            logger.WriteLine("second line");
+
+            Assert.True(File.Exists(logPath));
+            Assert.True(File.Exists(Path.Combine(tempDir, "nlink.1.log")));
+            var current = File.ReadAllText(logPath);
+            var rotated = File.ReadAllText(Path.Combine(tempDir, "nlink.1.log"));
+            Assert.Contains("second line", current, StringComparison.Ordinal);
+            Assert.Contains("AAA", rotated, StringComparison.Ordinal);
+        }
+        finally
+        {
+            CleanupDirectoryIfExists(tempDir);
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void RollingFileLogger_Rotation_And_Write_NeverThrow_WhenFileLocked()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-smoke-logs", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var logPath = Path.Combine(tempDir, "nlink.log");
+
+        try
+        {
+            File.WriteAllText(logPath, new string('X', 256));
+            var logger = new RollingFileLogger(logPath, maxFileBytes: 32);
+
+            using var lockStream = new FileStream(logPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+            var rotateEx = Record.Exception(() => logger.RotateIfNeeded());
+            var writeEx = Record.Exception(() => logger.WriteLine("line while locked"));
+
+            Assert.Null(rotateEx);
+            Assert.Null(writeEx);
+        }
+        finally
+        {
+            CleanupDirectoryIfExists(tempDir);
         }
     }
 
@@ -696,6 +945,44 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task Alpha3ScenarioA_HappyPath_HeadlessSessionRuntime_CompletesConnectAndChat()
+    {
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-a-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-a-" + Guid.NewGuid().ToString("N")));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        var helperReceived = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var helpeeReceived = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        helperRuntime.ChatMessageReceived += (_, e) => helperReceived.TrySetResult(e.Message.Text);
+        helpeeRuntime.ChatMessageReceived += (_, e) => helpeeReceived.TrySetResult(e.Message.Text);
+
+        var code = new SessionCode("321654");
+
+        await helpeeRuntime.StartHelpeeAsync(code, cts.Token);
+        await helperRuntime.StartHelperAsync(code, cts.Token);
+        await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(1));
+
+        await helpeeRuntime.ApproveAsync(cts.Token);
+
+        await WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected &&
+                  helpeeRuntime.HasSessionKey &&
+                  helperRuntime.HasSessionKey,
+            TimeSpan.FromSeconds(1));
+
+        Assert.NotNull(await helperRuntime.TrySendChatTextAsync("hello-a", cts.Token));
+        Assert.Equal("hello-a", await helpeeReceived.Task.WaitAsync(TimeSpan.FromSeconds(1), cts.Token));
+
+        helperReceived = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        helperRuntime.ChatMessageReceived += (_, e) => helperReceived.TrySetResult(e.Message.Text);
+        Assert.NotNull(await helpeeRuntime.TrySendChatTextAsync("reply-a", cts.Token));
+        Assert.Equal("reply-a", await helperReceived.Task.WaitAsync(TimeSpan.FromSeconds(1), cts.Token));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task SessionRuntime_NknRemoteSessionEnd_ShowsFriendlyMessage_AndCanReset()
     {
         FakeNknClient.ResetNetwork();
@@ -749,6 +1036,50 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task Alpha3ScenarioC_SessionEnd_HeadlessRemoteEnd_ShowsFriendlyMessage()
+    {
+        FakeNknClient.ResetNetwork();
+
+        try
+        {
+            var options = NknTransportOptions.Load();
+            using var helpeeTransport = new NknSignalingTransport(
+                new FakeNknClient("helpee.c.addr." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helpee-c", "helpee.c.fake"));
+            using var helperTransport = new NknSignalingTransport(
+                new FakeNknClient("helper.c.addr." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helper-c", "helper.c.fake"));
+            using var helpeeRuntime = new SessionRuntime(() => helpeeTransport);
+            using var helperRuntime = new SessionRuntime(() => helperTransport);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var code = new SessionCode("456789");
+            await helpeeRuntime.StartHelpeeAsync(code, cts.Token);
+            await helperRuntime.StartHelperAsync(code, cts.Token);
+            await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(2));
+            await helpeeRuntime.ApproveAsync(cts.Token);
+            await WaitUntilAsync(
+                () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                      helperRuntime.State == SessionRuntimeState.Connected,
+                TimeSpan.FromSeconds(2));
+
+            await helperRuntime.DisconnectAsync();
+
+            await WaitUntilAsync(
+                () => helpeeRuntime.State == SessionRuntimeState.Failed &&
+                      string.Equals(helpeeRuntime.StatusText, "The helper ended the session.", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task HelperViewModel_CopyInstallMessageCommand_UsesClipboardService()
     {
         var fakeClipboard = new FakeClipboardService();
@@ -760,8 +1091,8 @@ public class SmokeTests
             cancelAction: static () => { },
             transportConfig,
             runtime,
-            fakeClipboard,
-            shareConfig);
+            clipboardService: fakeClipboard,
+            shareMessageConfig: shareConfig);
 
         await helper.CopyInstallMessageCommand.ExecuteAsync(null);
 
@@ -796,6 +1127,29 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task Alpha3ScenarioB_WrongCodeTimeout_HeadlessHelperVm_ShowsFriendlyFailure_AndReconnect()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(
+            onJoinAsync: static (_, __) => throw new TimeoutException("Could not find session for code")));
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            approvalTimeout: TimeSpan.FromMilliseconds(100),
+            connectFailureCooldown: TimeSpan.Zero);
+
+        helper.CodeInput = "654321";
+        await helper.ConnectCommand.ExecuteAsync(null);
+
+        Assert.Equal(SessionRuntimeState.Failed, runtime.State);
+        Assert.Equal("No one found with that code.", helper.StatusText);
+        Assert.True(helper.ConnectCommand.CanExecute(null));
+        Assert.Equal("Failed", helper.ConnectionState);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task HelperViewModel_ApprovalTimeout_TransitionsToFailed_WithMappedMessage()
     {
         var transportConfig = CreateDevLocalTestConfig();
@@ -812,7 +1166,7 @@ public class SmokeTests
         await helper.ConnectCommand.ExecuteAsync(null);
 
         Assert.Equal(SessionRuntimeState.Failed, runtime.State);
-        Assert.Equal("No response yet. Try again.", helper.StatusText);
+        Assert.Equal("No response yet.", helper.StatusText);
         Assert.True(helper.ConnectCommand.CanExecute(null));
         Assert.Equal("Failed", helper.ConnectionState);
     }
@@ -842,7 +1196,7 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
-    public async Task SessionRuntime_TransportDisconnect_ShowsConnectionLostTryAgain()
+    public async Task SessionRuntime_TransportDisconnect_TransitionsToFailed_WithConnectionLost()
     {
         var scripted = new ScriptedSignalingTransport(onJoinAsync: static (_, __) => Task.CompletedTask);
         using var runtime = new SessionRuntime(() => scripted);
@@ -852,11 +1206,134 @@ public class SmokeTests
         scripted.RaiseDisconnected();
 
         await WaitUntilAsync(
-            () => runtime.State == SessionRuntimeState.Disconnected &&
-                  string.Equals(runtime.StatusText, "Connection lost. Try again.", StringComparison.Ordinal),
+            () => runtime.State == SessionRuntimeState.Failed &&
+                  string.Equals(runtime.StatusText, "Connection lost.", StringComparison.Ordinal),
             TimeSpan.FromSeconds(2));
 
-        Assert.Equal("Connection lost. Try again.", runtime.StatusText);
+        Assert.Equal("Connection lost.", runtime.StatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperViewModel_NknMissing_ShowsFriendlyError_AndDiagnosticsLink()
+    {
+        var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "NKN");
+            CleanupDirectoryIfExists(Path.Combine(AppContext.BaseDirectory, "bridge"));
+
+            var config = TransportRuntimeConfig.Select();
+            using var runtime = new SessionRuntime(() => new FakeSignalingTransport());
+            using var helper = new HelperPageViewModel(
+                cancelAction: static () => { },
+                config,
+                runtime,
+                openDiagnosticsAction: static () => { });
+
+            Assert.True(helper.IsStartupBlocked);
+            Assert.Equal("Please reinstall.", helper.StatusText);
+            Assert.True(helper.ShowOpenDiagnosticsLink);
+            Assert.False(helper.ShowConnectAction);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperViewModel_Disconnect_ShowsRetry_AndRetryReturnsToIdle()
+    {
+        var scripted = new ScriptedSignalingTransport(onJoinAsync: static (_, __) => Task.CompletedTask);
+        var transportConfig = CreateDevLocalTestConfig();
+        using var runtime = new SessionRuntime(() => scripted);
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            connectFailureCooldown: TimeSpan.Zero);
+
+        helper.CodeInput = "123456";
+        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Connecting, TimeSpan.FromSeconds(1));
+        scripted.RaiseDisconnected();
+        await connectTask;
+
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Failed &&
+                  helper.ConnectionState == "Failed" &&
+                  helper.ShowRetryAction &&
+                  string.Equals(helper.StatusText, "Connection lost.", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(2));
+
+        await helper.RetryCommand.ExecuteAsync(null);
+
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Idle &&
+                  helper.ConnectionState == "Idle" &&
+                  !helper.ShowRetryAction &&
+                  helper.ConnectCommand.CanExecute(null),
+            TimeSpan.FromSeconds(2));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task Alpha3ScenarioD_DisconnectAndRetry_HeadlessHelperVm_ReturnsToIdle()
+    {
+        var scripted = new ScriptedSignalingTransport(onJoinAsync: static (_, __) => Task.CompletedTask);
+        var transportConfig = CreateDevLocalTestConfig();
+        using var runtime = new SessionRuntime(() => scripted);
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            connectFailureCooldown: TimeSpan.Zero);
+
+        helper.CodeInput = "123456";
+        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Connecting, TimeSpan.FromSeconds(1));
+        scripted.RaiseDisconnected();
+        await connectTask;
+
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Failed &&
+                  string.Equals(helper.StatusText, "Connection lost.", StringComparison.Ordinal) &&
+                  helper.ShowRetryAction,
+            TimeSpan.FromSeconds(2));
+
+        await helper.RetryCommand.ExecuteAsync(null);
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Idle &&
+                  helper.ConnectionState == "Idle" &&
+                  helper.ConnectCommand.CanExecute(null),
+            TimeSpan.FromSeconds(2));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeeViewModel_IncomingJoinRequest_SwitchesToApprovalPanel()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-ui-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-ui-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
+        Assert.False(helpee.IsIncomingRequestView);
+        Assert.True(helpee.ShowWaitingPanel);
+
+        Assert.True(SessionCode.TryParse(helpee.ShareCode, out var code));
+        await helperRuntime.StartHelperAsync(code!, cts.Token);
+
+        await WaitUntilAsync(
+            () => helpee.IsIncomingRequestView &&
+                  helpee.ShowIncomingRequestPanel &&
+                  !helpee.ShowWaitingPanel &&
+                  string.Equals(helpee.PageTitle, "Someone wants to connect", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(2));
     }
 
     [Trait("Category", "Smoke")]

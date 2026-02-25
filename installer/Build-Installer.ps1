@@ -135,6 +135,32 @@ function Remove-StagedDebugFiles {
         Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
+function Get-DirectorySizeBytes {
+    param(
+        [Parameter(Mandatory = $true)][string]$RootDir
+    )
+
+    if (-not (Test-Path $RootDir)) {
+        return [int64]0
+    }
+
+    $sum = 0L
+    foreach ($file in Get-ChildItem -Path $RootDir -Recurse -File -ErrorAction SilentlyContinue) {
+        $sum += [int64]$file.Length
+    }
+
+    return $sum
+}
+
+function Format-Size {
+    param([int64]$Bytes)
+
+    if ($Bytes -lt 1KB) { return "$Bytes B" }
+    if ($Bytes -lt 1MB) { return ("{0:N1} KB" -f ($Bytes / 1KB)) }
+    if ($Bytes -lt 1GB) { return ("{0:N1} MB" -f ($Bytes / 1MB)) }
+    return ("{0:N2} GB" -f ($Bytes / 1GB))
+}
+
 function Publish-ReleaseAssets {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -290,3 +316,16 @@ foreach ($asset in @($releasePublish.Assets)) {
         Write-Host "[nLink] Release asset: $asset" -ForegroundColor Green
     }
 }
+
+$bridgeRootAbs = Join-Path $helperPortableOutAbs "bridge"
+$bridgeRidAbs = Join-Path $bridgeRootAbs $Runtime
+$nodeModulesAbs = Join-Path $bridgeRidAbs "node_modules"
+
+$totalSizeBytes = Get-DirectorySizeBytes -RootDir $helperPortableOutAbs
+$bridgeSizeBytes = Get-DirectorySizeBytes -RootDir $bridgeRootAbs
+$nodeModulesSizeBytes = Get-DirectorySizeBytes -RootDir $nodeModulesAbs
+
+Write-Host "[nLink] Size summary (installer staging):" -ForegroundColor Cyan
+Write-Host ("  total output size: {0} ({1} bytes)" -f (Format-Size $totalSizeBytes), $totalSizeBytes)
+Write-Host ("  bridge folder size: {0} ({1} bytes)" -f (Format-Size $bridgeSizeBytes), $bridgeSizeBytes)
+Write-Host ("  bridge/{0}/node_modules size: {1} ({2} bytes)" -f $Runtime, (Format-Size $nodeModulesSizeBytes), $nodeModulesSizeBytes)

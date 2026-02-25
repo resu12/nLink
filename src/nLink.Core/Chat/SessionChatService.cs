@@ -120,6 +120,7 @@ public sealed class SessionChatService : IChatService
 
         var bytes = ChatEnvelopeCodec.SerializeEnvelope(envelope);
         ChatRuntimeCounters.IncrementSent();
+        SessionTimeline.Record("ChatSent");
         if (reliabilityAttempt is not null)
         {
             SessionReliabilityLog.RecordStage(reliabilityAttempt, SessionReliabilityStage.ChatSent);
@@ -148,6 +149,7 @@ public sealed class SessionChatService : IChatService
     private void OnSessionKeyReady(object? sender, TransportSessionKeyReadyEventArgs e)
     {
         sessionKey = e.SharedKey.AsSpan().ToArray();
+        SessionTimeline.Record("SessionKeyReady");
         replayCache.Clear();
         if (reliabilityAttempt is not null)
         {
@@ -171,6 +173,7 @@ public sealed class SessionChatService : IChatService
     private void OnChatMessageReceived(object? sender, TransportChatMessageEventArgs e)
     {
         ChatRuntimeCounters.IncrementReceived();
+        SessionTimeline.Record("ChatReceived");
         if (reliabilityAttempt is not null)
         {
             SessionReliabilityLog.RecordStage(reliabilityAttempt, SessionReliabilityStage.ChatReceived);

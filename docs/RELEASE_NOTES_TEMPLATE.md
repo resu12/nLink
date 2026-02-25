@@ -23,4 +23,4 @@
 
 Open **Diagnostics** in the app and click **Copy diagnostics**.
 Paste that text into the GitHub issue/report.
-
+You can also click **Open logs folder** and attach the latest `nlink.log` files if needed.

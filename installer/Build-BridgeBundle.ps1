@@ -143,6 +143,163 @@ function Assert-BridgeBundleOutput {
     }
 }
 
+function Get-DirectorySizeBytes {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    if (-not (Test-Path $Path)) {
+        return [int64]0
+    }
+
+    $files = Get-ChildItem -Path $Path -Recurse -File -Force -ErrorAction SilentlyContinue
+    if ($null -eq $files) {
+        return [int64]0
+    }
+
+    $sum = [int64]0
+    foreach ($file in @($files)) {
+        $sum += [int64]$file.Length
+    }
+
+    return $sum
+}
+
+function Format-Bytes {
+    param(
+        [Parameter(Mandatory = $true)][int64]$Bytes
+    )
+
+    if ($Bytes -ge 1GB) { return ("{0:N1} GB ({1} bytes)" -f ($Bytes / 1GB), $Bytes) }
+    if ($Bytes -ge 1MB) { return ("{0:N1} MB ({1} bytes)" -f ($Bytes / 1MB), $Bytes) }
+    if ($Bytes -ge 1KB) { return ("{0:N1} KB ({1} bytes)" -f ($Bytes / 1KB), $Bytes) }
+    return ("{0} bytes" -f $Bytes)
+}
+
+function Remove-BridgeBundleJunk {
+    param(
+        [Parameter(Mandatory = $true)][string]$BridgeOutDir
+    )
+
+    $nodeModulesDir = Join-Path $BridgeOutDir "node_modules"
+    if (-not (Test-Path $nodeModulesDir)) {
+        return
+    }
+
+    $filePatterns = @("*.md", "*.markdown", "*.mkd", "*.map")
+    foreach ($pattern in $filePatterns) {
+        $files = Get-ChildItem -Path $nodeModulesDir -Recurse -File -Filter $pattern -ErrorAction SilentlyContinue
+        foreach ($file in @($files)) {
+            try {
+                Remove-Item -Force $file.FullName -ErrorAction Stop
+            }
+            catch {
+                # Best-effort cleanup only.
+            }
+        }
+    }
+
+    $dirNames = @("test", "tests", "__tests__", "docs", "doc", "example", "examples", "coverage")
+    foreach ($dirName in $dirNames) {
+        $dirs = Get-ChildItem -Path $nodeModulesDir -Recurse -Directory -Filter $dirName -ErrorAction SilentlyContinue
+        foreach ($dir in @($dirs)) {
+            try {
+                Remove-Item -Recurse -Force $dir.FullName -ErrorAction Stop
+            }
+            catch {
+                # Best-effort cleanup only.
+            }
+        }
+    }
+}
+
+function Test-BridgeBundleHealth {
+    param(
+        [Parameter(Mandatory = $true)][string]$NodePath,
+        [Parameter(Mandatory = $true)][string]$BridgeScriptPath
+    )
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $NodePath
+    $psi.Arguments = '"' + $BridgeScriptPath + '"'
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $psi.WorkingDirectory = Split-Path -Parent $BridgeScriptPath
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    $proc.EnableRaisingEvents = $true
+
+    if (-not $proc.Start()) {
+        throw "Bridge health check failed: could not start node bridge."
+    }
+
+    $proc.StandardInput.AutoFlush = $true
+
+    $stderrPump = [System.Threading.Tasks.Task]::Run([Action]{
+        try {
+            while (-not $proc.HasExited) {
+                $line = $proc.StandardError.ReadLine()
+                if ($null -eq $line) { break }
+            }
+        }
+        catch {
+            # ignore stderr read errors
+        }
+    })
+
+    try {
+        $proc.StandardInput.WriteLine('{"id":"1","cmd":"hello","protocol":1,"appVersion":"bundle-check"}')
+        $helloTask = $proc.StandardOutput.ReadLineAsync()
+        if (-not $helloTask.Wait(5000)) {
+            throw "Bridge health check failed: timed out waiting for hello_ok."
+        }
+        $helloLine = $helloTask.Result
+        if ([string]::IsNullOrWhiteSpace($helloLine)) {
+            throw "Bridge health check failed: empty hello response."
+        }
+        $helloJson = $helloLine | ConvertFrom-Json
+        if ($helloJson.event -ne "hello_ok") {
+            throw "Bridge health check failed: expected hello_ok, got $($helloJson.event)."
+        }
+
+        $proc.StandardInput.WriteLine('{"id":"2","cmd":"ping"}')
+        $pongTask = $proc.StandardOutput.ReadLineAsync()
+        if (-not $pongTask.Wait(2000)) {
+            throw "Bridge health check failed: timed out waiting for pong."
+        }
+        $pongLine = $pongTask.Result
+        if ([string]::IsNullOrWhiteSpace($pongLine)) {
+            throw "Bridge health check failed: empty pong response."
+        }
+        $pongJson = $pongLine | ConvertFrom-Json
+        if ($pongJson.event -ne "pong") {
+            throw "Bridge health check failed: expected pong, got $($pongJson.event)."
+        }
+
+        $proc.StandardInput.WriteLine('{"id":"3","cmd":"shutdown"}')
+        if (-not $proc.WaitForExit(4000)) {
+            throw "Bridge health check failed: shutdown timed out."
+        }
+    }
+    finally {
+        try {
+            if (-not $proc.HasExited) {
+                $proc.Kill()
+                [void]$proc.WaitForExit(2000)
+            }
+        }
+        catch {
+            # Best-effort cleanup.
+        }
+
+        try { $proc.Dispose() } catch {}
+    }
+}
+
 $runtimeConfig = Get-BridgeRuntimeConfig -Runtime $Runtime -NodeVersion $PinnedNodeVersion
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -212,4 +369,19 @@ if (-not (Test-Path $nodeModulesSource)) {
 Copy-Item -Recurse -Force $nodeModulesSource (Join-Path $outAbs "node_modules")
 
 Assert-BridgeBundleOutput -OutDir $outAbs
+
+$sizeBeforeTotal = Get-DirectorySizeBytes -Path $outAbs
+$sizeBeforeNodeModules = Get-DirectorySizeBytes -Path (Join-Path $outAbs "node_modules")
+Remove-BridgeBundleJunk -BridgeOutDir $outAbs
+$sizeAfterTotal = Get-DirectorySizeBytes -Path $outAbs
+$sizeAfterNodeModules = Get-DirectorySizeBytes -Path (Join-Path $outAbs "node_modules")
+
+Assert-BridgeBundleOutput -OutDir $outAbs
+Test-BridgeBundleHealth -NodePath (Join-Path $outAbs "node.exe") -BridgeScriptPath (Join-Path $outAbs "index.js")
+
 Write-Host "[nLink] Bridge bundle output: $outAbs" -ForegroundColor Green
+Write-Host "[nLink] Bridge bundle size (before cleanup): $(Format-Bytes -Bytes $sizeBeforeTotal)" -ForegroundColor Cyan
+Write-Host "[nLink] node_modules size (before cleanup): $(Format-Bytes -Bytes $sizeBeforeNodeModules)" -ForegroundColor Cyan
+Write-Host "[nLink] Bridge bundle size (after cleanup):  $(Format-Bytes -Bytes $sizeAfterTotal)" -ForegroundColor Cyan
+Write-Host "[nLink] node_modules size (after cleanup):  $(Format-Bytes -Bytes $sizeAfterNodeModules)" -ForegroundColor Cyan
+Write-Host "[nLink] Bridge hello/ping health check: PASS" -ForegroundColor Green

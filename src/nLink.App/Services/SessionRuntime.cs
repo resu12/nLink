@@ -3,6 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.Logging;
 using NLink.Infra.Nkn;
 
 namespace NLink.App.Services;
@@ -132,11 +133,13 @@ public sealed class SessionRuntime : IDisposable
             role = SessionRuntimeRole.Helpee;
             currentCode = code;
             pendingJoinRequest = null;
+            SessionTimeline.Record("Started");
+            SessionTimeline.Record("Hosting");
 
             WireTransport(nextTransport);
             chatService.AttachTransport(nextTransport);
 
-            SetState(SessionRuntimeState.Waiting, "Waiting for your helper to connect.");
+            SetState(SessionRuntimeState.Waiting, "Waiting for helper…");
 
             _ = RunHostAsync(nextTransport, code, linkedCts.Token);
         }
@@ -166,11 +169,13 @@ public sealed class SessionRuntime : IDisposable
             role = SessionRuntimeRole.Helper;
             currentCode = code;
             pendingJoinRequest = null;
+            SessionTimeline.Record("Started");
+            SessionTimeline.Record("Joining");
 
             WireTransport(nextTransport);
             chatService.AttachTransport(nextTransport);
 
-            SetState(SessionRuntimeState.Connecting, "Waiting for permission...");
+            SetState(SessionRuntimeState.Connecting, "Connecting…");
 
             await nextTransport.JoinAsync(code, linkedCts.Token).ConfigureAwait(false);
         }
@@ -196,7 +201,7 @@ public sealed class SessionRuntime : IDisposable
                 return;
             }
 
-            SetState(SessionRuntimeState.Connected, "Connected.");
+            SetState(SessionRuntimeState.Connected, "Connected");
         }
         finally
         {
@@ -456,19 +461,22 @@ public sealed class SessionRuntime : IDisposable
         }
 
         pendingJoinRequest = e;
+        SessionTimeline.Record("IncomingJoinRequest");
         SetState(SessionRuntimeState.IncomingJoinRequest, "Helper on this PC wants to connect. Click Allow.");
         IncomingJoinRequestAvailable?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnTransportApproved(object? sender, EventArgs e)
     {
-        SetState(SessionRuntimeState.Connected, "Connected.");
+        SessionTimeline.Record("Approved");
+        SetState(SessionRuntimeState.Connected, "Connected");
         Approved?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnTransportRejected(object? sender, EventArgs e)
     {
         pendingJoinRequest = null;
+        SessionTimeline.Record("Rejected");
         SetState(SessionRuntimeState.Rejected, "Permission was declined.");
         Rejected?.Invoke(this, EventArgs.Empty);
     }
@@ -480,16 +488,16 @@ public sealed class SessionRuntime : IDisposable
             return;
         }
 
-        var text = role switch
-        {
-            SessionRuntimeRole.Helpee => "Connection was lost. Waiting for another try.",
-            SessionRuntimeRole.Helper => "Connection lost. Try again.",
-            _ => "Connection was lost."
-        };
+        var shouldFail = state is SessionRuntimeState.Waiting
+            or SessionRuntimeState.IncomingJoinRequest
+            or SessionRuntimeState.Connecting
+            or SessionRuntimeState.Connected;
 
-        if (state != SessionRuntimeState.Connected)
+        if (shouldFail)
         {
-            SetState(SessionRuntimeState.Disconnected, text);
+            pendingJoinRequest = null;
+            SessionTimeline.Record("Disconnected", "connection_lost");
+            SetState(SessionRuntimeState.Failed, "Connection lost.");
         }
 
         Disconnected?.Invoke(this, EventArgs.Empty);
@@ -515,6 +523,8 @@ public sealed class SessionRuntime : IDisposable
         {
             try
             {
+                SessionTimeline.Record("SessionEndReceived", "remote_end");
+                SessionTimeline.Record("Disconnected", "remote_end");
                 await FailAsync(message).ConfigureAwait(false);
                 Disconnected?.Invoke(this, EventArgs.Empty);
             }
@@ -548,6 +558,9 @@ public sealed class SessionRuntime : IDisposable
     {
         state = nextState;
         statusText = nextStatusText;
+        LocalOperationalLog.Info(
+            "Session",
+            $"state={state}; role={role}; status={SanitizeStatusForLog(statusText)}");
 
         StateChanged?.Invoke(
             this,
@@ -603,5 +616,16 @@ public sealed class SessionRuntime : IDisposable
         {
             // Best-effort only.
         }
+    }
+
+    private static string SanitizeStatusForLog(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return "(none)";
+        }
+
+        var trimmed = text.Trim();
+        return trimmed.Length <= 120 ? trimmed : trimmed[..120];
     }
 }

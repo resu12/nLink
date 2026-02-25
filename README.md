@@ -6,19 +6,19 @@ Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke
 
 ## Quick Start (Windows)
 
-1. Go to the GitHub Releases page.
-2. Download:
-   - Installer (recommended), or
-   - Portable ZIP.
-3. Helpee:
-   - Open nLink.
-   - Click `I need help`.
-   - Share the 6-digit code.
-4. Helper:
-   - Open nLink.
-   - Click `I want to help`.
-   - Enter the code and click Connect.
-5. Helpee clicks Allow.
+1. Go to the GitHub Releases page and download the Installer (recommended) or Portable ZIP.
+2. Helpee opens nLink, clicks `I need help`, and shares the 6-digit code.
+3. Helper opens nLink, clicks `I want to help`, enters the code, and clicks `Connect`.
+4. Helpee clicks `Allow`.
+5. Chat opens on both sides.
+
+Helper (alpha.3):
+
+![Helper screen](docs/images/helper-alpha3.png)
+
+Helpee (alpha.3):
+
+![Helpee screen](docs/images/helpee-alpha3.png)
 
 If connection fails:
 Open Diagnostics -> Copy diagnostics and include it when reporting issues.

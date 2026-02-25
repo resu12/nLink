@@ -33,16 +33,17 @@
                       Margin="24">
             <StackPanel HorizontalAlignment="Center"
                         MaxWidth="720"
-                        Spacing="14">
+                        Spacing="16">
 
                 <TextBlock Classes="appTitle"
                            Text="{Binding PageTitle}"
+                           IsVisible="{Binding ShowPageHeader}"
                            HorizontalAlignment="Center"
                            TextAlignment="Center"/>
 
                 <TextBlock Classes="appBody"
                            Text="{Binding PageSubtitle}"
-                           IsVisible="{Binding IsWaitingView}"
+                           IsVisible="{Binding ShowPageSubtitle}"
                            TextAlignment="Center"
                            HorizontalAlignment="Center"
                            MaxWidth="560"/>
@@ -50,10 +51,25 @@
                 <Border Classes="appCard"
                         Padding="24">
                     <StackPanel Spacing="16">
+                        <StackPanel Spacing="8"
+                                    HorizontalAlignment="Center"
+                                    IsVisible="{Binding IsStartupBlocked}">
+                            <TextBlock Classes="appMuted"
+                                       Text="{Binding ConnectionStatus}"
+                                       FontSize="16"
+                                       TextAlignment="Center"
+                                       HorizontalAlignment="Center"
+                                       MaxWidth="560"
+                                       TextWrapping="Wrap"/>
+                            <Button Classes="linkButton"
+                                    Content="Open diagnostics"
+                                    Command="{Binding OpenDiagnosticsCommand}"
+                                    HorizontalAlignment="Center"/>
+                        </StackPanel>
 
                         <!-- State A: waiting/hosting -->
-                        <StackPanel Spacing="14"
-                                    IsVisible="{Binding IsWaitingView}">
+                        <StackPanel Spacing="16"
+                                    IsVisible="{Binding ShowWaitingPanel}">
                             <Border Background="{StaticResource AppMutedPanelBrush}"
                                     BorderBrush="{StaticResource AppCardBorderBrush}"
                                     BorderThickness="1"
@@ -61,33 +77,37 @@
                                     Padding="20"
                                     Cursor="Hand"
                                     PointerPressed="ShareCodeBorder_PointerPressed">
-                                <TextBlock Text="{Binding ShareCode}"
-                                           HorizontalAlignment="Center"
-                                           Foreground="{StaticResource AppTextBrush}"
-                                           FontFamily="Cascadia Mono,Consolas,Monaco,monospace"
-                                           FontSize="42"
-                                           FontWeight="Bold"
-                                           LetterSpacing="6"
-                                           TextAlignment="Center"/>
+                                <TextBlock Classes="codeDigits"
+                                           Text="{Binding ShareCode}"
+                                           AutomationProperties.AutomationId="Helpee.Code"
+                                           HorizontalAlignment="Center"/>
                             </Border>
 
-                            <StackPanel Orientation="Horizontal"
-                                        Spacing="10"
-                                        HorizontalAlignment="Stretch">
-                                <Button Classes="appButton primaryButton action"
+                            <Grid ColumnDefinitions="*,*"
+                                  ColumnSpacing="10"
+                                  IsVisible="{Binding ShowWaitingCodeActions}">
+                                <Button Grid.Column="0"
+                                        AutomationProperties.AutomationId="Helpee.CopyCode"
+                                        Classes="appButton primaryButton action"
                                         Content="Copy code"
                                         Command="{Binding CopyCodeCommand}"
-                                        HorizontalAlignment="Stretch"
-                                        Width="340"/>
+                                        HorizontalAlignment="Stretch"/>
 
-                                <Button Classes="appButton secondaryButton action"
+                                <Button Grid.Column="1"
+                                        AutomationProperties.AutomationId="Helpee.NewCode"
+                                        Classes="appButton secondaryButton action"
                                         Content="New code"
                                         Command="{Binding RegenerateCodeCommand}"
-                                        HorizontalAlignment="Stretch"
-                                        Width="340"/>
-                            </StackPanel>
+                                        HorizontalAlignment="Stretch"/>
+                            </Grid>
+
+                            <Button Classes="appButton secondaryButton action"
+                                    Content="Retry"
+                                    Command="{Binding RetryCommand}"
+                                    IsVisible="{Binding ShowRetryAction}"/>
 
                             <TextBlock Classes="appMuted"
+                                       AutomationProperties.AutomationId="Helpee.Status"
                                        Text="{Binding StatusLineText}"
                                        FontSize="15"
                                        TextAlignment="Center"
@@ -95,8 +115,8 @@
                         </StackPanel>
 
                         <!-- State B: incoming request -->
-                        <StackPanel Spacing="14"
-                                    IsVisible="{Binding IsIncomingRequestView}">
+                        <StackPanel Spacing="16"
+                                    IsVisible="{Binding ShowIncomingRequestPanel}">
                             <TextBlock Text="{Binding IncomingHelperName}"
                                        Foreground="{StaticResource AppTextBrush}"
                                        FontSize="18"
@@ -105,44 +125,41 @@
                                        HorizontalAlignment="Center"/>
 
                             <TextBlock Classes="appBody"
+                                       AutomationProperties.AutomationId="Helpee.Status"
                                        Text="{Binding StatusLineText}"
                                        TextAlignment="Center"
                                        HorizontalAlignment="Center"/>
 
-                            <Button Classes="appButton primaryButton action"
+                            <Button Classes="appButton positiveButton action"
+                                    AutomationProperties.AutomationId="Helpee.Allow"
                                     Content="Allow"
                                     Command="{Binding AllowCommand}"
                                     IsEnabled="{Binding HasIncomingRequest}"/>
 
                             <Button Classes="appButton secondaryButton action"
+                                    AutomationProperties.AutomationId="Helpee.Decline"
                                     Content="Decline"
                                     Command="{Binding DeclineCommand}"
                                     IsEnabled="{Binding HasIncomingRequest}"/>
                         </StackPanel>
 
                         <!-- State C: connected -->
-                        <StackPanel Spacing="12"
-                                    IsVisible="{Binding ShowChatSection}">
-                            <Border Classes="appPanel"
-                                    Padding="12">
-                                <TextBlock Classes="appBody"
-                                           Text="{Binding ConnectionStatus}"
-                                           TextAlignment="Center"
-                                           HorizontalAlignment="Center"/>
-                            </Border>
-
+                        <StackPanel Spacing="16"
+                                    IsVisible="{Binding ShowConnectedPanel}">
                             <Border HorizontalAlignment="Center"
                                     MinWidth="560"
                                     MaxWidth="720">
                                 <views:ChatView HorizontalAlignment="Stretch"/>
                             </Border>
-
-                            <Button Classes="appButton secondaryButton action"
-                                    Content="Disconnect"
-                                    Command="{Binding CancelCommand}"/>
                         </StackPanel>
                     </StackPanel>
                 </Border>
+
+                <Button Classes="linkButton"
+                        Content="Open diagnostics"
+                        Command="{Binding OpenDiagnosticsCommand}"
+                        HorizontalAlignment="Center"
+                        IsVisible="{Binding ShowOpenDiagnosticsLink}"/>
 
                 <Button Classes="appButton secondaryButton"
                         Content="Back"

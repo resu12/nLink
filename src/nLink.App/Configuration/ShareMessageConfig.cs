@@ -6,23 +6,41 @@ namespace NLink.App.Configuration;
 
 public sealed class ShareMessageConfig
 {
+    private const string DefaultRepoUrl = "https://github.com/resu12/nLink";
+
     public ShareMessageConfig(string? downloadUrl)
+        : this(downloadUrl, null)
+    {
+    }
+
+    public ShareMessageConfig(string? downloadUrl, string? repoUrl)
     {
         DownloadUrl = string.IsNullOrWhiteSpace(downloadUrl) ? null : downloadUrl.Trim();
+        RepoUrl = string.IsNullOrWhiteSpace(repoUrl) ? DefaultRepoUrl : repoUrl.Trim().TrimEnd('/');
     }
 
     public string? DownloadUrl { get; }
+
+    public string RepoUrl { get; }
+
+    public string ReleasesUrl => $"{RepoUrl}/releases";
+
+    public string BugReportUrl => $"{RepoUrl}/issues/new?template=bug_report.yml";
 
     public static ShareMessageConfig Load()
     {
         var env = Environment.GetEnvironmentVariable("NLINK_DOWNLOAD_URL");
         if (!string.IsNullOrWhiteSpace(env))
         {
-            return new ShareMessageConfig(env);
+            var repoEnv = Environment.GetEnvironmentVariable("NLINK_REPO_URL");
+            return new ShareMessageConfig(env, repoEnv);
         }
 
         var appSettingsValue = AppSettingsJson.TryGet("NLINK_DOWNLOAD_URL") ?? AppSettingsJson.TryGet("nLink:downloadUrl");
-        return new ShareMessageConfig(appSettingsValue);
+        var repoValue = Environment.GetEnvironmentVariable("NLINK_REPO_URL")
+                        ?? AppSettingsJson.TryGet("NLINK_REPO_URL")
+                        ?? AppSettingsJson.TryGet("nLink:repoUrl");
+        return new ShareMessageConfig(appSettingsValue, repoValue);
     }
 
     private static class AppSettingsJson

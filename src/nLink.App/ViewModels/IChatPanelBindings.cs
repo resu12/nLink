@@ -13,7 +13,13 @@ public interface IChatPanelBindings
 
     ObservableCollection<ChatLineViewModel> ChatMessages { get; }
 
+    bool HasChatMessages { get; }
+
+    bool ShowNoMessagesPlaceholder { get; }
+
     string ChatDraft { get; set; }
 
     IAsyncRelayCommand SendChatCommand { get; }
+
+    IRelayCommand EndSessionCommand { get; }
 }

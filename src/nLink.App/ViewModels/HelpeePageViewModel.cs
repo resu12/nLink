@@ -14,7 +14,9 @@ namespace NLink.App.ViewModels;
 
 public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanelBindings
 {
+    private static readonly TimeSpan DefaultIncomingRequestTimeout = TimeSpan.FromSeconds(20);
     private readonly Action cancelAction;
+    private readonly Action? openDiagnosticsAction;
     private readonly TransportRuntimeConfig transportConfig;
     private readonly SessionRuntime sessionRuntime;
     private readonly IClipboardService? clipboardService;
@@ -24,25 +26,32 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool showTroubleshooting;
     private bool showChatNotice;
     private string codeCopyStatusText = "Tell this code to your helper.";
-    private string connectionStatus = "Waiting for your helper to connect.";
+    private string connectionStatus = "Waiting for helper…";
     private string connectionState = "Waiting";
     private string chatDraft = string.Empty;
     private bool simulatedIncomingRequest;
     private SessionReliabilityAttempt? reliabilityAttempt;
     private CancellationTokenSource? codeCopyStatusResetCts;
+    private CancellationTokenSource? incomingRequestTimeoutCts;
+    private readonly TimeSpan incomingRequestTimeout;
+    private bool startupBlocked;
     private bool disposed;
 
     public HelpeePageViewModel(
         Action cancelAction,
         TransportRuntimeConfig transportConfig,
         SessionRuntime sessionRuntime,
+        Action? openDiagnosticsAction = null,
         IClipboardService? clipboardService = null,
-        ShareMessageConfig? shareMessageConfig = null)
+        ShareMessageConfig? shareMessageConfig = null,
+        TimeSpan? incomingRequestTimeout = null)
     {
         this.cancelAction = cancelAction;
+        this.openDiagnosticsAction = openDiagnosticsAction;
         this.transportConfig = transportConfig;
         this.sessionRuntime = sessionRuntime;
         this.clipboardService = clipboardService;
+        this.incomingRequestTimeout = incomingRequestTimeout ?? DefaultIncomingRequestTimeout;
         _ = shareMessageConfig;
 
         ChatMessages = new ObservableCollection<ChatLineViewModel>();
@@ -61,14 +70,22 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         AllowCommand = new RelayCommand(AllowIncomingRequest, CanAllowIncomingRequest);
         DeclineCommand = new AsyncRelayCommand(DeclineIncomingRequestAsync, CanDeclineIncomingRequest);
         SendChatCommand = new AsyncRelayCommand(SendChatAsync, CanSendChat);
+        RetryCommand = new AsyncRelayCommand(RetryAsync);
+        OpenDiagnosticsCommand = new RelayCommand(OpenDiagnostics, CanOpenDiagnostics);
         CancelCommand = new RelayCommand(CancelAndGoBack);
 
-        StartHosting();
+        InitializeStartupAvailabilityState();
+        if (!IsStartupBlocked)
+        {
+            StartHosting();
+        }
     }
 
-    public string PageTitle => IsIncomingRequestView ? "Helper wants to connect." : "Your code";
+    public string PageTitle => IsIncomingRequestView ? "Someone wants to connect" : "Your code";
+    public bool ShowPageHeader => !IsConnectedView;
 
     public string PageSubtitle => IsIncomingRequestView ? string.Empty : CodeCopyStatusText;
+    public bool ShowPageSubtitle => ConnectionState == "Waiting" && !IsStartupBlocked;
 
     public string ShareCode => sessionCode.Digits;
 
@@ -112,7 +129,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         private set => SetProperty(ref showTroubleshooting, value);
     }
 
-    public bool ShowDevTroubleshooting => transportConfig.IsDevLocal;
+    public bool ShowDevTroubleshooting => transportConfig.IsDevLocal && !IsIncomingRequestView && !IsStartupBlocked;
 
     public string ConnectionStatus
     {
@@ -130,9 +147,15 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(IsWaitingView));
                 OnPropertyChanged(nameof(IsIncomingRequestView));
                 OnPropertyChanged(nameof(IsConnectedView));
+                OnPropertyChanged(nameof(ShowWaitingPanel));
+                OnPropertyChanged(nameof(ShowIncomingRequestPanel));
+                OnPropertyChanged(nameof(ShowConnectedPanel));
+                OnPropertyChanged(nameof(ShowWaitingCodeActions));
                 OnPropertyChanged(nameof(ShowBackButton));
                 OnPropertyChanged(nameof(PageTitle));
                 OnPropertyChanged(nameof(PageSubtitle));
+                OnPropertyChanged(nameof(ShowPageSubtitle));
+                OnPropertyChanged(nameof(ShowPageHeader));
                 OnPropertyChanged(nameof(StatusLineText));
                 OnPropertyChanged(nameof(SecondaryActionText));
                 OnPropertyChanged(nameof(ShowChatSection));
@@ -147,20 +170,50 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool IsConnectedView => ConnectionState == "Connected";
 
     public bool ShowChatSection => IsConnectedView;
+    public bool ShowWaitingPanel => IsWaitingView && !IsStartupBlocked;
+    public bool ShowIncomingRequestPanel => IsIncomingRequestView && !IsStartupBlocked;
+    public bool ShowConnectedPanel => ShowChatSection && !IsStartupBlocked;
 
-    public bool ShowBackButton => !IsConnectedView;
+    public bool ShowBackButton => !IsConnectedView && !IsIncomingRequestView && !IsStartupBlocked;
 
     public string StatusLineText => IsIncomingRequestView
         ? "Waiting for you to allow."
         : IsConnectedView
             ? ConnectionStatus
-            : "Waiting for helper...";
+            : ConnectionStatus;
 
     public string SecondaryActionText => IsConnectedView ? "Disconnect" : "New code";
+
+    public bool IsStartupBlocked
+    {
+        get => startupBlocked;
+        private set
+        {
+            if (SetProperty(ref startupBlocked, value))
+            {
+                OnPropertyChanged(nameof(ShowHostingUi));
+                OnPropertyChanged(nameof(ShowWaitingPanel));
+                OnPropertyChanged(nameof(ShowIncomingRequestPanel));
+                OnPropertyChanged(nameof(ShowConnectedPanel));
+                OnPropertyChanged(nameof(ShowWaitingCodeActions));
+                OnPropertyChanged(nameof(ShowDevTroubleshooting));
+                OnPropertyChanged(nameof(ShowBackButton));
+                OnPropertyChanged(nameof(ShowRetryAction));
+                OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
+                OnPropertyChanged(nameof(ShowPageSubtitle));
+                OpenDiagnosticsCommand.NotifyCanExecuteChanged();
+            }
+        }
+    }
+
+    public bool ShowHostingUi => !IsStartupBlocked;
+    public bool ShowWaitingCodeActions => ShowHostingUi && ConnectionState == "Waiting";
 
     public ObservableCollection<ChatLineViewModel> ChatMessages { get; }
 
     public string ChatPanelTitle => "Message";
+    public bool HasChatMessages => ChatMessages.Count > 0;
+    public bool ShowNoMessagesPlaceholder => !HasChatMessages;
 
     public string ChatDraft
     {
@@ -198,7 +251,18 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public IAsyncRelayCommand SendChatCommand { get; }
 
+    public IAsyncRelayCommand RetryCommand { get; }
+
+    public IRelayCommand OpenDiagnosticsCommand { get; }
+
     public IRelayCommand CancelCommand { get; }
+    public IRelayCommand EndSessionCommand => CancelCommand;
+
+    public bool ShowRetryAction => !IsStartupBlocked && ConnectionState == "Failed";
+
+    public bool ShowOpenDiagnosticsLink =>
+        openDiagnosticsAction is not null &&
+        (IsStartupBlocked || string.Equals(ConnectionStatus, UserErrorMapper.NknStartFailedReinstall(), StringComparison.Ordinal));
 
     public void Dispose()
     {
@@ -218,6 +282,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.SetReliabilityAttempt(null);
         codeCopyStatusResetCts?.Cancel();
         codeCopyStatusResetCts?.Dispose();
+        incomingRequestTimeoutCts?.Cancel();
+        incomingRequestTimeoutCts?.Dispose();
         _ = sessionRuntime.ResetAsync();
     }
 
@@ -232,8 +298,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         ShowChatNotice = false;
         ChatDraft = string.Empty;
         ChatMessages.Clear();
+        OnPropertyChanged(nameof(HasChatMessages));
+        OnPropertyChanged(nameof(ShowNoMessagesPlaceholder));
         CodeCopyStatusText = "Tell this code to your helper.";
-        ConnectionStatus = "Waiting for your helper to connect.";
+        ConnectionStatus = "Waiting for helper…";
         ConnectionState = "Waiting";
 
         StartHosting();
@@ -251,6 +319,36 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private void ToggleTroubleshooting()
     {
         ShowTroubleshooting = !ShowTroubleshooting;
+    }
+
+    private async Task RetryAsync()
+    {
+        incomingRequestTimeoutCts?.Cancel();
+        incomingRequestTimeoutCts?.Dispose();
+        incomingRequestTimeoutCts = null;
+
+        await sessionRuntime.ResetAsync();
+
+        await UiThreadDispatch.RunAsync(() =>
+        {
+            HasIncomingRequest = false;
+            IsRequestAllowed = false;
+            ShowChatNotice = false;
+            ConnectionStatus = "Waiting for helper…";
+            ConnectionState = "Waiting";
+        });
+
+        StartHosting();
+    }
+
+    private bool CanOpenDiagnostics()
+    {
+        return openDiagnosticsAction is not null;
+    }
+
+    private void OpenDiagnostics()
+    {
+        openDiagnosticsAction?.Invoke();
     }
 
     public void NotifyCodeCopied()
@@ -309,6 +407,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         if (simulatedIncomingRequest)
         {
             simulatedIncomingRequest = false;
+            CancelIncomingRequestTimeout();
             HasIncomingRequest = false;
             IsRequestAllowed = true;
             ShowChatNotice = false;
@@ -354,15 +453,22 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             // Best-effort. Runtime disconnect/reject events will reconcile state.
         }
 
+        CancelIncomingRequestTimeout();
         HasIncomingRequest = false;
         IsRequestAllowed = false;
-        ConnectionStatus = "Waiting for your helper to connect.";
+        ConnectionStatus = "Waiting for helper…";
         ConnectionState = "Waiting";
     }
 
     private void StartHosting()
     {
+        if (IsStartupBlocked)
+        {
+            return;
+        }
+
         simulatedIncomingRequest = false;
+        CancelIncomingRequestTimeout();
         reliabilityAttempt = SessionReliabilityLog.StartAttempt("Helpee", transportConfig.Key);
         sessionRuntime.SetReliabilityAttempt(reliabilityAttempt);
         LogReliability(SessionReliabilityStage.CodeGenerated);
@@ -409,6 +515,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private void OnIncomingJoinRequestAvailable(object? sender, EventArgs e)
     {
         LogReliability(SessionReliabilityStage.IncomingJoinRequest);
+        StartIncomingRequestTimeout();
     }
 
     private void OnRuntimeDisconnected(object? sender, EventArgs e)
@@ -470,6 +577,9 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             ChatMessages.RemoveAt(0);
         }
+
+        OnPropertyChanged(nameof(HasChatMessages));
+        OnPropertyChanged(nameof(ShowNoMessagesPlaceholder));
     }
 
     private void LogReliability(SessionReliabilityStage stage, string? errorCode = null, string? errorHint = null)
@@ -520,6 +630,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 break;
 
             case SessionRuntimeState.Connected:
+                CancelIncomingRequestTimeout();
                 HasIncomingRequest = false;
                 IsRequestAllowed = true;
                 ConnectionStatus = transportConfig.AllowStatusText;
@@ -527,15 +638,13 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 break;
 
             case SessionRuntimeState.Disconnected:
+                CancelIncomingRequestTimeout();
                 if (!HasIncomingRequest && !IsRequestAllowed)
                 {
                     ConnectionStatus = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
-                        ? transportConfig.HelpeeDisconnectedText
+                        ? "Connection lost."
                         : sessionRuntime.StatusText;
-                    if (ConnectionState != "Connected")
-                    {
-                        ConnectionState = "Disconnected";
-                    }
+                    ConnectionState = "Failed";
                 }
                 break;
 
@@ -543,22 +652,27 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 if (!HasIncomingRequest && !IsRequestAllowed)
                 {
                     ConnectionStatus = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
-                        ? "Waiting for your helper to connect."
+                        ? "Waiting for helper…"
                         : sessionRuntime.StatusText;
                     ConnectionState = "Waiting";
                 }
                 break;
 
             case SessionRuntimeState.Failed:
+                CancelIncomingRequestTimeout();
                 HasIncomingRequest = false;
                 IsRequestAllowed = false;
                 ConnectionStatus = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
-                    ? "The session ended."
+                    ? "Connection lost."
                     : sessionRuntime.StatusText;
                 ConnectionState = "Failed";
                 break;
         }
 
+        OnPropertyChanged(nameof(ShowRetryAction));
+        OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
+        RetryCommand.NotifyCanExecuteChanged();
+        OpenDiagnosticsCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(IsChatReady));
         SendChatCommand.NotifyCanExecuteChanged();
         AllowCommand.NotifyCanExecuteChanged();
@@ -595,5 +709,74 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             CodeCopyStatusText = "Tell this code to your helper.";
         });
+    }
+
+    private void InitializeStartupAvailabilityState()
+    {
+        if (!string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (transportConfig.HasStartupWarning || UserErrorMapper.IsNknStartFailure(NknRuntimeDiagnostics.Snapshot().LastError))
+        {
+            IsStartupBlocked = true;
+            ConnectionStatus = UserErrorMapper.NknStartFailedReinstall();
+            ConnectionState = "Failed";
+        }
+    }
+
+    private void StartIncomingRequestTimeout()
+    {
+        CancelIncomingRequestTimeout();
+
+        incomingRequestTimeoutCts = new CancellationTokenSource();
+        var ct = incomingRequestTimeoutCts.Token;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(incomingRequestTimeout, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            if (ct.IsCancellationRequested || disposed)
+            {
+                return;
+            }
+
+            try
+            {
+                await sessionRuntime.RejectAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best-effort.
+            }
+
+            await UiThreadDispatch.RunAsync(() =>
+            {
+                if (!IsIncomingRequestView)
+                {
+                    return;
+                }
+
+                HasIncomingRequest = false;
+                IsRequestAllowed = false;
+                ConnectionStatus = "No response yet.";
+                ConnectionState = "Waiting";
+            });
+        });
+    }
+
+    private void CancelIncomingRequestTimeout()
+    {
+        incomingRequestTimeoutCts?.Cancel();
+        incomingRequestTimeoutCts?.Dispose();
+        incomingRequestTimeoutCts = null;
     }
 }

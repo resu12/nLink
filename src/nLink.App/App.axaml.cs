@@ -8,6 +8,7 @@ using NLink.App.Configuration;
 using NLink.App.Services;
 using NLink.App.ViewModels;
 using NLink.App.Views;
+using NLink.Core.Logging;
 
 namespace NLink.App;
 
@@ -28,6 +29,7 @@ public partial class App : Application
             // More info: https://docs.avaloniaui.net/docs/guides/development-guides/data-validation#manage-validationplugins
             DisableAvaloniaDataAnnotationValidation();
             ConfigureAppServices();
+            LocalOperationalLog.LogAppStart();
             var mainWindowViewModel = new MainWindowViewModel(Services);
             desktop.MainWindow = new MainWindow
             {

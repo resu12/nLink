@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_gui_smoke:
+        description: Run optional Windows GUI smoke tests
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   smoke:
@@ -34,11 +41,34 @@ jobs:
         run: dotnet build nLink.sln -c Release --no-restore
 
       - name: Smoke tests
-        run: dotnet test -c Release --filter Category=Smoke --no-build --logger "trx;LogFileName=test-results.trx"
+        run: dotnet test -c Release --filter Category=Smoke --no-build --logger "trx;LogFileName=smoke-results.trx"
 
       - name: Upload smoke test results
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: smoke-test-results
-          path: '**/test-results.trx'
+          path: '**/smoke-results.trx'
+          if-no-files-found: ignore
+
+      - name: GUI smoke tests (optional)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_gui_smoke == true }}
+        env:
+          NLINK_RUN_GUI_SMOKE: '1'
+        run: dotnet test -c Release --filter Category=GuiSmoke --no-build --logger "trx;LogFileName=gui-smoke-results.trx"
+
+      - name: Upload GUI smoke test results
+        uses: actions/upload-artifact@v4
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_gui_smoke == true }}
+        with:
+          name: gui-smoke-test-results
+          path: '**/gui-smoke-results.trx'
+          if-no-files-found: ignore
+
+      - name: Upload GUI smoke artifacts
+        uses: actions/upload-artifact@v4
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_gui_smoke == true }}
+        with:
+          name: gui-smoke-artifacts
+          path: artifacts/gui-smoke/**
+          if-no-files-found: ignore

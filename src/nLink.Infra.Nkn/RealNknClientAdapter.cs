@@ -8,6 +8,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using NLink.Core;
+using NLink.Core.Logging;
 
 namespace NLink.Infra.Nkn;
 
@@ -232,6 +233,24 @@ internal sealed class RealNknClientAdapter : INknClient
         }
         finally
         {
+            if (processToClose is not null)
+            {
+                var pid = processToClose.Id;
+                var exitCodeText = "unknown";
+                try
+                {
+                    if (processToClose.HasExited)
+                    {
+                        exitCodeText = processToClose.ExitCode.ToString();
+                    }
+                }
+                catch
+                {
+                    exitCodeText = "unknown";
+                }
+
+                Log($"Bridge shutdown complete (pid={pid}, exit_code={exitCodeText})");
+            }
             CleanupProcessState();
         }
     }
@@ -382,7 +401,7 @@ internal sealed class RealNknClientAdapter : INknClient
         stderrReaderTask = Task.Run(() => ReadStderrLoopAsync(newProcess), CancellationToken.None);
         NknRuntimeDiagnostics.SetBridgeProcessInfo(newProcess.Id, nodeVersion: null);
 
-        Log($"Bridge process started (node={Path.GetFileName(nodePath)}, script={bridgePath})");
+        Log($"Bridge process started (pid={newProcess.Id}, node={Path.GetFileName(nodePath)}, script={bridgePath})");
         return Task.CompletedTask;
     }
 
@@ -797,6 +816,7 @@ internal sealed class RealNknClientAdapter : INknClient
         }
 
         var reason = p is null || exitCode is null ? "bridge_process_exited" : $"bridge_process_exited:{exitCode.Value}";
+        Log($"Bridge process exited (pid={(p?.Id.ToString() ?? "unknown")}, exit_code={(exitCode?.ToString() ?? "unknown")})");
         NknRuntimeDiagnostics.SetBridgeLastExit(exitCode, "process exited");
         _ = Task.Run(() => HandleUnexpectedProcessExitAsync(reason), CancellationToken.None);
     }
@@ -1335,6 +1355,7 @@ internal sealed class RealNknClientAdapter : INknClient
     private static void Log(string message)
     {
         Console.WriteLine($"[nLink][NKN][Bridge] {message}");
+        LocalOperationalLog.Info("NKN.Bridge", message);
     }
 
     private void RecordBridgeFailure(string errorCode, string? errorHint)

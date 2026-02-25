@@ -1,22 +1,35 @@
-﻿using Avalonia;
 using System;
+using System.Linq;
+using System.Threading;
+using Avalonia;
 
 namespace NLink.App;
 
 sealed class Program
 {
-    // Initialization code. Don't use any Avalonia, third-party APIs or any
-    // SynchronizationContext-reliant code before AppMain is called: things aren't initialized
-    // yet and stuff might break.
     [STAThread]
-    public static void Main(string[] args) => BuildAvaloniaApp()
-        .StartWithClassicDesktopLifetime(args);
+    public static void Main(string[] args)
+    {
+        if (HasSelfTestArgument(args))
+        {
+            var exitCode = BridgeSelfTestRunner.RunAsync(Console.Out, Console.Error, CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+            Environment.ExitCode = exitCode;
+            return;
+        }
 
-    // Avalonia configuration, don't remove; also used by visual designer.
+        BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+    }
+
+    internal static bool HasSelfTestArgument(string[] args)
+    {
+        return args.Any(a => string.Equals(a, "--self-test", StringComparison.OrdinalIgnoreCase));
+    }
+
     public static AppBuilder BuildAvaloniaApp()
         => AppBuilder.Configure<App>()
             .UsePlatformDetect()
             .WithInterFont()
             .LogToTrace();
 }
-

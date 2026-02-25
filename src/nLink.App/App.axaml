@@ -58,6 +58,27 @@
             <Setter Property="FontSize" Value="14"/>
         </Style>
 
+        <Style Selector="TextBlock.codeDigits">
+            <Setter Property="Foreground" Value="{StaticResource AppTextBrush}"/>
+            <Setter Property="FontFamily" Value="Cascadia Mono,Consolas,Monaco,monospace"/>
+            <Setter Property="FontSize" Value="40"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="LetterSpacing" Value="6"/>
+            <Setter Property="TextAlignment" Value="Center"/>
+        </Style>
+
+        <Style Selector="TextBox.codeDigitsInput">
+            <Setter Property="Foreground" Value="{StaticResource AppTextBrush}"/>
+            <Setter Property="CaretBrush" Value="{StaticResource AppTextBrush}"/>
+            <Setter Property="FontFamily" Value="Cascadia Mono,Consolas,Monaco,monospace"/>
+            <Setter Property="FontSize" Value="40"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="LetterSpacing" Value="6"/>
+            <Setter Property="TextAlignment" Value="Center"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+
         <Style Selector="Border.appCard">
             <Setter Property="Background" Value="{StaticResource AppSurfaceBrush}"/>
             <Setter Property="BorderBrush" Value="{StaticResource AppCardBorderBrush}"/>
@@ -89,6 +110,13 @@
             <Setter Property="Background" Value="{StaticResource AppAccentBrush}"/>
             <Setter Property="Foreground" Value="{StaticResource AppAccentTextOnBrush}"/>
             <Setter Property="BorderBrush" Value="{StaticResource AppAccentBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+
+        <Style Selector="Button.positiveButton">
+            <Setter Property="Background" Value="#F2C94C"/>
+            <Setter Property="Foreground" Value="#0B0F16"/>
+            <Setter Property="BorderBrush" Value="#EAB308"/>
             <Setter Property="BorderThickness" Value="1"/>
         </Style>
 

@@ -35,17 +35,17 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
 
     private void ShowHelpeePage()
     {
-        NavigateTo(new HelpeePageViewModel(ShowHomePage, transportConfig, sessionRuntime, clipboardService, shareMessageConfig));
+        NavigateTo(new HelpeePageViewModel(ShowHomePage, transportConfig, sessionRuntime, ShowDiagnosticsPage, clipboardService, shareMessageConfig));
     }
 
     private void ShowHelperPage()
     {
-        NavigateTo(new HelperPageViewModel(ShowHomePage, transportConfig, sessionRuntime, clipboardService, shareMessageConfig));
+        NavigateTo(new HelperPageViewModel(ShowHomePage, transportConfig, sessionRuntime, ShowDiagnosticsPage, clipboardService, shareMessageConfig));
     }
 
     private void ShowDiagnosticsPage()
     {
-        NavigateTo(new DiagnosticsPageViewModel(ShowHomePage, transportConfig));
+        NavigateTo(new DiagnosticsPageViewModel(ShowHomePage, transportConfig, shareMessageConfig));
     }
 
     private void ShowHomePage()

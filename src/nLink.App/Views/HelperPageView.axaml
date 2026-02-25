@@ -61,45 +61,67 @@
                       Margin="24">
             <StackPanel HorizontalAlignment="Center"
                         MaxWidth="720"
-                        Spacing="14">
+                        Spacing="16">
                 <TextBlock Classes="appTitle"
                            Text="{Binding PageTitle}"
+                           IsVisible="{Binding ShowPageHeader}"
                            HorizontalAlignment="Center"
                            TextAlignment="Center"/>
 
                 <Border Classes="appCard"
                         Padding="24">
-                    <StackPanel Spacing="14">
+                    <StackPanel Spacing="16">
+                        <StackPanel Spacing="8"
+                                    HorizontalAlignment="Center"
+                                    IsVisible="{Binding IsStartupBlocked}">
+                            <TextBlock Classes="appMuted"
+                                       Text="{Binding StatusText}"
+                                       FontSize="16"
+                                       TextAlignment="Center"
+                                       HorizontalAlignment="Center"
+                                       MaxWidth="560"
+                                       TextWrapping="Wrap"/>
+                            <Button Classes="linkButton linkAction"
+                                    Content="Open diagnostics"
+                                    Command="{Binding OpenDiagnosticsCommand}"
+                                    HorizontalAlignment="Center"/>
+                        </StackPanel>
+
                         <TextBlock Classes="appMuted"
                                    Text="{Binding HelperPageHelpText}"
                                    FontSize="16"
                                    TextAlignment="Center"
                                    HorizontalAlignment="Center"
-                                   MaxWidth="560"/>
+                                   MaxWidth="560"
+                                   IsVisible="{Binding ShowMainControls}"/>
 
-                        <TextBox Classes="appInput highContrastInput"
+                        <TextBox Classes="appInput highContrastInput codeDigitsInput"
+                                 AutomationProperties.AutomationId="Helper.CodeInput"
                                  Text="{Binding CodeInput, Mode=TwoWay}"
                                  Watermark="123 456"
                                  MaxLength="7"
                                  TabIndex="0"
-                                 Height="62"
-                                 FontSize="28"
-                                 FontWeight="Bold"
-                                 LetterSpacing="4"
+                                 Height="74"
                                  HorizontalAlignment="Stretch"
-                                 HorizontalContentAlignment="Center"
-                                 VerticalContentAlignment="Center"
-                                 TextAlignment="Center"
+                                 IsVisible="{Binding ShowMainControls}"
                                  />
 
                         <Button Classes="appButton primaryButton action primaryAction"
+                                AutomationProperties.AutomationId="Helper.Connect"
                                 Content="Connect"
                                 TabIndex="1"
-                                Command="{Binding ConnectCommand}"/>
+                                Command="{Binding ConnectCommand}"
+                                IsVisible="{Binding ShowConnectAction}"/>
+
+                        <Button Classes="appButton secondaryButton action secondaryAction"
+                                Content="Retry"
+                                Command="{Binding RetryCommand}"
+                                IsVisible="{Binding ShowRetryAction}"/>
 
                         <StackPanel Orientation="Horizontal"
-                                    Spacing="14"
-                                    HorizontalAlignment="Center">
+                                    Spacing="12"
+                                    HorizontalAlignment="Center"
+                                    IsVisible="{Binding ShowMainControls}">
                             <Button Classes="linkButton linkAction"
                                     Content="They don't have nLink?"
                                     TabIndex="2"
@@ -116,27 +138,37 @@
                                    FontSize="14"
                                    TextAlignment="Center"
                                    HorizontalAlignment="Center"
-                                   IsVisible="{Binding ShowCopyFeedback}"/>
+                                   IsVisible="{Binding ShowCopyFeedbackInline}"/>
 
                         <TextBlock Classes="appMuted"
+                                   AutomationProperties.AutomationId="Helper.Status"
                                    Text="{Binding StatusText}"
                                    FontSize="16"
                                    TextAlignment="Center"
                                    HorizontalAlignment="Center"
-                                   IsVisible="{Binding ShowStatusText}"/>
+                                   IsVisible="{Binding ShowInlineStatusText}"/>
 
-                        <Border HorizontalAlignment="Center"
-                                MinWidth="560"
-                                MaxWidth="720"
-                                IsVisible="{Binding ShowChatPanel}">
-                            <views:ChatView HorizontalAlignment="Stretch"/>
-                        </Border>
+                        <StackPanel Spacing="16"
+                                    IsVisible="{Binding ShowConnectedPanel}">
+                            <Border HorizontalAlignment="Center"
+                                    MinWidth="560"
+                                    MaxWidth="720">
+                                <views:ChatView HorizontalAlignment="Stretch"/>
+                            </Border>
+                        </StackPanel>
+
+                        <Button Classes="linkButton linkAction"
+                                Content="Open diagnostics"
+                                Command="{Binding OpenDiagnosticsCommand}"
+                                HorizontalAlignment="Center"
+                                IsVisible="{Binding ShowOpenDiagnosticsLink}"/>
                     </StackPanel>
                 </Border>
 
                 <Button Classes="appButton secondaryButton backAction"
                         Content="Back"
-                        Command="{Binding CancelCommand}"/>
+                        Command="{Binding CancelCommand}"
+                        IsVisible="{Binding ShowBackButton}"/>
             </StackPanel>
         </ScrollViewer>
     </Grid>

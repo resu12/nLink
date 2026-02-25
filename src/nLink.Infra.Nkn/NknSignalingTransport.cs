@@ -179,6 +179,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
             catch (TimeoutException)
             {
                 NknRuntimeDiagnostics.SetLastError("Could not find session for code");
+                SessionTimeline.Record("DiscoveryTimeout");
                 SessionReliabilityLog.RecordStandalone(
                     "Helper",
                     "NKN",
@@ -193,6 +194,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
             remoteEndpoint = announcement.Endpoint;
             lastPeerAddress = announcement.Endpoint;
+            SessionTimeline.Record("DiscoveryFound");
             Log($"JoinAsync presence found (endpoint_len={announcement.Endpoint.Length}, identifier_len={announcement.Identifier.Length})");
 
             await BestEffortUnsubscribeCurrentTopicAsync();
@@ -214,6 +216,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
             helperJoinRequestMessageId = joinEnvelope.MessageId;
             await SendEnvelopeWithAckRetryAsync(remoteEndpoint, joinEnvelope, ct);
+            SessionTimeline.Record("JoinRequestSent");
             SessionReliabilityLog.RecordStandalone("Helper", "NKN", SessionReliabilityStage.DiscoveryFoundHost);
             SessionReliabilityLog.RecordStandalone("Helper", "NKN", SessionReliabilityStage.JoinRequestSent);
             Log($"JoinAsync sent JoinRequest with Ack (code={code.Digits}, msg_id={joinEnvelope.MessageId})");
@@ -288,6 +291,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
         });
 
         var envelope = CreateEnvelope(currentCode.Value.Digits, MsgType.SessionEnd, payload, replyTo: null);
+        SessionTimeline.Record("SessionEndSent");
         await SendEnvelopeAsync(remoteEndpoint, envelope, ct);
         Log($"SendSessionEndAsync sent SessionEnd (msg_id={envelope.MessageId})");
     }
@@ -450,6 +454,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
             return;
         }
         NknRuntimeDiagnostics.IncrementJoinRequestsReceived();
+        SessionTimeline.Record("IncomingJoinRequest");
 
         byte[] helperPubKey;
         try
@@ -614,6 +619,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
     private void HandleSessionEnd(string source, Envelope env)
     {
+        SessionTimeline.Record("SessionEndReceived");
         if (!string.IsNullOrWhiteSpace(source))
         {
             SendAckFireAndForget(source, env.Code, env.MessageId);

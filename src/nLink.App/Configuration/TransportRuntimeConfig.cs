@@ -76,16 +76,14 @@ public sealed class TransportRuntimeConfig
             : "Works across devices when both apps are open.";
 
     public string HelpeeDisconnectedText =>
-        "Connection was lost. Waiting for another try.";
+        "Connection lost.";
 
     public string HelperDisconnectedText =>
-        IsDevLocal
-            ? "Could not connect yet. Please try again."
-            : "Could not connect yet. Please try again.";
+        "Connection lost.";
 
-    public string ApprovedStatusText => "Connected.";
+    public string ApprovedStatusText => "Connected";
 
-    public string AllowStatusText => "Connected.";
+    public string AllowStatusText => "Connected";
 
     public static TransportRuntimeConfig Select()
     {
