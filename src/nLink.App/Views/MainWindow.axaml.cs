@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using NLink.App.ViewModels;
@@ -16,6 +17,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         DataContextChanged += OnDataContextChanged;
+        KeyDown += OnMainWindowKeyDown;
         TryLoadNarwhalPeekImage();
     }
 
@@ -66,5 +68,27 @@ public partial class MainWindow : Window
     {
         var showOnHomePage = DataContext is MainWindowViewModel vm && vm.CurrentPage is HomePageViewModel;
         NarwhalPeekImage.IsVisible = narwhalImageLoaded && showOnHomePage;
+    }
+
+    private void OnMainWindowKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.D)
+        {
+            return;
+        }
+
+        var modifiers = e.KeyModifiers;
+        var hasCtrl = modifiers.HasFlag(KeyModifiers.Control);
+        var hasShift = modifiers.HasFlag(KeyModifiers.Shift);
+        if (!hasCtrl || !hasShift)
+        {
+            return;
+        }
+
+        if (DataContext is MainWindowViewModel vm)
+        {
+            vm.ToggleDebugPanel();
+            e.Handled = true;
+        }
     }
 }

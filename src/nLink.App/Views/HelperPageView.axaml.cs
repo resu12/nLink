@@ -6,12 +6,14 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using NLink.App.Services;
 using NLink.App.ViewModels;
+using NLink.Core;
 
 namespace NLink.App.Views;
 
 public partial class HelperPageView : UserControl
 {
     private HelperPageViewModel? currentViewModel;
+    private bool normalizingHelperCodeInput;
 
     public HelperPageView()
     {
@@ -100,6 +102,41 @@ public partial class HelperPageView : UserControl
         e.Handled = true;
     }
 
+    private void HelperCodeInput_TextChanged(object? sender, TextChangedEventArgs e)
+    {
+        if (normalizingHelperCodeInput || sender is not TextBox textBox)
+        {
+            return;
+        }
+
+        var incoming = textBox.Text ?? string.Empty;
+        var caret = textBox.CaretIndex;
+        var digitsBeforeCaret = CountDigitsBeforeIndex(incoming, caret);
+
+        var digits = SessionCode.NormalizeDigits(incoming);
+        if (digits.Length > 6)
+        {
+            digits = digits[..6];
+        }
+
+        var formatted = SessionCode.FormatPartial(digits);
+        if (string.Equals(incoming, formatted, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        normalizingHelperCodeInput = true;
+        try
+        {
+            textBox.Text = formatted;
+            textBox.CaretIndex = MapCaretIndexFromDigitCount(formatted, digitsBeforeCaret);
+        }
+        finally
+        {
+            normalizingHelperCodeInput = false;
+        }
+    }
+
     private void ShowSendFileWindow()
     {
         var window = new SendFileWindow();
@@ -129,6 +166,46 @@ public partial class HelperPageView : UserControl
         {
             service.SetTopLevel(topLevel);
         }
+    }
+
+    private static int CountDigitsBeforeIndex(string text, int caretIndex)
+    {
+        var limit = Math.Clamp(caretIndex, 0, text.Length);
+        var count = 0;
+        for (var i = 0; i < limit; i++)
+        {
+            if (char.IsDigit(text[i]))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private static int MapCaretIndexFromDigitCount(string formattedText, int digitCount)
+    {
+        if (digitCount <= 0)
+        {
+            return 0;
+        }
+
+        var seenDigits = 0;
+        for (var i = 0; i < formattedText.Length; i++)
+        {
+            if (!char.IsDigit(formattedText[i]))
+            {
+                continue;
+            }
+
+            seenDigits++;
+            if (seenDigits >= digitCount)
+            {
+                return i + 1;
+            }
+        }
+
+        return formattedText.Length;
     }
 }
 

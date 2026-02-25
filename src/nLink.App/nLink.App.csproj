@@ -41,5 +41,11 @@
     <ProjectReference Include="..\nLink.Infra.DevLocal\nLink.Infra.DevLocal.csproj" />
     <ProjectReference Include="..\nLink.Infra.Nkn\nLink.Infra.Nkn.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>nLink.SmokeTests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
 </Project>
 

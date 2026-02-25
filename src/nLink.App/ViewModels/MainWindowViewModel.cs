@@ -2,6 +2,7 @@ using System;
 using NLink.App.Configuration;
 using NLink.App.Services;
 using NLink.Core;
+using NLink.Core.Metrics;
 
 namespace NLink.App.ViewModels;
 
@@ -12,6 +13,8 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
     private readonly ShareMessageConfig shareMessageConfig;
     private readonly IClipboardService clipboardService;
     private readonly SessionRuntime sessionRuntime;
+    private readonly MetricsRegistry metricsRegistry;
+    private readonly DebugMetricsPanelViewModel debugPanel;
     private readonly HomePageViewModel homePage;
     private ViewModelBase currentPage;
     private bool disposed;
@@ -22,7 +25,14 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
         transportConfig = TransportRuntimeConfig.Select();
         shareMessageConfig = this.services.GetRequired<ShareMessageConfig>();
         clipboardService = this.services.GetRequired<IClipboardService>();
-        sessionRuntime = new SessionRuntime(transportConfig.CreateTransport);
+        metricsRegistry = this.services.GetRequired<MetricsRegistry>();
+        sessionRuntime = new SessionRuntime(
+            transportConfig.CreateTransport,
+            watchdogOptions: null,
+            watchdogDelayAsync: null,
+            telemetrySink: new MetricsTelemetrySink(metricsRegistry),
+            bridgeReusePolicy: transportConfig.BridgeReusePolicy);
+        debugPanel = new DebugMetricsPanelViewModel(sessionRuntime, metricsRegistry);
         homePage = new HomePageViewModel(ShowHelpeePage, ShowHelperPage, ShowDiagnosticsPage, transportConfig);
         currentPage = homePage;
     }
@@ -31,6 +41,13 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
     {
         get => currentPage;
         private set => SetProperty(ref currentPage, value);
+    }
+
+    public DebugMetricsPanelViewModel DebugPanel => debugPanel;
+
+    public void ToggleDebugPanel()
+    {
+        debugPanel.ToggleVisible();
     }
 
     private void ShowHelpeePage()
@@ -45,7 +62,7 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
 
     private void ShowDiagnosticsPage()
     {
-        NavigateTo(new DiagnosticsPageViewModel(ShowHomePage, transportConfig, shareMessageConfig));
+        NavigateTo(new DiagnosticsPageViewModel(ShowHomePage, transportConfig, shareMessageConfig, sessionRuntime, metricsRegistry));
     }
 
     private void ShowHomePage()
@@ -82,6 +99,7 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
             disposablePage.Dispose();
         }
 
+        debugPanel.Dispose();
         sessionRuntime.Dispose();
     }
 }

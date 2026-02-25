@@ -376,7 +376,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (outcome == HelperConnectOutcome.PendingTimeout)
             {
                 LogReliability(SessionReliabilityStage.Disconnected, "approval_timeout", "No response yet.");
-                await sessionRuntime.FailAsync(UserErrorMapper.HelperApprovalTimeout());
+                var failure = TransportFailureMapper.CreateTimeout("approval_timeout");
+                await sessionRuntime.FailAsync(failure, UserErrorMapper.HelperApprovalTimeout());
                 OnPropertyChanged(nameof(ShowChatConnectionHint));
             }
         }
@@ -387,18 +388,22 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         catch (TimeoutException ex)
         {
             LogReliability(SessionReliabilityStage.DiscoveryTimeout, "timeout", "No one found with that code.");
-            await sessionRuntime.FailAsync(UserErrorMapper.FromHelperTimeoutException(ex));
+            var snapshot = NknRuntimeDiagnostics.Snapshot();
+            var failure = TransportFailureMapper.FromException(ex, snapshot.LastError, snapshot.LastDisconnectReason);
+            await sessionRuntime.FailAsync(failure, UserErrorMapper.FromHelperTimeoutException(ex));
             MarkFailedAttemptNow();
             OnPropertyChanged(nameof(ShowChatConnectionHint));
         }
-        catch (Exception)
+        catch (Exception ex)
         {
             var (errorCode, errorHint) = GetReliabilityError();
             LogReliability(SessionReliabilityStage.Disconnected, errorCode, errorHint);
-            var uiMessage = UserErrorMapper.IsNknStartFailure(NknRuntimeDiagnostics.Snapshot().LastError)
+            var snapshot = NknRuntimeDiagnostics.Snapshot();
+            var uiMessage = UserErrorMapper.IsNknStartFailure(snapshot.LastError)
                 ? UserErrorMapper.NknStartFailedReinstall()
                 : UserErrorMapper.HelperGenericConnectFailure();
-            await sessionRuntime.FailAsync(uiMessage);
+            var failure = TransportFailureMapper.FromException(ex, snapshot.LastError, snapshot.LastDisconnectReason);
+            await sessionRuntime.FailAsync(failure, uiMessage);
             MarkFailedAttemptNow();
             OnPropertyChanged(nameof(ShowChatConnectionHint));
         }

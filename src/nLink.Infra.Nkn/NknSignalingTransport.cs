@@ -82,7 +82,24 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
     public event EventHandler? RemoteSessionEnded;
 
+    internal event EventHandler<BridgeLifecycleEvent>? BridgeLifecycle;
+
     public bool CanSendSessionEnd => !disposed && currentCode is not null && !string.IsNullOrWhiteSpace(remoteEndpoint);
+
+    internal async Task PrepareForReuseAsync()
+    {
+        ThrowIfDisposed();
+
+        await StopPresenceLoopAsync();
+        await BestEffortUnsubscribeCurrentTopicAsync();
+        CancelPendingAcks();
+        ResetSessionTracking();
+        seenMessageIds.Clear();
+        currentCode = null;
+        lastPeerAddress = null;
+
+        Log("Prepared for reuse");
+    }
 
     public void Dispose()
     {
@@ -96,6 +113,10 @@ public sealed class NknSignalingTransport : ISignalingTransport
         // Avoid treating normal cleanup as a disconnection.
         client.MessageReceived -= OnClientMessageReceived;
         client.Disconnected -= OnClientDisconnected;
+        if (client is RealNknClientAdapter realClient)
+        {
+            realClient.BridgeLifecycle -= OnBridgeLifecycle;
+        }
 
         CleanupAsync().GetAwaiter().GetResult();
         DisposeEphemeralKeyState();
@@ -300,6 +321,15 @@ public sealed class NknSignalingTransport : ISignalingTransport
     {
         client.MessageReceived += OnClientMessageReceived;
         client.Disconnected += OnClientDisconnected;
+        if (client is RealNknClientAdapter realClient)
+        {
+            realClient.BridgeLifecycle += OnBridgeLifecycle;
+        }
+    }
+
+    private void OnBridgeLifecycle(object? sender, BridgeLifecycleEvent e)
+    {
+        BridgeLifecycle?.Invoke(this, e);
     }
 
     private void OnClientDisconnected(object? sender, EventArgs e)
@@ -899,6 +929,8 @@ public sealed class NknSignalingTransport : ISignalingTransport
     {
         await StopPresenceLoopAsync();
         await BestEffortUnsubscribeCurrentTopicAsync();
+        CancelPendingAcks();
+        ResetSessionTracking();
 
         try
         {
@@ -1000,6 +1032,17 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
         helperKeyToDispose?.Dispose();
         helpeeHostKeyToDispose?.Dispose();
+    }
+
+    private void CancelPendingAcks()
+    {
+        foreach (var pair in pendingAcks)
+        {
+            if (pendingAcks.TryRemove(pair.Key, out var pending))
+            {
+                pending.Completion.TrySetCanceled();
+            }
+        }
     }
 
     private void ReplaceHelpeeHostKeyPair(SessionEcdhKeyPair keyPair)

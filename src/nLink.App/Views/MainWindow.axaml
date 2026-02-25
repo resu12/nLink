@@ -3,6 +3,7 @@
         xmlns:vm="using:NLink.App.ViewModels"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:views="using:NLink.App.Views"
         mc:Ignorable="d"
         d:DesignWidth="1080"
         d:DesignHeight="760"
@@ -45,6 +46,63 @@
                         <RotateTransform Angle="180"/>
                     </Image.RenderTransform>
                 </Image>
+
+                <Border DataContext="{Binding DebugPanel}"
+                        IsVisible="{Binding IsVisible}"
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Top"
+                        Margin="16"
+                        Padding="12"
+                        MinWidth="320"
+                        MaxWidth="420"
+                        Background="#E0101624"
+                        BorderBrush="{StaticResource AppCardBorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="10"
+                        ZIndex="1000">
+                    <Grid RowDefinitions="Auto,Auto"
+                          RowSpacing="8">
+                        <TextBlock Text="Debug"
+                                   Classes="appMuted"
+                                   FontSize="13"/>
+
+                        <Grid Grid.Row="1"
+                              ColumnDefinitions="Auto,*"
+                              ColumnSpacing="12"
+                              RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                              RowSpacing="6">
+                            <TextBlock Text="State" Classes="appMuted" FontSize="13"/>
+                            <TextBlock Grid.Column="1" Text="{Binding CurrentTransportState}" Foreground="{StaticResource AppTextBrush}" FontSize="13"/>
+
+                            <TextBlock Grid.Row="1" Text="Last failure" Classes="appMuted" FontSize="13"/>
+                            <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding LastFailureCategory}" Foreground="{StaticResource AppTextBrush}" FontSize="13" TextWrapping="Wrap"/>
+
+                            <TextBlock Grid.Row="2" Text="Bridge start" Classes="appMuted" FontSize="13"/>
+                            <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding BridgeStartDuration}" Foreground="{StaticResource AppTextBrush}" FontSize="13"/>
+
+                            <TextBlock Grid.Row="3" Text="Connect" Classes="appMuted" FontSize="13"/>
+                            <TextBlock Grid.Row="3" Grid.Column="1" Text="{Binding ConnectDuration}" Foreground="{StaticResource AppTextBrush}" FontSize="13"/>
+
+                            <TextBlock Grid.Row="4" Text="Handshake" Classes="appMuted" FontSize="13"/>
+                            <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding HandshakeDuration}" Foreground="{StaticResource AppTextBrush}" FontSize="13"/>
+
+                            <TextBlock Grid.Row="5" Text="Attempts / fail" Classes="appMuted" FontSize="13"/>
+                            <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding AttemptsFailuresSummary}" Foreground="{StaticResource AppTextBrush}" FontSize="13"/>
+
+                            <TextBlock Grid.Row="6" Text="Success rate" Classes="appMuted" FontSize="13"/>
+                            <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding SuccessRateText}" Foreground="{StaticResource AppTextBrush}" FontSize="13"/>
+
+                            <TextBlock Grid.Row="7" Text="P95 c/h" Classes="appMuted" FontSize="13"/>
+                            <StackPanel Grid.Row="7"
+                                        Grid.Column="1"
+                                        Orientation="Horizontal"
+                                        Spacing="8">
+                                <TextBlock Text="{Binding ConnectP95Text}" Foreground="{StaticResource AppTextBrush}" FontSize="13"/>
+                                <TextBlock Text="{Binding HandshakeP95Text}" Foreground="{StaticResource AppMutedTextBrush}" FontSize="13"/>
+                            </StackPanel>
+                        </Grid>
+                    </Grid>
+                </Border>
             </Grid>
         </Border>
     </Grid>

@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using NLink.Core;
+using NLink.App.Services;
 using NLink.Infra.DevLocal;
 using NLink.Infra.Nkn;
 
@@ -23,6 +24,7 @@ public sealed class TransportRuntimeConfig
         string bridgeBundleProbeReason,
         string? startupWarningText,
         string? configurationErrorText,
+        BridgeReusePolicy bridgeReusePolicy,
         Func<ISignalingTransport> createTransport)
     {
         Key = key;
@@ -37,6 +39,7 @@ public sealed class TransportRuntimeConfig
         BridgeBundleProbeReason = bridgeBundleProbeReason;
         StartupWarningText = startupWarningText ?? string.Empty;
         ConfigurationErrorText = configurationErrorText ?? string.Empty;
+        BridgeReusePolicy = bridgeReusePolicy;
         CreateTransport = createTransport;
     }
 
@@ -67,6 +70,8 @@ public sealed class TransportRuntimeConfig
     public bool HasStartupWarning => !string.IsNullOrWhiteSpace(StartupWarningText);
 
     public bool HasConfigurationError => !string.IsNullOrWhiteSpace(ConfigurationErrorText);
+
+    public BridgeReusePolicy BridgeReusePolicy { get; }
 
     public Func<ISignalingTransport> CreateTransport { get; }
 
@@ -136,43 +141,103 @@ public sealed class TransportRuntimeConfig
         }
 
         var config = useNkn
-            ? new TransportRuntimeConfig(
-                key: "NKN",
-                displayName: "Internet connection",
-                buildMode: buildMode,
-                envVarValue: normalizedSetting,
-                selectionReason: hasExplicitSetting
-                    ? $"{buildMode} build with NLINK_TRANSPORT=NKN ({settingSource})"
-                    : $"{buildMode} build default to NKN ({settingSource})",
-                forcedByEnvironment: forcedByEnvironment,
-                autoSelected: autoSelected,
-                isDevLocal: false,
-                bridgeBundled: bridgeBundled,
-                bridgeBundleProbeReason: bridgeProbeReason,
-                startupWarningText: startupWarningText,
-                configurationErrorText: configurationErrorText,
-                createTransport: static () => new NknSignalingTransport())
-            : new TransportRuntimeConfig(
-                key: "DevLocal",
-                displayName: "Same PC test mode",
-                buildMode: buildMode,
-                envVarValue: normalizedSetting,
-                selectionReason: hasExplicitSetting
-                    ? $"{buildMode} build explicit/fallback ({settingSource})"
-                    : $"{buildMode} build default/fallback ({settingSource})",
-                forcedByEnvironment: forcedByEnvironment,
-                autoSelected: autoSelected,
-                isDevLocal: true,
-                bridgeBundled: bridgeBundled,
-                bridgeBundleProbeReason: bridgeProbeReason,
-                startupWarningText: startupWarningText,
-                configurationErrorText: configurationErrorText,
-                createTransport: static () => new DevLocalTransport());
+            ? CreateNknConfig(bridgeBundled, bridgeProbeReason, buildMode, normalizedSetting, hasExplicitSetting, settingSource, forcedByEnvironment, autoSelected, startupWarningText, configurationErrorText)
+            : CreateDevLocalConfig(bridgeBundled, bridgeProbeReason, buildMode, normalizedSetting, hasExplicitSetting, settingSource, forcedByEnvironment, autoSelected, startupWarningText, configurationErrorText);
 
         AppLog.Info(
-            $"Active transport selected: {config.Key} | build={config.BuildMode} | NLINK_TRANSPORT={config.EnvironmentVariableValue} | reason={config.SelectionReason}");
+            $"Active transport selected: {config.Key} | build={config.BuildMode} | NLINK_TRANSPORT={config.EnvironmentVariableValue} | reason={config.SelectionReason} | bridge_reuse_mode={config.BridgeReusePolicy.Mode}");
 
         return config;
+    }
+
+    private static TransportRuntimeConfig CreateNknConfig(
+        bool bridgeBundled,
+        string bridgeProbeReason,
+        string buildMode,
+        string normalizedSetting,
+        bool hasExplicitSetting,
+        string settingSource,
+        bool forcedByEnvironment,
+        bool autoSelected,
+        string? startupWarningText,
+        string? configurationErrorText)
+    {
+        var policy = ReadBridgeReusePolicy();
+        return new TransportRuntimeConfig(
+            key: "NKN",
+            displayName: "Internet connection",
+            buildMode: buildMode,
+            envVarValue: normalizedSetting,
+            selectionReason: hasExplicitSetting
+                ? $"{buildMode} build with NLINK_TRANSPORT=NKN ({settingSource})"
+                : $"{buildMode} build default to NKN ({settingSource})",
+            forcedByEnvironment: forcedByEnvironment,
+            autoSelected: autoSelected,
+            isDevLocal: false,
+            bridgeBundled: bridgeBundled,
+            bridgeBundleProbeReason: bridgeProbeReason,
+            startupWarningText: startupWarningText,
+            configurationErrorText: configurationErrorText,
+            bridgeReusePolicy: policy,
+            createTransport: static () => new NknSignalingTransport());
+    }
+
+    private static TransportRuntimeConfig CreateDevLocalConfig(
+        bool bridgeBundled,
+        string bridgeProbeReason,
+        string buildMode,
+        string normalizedSetting,
+        bool hasExplicitSetting,
+        string settingSource,
+        bool forcedByEnvironment,
+        bool autoSelected,
+        string? startupWarningText,
+        string? configurationErrorText)
+    {
+        return new TransportRuntimeConfig(
+            key: "DevLocal",
+            displayName: "Same PC test mode",
+            buildMode: buildMode,
+            envVarValue: normalizedSetting,
+            selectionReason: hasExplicitSetting
+                ? $"{buildMode} build explicit/fallback ({settingSource})"
+                : $"{buildMode} build default/fallback ({settingSource})",
+            forcedByEnvironment: forcedByEnvironment,
+            autoSelected: autoSelected,
+            isDevLocal: true,
+            bridgeBundled: bridgeBundled,
+            bridgeBundleProbeReason: bridgeProbeReason,
+            startupWarningText: startupWarningText,
+            configurationErrorText: configurationErrorText,
+            bridgeReusePolicy: BridgeReusePolicy.Default,
+            createTransport: static () => new DevLocalTransport());
+    }
+
+    private static BridgeReusePolicy ReadBridgeReusePolicy()
+    {
+        var modeValue =
+            Environment.GetEnvironmentVariable("NLINK_BRIDGE_REUSE_MODE")
+            ?? AppSettingsJson.TryGet("NLINK_BRIDGE_REUSE_MODE")
+            ?? AppSettingsJson.TryGet("nLink:bridgeReuseMode");
+
+        var timeoutValue =
+            Environment.GetEnvironmentVariable("NLINK_BRIDGE_KEEPALIVE_IDLE_TIMEOUT_SECONDS")
+            ?? AppSettingsJson.TryGet("NLINK_BRIDGE_KEEPALIVE_IDLE_TIMEOUT_SECONDS")
+            ?? AppSettingsJson.TryGet("nLink:bridgeKeepAliveIdleTimeoutSeconds");
+
+        var mode = string.Equals(modeValue, "KeepAlive", StringComparison.OrdinalIgnoreCase)
+            ? BridgeReuseMode.KeepAlive
+            : BridgeReuseMode.PerSession;
+
+        var timeoutSeconds = 60;
+        if (!string.IsNullOrWhiteSpace(timeoutValue) &&
+            int.TryParse(timeoutValue.Trim(), out var parsed) &&
+            parsed > 0)
+        {
+            timeoutSeconds = parsed;
+        }
+
+        return new BridgeReusePolicy(mode, TimeSpan.FromSeconds(timeoutSeconds));
     }
 
     public static bool IsBridgeBundledForCurrentRid(out string reason)

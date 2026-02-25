@@ -98,6 +98,7 @@
                         <TextBox Classes="appInput highContrastInput codeDigitsInput"
                                  AutomationProperties.AutomationId="Helper.CodeInput"
                                  Text="{Binding CodeInput, Mode=TwoWay}"
+                                 TextChanged="HelperCodeInput_TextChanged"
                                  Watermark="123 456"
                                  MaxLength="7"
                                  TabIndex="0"

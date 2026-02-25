@@ -17,6 +17,9 @@
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>nLink.SmokeTests</_Parameter1>
     </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>nLink</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 
 </Project>

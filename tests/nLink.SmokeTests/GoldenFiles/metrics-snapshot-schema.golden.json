@@ -1,0 +1,73 @@
+{
+  "Counters": [
+    {
+      "Name": "transport_connect_attempts_total",
+      "Tags": {
+        "Transport": "NKN",
+        "Scenario": "A",
+        "Result": "",
+        "FailureCategory": "",
+        "BridgeReuseMode": ""
+      },
+      "TagsKey": "NKN|A|||",
+      "Value": 2
+    },
+    {
+      "Name": "transport_connect_success_total",
+      "Tags": {
+        "Transport": "NKN",
+        "Scenario": "A",
+        "Result": "success",
+        "FailureCategory": "",
+        "BridgeReuseMode": ""
+      },
+      "TagsKey": "NKN|A|success||",
+      "Value": 1
+    }
+  ],
+  "Gauges": [
+    {
+      "Name": "bridge_pid",
+      "Tags": {
+        "Transport": "NKN",
+        "Scenario": "",
+        "Result": "",
+        "FailureCategory": "",
+        "BridgeReuseMode": ""
+      },
+      "TagsKey": "NKN||||",
+      "Value": 1234
+    }
+  ],
+  "Histograms": [
+    {
+      "Name": "transport_connect_duration_ms",
+      "Tags": {
+        "Transport": "NKN",
+        "Scenario": "A",
+        "Result": "success",
+        "FailureCategory": "",
+        "BridgeReuseMode": ""
+      },
+      "TagsKey": "NKN|A|success||",
+      "Count": 3,
+      "Sum": 38,
+      "Min": 4,
+      "Max": 25,
+      "Buckets": [
+        {
+          "UpperBound": 5,
+          "Count": 1
+        },
+        {
+          "UpperBound": 10,
+          "Count": 1
+        },
+        {
+          "UpperBound": "Infinity",
+          "Count": 1
+        }
+      ]
+    }
+  ]
+}

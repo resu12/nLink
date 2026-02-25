@@ -276,8 +276,16 @@ function Test-BridgeBundleHealth {
             throw "Bridge health check failed: empty pong response."
         }
         $pongJson = $pongLine | ConvertFrom-Json
-        if ($pongJson.event -ne "pong") {
-            throw "Bridge health check failed: expected pong, got $($pongJson.event)."
+        $pongKind = $null
+        if ($pongJson.PSObject.Properties.Name -contains 'event') {
+            $pongKind = [string]$pongJson.event
+        }
+        elseif ($pongJson.PSObject.Properties.Name -contains 'type') {
+            $pongKind = [string]$pongJson.type
+        }
+
+        if ($pongKind -ne "pong") {
+            throw "Bridge health check failed: expected pong, got $pongKind."
         }
 
         $proc.StandardInput.WriteLine('{"id":"3","cmd":"shutdown"}')

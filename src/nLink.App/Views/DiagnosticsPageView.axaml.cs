@@ -24,6 +24,7 @@ public partial class DiagnosticsPageView : UserControl
             subscribedViewModel.CopyReliabilityLogRequested -= OnCopyReliabilityLogRequested;
             subscribedViewModel.OpenLogsFolderRequested -= OnOpenLogsFolderRequested;
             subscribedViewModel.OpenBugReportRequested -= OnOpenBugReportRequested;
+            subscribedViewModel.OpenMetricsExportFolderRequested -= OnOpenMetricsExportFolderRequested;
             subscribedViewModel = null;
         }
 
@@ -36,6 +37,7 @@ public partial class DiagnosticsPageView : UserControl
         subscribedViewModel.CopyReliabilityLogRequested += OnCopyReliabilityLogRequested;
         subscribedViewModel.OpenLogsFolderRequested += OnOpenLogsFolderRequested;
         subscribedViewModel.OpenBugReportRequested += OnOpenBugReportRequested;
+        subscribedViewModel.OpenMetricsExportFolderRequested += OnOpenMetricsExportFolderRequested;
     }
 
     private async void OnCopyReliabilityLogRequested(object? sender, string text)
@@ -66,13 +68,7 @@ public partial class DiagnosticsPageView : UserControl
     {
         try
         {
-            var fullPath = System.IO.Path.GetFullPath(path);
-            System.IO.Directory.CreateDirectory(fullPath);
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = fullPath,
-                UseShellExecute = true,
-            });
+            OpenFolder(path);
         }
         catch
         {
@@ -99,6 +95,29 @@ public partial class DiagnosticsPageView : UserControl
         {
             // Best-effort helper action only.
         }
+    }
+
+    private void OnOpenMetricsExportFolderRequested(object? sender, string path)
+    {
+        try
+        {
+            OpenFolder(path);
+        }
+        catch
+        {
+            // Best-effort helper action only.
+        }
+    }
+
+    private static void OpenFolder(string path)
+    {
+        var fullPath = System.IO.Path.GetFullPath(path);
+        System.IO.Directory.CreateDirectory(fullPath);
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = fullPath,
+            UseShellExecute = true,
+        });
     }
 
     private void BindClipboardTopLevel()

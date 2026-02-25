@@ -507,7 +507,14 @@ async function handleUnsubscribe(command) {
 
   if (state.client && typeof state.client.unsubscribe === 'function') {
     const identifier = String(state.clientIdentifier || getClientIdentifier(state.client) || '').trim();
-    await callClientMethod('unsubscribe', [topic, identifier]);
+    try {
+      await callClientMethod('unsubscribe', [topic, identifier]);
+    } catch (error) {
+      if (!isBenignUnsubscribeError(error)) {
+        throw error;
+      }
+      // Treat known txpool duplicate subscription unsubscribe races as success.
+    }
   } else if (!state.client) {
     throw new Error('Not connected.');
   } else {
@@ -515,6 +522,13 @@ async function handleUnsubscribe(command) {
   }
 
   state.subscriptions.delete(topic);
+}
+
+function isBenignUnsubscribeError(error) {
+  const text = safeErrorMessage(error).toLowerCase();
+  return text.includes('duplicate subscription exist in block') ||
+    text.includes('subscription does not exist') ||
+    text.includes('no subscription');
 }
 
 async function handlePublish(command) {
@@ -560,13 +574,14 @@ async function handleHello(command) {
 
 async function handlePing(command) {
   emitJson({
-    event: 'pong',
-    id: command.id ?? null
+    type: 'pong',
+    id: command.id ?? null,
+    ts: Date.now()
   });
 }
 
 async function dispatchCommand(message) {
-  const cmd = String(message.cmd || message.command || '').trim();
+  const cmd = String(message.cmd || message.command || message.type || '').trim();
   if (!cmd) {
     throw new Error('Missing cmd.');
   }

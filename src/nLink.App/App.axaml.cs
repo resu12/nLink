@@ -9,6 +9,7 @@ using NLink.App.Services;
 using NLink.App.ViewModels;
 using NLink.App.Views;
 using NLink.Core.Logging;
+using NLink.Core.Metrics;
 
 namespace NLink.App;
 
@@ -53,6 +54,11 @@ public partial class App : Application
         if (!Services.TryGet<ShareMessageConfig>(out _))
         {
             Services.AddSingleton(ShareMessageConfig.Load());
+        }
+
+        if (!Services.TryGet<MetricsRegistry>(out _))
+        {
+            Services.AddSingleton(new MetricsRegistry());
         }
     }
 

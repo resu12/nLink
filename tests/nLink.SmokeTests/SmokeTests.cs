@@ -6,14 +6,17 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using NLink.App;
 using NLink.App.Configuration;
 using NLink.App.Services;
 using NLink.App.ViewModels;
 using NLink.Core;
 using NLink.Core.Chat;
 using NLink.Core.Logging;
+using NLink.Core.Metrics;
 using NLink.Infra.DevLocal;
 using NLink.Infra.Nkn;
 
@@ -91,6 +94,412 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task MetricsRegistry_IsThreadSafe_AndSnapshotIsConsistent()
+    {
+        var registry = new MetricsRegistry(new[] { 10d, 50d, 100d });
+        var counter = registry.Counter("connect_attempts", transport: "NKN", scenario: "A", result: "success");
+        var gauge = registry.Gauge("bridge_pid", transport: "NKN");
+        var histogram = registry.Histogram("connect_duration_ms", transport: "NKN", scenario: "A");
+
+        const int workers = 8;
+        const int iterations = 1_000;
+        var tasks = new List<Task>(workers);
+
+        for (var w = 0; w < workers; w++)
+        {
+            var workerIndex = w;
+            tasks.Add(Task.Run(() =>
+            {
+                for (var i = 0; i < iterations; i++)
+                {
+                    counter.Inc();
+                    histogram.Observe((workerIndex * iterations + i) % 120);
+                }
+
+                gauge.Set(workerIndex);
+            }));
+        }
+
+        await Task.WhenAll(tasks);
+
+        var snapshot = registry.Snapshot();
+
+        var counterSnap = Assert.Single(snapshot.Counters.Where(c => c.Name == "connect_attempts"));
+        Assert.Equal(workers * iterations, counterSnap.Value);
+        Assert.Equal("NKN", counterSnap.Tags.Transport);
+        Assert.Equal("A", counterSnap.Tags.Scenario);
+        Assert.Equal("success", counterSnap.Tags.Result);
+
+        var gaugeSnap = Assert.Single(snapshot.Gauges.Where(g => g.Name == "bridge_pid"));
+        Assert.True(gaugeSnap.Value >= 0);
+        Assert.True(gaugeSnap.Value <= workers - 1);
+
+        var histogramSnap = Assert.Single(snapshot.Histograms.Where(h => h.Name == "connect_duration_ms"));
+        Assert.Equal(workers * iterations, histogramSnap.Count);
+        Assert.True(histogramSnap.Sum >= 0);
+        Assert.True(histogramSnap.Min >= 0);
+        Assert.True(histogramSnap.Max <= 119);
+        Assert.Equal(histogramSnap.Count, histogramSnap.Buckets.Sum(b => b.Count));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void MetricsRegistry_JsonExport_MatchesSnapshot_AndIncludesLabels()
+    {
+        var registry = new MetricsRegistry(new[] { 5d, 10d });
+        registry.Counter("transport_failed", transport: "NKN", result: "failed", failureCategory: "HandshakeTimeout").Inc(2);
+        registry.Gauge("active_sessions", transport: "DEVLOCAL").Set(1);
+        registry.Histogram("handshake_duration_ms", transport: "NKN", scenario: "B").Observe(7);
+        registry.Histogram("handshake_duration_ms", transport: "NKN", scenario: "B").Observe(12);
+
+        var snapshot = registry.Snapshot();
+        var json = registry.ExportJson(indented: false);
+
+        Assert.Contains("\"Counters\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"Histograms\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"transport_failed\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"HandshakeTimeout\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"NKN\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"B\"", json, StringComparison.Ordinal);
+
+        var counterSnap = Assert.Single(snapshot.Counters.Where(c => c.Name == "transport_failed"));
+        Assert.Equal(2, counterSnap.Value);
+
+        var histSnap = Assert.Single(snapshot.Histograms.Where(h => h.Name == "handshake_duration_ms"));
+        Assert.Equal(2, histSnap.Count);
+        Assert.Equal(19, histSnap.Sum, precision: 6);
+        Assert.Equal(7, histSnap.Min, precision: 6);
+        Assert.Equal(12, histSnap.Max, precision: 6);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void MetricsRegistry_JsonExport_MatchesGoldenSchema()
+    {
+        var registry = new MetricsRegistry(new[] { 5d, 10d });
+        registry.Counter("transport_connect_attempts_total", transport: "NKN", scenario: "A").Inc(2);
+        registry.Counter("transport_connect_success_total", transport: "NKN", scenario: "A", result: "success").Inc(1);
+        registry.Gauge("bridge_pid", transport: "NKN").Set(1234);
+        registry.Histogram("transport_connect_duration_ms", new[] { 5d, 10d }, transport: "NKN", scenario: "A", result: "success").Observe(4);
+        registry.Histogram("transport_connect_duration_ms", new[] { 5d, 10d }, transport: "NKN", scenario: "A", result: "success").Observe(9);
+        registry.Histogram("transport_connect_duration_ms", new[] { 5d, 10d }, transport: "NKN", scenario: "A", result: "success").Observe(25);
+
+        var actual = registry.ExportJson(indented: true).Replace("\r\n", "\n");
+        var goldenPath = FindFileUpwards(Path.Combine("tests", "nLink.SmokeTests", "GoldenFiles", "metrics-snapshot-schema.golden.json"));
+        Assert.True(goldenPath is not null, "Golden file not found for metrics snapshot schema.");
+        var expected = File.ReadAllText(goldenPath!).Replace("\r\n", "\n");
+
+        Assert.Equal(NormalizeJson(expected), NormalizeJson(actual));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void MetricsTelemetrySink_SuccessfulConnect_RecordsAttemptsSuccess_AndDurations()
+    {
+        var registry = new MetricsRegistry();
+        var sink = new MetricsTelemetrySink(registry);
+
+        using var runtime = new SessionRuntime(
+            () => new ScriptedSignalingTransport(),
+            SessionRuntimeWatchdogOptions.Default with { Enabled = false },
+            telemetrySink: sink);
+
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.TransportInitializing, "start_helper"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.BridgeStarting, "nkn_bridge_starting"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.BridgeReady, "nkn_bridge_ready_assumed"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.Connecting, "join_start"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.Handshake, "join_request_sent"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.Connected, "transport_approved"));
+
+        var snapshot = registry.Snapshot();
+
+        var connectAttempts = Assert.Single(snapshot.Counters.Where(c => c.Name == "transport_connect_attempts_total"));
+        Assert.Equal(1, connectAttempts.Value);
+
+        var connectSuccess = Assert.Single(snapshot.Counters.Where(c => c.Name == "transport_connect_success_total"));
+        Assert.Equal(1, connectSuccess.Value);
+
+        Assert.Empty(snapshot.Counters.Where(c => c.Name == "transport_connect_failure_total"));
+
+        var bridgeStarts = Assert.Single(snapshot.Counters.Where(c => c.Name == "bridge_start_total"));
+        Assert.Equal(1, bridgeStarts.Value);
+
+        var connectDuration = Assert.Single(snapshot.Histograms.Where(h => h.Name == "transport_connect_duration_ms"));
+        Assert.Equal(1, connectDuration.Count);
+        Assert.True(connectDuration.Sum >= 0);
+
+        var handshakeDuration = Assert.Single(snapshot.Histograms.Where(h => h.Name == "transport_handshake_duration_ms"));
+        Assert.Equal(1, handshakeDuration.Count);
+        Assert.True(handshakeDuration.Sum >= 0);
+
+        var bridgeDuration = Assert.Single(snapshot.Histograms.Where(h => h.Name == "bridge_start_duration_ms"));
+        Assert.Equal(1, bridgeDuration.Count);
+        Assert.True(bridgeDuration.Sum >= 0);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void MetricsTelemetrySink_ScenarioLabel_IsAbsent_WhenNotSet()
+    {
+        var registry = new MetricsRegistry();
+        var sink = new MetricsTelemetrySink(registry);
+
+        sink.OnStateChanged(new TransportStateChangedTelemetryEvent(
+            From: TransportState.Idle,
+            To: TransportState.TransportInitializing,
+            Reason: "start_helper",
+            RunId: "run123",
+            Scenario: "",
+            BridgeReuseMode: "PerSession",
+            Attempt: 1,
+            Transport: "NKN",
+            SessionId: "sess123"));
+
+        var snapshot = registry.Snapshot();
+        var counter = Assert.Single(snapshot.Counters.Where(c => c.Name == "transport_connect_attempts_total"));
+        Assert.Equal(string.Empty, counter.Tags.Scenario);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void MetricsTelemetrySink_ScenarioLabel_IsPresent_WhenSet()
+    {
+        var registry = new MetricsRegistry();
+        var sink = new MetricsTelemetrySink(registry);
+
+        sink.OnStateChanged(new TransportStateChangedTelemetryEvent(
+            From: TransportState.Idle,
+            To: TransportState.TransportInitializing,
+            Reason: "start_helper",
+            RunId: "run123",
+            Scenario: "A",
+            BridgeReuseMode: "PerSession",
+            Attempt: 1,
+            Transport: "NKN",
+            SessionId: "sess123"));
+
+        sink.OnTimingCompleted(new TransportTimingCompletedTelemetryEvent(
+            EventName: "connect_completed",
+            MetricName: "connect_duration_ms",
+            DurationMs: 12.5,
+            Failed: false,
+            Reason: "transport_approved",
+            RunId: "run123",
+            Scenario: "A",
+            BridgeReuseMode: "PerSession",
+            Attempt: 1,
+            Transport: "NKN",
+            SessionId: "sess123"));
+
+        var snapshot = registry.Snapshot();
+        Assert.Contains(snapshot.Counters, c => c.Name == "transport_connect_attempts_total" && c.Tags.Scenario == "A");
+        Assert.Contains(snapshot.Counters, c => c.Name == "transport_connect_success_total" && c.Tags.Scenario == "A");
+        Assert.Contains(snapshot.Histograms, h => h.Name == "transport_connect_duration_ms" && h.Tags.Scenario == "A");
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void MetricsTelemetrySink_BridgeLifecycle_MapsToMetrics()
+    {
+        var registry = new MetricsRegistry();
+        var sink = new MetricsTelemetrySink(registry);
+
+        sink.OnBridgeLifecycle(new BridgeLifecycleTelemetryEvent(
+            EventName: "bridge_spawned",
+            StartMode: "cold",
+            Pid: 4242,
+            ReadyTimeMs: null,
+            PingRttMs: null,
+            UptimeMs: null,
+            ExitCode: null,
+            ExitReason: string.Empty,
+            RunId: "run1",
+            Scenario: "A",
+            BridgeReuseMode: "PerSession",
+            Attempt: 1,
+            Transport: "NKN",
+            SessionId: "sess1"));
+
+        sink.OnBridgeLifecycle(new BridgeLifecycleTelemetryEvent(
+            EventName: "bridge_ready",
+            StartMode: "cold",
+            Pid: 4242,
+            ReadyTimeMs: 123,
+            PingRttMs: 9,
+            UptimeMs: 123,
+            ExitCode: null,
+            ExitReason: string.Empty,
+            RunId: "run1",
+            Scenario: "A",
+            BridgeReuseMode: "PerSession",
+            Attempt: 1,
+            Transport: "NKN",
+            SessionId: "sess1"));
+
+        sink.OnBridgeLifecycle(new BridgeLifecycleTelemetryEvent(
+            EventName: "bridge_exited",
+            StartMode: string.Empty,
+            Pid: 4242,
+            ReadyTimeMs: null,
+            PingRttMs: null,
+            UptimeMs: 2500,
+            ExitCode: 1,
+            ExitReason: "crash",
+            RunId: "run1",
+            Scenario: "A",
+            BridgeReuseMode: "PerSession",
+            Attempt: 1,
+            Transport: "NKN",
+            SessionId: "sess1"));
+
+        sink.OnBridgeLifecycle(new BridgeLifecycleTelemetryEvent(
+            EventName: "bridge_spawned",
+            StartMode: "warm",
+            Pid: 4243,
+            ReadyTimeMs: null,
+            PingRttMs: null,
+            UptimeMs: null,
+            ExitCode: null,
+            ExitReason: string.Empty,
+            RunId: "run1",
+            Scenario: "A",
+            BridgeReuseMode: "KeepAlive",
+            Attempt: 2,
+            Transport: "NKN",
+            SessionId: "sess2"));
+
+        var snapshot = registry.Snapshot();
+
+        Assert.Contains(snapshot.Counters, c => c.Name == "bridge_spawn_total" && c.Tags.Result == "cold" && c.Value == 1);
+        Assert.Contains(snapshot.Counters, c => c.Name == "bridge_exit_total" && c.Tags.Result == "crash" && c.Value == 1);
+        Assert.Contains(snapshot.Counters, c => c.Name == "bridge_crash_total" && c.Value == 1);
+
+        Assert.Contains(snapshot.Gauges, g => g.Name == "bridge_pid" && Math.Abs(g.Value - 4242) < 0.001);
+        Assert.Contains(snapshot.Gauges, g => g.Name == "bridge_process_running" && Math.Abs(g.Value) < 0.001);
+        Assert.Contains(snapshot.Gauges, g => g.Name == "bridge_exit_code" && Math.Abs(g.Value - 1) < 0.001);
+
+        Assert.Contains(snapshot.Histograms, h => h.Name == "bridge_ready_time_ms" && h.Count == 1);
+        Assert.Contains(snapshot.Histograms, h => h.Name == "bridge_ping_rtt_ms" && h.Count == 1);
+        Assert.Contains(snapshot.Histograms, h => h.Name == "bridge_uptime_ms" && h.Count == 1);
+        Assert.Contains(snapshot.Gauges, g => g.Name == "bridge_warm_start_ratio" && g.Tags.BridgeReuseMode == "KeepAlive" && g.Value > 0d);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void BridgeExitClassifier_UsesExpectedClassification_WithFakeProcessRunner()
+    {
+        var fakeRunner = new FakeBridgeProcessRunner();
+
+        var normal = BridgeExitClassifier.Classify(shuttingDown: true, forcedKill: fakeRunner.WasForcedKillRequested, exitCode: 0);
+        Assert.Equal(BridgeExitReasonKind.Normal, normal.ReasonKind);
+        Assert.Equal("normal", normal.ReasonText);
+
+        var crash = BridgeExitClassifier.Classify(shuttingDown: false, forcedKill: fakeRunner.WasForcedKillRequested, exitCode: 1);
+        Assert.Equal(BridgeExitReasonKind.Crash, crash.ReasonKind);
+        Assert.Equal("crash", crash.ReasonText);
+
+        fakeRunner.WasForcedKillRequested = true;
+        var killed = BridgeExitClassifier.Classify(shuttingDown: true, forcedKill: fakeRunner.WasForcedKillRequested, exitCode: null);
+        Assert.Equal(BridgeExitReasonKind.Killed, killed.ReasonKind);
+        Assert.Equal("killed", killed.ReasonText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void MetricsTelemetrySink_FailureInjection_RecordsClassifiedFailures_AndNoUnknown()
+    {
+        var registry = new MetricsRegistry();
+        var sink = new MetricsTelemetrySink(registry);
+
+        sink.OnFailure(new TransportFailureTelemetryEvent(
+            Category: TransportFailureCategory.BridgeCrashed,
+            IsTransient: false,
+            Message: "Bridge crashed",
+            ExceptionType: nameof(InvalidOperationException),
+            RunId: "run1",
+            Scenario: "A",
+            BridgeReuseMode: "PerSession",
+            Attempt: 1,
+            Transport: "NKN",
+            State: TransportState.Connected.ToString(),
+            DurationMs: 100,
+            SessionId: "sess1"));
+
+        sink.OnFailure(new TransportFailureTelemetryEvent(
+            Category: TransportFailureCategory.JsonProtocolError,
+            IsTransient: false,
+            Message: "Protocol parse error",
+            ExceptionType: "JsonException",
+            RunId: "run1",
+            Scenario: "A",
+            BridgeReuseMode: "PerSession",
+            Attempt: 1,
+            Transport: "NKN",
+            State: TransportState.Handshake.ToString(),
+            DurationMs: 50,
+            SessionId: "sess1"));
+
+        sink.OnFailure(new TransportFailureTelemetryEvent(
+            Category: TransportFailureCategory.HandshakeTimeout,
+            IsTransient: true,
+            Message: "Timed out",
+            ExceptionType: nameof(TimeoutException),
+            RunId: "run1",
+            Scenario: "A",
+            BridgeReuseMode: "PerSession",
+            Attempt: 2,
+            Transport: "NKN",
+            State: TransportState.Handshake.ToString(),
+            DurationMs: 5000,
+            SessionId: "sess2"));
+
+        var snapshot = registry.Snapshot();
+
+        Assert.Contains(snapshot.Counters, c => c.Name == "bridge_crash_total" && c.Value > 0);
+        Assert.Contains(snapshot.Counters, c => c.Name == "transport_failure_total" && c.Tags.FailureCategory == nameof(TransportFailureCategory.BridgeCrashed) && c.Value > 0);
+        Assert.Contains(snapshot.Counters, c => c.Name == "transport_failure_total" && c.Tags.FailureCategory == nameof(TransportFailureCategory.JsonProtocolError) && c.Value > 0);
+        Assert.Contains(snapshot.Counters, c => c.Name == "transport_failure_total" && c.Tags.FailureCategory == nameof(TransportFailureCategory.HandshakeTimeout) && c.Value > 0);
+        Assert.DoesNotContain(snapshot.Counters, c => c.Name == "transport_failure_total" && c.Tags.FailureCategory == nameof(TransportFailureCategory.Unknown) && c.Value > 0);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_KeepAliveBridge_IdleTimeout_DisposesCachedBridge_AndRecordsKilledMetric()
+    {
+        FakeNknClient.ResetNetwork();
+
+        var idleDelayTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var registry = new MetricsRegistry();
+        var sink = new MetricsTelemetrySink(registry);
+        var fakeClient = new FakeNknClient("keepalive.host.addr");
+        var transport = new NknSignalingTransport(
+            fakeClient,
+            LoadNknOptionsWithOverrides(
+                Path.Combine(Path.GetTempPath(), "nlink-test-keepalive-" + Guid.NewGuid().ToString("N") + ".json"),
+                "keepalive-host"),
+            new NknIdentity("keepalive-host", "keepalive.host.addr"));
+
+        using var runtime = new SessionRuntime(
+            () => transport,
+            SessionRuntimeWatchdogOptions.Default with { Enabled = false },
+            telemetrySink: sink,
+            bridgeReusePolicy: new BridgeReusePolicy(BridgeReuseMode.KeepAlive, TimeSpan.FromSeconds(1)),
+            bridgeIdleDelayAsync: (_, _) => idleDelayTcs.Task);
+
+        await runtime.StartHelpeeAsync(CreateTestCode(), CancellationToken.None);
+        await runtime.ResetAsync();
+
+        Assert.True(runtime.HasCachedBridgeTransportForTests());
+
+        idleDelayTcs.TrySetResult();
+        await WaitUntilAsync(() => !runtime.HasCachedBridgeTransportForTests(), TimeSpan.FromSeconds(2));
+
+        var snapshot = registry.Snapshot();
+        Assert.Contains(snapshot.Counters, c => c.Name == "bridge_exit_total" && c.Tags.Result == "killed" && c.Value >= 1);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void UserErrorMapper_KeyMessages_AreShortAndUserFriendly()
     {
         Assert.Equal("No one found with that code.", UserErrorMapper.HelperDiscoveryTimeout());
@@ -135,7 +544,306 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
-    public void Diagnostics_CopyExport_IncludesRuntimeBasics_AndNoPayloadOrChatHistory()
+    public void Program_Parses_Benchmark_Argument()
+    {
+        var programType = typeof(NLink.App.App).Assembly.GetType("NLink.App.Program");
+        Assert.NotNull(programType);
+
+        var method = programType!.GetMethod("HasBenchmarkArgument", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var hasBench = (bool)method!.Invoke(null, new object[] { new[] { "--bench" } })!;
+        var noBench = (bool)method.Invoke(null, new object[] { new[] { "--something-else" } })!;
+
+        Assert.True(hasBench);
+        Assert.False(noBench);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void BenchmarkRunner_Parses_Defaults_And_Overrides()
+    {
+        Assert.True(BenchmarkRunner.TryParseOptionsForTests(new[] { "--bench" }, out var defaults, out var defaultError));
+        Assert.NotNull(defaults);
+        Assert.Equal(string.Empty, defaultError);
+        Assert.Equal(50, defaults!.Cycles);
+        Assert.Equal(0, defaults.DelayMs);
+        Assert.Equal("devlocal", defaults.Transport);
+        Assert.Equal(BridgeReuseMode.PerSession, defaults.BridgeReuseMode);
+        Assert.False(defaults.MemoryCheck);
+        Assert.Equal(5d, defaults.MemoryTolerancePercent);
+
+        Assert.True(BenchmarkRunner.TryParseOptionsForTests(
+            new[] { "--bench", "--cycles", "3", "--delay-ms", "25", "--transport", "nkn", "--bridge-reuse-mode", "keepalive", "--memory-check", "--memory-tolerance-percent", "7.5" },
+            out var custom,
+            out var customError));
+        Assert.NotNull(custom);
+        Assert.Equal(string.Empty, customError);
+        Assert.Equal(3, custom!.Cycles);
+        Assert.Equal(25, custom.DelayMs);
+        Assert.Equal("nkn", custom.Transport);
+        Assert.Equal(BridgeReuseMode.KeepAlive, custom.BridgeReuseMode);
+        Assert.True(custom.MemoryCheck);
+        Assert.Equal(7.5d, custom.MemoryTolerancePercent);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_TransportStateMachine_AllowsExpectedTransitions_AndStoresMonotonicTimestamps()
+    {
+        Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.Idle, TransportState.TransportInitializing));
+        Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.TransportInitializing, TransportState.BridgeStarting));
+        Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.BridgeStarting, TransportState.BridgeReady));
+        Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.BridgeReady, TransportState.Connecting));
+        Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.Connecting, TransportState.Handshake));
+        Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.Handshake, TransportState.Connected));
+        Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.Connected, TransportState.Reconnecting));
+        Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.Reconnecting, TransportState.Idle));
+
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+        var idleTs = runtime.GetTransportStateEntryTimestamp(TransportState.Idle);
+        Assert.True(idleTs > 0);
+
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.TransportInitializing, "test"));
+        Assert.True(runtime.GetTransportStateEntryTimestamp(TransportState.TransportInitializing) >= idleTs);
+        Assert.Equal(TransportState.TransportInitializing, runtime.TransportLifecycleState);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_TransportStateMachine_BlocksInvalidTransitions()
+    {
+        Assert.False(SessionRuntime.IsTransportTransitionAllowed(TransportState.Idle, TransportState.Connected));
+        Assert.False(SessionRuntime.IsTransportTransitionAllowed(TransportState.Disposed, TransportState.Idle));
+        Assert.False(SessionRuntime.IsTransportTransitionAllowed(TransportState.BridgeReady, TransportState.BridgeStarting));
+
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+        var idleTs = runtime.GetTransportStateEntryTimestamp(TransportState.Idle);
+
+        var changed = runtime.TryTransitionTransportStateForTests(TransportState.Connected, "invalid_test");
+        Assert.False(changed);
+        Assert.Equal(TransportState.Idle, runtime.TransportLifecycleState);
+        Assert.Equal(idleTs, runtime.GetTransportStateEntryTimestamp(TransportState.Idle));
+        Assert.Equal(0, runtime.GetTransportStateEntryTimestamp(TransportState.Connected));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_TransportDurations_AreRecorded_OnSuccess_AndNonNegative()
+    {
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.TransportInitializing, "test_start"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.BridgeStarting, "bridge"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.BridgeReady, "bridge_ready"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.Connecting, "connect"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.Handshake, "hs"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.Connected, "done"));
+
+        var bridgeMs = runtime.GetLastDurationMetricMilliseconds("bridge_start_duration_ms");
+        var initMs = runtime.GetLastDurationMetricMilliseconds("transport_init_duration_ms");
+        var connectMs = runtime.GetLastDurationMetricMilliseconds("connect_duration_ms");
+        var handshakeMs = runtime.GetLastDurationMetricMilliseconds("handshake_duration_ms");
+
+        Assert.NotNull(bridgeMs);
+        Assert.NotNull(initMs);
+        Assert.NotNull(connectMs);
+        Assert.NotNull(handshakeMs);
+        Assert.True(bridgeMs!.Value >= 0);
+        Assert.True(initMs!.Value >= 0);
+        Assert.True(connectMs!.Value >= 0);
+        Assert.True(handshakeMs!.Value >= 0);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_TransportDurations_AreRecorded_OnFailure_AndNonNegative()
+    {
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.TransportInitializing, "test_start"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.BridgeStarting, "bridge"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.Failed, "bridge_fail"));
+
+        var bridgeMs = runtime.GetLastDurationMetricMilliseconds("bridge_start_duration_ms");
+        var initMs = runtime.GetLastDurationMetricMilliseconds("transport_init_duration_ms");
+        var connectMs = runtime.GetLastDurationMetricMilliseconds("connect_duration_ms");
+
+        Assert.NotNull(bridgeMs);
+        Assert.NotNull(initMs);
+        Assert.NotNull(connectMs);
+        Assert.True(bridgeMs!.Value >= 0);
+        Assert.True(initMs!.Value >= 0);
+        Assert.True(connectMs!.Value >= 0);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_WatchdogTimeout_Handshake_TransitionsToFailed_AndClassifiesFailure()
+    {
+        var delay = new ControlledDelayScheduler();
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            HandshakeTimeout = TimeSpan.FromSeconds(30),
+        };
+
+        using var runtime = new SessionRuntime(
+            () => new ScriptedSignalingTransport(),
+            options,
+            delay.DelayAsync);
+
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.TransportInitializing, "test_start"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.Connecting, "connect_start"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.Handshake, "handshake_start"));
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        delay.CompleteLatest();
+
+        await WaitUntilAsync(
+            () => runtime.TransportLifecycleState == TransportState.Failed,
+            TimeSpan.FromSeconds(2));
+
+        Assert.Equal(TransportFailureCategory.HandshakeTimeout, runtime.GetLastFailureCategoryForTests());
+        Assert.Equal(SessionRuntimeState.Failed, runtime.State);
+        Assert.Equal("No response yet.", runtime.StatusText);
+        Assert.NotNull(runtime.GetLastDurationMetricMilliseconds("handshake_duration_ms"));
+        Assert.True(runtime.GetLastDurationMetricMilliseconds("handshake_duration_ms")!.Value >= 0);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_WatchdogTimeout_BridgeStarting_TransitionsToFailed_AndClassifiesFailure()
+    {
+        var delay = new ControlledDelayScheduler();
+        using var runtime = new SessionRuntime(
+            () => new ScriptedSignalingTransport(),
+            SessionRuntimeWatchdogOptions.Default,
+            delay.DelayAsync);
+
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.TransportInitializing, "test_start"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.BridgeStarting, "bridge_start"));
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        delay.CompleteLatest();
+
+        await WaitUntilAsync(
+            () => runtime.TransportLifecycleState == TransportState.Failed,
+            TimeSpan.FromSeconds(2));
+
+        Assert.Equal(TransportFailureCategory.BridgeStartFailure, runtime.GetLastFailureCategoryForTests());
+        Assert.Equal("Please reinstall.", runtime.StatusText);
+        Assert.NotNull(runtime.GetLastDurationMetricMilliseconds("bridge_start_duration_ms"));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_WatchdogTimeout_AutoRetryEnabled_ResetsToIdle()
+    {
+        var delay = new ControlledDelayScheduler();
+        var options = SessionRuntimeWatchdogOptions.Default with
+        {
+            AutoRetryEnabled = true,
+            ConnectingTimeout = TimeSpan.FromSeconds(30),
+        };
+
+        using var runtime = new SessionRuntime(
+            () => new ScriptedSignalingTransport(),
+            options,
+            delay.DelayAsync);
+
+        await runtime.StartHelpeeAsync(new SessionCode("123456"), CancellationToken.None);
+
+        await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
+        delay.CompleteLatest();
+
+        await WaitUntilAsync(
+            () => runtime.TransportLifecycleState == TransportState.Idle && runtime.State == SessionRuntimeState.Idle,
+            TimeSpan.FromSeconds(3));
+
+        Assert.Equal(TransportFailureCategory.PeerUnreachable, runtime.GetLastFailureCategoryForTests());
+        Assert.NotNull(runtime.GetLastDurationMetricMilliseconds("connect_duration_ms"));
+        Assert.True(runtime.GetLastDurationMetricMilliseconds("connect_duration_ms")!.Value >= 0);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void TransportFailureMapper_MapsTimeout_ToHandshakeTimeout()
+    {
+        var failure = TransportFailureMapper.FromException(new TimeoutException("Timed out waiting for approve."));
+
+        Assert.Equal(TransportFailureCategory.HandshakeTimeout, failure.Category);
+        Assert.True(failure.IsTransient);
+        Assert.Equal(nameof(TimeoutException), failure.ExceptionType);
+        Assert.False(string.IsNullOrWhiteSpace(failure.CorrelationId));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void TransportFailureMapper_MapsProcessExit_ToUnexpectedProcessExit()
+    {
+        var failure = TransportFailureMapper.FromSignals(
+            rawError: "nkn_client_disconnected",
+            lastDisconnectReason: "process exited",
+            fallbackMessage: "Connection lost.");
+
+        Assert.Equal(TransportFailureCategory.UnexpectedProcessExit, failure.Category);
+        Assert.True(failure.IsTransient);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void TransportFailureMapper_MapsJsonParse_ToJsonProtocolError()
+    {
+        var failure = TransportFailureMapper.FromException(new System.Text.Json.JsonException("invalid json"));
+
+        Assert.Equal(TransportFailureCategory.JsonProtocolError, failure.Category);
+        Assert.False(failure.IsTransient);
+        Assert.Equal(nameof(System.Text.Json.JsonException), failure.ExceptionType);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_ConnectAttempt_IncrementsOnRetry_SameSession()
+    {
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(
+            onJoinAsync: static (_, _) => Task.CompletedTask));
+        var code = new SessionCode("123456");
+
+        await runtime.StartHelperAsync(code, CancellationToken.None);
+        var firstAttempt = runtime.GetConnectAttemptForTests();
+        var firstSessionId = runtime.GetSessionIdForTests();
+
+        Assert.Equal(1, firstAttempt);
+        Assert.False(string.IsNullOrWhiteSpace(firstSessionId));
+
+        await runtime.ResetAsync();
+        await runtime.StartHelperAsync(code, CancellationToken.None);
+
+        Assert.Equal(2, runtime.GetConnectAttemptForTests());
+        Assert.Equal(firstSessionId, runtime.GetSessionIdForTests());
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_ConnectAttempt_ResetsForNewSession()
+    {
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(
+            onJoinAsync: static (_, _) => Task.CompletedTask));
+
+        await runtime.StartHelperAsync(new SessionCode("123456"), CancellationToken.None);
+        var firstSessionId = runtime.GetSessionIdForTests();
+        Assert.Equal(1, runtime.GetConnectAttemptForTests());
+
+        await runtime.ResetAsync();
+        await runtime.StartHelperAsync(new SessionCode("654321"), CancellationToken.None);
+
+        Assert.Equal(1, runtime.GetConnectAttemptForTests());
+        Assert.NotEqual(firstSessionId, runtime.GetSessionIdForTests());
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task Diagnostics_CopyExport_IncludesRuntimeBasics_AndNoPayloadOrChatHistory()
     {
         var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
         try
@@ -145,7 +853,19 @@ public class SmokeTests
             SessionTimeline.Record("Disconnected", "timeout");
             Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
             var config = TransportRuntimeConfig.Select();
-            var vm = new DiagnosticsPageViewModel(static () => { }, config);
+            using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+            runtime.TryTransitionTransportStateForTests(TransportState.TransportInitializing, "test");
+            runtime.TryTransitionTransportStateForTests(TransportState.Connecting, "test");
+            runtime.TryTransitionTransportStateForTests(TransportState.Failed, "test");
+            await runtime.FailAsync(
+                TransportFailure.Create(TransportFailureCategory.HandshakeTimeout, "Timed out", exceptionType: nameof(TimeoutException), rawError: "timeout", isTransient: true),
+                "No response yet.");
+            var metrics = new MetricsRegistry();
+            metrics.Counter("transport_connect_attempts_total", transport: "NKN", scenario: "A").Inc(2);
+            metrics.Counter("transport_connect_success_total", transport: "NKN", scenario: "A").Inc(1);
+            metrics.Histogram("transport_connect_duration_ms", transport: "NKN", scenario: "A").Observe(10);
+            metrics.Histogram("transport_connect_duration_ms", transport: "NKN", scenario: "A").Observe(30);
+            var vm = new DiagnosticsPageViewModel(static () => { }, config, sessionRuntime: runtime, metricsRegistry: metrics);
 
             string? copied = null;
             vm.CopyReliabilityLogRequested += (_, text) => copied = text;
@@ -158,8 +878,20 @@ public class SmokeTests
             Assert.Contains("Process architecture:", copied!, StringComparison.Ordinal);
             Assert.Contains("OS architecture:", copied!, StringComparison.Ordinal);
             Assert.Contains("Bridge RID:", copied!, StringComparison.Ordinal);
+            Assert.Contains("current_state:", copied!, StringComparison.Ordinal);
+            Assert.Contains("attempt:", copied!, StringComparison.Ordinal);
             Assert.Contains("Transport:", copied!, StringComparison.Ordinal);
             Assert.Contains("Forced by environment:", copied!, StringComparison.Ordinal);
+            Assert.Contains("bridge_process_status:", copied!, StringComparison.Ordinal);
+            Assert.Contains("last_connect_duration_ms:", copied!, StringComparison.Ordinal);
+            Assert.Contains("last_handshake_duration_ms:", copied!, StringComparison.Ordinal);
+            Assert.Contains("last_bridge_start_ms:", copied!, StringComparison.Ordinal);
+            Assert.Contains("last_failure_category:", copied!, StringComparison.Ordinal);
+            Assert.Contains("last_failure_message:", copied!, StringComparison.Ordinal);
+            Assert.Contains("Metrics snapshot", copied!, StringComparison.Ordinal);
+            Assert.Contains("connect_attempts_total:", copied!, StringComparison.Ordinal);
+            Assert.Contains("connect_success_rate_pct:", copied!, StringComparison.Ordinal);
+            Assert.Contains("transport_connect_duration_ms:", copied!, StringComparison.Ordinal);
             Assert.Contains("Session timeline (last 30)", copied!, StringComparison.Ordinal);
             Assert.Contains("Started", copied!, StringComparison.Ordinal);
             Assert.Contains("Disconnected | timeout", copied!, StringComparison.Ordinal);
@@ -172,6 +904,39 @@ public class SmokeTests
         {
             SessionTimeline.Clear();
             Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void DiagnosticsPageViewModel_ExportsMetricsJson_ToArtifactsDiagnostics_WithDeterministicTimestamp()
+    {
+        var metrics = new MetricsRegistry();
+        metrics.Counter("transport_connect_attempts_total", transport: "NKN").Inc();
+
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-metrics-export-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            var config = CreateDevLocalTestConfig();
+            var vm = new DiagnosticsPageViewModel(
+                static () => { },
+                config,
+                metricsRegistry: metrics,
+                nowProvider: static () => new DateTimeOffset(2026, 2, 24, 12, 34, 56, TimeSpan.Zero),
+                diagnosticsExportRootProvider: () => tempRoot);
+
+            var path = vm.ExportMetricsJsonForTests();
+            Assert.Equal(Path.GetFullPath(Path.Combine(tempRoot, "metrics-20260224-123456.json")), path);
+            Assert.True(File.Exists(path));
+
+            var json = File.ReadAllText(path);
+            Assert.Contains("\"Counters\"", json, StringComparison.Ordinal);
+            Assert.Contains("transport_connect_attempts_total", json, StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { Directory.Delete(tempRoot, recursive: true); } catch { }
         }
     }
 
@@ -1350,11 +2115,11 @@ public class SmokeTests
             "Bridge runtime not found. Build artifacts/bridge/win-x64 first (run installer/Build-BridgeBundle.ps1).");
 
         var nodePath = Path.Combine(bundleDir!, "node.exe");
-        var bridgePath = Path.Combine(bundleDir!, "index.js");
+        var bridgePath = FindFileUpwards(Path.Combine("tools", "nkn-bridge", "index.js")) ?? Path.Combine(bundleDir!, "index.js");
         Assert.True(File.Exists(nodePath),
             $"Bridge runtime not found. Expected bundled node at '{nodePath}'. Run installer/Build-BridgeBundle.ps1.");
         Assert.True(File.Exists(bridgePath),
-            $"Bridge runtime not found. Expected bridge script at '{bridgePath}'. Run installer/Build-BridgeBundle.ps1.");
+            $"Bridge script not found. Expected workspace tools/nkn-bridge/index.js or bundled bridge script at '{bridgePath}'.");
 
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
@@ -1390,6 +2155,130 @@ public class SmokeTests
         {
             Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task Bridge_Startup_WithMockBridge_DelayedPong_EmitsReadyAfterPong()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-delay", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-delay.js");
+        File.WriteAllText(bridgePath, BuildMockBridgeScript(delayPongMs: 250, respondToPing: true));
+
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+
+            var options = NknTransportOptions.Load();
+            var identity = new NknIdentity("mock-delay", "mock-delay.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            BridgeLifecycleEvent? readyEvent = null;
+            adapter.BridgeLifecycle += (_, e) =>
+            {
+                if (e.Kind == BridgeLifecycleEventKind.Ready)
+                {
+                    readyEvent = e;
+                }
+            };
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var sw = Stopwatch.StartNew();
+            await adapter.StartBridgeAsync(cts.Token);
+            sw.Stop();
+
+            Assert.True(sw.ElapsedMilliseconds >= 150, "Bridge start completed before delayed pong should have arrived.");
+            Assert.True(adapter.IsBridgeProcessRunning);
+            Assert.True(readyEvent.HasValue);
+            Assert.Equal(BridgeLifecycleEventKind.Ready, readyEvent.Value.Kind);
+            Assert.True(readyEvent.Value.PingRttMs.HasValue);
+            Assert.True(readyEvent.Value.PingRttMs.Value >= 150);
+            Assert.True(NknRuntimeDiagnostics.Snapshot().BridgeLastPongUtcTicks > 0);
+
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task Bridge_Startup_WithMockBridge_NoPong_FailsAsBridgeUnresponsive()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-nopong", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-nopong.js");
+        File.WriteAllText(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: false));
+
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+
+            var options = NknTransportOptions.Load();
+            var identity = new NknIdentity("mock-nopong", "mock-nopong.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => adapter.StartBridgeAsync(cts.Token));
+            Assert.Contains("hello failed", ex.Message, StringComparison.OrdinalIgnoreCase);
+
+            var snapshot = NknRuntimeDiagnostics.Snapshot();
+            Assert.Contains("NKN_START_FAILED", snapshot.LastError, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("bridge_unresponsive", snapshot.LastError, StringComparison.OrdinalIgnoreCase);
+
+            var failure = TransportFailureMapper.FromSignals(snapshot.LastError);
+            Assert.Equal(TransportFailureCategory.BridgeUnresponsive, failure.Category);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
         }
     }
 
@@ -1665,6 +2554,12 @@ public class SmokeTests
         return null;
     }
 
+    private static string NormalizeJson(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        return JsonSerializer.Serialize(document.RootElement);
+    }
+
     private static string GetCurrentBridgeRidForTests()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) &&
@@ -1701,6 +2596,40 @@ public class SmokeTests
         File.WriteAllText(Path.Combine(bridgeRoot, "index.js"), "// fake");
         File.WriteAllText(Path.Combine(bridgeRoot, nodeFileName), "fake");
         Directory.CreateDirectory(Path.Combine(bridgeRoot, "node_modules"));
+    }
+
+    private static string BuildMockBridgeScript(int delayPongMs, bool respondToPing)
+    {
+        var delay = Math.Max(0, delayPongMs);
+        var respond = respondToPing ? "true" : "false";
+        return
+$@"'use strict';
+const readline = require('readline');
+const rl = readline.createInterface({{ input: process.stdin, crlfDelay: Infinity, terminal: false }});
+function emit(obj) {{ process.stdout.write(JSON.stringify(obj) + '\n'); }}
+rl.on('line', (line) => {{
+  if (!line || !line.trim()) return;
+  let msg;
+  try {{ msg = JSON.parse(line); }} catch (e) {{ emit({{ event:'error', id:null, cmd:null, reason:'Invalid JSON' }}); return; }}
+  if (msg.cmd === 'hello') {{
+    emit({{ event:'hello_ok', id: msg.id ?? null, protocol: 1, sdk: 'mock-sdk@1.0.0' }});
+    return;
+  }}
+  if ((msg.type === 'ping') || (msg.cmd === 'ping')) {{
+    if ({respond}) {{
+      setTimeout(() => emit({{ type:'pong', id: msg.id ?? null, ts: Date.now() }}), {delay});
+    }}
+    return;
+  }}
+  if (msg.cmd === 'shutdown') {{
+    emit({{ event:'ok', id: msg.id ?? null, cmd: 'shutdown' }});
+    emit({{ event:'disconnected', reason:'shutdown' }});
+    setTimeout(() => process.exit(0), 10);
+    return;
+  }}
+  emit({{ event:'ok', id: msg.id ?? null, cmd: msg.cmd ?? msg.type ?? null }});
+}});
+";
     }
 
     private static void CleanupDirectoryIfExists(string path)
@@ -1904,6 +2833,57 @@ public class SmokeTests
         }
     }
 
+    private sealed class ControlledDelayScheduler
+    {
+        private readonly object gate = new();
+        private readonly List<TaskCompletionSource> pending = new();
+
+        public int PendingCount
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return pending.Count(t => !t.Task.IsCompleted);
+                }
+            }
+        }
+
+        public Task DelayAsync(TimeSpan _, CancellationToken ct)
+        {
+            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            CancellationTokenRegistration ctr = default;
+            ctr = ct.Register(() =>
+            {
+                tcs.TrySetCanceled(ct);
+                ctr.Dispose();
+            });
+
+            lock (gate)
+            {
+                pending.Add(tcs);
+            }
+
+            return tcs.Task;
+        }
+
+        public void CompleteLatest()
+        {
+            lock (gate)
+            {
+                for (var i = pending.Count - 1; i >= 0; i--)
+                {
+                    if (pending[i].TrySetResult())
+                    {
+                        return;
+                    }
+                }
+            }
+
+            throw new InvalidOperationException("No pending delay task to complete.");
+        }
+    }
+
     private sealed class FakeSessionTransportNetwork
     {
         private readonly object gate = new();
@@ -2035,5 +3015,10 @@ public class SmokeTests
                 throw new ObjectDisposedException(nameof(FakeSessionTransport));
             }
         }
+    }
+
+    private sealed class FakeBridgeProcessRunner : IBridgeProcessRunner
+    {
+        public bool WasForcedKillRequested { get; set; }
     }
 }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -8,9 +9,11 @@ using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.Input;
 using NLink.App.Configuration;
 using NLink.App.Threading;
+using NLink.App.Services;
 using NLink.Core.Chat;
 using NLink.Core;
 using NLink.Core.Logging;
+using NLink.Core.Metrics;
 using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
@@ -21,12 +24,26 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
     private string copyFeedbackText = string.Empty;
     private bool showCopyFeedback;
     private readonly string bugReportUrl;
+    private readonly DiagnosticsSnapshot runtimeDiagnosticsSnapshot;
+    private readonly MetricsRegistry? metricsRegistry;
+    private readonly Func<DateTimeOffset> nowProvider;
+    private readonly Func<string> diagnosticsExportRootProvider;
 
-    public DiagnosticsPageViewModel(Action backAction, TransportRuntimeConfig transportConfig, ShareMessageConfig? linksConfig = null)
+    public DiagnosticsPageViewModel(
+        Action backAction,
+        TransportRuntimeConfig transportConfig,
+        ShareMessageConfig? linksConfig = null,
+        SessionRuntime? sessionRuntime = null,
+        MetricsRegistry? metricsRegistry = null,
+        Func<DateTimeOffset>? nowProvider = null,
+        Func<string>? diagnosticsExportRootProvider = null)
     {
         linksConfig ??= new ShareMessageConfig(null);
         BackCommand = new RelayCommand(backAction);
         bugReportUrl = linksConfig.BugReportUrl;
+        this.metricsRegistry = metricsRegistry;
+        this.nowProvider = nowProvider ?? DefaultNowProvider;
+        this.diagnosticsExportRootProvider = diagnosticsExportRootProvider ?? DefaultDiagnosticsExportRootProvider;
 
         ActiveTransport = transportConfig.DisplayName;
         TransportKey = transportConfig.Key;
@@ -42,6 +59,15 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
         ProcessArchitecture = RuntimeInformation.ProcessArchitecture.ToString();
         OsArchitecture = RuntimeInformation.OSArchitecture.ToString();
         BridgeResolutionRid = ResolveBridgeRidForDiagnostics();
+        runtimeDiagnosticsSnapshot = sessionRuntime?.GetDiagnosticsSnapshot() ?? new DiagnosticsSnapshot(
+            CurrentState: "(unknown)",
+            SessionUiState: "(unknown)",
+            AttemptNumber: 0,
+            LastFailureCategory: "(none)",
+            LastFailureMessage: "(none)",
+            LastConnectDurationMs: null,
+            LastHandshakeDurationMs: null,
+            LastBridgeStartDurationMs: null);
 
         if (string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase))
         {
@@ -76,6 +102,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
         DecryptFailed = counters.ChatDecryptFailed.ToString();
         RecentConnectionAttemptsText = BuildRecentConnectionAttemptsText(SessionReliabilityLog.SnapshotRecent(10));
         CopyReliabilityLogCommand = new RelayCommand(RequestCopyReliabilityLog);
+        ExportMetricsJsonCommand = new RelayCommand(ExportMetricsJson);
         OpenLogsFolderCommand = new RelayCommand(RequestOpenLogsFolder);
         ReportBugCommand = new RelayCommand(RequestOpenBugReport);
     }
@@ -111,6 +138,13 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
     public string OsArchitecture { get; }
 
     public string BridgeResolutionRid { get; }
+    public string CurrentTransportState => runtimeDiagnosticsSnapshot.CurrentState;
+    public string LastFailureCategory => runtimeDiagnosticsSnapshot.LastFailureCategory;
+    public string LastFailureMessage => runtimeDiagnosticsSnapshot.LastFailureMessage;
+    public string AttemptNumber => runtimeDiagnosticsSnapshot.AttemptNumber.ToString();
+    public string LastConnectDurationMs => FormatDuration(runtimeDiagnosticsSnapshot.LastConnectDurationMs);
+    public string LastHandshakeDurationMs => FormatDuration(runtimeDiagnosticsSnapshot.LastHandshakeDurationMs);
+    public string LastBridgeStartDurationMs => FormatDuration(runtimeDiagnosticsSnapshot.LastBridgeStartDurationMs);
 
     public string NknAddress { get; }
 
@@ -173,6 +207,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
     }
 
     public IRelayCommand CopyReliabilityLogCommand { get; }
+    public IRelayCommand ExportMetricsJsonCommand { get; }
 
     public IRelayCommand OpenLogsFolderCommand { get; }
 
@@ -185,6 +220,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
     public event EventHandler<string>? OpenLogsFolderRequested;
 
     public event EventHandler<string>? OpenBugReportRequested;
+    public event EventHandler<string>? OpenMetricsExportFolderRequested;
 
     public void NotifyCopySucceeded()
     {
@@ -223,6 +259,20 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
         OpenBugReportRequested?.Invoke(this, bugReportUrl);
     }
 
+    private void ExportMetricsJson()
+    {
+        try
+        {
+            var outputPath = ExportMetricsJsonToFile();
+            OpenMetricsExportFolderRequested?.Invoke(this, Path.GetDirectoryName(outputPath) ?? diagnosticsExportRootProvider());
+            _ = ShowCopyFeedbackAsync("Metrics exported", success: true);
+        }
+        catch
+        {
+            _ = ShowCopyFeedbackAsync("Could not export metrics", success: false);
+        }
+    }
+
     private async Task ShowCopyFeedbackAsync(string text, bool success)
     {
         copyFeedbackCts?.Cancel();
@@ -257,9 +307,11 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
     }
 
     internal string BuildDiagnosticsCopyTextForTests() => BuildDiagnosticsCopyText();
+    internal string ExportMetricsJsonForTests() => ExportMetricsJsonToFile();
 
     private string BuildDiagnosticsCopyText()
     {
+        var metricsSnapshot = metricsRegistry?.Snapshot();
         var timelineText = BuildSessionTimelineText(SessionTimeline.SnapshotRecent(30));
         var lines = new List<string>
         {
@@ -270,6 +322,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
             $"Process architecture: {ProcessArchitecture}",
             $"OS architecture: {OsArchitecture}",
             $"Bridge RID: {BridgeResolutionRid}",
+            $"current_state: {CurrentTransportState}",
+            $"attempt: {AttemptNumber}",
             string.Empty,
             $"Transport: {TransportSummary}",
             $"Connection method: {ActiveTransport}",
@@ -289,6 +343,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
             $"Last heartbeat: {LastHeartbeat}",
             $"Bridge restarts: {BridgeRestarts}",
             $"Last bridge exit: {LastBridgeExit}",
+            $"bridge_process_status: {BuildBridgeProcessStatus()}",
             $"bridge_raw_messages_received: {BridgeRawMessagesReceived}",
             $"last_bridge_message_kind: {LastBridgeMessageKind}",
             $"last_bridge_message_source: {LastBridgeMessageSource}",
@@ -307,9 +362,22 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
             $"chat_sent: {ChatSent}",
             $"chat_received: {ChatReceived}",
             $"decrypt_failed: {DecryptFailed}",
+            $"last_connect_duration_ms: {LastConnectDurationMs}",
+            $"last_handshake_duration_ms: {LastHandshakeDurationMs}",
+            $"last_bridge_start_ms: {LastBridgeStartDurationMs}",
+            string.Empty,
+            "Metrics snapshot",
+            "--------------",
+            BuildCompactMetricsSummary(
+                metricsSnapshot,
+                LastConnectDurationMs,
+                LastHandshakeDurationMs,
+                LastBridgeStartDurationMs),
             string.Empty,
             "Errors",
             "------",
+            $"last_failure_category: {LastFailureCategory}",
+            $"last_failure_message: {LastFailureMessage}",
             $"last_error: {LastError}",
             string.Empty,
             "Session timeline (last 30)",
@@ -321,6 +389,128 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
         };
 
         return SensitiveDataRedactor.Redact(string.Join(Environment.NewLine, lines));
+    }
+
+    private string ExportMetricsJsonToFile()
+    {
+        if (metricsRegistry is null)
+        {
+            throw new InvalidOperationException("Metrics registry is not available.");
+        }
+
+        var root = diagnosticsExportRootProvider();
+        var timestamp = nowProvider().UtcDateTime.ToString("yyyyMMdd-HHmmss");
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, $"metrics-{timestamp}.json");
+        File.WriteAllText(path, metricsRegistry.ExportJson(indented: true));
+        return Path.GetFullPath(path);
+    }
+
+    private static string BuildCompactMetricsSummary(
+        MetricsSnapshot? snapshot,
+        string lastConnectDurationMs,
+        string lastHandshakeDurationMs,
+        string lastBridgeStartDurationMs)
+    {
+        if (snapshot is null)
+        {
+            return "Metrics not available.";
+        }
+
+        long SumCounter(string name) => snapshot.Counters.Where(c => c.Name == name).Sum(c => c.Value);
+
+        var connectAttempts = SumCounter("transport_connect_attempts_total");
+        var connectSuccess = SumCounter("transport_connect_success_total");
+        var connectFailure = SumCounter("transport_connect_failure_total");
+        var reconnectAttempts = SumCounter("transport_reconnect_attempts_total");
+        var bridgeStarts = SumCounter("bridge_start_total");
+        var bridgeRestarts = SumCounter("bridge_restart_total");
+        var bridgeCrashes = SumCounter("bridge_crash_total");
+
+        var successRate = connectAttempts > 0
+            ? (double)connectSuccess / connectAttempts * 100.0
+            : 0.0;
+
+        var lines = new List<string>
+        {
+            $"connect_attempts_total: {connectAttempts}",
+            $"connect_success_total: {connectSuccess}",
+            $"connect_failure_total: {connectFailure}",
+            $"connect_success_rate_pct: {successRate:F1}",
+            $"reconnect_attempts_total: {reconnectAttempts}",
+            $"bridge_start_total: {bridgeStarts}",
+            $"bridge_restart_total: {bridgeRestarts}",
+            $"bridge_crash_total: {bridgeCrashes}",
+            $"last_connect_duration_ms: {lastConnectDurationMs}",
+            $"last_handshake_duration_ms: {lastHandshakeDurationMs}",
+            $"last_bridge_start_ms: {lastBridgeStartDurationMs}",
+        };
+
+        AppendHistogramSummary(lines, snapshot, "transport_connect_duration_ms");
+        AppendHistogramSummary(lines, snapshot, "transport_handshake_duration_ms");
+        AppendHistogramSummary(lines, snapshot, "bridge_start_duration_ms");
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private static void AppendHistogramSummary(List<string> lines, MetricsSnapshot snapshot, string histogramName)
+    {
+        var entries = snapshot.Histograms.Where(h => h.Name == histogramName).ToArray();
+        if (entries.Length == 0)
+        {
+            lines.Add($"{histogramName}: (none)");
+            return;
+        }
+
+        var count = entries.Sum(h => h.Count);
+        var sum = entries.Sum(h => h.Sum);
+        var min = entries.Where(h => h.Count > 0).Select(h => h.Min).DefaultIfEmpty(0).Min();
+        var max = entries.Where(h => h.Count > 0).Select(h => h.Max).DefaultIfEmpty(0).Max();
+        var mean = count > 0 ? sum / count : 0;
+        var p50 = EstimatePercentile(entries, 0.50);
+        var p95 = EstimatePercentile(entries, 0.95);
+
+        lines.Add($"{histogramName}: count={count}, min={min:F2}, max={max:F2}, mean={mean:F2}, p50={p50:F2}, p95={p95:F2}");
+    }
+
+    private static double EstimatePercentile(IReadOnlyList<HistogramMetricSnapshot> entries, double percentile)
+    {
+        var allBuckets = new SortedDictionary<double, long>();
+        long total = 0;
+
+        foreach (var entry in entries)
+        {
+            foreach (var bucket in entry.Buckets)
+            {
+                if (bucket.Count <= 0)
+                {
+                    continue;
+                }
+
+                total += bucket.Count;
+                var key = double.IsPositiveInfinity(bucket.UpperBound) ? double.MaxValue : bucket.UpperBound;
+                allBuckets.TryGetValue(key, out var existing);
+                allBuckets[key] = existing + bucket.Count;
+            }
+        }
+
+        if (total == 0 || allBuckets.Count == 0)
+        {
+            return 0;
+        }
+
+        var threshold = (long)Math.Ceiling(total * percentile);
+        long running = 0;
+        foreach (var pair in allBuckets)
+        {
+            running += pair.Value;
+            if (running >= threshold)
+            {
+                return pair.Key == double.MaxValue ? 0 : pair.Key;
+            }
+        }
+
+        return 0;
     }
 
     private static string BuildRecentConnectionAttemptsText(IReadOnlyList<SessionReliabilityRecord> rows)
@@ -381,6 +571,21 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
         };
     }
 
+    private string BuildBridgeProcessStatus()
+    {
+        if (BridgePid != "(not running)")
+        {
+            return $"running (pid {BridgePid})";
+        }
+
+        return $"not running (last exit: {LastBridgeExit})";
+    }
+
+    private static string FormatDuration(double? value)
+    {
+        return value.HasValue ? value.Value.ToString("F2") : "(none)";
+    }
+
     private static string ResolveAppVersion()
     {
         try
@@ -434,4 +639,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
             return "unknown";
         }
     }
+
+    private static DateTimeOffset DefaultNowProvider() => DateTimeOffset.UtcNow;
+
+    private static string DefaultDiagnosticsExportRootProvider() => Path.GetFullPath(Path.Combine("artifacts", "diagnostics"));
 }
