@@ -16,6 +16,8 @@ on:
 jobs:
   smoke:
     runs-on: windows-latest
+    env:
+      NLINK_BRIDGE_RUNTIME_DIR: artifacts/bridge/win-x64
 
     steps:
       - name: Checkout
@@ -51,6 +53,20 @@ jobs:
           echo "dotnet format --verify-no-changes found formatting drift."
           echo "Run: dotnet format nLink.sln"
           echo "This is non-blocking for now."
+
+      - name: Build bridge bundle
+        shell: powershell
+        run: .\installer\Build-BridgeBundle.ps1 -Runtime win-x64
+
+      - name: Verify bridge bundle layout
+        shell: powershell
+        run: |
+          Write-Host "NLINK_BRIDGE_RUNTIME_DIR=$env:NLINK_BRIDGE_RUNTIME_DIR"
+          if (-not (Test-Path $env:NLINK_BRIDGE_RUNTIME_DIR)) {
+            throw "Bridge runtime directory not found: $env:NLINK_BRIDGE_RUNTIME_DIR"
+          }
+          Get-ChildItem -Path $env:NLINK_BRIDGE_RUNTIME_DIR -Force
+          Get-ChildItem -Path (Join-Path $env:NLINK_BRIDGE_RUNTIME_DIR "node_modules") -Force | Select-Object -First 20
 
       - name: Smoke tests
         run: dotnet test -c Release --filter Category=Smoke --no-build --logger "trx;LogFileName=smoke-results.trx"

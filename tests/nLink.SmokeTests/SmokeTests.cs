@@ -2823,9 +2823,9 @@ public class SmokeTests
             return;
         }
 
-        var bundleDir = TryFindBridgeBundleDirectory();
+        var bundleDir = ResolveBridgeRuntimeDirectoryForHealthCheck(out var attemptedPath, out var runtimeDirSource);
         Assert.True(bundleDir is not null,
-            "Bridge runtime not found. Build artifacts/bridge/win-x64 first (run installer/Build-BridgeBundle.ps1).");
+            $"Bridge runtime not found. Source={runtimeDirSource}, attempted='{attemptedPath}'. Build artifacts/bridge/win-x64 first (run installer/Build-BridgeBundle.ps1).");
 
         var nodePath = Path.Combine(bundleDir!, "node.exe");
         var bridgePath = FindFileUpwards(Path.Combine("tools", "nkn-bridge", "index.js")) ?? Path.Combine(bundleDir!, "index.js");
@@ -4175,6 +4175,43 @@ rl.on('line', (line) => {
         }
 
         return null;
+    }
+
+    private static string? ResolveBridgeRuntimeDirectoryForHealthCheck(out string attemptedPath, out string source)
+    {
+        var envValue = Environment.GetEnvironmentVariable("NLINK_BRIDGE_RUNTIME_DIR");
+        if (!string.IsNullOrWhiteSpace(envValue))
+        {
+            source = "env:NLINK_BRIDGE_RUNTIME_DIR";
+            attemptedPath = ResolvePathFromRepoRoot(envValue);
+            return Directory.Exists(attemptedPath) ? attemptedPath : null;
+        }
+
+        source = "default:artifacts/bridge/win-x64";
+        attemptedPath = ResolvePathFromRepoRoot(Path.Combine("artifacts", "bridge", "win-x64"));
+        if (Directory.Exists(attemptedPath))
+        {
+            return attemptedPath;
+        }
+
+        return TryFindBridgeBundleDirectory();
+    }
+
+    private static string ResolvePathFromRepoRoot(string pathValue)
+    {
+        if (Path.IsPathRooted(pathValue))
+        {
+            return Path.GetFullPath(pathValue);
+        }
+
+        var versionPath = FindFileUpwards("VERSION");
+        if (!string.IsNullOrWhiteSpace(versionPath))
+        {
+            var repoRoot = Path.GetDirectoryName(versionPath)!;
+            return Path.GetFullPath(Path.Combine(repoRoot, pathValue));
+        }
+
+        return Path.GetFullPath(pathValue);
     }
 
     private static NknTransportOptions LoadNknOptionsWithOverrides(string keyPath, string identifier)
