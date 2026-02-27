@@ -14,6 +14,7 @@
 #define MyAppExeName "nLink.exe"
 
 [Setup]
+; Keep AppId stable across beta builds so silent upgrade/rollback tests exercise true in-place upgrades.
 AppId={{9D5C9C2D-7D66-4E6E-8A5A-20F64C2F31A7}
 AppName={#MyAppName}
 AppVersion={#AppVersion}

@@ -1,10 +1,7 @@
-using System;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
 using NLink.Core;
 
 namespace NLink.Infra.Nkn;
@@ -85,6 +82,32 @@ public sealed class NknSignalingTransport : ISignalingTransport
     internal event EventHandler<BridgeLifecycleEvent>? BridgeLifecycle;
 
     public bool CanSendSessionEnd => !disposed && currentCode is not null && !string.IsNullOrWhiteSpace(remoteEndpoint);
+
+    public async Task<bool> TryPingBridgeHealthAsync(CancellationToken ct)
+    {
+        ThrowIfDisposed();
+
+        if (client is not RealNknClientAdapter realClient)
+        {
+            return false;
+        }
+
+        try
+        {
+            await realClient.PingBridgeAsync(ct).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            NknRuntimeDiagnostics.SetLastError(ex);
+            Log($"TryPingBridgeHealthAsync failed ({ex.GetType().Name})");
+            return false;
+        }
+    }
 
     internal async Task PrepareForReuseAsync()
     {

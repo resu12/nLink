@@ -1,5 +1,3 @@
-using System.Threading;
-
 namespace NLink.Core.Chat;
 
 public static class ChatRuntimeCounters

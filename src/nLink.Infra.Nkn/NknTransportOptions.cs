@@ -1,6 +1,4 @@
-using System;
 using System.Diagnostics;
-using System.IO;
 using System.Text.Json;
 
 namespace NLink.Infra.Nkn;
@@ -16,6 +14,14 @@ internal sealed class NknTransportOptions
     public string? Identifier { get; private set; }
 
     public string KeyPath { get; private set; } = string.Empty;
+
+    public bool PreflightRpcEnabled { get; private set; }
+
+    public int PreflightTimeoutMs { get; private set; }
+
+    public int PreflightConcurrency { get; private set; }
+
+    public int PreflightCacheTtlMs { get; private set; }
 
     public static NknTransportOptions Load()
     {
@@ -36,11 +42,35 @@ internal sealed class NknTransportOptions
             appSettings.Get("NLINK_NKN_KEY_PATH"),
             appSettings.Get("nLink:nkn:keyPath"));
 
+        var preflightRpcEnabled = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED"),
+            appSettings.Get("NLINK_NKN_PREFLIGHT_RPC_ENABLED"),
+            appSettings.Get("nLink:nkn:preflightRpcEnabled"));
+
+        var preflightTimeoutMs = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS"),
+            appSettings.Get("NLINK_NKN_PREFLIGHT_TIMEOUT_MS"),
+            appSettings.Get("nLink:nkn:preflightTimeoutMs"));
+
+        var preflightConcurrency = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CONCURRENCY"),
+            appSettings.Get("NLINK_NKN_PREFLIGHT_CONCURRENCY"),
+            appSettings.Get("nLink:nkn:preflightConcurrency"));
+
+        var preflightCacheTtlMs = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CACHE_TTL_MS"),
+            appSettings.Get("NLINK_NKN_PREFLIGHT_CACHE_TTL_MS"),
+            appSettings.Get("nLink:nkn:preflightCacheTtlMs"));
+
         return new NknTransportOptions
         {
             SeedRpc = seedRpc,
             Identifier = identifier,
             KeyPath = ResolveKeyPath(configuredKeyPath),
+            PreflightRpcEnabled = ParseBool(preflightRpcEnabled, defaultValue: false),
+            PreflightTimeoutMs = ParseInt(preflightTimeoutMs, defaultValue: 700, minValue: 1, maxValue: 60_000),
+            PreflightConcurrency = ParseInt(preflightConcurrency, defaultValue: 8, minValue: 1, maxValue: 256),
+            PreflightCacheTtlMs = ParseInt(preflightCacheTtlMs, defaultValue: 600_000, minValue: 0, maxValue: 86_400_000),
         };
     }
 
@@ -117,6 +147,41 @@ internal sealed class NknTransportOptions
         }
 
         return null;
+    }
+
+    private static bool ParseBool(string? value, bool defaultValue)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return defaultValue;
+        }
+
+        if (bool.TryParse(value, out var parsed))
+        {
+            return parsed;
+        }
+
+        return defaultValue;
+    }
+
+    private static int ParseInt(string? value, int defaultValue, int minValue, int maxValue)
+    {
+        if (string.IsNullOrWhiteSpace(value) || !int.TryParse(value, out var parsed))
+        {
+            return defaultValue;
+        }
+
+        if (parsed < minValue)
+        {
+            return minValue;
+        }
+
+        if (parsed > maxValue)
+        {
+            return maxValue;
+        }
+
+        return parsed;
     }
 
     private sealed class AppSettingsJson

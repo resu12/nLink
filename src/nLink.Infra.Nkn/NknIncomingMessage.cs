@@ -1,5 +1,3 @@
-using System;
-
 namespace NLink.Infra.Nkn;
 
 internal sealed class NknIncomingMessage : EventArgs

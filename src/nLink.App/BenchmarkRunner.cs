@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using NLink.App.Services;
 using NLink.Core;
 using NLink.Core.Metrics;
+using NLink.Core.Resources;
 using NLink.Infra.DevLocal;
 using NLink.Infra.Nkn;
 
@@ -41,13 +42,27 @@ internal static class BenchmarkRunner
             var outDir = PrepareOutputDirectory();
             var timestamp = started.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
             var jsonPath = Path.Combine(outDir, $"metrics-{timestamp}.json");
+            var metricsSnapshot = metrics.Snapshot();
+            ReliabilityGateResult? gateResult = null;
+            if (options!.ReliabilityGateEnabled)
+            {
+                gateResult = ReliabilityGate.Evaluate(
+                    new ReliabilityGateInput(
+                        Metrics: metricsSnapshot,
+                        SuccessRatePercent: result.SuccessRatePercent,
+                        Transport: options.Transport.ToUpperInvariant(),
+                        BridgeReuseMode: options.BridgeReuseMode.ToString()),
+                    options.ReliabilityGateThresholds);
+            }
+
             var payload = new BenchmarkOutput(
                 Version: GetVersion(),
                 StartedUtc: started,
                 CompletedUtc: DateTimeOffset.UtcNow,
                 Options: options!,
                 Summary: result,
-                Metrics: metrics.Snapshot());
+                Metrics: metricsSnapshot,
+                ReliabilityGate: gateResult);
 
             await File.WriteAllTextAsync(
                 jsonPath,
@@ -72,6 +87,10 @@ internal static class BenchmarkRunner
             await output.WriteLineAsync($"  Memory samples (steady-state): {result.MemorySamplesCount}");
             await output.WriteLineAsync($"  Memory check basis: {result.MemoryCheckBasis}");
             await output.WriteLineAsync($"  Peak private / working set (bytes): {result.PeakPrivateBytes} / {result.PeakWorkingSetBytes}");
+            if (gateResult is not null)
+            {
+                await output.WriteLineAsync($"  Reliability gate: {(gateResult.Passed ? "PASS" : "FAIL")}");
+            }
             if (result.MemoryCheckEnabled)
             {
                 await output.WriteLineAsync($"  Memory check (tolerance ±{result.MemoryTolerancePercent:F1}%): {(result.MemoryCheckPassed ? "PASS" : "FAIL")}");
@@ -91,6 +110,15 @@ internal static class BenchmarkRunner
 
             await output.WriteLineAsync("");
             await output.WriteLineAsync($"Metrics JSON: {Path.GetFullPath(jsonPath)}");
+            if (gateResult is not null && !gateResult.Passed)
+            {
+                await error.WriteLineAsync("FAIL: Reliability gate failed.");
+                foreach (var failure in gateResult.Failures)
+                {
+                    await error.WriteLineAsync($"  - [{failure.Code}] {failure.Message}");
+                }
+                return 3;
+            }
             if (result.MemoryCheckEnabled && !result.MemoryCheckPassed)
             {
                 await error.WriteLineAsync(
@@ -144,7 +172,9 @@ internal static class BenchmarkRunner
         string Transport,
         BridgeReuseMode BridgeReuseMode,
         bool MemoryCheck,
-        double MemoryTolerancePercent)
+        double MemoryTolerancePercent,
+        bool ReliabilityGateEnabled,
+        ReliabilityGateThresholds ReliabilityGateThresholds)
     {
         public static bool TryParse(string[] args, out BenchmarkRunnerOptions? options, out string error)
         {
@@ -157,6 +187,11 @@ internal static class BenchmarkRunner
             var reuse = BridgeReuseMode.PerSession;
             var memoryCheck = false;
             var memoryTolerancePercent = DefaultMemoryTolerancePercent;
+            var reliabilityGateEnabled = false;
+            var gateMinSuccessRatePercent = double.NaN;
+            var gateRequireNoUnknown = true;
+            var gateRequireNoStuck = true;
+            bool? gateFailOnBridgeCrash = null;
 
             for (var i = 0; i < args.Length; i++)
             {
@@ -201,6 +236,45 @@ internal static class BenchmarkRunner
                         {
                             memoryCheck = parsedMemoryCheck;
                         }
+                        break;
+                    case "--reliability-gate":
+                        reliabilityGateEnabled = true;
+                        if (!string.IsNullOrWhiteSpace(value) &&
+                            bool.TryParse(value, out var parsedGate))
+                        {
+                            reliabilityGateEnabled = parsedGate;
+                        }
+                        break;
+                    case "--gate-min-success-rate":
+                        if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out gateMinSuccessRatePercent) ||
+                            double.IsNaN(gateMinSuccessRatePercent) ||
+                            double.IsInfinity(gateMinSuccessRatePercent))
+                        {
+                            error = "Invalid --gate-min-success-rate value.";
+                            return false;
+                        }
+                        break;
+                    case "--gate-no-unknown":
+                        if (!bool.TryParse(value, out gateRequireNoUnknown))
+                        {
+                            error = "Invalid --gate-no-unknown value.";
+                            return false;
+                        }
+                        break;
+                    case "--gate-no-stuck":
+                        if (!bool.TryParse(value, out gateRequireNoStuck))
+                        {
+                            error = "Invalid --gate-no-stuck value.";
+                            return false;
+                        }
+                        break;
+                    case "--gate-fail-on-bridge-crash":
+                        if (!bool.TryParse(value, out var parsedGateBridgeCrash))
+                        {
+                            error = "Invalid --gate-fail-on-bridge-crash value.";
+                            return false;
+                        }
+                        gateFailOnBridgeCrash = parsedGateBridgeCrash;
                         break;
                     case "--memory-tolerance-percent":
                         if (!double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out memoryTolerancePercent) ||
@@ -253,7 +327,25 @@ internal static class BenchmarkRunner
                 }
             }
 
-            options = new BenchmarkRunnerOptions(cycles, delayMs, transport, reuse, memoryCheck, memoryTolerancePercent);
+            var resolvedGateMinSuccessRate = double.IsNaN(gateMinSuccessRatePercent)
+                ? (transport == "devlocal" ? 100d : 95d)
+                : gateMinSuccessRatePercent;
+            var resolvedGateFailOnBridgeCrash = gateFailOnBridgeCrash ?? (transport == "nkn");
+            var gateThresholds = new ReliabilityGateThresholds(
+                MinSuccessRatePercent: resolvedGateMinSuccessRate,
+                RequireNoUnknownFailures: gateRequireNoUnknown,
+                RequireNoStuckStates: gateRequireNoStuck,
+                FailOnBridgeCrash: resolvedGateFailOnBridgeCrash);
+
+            options = new BenchmarkRunnerOptions(
+                cycles,
+                delayMs,
+                transport,
+                reuse,
+                memoryCheck,
+                memoryTolerancePercent,
+                reliabilityGateEnabled,
+                gateThresholds);
             return true;
         }
     }
@@ -377,6 +469,8 @@ internal static class BenchmarkRunner
                     MemoryCheckEnabled: options.MemoryCheck,
                     MemoryTolerancePercent: options.MemoryTolerancePercent,
                     MemoryCheckPassed: memoryCheckPassed,
+                    FinalActiveCounters: ActiveRuntimeCounters.Snapshot(),
+                    MaxActiveConnectAttempts: ActiveRuntimeCounters.MaxActiveConnectAttemptsObserved(),
                     TopFailureCategories: failures
                         .OrderByDescending(kv => kv.Value)
                         .ThenBy(kv => kv.Key, StringComparer.Ordinal)
@@ -716,7 +810,8 @@ internal static class BenchmarkRunner
         DateTimeOffset CompletedUtc,
         BenchmarkRunnerOptions Options,
         BenchmarkSummary Summary,
-        MetricsSnapshot Metrics);
+        MetricsSnapshot Metrics,
+        ReliabilityGateResult? ReliabilityGate);
 
     private sealed record BenchmarkSummary(
         int CyclesRequested,
@@ -740,6 +835,8 @@ internal static class BenchmarkRunner
         double MemoryTolerancePercent,
         bool MemoryCheckPassed,
         string MemoryCheckBasis,
+        ActiveResourceCountersSnapshot FinalActiveCounters,
+        long MaxActiveConnectAttempts,
         FailureCount[] TopFailureCategories);
 
     private sealed record FailureCount(string Category, int Count);

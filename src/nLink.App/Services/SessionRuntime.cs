@@ -6,6 +6,8 @@ using System.Threading.Tasks;
 using NLink.Core;
 using NLink.Core.Chat;
 using NLink.Core.Logging;
+using NLink.Core.Resources;
+using NLink.Core.Retry;
 using NLink.Infra.Nkn;
 
 namespace NLink.App.Services;
@@ -66,6 +68,20 @@ public sealed class SessionRuntimeStateChangedEventArgs : EventArgs
     public SessionCode? CurrentCode { get; }
 }
 
+public sealed class SessionRuntimeTransientStatusChangedEventArgs : EventArgs
+{
+    public SessionRuntimeTransientStatusChangedEventArgs(bool isVisible, string text, bool canCancel)
+    {
+        IsVisible = isVisible;
+        Text = text;
+        CanCancel = canCancel;
+    }
+
+    public bool IsVisible { get; }
+    public string Text { get; }
+    public bool CanCancel { get; }
+}
+
 public readonly record struct DiagnosticsSnapshot(
     string CurrentState,
     string SessionUiState,
@@ -87,10 +103,10 @@ internal sealed record SessionRuntimeWatchdogOptions(
     public static SessionRuntimeWatchdogOptions Default { get; } = new(
         Enabled: true,
         AutoRetryEnabled: false,
-        BridgeStartingTimeout: TimeSpan.FromSeconds(10),
-        ConnectingTimeout: TimeSpan.FromSeconds(30),
-        HandshakeTimeout: TimeSpan.FromSeconds(30),
-        ReconnectingTimeout: TimeSpan.FromSeconds(10));
+        BridgeStartingTimeout: TimeSpan.FromSeconds(8),
+        ConnectingTimeout: TimeSpan.FromSeconds(20),
+        HandshakeTimeout: TimeSpan.FromSeconds(20),
+        ReconnectingTimeout: TimeSpan.FromSeconds(8));
 }
 
 public sealed class SessionRuntime : IDisposable
@@ -106,6 +122,7 @@ public sealed class SessionRuntime : IDisposable
     private readonly ITransportTelemetrySink telemetrySink;
     private readonly BridgeReusePolicy bridgeReusePolicy;
     private readonly Func<TimeSpan, CancellationToken, Task> bridgeIdleDelayAsync;
+    private readonly RetryPolicy watchdogRetryPolicy;
 
     private CancellationTokenSource? sessionCts;
     private ISignalingTransport? transport;
@@ -133,6 +150,14 @@ public sealed class SessionRuntime : IDisposable
     private ISignalingTransport? cachedBridgeTransport;
     private CancellationTokenSource? cachedBridgeIdleCts;
     private long cachedBridgeIdleGeneration;
+    private bool transientStatusVisible;
+    private string transientStatusText = string.Empty;
+    private bool transientStatusCanCancel;
+    private int quietHelpeeRehostInProgress;
+    private bool activeSessionCounted;
+    private bool activeConnectAttemptCounted;
+    private bool lastDisconnectWasRemoteEnd;
+    private int externalRecoveryInProgress;
 
     public SessionRuntime(Func<ISignalingTransport> createTransport)
         : this(createTransport, SessionRuntimeWatchdogOptions.Default, DefaultWatchdogDelayAsync, TransportTelemetry.Noop, BridgeReusePolicy.Default, null)
@@ -153,6 +178,13 @@ public sealed class SessionRuntime : IDisposable
         this.telemetrySink = telemetrySink ?? TransportTelemetry.Noop;
         this.bridgeReusePolicy = bridgeReusePolicy ?? BridgeReusePolicy.Default;
         this.bridgeIdleDelayAsync = bridgeIdleDelayAsync ?? DefaultWatchdogDelayAsync;
+        watchdogRetryPolicy = new RetryPolicy(
+            new RetryPolicyOptions(
+                MaxAttempts: 3,
+                InitialDelay: TimeSpan.FromMilliseconds(200),
+                MaxDelay: TimeSpan.FromSeconds(1),
+                JitterRatio: 0.10));
+        watchdogRetryPolicy.EventEmitted += OnWatchdogRetryPolicyEvent;
         transportStateEntryTimestamps[transportState] = Stopwatch.GetTimestamp();
 
         chatService.MessageReceived += OnChatMessageReceived;
@@ -162,7 +194,75 @@ public sealed class SessionRuntime : IDisposable
 
     private static Task DefaultWatchdogDelayAsync(TimeSpan delay, CancellationToken ct) => Task.Delay(delay, ct);
 
+    private void MarkActiveSession()
+    {
+        if (activeSessionCounted)
+        {
+            return;
+        }
+
+        ActiveRuntimeCounters.IncSessions();
+        activeSessionCounted = true;
+    }
+
+    private void ClearActiveSession()
+    {
+        if (!activeSessionCounted)
+        {
+            return;
+        }
+
+        ActiveRuntimeCounters.DecSessions();
+        activeSessionCounted = false;
+    }
+
+    private void MarkActiveConnectAttempt()
+    {
+        if (activeConnectAttemptCounted)
+        {
+            return;
+        }
+
+        ActiveRuntimeCounters.IncConnectAttempts();
+        activeConnectAttemptCounted = true;
+    }
+
+    private void ClearActiveConnectAttempt()
+    {
+        if (!activeConnectAttemptCounted)
+        {
+            return;
+        }
+
+        ActiveRuntimeCounters.DecConnectAttempts();
+        activeConnectAttemptCounted = false;
+    }
+
+    private void RunCountedBackgroundTask(Func<Task> body, bool countAsTransportTask = true)
+    {
+        if (countAsTransportTask)
+        {
+            ActiveRuntimeCounters.IncTransportTasks();
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await body().ConfigureAwait(false);
+            }
+            finally
+            {
+                if (countAsTransportTask)
+                {
+                    ActiveRuntimeCounters.DecTransportTasks();
+                }
+            }
+        });
+    }
+
     public event EventHandler<SessionRuntimeStateChangedEventArgs>? StateChanged;
+    public event EventHandler<SessionRuntimeTransientStatusChangedEventArgs>? TransientStatusChanged;
 
     public event EventHandler? IncomingJoinRequestAvailable;
 
@@ -184,12 +284,55 @@ public sealed class SessionRuntime : IDisposable
     public SessionRuntimeRole Role => role;
 
     public string StatusText => statusText;
+    public bool IsTransientStatusVisible => transientStatusVisible;
+    public string TransientStatusText => transientStatusText;
+    public bool CanCancelTransientStatus => transientStatusCanCancel;
+    public TransportFailure? LastTransportFailure => lastTransportFailure;
 
     public SessionCode? CurrentCode => currentCode;
 
     public bool HasPendingJoinRequest => pendingJoinRequest is not null;
 
     public bool CanSendChat => chatService.CanSend;
+    public bool LastDisconnectWasRemoteEnd => lastDisconnectWasRemoteEnd;
+
+    public async Task CancelTransientAsync()
+    {
+        bool shouldReset;
+        await lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            shouldReset = !disposed && transportState is TransportState.BridgeStarting
+                or TransportState.BridgeReady
+                or TransportState.TransportInitializing
+                or TransportState.Connecting
+                or TransportState.Handshake
+                or TransportState.Reconnecting;
+        }
+        finally
+        {
+            lifecycleGate.Release();
+        }
+
+        if (!shouldReset)
+        {
+            return;
+        }
+
+        await ResetAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
+        await lifecycleGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (!disposed && state != SessionRuntimeState.Connected)
+            {
+                SetState(SessionRuntimeState.Idle, string.Empty);
+            }
+        }
+        finally
+        {
+            lifecycleGate.Release();
+        }
+    }
 
     public bool HasSessionKey => chatService.HasSessionKey;
 
@@ -212,6 +355,7 @@ public sealed class SessionRuntime : IDisposable
     internal TransportFailureCategory? GetLastFailureCategoryForTests() => lastTransportFailure?.Category;
 
     internal bool HasCachedBridgeTransportForTests() => cachedBridgeTransport is not null;
+    internal void SetRoleForTests(SessionRuntimeRole value) => role = value;
 
     public DiagnosticsSnapshot GetDiagnosticsSnapshot()
     {
@@ -224,6 +368,112 @@ public sealed class SessionRuntime : IDisposable
             LastConnectDurationMs: GetLastDurationMetricMilliseconds("connect_duration_ms"),
             LastHandshakeDurationMs: GetLastDurationMetricMilliseconds("handshake_duration_ms"),
             LastBridgeStartDurationMs: GetLastDurationMetricMilliseconds("bridge_start_duration_ms"));
+    }
+
+    internal async Task HandleExternalRecoveryAsync(ExternalRecoveryTrigger triggers, CancellationToken ct)
+    {
+        if (triggers == ExternalRecoveryTrigger.None)
+        {
+            return;
+        }
+
+        ObjectDisposedException.ThrowIf(disposed, this);
+
+        if (Interlocked.CompareExchange(ref externalRecoveryInProgress, 1, 0) != 0)
+        {
+            LocalOperationalLog.Info("Network", $"event=external_recovery_skipped; reason=inflight; triggers={triggers}");
+            return;
+        }
+
+        try
+        {
+            SessionRuntimeRole roleSnapshot;
+            SessionCode? codeSnapshot;
+            SessionRuntimeState uiStateSnapshot;
+            TransportState transportStateSnapshot;
+            ISignalingTransport? activeTransportSnapshot;
+            ISignalingTransport? cachedTransportSnapshot;
+            bool connectInFlight;
+
+            await lifecycleGate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                roleSnapshot = role;
+                codeSnapshot = currentCode;
+                uiStateSnapshot = state;
+                transportStateSnapshot = transportState;
+                activeTransportSnapshot = transport;
+                cachedTransportSnapshot = cachedBridgeTransport;
+                connectInFlight = activeConnectAttemptCounted || transportState is TransportState.BridgeStarting
+                    or TransportState.BridgeReady
+                    or TransportState.TransportInitializing
+                    or TransportState.Connecting
+                    or TransportState.Handshake
+                    or TransportState.Reconnecting;
+            }
+            finally
+            {
+                lifecycleGate.Release();
+            }
+
+            var pingRequested = triggers is not ExternalRecoveryTrigger.None;
+            var pingSucceeded = false;
+            if (pingRequested)
+            {
+                pingSucceeded = await TryPingBridgeForExternalRecoveryAsync(
+                    activeTransportSnapshot,
+                    cachedTransportSnapshot,
+                    ct).ConfigureAwait(false);
+            }
+
+            if (connectInFlight)
+            {
+                LocalOperationalLog.Info(
+                    "Network",
+                    $"event=external_recovery_skipped; reason=connect_inflight; triggers={triggers}; state={transportStateSnapshot}");
+                return;
+            }
+
+            var shouldReconnect =
+                codeSnapshot is not null &&
+                roleSnapshot is SessionRuntimeRole.Helpee or SessionRuntimeRole.Helper &&
+                (
+                    !pingSucceeded ||
+                    uiStateSnapshot is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected
+                );
+
+            if (!shouldReconnect)
+            {
+                LocalOperationalLog.Info(
+                    "Network",
+                    $"event=external_recovery_noop; triggers={triggers}; ping_ok={pingSucceeded}; ui_state={uiStateSnapshot}; transport_state={transportStateSnapshot}");
+                return;
+            }
+
+            LocalOperationalLog.Warn(
+                "Network",
+                $"event=external_recovery_reconnect; triggers={triggers}; role={roleSnapshot}; ui_state={uiStateSnapshot}; transport_state={transportStateSnapshot}");
+
+            await ResetAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
+
+            if (roleSnapshot == SessionRuntimeRole.Helpee)
+            {
+                await StartHelpeeAsync(codeSnapshot!.Value, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                await StartHelperAsync(codeSnapshot!.Value, ct).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref externalRecoveryInProgress, 0);
+        }
     }
 
     public void SetReliabilityAttempt(SessionReliabilityAttempt? attempt)
@@ -501,6 +751,7 @@ public sealed class SessionRuntime : IDisposable
         }
 
         chatService.Dispose();
+        watchdogRetryPolicy.EventEmitted -= OnWatchdogRetryPolicyEvent;
         lifecycleGate.Dispose();
     }
 
@@ -521,11 +772,23 @@ public sealed class SessionRuntime : IDisposable
                 return;
             }
 
-            var lastError = NknRuntimeDiagnostics.Snapshot().LastError;
-            var message = UserErrorMapper.IsNknStartFailure(lastError)
+            var nknSnapshot = NknRuntimeDiagnostics.Snapshot();
+            var lastError = nknSnapshot.LastError;
+            var failure = TransportFailureMapper.FromSignals(
+                lastError,
+                lastDisconnectReason: nknSnapshot.LastDisconnectReason,
+                fallbackMessage: "Connection lost.");
+
+            if (ShouldQuietlyRecoverHelpeeHostStartFailure(failure, code) &&
+                TryScheduleQuietHelpeeRehost(code, "host_start_failed_rehost"))
+            {
+                LogTransportFailure(failure, "host_start_failed_recovering");
+                return;
+            }
+
+            var message = failure.Category == TransportFailureCategory.BridgeStartFailure && UserErrorMapper.IsNknStartFailure(lastError)
                 ? UserErrorMapper.NknStartFailedReinstall()
-                : UserErrorMapper.HelpeeHostStartFailure();
-            var failure = TransportFailureMapper.FromSignals(lastError, lastDisconnectReason: NknRuntimeDiagnostics.Snapshot().LastDisconnectReason, fallbackMessage: message);
+                : FailureCopyMap.For(failure.Category).Message;
             TransitionTo(TransportState.Failed, "host_start_failed");
             SetState(SessionRuntimeState.Disconnected, message);
             LogTransportFailure(failure, "host_start_failed");
@@ -572,6 +835,8 @@ public sealed class SessionRuntime : IDisposable
             }
 
             chatService.DetachTransport();
+            ClearActiveConnectAttempt();
+            ClearActiveSession();
 
             if (oldCts is not null)
             {
@@ -742,8 +1007,34 @@ public sealed class SessionRuntime : IDisposable
         }
     }
 
+    private bool IsFromCurrentTransport(object? sender)
+    {
+        if (sender is null)
+        {
+            return true;
+        }
+
+        return ReferenceEquals(sender, transport);
+    }
+
+    private bool IsKnownBridgeEventSender(object? sender)
+    {
+        if (sender is null)
+        {
+            return true;
+        }
+
+        return ReferenceEquals(sender, transport) || ReferenceEquals(sender, cachedBridgeTransport);
+    }
+
     private void OnIncomingJoinRequest(object? sender, IncomingJoinRequestEventArgs e)
     {
+        if (!IsFromCurrentTransport(sender))
+        {
+            _ = e.RejectAsync();
+            return;
+        }
+
         if (disposed || resetInProgress)
         {
             _ = e.RejectAsync();
@@ -765,6 +1056,11 @@ public sealed class SessionRuntime : IDisposable
 
     private void OnTransportApproved(object? sender, EventArgs e)
     {
+        if (!IsFromCurrentTransport(sender))
+        {
+            return;
+        }
+
         SessionTimeline.Record("Approved");
         TransitionTo(TransportState.Connected, "transport_approved");
         SetState(SessionRuntimeState.Connected, "Connected");
@@ -773,6 +1069,11 @@ public sealed class SessionRuntime : IDisposable
 
     private void OnTransportRejected(object? sender, EventArgs e)
     {
+        if (!IsFromCurrentTransport(sender))
+        {
+            return;
+        }
+
         pendingJoinRequest = null;
         SessionTimeline.Record("Rejected");
         TransitionTo(TransportState.Failed, "transport_rejected");
@@ -782,8 +1083,32 @@ public sealed class SessionRuntime : IDisposable
 
     private void OnTransportDisconnected(object? sender, EventArgs e)
     {
+        if (!IsFromCurrentTransport(sender))
+        {
+            return;
+        }
+
         if (disposed || resetInProgress || remoteSessionEndHandling || sessionCts?.IsCancellationRequested == true)
         {
+            return;
+        }
+
+        // A transport-level disconnect often follows an explicit SessionEnd envelope.
+        // In that case the user-facing state/message was already handled in OnRemoteSessionEnded.
+        // Do not clear the remote-end marker or overwrite the helper UI with a generic error.
+        if (lastDisconnectWasRemoteEnd)
+        {
+            Disconnected?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        // Helpee idle hosting should recover quietly if the underlying transport/bridge drops.
+        // Do not surface this as "Connection lost." while simply waiting for a helper.
+        if (role == SessionRuntimeRole.Helpee &&
+            state == SessionRuntimeState.Waiting &&
+            currentCode is SessionCode codeToRehost)
+        {
+            TryScheduleQuietHelpeeRehost(codeToRehost, "transport_disconnected_rehost");
             return;
         }
 
@@ -794,6 +1119,7 @@ public sealed class SessionRuntime : IDisposable
 
         if (shouldFail)
         {
+            lastDisconnectWasRemoteEnd = false;
             pendingJoinRequest = null;
             SessionTimeline.Record("Disconnected", "connection_lost");
             var snapshot = NknRuntimeDiagnostics.Snapshot();
@@ -811,12 +1137,18 @@ public sealed class SessionRuntime : IDisposable
 
     private void OnRemoteSessionEnded(object? sender, EventArgs e)
     {
+        if (!IsFromCurrentTransport(sender))
+        {
+            return;
+        }
+
         if (disposed || resetInProgress || remoteSessionEndHandling)
         {
             return;
         }
 
         remoteSessionEndHandling = true;
+        lastDisconnectWasRemoteEnd = true;
 
         var message = role switch
         {
@@ -825,7 +1157,7 @@ public sealed class SessionRuntime : IDisposable
             _ => "The session ended."
         };
 
-        _ = Task.Run(async () =>
+        RunCountedBackgroundTask(async () =>
         {
             try
             {
@@ -845,9 +1177,74 @@ public sealed class SessionRuntime : IDisposable
         });
     }
 
+    private bool ShouldQuietlyRecoverHelpeeHostStartFailure(TransportFailure failure, SessionCode code)
+    {
+        if (role != SessionRuntimeRole.Helpee)
+        {
+            return false;
+        }
+
+        if (currentCode is null || currentCode.Value.Digits != code.Digits)
+        {
+            return false;
+        }
+
+        // Host startup can fail while a previous disconnect/reset/rehost callback is still
+        // settling UI state. Keep helpee recovery quiet unless a real interactive session is
+        // in progress or approval is currently pending.
+        if (state is SessionRuntimeState.Connected or SessionRuntimeState.IncomingJoinRequest)
+        {
+            return false;
+        }
+
+        return failure.IsTransient || failure.Category is
+            TransportFailureCategory.BridgeUnresponsive or
+            TransportFailureCategory.UnexpectedProcessExit or
+            TransportFailureCategory.BridgeCrashed or
+            TransportFailureCategory.UserCancelled;
+    }
+
+    private bool TryScheduleQuietHelpeeRehost(SessionCode codeToRehost, string reason)
+    {
+        if (Interlocked.Exchange(ref quietHelpeeRehostInProgress, 1) != 0)
+        {
+            return false;
+        }
+
+        LocalOperationalLog.Info(
+            "Session",
+            $"event={reason}; role=Helpee; code={codeToRehost.Digits}; attempt={connectAttempt}; transport={GetCurrentTransportKind()}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+
+        ActiveRuntimeCounters.IncWatchdogs();
+        RunCountedBackgroundTask(async () =>
+        {
+            try
+            {
+                await ResetAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
+                await StartHelpeeAsync(codeToRehost, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                // If quiet recovery fails, the normal start path / subsequent disconnects will surface UI state.
+            }
+            finally
+            {
+                Interlocked.Exchange(ref quietHelpeeRehostInProgress, 0);
+            }
+        });
+
+        return true;
+    }
+
     private void OnBridgeLifecycle(object? sender, BridgeLifecycleEvent e)
     {
-        if (e.Kind == BridgeLifecycleEventKind.Ready &&
+        if (!IsKnownBridgeEventSender(sender))
+        {
+            return;
+        }
+
+        if (ReferenceEquals(sender, transport) &&
+            e.Kind == BridgeLifecycleEventKind.Ready &&
             transportState == TransportState.BridgeStarting)
         {
             TransitionTo(TransportState.BridgeReady, "bridge_ready");
@@ -875,6 +1272,13 @@ public sealed class SessionRuntime : IDisposable
         LocalOperationalLog.Info(
             "Session",
             $"event={eventName}; start_mode={(string.IsNullOrWhiteSpace(startMode) ? "(none)" : startMode)}; pid={(e.Pid?.ToString() ?? "(none)")}; ready_time_ms={(e.ReadyTimeMs?.ToString("F2") ?? "(none)")}; ping_rtt_ms={(e.PingRttMs?.ToString("F2") ?? "(none)")}; uptime_ms={(e.UptimeMs?.ToString("F2") ?? "(none)")}; exit_code={(e.ExitCode?.ToString() ?? "(none)")}; exit_reason={(string.IsNullOrWhiteSpace(exitReason) ? "(none)" : exitReason)}; attempt={connectAttempt}; transport={transportKind}; bridge_reuse_mode={GetBridgeReuseModeForLog()}; run_id={GetRunIdForLog()}; session_id={sessionIdForLog}; scenario={GetScenarioForLog()}");
+
+        if (e.Kind == BridgeLifecycleEventKind.Ready &&
+            e.StartMode == BridgeStartMode.Cold &&
+            e.ReadyTimeMs.HasValue)
+        {
+            NknRuntimeDiagnostics.RecordFirstColdStart(e.ReadyTimeMs.Value, DateTimeOffset.UtcNow);
+        }
 
         telemetrySink.OnBridgeLifecycle(new BridgeLifecycleTelemetryEvent(
             eventName,
@@ -978,6 +1382,7 @@ public sealed class SessionRuntime : IDisposable
         transportStateEntryTimestamps[newState] = Stopwatch.GetTimestamp();
         HandleTimingAfterStateChange(newState);
         UpdateWatchdogForState(newState, reason);
+        UpdateTransientStatusForTransportState(newState);
         LocalOperationalLog.Info(
             "Session",
             $"event=transport_state_changed; from={previous}; to={newState}; reason={reason}; ex={ex?.GetType().Name ?? "(none)"}; attempt={connectAttempt}; transport={GetCurrentTransportKind()}; bridge_reuse_mode={GetBridgeReuseModeForLog()}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
@@ -991,6 +1396,62 @@ public sealed class SessionRuntime : IDisposable
             connectAttempt,
             GetCurrentTransportKind(),
             GetSessionIdForLog()));
+    }
+
+    private void UpdateTransientStatusForTransportState(TransportState stateValue)
+    {
+        switch (stateValue)
+        {
+            case TransportState.BridgeStarting:
+            case TransportState.BridgeReady:
+            case TransportState.TransportInitializing:
+            case TransportState.Connecting:
+            case TransportState.Handshake:
+                SetTransientStatus(
+                    isVisible: true,
+                    text: connectAttempt > 0 ? $"Connecting… (attempt {connectAttempt})" : "Connecting…",
+                    canCancel: true);
+                break;
+            case TransportState.Reconnecting:
+                SetTransientStatus(
+                    isVisible: true,
+                    text: connectAttempt > 0 ? $"Reconnecting… (attempt {connectAttempt})" : "Reconnecting…",
+                    canCancel: true);
+                break;
+            default:
+                SetTransientStatus(isVisible: false, text: string.Empty, canCancel: false);
+                break;
+        }
+    }
+
+    private void SetTransientStatus(bool isVisible, string text, bool canCancel)
+    {
+        text ??= string.Empty;
+        var changed =
+            transientStatusVisible != isVisible ||
+            !string.Equals(transientStatusText, text, StringComparison.Ordinal) ||
+            transientStatusCanCancel != canCancel;
+
+        transientStatusVisible = isVisible;
+        transientStatusText = text;
+        transientStatusCanCancel = canCancel;
+
+        if (!changed)
+        {
+            return;
+        }
+
+        RaiseTransientStatusChanged();
+    }
+
+    private void RaiseTransientStatusChanged()
+    {
+        TransientStatusChanged?.Invoke(
+            this,
+            new SessionRuntimeTransientStatusChangedEventArgs(
+                transientStatusVisible,
+                transientStatusText,
+                transientStatusCanCancel));
     }
 
     internal bool TryTransitionTransportStateForTests(TransportState newState, string reason)
@@ -1036,7 +1497,7 @@ public sealed class SessionRuntime : IDisposable
             return;
         }
 
-        var timeout = GetWatchdogTimeout(newState);
+        var timeout = GetWatchdogTimeout(newState, reason);
         if (timeout is null || timeout.Value <= TimeSpan.Zero)
         {
             return;
@@ -1072,11 +1533,24 @@ public sealed class SessionRuntime : IDisposable
                     "Session",
                     $"event=transport_watchdog_internal_error; state={newState}; ex={watchdogEx.GetType().Name}; attempt={attempt}; transport={GetCurrentTransportKind()}; run_id={GetRunIdForLog()}; session_id={sessionIdSnapshot}; scenario={GetScenarioForLog()}");
             }
+            finally
+            {
+                ActiveRuntimeCounters.DecWatchdogs();
+            }
         });
     }
 
-    private TimeSpan? GetWatchdogTimeout(TransportState state)
+    private TimeSpan? GetWatchdogTimeout(TransportState state, string reason)
     {
+        // Helpee hosting can sit in "Connecting" indefinitely while waiting for a helper.
+        // NKN may enter Connecting first from "bridge_ready", then again from "host_start".
+        // Do not treat helpee's waiting-host state as a stuck connect timeout.
+        if (state == TransportState.Connecting &&
+            role == SessionRuntimeRole.Helpee)
+        {
+            return null;
+        }
+
         return state switch
         {
             TransportState.BridgeStarting => watchdogOptions.BridgeStartingTimeout,
@@ -1118,6 +1592,45 @@ public sealed class SessionRuntime : IDisposable
         }
     }
 
+    private static async Task<bool> TryPingBridgeForExternalRecoveryAsync(
+        ISignalingTransport? activeTransport,
+        ISignalingTransport? cachedTransport,
+        CancellationToken ct)
+    {
+        static async Task<bool> TryPingAsync(ISignalingTransport? candidate, CancellationToken token)
+        {
+            if (candidate is not NknSignalingTransport nknTransport)
+            {
+                return false;
+            }
+
+            try
+            {
+                return await nknTransport.TryPingBridgeHealthAsync(token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        if (await TryPingAsync(activeTransport, ct).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        if (!ReferenceEquals(activeTransport, cachedTransport))
+        {
+            return await TryPingAsync(cachedTransport, ct).ConfigureAwait(false);
+        }
+
+        return false;
+    }
+
     private void StartCachedBridgeIdleTimeout()
     {
         CancelCachedBridgeIdleTimeout();
@@ -1131,7 +1644,8 @@ public sealed class SessionRuntime : IDisposable
         var generation = Interlocked.Increment(ref cachedBridgeIdleGeneration);
         cachedBridgeIdleCts = cts;
 
-        _ = Task.Run(async () =>
+        ActiveRuntimeCounters.IncRetryTimers();
+        RunCountedBackgroundTask(async () =>
         {
             try
             {
@@ -1147,6 +1661,10 @@ public sealed class SessionRuntime : IDisposable
                 LocalOperationalLog.Error(
                     "Session",
                     $"event=bridge_idle_timeout_internal_error; ex={ex.GetType().Name}; attempt={connectAttempt}; transport={GetCurrentTransportKind()}; bridge_reuse_mode={GetBridgeReuseModeForLog()}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+            }
+            finally
+            {
+                ActiveRuntimeCounters.DecRetryTimers();
             }
         });
     }
@@ -1271,6 +1789,16 @@ public sealed class SessionRuntime : IDisposable
                 return;
             }
 
+            // Helpee waiting for a helper is intentionally long-lived. If a connecting
+            // watchdog was armed due to transition ordering/race, suppress the false
+            // timeout instead of surfacing "Connection lost.".
+            if (expectedState == TransportState.Connecting &&
+                role == SessionRuntimeRole.Helpee &&
+                state == SessionRuntimeState.Waiting)
+            {
+                return;
+            }
+
             var failure = CreateWatchdogFailure(expectedState, timeout);
             LocalOperationalLog.Error(
                 "Session",
@@ -1300,12 +1828,52 @@ public sealed class SessionRuntime : IDisposable
                 LocalOperationalLog.Info(
                     "Session",
                     $"event=transport_watchdog_retry_requested; attempt={connectAttempt}; transport={GetCurrentTransportKind()}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
-                await ResetAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
+                await watchdogRetryPolicy.ExecuteAsync(
+                    async (_, retryCt) =>
+                    {
+                        retryCt.ThrowIfCancellationRequested();
+                        await ResetAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
+                    },
+                    resetBetweenAttemptsAsync: null,
+                    CancellationToken.None).ConfigureAwait(false);
             }
             catch
             {
                 // Best-effort; leave Failed state if reset fails.
             }
+        }
+    }
+
+    private void OnWatchdogRetryPolicyEvent(object? sender, RetryEvent e)
+    {
+        var kind = e.Kind switch
+        {
+            RetryEventKind.AttemptStart => "retry_attempt_start",
+            RetryEventKind.AttemptScheduled => "retry_attempt_scheduled",
+            RetryEventKind.AttemptSuccess => "retry_attempt_success",
+            RetryEventKind.FinalFail => "retry_attempt_final_fail",
+            _ => "retry_attempt"
+        };
+
+        LocalOperationalLog.Info(
+            "Session",
+            $"event={kind}; retry_attempt={e.Attempt}; retry_max_attempts={e.MaxAttempts}; delay_ms={(e.Delay?.TotalMilliseconds.ToString("F0") ?? "(none)")}; reason={(string.IsNullOrWhiteSpace(e.Reason) ? "(none)" : e.Reason)}; ex={(string.IsNullOrWhiteSpace(e.ExceptionType) ? "(none)" : e.ExceptionType)}; attempt={connectAttempt}; transport={GetCurrentTransportKind()}; bridge_reuse_mode={GetBridgeReuseModeForLog()}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+
+        switch (e.Kind)
+        {
+            case RetryEventKind.AttemptStart:
+                SetTransientStatus(true, $"Reconnecting… (attempt {e.Attempt})", canCancel: true);
+                break;
+            case RetryEventKind.AttemptScheduled:
+                var nextSeconds = Math.Max(1, (int)Math.Ceiling((e.Delay ?? TimeSpan.Zero).TotalSeconds));
+                SetTransientStatus(true, $"Reconnecting… (attempt {e.Attempt}, next retry in {nextSeconds}s)", canCancel: true);
+                break;
+            case RetryEventKind.AttemptSuccess:
+                SetTransientStatus(true, "Reconnecting…", canCancel: true);
+                break;
+            case RetryEventKind.FinalFail:
+                SetTransientStatus(false, string.Empty, canCancel: false);
+                break;
         }
     }
 
@@ -1355,6 +1923,10 @@ public sealed class SessionRuntime : IDisposable
 
     private void BeginConnectAttempt(SessionRuntimeRole nextRole, SessionCode code)
     {
+        lastDisconnectWasRemoteEnd = false;
+        MarkActiveSession();
+        MarkActiveConnectAttempt();
+
         var key = $"{nextRole}:{code.Digits}";
         if (!string.Equals(attemptSessionKey, key, StringComparison.Ordinal))
         {
@@ -1521,6 +2093,14 @@ public sealed class SessionRuntime : IDisposable
     {
         state = nextState;
         statusText = nextStatusText;
+
+        // Helpee hosting ("Waiting for helper…") should never be subject to a connect
+        // watchdog. Cancel any stale watchdog that may have been armed before state settled.
+        if (role == SessionRuntimeRole.Helpee && nextState == SessionRuntimeState.Waiting)
+        {
+            CancelWatchdog();
+        }
+
         LocalOperationalLog.Info(
             "Session",
             $"state={state}; role={role}; status={SanitizeStatusForLog(statusText)}");

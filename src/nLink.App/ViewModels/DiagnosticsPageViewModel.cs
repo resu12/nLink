@@ -4,28 +4,25 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Threading;
-using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.Input;
 using NLink.App.Configuration;
-using NLink.App.Threading;
 using NLink.App.Services;
-using NLink.Core.Chat;
 using NLink.Core;
+using NLink.Core.Chat;
 using NLink.Core.Logging;
 using NLink.Core.Metrics;
 using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
 
-public sealed class DiagnosticsPageViewModel : ViewModelBase
+public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 {
-    private CancellationTokenSource? copyFeedbackCts;
-    private string copyFeedbackText = string.Empty;
-    private bool showCopyFeedback;
+    private readonly InlineTransientText copyFeedback = new();
     private readonly string bugReportUrl;
     private readonly DiagnosticsSnapshot runtimeDiagnosticsSnapshot;
     private readonly MetricsRegistry? metricsRegistry;
+    private readonly ResourceRuntimeTracker? resourceRuntimeTracker;
+    private readonly HangReportService? hangReportService;
     private readonly Func<DateTimeOffset> nowProvider;
     private readonly Func<string> diagnosticsExportRootProvider;
 
@@ -35,6 +32,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
         ShareMessageConfig? linksConfig = null,
         SessionRuntime? sessionRuntime = null,
         MetricsRegistry? metricsRegistry = null,
+        ResourceRuntimeTracker? resourceRuntimeTracker = null,
+        HangReportService? hangReportService = null,
         Func<DateTimeOffset>? nowProvider = null,
         Func<string>? diagnosticsExportRootProvider = null)
     {
@@ -42,6 +41,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
         BackCommand = new RelayCommand(backAction);
         bugReportUrl = linksConfig.BugReportUrl;
         this.metricsRegistry = metricsRegistry;
+        this.resourceRuntimeTracker = resourceRuntimeTracker;
+        this.hangReportService = hangReportService;
         this.nowProvider = nowProvider ?? DefaultNowProvider;
         this.diagnosticsExportRootProvider = diagnosticsExportRootProvider ?? DefaultDiagnosticsExportRootProvider;
 
@@ -97,11 +98,19 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
         AcksReceived = nknDiagnostics.AcksReceived.ToString();
         AcksIgnoredSourceMismatch = nknDiagnostics.AcksIgnoredSourceMismatch.ToString();
         LastDisconnectReason = nknDiagnostics.LastDisconnectReason;
+        FirstColdStartObserved = nknDiagnostics.FirstColdStartObserved ? "Yes" : "No";
+        FirstColdStartMs = nknDiagnostics.FirstColdStartObserved && nknDiagnostics.FirstColdStartMs >= 0
+            ? nknDiagnostics.FirstColdStartMs.ToString("F2")
+            : "(none)";
+        FirstColdStartRecordedUtc = nknDiagnostics.FirstColdStartUtcTicks > 0
+            ? new DateTimeOffset(nknDiagnostics.FirstColdStartUtcTicks, TimeSpan.Zero).ToString("u")
+            : "(none)";
         ChatSent = counters.ChatSent.ToString();
         ChatReceived = counters.ChatReceived.ToString();
         DecryptFailed = counters.ChatDecryptFailed.ToString();
         RecentConnectionAttemptsText = BuildRecentConnectionAttemptsText(SessionReliabilityLog.SnapshotRecent(10));
         CopyReliabilityLogCommand = new RelayCommand(RequestCopyReliabilityLog);
+        SaveHangReportCommand = new RelayCommand(SaveHangReport);
         ExportMetricsJsonCommand = new RelayCommand(ExportMetricsJson);
         OpenLogsFolderCommand = new RelayCommand(RequestOpenLogsFolder);
         ReportBugCommand = new RelayCommand(RequestOpenBugReport);
@@ -189,24 +198,22 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
     public string AcksIgnoredSourceMismatch { get; }
 
     public string LastDisconnectReason { get; }
+    public string FirstColdStartObserved { get; }
+    public string FirstColdStartMs { get; }
+    public string FirstColdStartRecordedUtc { get; }
 
     public string RecentConnectionAttemptsTitle => "Recent connection attempts";
 
     public string RecentConnectionAttemptsText { get; }
 
     public bool ShowCopyFeedback
-    {
-        get => showCopyFeedback;
-        private set => SetProperty(ref showCopyFeedback, value);
-    }
+        => copyFeedback.IsVisible;
 
-    public string CopyFeedbackText
-    {
-        get => copyFeedbackText;
-        private set => SetProperty(ref copyFeedbackText, value);
-    }
+    public string CopyFeedbackText => copyFeedback.Text;
+    public InlineTransientText CopyFeedback => copyFeedback;
 
     public IRelayCommand CopyReliabilityLogCommand { get; }
+    public IRelayCommand SaveHangReportCommand { get; }
     public IRelayCommand ExportMetricsJsonCommand { get; }
 
     public IRelayCommand OpenLogsFolderCommand { get; }
@@ -221,15 +228,16 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
 
     public event EventHandler<string>? OpenBugReportRequested;
     public event EventHandler<string>? OpenMetricsExportFolderRequested;
+    public event EventHandler<string>? OpenHangReportFolderRequested;
 
     public void NotifyCopySucceeded()
     {
-        _ = ShowCopyFeedbackAsync("Copied", success: true);
+        copyFeedback.Show("Copied");
     }
 
     public void NotifyCopyFailed()
     {
-        _ = ShowCopyFeedbackAsync("Could not copy", success: false);
+        copyFeedback.Show("Could not copy");
     }
 
     private static string BuildLastBridgeExitText(int exitCode, string reason)
@@ -259,51 +267,46 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
         OpenBugReportRequested?.Invoke(this, bugReportUrl);
     }
 
+    private void SaveHangReport()
+    {
+        try
+        {
+            if (hangReportService is null)
+            {
+                copyFeedback.Show("Hang report unavailable");
+                return;
+            }
+
+            var result = hangReportService.Capture(
+                HangReportTriggerKind.ManualDiagnostics,
+                "manual_diagnostics_page",
+                diagnosticsTextOverride: BuildDiagnosticsCopyText());
+            OpenHangReportFolderRequested?.Invoke(this, result.FolderPath);
+            copyFeedback.Show("Hang report saved");
+        }
+        catch
+        {
+            copyFeedback.Show("Could not save hang report");
+        }
+    }
+
     private void ExportMetricsJson()
     {
         try
         {
             var outputPath = ExportMetricsJsonToFile();
             OpenMetricsExportFolderRequested?.Invoke(this, Path.GetDirectoryName(outputPath) ?? diagnosticsExportRootProvider());
-            _ = ShowCopyFeedbackAsync("Metrics exported", success: true);
+            copyFeedback.Show("Metrics exported");
         }
         catch
         {
-            _ = ShowCopyFeedbackAsync("Could not export metrics", success: false);
+            copyFeedback.Show("Could not export metrics");
         }
     }
 
-    private async Task ShowCopyFeedbackAsync(string text, bool success)
+    public void Dispose()
     {
-        copyFeedbackCts?.Cancel();
-        copyFeedbackCts?.Dispose();
-        copyFeedbackCts = new CancellationTokenSource();
-        var ct = copyFeedbackCts.Token;
-
-        await UiThreadDispatch.RunAsync(() =>
-        {
-            CopyFeedbackText = text;
-            ShowCopyFeedback = true;
-        });
-
-        try
-        {
-            await Task.Delay(TimeSpan.FromSeconds(2), ct);
-        }
-        catch (OperationCanceledException)
-        {
-            return;
-        }
-
-        if (ct.IsCancellationRequested)
-        {
-            return;
-        }
-
-        await UiThreadDispatch.RunAsync(() =>
-        {
-            ShowCopyFeedback = false;
-        });
+        copyFeedback.Dispose();
     }
 
     internal string BuildDiagnosticsCopyTextForTests() => BuildDiagnosticsCopyText();
@@ -354,6 +357,9 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
             $"acks_received: {AcksReceived}",
             $"acks_ignored_source_mismatch: {AcksIgnoredSourceMismatch}",
             $"last_disconnect_reason: {LastDisconnectReason}",
+            $"bridge_first_cold_start_observed: {FirstColdStartObserved}",
+            $"bridge_first_cold_start_ms: {FirstColdStartMs}",
+            $"bridge_first_cold_start_recorded_utc: {FirstColdStartRecordedUtc}",
             string.Empty,
             "Counters",
             "--------",
@@ -374,6 +380,10 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
                 LastHandshakeDurationMs,
                 LastBridgeStartDurationMs),
             string.Empty,
+            "Resource snapshot",
+            "--------------",
+            BuildCompactResourceSummary(),
+            string.Empty,
             "Errors",
             "------",
             $"last_failure_category: {LastFailureCategory}",
@@ -388,7 +398,93 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
             RecentConnectionAttemptsText
         };
 
-        return SensitiveDataRedactor.Redact(string.Join(Environment.NewLine, lines));
+        return DiagnosticsRedactor.Redact(string.Join(Environment.NewLine, lines));
+    }
+
+    private string BuildCompactResourceSummary()
+    {
+        var last = resourceRuntimeTracker?.GetLastSnapshot();
+        var peak = resourceRuntimeTracker?.GetPeakSnapshot();
+        var latestResourceSummary = resourceRuntimeTracker?.TryReadLatestResourceSummary();
+        var latestLeakSummary = resourceRuntimeTracker?.TryReadLatestLeakCheckSummary();
+
+        var lines = new List<string>();
+        if (last is null)
+        {
+            lines.Add("last_snapshot: (none)");
+        }
+        else
+        {
+            lines.Add($"last_snapshot_utc: {last.TimestampUtc:u}");
+            lines.Add($"app_last_working_set_mb: {last.App.WorkingSetMB:F2}");
+            lines.Add($"app_last_private_bytes_mb: {last.App.PrivateBytesMB:F2}");
+            lines.Add($"app_last_threads: {last.App.ThreadCount}");
+            lines.Add($"app_last_handles: {last.App.HandleCount}");
+            lines.Add($"app_last_cpu_pct: {last.App.CpuPercent:F2}");
+            if (last.Bridge is not null)
+            {
+                lines.Add($"bridge_last_working_set_mb: {last.Bridge.WorkingSetMB:F2}");
+                lines.Add($"bridge_last_private_bytes_mb: {last.Bridge.PrivateBytesMB:F2}");
+                lines.Add($"bridge_last_threads: {last.Bridge.ThreadCount}");
+                lines.Add($"bridge_last_handles: {last.Bridge.HandleCount}");
+                lines.Add($"bridge_last_cpu_pct: {last.Bridge.CpuPercent:F2}");
+            }
+            else
+            {
+                lines.Add("bridge_last_snapshot: (not running)");
+            }
+
+            lines.Add($"active_sessions: {last.ActiveCounters.ActiveSessions}");
+            lines.Add($"active_connect_attempts: {last.ActiveCounters.ActiveConnectAttempts}");
+            lines.Add($"active_retry_timers: {last.ActiveCounters.ActiveRetryTimers}");
+            lines.Add($"active_watchdogs: {last.ActiveCounters.ActiveWatchdogs}");
+            lines.Add($"active_transport_tasks: {last.ActiveCounters.ActiveTransportTasks}");
+            lines.Add($"active_bridge_io_readers: {last.ActiveCounters.ActiveBridgeIoReaders}");
+        }
+
+        if (peak is not null)
+        {
+            lines.Add($"app_peak_working_set_mb_since_start: {peak.App.WorkingSetMB:F2}");
+            lines.Add($"app_peak_private_bytes_mb_since_start: {peak.App.PrivateBytesMB:F2}");
+            if (peak.Bridge is not null)
+            {
+                lines.Add($"bridge_peak_working_set_mb_since_start: {peak.Bridge.WorkingSetMB:F2}");
+                lines.Add($"bridge_peak_private_bytes_mb_since_start: {peak.Bridge.PrivateBytesMB:F2}");
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(latestResourceSummary))
+        {
+            lines.Add(string.Empty);
+            lines.Add("last_resource_benchmark_summary:");
+            lines.AddRange(TrimSummaryLines(latestResourceSummary!, 12));
+        }
+
+        if (!string.IsNullOrWhiteSpace(latestLeakSummary))
+        {
+            lines.Add(string.Empty);
+            lines.Add("last_leak_check_summary:");
+            lines.AddRange(TrimSummaryLines(latestLeakSummary!, 12));
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private static IEnumerable<string> TrimSummaryLines(string text, int maxLines)
+    {
+        var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        for (var i = 0; i < lines.Length && i < maxLines; i++)
+        {
+            if (!string.IsNullOrWhiteSpace(lines[i]))
+            {
+                yield return lines[i];
+            }
+        }
+
+        if (lines.Length > maxLines)
+        {
+            yield return "...";
+        }
     }
 
     private string ExportMetricsJsonToFile()
@@ -449,8 +545,22 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase
         AppendHistogramSummary(lines, snapshot, "transport_connect_duration_ms");
         AppendHistogramSummary(lines, snapshot, "transport_handshake_duration_ms");
         AppendHistogramSummary(lines, snapshot, "bridge_start_duration_ms");
+        AppendGaugeSummary(lines, snapshot, "bridge_cold_start_ms");
 
         return string.Join(Environment.NewLine, lines);
+    }
+
+    private static void AppendGaugeSummary(List<string> lines, MetricsSnapshot snapshot, string gaugeName)
+    {
+        var entries = snapshot.Gauges.Where(g => g.Name == gaugeName).ToArray();
+        if (entries.Length == 0)
+        {
+            lines.Add($"{gaugeName}: (none)");
+            return;
+        }
+
+        var value = entries.Max(g => g.Value);
+        lines.Add($"{gaugeName}: {value:F2}");
     }
 
     private static void AppendHistogramSummary(List<string> lines, MetricsSnapshot snapshot, string histogramName)

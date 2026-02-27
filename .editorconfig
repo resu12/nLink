@@ -1,0 +1,37 @@
+root = true
+
+[*.{cs,csx}]
+indent_style = space
+indent_size = 4
+tab_width = 4
+end_of_line = crlf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Keep analyzer/style adoption low-noise for now (warn/suggestion only),
+# except unused usings after cleanup.
+dotnet_diagnostic.IDE0005.severity = error
+
+# Formatting/style preferences (non-blocking).
+dotnet_sort_system_directives_first = true:suggestion
+dotnet_separate_import_directive_groups = false:suggestion
+dotnet_style_qualification_for_field = false:suggestion
+dotnet_style_qualification_for_property = false:suggestion
+dotnet_style_qualification_for_method = false:suggestion
+dotnet_style_qualification_for_event = false:suggestion
+csharp_style_var_for_built_in_types = true:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+csharp_style_var_elsewhere = true:suggestion
+csharp_new_line_before_open_brace = all
+csharp_indent_case_contents = true
+csharp_indent_switch_labels = true
+csharp_preserve_single_line_statements = true
+csharp_preserve_single_line_blocks = true
+
+[src/**/*.cs]
+indent_style = space
+indent_size = 4
+
+[tests/**/*.cs]
+indent_style = space
+indent_size = 4

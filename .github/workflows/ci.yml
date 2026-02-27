@@ -40,8 +40,23 @@ jobs:
       - name: Build (Release)
         run: dotnet build nLink.sln -c Release --no-restore
 
+      - name: Format check (non-blocking)
+        id: format_verify
+        continue-on-error: true
+        run: dotnet format nLink.sln --verify-no-changes --no-restore
+
+      - name: Format check guidance
+        if: ${{ always() && steps.format_verify.outcome == 'failure' }}
+        run: |
+          echo "dotnet format --verify-no-changes found formatting drift."
+          echo "Run: dotnet format nLink.sln"
+          echo "This is non-blocking for now."
+
       - name: Smoke tests
         run: dotnet test -c Release --filter Category=Smoke --no-build --logger "trx;LogFileName=smoke-results.trx"
+
+      - name: Reliability gate (DevLocal benchmark, fast)
+        run: dotnet run -c Release --no-build --project src/nLink.App -- --bench --cycles 20 --delay-ms 0 --transport devlocal --bridge-reuse-mode persession --reliability-gate
 
       - name: Upload smoke test results
         uses: actions/upload-artifact@v4
@@ -49,6 +64,14 @@ jobs:
         with:
           name: smoke-test-results
           path: '**/smoke-results.trx'
+          if-no-files-found: ignore
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-artifacts
+          path: artifacts/bench/**
           if-no-files-found: ignore
 
       - name: GUI smoke tests (optional)

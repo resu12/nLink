@@ -51,21 +51,15 @@
                 <Border Classes="appCard"
                         Padding="24">
                     <StackPanel Spacing="16">
-                        <StackPanel Spacing="8"
-                                    HorizontalAlignment="Center"
-                                    IsVisible="{Binding IsStartupBlocked}">
-                            <TextBlock Classes="appMuted"
-                                       Text="{Binding ConnectionStatus}"
-                                       FontSize="16"
-                                       TextAlignment="Center"
-                                       HorizontalAlignment="Center"
-                                       MaxWidth="560"
-                                       TextWrapping="Wrap"/>
-                            <Button Classes="linkButton"
-                                    Content="Open diagnostics"
-                                    Command="{Binding OpenDiagnosticsCommand}"
-                                    HorizontalAlignment="Center"/>
-                        </StackPanel>
+                        <views:StatusBanner Status="{Binding BannerStatus}"
+                                            ForceVisible="{Binding ShowStatusBanner}"
+                                            CopyDiagnosticsCommand="{Binding StatusBannerCopyDiagnosticsCommand}"
+                                            CancelCommand="{Binding StatusBannerCancelCommand}"
+                                            FailureCategory="{Binding StatusBannerFailureCategory}"
+                                            SessionCorrelationId="{Binding StatusBannerSessionCorrelationId}"
+                                            LastConnectDuration="{Binding StatusBannerLastConnectDuration}"
+                                            LastHandshakeDuration="{Binding StatusBannerLastHandshakeDuration}"
+                                            BridgeState="{Binding StatusBannerBridgeState}"/>
 
                         <!-- State A: waiting/hosting -->
                         <StackPanel Spacing="16"
@@ -101,6 +95,13 @@
                                         HorizontalAlignment="Stretch"/>
                             </Grid>
 
+                            <TextBlock Classes="appMuted"
+                                       Text="{Binding CopyFeedback.Text}"
+                                       FontSize="14"
+                                       TextAlignment="Center"
+                                       HorizontalAlignment="Center"
+                                       IsVisible="{Binding CopyFeedback.IsVisible}"/>
+
                             <Button Classes="appButton secondaryButton action"
                                     Content="Retry"
                                     Command="{Binding RetryCommand}"
@@ -111,7 +112,8 @@
                                        Text="{Binding StatusLineText}"
                                        FontSize="15"
                                        TextAlignment="Center"
-                                       HorizontalAlignment="Center"/>
+                                       HorizontalAlignment="Center"
+                                       IsVisible="{Binding ShowWaitingStatusLine}"/>
                         </StackPanel>
 
                         <!-- State B: incoming request -->

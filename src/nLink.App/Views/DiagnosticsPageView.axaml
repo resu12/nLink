@@ -198,52 +198,64 @@
 
                 <StackPanel Spacing="8"
                             MaxWidth="820">
-                    <Grid ColumnDefinitions="*,*,*,*,*"
-                          ColumnSpacing="12">
-                        <Button Grid.Column="0"
-                                AutomationProperties.AutomationId="Diag.Copy"
+                    <WrapPanel HorizontalAlignment="Center">
+                        <Button AutomationProperties.AutomationId="Diag.Copy"
                                 Classes="appButton secondaryButton"
                                 Content="Copy diagnostics"
                                 Command="{Binding CopyReliabilityLogCommand}"
+                                MinWidth="170"
                                 Height="52"
-                                FontSize="18"/>
+                                FontSize="18"
+                                Margin="0,0,12,12"/>
 
-                        <Button Grid.Column="1"
-                                Classes="appButton secondaryButton"
+                        <Button Classes="appButton secondaryButton"
                                 Content="Export metrics JSON"
                                 Command="{Binding ExportMetricsJsonCommand}"
+                                MinWidth="190"
                                 Height="52"
-                                FontSize="18"/>
+                                FontSize="18"
+                                Margin="0,0,12,12"/>
 
-                        <Button Grid.Column="2"
-                                Classes="appButton secondaryButton"
+                        <Button Classes="appButton secondaryButton"
+                                Content="Save Hang Report"
+                                Command="{Binding SaveHangReportCommand}"
+                                MinWidth="190"
+                                Height="52"
+                                FontSize="18"
+                                Margin="0,0,12,12"/>
+
+                        <Button Classes="appButton secondaryButton"
                                 Content="Report a bug"
                                 Command="{Binding ReportBugCommand}"
+                                MinWidth="160"
                                 Height="52"
-                                FontSize="18"/>
+                                FontSize="18"
+                                Margin="0,0,12,12"/>
 
-                        <Button Grid.Column="3"
-                                AutomationProperties.AutomationId="Diag.OpenLogs"
+                        <Button AutomationProperties.AutomationId="Diag.OpenLogs"
                                 Classes="appButton secondaryButton"
                                 Content="Open logs folder"
                                 Command="{Binding OpenLogsFolderCommand}"
+                                MinWidth="180"
                                 Height="52"
-                                FontSize="18"/>
+                                FontSize="18"
+                                Margin="0,0,12,12"/>
 
-                        <Button Grid.Column="4"
-                                Classes="appButton secondaryButton"
+                        <Button Classes="appButton secondaryButton"
                                 Content="Back"
                                 Command="{Binding BackCommand}"
+                                MinWidth="140"
                                 Height="52"
-                                FontSize="18"/>
-                    </Grid>
+                                FontSize="18"
+                                Margin="0,0,12,12"/>
+                    </WrapPanel>
 
                     <TextBlock Classes="appMuted"
-                               Text="{Binding CopyFeedbackText}"
+                               Text="{Binding CopyFeedback.Text}"
                                FontSize="13"
                                HorizontalAlignment="Center"
                                TextAlignment="Center"
-                               IsVisible="{Binding ShowCopyFeedback}"/>
+                               IsVisible="{Binding CopyFeedback.IsVisible}"/>
                 </StackPanel>
             </StackPanel>
         </ScrollViewer>

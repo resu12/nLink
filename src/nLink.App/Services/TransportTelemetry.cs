@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Threading;
 using NLink.Core.Metrics;
 
 namespace NLink.App.Services;
@@ -82,6 +83,7 @@ public readonly record struct BridgeLifecycleTelemetryEvent(
 public sealed class MetricsTelemetrySink : ITransportTelemetrySink
 {
     private readonly MetricsRegistry metrics;
+    private int firstColdStartRecorded;
 
     public MetricsTelemetrySink(MetricsRegistry metrics)
     {
@@ -176,6 +178,28 @@ public sealed class MetricsTelemetrySink : ITransportTelemetrySink
                 failureCategory: evt.Category.ToString(),
                 bridgeReuseMode: evt.BridgeReuseMode).Inc();
         }
+
+        if (evt.Category is TransportFailureCategory.BridgeUnresponsive)
+        {
+            metrics.Counter(
+                "bridge_unresponsive_total",
+                transport: evt.Transport,
+                scenario: evt.Scenario,
+                failureCategory: evt.Category.ToString(),
+                bridgeReuseMode: evt.BridgeReuseMode).Inc();
+        }
+
+        if (evt.Category is TransportFailureCategory.HandshakeTimeout
+            or TransportFailureCategory.BridgeStartFailure
+            or TransportFailureCategory.BridgeUnresponsive)
+        {
+            metrics.Counter(
+                "state_stuck_count",
+                transport: evt.Transport,
+                scenario: evt.Scenario,
+                failureCategory: evt.Category.ToString(),
+                bridgeReuseMode: evt.BridgeReuseMode).Inc();
+        }
     }
 
     public void OnBridgeLifecycle(BridgeLifecycleTelemetryEvent evt)
@@ -214,6 +238,17 @@ public sealed class MetricsTelemetrySink : ITransportTelemetrySink
                         result: string.IsNullOrWhiteSpace(evt.StartMode) ? "unknown" : evt.StartMode,
                         bridgeReuseMode: evt.BridgeReuseMode)
                         .Observe(evt.ReadyTimeMs.Value);
+
+                    if (string.Equals(evt.StartMode, "cold", StringComparison.OrdinalIgnoreCase) &&
+                        Interlocked.CompareExchange(ref firstColdStartRecorded, 1, 0) == 0)
+                    {
+                        metrics.Gauge(
+                            "bridge_cold_start_ms",
+                            transport: evt.Transport,
+                            scenario: evt.Scenario,
+                            bridgeReuseMode: evt.BridgeReuseMode)
+                            .Set(evt.ReadyTimeMs.Value);
+                    }
                 }
                 if (evt.PingRttMs.HasValue)
                 {
@@ -241,6 +276,15 @@ public sealed class MetricsTelemetrySink : ITransportTelemetrySink
                         transport: evt.Transport,
                         scenario: evt.Scenario,
                         failureCategory: "BridgeCrashed").Inc();
+                }
+                else if (string.Equals(evt.ExitReason, "killed", StringComparison.OrdinalIgnoreCase))
+                {
+                    metrics.Counter(
+                        "bridge_killed_total",
+                        transport: evt.Transport,
+                        scenario: evt.Scenario,
+                        failureCategory: "BridgeKilled",
+                        bridgeReuseMode: evt.BridgeReuseMode).Inc();
                 }
                 metrics.Gauge(
                     "bridge_process_running",

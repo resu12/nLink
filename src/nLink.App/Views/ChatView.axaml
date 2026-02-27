@@ -141,11 +141,13 @@
               ColumnSpacing="12"
               VerticalAlignment="Center">
             <TextBox Grid.Column="0"
+                     x:Name="ChatInputTextBox"
                      AutomationProperties.AutomationId="Chat.Input"
                      Classes="chatInput"
                      Text="{Binding ChatDraft, Mode=TwoWay}"
                      Watermark="Type a message"
-                     KeyDown="ChatDraftTextBox_KeyDown"
+                     AcceptsReturn="True"
+                     TextWrapping="Wrap"
                      HorizontalAlignment="Stretch"
                      FontSize="16"/>
 

@@ -1,14 +1,8 @@
-using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
-using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
 using NLink.App;
 using NLink.App.Configuration;
 using NLink.App.Services;
@@ -17,6 +11,8 @@ using NLink.Core;
 using NLink.Core.Chat;
 using NLink.Core.Logging;
 using NLink.Core.Metrics;
+using NLink.Core.Resources;
+using NLink.Core.Retry;
 using NLink.Infra.DevLocal;
 using NLink.Infra.Nkn;
 
@@ -24,6 +20,107 @@ namespace NLink.SmokeTests;
 
 public class SmokeTests
 {
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task RetryPolicy_RetriesWithBoundedBackoff_AndTracksAttemptCounts()
+    {
+        var observedDelays = new List<TimeSpan>();
+        var events = new List<RetryEvent>();
+        var resets = 0;
+        var operationCalls = 0;
+
+        var policy = new RetryPolicy(
+            new RetryPolicyOptions(
+                MaxAttempts: 4,
+                InitialDelay: TimeSpan.FromMilliseconds(100),
+                MaxDelay: TimeSpan.FromMilliseconds(500),
+                JitterRatio: 0d),
+            delayAsync: (delay, _) =>
+            {
+                observedDelays.Add(delay);
+                return Task.CompletedTask;
+            });
+        policy.EventEmitted += (_, e) => events.Add(e);
+
+        var result = await policy.ExecuteAsync(
+            operationAsync: (_, _) =>
+            {
+                operationCalls++;
+                if (operationCalls < 3)
+                {
+                    throw new InvalidOperationException("retry_me");
+                }
+
+                return Task.CompletedTask;
+            },
+            resetBetweenAttemptsAsync: (_, _) =>
+            {
+                resets++;
+                return Task.CompletedTask;
+            },
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(3, result.Attempts);
+        Assert.Null(result.LastException);
+        Assert.Equal(3, operationCalls);
+        Assert.Equal(2, resets);
+        Assert.Equal(new[] { 100d, 200d }, observedDelays.Select(d => d.TotalMilliseconds).ToArray());
+
+        Assert.Equal(3, events.Count(e => e.Kind == RetryEventKind.AttemptStart));
+        Assert.Equal(2, events.Count(e => e.Kind == RetryEventKind.AttemptScheduled));
+        Assert.Equal(1, events.Count(e => e.Kind == RetryEventKind.AttemptSuccess));
+        Assert.DoesNotContain(events, e => e.Kind == RetryEventKind.FinalFail);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task RetryPolicy_DelayBounds_WithJitter_StayWithinConfiguredRange()
+    {
+        static RetryPolicy Create(double random, List<TimeSpan> delays)
+            => new(
+                new RetryPolicyOptions(
+                    MaxAttempts: 3,
+                    InitialDelay: TimeSpan.FromMilliseconds(1000),
+                    MaxDelay: TimeSpan.FromMilliseconds(2000),
+                    JitterRatio: 0.20),
+                delayAsync: (delay, _) =>
+                {
+                    delays.Add(delay);
+                    return Task.CompletedTask;
+                },
+                nextRandom: () => random);
+
+        async Task<List<TimeSpan>> RunAndCaptureAsync(double random)
+        {
+            var delays = new List<TimeSpan>();
+            var policy = Create(random, delays);
+            await policy.ExecuteAsync(
+                operationAsync: (_, _) => throw new InvalidOperationException("always_fail"),
+                resetBetweenAttemptsAsync: null,
+                CancellationToken.None);
+            return delays;
+        }
+
+        var minJitterDelays = await RunAndCaptureAsync(0d);
+        var maxJitterDelays = await RunAndCaptureAsync(1d);
+
+        Assert.Equal(2, minJitterDelays.Count);
+        Assert.Equal(2, maxJitterDelays.Count);
+
+        // Attempt 1 base=1000ms, jitter ±20%
+        Assert.InRange(minJitterDelays[0].TotalMilliseconds, 800d, 2000d);
+        Assert.InRange(maxJitterDelays[0].TotalMilliseconds, 800d, 2000d);
+        Assert.InRange(minJitterDelays[0].TotalMilliseconds, 800d, 1000d);
+        Assert.InRange(maxJitterDelays[0].TotalMilliseconds, 1000d, 1200d);
+
+        // Attempt 2 base=2000ms (clamped), jitter ±20% but clamped to max 2000ms
+        Assert.InRange(minJitterDelays[1].TotalMilliseconds, 1600d, 2000d);
+        Assert.InRange(maxJitterDelays[1].TotalMilliseconds, 1600d, 2000d);
+        Assert.True(minJitterDelays[1].TotalMilliseconds <= 2000d);
+        Assert.True(maxJitterDelays[1].TotalMilliseconds <= 2000d);
+    }
+
     [Trait("Category", "Smoke")]
     [Fact]
     public void SessionCode_FormatsToSixDigits_AndRejectsNonDigits()
@@ -368,6 +465,22 @@ public class SmokeTests
             Transport: "NKN",
             SessionId: "sess2"));
 
+        sink.OnBridgeLifecycle(new BridgeLifecycleTelemetryEvent(
+            EventName: "bridge_ready",
+            StartMode: "cold",
+            Pid: 4244,
+            ReadyTimeMs: 999,
+            PingRttMs: 10,
+            UptimeMs: 999,
+            ExitCode: null,
+            ExitReason: string.Empty,
+            RunId: "run1",
+            Scenario: "B",
+            BridgeReuseMode: "PerSession",
+            Attempt: 3,
+            Transport: "NKN",
+            SessionId: "sess3"));
+
         var snapshot = registry.Snapshot();
 
         Assert.Contains(snapshot.Counters, c => c.Name == "bridge_spawn_total" && c.Tags.Result == "cold" && c.Value == 1);
@@ -377,11 +490,457 @@ public class SmokeTests
         Assert.Contains(snapshot.Gauges, g => g.Name == "bridge_pid" && Math.Abs(g.Value - 4242) < 0.001);
         Assert.Contains(snapshot.Gauges, g => g.Name == "bridge_process_running" && Math.Abs(g.Value) < 0.001);
         Assert.Contains(snapshot.Gauges, g => g.Name == "bridge_exit_code" && Math.Abs(g.Value - 1) < 0.001);
+        Assert.Contains(snapshot.Gauges, g => g.Name == "bridge_cold_start_ms" && Math.Abs(g.Value - 123) < 0.001);
+        Assert.DoesNotContain(snapshot.Gauges, g => g.Name == "bridge_cold_start_ms" && Math.Abs(g.Value - 999) < 0.001);
 
-        Assert.Contains(snapshot.Histograms, h => h.Name == "bridge_ready_time_ms" && h.Count == 1);
-        Assert.Contains(snapshot.Histograms, h => h.Name == "bridge_ping_rtt_ms" && h.Count == 1);
+        Assert.Equal(2, snapshot.Histograms.Where(h => h.Name == "bridge_ready_time_ms").Sum(h => h.Count));
+        Assert.Equal(2, snapshot.Histograms.Where(h => h.Name == "bridge_ping_rtt_ms").Sum(h => h.Count));
         Assert.Contains(snapshot.Histograms, h => h.Name == "bridge_uptime_ms" && h.Count == 1);
         Assert.Contains(snapshot.Gauges, g => g.Name == "bridge_warm_start_ratio" && g.Tags.BridgeReuseMode == "KeepAlive" && g.Value > 0d);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void ReliabilityGate_Passes_WhenThresholdsAreMet()
+    {
+        var registry = new MetricsRegistry();
+        registry.Counter("transport_connect_attempts_total", transport: "DEVLOCAL", bridgeReuseMode: "PerSession").Inc();
+        registry.Counter("transport_connect_success_total", transport: "DEVLOCAL", bridgeReuseMode: "PerSession").Inc();
+        registry.Histogram("transport_connect_duration_ms", transport: "DEVLOCAL", result: "success", bridgeReuseMode: "PerSession").Observe(12);
+        registry.Histogram("transport_handshake_duration_ms", transport: "DEVLOCAL", result: "success", bridgeReuseMode: "PerSession").Observe(3);
+
+        var result = ReliabilityGate.Evaluate(
+            new ReliabilityGateInput(
+                registry.Snapshot(),
+                SuccessRatePercent: 100,
+                Transport: "DEVLOCAL",
+                BridgeReuseMode: "PerSession"),
+            new ReliabilityGateThresholds(
+                MinSuccessRatePercent: 99,
+                RequireNoUnknownFailures: true,
+                RequireNoStuckStates: true,
+                FailOnBridgeCrash: false));
+
+        Assert.True(result.Passed);
+        Assert.Empty(result.Failures);
+        Assert.Equal(0, result.UnknownFailures);
+        Assert.Equal(0, result.StateStuckCount);
+        Assert.Equal(0, result.BridgeCrashTotal);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void ReliabilityGate_Fails_WithClearReasons()
+    {
+        var registry = new MetricsRegistry();
+        registry.Counter("transport_failure_total", transport: "NKN", failureCategory: "Unknown", bridgeReuseMode: "PerSession").Inc();
+        registry.Counter("state_stuck_count", transport: "NKN", failureCategory: "HandshakeTimeout", bridgeReuseMode: "PerSession").Inc(2);
+        registry.Counter("bridge_crash_total", transport: "NKN", bridgeReuseMode: "PerSession").Inc();
+
+        var result = ReliabilityGate.Evaluate(
+            new ReliabilityGateInput(
+                registry.Snapshot(),
+                SuccessRatePercent: 80,
+                Transport: "NKN",
+                BridgeReuseMode: "PerSession"),
+            new ReliabilityGateThresholds(
+                MinSuccessRatePercent: 95,
+                RequireNoUnknownFailures: true,
+                RequireNoStuckStates: true,
+                FailOnBridgeCrash: true));
+
+        Assert.False(result.Passed);
+        Assert.Equal(1, result.UnknownFailures);
+        Assert.Equal(2, result.StateStuckCount);
+        Assert.Equal(1, result.BridgeCrashTotal);
+        Assert.Contains(result.Failures, f => f.Code == "success_rate_below_target");
+        Assert.Contains(result.Failures, f => f.Code == "unknown_failures_present");
+        Assert.Contains(result.Failures, f => f.Code == "state_stuck_detected");
+        Assert.Contains(result.Failures, f => f.Code == "bridge_crash_detected");
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void TransportFailureMapper_EmptySignals_MapsToUserCancelled_NotUnknown()
+    {
+        var failure = TransportFailureMapper.FromSignals(
+            rawError: null,
+            exceptionType: null,
+            lastDisconnectReason: null,
+            fallbackMessage: "Connection lost.");
+
+        Assert.Equal(TransportFailureCategory.UserCancelled, failure.Category);
+        Assert.True(failure.IsTransient);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void StatusPresenter_ConnectSuccessFlow_TransitionsToConnected()
+    {
+        var source = new FakeStatusPresenterSource();
+        using var presenter = new StatusPresenter(source);
+
+        Assert.Equal(UserStatusKind.Idle, presenter.CurrentStatus.Kind);
+
+        source.SetAttempt(1);
+        source.SetTransportState(TransportState.Connecting);
+        source.RaiseTransient(isVisible: true, text: "Connecting… (attempt 1)", canCancel: true);
+
+        Assert.Equal(UserStatusKind.Connecting, presenter.CurrentStatus.Kind);
+        Assert.Equal(1, presenter.CurrentStatus.Attempt);
+        Assert.True(presenter.CurrentStatus.CanCancel);
+
+        source.SetSessionUiState(SessionRuntimeState.Connected);
+        source.SetTransportState(TransportState.Connected);
+        source.RaiseTransient(isVisible: false, text: string.Empty, canCancel: false);
+        source.RaiseStateChanged();
+
+        Assert.Equal(UserStatusKind.Connected, presenter.CurrentStatus.Kind);
+        Assert.Equal("Connected", presenter.CurrentStatus.Title);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void StatusPresenter_RetryFlow_ShowsAttemptAndCountdown()
+    {
+        var source = new FakeStatusPresenterSource();
+        using var presenter = new StatusPresenter(source);
+
+        source.SetAttempt(3);
+        source.SetTransportState(TransportState.Reconnecting);
+        source.RaiseTransient(isVisible: true, text: "Reconnecting… (attempt 3, next retry in 2s)", canCancel: true);
+
+        Assert.Equal(UserStatusKind.Reconnecting, presenter.CurrentStatus.Kind);
+        Assert.Equal(3, presenter.CurrentStatus.Attempt);
+        Assert.Equal(2, presenter.CurrentStatus.NextRetryInSeconds);
+        Assert.True(presenter.CurrentStatus.CanCancel);
+        Assert.Equal(FailureSeverity.Warning, presenter.CurrentStatus.Severity);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void StatusPresenter_FailureMapping_UsesFailureCopyMap()
+    {
+        var source = new FakeStatusPresenterSource();
+        using var presenter = new StatusPresenter(source);
+
+        source.SetAttempt(2);
+        source.SetFailure(TransportFailure.Create(
+            TransportFailureCategory.HandshakeTimeout,
+            "timeout",
+            exceptionType: nameof(TimeoutException),
+            rawError: "handshake timeout",
+            isTransient: true,
+            correlationId: "abc123"));
+        source.SetSessionUiState(SessionRuntimeState.Failed);
+        source.SetTransportState(TransportState.Failed);
+        source.RaiseStateChanged();
+
+        var expected = FailureCopyMap.For(TransportFailureCategory.HandshakeTimeout);
+        Assert.Equal(UserStatusKind.Failed, presenter.CurrentStatus.Kind);
+        Assert.Equal(expected.Title, presenter.CurrentStatus.Title);
+        Assert.Equal(expected.Message, presenter.CurrentStatus.Message);
+        Assert.True(presenter.CurrentStatus.CanCopyDiagnostics);
+        Assert.Equal("abc123", presenter.CurrentStatus.CorrelationId);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void StatusPresenter_DuplicateFailureWithinWindow_DoesNotReemit()
+    {
+        var source = new FakeStatusPresenterSource();
+        var now = new DateTimeOffset(2026, 2, 25, 12, 0, 0, TimeSpan.Zero);
+        using var presenter = new StatusPresenter(source, countdownTimer: null, nowProvider: () => now, failureDedupeWindow: TimeSpan.FromSeconds(10));
+        var emitted = 0;
+        presenter.StatusChanged += (_, _) => emitted++;
+
+        source.SetFailure(TransportFailure.Create(
+            TransportFailureCategory.HandshakeTimeout,
+            "timeout",
+            exceptionType: nameof(TimeoutException),
+            rawError: "handshake timeout",
+            isTransient: true,
+            correlationId: "corr-a"));
+        source.SetSessionUiState(SessionRuntimeState.Failed);
+        source.SetTransportState(TransportState.Failed);
+        source.RaiseStateChanged();
+
+        Assert.Equal(1, emitted);
+        var expected = FailureCopyMap.For(TransportFailureCategory.HandshakeTimeout);
+        Assert.Equal(expected.Title, presenter.CurrentStatus.Title);
+
+        now = now.AddSeconds(5);
+        source.SetFailure(TransportFailure.Create(
+            TransportFailureCategory.HandshakeTimeout,
+            "timeout again",
+            exceptionType: nameof(TimeoutException),
+            rawError: "handshake timeout",
+            isTransient: true,
+            correlationId: "corr-b"));
+        source.RaiseStateChanged();
+
+        Assert.Equal(1, emitted);
+        Assert.Equal(expected.Title, presenter.CurrentStatus.Title);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void StatusPresenter_DifferentFailureCategory_AlwaysReemits()
+    {
+        var source = new FakeStatusPresenterSource();
+        var now = new DateTimeOffset(2026, 2, 25, 12, 0, 0, TimeSpan.Zero);
+        using var presenter = new StatusPresenter(source, countdownTimer: null, nowProvider: () => now, failureDedupeWindow: TimeSpan.FromSeconds(10));
+        var emitted = 0;
+        presenter.StatusChanged += (_, _) => emitted++;
+
+        source.SetFailure(TransportFailure.Create(
+            TransportFailureCategory.HandshakeTimeout,
+            "timeout",
+            exceptionType: nameof(TimeoutException),
+            rawError: "handshake timeout",
+            isTransient: true,
+            correlationId: "corr-a"));
+        source.SetSessionUiState(SessionRuntimeState.Failed);
+        source.SetTransportState(TransportState.Failed);
+        source.RaiseStateChanged();
+
+        now = now.AddSeconds(1);
+        source.SetFailure(TransportFailure.Create(
+            TransportFailureCategory.BridgeStartFailure,
+            "bridge failed",
+            exceptionType: nameof(InvalidOperationException),
+            rawError: "bridge start failed",
+            isTransient: false,
+            correlationId: "corr-b"));
+        source.RaiseStateChanged();
+
+        Assert.Equal(2, emitted);
+        var expected = FailureCopyMap.For(TransportFailureCategory.BridgeStartFailure);
+        Assert.Equal(expected.Title, presenter.CurrentStatus.Title);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void StatusPresenter_UserCancelled_ReturnsToIdle()
+    {
+        var source = new FakeStatusPresenterSource();
+        using var presenter = new StatusPresenter(source);
+
+        source.SetFailure(TransportFailure.Create(
+            TransportFailureCategory.UserCancelled,
+            "cancelled",
+            exceptionType: null,
+            rawError: null,
+            isTransient: true,
+            correlationId: null));
+        source.SetSessionUiState(SessionRuntimeState.Failed);
+        source.SetTransportState(TransportState.Failed);
+        source.RaiseStateChanged();
+
+        Assert.Equal(UserStatusKind.Idle, presenter.CurrentStatus.Kind);
+        Assert.Equal(string.Empty, presenter.CurrentStatus.Title);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void StatusPresenter_ReconnectCountdown_DecrementsProperly()
+    {
+        var source = new FakeStatusPresenterSource();
+        using var timer = new FakeManualTimer();
+        using var presenter = new StatusPresenter(source, timer);
+
+        source.SetTransportState(TransportState.Reconnecting);
+        source.RaiseTransient(isVisible: true, text: "Reconnecting… (attempt 2, next retry in 3s)", canCancel: true);
+
+        Assert.Equal(3, presenter.CurrentStatus.NextRetryInSeconds);
+        timer.Tick();
+        Assert.Equal(2, presenter.CurrentStatus.NextRetryInSeconds);
+        timer.Tick();
+        Assert.Equal(1, presenter.CurrentStatus.NextRetryInSeconds);
+        timer.Tick();
+        Assert.Equal(0, presenter.CurrentStatus.NextRetryInSeconds);
+        Assert.False(timer.IsRunning);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void StatusPresenter_ReconnectCountdown_CancelsOnConnectSuccess()
+    {
+        var source = new FakeStatusPresenterSource();
+        using var timer = new FakeManualTimer();
+        using var presenter = new StatusPresenter(source, timer);
+
+        source.SetTransportState(TransportState.Reconnecting);
+        source.RaiseTransient(isVisible: true, text: "Reconnecting… (attempt 1, next retry in 5s)", canCancel: true);
+        Assert.True(timer.IsRunning);
+
+        source.SetTransportState(TransportState.Connected);
+        source.SetSessionUiState(SessionRuntimeState.Connected);
+        source.RaiseTransient(isVisible: false, text: string.Empty, canCancel: false);
+        source.RaiseStateChanged();
+
+        var before = presenter.CurrentStatus;
+        Assert.Equal(UserStatusKind.Connected, before.Kind);
+        Assert.False(timer.IsRunning);
+
+        timer.Tick();
+        Assert.Equal(before, presenter.CurrentStatus);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void StatusPresenter_ReconnectCountdown_StopsOnDispose()
+    {
+        var source = new FakeStatusPresenterSource();
+        using var timer = new FakeManualTimer();
+        var presenter = new StatusPresenter(source, timer);
+
+        source.SetTransportState(TransportState.Reconnecting);
+        source.RaiseTransient(isVisible: true, text: "Reconnecting… (attempt 1, next retry in 2s)", canCancel: true);
+        Assert.True(timer.IsRunning);
+
+        presenter.Dispose();
+        Assert.False(timer.IsRunning);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void InlineTransientText_Show_MakesTextVisible()
+    {
+        using var timer = new FakeManualTimer();
+        using var feedback = new NLink.App.Services.InlineTransientText(timer);
+
+        feedback.Show("Copied");
+
+        Assert.True(feedback.IsVisible);
+        Assert.Equal("Copied", feedback.Text);
+        Assert.True(timer.IsRunning);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void InlineTransientText_AutoHides_AfterTimerTick()
+    {
+        using var timer = new FakeManualTimer();
+        using var feedback = new NLink.App.Services.InlineTransientText(timer);
+
+        feedback.Show("Copied");
+        timer.Tick();
+
+        Assert.False(feedback.IsVisible);
+        Assert.Equal(string.Empty, feedback.Text);
+        Assert.False(timer.IsRunning);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void InlineTransientText_MultipleTriggers_ReplaceMessageWithoutOverlap()
+    {
+        using var timer = new FakeManualTimer();
+        using var feedback = new NLink.App.Services.InlineTransientText(timer);
+
+        feedback.Show("First");
+        feedback.Show("Second");
+
+        Assert.True(feedback.IsVisible);
+        Assert.Equal("Second", feedback.Text);
+        Assert.True(timer.IsRunning);
+
+        timer.Tick();
+
+        Assert.False(feedback.IsVisible);
+        Assert.Equal(string.Empty, feedback.Text);
+        Assert.False(timer.IsRunning);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperPageViewModel_StatusBanner_ReactsToFailedReconnectingConnected()
+    {
+        var source = new FakeStatusPresenterSource();
+        using var presenter = new StatusPresenter(source);
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(), SessionRuntimeWatchdogOptions.Default with { Enabled = false });
+        var transportConfig = CreateDevLocalTestConfig();
+
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            statusPresenter: presenter);
+
+        source.SetFailure(TransportFailure.Create(
+            TransportFailureCategory.HandshakeTimeout,
+            "Timed out",
+            exceptionType: nameof(TimeoutException),
+            rawError: "handshake timeout",
+            isTransient: true,
+            correlationId: "corr1"));
+        source.SetSessionUiState(SessionRuntimeState.Failed);
+        source.SetTransportState(TransportState.Failed);
+        source.RaiseStateChanged();
+
+        Assert.Equal(UserStatusKind.Failed, helper.BannerStatus.Kind);
+        Assert.True(helper.ShowStatusBanner);
+
+        source.SetAttempt(2);
+        source.SetTransportState(TransportState.Reconnecting);
+        source.RaiseTransient(isVisible: true, text: "Reconnecting… (attempt 2, next retry in 1s)", canCancel: true);
+
+        Assert.Equal(UserStatusKind.Reconnecting, helper.BannerStatus.Kind);
+        Assert.True(helper.ShowStatusBanner);
+
+        source.SetSessionUiState(SessionRuntimeState.Connected);
+        source.SetTransportState(TransportState.Connected);
+        source.RaiseTransient(isVisible: false, text: string.Empty, canCancel: false);
+        source.RaiseStateChanged();
+
+        Assert.Equal(UserStatusKind.Connected, helper.BannerStatus.Kind);
+        Assert.False(helper.ShowStatusBanner);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeePageViewModel_StatusBanner_ReactsToFailedReconnectingConnected()
+    {
+        var source = new FakeStatusPresenterSource();
+        using var presenter = new StatusPresenter(source);
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(), SessionRuntimeWatchdogOptions.Default with { Enabled = false });
+        var transportConfig = CreateDevLocalTestConfig();
+
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            statusPresenter: presenter);
+
+        source.SetFailure(TransportFailure.Create(
+            TransportFailureCategory.BridgeStartFailure,
+            "Bridge unavailable",
+            exceptionType: nameof(InvalidOperationException),
+            rawError: "bridge_start_failed",
+            isTransient: false,
+            correlationId: "corr2"));
+        source.SetSessionUiState(SessionRuntimeState.Failed);
+        source.SetTransportState(TransportState.Failed);
+        source.RaiseStateChanged();
+
+        Assert.Equal(UserStatusKind.Failed, helpee.BannerStatus.Kind);
+        Assert.True(helpee.ShowStatusBanner);
+
+        source.SetAttempt(3);
+        source.SetTransportState(TransportState.Reconnecting);
+        source.RaiseTransient(isVisible: true, text: "Reconnecting… (attempt 3, next retry in 2s)", canCancel: true);
+
+        Assert.Equal(UserStatusKind.Reconnecting, helpee.BannerStatus.Kind);
+        Assert.True(helpee.ShowStatusBanner);
+
+        source.SetSessionUiState(SessionRuntimeState.Connected);
+        source.SetTransportState(TransportState.Connected);
+        source.RaiseTransient(isVisible: false, text: string.Empty, canCancel: false);
+        source.RaiseStateChanged();
+
+        Assert.Equal(UserStatusKind.Connected, helpee.BannerStatus.Kind);
+        Assert.False(helpee.ShowStatusBanner);
     }
 
     [Trait("Category", "Smoke")]
@@ -405,6 +964,7 @@ public class SmokeTests
     }
 
     [Trait("Category", "Smoke")]
+    [Trait("Category", "BridgeStabilityPromotion")]
     [Fact]
     public void MetricsTelemetrySink_FailureInjection_RecordsClassifiedFailures_AndNoUnknown()
     {
@@ -511,6 +1071,20 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void FailurePresenter_MapsEveryTransportFailureCategory()
+    {
+        foreach (var category in Enum.GetValues<TransportFailureCategory>())
+        {
+            var presented = FailurePresenter.Present(category);
+            Assert.False(string.IsNullOrWhiteSpace(presented.Title), $"Missing title for {category}");
+            Assert.False(string.IsNullOrWhiteSpace(presented.Message), $"Missing message for {category}");
+            Assert.False(string.IsNullOrWhiteSpace(presented.RecommendedAction), $"Missing action for {category}");
+            Assert.Contains("Copy Diagnostics", presented.RecommendedAction, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void AppAssembly_InformationalVersion_Matches_VERSION_File()
     {
         var assembly = typeof(DiagnosticsPageViewModel).Assembly;
@@ -561,6 +1135,23 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void Program_Parses_Soak_Argument()
+    {
+        var programType = typeof(NLink.App.App).Assembly.GetType("NLink.App.Program");
+        Assert.NotNull(programType);
+
+        var method = programType!.GetMethod("HasSoakArgument", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var hasSoak = (bool)method!.Invoke(null, new object[] { new[] { "--soak" } })!;
+        var noSoak = (bool)method.Invoke(null, new object[] { new[] { "--something-else" } })!;
+
+        Assert.True(hasSoak);
+        Assert.False(noSoak);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void BenchmarkRunner_Parses_Defaults_And_Overrides()
     {
         Assert.True(BenchmarkRunner.TryParseOptionsForTests(new[] { "--bench" }, out var defaults, out var defaultError));
@@ -585,6 +1176,40 @@ public class SmokeTests
         Assert.Equal(BridgeReuseMode.KeepAlive, custom.BridgeReuseMode);
         Assert.True(custom.MemoryCheck);
         Assert.Equal(7.5d, custom.MemoryTolerancePercent);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SoakRunner_Parses_And_Maps_To_BenchmarkArgs()
+    {
+        Assert.True(SoakRunner.TryParseOptionsForTests(new[] { "--soak" }, out var defaults, out var defaultError));
+        Assert.NotNull(defaults);
+        Assert.Equal(string.Empty, defaultError);
+        Assert.False(defaults!.FailOnGate);
+
+        var defaultBenchArgs = SoakRunner.BuildBenchmarkArgsForTests(defaults);
+        Assert.Contains("--bench", defaultBenchArgs);
+        Assert.DoesNotContain("--reliability-gate", defaultBenchArgs);
+
+        Assert.True(SoakRunner.TryParseOptionsForTests(
+            new[] { "--soak", "--cycles", "10", "--delay-ms", "5", "--transport", "devlocal", "--bridge-reuse-mode", "persession", "--fail-on-gate" },
+            out var custom,
+            out var customError));
+        Assert.NotNull(custom);
+        Assert.Equal(string.Empty, customError);
+        Assert.True(custom!.FailOnGate);
+
+        var mappedArgs = SoakRunner.BuildBenchmarkArgsForTests(custom);
+        Assert.Contains("--bench", mappedArgs);
+        Assert.Contains("--cycles", mappedArgs);
+        Assert.Contains("10", mappedArgs);
+        Assert.Contains("--delay-ms", mappedArgs);
+        Assert.Contains("5", mappedArgs);
+        Assert.Contains("--transport", mappedArgs);
+        Assert.Contains("devlocal", mappedArgs);
+        Assert.Contains("--bridge-reuse-mode", mappedArgs);
+        Assert.Contains("persession", mappedArgs);
+        Assert.Contains("--reliability-gate", mappedArgs);
     }
 
     [Trait("Category", "Smoke")]
@@ -752,6 +1377,7 @@ public class SmokeTests
             delay.DelayAsync);
 
         await runtime.StartHelpeeAsync(new SessionCode("123456"), CancellationToken.None);
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.Handshake, "test_handshake"));
 
         await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
         delay.CompleteLatest();
@@ -760,9 +1386,96 @@ public class SmokeTests
             () => runtime.TransportLifecycleState == TransportState.Idle && runtime.State == SessionRuntimeState.Idle,
             TimeSpan.FromSeconds(3));
 
-        Assert.Equal(TransportFailureCategory.PeerUnreachable, runtime.GetLastFailureCategoryForTests());
+        Assert.Equal(TransportFailureCategory.HandshakeTimeout, runtime.GetLastFailureCategoryForTests());
         Assert.NotNull(runtime.GetLastDurationMetricMilliseconds("connect_duration_ms"));
         Assert.True(runtime.GetLastDurationMetricMilliseconds("connect_duration_ms")!.Value >= 0);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_HelpeeConnectingFromBridgeReady_DoesNotWatchdogTimeoutWhileIdle()
+    {
+        var delay = new ControlledDelayScheduler();
+        using var runtime = new SessionRuntime(
+            () => new ScriptedSignalingTransport(),
+            SessionRuntimeWatchdogOptions.Default,
+            delay.DelayAsync);
+
+        runtime.SetRoleForTests(SessionRuntimeRole.Helpee);
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.TransportInitializing, "start_helpee"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.BridgeStarting, "nkn_bridge_starting"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.BridgeReady, "bridge_ready"));
+        Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.Connecting, "bridge_ready"));
+
+        // The helpee hosting path should not arm a connecting watchdog while idle.
+        await Task.Delay(100);
+
+        Assert.Equal(0, delay.PendingCount);
+        Assert.Equal(TransportState.Connecting, runtime.TransportLifecycleState);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_HelpeeIdleDisconnect_DuplicateEvents_DoNotStartMultipleRehosts()
+    {
+        var created = new List<ScriptedSignalingTransport>();
+        var factory = new CountingTransportFactory(() =>
+        {
+            var transport = new ScriptedSignalingTransport();
+            lock (created)
+            {
+                created.Add(transport);
+            }
+
+            return transport;
+        });
+
+        using var runtime = new SessionRuntime(factory.Create);
+        await runtime.StartHelpeeAsync(new SessionCode("123456"), CancellationToken.None);
+
+        ScriptedSignalingTransport first;
+        lock (created)
+        {
+            first = Assert.IsType<ScriptedSignalingTransport>(created.Single());
+        }
+
+        // Duplicate disconnected notifications can happen around bridge/process teardown.
+        first.RaiseDisconnected();
+        first.RaiseDisconnected();
+
+        await WaitUntilAsync(() => factory.CreateCount >= 2, TimeSpan.FromSeconds(2));
+        await Task.Delay(200);
+
+        Assert.Equal(2, factory.CreateCount);
+        Assert.Equal(SessionRuntimeState.Waiting, runtime.State);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_IgnoresStaleTransportDisconnectedEvent_AfterResetAndRehost()
+    {
+        var first = new ScriptedSignalingTransport();
+        var second = new ScriptedSignalingTransport();
+        var queue = new Queue<ISignalingTransport>(new ISignalingTransport[] { first, second });
+
+        using var runtime = new SessionRuntime(() => queue.Dequeue());
+
+        await runtime.StartHelpeeAsync(new SessionCode("111111"), CancellationToken.None);
+        Assert.Equal(SessionRuntimeState.Waiting, runtime.State);
+
+        await runtime.ResetAsync();
+        await runtime.StartHelpeeAsync(new SessionCode("222222"), CancellationToken.None);
+        Assert.Equal(SessionRuntimeState.Waiting, runtime.State);
+
+        var onDisconnected = typeof(SessionRuntime).GetMethod(
+            "OnTransportDisconnected",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(onDisconnected);
+
+        onDisconnected!.Invoke(runtime, new object?[] { first, EventArgs.Empty });
+
+        Assert.Equal(SessionRuntimeState.Waiting, runtime.State);
+        Assert.Equal("Waiting for helper…", runtime.StatusText);
     }
 
     [Trait("Category", "Smoke")]
@@ -1128,7 +1841,7 @@ public class SmokeTests
             Assert.Equal("Please reinstall.", helper.StatusText);
             Assert.False(helper.ConnectCommand.CanExecute(null));
             Assert.True(helper.ShowOpenDiagnosticsLink);
-            Assert.Equal(SessionRuntimeState.Idle, runtime.State);
+            Assert.Equal(SessionRuntimeState.Failed, runtime.State);
         }
         finally
         {
@@ -2227,6 +2940,7 @@ public class SmokeTests
     }
 
     [Trait("Category", "Smoke")]
+    [Trait("Category", "BridgeStabilityPromotion")]
     [Fact]
     public async Task Bridge_Startup_WithMockBridge_NoPong_FailsAsBridgeUnresponsive()
     {
@@ -2278,6 +2992,668 @@ public class SmokeTests
         {
             Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task Bridge_ConcurrentConnectAsync_SharesSingleConnectAttempt()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-concurrent-connect", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-concurrent.js");
+        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(
+            connectBehaviorJs: $@"
+connectCount++;
+fs.writeFileSync({JsonSerializer.Serialize(countFile)}, String(connectCount));
+emit({{ event:'ok', id: msg.id ?? null, cmd:'connect' }});
+setTimeout(() => emit({{ event:'ready', address:'mock.concurrent.addr', connectId: msg.connectId ?? null }}), 200);
+return;
+"));
+
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-concurrent");
+            var identity = NknIdentityStore.LoadOrCreate(options);
+            using var adapter = new RealNknClientAdapter(identity, options);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var t1 = adapter.ConnectAsync(cts.Token);
+            var t2 = adapter.ConnectAsync(cts.Token);
+            await Task.WhenAll(t1, t2);
+
+            await adapter.DisconnectAsync();
+
+            var connectCountText = File.Exists(countFile) ? File.ReadAllText(countFile).Trim() : string.Empty;
+            Assert.Equal("1", connectCountText);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task Bridge_StaleReady_Ignored_UntilMatchingConnectIdArrives()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-stale-ready", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-stale-ready.js");
+        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(
+            connectBehaviorJs: @"
+emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
+setTimeout(() => emit({ event:'ready', address:'wrong.addr', connectId:'ffffffffffffffffffffffffffffffff' }), 50);
+setTimeout(() => emit({ event:'ready', address:'correct.addr', connectId: msg.connectId ?? null }), 220);
+return;
+"));
+
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-stale-ready");
+            var identity = NknIdentityStore.LoadOrCreate(options);
+            using var adapter = new RealNknClientAdapter(identity, options);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var sw = Stopwatch.StartNew();
+            await adapter.ConnectAsync(cts.Token);
+            sw.Stop();
+
+            Assert.True(sw.ElapsedMilliseconds >= 150, "ConnectAsync completed too early; stale ready may have been accepted.");
+            Assert.Equal("correct.addr", adapter.Address);
+
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task Bridge_ConnectFailure_ResetsInflight_AndUsesNewConnectIdNextAttempt()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-connect-reset", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var idsFile = Path.Combine(tempDir, "connect-ids.json");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-connect-reset.js");
+        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(
+            connectBehaviorJs: $@"
+connectIds.push(String(msg.connectId || ''));
+fs.writeFileSync({JsonSerializer.Serialize(idsFile)}, JSON.stringify(connectIds));
+emit({{ event:'ok', id: msg.id ?? null, cmd:'connect' }});
+if (connectIds.length >= 2) {{
+  setTimeout(() => emit({{ event:'ready', address:'second-success.addr', connectId: msg.connectId ?? null }}), 40);
+}}
+return;
+"));
+
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-connect-reset");
+            var identity = NknIdentityStore.LoadOrCreate(options);
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.SetConnectReadyTimeoutForTests(TimeSpan.FromMilliseconds(120));
+
+            await Assert.ThrowsAnyAsync<TimeoutException>(() => adapter.ConnectAsync(CancellationToken.None));
+            await adapter.ConnectAsync(CancellationToken.None);
+            Assert.Equal("second-success.addr", adapter.Address);
+
+            await adapter.DisconnectAsync();
+
+            var idsJson = File.Exists(idsFile) ? File.ReadAllText(idsFile) : "[]";
+            using var doc = JsonDocument.Parse(idsJson);
+            var ids = doc.RootElement.EnumerateArray().Select(x => x.GetString() ?? string.Empty).ToArray();
+            Assert.True(ids.Length >= 2);
+            Assert.All(ids, id => Assert.Matches("^[0-9a-f]{32}$", id));
+            Assert.NotEqual(ids[0], ids[1]);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task Bridge_ConnectPayload_RespectsPreflightOptions()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-preflight-payload", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var payloadFile = Path.Combine(tempDir, "payload.json");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-preflight-payload.js");
+        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(
+            connectBehaviorJs: $@"
+fs.writeFileSync({JsonSerializer.Serialize(payloadFile)}, JSON.stringify(msg));
+emit({{ event:'ok', id: msg.id ?? null, cmd:'connect' }});
+setTimeout(() => emit({{ event:'ready', address:'payload-test.addr', connectId: msg.connectId ?? null }}), 20);
+return;
+"));
+
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevEnabled = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED");
+        var prevTimeout = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS");
+        var prevConc = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CONCURRENCY");
+        var prevTtl = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CACHE_TTL_MS");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+
+            // Disabled by default -> no preflight fields.
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CONCURRENCY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CACHE_TTL_MS", null);
+
+            var disabledOptions = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id-disabled.json"), "mock-preflight-disabled");
+            var disabledIdentity = NknIdentityStore.LoadOrCreate(disabledOptions);
+            using (var adapterDisabled = new RealNknClientAdapter(disabledIdentity, disabledOptions))
+            {
+                await adapterDisabled.ConnectAsync(CancellationToken.None);
+                await adapterDisabled.DisconnectAsync();
+            }
+
+            using (var payloadDoc = JsonDocument.Parse(File.ReadAllText(payloadFile)))
+            {
+                var root = payloadDoc.RootElement;
+                Assert.True(root.TryGetProperty("connectId", out _));
+                Assert.False(root.TryGetProperty("preflightRpcEnabled", out _));
+                Assert.False(root.TryGetProperty("preflightTimeoutMs", out _));
+                Assert.False(root.TryGetProperty("preflightConcurrency", out _));
+                Assert.False(root.TryGetProperty("preflightCacheTtlMs", out _));
+            }
+
+            // Enabled -> fields present.
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", "true");
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", "701");
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CONCURRENCY", "9");
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CACHE_TTL_MS", "600001");
+
+            var enabledOptions = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id-enabled.json"), "mock-preflight-enabled");
+            var enabledIdentity = NknIdentityStore.LoadOrCreate(enabledOptions);
+            using (var adapterEnabled = new RealNknClientAdapter(enabledIdentity, enabledOptions))
+            {
+                await adapterEnabled.ConnectAsync(CancellationToken.None);
+                await adapterEnabled.DisconnectAsync();
+            }
+
+            using (var payloadDoc = JsonDocument.Parse(File.ReadAllText(payloadFile)))
+            {
+                var root = payloadDoc.RootElement;
+                Assert.True(root.TryGetProperty("preflightRpcEnabled", out var enabledProp) && enabledProp.ValueKind is JsonValueKind.True);
+                Assert.Equal(701, root.GetProperty("preflightTimeoutMs").GetInt32());
+                Assert.Equal(9, root.GetProperty("preflightConcurrency").GetInt32());
+                Assert.Equal(600001, root.GetProperty("preflightCacheTtlMs").GetInt32());
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", prevEnabled);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", prevTimeout);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CONCURRENCY", prevConc);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CACHE_TTL_MS", prevTtl);
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task Bridge_ProgressDiagnostics_AreRecorded_OnConnectReadyTimeout()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-progress-timeout", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-progress-timeout.js");
+        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(
+            connectBehaviorJs: @"
+emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
+emit({ event:'rpc_selected', rpc:'https://mock-rpc-1.example:30003', connectId: msg.connectId ?? null, ts: Date.now() });
+return;
+"));
+
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-progress-timeout");
+            var identity = NknIdentityStore.LoadOrCreate(options);
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.SetConnectReadyTimeoutForTests(TimeSpan.FromMilliseconds(150));
+
+            await Assert.ThrowsAnyAsync<TimeoutException>(() => adapter.ConnectAsync(CancellationToken.None));
+
+            var snapshot = NknRuntimeDiagnostics.Snapshot();
+            Assert.Equal("rpc_selected", snapshot.LastProgressEventType);
+            Assert.Equal("https://mock-rpc-1.example:30003", snapshot.LastSelectedRpc);
+            Assert.True(snapshot.LastProgressEventUtcTicks > 0);
+            Assert.Contains("NKN_START_FAILED", snapshot.LastError, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("progress=rpc_selected", snapshot.LastError, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Trait("Category", "BridgeStabilityPromotion")]
+    [Fact]
+    public async Task Bridge_Disconnect_WithUnresponsiveShutdownBridge_ForcesKill_AndCleansProcessHandles()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-ignore-shutdown", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-ignore-shutdown.js");
+        File.WriteAllText(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: true, respondToShutdown: false));
+
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+
+            var options = NknTransportOptions.Load();
+            var identity = new NknIdentity("mock-ignore-shutdown", "mock-ignore-shutdown.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            await adapter.StartBridgeAsync(cts.Token);
+            Assert.True(adapter.IsBridgeProcessRunning);
+
+            await adapter.DisconnectAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+            await WaitUntilAsync(() => !adapter.IsBridgeProcessRunning, TimeSpan.FromSeconds(2));
+            var debugState = adapter.GetDebugStateForTests();
+            Assert.False(debugState.HasProcessReference);
+            Assert.False(debugState.HasStdinReference);
+            Assert.False(debugState.HasStdoutReaderTaskReference);
+            Assert.False(debugState.HasStderrReaderTaskReference);
+            Assert.Equal(0, debugState.TrackedPid);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Trait("Category", "BridgeStabilityPromotion")]
+    [Fact]
+    public async Task Bridge_StderrSpam_DoesNotHang_AndShutsDownCleanly()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-stderr-spam", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-stderr-spam.js");
+        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithStderrSpam());
+
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+
+            var options = NknTransportOptions.Load();
+            var identity = new NknIdentity("mock-stderr-spam", "mock-stderr-spam.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+            await adapter.StartBridgeAsync(cts.Token);
+            await adapter.PingBridgeAsync(cts.Token);
+            await adapter.DisconnectAsync().WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
+
+            await WaitUntilAsync(() => !adapter.IsBridgeProcessRunning, TimeSpan.FromSeconds(2));
+            var debugState = adapter.GetDebugStateForTests();
+            Assert.False(debugState.HasProcessReference);
+            Assert.False(debugState.HasStdoutReaderTaskReference);
+            Assert.False(debugState.HasStderrReaderTaskReference);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Trait("Category", "BridgeStabilityPromotion")]
+    [Fact]
+    public async Task Bridge_RapidStartDisposeCycles_DoNotLeaveOrphanProcessesOrHandleRefs()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-rapid-cycles", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-rapid-cycles.js");
+        File.WriteAllText(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: true, respondToShutdown: true));
+
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+
+            for (var i = 0; i < 50; i++)
+            {
+                var options = NknTransportOptions.Load();
+                var identity = new NknIdentity("mock-cycle-" + i, "mock-cycle.fake");
+                using var adapter = new RealNknClientAdapter(identity, options);
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+                await adapter.StartBridgeAsync(cts.Token);
+                Assert.True(adapter.IsBridgeProcessRunning);
+                await adapter.DisconnectAsync().WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
+                await WaitUntilAsync(() => !adapter.IsBridgeProcessRunning, TimeSpan.FromSeconds(2));
+
+                var debugState = adapter.GetDebugStateForTests();
+                Assert.False(debugState.HasProcessReference);
+                Assert.False(debugState.HasStdinReference);
+                Assert.False(debugState.HasStdoutReaderTaskReference);
+                Assert.False(debugState.HasStderrReaderTaskReference);
+                Assert.Equal(0, debugState.TrackedPid);
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "BridgeStabilityPromotion")]
+    [Fact]
+    public async Task Bridge_RapidStartDisposeCycles200_Promotion_NoOrphansOrHandleRefs()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-rapid-cycles-200", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-rapid-cycles-200.js");
+        File.WriteAllText(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: true, respondToShutdown: true));
+
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+
+            for (var i = 0; i < 200; i++)
+            {
+                var options = NknTransportOptions.Load();
+                var identity = new NknIdentity("mock-cycle200-" + i, "mock-cycle200.fake");
+                using var adapter = new RealNknClientAdapter(identity, options);
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+                await adapter.StartBridgeAsync(cts.Token);
+                Assert.True(adapter.IsBridgeProcessRunning);
+                await adapter.DisconnectAsync().WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
+                await WaitUntilAsync(() => !adapter.IsBridgeProcessRunning, TimeSpan.FromSeconds(2));
+
+                var debugState = adapter.GetDebugStateForTests();
+                Assert.False(debugState.HasProcessReference);
+                Assert.False(debugState.HasStdinReference);
+                Assert.False(debugState.HasStdoutReaderTaskReference);
+                Assert.False(debugState.HasStderrReaderTaskReference);
+                Assert.Equal(0, debugState.TrackedPid);
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task Bridge_TrackedPidCleanup_KillsOrphanNodeProcess_ByPidAndStartTime()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-orphan", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var scriptPath = Path.Combine(tempDir, "idle-node.js");
+        File.WriteAllText(scriptPath, "setInterval(() => {}, 1000);");
+
+        using var proc = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = nodePath,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            }
+        };
+        proc.StartInfo.ArgumentList.Add(scriptPath);
+        Assert.True(proc.Start());
+
+        var pid = proc.Id;
+        var startTimeUtcFileTime = proc.StartTime.ToUniversalTime().ToFileTimeUtc();
+
+        try
+        {
+            Assert.True(RealNknClientAdapter.TryCleanupTrackedNodeProcessForTests(pid, startTimeUtcFileTime));
+            await WaitUntilAsync(() =>
+            {
+                try { return proc.HasExited; } catch { return true; }
+            }, TimeSpan.FromSeconds(3));
+        }
+        finally
+        {
+            try
+            {
+                if (!proc.HasExited)
+                {
+                    proc.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+                // best effort
+            }
             try { CleanupDirectoryIfExists(tempDir); } catch { }
         }
     }
@@ -2335,7 +3711,7 @@ public class SmokeTests
             var after = NknRuntimeDiagnostics.Snapshot();
             Assert.True(after.BridgeRestartCount > before.BridgeRestartCount, "Bridge restart count did not increment.");
             Assert.NotEqual(before.BridgePid, after.BridgePid);
-            Assert.Equal("process exited", after.BridgeLastExitReason);
+            Assert.Equal("crash", after.BridgeLastExitReason);
 
             await adapter.DisconnectAsync();
             await WaitUntilAsync(() => !adapter.IsBridgeProcessRunning, TimeSpan.FromSeconds(3));
@@ -2598,10 +3974,11 @@ public class SmokeTests
         Directory.CreateDirectory(Path.Combine(bridgeRoot, "node_modules"));
     }
 
-    private static string BuildMockBridgeScript(int delayPongMs, bool respondToPing)
+    private static string BuildMockBridgeScript(int delayPongMs, bool respondToPing, bool respondToShutdown = true)
     {
         var delay = Math.Max(0, delayPongMs);
         var respond = respondToPing ? "true" : "false";
+        var shutdownRespond = respondToShutdown ? "true" : "false";
         return
 $@"'use strict';
 const readline = require('readline');
@@ -2622,14 +3999,99 @@ rl.on('line', (line) => {{
     return;
   }}
   if (msg.cmd === 'shutdown') {{
-    emit({{ event:'ok', id: msg.id ?? null, cmd: 'shutdown' }});
-    emit({{ event:'disconnected', reason:'shutdown' }});
-    setTimeout(() => process.exit(0), 10);
+    if ({shutdownRespond}) {{
+      emit({{ event:'ok', id: msg.id ?? null, cmd: 'shutdown' }});
+      emit({{ event:'disconnected', reason:'shutdown' }});
+      setTimeout(() => process.exit(0), 10);
+    }}
     return;
   }}
   emit({{ event:'ok', id: msg.id ?? null, cmd: msg.cmd ?? msg.type ?? null }});
 }});
 ";
+    }
+
+    private static string BuildMockBridgeScriptWithCustomConnect(string connectBehaviorJs, int delayPongMs = 0, bool respondToPing = true, bool respondToShutdown = true)
+    {
+        var delay = Math.Max(0, delayPongMs);
+        var respond = respondToPing ? "true" : "false";
+        var shutdownRespond = respondToShutdown ? "true" : "false";
+        return
+$@"'use strict';
+const fs = require('fs');
+const readline = require('readline');
+const rl = readline.createInterface({{ input: process.stdin, crlfDelay: Infinity, terminal: false }});
+let connectCount = 0;
+const connectIds = [];
+function emit(obj) {{ process.stdout.write(JSON.stringify(obj) + '\n'); }}
+rl.on('line', (line) => {{
+  if (!line || !line.trim()) return;
+  let msg;
+  try {{ msg = JSON.parse(line); }} catch (e) {{ emit({{ event:'error', id:null, cmd:null, reason:'Invalid JSON' }}); return; }}
+  if (msg.cmd === 'hello') {{
+    emit({{ event:'hello_ok', id: msg.id ?? null, protocol: 1, sdk: 'mock-sdk@1.0.0' }});
+    return;
+  }}
+  if ((msg.type === 'ping') || (msg.cmd === 'ping')) {{
+    if ({respond}) {{
+      setTimeout(() => emit({{ type:'pong', id: msg.id ?? null, ts: Date.now() }}), {delay});
+    }}
+    return;
+  }}
+  if (msg.cmd === 'shutdown') {{
+    if ({shutdownRespond}) {{
+      emit({{ event:'ok', id: msg.id ?? null, cmd: 'shutdown' }});
+      emit({{ event:'disconnected', reason:'shutdown' }});
+      setTimeout(() => process.exit(0), 10);
+    }}
+    return;
+  }}
+  if (msg.cmd === 'connect') {{
+    {connectBehaviorJs}
+  }}
+  emit({{ event:'ok', id: msg.id ?? null, cmd: msg.cmd ?? msg.type ?? null }});
+}});
+";
+    }
+
+    private static string BuildMockBridgeScriptWithStderrSpam()
+    {
+        return
+@"'use strict';
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity, terminal: false });
+function emit(obj) { process.stdout.write(JSON.stringify(obj) + '\n'); }
+let spamTimer = null;
+function startSpam() {
+  if (spamTimer) return;
+  let n = 0;
+  spamTimer = setInterval(() => {
+    for (let i = 0; i < 50; i++) {
+      process.stderr.write('spam-line-' + (n++) + ' xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n');
+    }
+  }, 5);
+}
+function stopSpam() {
+  if (spamTimer) {
+    clearInterval(spamTimer);
+    spamTimer = null;
+  }
+}
+rl.on('line', (line) => {
+  if (!line || !line.trim()) return;
+  let msg;
+  try { msg = JSON.parse(line); } catch { emit({ event:'error', id:null, cmd:null, reason:'Invalid JSON' }); return; }
+  if (msg.cmd === 'hello') { emit({ event:'hello_ok', id: msg.id ?? null, protocol: 1, sdk: 'mock-sdk@1.0.0' }); startSpam(); return; }
+  if ((msg.type === 'ping') || (msg.cmd === 'ping')) { emit({ type:'pong', id: msg.id ?? null, ts: Date.now() }); return; }
+  if (msg.cmd === 'shutdown') {
+    emit({ event:'ok', id: msg.id ?? null, cmd: 'shutdown' });
+    emit({ event:'disconnected', reason:'shutdown' });
+    stopSpam();
+    setTimeout(() => process.exit(0), 10);
+    return;
+  }
+  emit({ event:'ok', id: msg.id ?? null, cmd: msg.cmd ?? msg.type ?? null });
+});";
     }
 
     private static void CleanupDirectoryIfExists(string path)
@@ -3020,5 +4482,248 @@ rl.on('line', (line) => {{
     private sealed class FakeBridgeProcessRunner : IBridgeProcessRunner
     {
         public bool WasForcedKillRequested { get; set; }
+    }
+
+    private sealed class FakeStatusPresenterSource : IStatusPresenterSource
+    {
+        private SessionRuntimeState uiState = SessionRuntimeState.Idle;
+        private TransportState transportState = TransportState.Idle;
+        private string statusText = string.Empty;
+        private TransportFailure? failure;
+        private long attempt;
+
+        public event EventHandler<SessionRuntimeStateChangedEventArgs>? StateChanged;
+        public event EventHandler<SessionRuntimeTransientStatusChangedEventArgs>? TransientStatusChanged;
+
+        public SessionRuntimeState State => uiState;
+        public TransportState TransportLifecycleState => transportState;
+        public string StatusText => statusText;
+        public TransportFailure? LastTransportFailure => failure;
+
+        public DiagnosticsSnapshot GetDiagnosticsSnapshot()
+            => new(
+                CurrentState: transportState.ToString(),
+                SessionUiState: uiState.ToString(),
+                AttemptNumber: attempt,
+                LastFailureCategory: failure?.Category.ToString() ?? string.Empty,
+                LastFailureMessage: failure?.Message ?? string.Empty,
+                LastConnectDurationMs: null,
+                LastHandshakeDurationMs: null,
+                LastBridgeStartDurationMs: null);
+
+        public void SetAttempt(long value) => attempt = value;
+        public void SetTransportState(TransportState state) => transportState = state;
+        public void SetSessionUiState(SessionRuntimeState state) => uiState = state;
+        public void SetStatusText(string text) => statusText = text ?? string.Empty;
+        public void SetFailure(TransportFailure? transportFailure) => failure = transportFailure;
+
+        public void RaiseStateChanged()
+            => StateChanged?.Invoke(this, new SessionRuntimeStateChangedEventArgs(uiState, SessionRuntimeRole.Helper, statusText, currentCode: null));
+
+        public void RaiseTransient(bool isVisible, string text, bool canCancel)
+        {
+            statusText = text ?? string.Empty;
+            TransientStatusChanged?.Invoke(this, new SessionRuntimeTransientStatusChangedEventArgs(isVisible, statusText, canCancel));
+        }
+    }
+
+    private sealed class FakeManualTimer : NLink.App.Services.ITimer
+    {
+        private Action? callback;
+        private bool disposed;
+
+        public bool IsRunning { get; private set; }
+
+        public void Start(TimeSpan dueTime, TimeSpan period, Action callback)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            this.callback = callback ?? throw new ArgumentNullException(nameof(callback));
+            IsRunning = true;
+        }
+
+        public void Stop()
+        {
+            IsRunning = false;
+            callback = null;
+        }
+
+        public void Tick()
+        {
+            if (disposed || !IsRunning || callback is null)
+            {
+                return;
+            }
+
+            callback();
+        }
+
+        public void Dispose()
+        {
+            disposed = true;
+            Stop();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void CpuUsageCalculator_ReturnsNonNegative_AndStableForFixedInputs()
+    {
+        var value1 = CpuUsageCalculator.CalculatePercent(deltaCpuMs: 50, elapsedWallMs: 1000, processorCount: 4);
+        var value2 = CpuUsageCalculator.CalculatePercent(deltaCpuMs: 50, elapsedWallMs: 1000, processorCount: 4);
+        var zero = CpuUsageCalculator.CalculatePercent(deltaCpuMs: -1, elapsedWallMs: 1000, processorCount: 4);
+
+        Assert.InRange(value1, 0, 100);
+        Assert.Equal(value1, value2);
+        Assert.Equal(0, zero);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void ResourceSnapshot_JsonSerialization_IsDeterministic()
+    {
+        var snapshot = new ResourceSnapshot(
+            TimestampUtc: new DateTimeOffset(2026, 2, 26, 12, 0, 0, TimeSpan.Zero),
+            App: new ResourceProcessSnapshot(123, "nLink", 100.5, 90.25, 50.75, 1, 2, 3, 25, 120, 1.25),
+            Bridge: new ResourceProcessSnapshot(456, "node", 80.5, 70.25, 0, 0, 0, 0, 12, 80, 0.75),
+            ActiveCounters: new ActiveResourceCountersSnapshot(0, 0, 0, 0, 0, 0));
+
+        var json1 = snapshot.ToJson();
+        var json2 = snapshot.ToJson();
+
+        Assert.Equal(json1, json2);
+        Assert.Contains("\"App\"", json1, StringComparison.Ordinal);
+        Assert.Contains("\"Bridge\"", json1, StringComparison.Ordinal);
+        Assert.Contains("\"ActiveCounters\"", json1, StringComparison.Ordinal);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void ResourceGate_EvaluatesThresholdsAndGrowth()
+    {
+        var baseSnapshot = new ResourceSnapshot(
+            DateTimeOffset.UtcNow,
+            new ResourceProcessSnapshot(1, "app", 100, 100, 10, 0, 0, 0, 10, 100, 1),
+            null,
+            new ActiveResourceCountersSnapshot(0, 0, 0, 0, 0, 0));
+        var endSnapshot = new ResourceSnapshot(
+            DateTimeOffset.UtcNow.AddSeconds(10),
+            new ResourceProcessSnapshot(1, "app", 140, 150, 12, 1, 0, 0, 12, 120, 2),
+            null,
+            new ActiveResourceCountersSnapshot(0, 0, 0, 0, 0, 0));
+
+        var summary = ResourceSummaryBuilder.BuildSummary(new[] { baseSnapshot, endSnapshot });
+        var thresholds = new ResourceGateThresholds(
+            AppWorkingSetMaxMB: 200,
+            AppPrivateBytesMaxMB: 200,
+            AppThreadMax: 100,
+            AppHandleMax: 500,
+            AppCpuIdleAvgMaxPct: 50,
+            GrowthWarnPercent: 5,
+            GrowthFailPercent: 60);
+        var result = ResourceGate.Evaluate(new ResourceGateInput(summary, "DEVLOCAL", "PerSession", "test"), thresholds);
+
+        Assert.True(result.Passed);
+        Assert.NotEmpty(result.Warnings);
+        Assert.Contains(result.Warnings, w => w.Contains("growth", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void ResourceGate_CanDisableGenericGrowthChecks_WhileKeepingCleanupChecks()
+    {
+        var snapshotA = new ResourceSnapshot(
+            DateTimeOffset.UtcNow,
+            new ResourceProcessSnapshot(1, "app", 100, 100, 10, 0, 0, 0, 10, 100, 0),
+            null,
+            new ActiveResourceCountersSnapshot(0, 0, 0, 0, 0, 0));
+        var snapshotB = snapshotA with
+        {
+            TimestampUtc = DateTimeOffset.UtcNow.AddSeconds(10),
+            App = snapshotA.App with { WorkingSetMB = 250, PrivateBytesMB = 250, ThreadCount = 20, HandleCount = 300 }
+        };
+
+        var summary = ResourceSummaryBuilder.BuildSummary(new[] { snapshotA, snapshotB });
+        var thresholds = new ResourceGateThresholds(
+            AppWorkingSetMaxMB: 1000,
+            AppPrivateBytesMaxMB: 1000,
+            AppThreadMax: 1000,
+            AppHandleMax: 1000,
+            AppCpuIdleAvgMaxPct: 100,
+            GrowthWarnPercent: 1,
+            GrowthFailPercent: 1,
+            EvaluateGrowthChecks: false);
+
+        var result = ResourceGate.Evaluate(new ResourceGateInput(summary, "DEVLOCAL", "PerSession", "test"), thresholds);
+        Assert.True(result.Passed);
+        Assert.Empty(result.Failures);
+        Assert.Empty(result.Warnings);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task ResourceBenchmarkRunner_LeakCheck_ShortRun_LeavesActiveCountersAtZero_AndWritesArtifacts()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-resource-smoke-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        var previousCwd = Environment.CurrentDirectory;
+        try
+        {
+            Environment.CurrentDirectory = tempRoot;
+            ActiveRuntimeCounters.ResetForTests();
+
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exitCode = await ResourceBenchmarkRunner.RunAsync(
+                new[]
+                {
+                    "--leak-check",
+                    "--cycles", "50",
+                    "--transport", "devlocal",
+                    "--bridge-reuse-mode", "persession",
+                    "--delay-ms", "0",
+                    "--leak-growth-fail-percent", "1000"
+                },
+                stdout,
+                stderr,
+                CancellationToken.None);
+
+            Assert.Equal(0, exitCode);
+
+            var resourcesDir = Path.Combine(tempRoot, "artifacts", "resources");
+            Assert.True(Directory.Exists(resourcesDir));
+            Assert.NotEmpty(Directory.GetFiles(resourcesDir, "leak-check-*.json", SearchOption.TopDirectoryOnly));
+            Assert.True(File.Exists(Path.Combine(resourcesDir, "leak-check-summary.txt")));
+
+            var counters = ActiveRuntimeCounters.Snapshot();
+            Assert.Equal(0, counters.ActiveSessions);
+            Assert.Equal(0, counters.ActiveConnectAttempts);
+            Assert.Equal(0, counters.ActiveRetryTimers);
+            Assert.Equal(0, counters.ActiveWatchdogs);
+            Assert.Equal(0, counters.ActiveTransportTasks);
+            Assert.Equal(0, counters.ActiveBridgeIoReaders);
+
+            var nkn = NknRuntimeDiagnostics.Snapshot();
+            if (nkn.BridgePid > 0)
+            {
+                bool isRunning;
+                try
+                {
+                    using var process = Process.GetProcessById(nkn.BridgePid);
+                    isRunning = !process.HasExited;
+                }
+                catch (ArgumentException)
+                {
+                    isRunning = false;
+                }
+
+                Assert.False(isRunning, $"Expected no orphan bridge PID after DevLocal leak-check, but PID {nkn.BridgePid} is still running.");
+            }
+        }
+        finally
+        {
+            Environment.CurrentDirectory = previousCwd;
+            try { Directory.Delete(tempRoot, recursive: true); } catch { }
+            ActiveRuntimeCounters.ResetForTests();
+        }
     }
 }

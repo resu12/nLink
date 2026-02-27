@@ -19,9 +19,27 @@ sealed class Program
             return;
         }
 
+        if (HasSoakArgument(args))
+        {
+            var exitCode = SoakRunner.RunAsync(args, Console.Out, Console.Error, CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+            Environment.ExitCode = exitCode;
+            return;
+        }
+
         if (HasSelfTestArgument(args))
         {
             var exitCode = BridgeSelfTestRunner.RunAsync(Console.Out, Console.Error, CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+            Environment.ExitCode = exitCode;
+            return;
+        }
+
+        if (HasResourceRunnerArgument(args))
+        {
+            var exitCode = ResourceBenchmarkRunner.RunAsync(args, Console.Out, Console.Error, CancellationToken.None)
                 .GetAwaiter()
                 .GetResult();
             Environment.ExitCode = exitCode;
@@ -39,6 +57,18 @@ sealed class Program
     internal static bool HasBenchmarkArgument(string[] args)
     {
         return args.Any(a => string.Equals(a, "--bench", StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal static bool HasSoakArgument(string[] args)
+    {
+        return args.Any(a => string.Equals(a, "--soak", StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal static bool HasResourceRunnerArgument(string[] args)
+    {
+        return args.Any(a =>
+            string.Equals(a, "--resource-bench", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(a, "--leak-check", StringComparison.OrdinalIgnoreCase));
     }
 
     public static AppBuilder BuildAvaloniaApp()

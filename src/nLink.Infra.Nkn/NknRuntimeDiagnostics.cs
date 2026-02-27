@@ -1,6 +1,3 @@
-using System;
-using System.Threading;
-
 namespace NLink.Infra.Nkn;
 
 public static class NknRuntimeDiagnostics
@@ -18,6 +15,7 @@ public static class NknRuntimeDiagnostics
     private static long bridgeRestartCount;
     private static int bridgeLastExitCode = -1;
     private static string bridgeLastExitReason = "(none)";
+    private static double bridgeLastUptimeMs = -1;
     private static long messagesSent;
     private static long messagesReceived;
     private static long bridgeRawMessagesReceived;
@@ -25,11 +23,17 @@ public static class NknRuntimeDiagnostics
     private static bool? lastBridgeMessageIsTopic;
     private static string lastEnvelopeType = "(none)";
     private static string lastEnvelopeDropReason = "(none)";
+    private static string lastProgressEventType = "(none)";
+    private static long lastProgressEventUtcTicks;
+    private static string lastSelectedRpc = "(none)";
     private static long joinRequestsReceived;
     private static long incomingJoinRequestRaisedCount;
     private static long acksReceived;
     private static long acksIgnoredSourceMismatch;
     private static string lastDisconnectReason = "(none)";
+    private static double firstColdStartMs = -1d;
+    private static long firstColdStartUtcTicks;
+    private static int firstColdStartObserved;
 
     public static void SetIdentity(string address, string identifier, string keyPath, string? seedRpc)
     {
@@ -96,6 +100,20 @@ public static class NknRuntimeDiagnostics
         }
     }
 
+    public static void SetLastProgressEvent(string? eventType, DateTimeOffset utcTime, string? selectedRpc = null)
+    {
+        lock (Gate)
+        {
+            lastProgressEventType = string.IsNullOrWhiteSpace(eventType) ? "(none)" : eventType!;
+            if (!string.IsNullOrWhiteSpace(selectedRpc))
+            {
+                lastSelectedRpc = selectedRpc!;
+            }
+        }
+
+        Interlocked.Exchange(ref lastProgressEventUtcTicks, utcTime.UtcDateTime.Ticks);
+    }
+
     public static void IncrementJoinRequestsReceived() => Interlocked.Increment(ref joinRequestsReceived);
 
     public static void IncrementIncomingJoinRequestRaised() => Interlocked.Increment(ref incomingJoinRequestRaisedCount);
@@ -142,6 +160,34 @@ public static class NknRuntimeDiagnostics
         }
     }
 
+    public static void SetBridgeLastUptimeMs(double? uptimeMs)
+    {
+        lock (Gate)
+        {
+            bridgeLastUptimeMs = uptimeMs.GetValueOrDefault(-1d);
+        }
+    }
+
+    public static void RecordFirstColdStart(double? readyTimeMs, DateTimeOffset utcTime)
+    {
+        if (!readyTimeMs.HasValue || readyTimeMs.Value < 0)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref firstColdStartObserved, 1, 0) != 0)
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            firstColdStartMs = readyTimeMs.Value;
+        }
+
+        Interlocked.Exchange(ref firstColdStartUtcTicks, utcTime.UtcDateTime.Ticks);
+    }
+
     public static void SetLastError(string message)
     {
         lock (Gate)
@@ -176,16 +222,23 @@ public static class NknRuntimeDiagnostics
                 BridgeRestartCount: Interlocked.Read(ref bridgeRestartCount),
                 BridgeLastExitCode: bridgeLastExitCode,
                 BridgeLastExitReason: string.IsNullOrWhiteSpace(bridgeLastExitReason) ? "(none)" : bridgeLastExitReason,
+                BridgeLastUptimeMs: bridgeLastUptimeMs,
                 BridgeRawMessagesReceived: Interlocked.Read(ref bridgeRawMessagesReceived),
                 LastBridgeMessageSource: string.IsNullOrWhiteSpace(lastBridgeMessageSource) ? "(none)" : lastBridgeMessageSource,
                 LastBridgeMessageIsTopic: lastBridgeMessageIsTopic,
                 LastEnvelopeType: string.IsNullOrWhiteSpace(lastEnvelopeType) ? "(none)" : lastEnvelopeType,
                 LastEnvelopeDropReason: string.IsNullOrWhiteSpace(lastEnvelopeDropReason) ? "(none)" : lastEnvelopeDropReason,
+                LastProgressEventType: string.IsNullOrWhiteSpace(lastProgressEventType) ? "(none)" : lastProgressEventType,
+                LastProgressEventUtcTicks: Interlocked.Read(ref lastProgressEventUtcTicks),
+                LastSelectedRpc: string.IsNullOrWhiteSpace(lastSelectedRpc) ? "(none)" : lastSelectedRpc,
                 JoinRequestsReceived: Interlocked.Read(ref joinRequestsReceived),
                 IncomingJoinRequestRaisedCount: Interlocked.Read(ref incomingJoinRequestRaisedCount),
                 AcksReceived: Interlocked.Read(ref acksReceived),
                 AcksIgnoredSourceMismatch: Interlocked.Read(ref acksIgnoredSourceMismatch),
-                LastDisconnectReason: string.IsNullOrWhiteSpace(lastDisconnectReason) ? "(none)" : lastDisconnectReason);
+                LastDisconnectReason: string.IsNullOrWhiteSpace(lastDisconnectReason) ? "(none)" : lastDisconnectReason,
+                FirstColdStartObserved: Interlocked.CompareExchange(ref firstColdStartObserved, 0, 0) != 0,
+                FirstColdStartMs: firstColdStartMs,
+                FirstColdStartUtcTicks: Interlocked.Read(ref firstColdStartUtcTicks));
         }
     }
 }
@@ -204,13 +257,20 @@ public readonly record struct NknRuntimeDiagnosticsSnapshot(
     long BridgeRestartCount,
     int BridgeLastExitCode,
     string BridgeLastExitReason,
+    double BridgeLastUptimeMs,
     long BridgeRawMessagesReceived,
     string LastBridgeMessageSource,
     bool? LastBridgeMessageIsTopic,
     string LastEnvelopeType,
     string LastEnvelopeDropReason,
+    string LastProgressEventType,
+    long LastProgressEventUtcTicks,
+    string LastSelectedRpc,
     long JoinRequestsReceived,
     long IncomingJoinRequestRaisedCount,
     long AcksReceived,
     long AcksIgnoredSourceMismatch,
-    string LastDisconnectReason);
+    string LastDisconnectReason,
+    bool FirstColdStartObserved,
+    double FirstColdStartMs,
+    long FirstColdStartUtcTicks);

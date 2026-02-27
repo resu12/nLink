@@ -1,11 +1,7 @@
-using System;
-using System.IO;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Threading;
-using System.Threading.Tasks;
 using NLink.Core;
 using NLink.Core.Chat;
 
@@ -53,44 +49,49 @@ public sealed class DevLocalTransport : ISignalingTransport
     public async Task HostAsync(SessionCode code, CancellationToken ct)
     {
         ThrowIfDisposed();
-        using var cancelRegistration = ct.Register(() => ClearActiveConnection()?.Dispose());
-
-        while (!ct.IsCancellationRequested)
+        var cancelRegistration = ct.Register(() => ClearActiveConnection()?.Dispose());
+        try
         {
-            if (disposed)
+            while (!ct.IsCancellationRequested)
             {
-                break;
-            }
-
-            try
-            {
-                await HandleSingleHostConnectionAsync(code, ct);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                break;
-            }
-            catch
-            {
-                OnDisconnected();
+                if (disposed)
+                {
+                    break;
+                }
 
                 try
                 {
-                    await Task.Delay(150, ct);
+                    await HandleSingleHostConnectionAsync(code, ct);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
                     break;
                 }
+                catch
+                {
+                    OnDisconnected();
+
+                    try
+                    {
+                        await Task.Delay(150, ct);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                }
             }
+        }
+        finally
+        {
+            cancelRegistration.Dispose();
         }
     }
 
     public async Task JoinAsync(SessionCode code, CancellationToken ct)
     {
         ThrowIfDisposed();
-        using var cancelRegistration = ct.Register(() => ClearActiveConnection()?.Dispose());
-
+        var cancelRegistration = ct.Register(() => ClearActiveConnection()?.Dispose());
         SessionConnection? connection = null;
 
         try
@@ -100,9 +101,7 @@ public sealed class DevLocalTransport : ISignalingTransport
                 BuildPipeName(code),
                 PipeDirection.InOut,
                 PipeOptions.Asynchronous);
-
             await client.ConnectAsync(ConnectTimeoutMs, ct);
-
             connection = new SessionConnection(client);
             ReplaceActiveConnection(connection);
 
@@ -138,6 +137,10 @@ public sealed class DevLocalTransport : ISignalingTransport
         {
             OnDisconnected();
         }
+        finally
+        {
+            cancelRegistration.Dispose();
+        }
     }
 
     public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
@@ -161,82 +164,92 @@ public sealed class DevLocalTransport : ISignalingTransport
 
     private async Task HandleSingleHostConnectionAsync(SessionCode code, CancellationToken ct)
     {
-        var server = new NamedPipeServerStream(
-            BuildPipeName(code),
-            PipeDirection.InOut,
-            1,
-            PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous);
-
-        await server.WaitForConnectionAsync(ct);
-
-        var connection = new SessionConnection(server);
-        ReplaceActiveConnection(connection);
-
+        NamedPipeServerStream? server = null;
         try
         {
-            var joinFrame = await connection.ReadFrameAsync(ct);
-            if (joinFrame is null || !string.Equals(joinFrame.Type, JoinFrameType, StringComparison.Ordinal))
-            {
-                await connection.WriteFrameAsync(new TransportFrame { Type = RejectFrameType }, ct);
-                return;
-            }
+            server = new NamedPipeServerStream(
+                BuildPipeName(code),
+                PipeDirection.InOut,
+                1,
+                PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous);
+            await server.WaitForConnectionAsync(ct);
+            var connection = new SessionConnection(server);
+            server = null; // ownership transferred to SessionConnection
+            ReplaceActiveConnection(connection);
 
-            byte[] helperPublicKey;
             try
             {
-                helperPublicKey = Convert.FromBase64String(joinFrame.Data ?? string.Empty);
-            }
-            catch (FormatException)
-            {
-                await connection.WriteFrameAsync(new TransportFrame { Type = RejectFrameType }, ct);
-                return;
-            }
-
-            using var hostKeyPair = ChatKeyAgreement.CreateKeyPair();
-            var sharedKey = hostKeyPair.DeriveSharedKey(helperPublicKey);
-
-            await connection.WriteFrameAsync(
-                new TransportFrame
+                var joinFrame = await connection.ReadFrameAsync(ct);
+                if (joinFrame is null || !string.Equals(joinFrame.Type, JoinFrameType, StringComparison.Ordinal))
                 {
-                    Type = HelloFrameType,
-                    Data = Convert.ToBase64String(hostKeyPair.PublicKey),
-                },
-                ct);
+                    await connection.WriteFrameAsync(new TransportFrame { Type = RejectFrameType }, ct);
+                    return;
+                }
 
-            SessionKeyReady?.Invoke(this, new TransportSessionKeyReadyEventArgs(sharedKey));
-
-            var joinRequestArgs = new IncomingJoinRequestEventArgs(
-                approveAsync: token => ApproveHostJoinAsync(connection, token),
-                rejectAsync: token => RejectHostJoinAsync(connection, token));
-
-            var handler = IncomingJoinRequest;
-            if (handler is null)
-            {
-                await joinRequestArgs.RejectAsync(ct);
-            }
-            else
-            {
+                byte[] helperPublicKey;
                 try
                 {
-                    handler(this, joinRequestArgs);
+                    helperPublicKey = Convert.FromBase64String(joinFrame.Data ?? string.Empty);
                 }
-                catch
+                catch (FormatException)
+                {
+                    await connection.WriteFrameAsync(new TransportFrame { Type = RejectFrameType }, ct);
+                    return;
+                }
+
+                using var hostKeyPair = ChatKeyAgreement.CreateKeyPair();
+                var sharedKey = hostKeyPair.DeriveSharedKey(helperPublicKey);
+
+                await connection.WriteFrameAsync(
+                    new TransportFrame
+                    {
+                        Type = HelloFrameType,
+                        Data = Convert.ToBase64String(hostKeyPair.PublicKey),
+                    },
+                    ct);
+
+                SessionKeyReady?.Invoke(this, new TransportSessionKeyReadyEventArgs(sharedKey));
+
+                var joinRequestArgs = new IncomingJoinRequestEventArgs(
+                    approveAsync: token => ApproveHostJoinAsync(connection, token),
+                    rejectAsync: token => RejectHostJoinAsync(connection, token));
+
+                var handler = IncomingJoinRequest;
+                if (handler is null)
                 {
                     await joinRequestArgs.RejectAsync(ct);
                 }
-            }
+                else
+                {
+                    try
+                    {
+                        handler(this, joinRequestArgs);
+                    }
+                    catch
+                    {
+                        await joinRequestArgs.RejectAsync(ct);
+                    }
+                }
 
-            await RunHostReadLoopAsync(connection, ct);
+                await RunHostReadLoopAsync(connection, ct);
+            }
+            finally
+            {
+                if (ReferenceEquals(GetActiveConnection(), connection))
+                {
+                    ClearActiveConnection();
+                }
+
+                connection.Dispose();
+            }
         }
         finally
         {
-            if (ReferenceEquals(GetActiveConnection(), connection))
+            if (server is not null)
             {
-                ClearActiveConnection();
+                try { server.Dispose(); } catch { }
             }
-
-            connection.Dispose();
         }
     }
 
@@ -316,6 +329,8 @@ public sealed class DevLocalTransport : ISignalingTransport
             {
                 ClearActiveConnection();
             }
+
+            connection.Dispose();
         }
     }
 
@@ -490,11 +505,11 @@ public sealed class DevLocalTransport : ISignalingTransport
             {
                 return;
             }
-
             // Closing the pipe is enough to break any pending read/write loops.
             // Avoid disposing reader/writer synchronously here because they may block
             // while another thread is already in a pipe read during test shutdown.
             try { pipe.Dispose(); } catch { }
+            try { writeGate.Dispose(); } catch { }
         }
     }
 

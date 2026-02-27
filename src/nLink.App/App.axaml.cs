@@ -1,8 +1,7 @@
-﻿using Avalonia;
+﻿using System.Linq;
+using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
-using Avalonia.Data.Core;
 using Avalonia.Data.Core.Plugins;
-using System.Linq;
 using Avalonia.Markup.Xaml;
 using NLink.App.Configuration;
 using NLink.App.Services;
@@ -59,6 +58,13 @@ public partial class App : Application
         if (!Services.TryGet<MetricsRegistry>(out _))
         {
             Services.AddSingleton(new MetricsRegistry());
+        }
+
+        if (!Services.TryGet<ResourceRuntimeTracker>(out _))
+        {
+            var tracker = new ResourceRuntimeTracker();
+            tracker.Start();
+            Services.AddSingleton(tracker);
         }
     }
 

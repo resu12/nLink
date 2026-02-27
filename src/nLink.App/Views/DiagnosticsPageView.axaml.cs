@@ -25,6 +25,7 @@ public partial class DiagnosticsPageView : UserControl
             subscribedViewModel.OpenLogsFolderRequested -= OnOpenLogsFolderRequested;
             subscribedViewModel.OpenBugReportRequested -= OnOpenBugReportRequested;
             subscribedViewModel.OpenMetricsExportFolderRequested -= OnOpenMetricsExportFolderRequested;
+            subscribedViewModel.OpenHangReportFolderRequested -= OnOpenHangReportFolderRequested;
             subscribedViewModel = null;
         }
 
@@ -38,6 +39,7 @@ public partial class DiagnosticsPageView : UserControl
         subscribedViewModel.OpenLogsFolderRequested += OnOpenLogsFolderRequested;
         subscribedViewModel.OpenBugReportRequested += OnOpenBugReportRequested;
         subscribedViewModel.OpenMetricsExportFolderRequested += OnOpenMetricsExportFolderRequested;
+        subscribedViewModel.OpenHangReportFolderRequested += OnOpenHangReportFolderRequested;
     }
 
     private async void OnCopyReliabilityLogRequested(object? sender, string text)
@@ -98,6 +100,18 @@ public partial class DiagnosticsPageView : UserControl
     }
 
     private void OnOpenMetricsExportFolderRequested(object? sender, string path)
+    {
+        try
+        {
+            OpenFolder(path);
+        }
+        catch
+        {
+            // Best-effort helper action only.
+        }
+    }
+
+    private void OnOpenHangReportFolderRequested(object? sender, string path)
     {
         try
         {

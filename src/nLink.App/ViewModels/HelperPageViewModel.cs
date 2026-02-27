@@ -21,6 +21,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly Action? openDiagnosticsAction;
     private readonly TransportRuntimeConfig transportConfig;
     private readonly SessionRuntime sessionRuntime;
+    private readonly StatusPresenter statusPresenter;
+    private readonly bool ownsStatusPresenter;
     private readonly IClipboardService? clipboardService;
     private readonly ShareMessageConfig shareMessageConfig;
 
@@ -28,13 +30,18 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private string statusText = string.Empty;
     private string connectionState = "Idle";
     private string chatDraft = string.Empty;
+    private string failureTitle = string.Empty;
+    private string failureMessage = string.Empty;
+    private string failureActionText = string.Empty;
+    private bool showTransientBanner;
+    private string transientBannerText = string.Empty;
+    private bool canCancelTransient;
     private bool isConnecting;
     private bool showChatNotice;
-    private bool showCopyFeedback;
-    private string copyFeedbackText = string.Empty;
     private bool startupBlocked;
+    private UserFacingStatus bannerStatus = UserFacingStatus.IdleStatus;
     private CancellationTokenSource? connectCts;
-    private CancellationTokenSource? copyFeedbackResetCts;
+    private readonly InlineTransientText copyFeedback = new();
     private readonly Func<DateTimeOffset> nowProvider;
     private readonly TimeSpan connectFailureCooldown;
     private readonly TimeSpan approvalTimeout;
@@ -50,6 +57,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         Action? openDiagnosticsAction = null,
         IClipboardService? clipboardService = null,
         ShareMessageConfig? shareMessageConfig = null,
+        StatusPresenter? statusPresenter = null,
         TimeSpan? approvalTimeout = null,
         TimeSpan? connectFailureCooldown = null,
         Func<DateTimeOffset>? nowProvider = null)
@@ -58,6 +66,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         this.openDiagnosticsAction = openDiagnosticsAction;
         this.transportConfig = transportConfig;
         this.sessionRuntime = sessionRuntime;
+        this.statusPresenter = statusPresenter ?? new StatusPresenter(sessionRuntime);
+        ownsStatusPresenter = statusPresenter is null;
         this.clipboardService = clipboardService;
         this.shareMessageConfig = shareMessageConfig ?? new ShareMessageConfig(null);
         this.approvalTimeout = approvalTimeout ?? DefaultApprovalTimeout;
@@ -67,22 +77,28 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         ChatMessages = new ObservableCollection<ChatLineViewModel>();
 
         sessionRuntime.StateChanged += OnSessionRuntimeStateChanged;
+        sessionRuntime.TransientStatusChanged += OnTransientStatusChanged;
         sessionRuntime.Approved += OnApproved;
         sessionRuntime.Rejected += OnRejected;
         sessionRuntime.Disconnected += OnDisconnected;
         sessionRuntime.ChatMessageReceived += OnChatMessageReceived;
         sessionRuntime.ChatMessageReceivedBeforeApproved += OnChatMessageReceivedBeforeApproved;
         sessionRuntime.ChatStateChanged += OnChatStateChanged;
+        this.statusPresenter.StatusChanged += OnStatusPresenterChanged;
+        copyFeedback.PropertyChanged += OnCopyFeedbackPropertyChanged;
 
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
         CopyInstallMessageCommand = new AsyncRelayCommand(CopyInstallMessageAsync);
         SendFileCommand = new RelayCommand(RequestSendFileWindow);
         SendChatCommand = new AsyncRelayCommand(SendChatAsync, CanSendChat);
         RetryCommand = new AsyncRelayCommand(RetryAsync, CanRetry);
+        CancelTransientCommand = new AsyncRelayCommand(CancelTransientAsync, CanCancelTransientOperation);
         OpenDiagnosticsCommand = new RelayCommand(OpenDiagnostics, CanOpenDiagnostics);
         CancelCommand = new RelayCommand(CancelAndGoBack);
 
         InitializeStartupAvailabilityState();
+        BannerStatus = this.statusPresenter.CurrentStatus;
+        SyncTransientStatusFromRuntime();
     }
 
     public string PageTitle => "Enter the 6-digit code";
@@ -142,7 +158,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowChatConnectionHint));
                 OnPropertyChanged(nameof(ShowMainControls));
                 OnPropertyChanged(nameof(ShowConnectAction));
+                OnPropertyChanged(nameof(ShowStartupBlockedPanel));
                 OnPropertyChanged(nameof(ShowInlineStatusText));
+                OnPropertyChanged(nameof(ShowFailurePanel));
                 OnPropertyChanged(nameof(ShowCopyFeedbackInline));
                 OnPropertyChanged(nameof(ShowBackButton));
                 OnPropertyChanged(nameof(ShowPageHeader));
@@ -175,7 +193,25 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool ShowChatPanel => IsConnectedView;
 
     public bool ShowStatusText => !string.IsNullOrWhiteSpace(StatusText);
-    public bool ShowInlineStatusText => ShowStatusText && !IsStartupBlocked && !IsConnectedView;
+    public bool ShowInlineStatusText => ShowStatusText && !IsStartupBlocked && !IsConnectedView && !ShowFailurePanel;
+    public UserFacingStatus BannerStatus
+    {
+        get => bannerStatus;
+        private set
+        {
+            if (SetProperty(ref bannerStatus, value))
+            {
+                OnPropertyChanged(nameof(ShowStatusBanner));
+            }
+        }
+    }
+
+    public bool ShowStatusBanner => BannerStatus.Kind is not UserStatusKind.Idle and not UserStatusKind.Connected;
+    public string? StatusBannerFailureCategory => NormalizeBannerDetail(sessionRuntime.LastTransportFailure?.Category.ToString());
+    public string? StatusBannerSessionCorrelationId => NormalizeBannerDetail(sessionRuntime.LastTransportFailure?.CorrelationId);
+    public string? StatusBannerLastConnectDuration => FormatBannerDuration(sessionRuntime.GetDiagnosticsSnapshot().LastConnectDurationMs);
+    public string? StatusBannerLastHandshakeDuration => FormatBannerDuration(sessionRuntime.GetDiagnosticsSnapshot().LastHandshakeDurationMs);
+    public string? StatusBannerBridgeState => BuildBannerBridgeState();
 
     public bool IsStartupBlocked
     {
@@ -188,7 +224,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowConnectAction));
                 OnPropertyChanged(nameof(ShowRetryAction));
                 OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
+                OnPropertyChanged(nameof(ShowStartupBlockedPanel));
                 OnPropertyChanged(nameof(ShowInlineStatusText));
+                OnPropertyChanged(nameof(ShowFailurePanel));
                 OnPropertyChanged(nameof(ShowCopyFeedbackInline));
                 ConnectCommand.NotifyCanExecuteChanged();
                 RetryCommand.NotifyCanExecuteChanged();
@@ -200,6 +238,29 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool ShowMainControls => !IsStartupBlocked && !ShowRetryAction && !IsConnectedView;
 
     public bool ShowConnectAction => ShowMainControls && !ShowRetryAction;
+    public bool ShowStartupBlockedPanel => IsStartupBlocked && !ShowFailurePanel;
+
+    public string FailureTitle
+    {
+        get => failureTitle;
+        private set => SetProperty(ref failureTitle, value);
+    }
+
+    public string FailureMessage
+    {
+        get => failureMessage;
+        private set => SetProperty(ref failureMessage, value);
+    }
+
+    public string FailureActionText
+    {
+        get => failureActionText;
+        private set => SetProperty(ref failureActionText, value);
+    }
+
+    public bool ShowFailurePanel =>
+        (!string.IsNullOrWhiteSpace(FailureTitle) || !string.IsNullOrWhiteSpace(FailureMessage)) &&
+        (IsStartupBlocked || string.Equals(ConnectionState, "Failed", StringComparison.Ordinal));
 
     public string ChatPanelTitle => "Message";
     public bool HasChatMessages => ChatMessages.Count > 0;
@@ -240,11 +301,14 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public IAsyncRelayCommand SendChatCommand { get; }
 
     public IAsyncRelayCommand RetryCommand { get; }
+    public IAsyncRelayCommand CancelTransientCommand { get; }
 
     public IRelayCommand OpenDiagnosticsCommand { get; }
 
     public IRelayCommand CancelCommand { get; }
     public IRelayCommand EndSessionCommand => CancelCommand;
+    public IRelayCommand StatusBannerCopyDiagnosticsCommand => OpenDiagnosticsCommand;
+    public IAsyncRelayCommand StatusBannerCancelCommand => CancelTransientCommand;
 
     public event EventHandler? SendFileRequested;
 
@@ -256,26 +320,32 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         openDiagnosticsAction is not null &&
         (IsStartupBlocked || string.Equals(StatusText, UserErrorMapper.NknStartFailedReinstall(), StringComparison.Ordinal));
 
-    public bool ShowCopyFeedback
-    {
-        get => showCopyFeedback;
-        private set
-        {
-            if (SetProperty(ref showCopyFeedback, value))
-            {
-                OnPropertyChanged(nameof(ShowCopyFeedbackInline));
-            }
-        }
-    }
-
-    public bool ShowCopyFeedbackInline => ShowMainControls && ShowCopyFeedback;
+    public InlineTransientText CopyFeedback => copyFeedback;
+    public bool ShowCopyFeedbackInline => ShowMainControls && copyFeedback.IsVisible;
 
     public bool ShowBackButton => !IsConnectedView;
-
-    public string CopyFeedbackText
+    public bool ShowTransientBanner
     {
-        get => copyFeedbackText;
-        private set => SetProperty(ref copyFeedbackText, value);
+        get => showTransientBanner;
+        private set => SetProperty(ref showTransientBanner, value);
+    }
+
+    public string TransientBannerText
+    {
+        get => transientBannerText;
+        private set => SetProperty(ref transientBannerText, value);
+    }
+
+    public bool CanCancelTransient
+    {
+        get => canCancelTransient;
+        private set
+        {
+            if (SetProperty(ref canCancelTransient, value))
+            {
+                CancelTransientCommand.NotifyCanExecuteChanged();
+            }
+        }
     }
 
     public void Dispose()
@@ -288,26 +358,52 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         disposed = true;
 
         sessionRuntime.StateChanged -= OnSessionRuntimeStateChanged;
+        sessionRuntime.TransientStatusChanged -= OnTransientStatusChanged;
         sessionRuntime.Approved -= OnApproved;
         sessionRuntime.Rejected -= OnRejected;
         sessionRuntime.Disconnected -= OnDisconnected;
         sessionRuntime.ChatMessageReceived -= OnChatMessageReceived;
         sessionRuntime.ChatMessageReceivedBeforeApproved -= OnChatMessageReceivedBeforeApproved;
         sessionRuntime.ChatStateChanged -= OnChatStateChanged;
+        statusPresenter.StatusChanged -= OnStatusPresenterChanged;
+        copyFeedback.PropertyChanged -= OnCopyFeedbackPropertyChanged;
+        if (ownsStatusPresenter)
+        {
+            statusPresenter.Dispose();
+        }
         sessionRuntime.SetReliabilityAttempt(null);
         _ = sessionRuntime.ResetAsync();
 
         connectCts?.Cancel();
         connectCts?.Dispose();
         connectCts = null;
-        copyFeedbackResetCts?.Cancel();
-        copyFeedbackResetCts?.Dispose();
-        copyFeedbackResetCts = null;
+        copyFeedback.Dispose();
     }
 
     private bool CanConnect()
     {
         return !IsStartupBlocked && !IsConnecting && SessionCode.TryParse(CodeInput, out _);
+    }
+
+    private bool CanCancelTransientOperation()
+    {
+        return ShowTransientBanner && CanCancelTransient;
+    }
+
+    private async Task CancelTransientAsync()
+    {
+        try
+        {
+            await sessionRuntime.CancelTransientAsync();
+        }
+        catch
+        {
+            // best effort UX action
+        }
+        finally
+        {
+            SyncTransientStatusFromRuntime();
+        }
     }
 
     private bool CanSendChat()
@@ -450,15 +546,31 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             await ConnectAsync();
         }
 
-        var message = await sessionRuntime.TrySendChatTextAsync(ChatDraft, CancellationToken.None);
-        if (message is null)
+        var draft = ChatDraft;
+        var optimisticText = draft.Trim();
+        if (string.IsNullOrWhiteSpace(optimisticText))
         {
             return;
         }
 
         ChatDraft = string.Empty;
         ShowChatNotice = false;
-        AddChatLine(message.Value.Text, isLocal: true);
+        var optimisticLine = AddChatLine(optimisticText, isLocal: true);
+
+        var message = await sessionRuntime.TrySendChatTextAsync(draft, CancellationToken.None);
+        if (message is null)
+        {
+            ChatMessages.Remove(optimisticLine);
+            OnPropertyChanged(nameof(HasChatMessages));
+            OnPropertyChanged(nameof(ShowNoMessagesPlaceholder));
+            OnPropertyChanged(nameof(ShowChatPanel));
+            OnPropertyChanged(nameof(ShowChatConnectionHint));
+            if (string.IsNullOrWhiteSpace(ChatDraft))
+            {
+                ChatDraft = draft;
+            }
+            return;
+        }
     }
 
     private void CancelAndGoBack()
@@ -480,7 +592,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         if (clipboardService is null)
         {
-            _ = ShowTransientCopyFeedbackAsync("Could not copy. Please try again.");
+            copyFeedback.Show("Could not copy. Please try again.");
             return;
         }
 
@@ -488,11 +600,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             var text = BuildHelperInstallMessage();
             await clipboardService.SetTextAsync(text);
-            _ = ShowTransientCopyFeedbackAsync("Copied. Paste it in your chat.");
+            copyFeedback.Show("Copied. Paste it in your chat.");
         }
         catch
         {
-            _ = ShowTransientCopyFeedbackAsync("Could not copy. Please try again.");
+            copyFeedback.Show("Could not copy. Please try again.");
         }
     }
 
@@ -542,9 +654,30 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         _ = UiThreadDispatch.RunAsync(() =>
         {
-            StatusText = string.Equals(sessionRuntime.StatusText, "Connection lost.", StringComparison.Ordinal)
-                ? "Connection lost."
-                : transportConfig.HelperDisconnectedText;
+            var runtimeStatus = sessionRuntime.StatusText;
+            if (string.IsNullOrWhiteSpace(runtimeStatus))
+            {
+                // Remote session-end can race with runtime reset back to Idle, clearing StatusText
+                // before the helper VM handles the disconnect callback. If we were connected and
+                // there is no classified failure, prefer the friendly session-ended message.
+                var nknSnapshot = NknRuntimeDiagnostics.Snapshot();
+                var remoteSessionEndSeenInDiagnostics =
+                    string.Equals(nknSnapshot.LastEnvelopeType, "SessionEnd", StringComparison.OrdinalIgnoreCase);
+                var disconnectedAfterConnectedNoFailure =
+                    string.Equals(ConnectionState, "Connected", StringComparison.Ordinal) &&
+                    sessionRuntime.LastTransportFailure is null;
+
+                StatusText = sessionRuntime.LastTransportFailure is null &&
+                             (sessionRuntime.LastDisconnectWasRemoteEnd ||
+                              disconnectedAfterConnectedNoFailure ||
+                              remoteSessionEndSeenInDiagnostics)
+                    ? "The other person ended the session."
+                    : transportConfig.HelperDisconnectedText;
+            }
+            else
+            {
+                StatusText = runtimeStatus;
+            }
             var (errorCode, errorHint) = GetReliabilityError();
             LogReliability(SessionReliabilityStage.Disconnected, errorCode, errorHint);
             if (string.Equals(sessionRuntime.StatusText, "Connection lost.", StringComparison.Ordinal))
@@ -605,13 +738,38 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         });
     }
 
-    private void AddChatLine(string text, bool isLocal)
+    private void OnTransientStatusChanged(object? sender, SessionRuntimeTransientStatusChangedEventArgs e)
     {
-        ChatMessages.Add(new ChatLineViewModel
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(SyncTransientStatusFromRuntime);
+    }
+
+    private void OnStatusPresenterChanged(object? sender, UserFacingStatusChangedEventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(() =>
+        {
+            BannerStatus = e.Status;
+            NotifyStatusBannerDetailChanged();
+        });
+    }
+
+    private ChatLineViewModel AddChatLine(string text, bool isLocal)
+    {
+        var line = new ChatLineViewModel
         {
             Text = text,
             IsLocal = isLocal,
-        });
+        };
+        ChatMessages.Add(line);
 
         while (ChatMessages.Count > 100)
         {
@@ -622,6 +780,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowNoMessagesPlaceholder));
         OnPropertyChanged(nameof(ShowChatPanel));
         OnPropertyChanged(nameof(ShowChatConnectionHint));
+        return line;
     }
 
     private void LogReliability(SessionReliabilityStage stage, string? errorCode = null, string? errorHint = null)
@@ -655,15 +814,18 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         switch (sessionRuntime.State)
         {
             case SessionRuntimeState.Connecting:
+                ClearFailurePresentation();
                 StatusText = "Connecting…";
                 ConnectionState = "Connecting";
                 break;
             case SessionRuntimeState.Connected:
+                ClearFailurePresentation();
                 StatusText = transportConfig.ApprovedStatusText;
                 ConnectionState = "Connected";
                 ShowChatNotice = false;
                 break;
             case SessionRuntimeState.Rejected:
+                ClearFailurePresentation();
                 StatusText = UserErrorMapper.HelperRejected();
                 ConnectionState = "Rejected";
                 break;
@@ -672,12 +834,14 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                     ? UserErrorMapper.HelperGenericConnectFailure()
                     : sessionRuntime.StatusText;
                 ConnectionState = "Failed";
+                ApplyFailurePresentation();
                 break;
             case SessionRuntimeState.Disconnected:
                 StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
                     ? "Connection lost."
                     : sessionRuntime.StatusText;
                 ConnectionState = "Failed";
+                ApplyFailurePresentation();
                 break;
         }
 
@@ -687,11 +851,31 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowRetryAction));
         OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
         OnPropertyChanged(nameof(ShowInlineStatusText));
+        OnPropertyChanged(nameof(ShowFailurePanel));
         OnPropertyChanged(nameof(ShowMainControls));
         OnPropertyChanged(nameof(ShowCopyFeedbackInline));
         SendChatCommand.NotifyCanExecuteChanged();
         RetryCommand.NotifyCanExecuteChanged();
         OpenDiagnosticsCommand.NotifyCanExecuteChanged();
+        SyncTransientStatusFromRuntime();
+        NotifyStatusBannerDetailChanged();
+    }
+
+    private void SyncTransientStatusFromRuntime()
+    {
+        ShowTransientBanner = sessionRuntime.IsTransientStatusVisible && !IsConnectedView;
+        TransientBannerText = sessionRuntime.TransientStatusText;
+        CanCancelTransient = sessionRuntime.CanCancelTransientStatus;
+    }
+
+    private void ApplyFailurePresentation()
+    {
+        // Error presentation is handled centrally by StatusPresenter -> StatusBanner.
+    }
+
+    private void ClearFailurePresentation()
+    {
+        // Error presentation is handled centrally by StatusPresenter -> StatusBanner.
     }
 
     private bool IsInFailureCooldown()
@@ -744,6 +928,14 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
+    private void OnCopyFeedbackPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(InlineTransientText.IsVisible) or nameof(InlineTransientText.Text))
+        {
+            OnPropertyChanged(nameof(ShowCopyFeedbackInline));
+        }
+    }
+
     private enum HelperConnectOutcome
     {
         None,
@@ -751,40 +943,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         Rejected,
         Disconnected,
         PendingTimeout,
-    }
-
-    private async Task ShowTransientCopyFeedbackAsync(string text)
-    {
-        copyFeedbackResetCts?.Cancel();
-        copyFeedbackResetCts?.Dispose();
-        copyFeedbackResetCts = new CancellationTokenSource();
-        var ct = copyFeedbackResetCts.Token;
-
-        await UiThreadDispatch.RunAsync(() =>
-        {
-            CopyFeedbackText = text;
-            ShowCopyFeedback = true;
-        });
-
-        try
-        {
-            await Task.Delay(TimeSpan.FromSeconds(2), ct);
-        }
-        catch (OperationCanceledException)
-        {
-            return;
-        }
-
-        if (ct.IsCancellationRequested)
-        {
-            return;
-        }
-
-        await UiThreadDispatch.RunAsync(() =>
-        {
-            ShowCopyFeedback = false;
-            CopyFeedbackText = string.Empty;
-        });
     }
 
     private void InitializeStartupAvailabilityState()
@@ -799,6 +957,56 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             IsStartupBlocked = true;
             StatusText = UserErrorMapper.NknStartFailedReinstall();
             ConnectionState = "Failed";
+            var failure = TransportFailure.Create(
+                TransportFailureCategory.BridgeStartFailure,
+                "Connection system isn’t available. Please reinstall.",
+                rawError: NknRuntimeDiagnostics.Snapshot().LastError,
+                isTransient: false);
+            _ = sessionRuntime.FailAsync(failure, UserErrorMapper.NknStartFailedReinstall());
         }
     }
+
+    private void NotifyStatusBannerDetailChanged()
+    {
+        OnPropertyChanged(nameof(StatusBannerFailureCategory));
+        OnPropertyChanged(nameof(StatusBannerSessionCorrelationId));
+        OnPropertyChanged(nameof(StatusBannerLastConnectDuration));
+        OnPropertyChanged(nameof(StatusBannerLastHandshakeDuration));
+        OnPropertyChanged(nameof(StatusBannerBridgeState));
+    }
+
+    private string? BuildBannerBridgeState()
+    {
+        if (!string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var snapshot = NknRuntimeDiagnostics.Snapshot();
+        if (snapshot.BridgePid > 0)
+        {
+            return $"Running (PID {snapshot.BridgePid})";
+        }
+
+        if (snapshot.BridgeLastExitCode >= 0)
+        {
+            return $"Exited (code {snapshot.BridgeLastExitCode})";
+        }
+
+        if (!string.IsNullOrWhiteSpace(snapshot.BridgeLastExitReason) &&
+            !string.Equals(snapshot.BridgeLastExitReason, "(none)", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"Exited ({snapshot.BridgeLastExitReason})";
+        }
+
+        return null;
+    }
+
+    private static string? FormatBannerDuration(double? value)
+        => value.HasValue ? $"{value.Value:F0} ms" : null;
+
+    private static string? NormalizeBannerDetail(string? value)
+        => string.IsNullOrWhiteSpace(value) || string.Equals(value, "(none)", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : value;
 }

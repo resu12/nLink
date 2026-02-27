@@ -1,5 +1,3 @@
-using System.Collections.Generic;
-
 namespace NLink.Core;
 
 public static class SessionTimeline

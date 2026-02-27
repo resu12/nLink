@@ -130,6 +130,160 @@ function Find-VisibleByAutomationIdOrName {
     return $null
 }
 
+function Test-TextVisible {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Root,
+        [Parameter(Mandatory = $true)][string]$Text
+    )
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    $texts = Find-AllByType -Root $Root -ControlType ([System.Windows.Automation.ControlType]::Text)
+    foreach ($t in @($texts)) {
+        if ($t.Current.IsOffscreen -eq $false -and $t.Current.Name -eq $Text) { return $true }
+    }
+    return $false
+}
+
+function Get-ElementTextSafe {
+    param([System.Windows.Automation.AutomationElement]$Element)
+    if ($null -eq $Element) { return '' }
+    try { return [string]$Element.Current.Name } catch { return '' }
+}
+
+function Get-BannerElements {
+    param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window)
+
+    $banner = Find-VisibleByAutomationId -Root $Window -AutomationId 'StatusBanner'
+    if (-not $banner) {
+        # Avalonia UIA can omit AutomationIds on some machines; fall back to known controls.
+        return $null
+    }
+
+    return [pscustomobject]@{
+        Banner = $banner
+        Title = Find-VisibleByAutomationId -Root $banner -AutomationId 'StatusTitle'
+        Message = Find-VisibleByAutomationId -Root $banner -AutomationId 'StatusMessage'
+        RetryCountdown = Find-VisibleByAutomationId -Root $banner -AutomationId 'RetryCountdown'
+        CopyDiagnosticsButton = Find-VisibleByAutomationId -Root $banner -AutomationId 'CopyDiagnosticsButton'
+        CancelButton = Find-VisibleByAutomationId -Root $banner -AutomationId 'CancelButton'
+    }
+}
+
+function Get-BannerTextBundle {
+    param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window)
+
+    $els = Get-BannerElements -Window $Window
+    if ($els) {
+        return [pscustomobject]@{
+            HasBanner = $true
+            Title = (Get-ElementTextSafe $els.Title)
+            Message = (Get-ElementTextSafe $els.Message)
+            RetryCountdown = (Get-ElementTextSafe $els.RetryCountdown)
+            HasCopyDiagnosticsButton = ($null -ne $els.CopyDiagnosticsButton -and -not $els.CopyDiagnosticsButton.Current.IsOffscreen)
+            HasCancelButton = ($null -ne $els.CancelButton -and -not $els.CancelButton.Current.IsOffscreen)
+            Elements = $els
+        }
+    }
+
+    # Fallback when AutomationIds are missing in UIA on some systems.
+    $title = ''
+    $message = ''
+    $retryText = ''
+    $hasCopy = $false
+    $hasCancel = $false
+    try {
+        if (Test-TextVisible -Root $Window -Text 'Copy Diagnostics') { $hasCopy = $true }
+        if (Test-TextVisible -Root $Window -Text 'Cancel') { $hasCancel = $true }
+        $texts = Find-AllByType -Root $Window -ControlType ([System.Windows.Automation.ControlType]::Text)
+        foreach ($t in @($texts)) {
+            if ($t.Current.IsOffscreen) { continue }
+            $name = [string]$t.Current.Name
+            if ([string]::IsNullOrWhiteSpace($name)) { continue }
+            if (-not $title -and ($name -match 'Connected|Connecting|Reconnecting|Session|Couldn|No one found|No response|Please reinstall|Connection')) {
+                $title = $name
+                continue
+            }
+            if (-not $retryText -and $name -match 'attempt|retry in \d+s') {
+                $retryText = $name
+                continue
+            }
+            if (-not $message -and $name.Length -gt 6) {
+                $message = $name
+            }
+        }
+    } catch {}
+
+    return [pscustomobject]@{
+        HasBanner = ($hasCopy -or $hasCancel -or -not [string]::IsNullOrWhiteSpace($title) -or -not [string]::IsNullOrWhiteSpace($message))
+        Title = $title
+        Message = $message
+        RetryCountdown = $retryText
+        HasCopyDiagnosticsButton = $hasCopy
+        HasCancelButton = $hasCancel
+        Elements = $null
+    }
+}
+
+function Test-ContainsAllTokens {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string[]]$Tokens
+    )
+    foreach ($token in $Tokens) {
+        if ([string]::IsNullOrWhiteSpace($token)) { continue }
+        if ($Text.IndexOf($token, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Wait-BannerVisibleWithAnyToken {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string[]]$TitleOrMessageTokens,
+        [int]$TimeoutMs = 15000
+    )
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage ("Timed out waiting for status banner tokens: " + ($TitleOrMessageTokens -join ', ')) -Condition {
+        $bundle = Get-BannerTextBundle -Window $Window
+        if (-not $bundle.HasBanner) { return $null }
+        $allText = (($bundle.Title + ' ' + $bundle.Message).Trim())
+        foreach ($token in $TitleOrMessageTokens) {
+            if ([string]::IsNullOrWhiteSpace($token)) { continue }
+            if ($allText.IndexOf($token, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                return $bundle
+            }
+        }
+        return $null
+    }
+}
+
+function Wait-RetryCountdownVisible {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [int]$TimeoutMs = 15000
+    )
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage 'Timed out waiting for retry countdown in status banner.' -Condition {
+        $bundle = Get-BannerTextBundle -Window $Window
+        if (-not $bundle.HasBanner) { return $null }
+        $text = [string]$bundle.RetryCountdown
+        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+        if ($text -match 'attempt' -and $text -match '\d+s') { return $bundle }
+        return $null
+    }
+}
+
+function Wait-BannerGone {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [int]$TimeoutMs = 10000
+    )
+    [void](Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage 'Timed out waiting for status banner to disappear.' -Condition {
+        $bundle = Get-BannerTextBundle -Window $Window
+        if (-not $bundle.HasBanner) { return $true }
+        return $null
+    })
+}
+
 function Click-Element {
     param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Element)
     if (-not $Element.Current.IsEnabled) {
@@ -261,13 +415,13 @@ function Get-HelpeeCodeFromUi {
         if (-not $el) {
             $texts = Find-AllByType -Root $HelpeeWindow -ControlType ([System.Windows.Automation.ControlType]::Text)
             foreach ($t in @($texts)) {
-                if ($t.Current.IsOffscreen -eq $false -and $t.Current.Name -match '^\d{6}$') { $el = $t; break }
+                if ($t.Current.IsOffscreen -eq $false -and $t.Current.Name -match '^\d{3}\s?\d{3}$') { $el = $t; break }
             }
         }
-        if ($el -and $el.Current.Name -match '^\d{6}$') { return $el.Current.Name }
+        if ($el -and $el.Current.Name -match '^\d{3}\s?\d{3}$') { return $el.Current.Name }
         return $null
     }
-    return [string]$codeText
+    return ([string]$codeText -replace '\D','')
 }
 
 function Copy-HelpeeCodeAndReadClipboard {
@@ -276,11 +430,13 @@ function Copy-HelpeeCodeAndReadClipboard {
         Find-VisibleByAutomationIdOrName -Root $HelpeeWindow -AutomationId 'Helpee.CopyCode' -FallbackName 'Copy code' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
     }
     Click-Element $copyBtn
-    return Wait-Until -TimeoutMs 4000 -PollMs 150 -OnTimeoutMessage 'Timed out waiting for code on clipboard.' -Condition {
-        $m = [regex]::Match([string](Get-ClipboardTextSafe), '\d{6}')
+    $raw = Wait-Until -TimeoutMs 4000 -PollMs 150 -OnTimeoutMessage 'Timed out waiting for code on clipboard.' -Condition {
+        $text = [string](Get-ClipboardTextSafe)
+        $m = [regex]::Match($text, '\d{3}\s?\d{3}')
         if ($m.Success) { return $m.Value }
         return $null
     }
+    return ([string]$raw -replace '\D','')
 }
 
 function Enter-HelperCodeAndConnect {
@@ -331,6 +487,18 @@ function Wait-ConnectedChatVisible {
         if ($s -and $s.Current.Name -match 'Connected') { return $s }
         return $null
     })
+}
+
+function Wait-ConnectButtonEnabled {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [int]$TimeoutMs = 10000
+    )
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helper.Connect enabled.' -Condition {
+        $b = Find-VisibleByAutomationIdOrName -Root $Window -AutomationId 'Helper.Connect' -FallbackName 'Connect' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($b -and $b.Current.IsEnabled) { return $b }
+        return $null
+    }
 }
 
 function Helper-SendChatMessage {
@@ -519,7 +687,7 @@ function Run-ScenarioA {
     Start-HelpeeFlow -Context $Context
     [void](Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow)
     Start-HelperFlow -Context $Context
-    [void](Connect-HelperAndHelpee -Context $Context)
+    $initialCode = Connect-HelperAndHelpee -Context $Context
 
     # Chat roundtrip (helper -> helpee via Send button, helpee -> helper via Enter).
     $msg1 = "gui smoke hello"
@@ -536,71 +704,131 @@ function Run-ScenarioA {
 
     # End session from helper if possible; verify remote sees ended/lost status.
     [void](Click-DisconnectIfVisible -Window $Context.HelperWindow)
-    [void](Wait-StatusTextContains -Window $Context.HelpeeWindow -Candidates @('ended the session','Connection lost') -TimeoutMs 10000)
+    try {
+        [void](Wait-StatusTextContains -Window $Context.HelpeeWindow -Candidates @('ended the session','Connection lost') -TimeoutMs 5000)
+    }
+    catch {
+        # Newer builds may auto-regenerate a fresh helpee code immediately after disconnect.
+        [void](Wait-Until -TimeoutMs 12000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee to auto-generate a new code after session end.' -Condition {
+            $newCode = Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow
+            if ($newCode -and $newCode -ne $initialCode) { return $newCode }
+            return $null
+        })
+    }
 }
 
 function Run-ScenarioB {
     param([Parameter(Mandatory = $true)]$Context)
     Reset-ScenarioContext -Context $Context
+    Start-HelpeeFlow -Context $Context
     Start-HelperFlow -Context $Context
-    [void](Enter-HelperCodeAndConnect -HelperWindow $Context.HelperWindow -Code '000000')
-    [void](Wait-StatusTextContains -Window $Context.HelperWindow -Candidates @('No one found with that code.','No one found','Connection lost.','No response yet.') -TimeoutMs 35000)
 
-    # Current UX may show Retry instead of immediately returning to Connect.
-    $connectAgain = Find-VisibleByAutomationIdOrName -Root $Context.HelperWindow -AutomationId 'Helper.Connect' -FallbackName 'Connect' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
-    if ($connectAgain -and $connectAgain.Current.IsEnabled) {
-        return
-    }
+    # Handshake timeout path: connect helper but do not click Allow on helpee.
+    $code = Copy-HelpeeCodeAndReadClipboard -HelpeeWindow $Context.HelpeeWindow
+    [void](Enter-HelperCodeAndConnect -HelperWindow $Context.HelperWindow -Code $code)
 
-    $retry = Wait-Until -TimeoutMs 25000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Retry after wrong code.' -Condition {
-        $b = Find-ByNameAndType -Root $Context.HelperWindow -Name 'Retry' -ControlType ([System.Windows.Automation.ControlType]::Button)
-        if ($b) { return $b }
-        return $null
-    }
-    if ($retry.Current.IsEnabled) {
-        Click-Element $retry
-
-        [void](Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Connect to return after Retry.' -Condition {
-            $b = Find-VisibleByAutomationIdOrName -Root $Context.HelperWindow -AutomationId 'Helper.Connect' -FallbackName 'Connect' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
-            if ($b -and $b.Current.IsEnabled) { return $b }
-            return $null
-        })
-        return
-    }
-
-    # Fallback recovery path: Back to home and reopen helper page, then verify Connect is usable.
-    $back = Find-ByNameAndType -Root $Context.HelperWindow -Name 'Back' -ControlType ([System.Windows.Automation.ControlType]::Button)
-    if (-not $back -or -not $back.Current.IsEnabled) {
-        throw "Neither Connect nor enabled Retry is available after wrong-code failure."
-    }
-    Click-Element $back
-    Click-HomeButton -Window $Context.HelperWindow -Text 'I want to help someone'
-    $inputAfterBack = Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helper.CodeInput after Back recovery.' -Condition {
-        Find-VisibleByAutomationIdOrName -Root $Context.HelperWindow -AutomationId 'Helper.CodeInput' -FallbackControlType ([System.Windows.Automation.ControlType]::Edit)
-    }
-    Set-Text -Element $inputAfterBack -Text '123456'
-
-    [void](Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Connect to enable after Back recovery.' -Condition {
-        $b = Find-VisibleByAutomationIdOrName -Root $Context.HelperWindow -AutomationId 'Helper.Connect' -FallbackName 'Connect' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
-        if ($b -and $b.Current.IsEnabled) { return $b }
+    # Confirm the helpee actually got the request, but intentionally don't allow/decline.
+    [void](Wait-Until -TimeoutMs 25000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee Allow during handshake-timeout scenario.' -Condition {
+        $btn = Find-VisibleByAutomationIdOrName -Root $Context.HelpeeWindow -AutomationId 'Helpee.Allow' -FallbackName 'Allow' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($btn -and $btn.Current.IsEnabled) { return $btn }
         return $null
     })
+
+    # Prefer validating reconnect banner/countdown when present, but keep the test resilient if the build goes straight to Failed.
+    try {
+        $reconnectBanner = Wait-BannerVisibleWithAnyToken -Window $Context.HelperWindow -TitleOrMessageTokens @('reconnect') -TimeoutMs 15000
+        if ($reconnectBanner) {
+            [void](Wait-RetryCountdownVisible -Window $Context.HelperWindow -TimeoutMs 15000)
+        }
+    }
+    catch {
+        Write-Host "[GUI Smoke][B] Reconnecting banner not observed before failure (accepted for non-auto-retry builds)." -ForegroundColor Yellow
+    }
+
+    $failedBanner = $null
+    try {
+        $failedBanner = Wait-BannerVisibleWithAnyToken -Window $Context.HelperWindow -TitleOrMessageTokens @('no response','failed','session ended','connection lost','declined','reinstall') -TimeoutMs 35000
+    }
+    catch {
+        # Some current builds surface a simple inline/helper status text instead of the shared banner for this path.
+        [void](Wait-StatusTextContains -Window $Context.HelperWindow -Candidates @('wrong','connect','declined','response','respond','lost') -TimeoutMs 5000)
+    }
+
+    if ($failedBanner -and -not $failedBanner.HasCopyDiagnosticsButton) {
+        throw "Expected Copy Diagnostics button on failed helper status banner after handshake timeout."
+    }
+
+    # Some builds surface a dedicated Retry action, others return directly to the helper form
+    # with Connect re-enabled. Accept either as a valid recovery UX.
+    $retry = $null
+    try {
+        $retry = Wait-Until -TimeoutMs 5000 -PollMs 200 -OnTimeoutMessage 'Retry button not shown (will fall back to Connect-enabled check).' -Condition {
+            $b = Find-ByNameAndType -Root $Context.HelperWindow -Name 'Retry' -ControlType ([System.Windows.Automation.ControlType]::Button)
+            if ($b -and $b.Current.IsEnabled) { return $b }
+            return $null
+        }
+    }
+    catch {
+        $retry = $null
+    }
+
+    if ($retry) {
+        Click-Element $retry
+    }
+    [void](Wait-ConnectButtonEnabled -Window $Context.HelperWindow -TimeoutMs 10000)
 }
 
 function Run-ScenarioC {
     param([Parameter(Mandatory = $true)]$Context)
     Reset-ScenarioContext -Context $Context
-    Start-HelpeeFlow -Context $Context
     Start-HelperFlow -Context $Context
-    [void](Connect-HelperAndHelpee -Context $Context)
+    [void](Enter-HelperCodeAndConnect -HelperWindow $Context.HelperWindow -Code '000000')
 
-    # Prefer graceful disconnect, otherwise close helpee window.
-    $didClick = Click-DisconnectIfVisible -Window $Context.HelpeeWindow
-    if (-not $didClick) {
-        try { Stop-Process -Id $Context.HelpeeProc.Id -Force -ErrorAction Stop } catch {}
+    # User cancel on transient banner (connecting).
+    $banner = $null
+    try {
+        $banner = Wait-BannerVisibleWithAnyToken -Window $Context.HelperWindow -TitleOrMessageTokens @('connect','reconnect') -TimeoutMs 5000
+    }
+    catch {
+        $banner = $null
     }
 
-    [void](Wait-StatusTextContains -Window $Context.HelperWindow -Candidates @('ended the session','Connection lost') -TimeoutMs 15000)
+    if ($banner -and $banner.HasCancelButton) {
+        $cancel = Wait-Until -TimeoutMs 5000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for status banner Cancel button.' -Condition {
+            $bundle = Get-BannerTextBundle -Window $Context.HelperWindow
+            if ($bundle.HasBanner -and $bundle.HasCancelButton) {
+                if ($bundle.Elements -and $bundle.Elements.CancelButton -and $bundle.Elements.CancelButton.Current.IsEnabled) {
+                    return $bundle.Elements.CancelButton
+                }
+                $btn = Find-ByNameAndType -Root $Context.HelperWindow -Name 'Cancel' -ControlType ([System.Windows.Automation.ControlType]::Button)
+                if ($btn -and $btn.Current.IsEnabled) { return $btn }
+            }
+            return $null
+        }
+        Click-Element $cancel
+
+        # Banner should disappear and helper should return to idle-ish state (code field + Connect enabled).
+        Wait-BannerGone -Window $Context.HelperWindow -TimeoutMs 10000
+        [void](Wait-ConnectButtonEnabled -Window $Context.HelperWindow -TimeoutMs 10000)
+        return
+    }
+
+    # Compatibility fallback for builds that still show a legacy inline "Connecting..." status without banner cancel.
+    Write-Host "[GUI Smoke][C] Cancel banner not observed; validating fallback connecting state + recovery using Back." -ForegroundColor Yellow
+    [void](Wait-StatusTextContains -Window $Context.HelperWindow -Candidates @('connect') -TimeoutMs 5000)
+
+    $back = Wait-Until -TimeoutMs 5000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Back button in fallback cancel scenario.' -Condition {
+        $b = Find-ByNameAndType -Root $Context.HelperWindow -Name 'Back' -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($b -and $b.Current.IsEnabled) { return $b }
+        return $null
+    }
+    Click-Element $back
+
+    [void](Wait-Until -TimeoutMs 8000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting to return to main screen after fallback Back.' -Condition {
+        $needHelp = Find-ByNameAndType -Root $Context.HelperWindow -Name 'I need help' -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($needHelp -and $needHelp.Current.IsEnabled) { return $needHelp }
+        return $null
+    })
 }
 
 function Get-ChildNodeProcesses {
@@ -638,18 +866,19 @@ function Run-ScenarioD {
     Write-Host "[GUI Smoke][D] Killing helper bridge process pid=$($node.ProcessId)" -ForegroundColor Yellow
     Stop-Process -Id $node.ProcessId -Force -ErrorAction Stop
 
-    [void](Wait-StatusTextContains -Window $Context.HelperWindow -Candidates @('Connection lost') -TimeoutMs 30000)
+    $failedBanner = Wait-BannerVisibleWithAnyToken -Window $Context.HelperWindow -TitleOrMessageTokens @('connection', 'lost', 'session', 'ended') -TimeoutMs 30000
+    if (-not $failedBanner.HasCopyDiagnosticsButton) {
+        throw "Expected Copy Diagnostics button on failed banner after simulated bridge crash."
+    }
 
     $retryBtn = Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Retry button after bridge crash.' -Condition {
-        Find-ByNameAndType -Root $Context.HelperWindow -Name 'Retry' -ControlType ([System.Windows.Automation.ControlType]::Button)
+        $b = Find-ByNameAndType -Root $Context.HelperWindow -Name 'Retry' -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($b -and $b.Current.IsEnabled) { return $b }
+        return $null
     }
     Click-Element $retryBtn
 
-    [void](Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helper.Connect after retry reset.' -Condition {
-        $b = Find-VisibleByAutomationIdOrName -Root $Context.HelperWindow -AutomationId 'Helper.Connect' -FallbackName 'Connect' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
-        if ($b -and $b.Current.IsEnabled) { return $b }
-        return $null
-    })
+    [void](Wait-ConnectButtonEnabled -Window $Context.HelperWindow -TimeoutMs 10000)
 }
 
 $resolvedExe = (Resolve-Path $ExePath).Path

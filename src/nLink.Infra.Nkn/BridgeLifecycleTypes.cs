@@ -1,5 +1,3 @@
-using System;
-
 namespace NLink.Infra.Nkn;
 
 internal enum BridgeLifecycleEventKind
@@ -42,6 +40,13 @@ internal interface IBridgeProcessRunner
 {
     bool WasForcedKillRequested { get; }
 }
+
+internal readonly record struct BridgeProcessDebugState(
+    bool HasProcessReference,
+    bool HasStdinReference,
+    bool HasStdoutReaderTaskReference,
+    bool HasStderrReaderTaskReference,
+    int TrackedPid);
 
 internal static class BridgeExitClassifier
 {

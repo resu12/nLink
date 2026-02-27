@@ -71,21 +71,15 @@
                 <Border Classes="appCard"
                         Padding="24">
                     <StackPanel Spacing="16">
-                        <StackPanel Spacing="8"
-                                    HorizontalAlignment="Center"
-                                    IsVisible="{Binding IsStartupBlocked}">
-                            <TextBlock Classes="appMuted"
-                                       Text="{Binding StatusText}"
-                                       FontSize="16"
-                                       TextAlignment="Center"
-                                       HorizontalAlignment="Center"
-                                       MaxWidth="560"
-                                       TextWrapping="Wrap"/>
-                            <Button Classes="linkButton linkAction"
-                                    Content="Open diagnostics"
-                                    Command="{Binding OpenDiagnosticsCommand}"
-                                    HorizontalAlignment="Center"/>
-                        </StackPanel>
+                        <views:StatusBanner Status="{Binding BannerStatus}"
+                                            ForceVisible="{Binding ShowStatusBanner}"
+                                            CopyDiagnosticsCommand="{Binding StatusBannerCopyDiagnosticsCommand}"
+                                            CancelCommand="{Binding StatusBannerCancelCommand}"
+                                            FailureCategory="{Binding StatusBannerFailureCategory}"
+                                            SessionCorrelationId="{Binding StatusBannerSessionCorrelationId}"
+                                            LastConnectDuration="{Binding StatusBannerLastConnectDuration}"
+                                            LastHandshakeDuration="{Binding StatusBannerLastHandshakeDuration}"
+                                            BridgeState="{Binding StatusBannerBridgeState}"/>
 
                         <TextBlock Classes="appMuted"
                                    Text="{Binding HelperPageHelpText}"
@@ -97,8 +91,10 @@
 
                         <TextBox Classes="appInput highContrastInput codeDigitsInput"
                                  AutomationProperties.AutomationId="Helper.CodeInput"
-                                 Text="{Binding CodeInput, Mode=TwoWay}"
+                                 Text="{Binding CodeInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                  TextChanged="HelperCodeInput_TextChanged"
+                                 TextInput="HelperCodeInput_TextInput"
+                                 KeyDown="HelperCodeInput_KeyDown"
                                  Watermark="123 456"
                                  MaxLength="7"
                                  TabIndex="0"
@@ -135,7 +131,7 @@
                         </StackPanel>
 
                         <TextBlock Classes="appMuted"
-                                   Text="{Binding CopyFeedbackText}"
+                                   Text="{Binding CopyFeedback.Text}"
                                    FontSize="14"
                                    TextAlignment="Center"
                                    HorizontalAlignment="Center"
@@ -143,11 +139,11 @@
 
                         <TextBlock Classes="appMuted"
                                    AutomationProperties.AutomationId="Helper.Status"
-                                   Text="{Binding StatusText}"
-                                   FontSize="16"
+                                   Text="{Binding BannerStatus.Message}"
+                                   FontSize="14"
                                    TextAlignment="Center"
                                    HorizontalAlignment="Center"
-                                   IsVisible="{Binding ShowInlineStatusText}"/>
+                                   IsVisible="{Binding ShowStatusBanner}"/>
 
                         <StackPanel Spacing="16"
                                     IsVisible="{Binding ShowConnectedPanel}">

@@ -43,7 +43,9 @@ const state = {
   readyEmitted: false,
   shuttingDown: false,
   subscriptions: new Set(),
-  clientIdentifier: ''
+  clientIdentifier: '',
+  connectId: '',
+  preflightProgressEnabled: false
 };
 
 let rpcCandidateCursor = 0;
@@ -234,7 +236,8 @@ function attachClientHandlers(client) {
     state.readyEmitted = true;
     emitJson({
       event: 'ready',
-      address: getClientAddress(client)
+      address: getClientAddress(client),
+      ...(state.connectId ? { connectId: state.connectId } : {})
     });
   };
 
@@ -357,6 +360,8 @@ async function handleConnect(command) {
   }
 
   await closeClient();
+  state.connectId = typeof command.connectId === 'string' ? command.connectId : '';
+  state.preflightProgressEnabled = Boolean(command.preflightRpcEnabled);
 
   const seed = decodeSeed(command.seedHex, command.seedBase64);
   const options = {
@@ -384,6 +389,26 @@ async function handleConnect(command) {
     // Keep both keys for compatibility with SDK versions/docs naming differences.
     options.rpcServerAddr = rpcCandidates[0];
     options.seedRPCServerAddr = rpcCandidates[0];
+  }
+
+  if (state.preflightProgressEnabled) {
+    emitJson({
+      event: 'rpc_preflight',
+      connectId: state.connectId || null,
+      timeoutMs: Number(command.preflightTimeoutMs) || null,
+      concurrency: Number(command.preflightConcurrency) || null,
+      cacheTtlMs: Number(command.preflightCacheTtlMs) || null,
+      ts: Date.now()
+    });
+    if (options.rpcServerAddr) {
+      emitJson({
+        event: 'rpc_selected',
+        connectId: state.connectId || null,
+        rpc: options.rpcServerAddr,
+        stage: 'initial',
+        ts: Date.now()
+      });
+    }
   }
 
   logStderr(`Creating NKN client (rpc=${options.rpcServerAddr || 'default'})`);
@@ -424,7 +449,17 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
 
     try {
       logStderr(`Retrying NKN client bootstrap with alternate rpc=${rpc}`);
+      if (state.preflightProgressEnabled) {
+        emitJson({
+          event: 'rpc_fallback_attempt',
+          connectId: state.connectId || null,
+          rpc,
+          ts: Date.now()
+        });
+      }
       await closeClient();
+      state.connectId = typeof originalCommand.connectId === 'string' ? originalCommand.connectId : '';
+      state.preflightProgressEnabled = Boolean(originalCommand.preflightRpcEnabled);
 
       const seed = decodeSeed(originalCommand.seedHex, originalCommand.seedBase64);
       const options = {
@@ -452,6 +487,15 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
       state.readyEmitted = false;
       state.clientIdentifier = typeof options.identifier === 'string' ? options.identifier : getClientIdentifier(client);
       attachClientHandlers(client);
+      if (state.preflightProgressEnabled) {
+        emitJson({
+          event: 'rpc_selected',
+          connectId: state.connectId || null,
+          rpc,
+          stage: 'fallback',
+          ts: Date.now()
+        });
+      }
     } catch (error) {
       logStderr(`Alternate bootstrap failed: ${safeErrorMessage(error)}`);
     }
@@ -489,7 +533,14 @@ async function handleSubscribe(command) {
   // Prefer SDK method, but track locally either way.
   if (state.client && typeof state.client.subscribe === 'function') {
     const identifier = String(state.clientIdentifier || getClientIdentifier(state.client) || '').trim();
-    await callClientMethod('subscribe', [topic, DEFAULT_SUBSCRIBE_DURATION, identifier]);
+    try {
+      await callClientMethod('subscribe', [topic, DEFAULT_SUBSCRIBE_DURATION, identifier]);
+    } catch (error) {
+      if (!isBenignSubscribeError(error)) {
+        throw error;
+      }
+      // Treat known txpool duplicate subscription races as success.
+    }
   } else if (!state.client) {
     throw new Error('Not connected.');
   } else {
@@ -524,10 +575,17 @@ async function handleUnsubscribe(command) {
   state.subscriptions.delete(topic);
 }
 
+function isBenignSubscribeError(error) {
+  const text = safeErrorMessage(error).toLowerCase();
+  return text.includes('duplicate subscription exist in block') ||
+    text.includes('duplicate subscription');
+}
+
 function isBenignUnsubscribeError(error) {
   const text = safeErrorMessage(error).toLowerCase();
   return text.includes('duplicate subscription exist in block') ||
     text.includes('subscription does not exist') ||
+    (text.includes('subscription') && text.includes("doesn't exist")) ||
     text.includes('no subscription');
 }
 

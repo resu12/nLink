@@ -12,11 +12,11 @@ Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke
 4. Helpee clicks `Allow`.
 5. Chat opens on both sides.
 
-Helper (alpha.3):
+Helper (UI screenshot, may vary slightly by pre-release):
 
 ![Helper screen](docs/images/helper-alpha3.png)
 
-Helpee (alpha.3):
+Helpee (UI screenshot, may vary slightly by pre-release):
 
 ![Helpee screen](docs/images/helpee-alpha3.png)
 
@@ -25,7 +25,7 @@ Open Diagnostics -> Copy diagnostics and include it when reporting issues.
 
 Notes:
 - Windows x64 only
-- Alpha pre-release
+- Alpha pre-release (`0.1.0-alpha.5`)
 
 Versioning:
 - Release version uses SemVer (for example: `0.1.0-alpha.2`)
@@ -54,6 +54,42 @@ License:
   `dotnet test`
 - Run deterministic smoke tests (always available):
   `dotnet test -c Release --filter Category=Smoke`
+
+### Release Validation (Maintainers, Windows)
+
+- Recommended full pre-release automation (tests + packaging):
+  `powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunFormatCheck -RunBetaReadiness`
+- Optional GUI smoke (interactive desktop session required):
+  `powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunGuiSmoke -RunFormatCheck -RunBetaReadiness`
+- Output release assets:
+  `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
+  `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
+- Optional beta hardening extras (offline/permissions/installer upgrade rollback/hang checks):
+  see `docs/BETA_HARDENING_EXTRAS.md`
+
+### Dead-Code Report (Local, Non-Destructive)
+
+- Generate a warning-based dead-code candidate report:
+  `powershell -ExecutionPolicy Bypass -File .\tools\DeadCode-Report.ps1`
+- Output:
+  `artifacts/deadcode/report.md`
+
+### Resource Footprint Tools (Phase 5)
+
+- Resource benchmark (idle/connect/idle/disconnect/idle, writes JSON + summary):
+  `dotnet run --project src/nLink.App -c Release -- --resource-bench --transport devlocal`
+- Leak check (cycle-based growth check, writes JSON + summary):
+  `dotnet run --project src/nLink.App -c Release -- --leak-check --cycles 200 --transport devlocal`
+- Enable resource gate failure (threshold + growth checks):
+  add `--fail-on-gate`
+- ResourceGate threshold overrides (examples):
+  `--resource-growth-warn-percent 10 --resource-growth-fail-percent 20`
+  `--app-working-set-max-mb 1024 --app-private-bytes-max-mb 1024 --app-thread-max 400 --app-handle-max 20000 --app-cpu-idle-avg-max-pct 40`
+  `--bridge-working-set-max-mb 512 --bridge-private-bytes-max-mb 512 --bridge-thread-max 300 --bridge-handle-max 20000 --bridge-cpu-idle-avg-max-pct 40 --resource-fail-on-bridge-thresholds`
+- LeakCheck growth threshold override:
+  `--leak-growth-fail-percent 20`
+- Pre-release helpers:
+  `powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunResources -RunLeakCheck`
 
 ### Building Portable EXE (ZIP Release)
 

@@ -102,6 +102,32 @@ public partial class HelperPageView : UserControl
         e.Handled = true;
     }
 
+    private void HelperCodeInput_KeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter)
+        {
+            return;
+        }
+
+        if ((e.KeyModifiers & KeyModifiers.Shift) == KeyModifiers.Shift)
+        {
+            return;
+        }
+
+        if (DataContext is not HelperPageViewModel vm)
+        {
+            return;
+        }
+
+        if (!vm.ConnectCommand.CanExecute(null))
+        {
+            return;
+        }
+
+        vm.ConnectCommand.Execute(null);
+        e.Handled = true;
+    }
+
     private void HelperCodeInput_TextChanged(object? sender, TextChangedEventArgs e)
     {
         if (normalizingHelperCodeInput || sender is not TextBox textBox)
@@ -135,6 +161,30 @@ public partial class HelperPageView : UserControl
         {
             normalizingHelperCodeInput = false;
         }
+    }
+
+    private void HelperCodeInput_TextInput(object? sender, TextInputEventArgs e)
+    {
+        if (sender is not TextBox textBox || string.IsNullOrEmpty(e.Text))
+        {
+            return;
+        }
+
+        foreach (var ch in e.Text)
+        {
+            if (!char.IsDigit(ch))
+            {
+                e.Handled = true;
+                return;
+            }
+        }
+
+        if (!WouldExceedDigitLimit(textBox, e.Text))
+        {
+            return;
+        }
+
+        e.Handled = true;
     }
 
     private void ShowSendFileWindow()
@@ -206,6 +256,39 @@ public partial class HelperPageView : UserControl
         }
 
         return formattedText.Length;
+    }
+
+    private static bool WouldExceedDigitLimit(TextBox textBox, string newText)
+    {
+        var currentText = textBox.Text ?? string.Empty;
+        var selectionStart = Math.Clamp(textBox.SelectionStart, 0, currentText.Length);
+        var selectionEnd = Math.Clamp(textBox.SelectionEnd, 0, currentText.Length);
+        if (selectionEnd < selectionStart)
+        {
+            (selectionStart, selectionEnd) = (selectionEnd, selectionStart);
+        }
+
+        var selectedDigitCount = 0;
+        for (var i = selectionStart; i < selectionEnd; i++)
+        {
+            if (char.IsDigit(currentText[i]))
+            {
+                selectedDigitCount++;
+            }
+        }
+
+        var currentDigitCount = SessionCode.NormalizeDigits(currentText).Length;
+        var incomingDigitCount = 0;
+        foreach (var ch in newText)
+        {
+            if (char.IsDigit(ch))
+            {
+                incomingDigitCount++;
+            }
+        }
+
+        var resultingDigitCount = currentDigitCount - selectedDigitCount + incomingDigitCount;
+        return resultingDigitCount > 6;
     }
 }
 

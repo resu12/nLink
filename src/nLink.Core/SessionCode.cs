@@ -1,6 +1,4 @@
-﻿using System;
-
-namespace NLink.Core;
+﻿namespace NLink.Core;
 
 public readonly struct SessionCode : IEquatable<SessionCode>
 {

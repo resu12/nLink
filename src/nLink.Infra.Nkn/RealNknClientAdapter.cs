@@ -1,58 +1,45 @@
-using System.Collections.Concurrent;
-using System.Diagnostics;
-using System.IO;
+﻿using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
 using NLink.Core;
 using NLink.Core.Logging;
+using NLink.Core.Retry;
 
 namespace NLink.Infra.Nkn;
 
 internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
 {
-    private const int ShutdownWaitMilliseconds = 2000;
     private const int MaxPayloadBytes = 64 * 1024;
     private static readonly TimeSpan CommandAckTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ConnectReadyTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan PingInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan PingTimeout = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan[] UnexpectedExitRestartBackoff =
-    {
-        TimeSpan.FromSeconds(1),
-        TimeSpan.FromSeconds(2),
-        TimeSpan.FromSeconds(4),
-        TimeSpan.FromSeconds(8),
-        TimeSpan.FromSeconds(16),
-    };
+    private static readonly RetryPolicyOptions UnexpectedExitRestartRetryOptions = new(
+        MaxAttempts: 5,
+        InitialDelay: TimeSpan.FromSeconds(1),
+        MaxDelay: TimeSpan.FromSeconds(16),
+        JitterRatio: 0d);
 
     private readonly object gate = new();
     private readonly NknIdentity identity;
     private readonly NknTransportOptions options;
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> pendingCommands = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> pendingHelloResponses = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> pendingPongResponses = new(StringComparer.Ordinal);
+    private readonly BridgeSupervisor bridgeSupervisor;
+    private readonly BridgeProtocolClient protocolClient;
+    private readonly BridgeProtocolEventRouter protocolEventRouter;
 
-    private Process? process;
-    private Task? stdoutReaderTask;
-    private Task? stderrReaderTask;
-    private StreamWriter? stdin;
-    private TaskCompletionSource<string>? pendingReady;
+    private readonly ConnectAttemptCoordinator connectAttempts = new();
+    private TimeSpan? connectReadyTimeoutOverrideForTests;
     private CancellationTokenSource? pingLoopCts;
     private Task? pingLoopTask;
     private string address;
-    private long nextCommandId;
     private int disconnectedRaised;
     private int unexpectedRestartLoopActive;
     private bool helloCompleted;
     private bool shuttingDown;
     private bool disposed;
-    private bool bridgeForcedKillRequested;
-    private long currentBridgeSpawnTicks;
     private string reliabilityModeHint = "Helper";
 
     public RealNknClientAdapter(NknIdentity identity, NknTransportOptions options)
@@ -60,6 +47,68 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         this.identity = identity ?? throw new ArgumentNullException(nameof(identity));
         this.options = options ?? throw new ArgumentNullException(nameof(options));
         address = identity.Address;
+        bridgeSupervisor = new BridgeSupervisor(
+            callbacks: new BridgeSupervisorCallbacks
+            {
+                Log = Log,
+                SignalDisconnected = SignalDisconnected,
+                OnUnexpectedExitDetected = reason => _ = Task.Run(() => HandleUnexpectedProcessExitAsync(reason), CancellationToken.None),
+                RecordBridgeFailure = RecordBridgeFailure,
+                EmitBridgeLifecycle = EmitBridgeLifecycle,
+            },
+            resolveNodePath: ResolveNodeExecutablePath,
+            resolveBridgePath: ResolveBridgeScriptPath,
+            onStdoutLineAsync: (line, _, _, _) =>
+            {
+                protocolClient!.HandleStdoutJsonLine(line);
+                return Task.CompletedTask;
+            },
+            onStderrLineAsync: (line, _, _, _) =>
+            {
+                Log($"bridge stderr: {line}");
+                return Task.CompletedTask;
+            },
+            getCleanupReasonPrefix: () => "bridge",
+            isDisposed: () => disposed,
+            isShuttingDown: () =>
+            {
+                lock (gate)
+                {
+                    return shuttingDown;
+                }
+            },
+            getReliabilityModeHint: () =>
+            {
+                lock (gate)
+                {
+                    return reliabilityModeHint;
+                }
+            },
+            getCurrentUptimeMs: () => bridgeSupervisor is null ? null : GetCurrentBridgeUptimeMs());
+
+        protocolEventRouter = new BridgeProtocolEventRouter(
+            identity.Address,
+            connectAttempts,
+            getCurrentPid: () => bridgeSupervisor.CurrentPid,
+            setConnectedAddress: addr =>
+            {
+                lock (gate)
+                {
+                    address = addr;
+                }
+            },
+            log: Log);
+
+        protocolClient = new BridgeProtocolClient(
+            getWriter: () => bridgeSupervisor.GetActiveIoOrThrow().JsonlWriter,
+            log: Log,
+            onReady: root => protocolEventRouter.HandleReady(root),
+            onRpcProgress: (eventName, root) => protocolEventRouter.HandleRpcProgress(eventName, root),
+            onMessage: HandleMessage,
+            onDisconnected: HandleBridgeDisconnected,
+            onHelloOk: root => protocolEventRouter.HandleHelloOk(root),
+            onPong: root => protocolEventRouter.HandlePong(root),
+            onUnmatchedBridgeError: reason => SignalDisconnected("bridge_error:" + reason));
     }
 
     public string Address
@@ -78,7 +127,17 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
     public event EventHandler? Disconnected;
     internal event EventHandler<BridgeLifecycleEvent>? BridgeLifecycle;
 
-    bool IBridgeProcessRunner.WasForcedKillRequested => bridgeForcedKillRequested;
+    bool IBridgeProcessRunner.WasForcedKillRequested => bridgeSupervisor.WasForcedKillRequested;
+
+    internal BridgeProcessDebugState GetDebugStateForTests()
+    {
+        return bridgeSupervisor.GetDebugStateForTests();
+    }
+
+    internal static bool TryCleanupTrackedNodeProcessForTests(int pid, long startTimeUtcFileTime)
+    {
+        return BridgeSupervisor.TryCleanupTrackedNodeProcessByPidForTests(pid, startTimeUtcFileTime);
+    }
 
     internal void SetReliabilityModeHint(string mode)
     {
@@ -86,6 +145,16 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         {
             reliabilityModeHint = string.Equals(mode, "Helpee", StringComparison.OrdinalIgnoreCase) ? "Helpee" : "Helper";
         }
+    }
+
+    internal void SetConnectReadyTimeoutForTests(TimeSpan timeout)
+    {
+        connectReadyTimeoutOverrideForTests = timeout <= TimeSpan.Zero ? null : timeout;
+    }
+
+    internal void HandleStdoutJsonLineForTests(string line)
+    {
+        protocolClient.HandleStdoutJsonLine(line);
     }
 
     internal async Task StartBridgeAsync(CancellationToken ct)
@@ -118,79 +187,90 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
     {
         get
         {
-            lock (gate)
-            {
-                return process is not null && !process.HasExited;
-            }
+            return bridgeSupervisor.IsProcessRunning;
         }
     }
 
     public async Task ConnectAsync(CancellationToken ct)
     {
         ThrowIfDisposed();
+        var connectTask = connectAttempts.GetOrCreateConnectTask(
+            bridgeSupervisor.IsProcessRunning,
+            sequence => ConnectCoreAsync(sequence, ct));
+        await connectTask.WaitAsync(ct);
+    }
 
-        TaskCompletionSource<string>? readyWait;
-        lock (gate)
-        {
-            if (process is not null && !process.HasExited && pendingReady is not null && pendingReady.Task.IsCompletedSuccessfully)
-            {
-                return;
-            }
-        }
+    private async Task ConnectCoreAsync(long sequence, CancellationToken ct)
+    {
+        TaskCompletionSource<string> readyWait;
+        string connectId = Guid.NewGuid().ToString("N");
 
         try
         {
-            await EnsureProcessStartedAsync(ct);
-            await EnsureHelloHandshakeAsync(ct);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            var existing = NknRuntimeDiagnostics.Snapshot().LastError;
-            if (string.IsNullOrWhiteSpace(existing) ||
-                !existing.StartsWith("NKN_START_FAILED:", StringComparison.Ordinal))
+            try
             {
-                SetNknStartFailed("bridge_start", ex.Message);
+                await EnsureProcessStartedAsync(ct);
+                await EnsureHelloHandshakeAsync(ct);
             }
-            throw;
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                var existing = NknRuntimeDiagnostics.Snapshot().LastError;
+                if (string.IsNullOrWhiteSpace(existing) ||
+                    !existing.StartsWith("NKN_START_FAILED:", StringComparison.Ordinal))
+                {
+                    SetNknStartFailed("bridge_start", ex.Message);
+                }
+                throw;
+            }
+
+            readyWait = connectAttempts.RegisterPendingReady(connectId);
+
+            var seedBase64 = ReadPersistedSeedBase64(options.KeyPath);
+
+            var payload = new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["identifier"] = identity.Identifier,
+                ["seedBase64"] = seedBase64,
+                ["seedRpc"] = string.IsNullOrWhiteSpace(options.SeedRpc) ? null : options.SeedRpc,
+                ["connectId"] = connectId,
+            };
+
+            if (options.PreflightRpcEnabled)
+            {
+                payload["preflightRpcEnabled"] = true;
+                payload["preflightTimeoutMs"] = options.PreflightTimeoutMs;
+                payload["preflightConcurrency"] = options.PreflightConcurrency;
+                payload["preflightCacheTtlMs"] = options.PreflightCacheTtlMs;
+            }
+
+            await SendCommandAndWaitAckAsync("connect", payload, ct, timeoutOverride: CommandAckTimeout);
+
+            string readyAddress;
+            try
+            {
+                readyAddress = await readyWait.Task.WaitAsync(connectReadyTimeoutOverrideForTests ?? ConnectReadyTimeout, ct);
+            }
+            catch (TimeoutException ex)
+            {
+                NknRuntimeDiagnostics.SetLastError("bridge_connect_ready_timeout");
+                var progressSuffix = BuildLastProgressSummaryForDiagnostics();
+                SetNknStartFailed("ready_timeout", $"Timed out waiting for bridge ready.{progressSuffix}");
+                RecordBridgeFailure("bridge_connect_ready_timeout", $"The local helper process did not become ready.{progressSuffix}");
+                throw new TimeoutException("Timed out waiting for NKN bridge ready(address) after connect.", ex);
+            }
+
+            lock (gate)
+            {
+                address = string.IsNullOrWhiteSpace(readyAddress) ? identity.Address : readyAddress;
+            }
+
+            StartPingLoopIfNeeded();
+            Log($"Connected bridge (address_len={Address.Length})");
         }
-
-        lock (gate)
+        finally
         {
-            pendingReady = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-            readyWait = pendingReady;
+            connectAttempts.CompleteAttempt(sequence, connectId);
         }
-
-        var seedBase64 = ReadPersistedSeedBase64(options.KeyPath);
-
-        var payload = new Dictionary<string, object?>(StringComparer.Ordinal)
-        {
-            ["identifier"] = identity.Identifier,
-            ["seedBase64"] = seedBase64,
-            ["seedRpc"] = string.IsNullOrWhiteSpace(options.SeedRpc) ? null : options.SeedRpc,
-        };
-
-        await SendCommandAndWaitAckAsync("connect", payload, ct, timeoutOverride: CommandAckTimeout);
-
-        string readyAddress;
-        try
-        {
-            readyAddress = await readyWait.Task.WaitAsync(ConnectReadyTimeout, ct);
-        }
-        catch (TimeoutException ex)
-        {
-            NknRuntimeDiagnostics.SetLastError("bridge_connect_ready_timeout");
-            SetNknStartFailed("ready_timeout", "Timed out waiting for bridge ready.");
-            RecordBridgeFailure("bridge_connect_ready_timeout", "The local helper process did not become ready.");
-            throw new TimeoutException("Timed out waiting for NKN bridge ready(address) after connect.", ex);
-        }
-
-        lock (gate)
-        {
-            address = string.IsNullOrWhiteSpace(readyAddress) ? identity.Address : readyAddress;
-        }
-
-        StartPingLoopIfNeeded();
-        Log($"Connected bridge (address_len={Address.Length})");
     }
 
     public async Task DisconnectAsync()
@@ -199,73 +279,33 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         {
             return;
         }
-
-        Process? processToClose;
         lock (gate)
         {
-            if (process is null)
+            if (!bridgeSupervisor.IsProcessRunning)
             {
                 return;
             }
 
             shuttingDown = true;
-            processToClose = process;
         }
 
         try
         {
             await StopPingLoopAsync();
-            await SendCommandAndWaitAckAsync(
-                "shutdown",
-                payload: null,
-                CancellationToken.None,
-                timeoutOverride: CommandAckTimeout);
-        }
-        catch (Exception ex)
-        {
-            Log($"Bridge shutdown command failed ({ex.GetType().Name})");
-        }
-
-        try
-        {
-            if (processToClose is not null && !processToClose.HasExited)
-            {
-                if (!processToClose.WaitForExit(ShutdownWaitMilliseconds))
-                {
-                    RecordBridgeFailure("bridge_shutdown_forced_kill", "Needed to close the local helper process.");
-                    lock (gate)
-                    {
-                        bridgeForcedKillRequested = true;
-                    }
-                    processToClose.Kill(entireProcessTree: true);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Log($"Bridge process stop failed ({ex.GetType().Name})");
+            await bridgeSupervisor.RequestShutdownAndCleanupAsync(
+                sendShutdownAsync: shutdownCt => SendCommandAndWaitAckAsync(
+                    "shutdown",
+                    payload: null,
+                    shutdownCt,
+                    timeoutOverride: CommandAckTimeout),
+                CancellationToken.None).ConfigureAwait(false);
         }
         finally
         {
-            if (processToClose is not null)
+            lock (gate)
             {
-                var pid = processToClose.Id;
-                var exitCodeText = "unknown";
-                try
-                {
-                    if (processToClose.HasExited)
-                    {
-                        exitCodeText = processToClose.ExitCode.ToString();
-                    }
-                }
-                catch
-                {
-                    exitCodeText = "unknown";
-                }
-
-                Log($"Bridge shutdown complete (pid={pid}, exit_code={exitCodeText})");
+                shuttingDown = false;
             }
-            CleanupProcessState();
         }
     }
 
@@ -346,7 +386,13 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         disposed = true;
         try
         {
-            DisconnectAsync().GetAwaiter().GetResult();
+            lock (gate)
+            {
+                shuttingDown = true;
+            }
+
+            CancelPingLoop();
+            bridgeSupervisor.CleanupState();
         }
         catch
         {
@@ -354,91 +400,16 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         }
     }
 
-    private Task EnsureProcessStartedAsync(CancellationToken ct)
+    private async Task EnsureProcessStartedAsync(CancellationToken ct)
     {
-        Process? existing;
+        await bridgeSupervisor.EnsureStartedAsync(ct).ConfigureAwait(false);
         lock (gate)
         {
-            existing = process;
-            if (existing is not null && !existing.HasExited && stdin is not null)
-            {
-                EmitBridgeLifecycle(new BridgeLifecycleEvent(
-                    BridgeLifecycleEventKind.Spawned,
-                    BridgeStartMode.Warm,
-                    existing.Id,
-                    ReadyTimeMs: null,
-                    PingRttMs: null,
-                    UptimeMs: ElapsedSinceTicksMilliseconds(currentBridgeSpawnTicks),
-                    ExitCode: null,
-                    ExitReasonKind: null,
-                    ExitReasonText: string.Empty));
-                return Task.CompletedTask;
-            }
-        }
-
-        var bridgePath = ResolveBridgeScriptPath();
-        var nodePath = ResolveNodeExecutablePath();
-
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = nodePath,
-            UseShellExecute = false,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-            WorkingDirectory = Path.GetDirectoryName(bridgePath) ?? Environment.CurrentDirectory,
-        };
-
-        startInfo.ArgumentList.Add(bridgePath);
-
-        var newProcess = new Process
-        {
-            StartInfo = startInfo,
-            EnableRaisingEvents = true,
-        };
-        newProcess.Exited += OnBridgeProcessExited;
-
-        if (!newProcess.Start())
-        {
-            throw new InvalidOperationException("Failed to start NKN bridge process.");
-        }
-
-        ct.ThrowIfCancellationRequested();
-
-        var newStdin = newProcess.StandardInput;
-        newStdin.AutoFlush = true;
-
-        CleanupProcessState();
-
-        lock (gate)
-        {
-            process = newProcess;
-            stdin = newStdin;
-            pendingReady = null;
+            connectAttempts.ResetPendingReadyForNewProcessStart();
             helloCompleted = false;
-            bridgeForcedKillRequested = false;
-            currentBridgeSpawnTicks = Stopwatch.GetTimestamp();
             Interlocked.Exchange(ref disconnectedRaised, 0);
             shuttingDown = false;
         }
-
-        stdoutReaderTask = Task.Run(() => ReadStdoutLoopAsync(newProcess), CancellationToken.None);
-        stderrReaderTask = Task.Run(() => ReadStderrLoopAsync(newProcess), CancellationToken.None);
-        NknRuntimeDiagnostics.SetBridgeProcessInfo(newProcess.Id, nodeVersion: null);
-        EmitBridgeLifecycle(new BridgeLifecycleEvent(
-            BridgeLifecycleEventKind.Spawned,
-            BridgeStartMode.Cold,
-            newProcess.Id,
-            ReadyTimeMs: null,
-            PingRttMs: null,
-            UptimeMs: null,
-            ExitCode: null,
-            ExitReasonKind: null,
-            ExitReasonText: string.Empty));
-
-        Log($"Bridge process started (pid={newProcess.Id}, node={Path.GetFileName(nodePath)}, script={bridgePath})");
-        return Task.CompletedTask;
     }
 
     private async Task EnsureHelloHandshakeAsync(CancellationToken ct)
@@ -448,8 +419,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         bool alreadyHelloCompleted;
         lock (gate)
         {
-            spawnTicksSnapshot = currentBridgeSpawnTicks;
-            pidSnapshot = process is { } p && !p.HasExited ? p.Id : null;
+            spawnTicksSnapshot = bridgeSupervisor.CurrentSpawnTicks;
+            pidSnapshot = bridgeSupervisor.CurrentPid;
             alreadyHelloCompleted = helloCompleted;
         }
 
@@ -481,7 +452,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
                     ["protocol"] = 1,
                     ["appVersion"] = GetAssemblyVersionString(),
                 },
-                pendingHelloResponses,
+                BridgeWaitKind.HelloOk,
                 HelloTimeout,
                 ct);
 
@@ -507,6 +478,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
 
             Log($"Bridge hello_ok + pong (ping_rtt_ms={pingStopwatch.Elapsed.TotalMilliseconds:0.##})");
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            Log("Bridge hello canceled by caller token");
+            throw;
+        }
         catch (Exception ex)
         {
             if (ex is TimeoutException)
@@ -518,9 +494,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
             else
             {
                 NknRuntimeDiagnostics.SetLastError("bridge_hello_failed");
-                SetNknStartFailed("hello_failed", ex.Message);
+                SetNknStartFailed("hello_failed", $"{ex.GetType().Name}: {ex.Message}");
                 RecordBridgeFailure("bridge_hello_failed", "Could not start the local helper process.");
             }
+
+            Log($"Bridge hello/ping failed ({ex.GetType().Name})");
             throw new InvalidOperationException($"NKN bridge hello failed: {ex.Message}", ex);
         }
     }
@@ -529,45 +507,14 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
     {
         ThrowIfDisposed();
 
-        StreamWriter writer;
-        Process? currentProcess;
-        lock (gate)
-        {
-            writer = stdin ?? throw new InvalidOperationException("NKN bridge is not running.");
-            currentProcess = process;
-        }
-
-        if (currentProcess is null || currentProcess.HasExited)
-        {
-            throw new InvalidOperationException("NKN bridge process is not available.");
-        }
-
-        var id = Interlocked.Increment(ref nextCommandId).ToString(System.Globalization.CultureInfo.InvariantCulture);
-        var wait = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!pendingPongResponses.TryAdd(id, wait))
-        {
-            throw new InvalidOperationException("Duplicate bridge ping id.");
-        }
-
         try
         {
-            var ping = JsonSerializer.Serialize(new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                ["type"] = "ping",
-                ["id"] = id,
-            });
-
-            await writer.WriteLineAsync(ping);
-            return await wait.Task.WaitAsync(timeout, ct);
+            return await protocolClient.SendPingAndWaitPongAsync(timeout, ct).ConfigureAwait(false);
         }
         catch (TimeoutException ex)
         {
             NknRuntimeDiagnostics.SetLastError("bridge_ping_timeout");
             throw new TimeoutException("Timed out waiting for bridge pong.", ex);
-        }
-        finally
-        {
-            pendingPongResponses.TryRemove(id, out _);
         }
     }
 
@@ -579,313 +526,31 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
     {
         ThrowIfDisposed();
 
-        StreamWriter writer;
-        Process? currentProcess;
-        lock (gate)
-        {
-            writer = stdin ?? throw new InvalidOperationException("NKN bridge is not running.");
-            currentProcess = process;
-        }
-
-        if (currentProcess is null || currentProcess.HasExited)
-        {
-            throw new InvalidOperationException("NKN bridge process is not available.");
-        }
-
-        var id = Interlocked.Increment(ref nextCommandId).ToString(System.Globalization.CultureInfo.InvariantCulture);
-        var wait = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!pendingCommands.TryAdd(id, wait))
-        {
-            throw new InvalidOperationException("Duplicate bridge command id.");
-        }
-
+        var timeout = timeoutOverride ?? CommandAckTimeout;
         try
         {
-            var command = new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                ["id"] = id,
-                ["cmd"] = cmd,
-            };
-
-            if (payload is not null)
-            {
-                foreach (var pair in payload)
-                {
-                    command[pair.Key] = pair.Value;
-                }
-            }
-
-            var json = JsonSerializer.Serialize(command);
-            await writer.WriteLineAsync(json);
-
-            var ackTask = wait.Task;
-            var timeout = timeoutOverride ?? CommandAckTimeout;
-            try
-            {
-                await ackTask.WaitAsync(timeout, ct);
-            }
-            catch (TimeoutException ex)
-            {
-                NknRuntimeDiagnostics.SetLastError($"bridge_{cmd}_timeout");
-                if (string.Equals(cmd, "shutdown", StringComparison.Ordinal))
-                {
-                    RecordBridgeFailure("bridge_shutdown_timeout", "The local helper process took too long to close.");
-                }
-                throw new TimeoutException($"Timed out waiting for bridge response to '{cmd}'.", ex);
-            }
+            await protocolClient.SendCommandAndWaitAckAsync(cmd, payload, timeout, ct).ConfigureAwait(false);
         }
-        finally
+        catch (TimeoutException ex)
         {
-            pendingCommands.TryRemove(id, out _);
+            NknRuntimeDiagnostics.SetLastError($"bridge_{cmd}_timeout");
+            if (string.Equals(cmd, "shutdown", StringComparison.Ordinal))
+            {
+                RecordBridgeFailure("bridge_shutdown_timeout", "The local helper process took too long to close.");
+            }
+            throw new TimeoutException($"Timed out waiting for bridge response to '{cmd}'.", ex);
         }
     }
 
     private async Task<JsonElement> SendCommandAndWaitBridgeEventAsync(
         string cmd,
         Dictionary<string, object?>? payload,
-        ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> pendingMap,
+        BridgeWaitKind waitKind,
         TimeSpan timeout,
         CancellationToken ct)
     {
         ThrowIfDisposed();
-
-        StreamWriter writer;
-        Process? currentProcess;
-        lock (gate)
-        {
-            writer = stdin ?? throw new InvalidOperationException("NKN bridge is not running.");
-            currentProcess = process;
-        }
-
-        if (currentProcess is null || currentProcess.HasExited)
-        {
-            throw new InvalidOperationException("NKN bridge process is not available.");
-        }
-
-        var id = Interlocked.Increment(ref nextCommandId).ToString(System.Globalization.CultureInfo.InvariantCulture);
-        var wait = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!pendingMap.TryAdd(id, wait))
-        {
-            throw new InvalidOperationException("Duplicate bridge command id.");
-        }
-
-        try
-        {
-            var command = new Dictionary<string, object?>(StringComparer.Ordinal)
-            {
-                ["id"] = id,
-                ["cmd"] = cmd,
-            };
-
-            if (payload is not null)
-            {
-                foreach (var pair in payload)
-                {
-                    command[pair.Key] = pair.Value;
-                }
-            }
-
-            var json = JsonSerializer.Serialize(command);
-            await writer.WriteLineAsync(json);
-            return await wait.Task.WaitAsync(timeout, ct);
-        }
-        finally
-        {
-            pendingMap.TryRemove(id, out _);
-        }
-    }
-
-    private async Task ReadStdoutLoopAsync(Process targetProcess)
-    {
-        try
-        {
-            while (!targetProcess.HasExited)
-            {
-                var line = await targetProcess.StandardOutput.ReadLineAsync();
-                if (line is null)
-                {
-                    break;
-                }
-
-                if (line.Length == 0)
-                {
-                    continue;
-                }
-
-                HandleStdoutJsonLine(line);
-            }
-        }
-        catch (Exception ex)
-        {
-            Log($"Bridge stdout reader failed ({ex.GetType().Name})");
-            SignalDisconnected($"stdout_reader_failed:{ex.GetType().Name}");
-        }
-    }
-
-    private async Task ReadStderrLoopAsync(Process targetProcess)
-    {
-        try
-        {
-            while (!targetProcess.HasExited)
-            {
-                var line = await targetProcess.StandardError.ReadLineAsync();
-                if (line is null)
-                {
-                    break;
-                }
-
-                if (line.Length == 0)
-                {
-                    continue;
-                }
-
-                Log($"bridge stderr: {line}");
-            }
-        }
-        catch
-        {
-            // stderr is diagnostic only
-        }
-    }
-
-    private void HandleStdoutJsonLine(string line)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(line);
-            var root = doc.RootElement;
-            if (root.ValueKind != JsonValueKind.Object)
-            {
-                return;
-            }
-
-            if (!TryGetString(root, "event", out var eventName))
-            {
-                if (!TryGetString(root, "type", out eventName))
-                {
-                    return;
-                }
-            }
-
-            switch (eventName)
-            {
-                case "ok":
-                    HandleCommandOk(root);
-                    break;
-                case "error":
-                    HandleCommandError(root);
-                    break;
-                case "hello_ok":
-                    HandleHelloOk(root);
-                    break;
-                case "pong":
-                    HandlePong(root);
-                    break;
-                case "ready":
-                    HandleReady(root);
-                    break;
-                case "message":
-                    HandleMessage(root);
-                    break;
-                case "disconnected":
-                    HandleBridgeDisconnected(root);
-                    break;
-            }
-        }
-        catch (JsonException ex)
-        {
-            Log($"Bridge stdout JSON parse failed ({ex.GetType().Name})");
-        }
-    }
-
-    private void HandleCommandOk(JsonElement root)
-    {
-        if (!TryGetId(root, out var id))
-        {
-            return;
-        }
-
-        if (pendingCommands.TryGetValue(id, out var tcs))
-        {
-            tcs.TrySetResult(root.Clone());
-        }
-    }
-
-    private void HandleCommandError(JsonElement root)
-    {
-        var reason = TryGetString(root, "reason", out var r) ? r : "bridge_command_error";
-        if (TryGetId(root, out var id) && pendingCommands.TryGetValue(id, out var tcs))
-        {
-            tcs.TrySetException(new InvalidOperationException(reason));
-        }
-        else if (TryGetId(root, out id) && pendingHelloResponses.TryGetValue(id, out var helloTcs))
-        {
-            helloTcs.TrySetException(new InvalidOperationException(reason));
-        }
-        else if (TryGetId(root, out id) && pendingPongResponses.TryGetValue(id, out var pongTcs))
-        {
-            pongTcs.TrySetException(new InvalidOperationException(reason));
-        }
-        else
-        {
-            SignalDisconnected("bridge_error:" + reason);
-        }
-    }
-
-    private void HandleHelloOk(JsonElement root)
-    {
-        if (!TryGetId(root, out var id))
-        {
-            return;
-        }
-
-        string? sdk = null;
-        if (TryGetString(root, "sdk", out var sdkValue) && !string.IsNullOrWhiteSpace(sdkValue))
-        {
-            sdk = sdkValue;
-        }
-
-        try
-        {
-            lock (gate)
-            {
-                NknRuntimeDiagnostics.SetBridgeProcessInfo(process?.Id ?? 0, sdk);
-            }
-        }
-        catch
-        {
-            NknRuntimeDiagnostics.SetBridgeProcessInfo(0, sdk);
-        }
-
-        if (pendingHelloResponses.TryGetValue(id, out var tcs))
-        {
-            tcs.TrySetResult(root.Clone());
-        }
-    }
-
-    private void HandlePong(JsonElement root)
-    {
-        if (!TryGetId(root, out var id))
-        {
-            return;
-        }
-
-        NknRuntimeDiagnostics.SetBridgeLastPongUtc(DateTimeOffset.UtcNow);
-
-        if (pendingPongResponses.TryGetValue(id, out var tcs))
-        {
-            tcs.TrySetResult(root.Clone());
-        }
-    }
-
-    private void HandleReady(JsonElement root)
-    {
-        var readyAddress = TryGetString(root, "address", out var a) ? a : string.Empty;
-        lock (gate)
-        {
-            address = string.IsNullOrWhiteSpace(readyAddress) ? identity.Address : readyAddress;
-            pendingReady?.TrySetResult(address);
-        }
+        return await protocolClient.SendCommandAndWaitBridgeEventAsync(cmd, payload, waitKind, timeout, ct).ConfigureAwait(false);
     }
 
     private void HandleMessage(JsonElement root)
@@ -929,52 +594,6 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         SignalDisconnected(reason);
     }
 
-    private void OnBridgeProcessExited(object? sender, EventArgs e)
-    {
-        var p = sender as Process;
-        int? exitCode = null;
-        bool forcedKill;
-        bool shuttingDownSnapshot;
-        long spawnTicksSnapshot;
-        int? pidSnapshot;
-        if (p is not null)
-        {
-            try
-            {
-                exitCode = p.ExitCode;
-            }
-            catch
-            {
-                exitCode = null;
-            }
-        }
-
-        lock (gate)
-        {
-            forcedKill = bridgeForcedKillRequested;
-            shuttingDownSnapshot = shuttingDown;
-            spawnTicksSnapshot = currentBridgeSpawnTicks;
-            pidSnapshot = p is not null ? p.Id : (process is { } proc ? proc.Id : null);
-        }
-
-        var exitClassification = BridgeExitClassifier.Classify(shuttingDownSnapshot, forcedKill, exitCode);
-
-        var reason = p is null || exitCode is null ? "bridge_process_exited" : $"bridge_process_exited:{exitCode.Value}";
-        Log($"Bridge process exited (pid={(p?.Id.ToString() ?? "unknown")}, exit_code={(exitCode?.ToString() ?? "unknown")})");
-        NknRuntimeDiagnostics.SetBridgeLastExit(exitCode, "process exited");
-        EmitBridgeLifecycle(new BridgeLifecycleEvent(
-            BridgeLifecycleEventKind.Exited,
-            StartMode: null,
-            Pid: pidSnapshot,
-            ReadyTimeMs: null,
-            PingRttMs: null,
-            UptimeMs: ElapsedSinceTicksMilliseconds(spawnTicksSnapshot),
-            ExitCode: exitCode,
-            ExitReasonKind: exitClassification.ReasonKind,
-            ExitReasonText: exitClassification.ReasonText));
-        _ = Task.Run(() => HandleUnexpectedProcessExitAsync(reason), CancellationToken.None);
-    }
-
     private void SignalDisconnected(string reason)
     {
         if (Interlocked.Exchange(ref disconnectedRaised, 1) != 0)
@@ -1007,7 +626,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         lock (gate)
         {
             expectedShutdown = shuttingDown;
-            wasConnected = pendingReady is not null && pendingReady.Task.IsCompletedSuccessfully;
+            wasConnected = connectAttempts.WasConnected();
         }
 
         if (expectedShutdown)
@@ -1025,34 +644,48 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
             Log($"Bridge exited unexpectedly ({reason})");
             FailPendingOperations(reason);
             await StopPingLoopAsync();
-            CleanupProcessState();
+            await bridgeSupervisor.CleanupStateAsync(waitForReaders: true, "unexpected_exit").ConfigureAwait(false);
 
-            for (var i = 0; i < UnexpectedExitRestartBackoff.Length && !disposed; i++)
+            var retryPolicy = new RetryPolicy(UnexpectedExitRestartRetryOptions);
+            retryPolicy.EventEmitted += OnUnexpectedExitRetryPolicyEvent;
+            try
             {
-                var delay = UnexpectedExitRestartBackoff[i];
-                Log($"Bridge restart retry {i + 1}/{UnexpectedExitRestartBackoff.Length} in {delay.TotalSeconds:0}s");
-                await Task.Delay(delay, CancellationToken.None);
-
-                try
-                {
-                    await EnsureProcessStartedAsync(CancellationToken.None);
-                    await EnsureHelloHandshakeAsync(CancellationToken.None);
-
-                    if (wasConnected)
+                var retryResult = await retryPolicy.ExecuteAsync(
+                    async (_, ct) =>
                     {
-                        await ConnectAsync(CancellationToken.None);
-                    }
+                        ct.ThrowIfCancellationRequested();
+                        if (disposed)
+                        {
+                            throw new OperationCanceledException("disposed");
+                        }
 
-                    NknRuntimeDiagnostics.IncrementBridgeRestartCount();
-                    Log("Bridge restart succeeded");
+                        await EnsureProcessStartedAsync(ct).ConfigureAwait(false);
+                        await EnsureHelloHandshakeAsync(ct).ConfigureAwait(false);
+
+                        if (wasConnected)
+                        {
+                            await ConnectAsync(ct).ConfigureAwait(false);
+                        }
+
+                        NknRuntimeDiagnostics.IncrementBridgeRestartCount();
+                        Log("Bridge restart succeeded");
+                    },
+                    resetBetweenAttemptsAsync: (_, _) =>
+                    {
+                        NknRuntimeDiagnostics.SetLastError("bridge_restart_retry_failed");
+                        return bridgeSupervisor.CleanupStateAsync(waitForReaders: true, "restart_retry_reset");
+                    },
+                    CancellationToken.None,
+                    shouldRetry: _ => !disposed).ConfigureAwait(false);
+
+                if (retryResult.Succeeded)
+                {
                     return;
                 }
-                catch (Exception ex)
-                {
-                    NknRuntimeDiagnostics.SetLastError("bridge_restart_retry_failed");
-                    Log($"Bridge restart attempt failed ({ex.GetType().Name})");
-                    CleanupProcessState();
-                }
+            }
+            finally
+            {
+                retryPolicy.EventEmitted -= OnUnexpectedExitRetryPolicyEvent;
             }
 
             NknRuntimeDiagnostics.SetLastError("bridge_restart_failed");
@@ -1065,60 +698,37 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         }
     }
 
+    private void OnUnexpectedExitRetryPolicyEvent(object? sender, RetryEvent e)
+    {
+        switch (e.Kind)
+        {
+            case RetryEventKind.AttemptStart:
+                Log($"Bridge restart attempt {e.Attempt}/{e.MaxAttempts} starting");
+                break;
+            case RetryEventKind.AttemptScheduled:
+                Log($"Bridge restart retry {Math.Min(e.Attempt + 1, e.MaxAttempts)}/{e.MaxAttempts} in {(e.Delay?.TotalSeconds ?? 0):0}s");
+                break;
+            case RetryEventKind.AttemptSuccess:
+                Log($"Bridge restart attempt {e.Attempt}/{e.MaxAttempts} succeeded");
+                break;
+            case RetryEventKind.FinalFail:
+                Log($"Bridge restart failed after {e.Attempt}/{e.MaxAttempts} attempts ({(string.IsNullOrWhiteSpace(e.ExceptionType) ? "Unknown" : e.ExceptionType)})");
+                break;
+        }
+    }
+
     private void FailPendingOperations(string reason)
     {
-        lock (gate)
-        {
-            pendingReady?.TrySetException(new InvalidOperationException(reason));
-        }
+        connectAttempts.FailPendingReady(reason);
 
-        foreach (var pending in pendingCommands.ToArray())
-        {
-            if (pendingCommands.TryRemove(pending.Key, out var tcs))
-            {
-                tcs.TrySetException(new InvalidOperationException(reason));
-            }
-        }
-
-        foreach (var pending in pendingHelloResponses.ToArray())
-        {
-            if (pendingHelloResponses.TryRemove(pending.Key, out var tcs))
-            {
-                tcs.TrySetException(new InvalidOperationException(reason));
-            }
-        }
-
-        foreach (var pending in pendingPongResponses.ToArray())
-        {
-            if (pendingPongResponses.TryRemove(pending.Key, out var tcs))
-            {
-                tcs.TrySetException(new InvalidOperationException(reason));
-            }
-        }
+        protocolClient.FailPendingOperations(reason);
 
         CancelPingLoop();
     }
 
     private void CleanupProcessState()
     {
-        lock (gate)
-        {
-            if (process is not null)
-            {
-                process.Exited -= OnBridgeProcessExited;
-                process.Dispose();
-                process = null;
-            }
-
-            stdin?.Dispose();
-            stdin = null;
-            pendingReady = null;
-            helloCompleted = false;
-            bridgeForcedKillRequested = false;
-            currentBridgeSpawnTicks = 0;
-            stdoutReaderTask = null;
-            stderrReaderTask = null;
-        }
+        bridgeSupervisor.CleanupState();
     }
 
     private void StartPingLoopIfNeeded()
@@ -1216,29 +826,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
 
     private async Task RestartBridgeProcessAsync()
     {
-        Process? toKill;
         lock (gate)
         {
-            toKill = process;
             shuttingDown = true;
         }
-
-        try
-        {
-            if (toKill is not null && !toKill.HasExited)
-            {
-                toKill.Kill(entireProcessTree: true);
-                toKill.WaitForExit(ShutdownWaitMilliseconds);
-            }
-        }
-        catch (Exception ex)
-        {
-            Log($"Bridge restart kill failed ({ex.GetType().Name})");
-        }
-        finally
-        {
-            CleanupProcessState();
-        }
+        bridgeSupervisor.MarkForcedKillRequested();
+        await bridgeSupervisor.CleanupStateAsync(waitForReaders: true, "restart").ConfigureAwait(false);
 
         try
         {
@@ -1263,6 +856,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
                 }
             }
         }
+    }
+
+    private double? GetCurrentBridgeUptimeMs()
+    {
+        return ElapsedSinceTicksMilliseconds(bridgeSupervisor.CurrentSpawnTicks);
     }
 
     private static bool TryGetString(JsonElement root, string propertyName, out string value)
@@ -1503,6 +1101,24 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         NknRuntimeDiagnostics.SetLastError($"NKN_START_FAILED: {shortReason} ({safeDetail})");
     }
 
+    private static string BuildLastProgressSummaryForDiagnostics()
+    {
+        var snapshot = NknRuntimeDiagnostics.Snapshot();
+        if (string.Equals(snapshot.LastProgressEventType, "(none)", StringComparison.Ordinal))
+        {
+            return string.Empty;
+        }
+
+        var builder = new StringBuilder();
+        builder.Append(" progress=").Append(snapshot.LastProgressEventType);
+        if (!string.Equals(snapshot.LastSelectedRpc, "(none)", StringComparison.Ordinal))
+        {
+            builder.Append(", rpc=").Append(snapshot.LastSelectedRpc);
+        }
+
+        return builder.ToString();
+    }
+
     private static void Log(string message)
     {
         Console.WriteLine($"[nLink][NKN][Bridge] {message}");
@@ -1552,4 +1168,6 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
 
         return elapsedTicks * 1000d / Stopwatch.Frequency;
     }
+
 }
+

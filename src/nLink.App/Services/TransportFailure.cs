@@ -81,8 +81,20 @@ public static class TransportFailureMapper
         string? lastDisconnectReason = null,
         string? fallbackMessage = null)
     {
+        rawError = NormalizeSignalValue(rawError);
+        lastDisconnectReason = NormalizeSignalValue(lastDisconnectReason);
         var raw = ((rawError ?? string.Empty) + " " + (lastDisconnectReason ?? string.Empty)).Trim();
         var normalized = raw.ToLowerInvariant();
+
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return TransportFailure.Create(
+                TransportFailureCategory.UserCancelled,
+                string.IsNullOrWhiteSpace(fallbackMessage) ? "Session ended" : fallbackMessage!,
+                exceptionType,
+                raw,
+                isTransient: true);
+        }
 
         if (normalized.Contains("json", StringComparison.Ordinal) ||
             normalized.Contains("parse", StringComparison.Ordinal))
@@ -116,7 +128,9 @@ public static class TransportFailureMapper
         }
 
         if (normalized.Contains("bridge_ping_timeout", StringComparison.Ordinal) ||
-            normalized.Contains("bridge_unresponsive", StringComparison.Ordinal))
+            normalized.Contains("bridge_unresponsive", StringComparison.Ordinal) ||
+            (normalized.Contains("nkn bridge hello failed", StringComparison.Ordinal) &&
+             normalized.Contains("timed out", StringComparison.Ordinal)))
         {
             return TransportFailure.Create(
                 TransportFailureCategory.BridgeUnresponsive,
@@ -127,6 +141,7 @@ public static class TransportFailureMapper
         }
 
         if (normalized.Contains("bridge_hello_failed", StringComparison.Ordinal) ||
+            normalized.Contains("nkn bridge hello failed", StringComparison.Ordinal) ||
             normalized.Contains("bridge_connect_ready_timeout", StringComparison.Ordinal) ||
             normalized.Contains("nkn_start_failed", StringComparison.Ordinal) ||
             normalized.Contains("bridge runtime not found", StringComparison.Ordinal) ||
@@ -206,5 +221,22 @@ public static class TransportFailureMapper
             exceptionType: ex.GetType().Name,
             rawError: combinedRaw,
             isTransient: isTransient);
+    }
+
+    private static string? NormalizeSignalValue(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var trimmed = value.Trim();
+        if (trimmed.Equals("(none)", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals("none", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return trimmed;
     }
 }

@@ -135,14 +135,17 @@ internal static class BridgeSelfTestRunner
     {
         using var doc = JsonDocument.Parse(line);
         var root = doc.RootElement.Clone();
-        if (root.ValueKind != JsonValueKind.Object ||
-            !root.TryGetProperty("event", out var eventProp) ||
-            eventProp.ValueKind != JsonValueKind.String)
+        if (root.ValueKind != JsonValueKind.Object)
         {
-            throw new InvalidOperationException("Bridge returned invalid JSON event.");
+            throw new InvalidOperationException($"Bridge returned non-object JSON line: {BuildLinePreview(line)}");
         }
 
-        return (eventProp.GetString() ?? string.Empty, root);
+        if (!TryReadEventName(root, out var eventName))
+        {
+            throw new InvalidOperationException($"Bridge returned JSON without event/type: {BuildLinePreview(line)}");
+        }
+
+        return (eventName, root);
     }
 
     private static string ResolveBridgeScriptPath(string rid)
@@ -281,5 +284,39 @@ internal static class BridgeSelfTestRunner
         {
             // Best-effort cleanup.
         }
+    }
+
+    private static bool TryReadEventName(JsonElement root, out string eventName)
+    {
+        eventName = string.Empty;
+        if (root.TryGetProperty("event", out var eventProp) && eventProp.ValueKind == JsonValueKind.String)
+        {
+            eventName = eventProp.GetString() ?? string.Empty;
+            return !string.IsNullOrWhiteSpace(eventName);
+        }
+
+        if (root.TryGetProperty("type", out var typeProp) && typeProp.ValueKind == JsonValueKind.String)
+        {
+            eventName = typeProp.GetString() ?? string.Empty;
+            return !string.IsNullOrWhiteSpace(eventName);
+        }
+
+        return false;
+    }
+
+    private static string BuildLinePreview(string? line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return "(empty)";
+        }
+
+        var compact = line.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        if (compact.Length > 160)
+        {
+            compact = compact[..160];
+        }
+
+        return compact;
     }
 }

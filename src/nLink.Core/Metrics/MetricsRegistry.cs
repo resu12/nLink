@@ -1,5 +1,5 @@
 using System.Collections.Concurrent;
-using System.Linq;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -148,7 +148,7 @@ public sealed class MetricsRegistry
         public static MetricTags Create(string? transport, string? scenario, string? result, string? failureCategory, string? bridgeReuseMode)
         {
             var normalizedTransport = Normalize(transport);
-            var normalizedScenario = Normalize(scenario);
+            var normalizedScenario = NormalizeScenario(scenario);
             var normalizedResult = Normalize(result);
             var normalizedFailureCategory = Normalize(failureCategory);
             var normalizedBridgeReuseMode = Normalize(bridgeReuseMode);
@@ -187,6 +187,24 @@ public sealed class MetricsRegistry
         private static string Normalize(string? value)
         {
             return string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim();
+        }
+
+        public static string NormalizeScenario(string? scenario)
+        {
+            var normalized = Normalize(scenario);
+            if (normalized.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            if (normalized is "A" or "B" or "C" or "D")
+            {
+                return normalized;
+            }
+
+            Debug.Fail($"Metrics scenario label outside allowed bounded set: '{normalized}'");
+            Trace.TraceWarning($"[nLink][Metrics] scenario label rejected (value='{normalized}')");
+            return string.Empty;
         }
     }
 

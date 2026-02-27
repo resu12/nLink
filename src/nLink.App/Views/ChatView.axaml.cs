@@ -1,9 +1,8 @@
-using System;
-using System.Collections;
 using System.Collections.Specialized;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Threading;
 using NLink.App.ViewModels;
 
@@ -16,6 +15,16 @@ public partial class ChatView : UserControl
     public ChatView()
     {
         InitializeComponent();
+        if (ChatInputTextBox is not null)
+        {
+            // Handle Enter before TextBox AcceptsReturn consumes it, while still letting
+            // Shift+Enter pass through for newline insertion.
+            ChatInputTextBox.AddHandler(
+                InputElement.KeyDownEvent,
+                ChatDraftTextBox_KeyDown,
+                RoutingStrategies.Tunnel,
+                handledEventsToo: true);
+        }
         PropertyChanged += OnViewPropertyChanged;
         AttachedToVisualTree += (_, _) => HookMessagesCollection();
         DetachedFromVisualTree += (_, _) => UnhookMessagesCollection();
@@ -78,6 +87,11 @@ public partial class ChatView : UserControl
     private void ChatDraftTextBox_KeyDown(object? sender, KeyEventArgs e)
     {
         if (e.Key != Key.Enter)
+        {
+            return;
+        }
+
+        if ((e.KeyModifiers & KeyModifiers.Shift) == KeyModifiers.Shift)
         {
             return;
         }

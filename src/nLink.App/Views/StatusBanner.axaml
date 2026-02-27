@@ -1,0 +1,130 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:services="using:NLink.App.Services"
+             mc:Ignorable="d"
+             x:Class="NLink.App.Views.StatusBanner"
+             x:Name="Root">
+
+    <Border Classes="appCard"
+            Padding="12"
+            IsVisible="{Binding #Root.IsBannerVisible}"
+            AutomationProperties.AutomationId="StatusBanner">
+        <StackPanel Spacing="10">
+            <StackPanel Spacing="4">
+                <TextBlock Text="{Binding #Root.StatusTitle}"
+                           FontSize="16"
+                           FontWeight="SemiBold"
+                           AutomationProperties.AutomationId="StatusTitle"/>
+
+                <TextBlock Text="{Binding #Root.StatusMessage}"
+                           TextWrapping="Wrap"
+                           Classes="appMuted"
+                           AutomationProperties.AutomationId="StatusMessage"/>
+
+                <TextBlock Text="{Binding #Root.RetryCountdownText}"
+                           IsVisible="{Binding #Root.ShowRetryCountdown}"
+                           Classes="appMuted"
+                           AutomationProperties.AutomationId="RetryCountdown"/>
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal"
+                        Spacing="8">
+                <Button Content="Copy Diagnostics"
+                        Classes="appButton secondaryButton"
+                        Command="{Binding #Root.CopyDiagnosticsCommand}"
+                        IsVisible="{Binding #Root.ShowCopyDiagnosticsButton}"
+                        Height="36"
+                        MinWidth="140"
+                        AutomationProperties.AutomationId="CopyDiagnosticsButton"/>
+
+                <Button Content="Cancel"
+                        Classes="appButton secondaryButton"
+                        Command="{Binding #Root.CancelCommand}"
+                        IsVisible="{Binding #Root.ShowCancelButton}"
+                        Height="36"
+                        MinWidth="92"
+                        AutomationProperties.AutomationId="CancelButton"/>
+            </StackPanel>
+
+            <Expander Header="Details"
+                      IsVisible="{Binding #Root.ShowDetailsExpander}"
+                      AutomationProperties.AutomationId="DetailsExpander">
+                <Border Classes="appPanel"
+                        Padding="10"
+                        Margin="0,6,0,0">
+                    <StackPanel Spacing="6">
+                        <Grid ColumnDefinitions="150,*"
+                              ColumnSpacing="8"
+                              IsVisible="{Binding #Root.ShowFailureCategoryDetail}">
+                            <TextBlock Text="Failure category"
+                                       Classes="appMuted"/>
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding #Root.FailureCategoryText}"
+                                       TextWrapping="Wrap"
+                                       Classes="appMuted"
+                                       AutomationProperties.AutomationId="StatusDetailFailureCategory"/>
+                        </Grid>
+
+                        <Grid ColumnDefinitions="150,*"
+                              ColumnSpacing="8"
+                              IsVisible="{Binding #Root.ShowSessionCorrelationIdDetail}">
+                            <TextBlock Text="Session ID"
+                                       Classes="appMuted"/>
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding #Root.SessionCorrelationIdText}"
+                                       TextWrapping="Wrap"
+                                       Classes="appMuted"
+                                       FontFamily="Cascadia Mono,Consolas,Menlo,Monaco,monospace"
+                                       AutomationProperties.AutomationId="StatusDetailSessionId"/>
+                        </Grid>
+
+                        <Grid ColumnDefinitions="150,*"
+                              ColumnSpacing="8"
+                              IsVisible="{Binding #Root.ShowLastConnectDurationDetail}">
+                            <TextBlock Text="Last connect time"
+                                       Classes="appMuted"/>
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding #Root.LastConnectDurationText}"
+                                       TextWrapping="Wrap"
+                                       Classes="appMuted"
+                                       AutomationProperties.AutomationId="StatusDetailLastConnectDuration"/>
+                        </Grid>
+
+                        <Grid ColumnDefinitions="150,*"
+                              ColumnSpacing="8"
+                              IsVisible="{Binding #Root.ShowLastHandshakeDurationDetail}">
+                            <TextBlock Text="Last handshake time"
+                                       Classes="appMuted"/>
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding #Root.LastHandshakeDurationText}"
+                                       TextWrapping="Wrap"
+                                       Classes="appMuted"
+                                       AutomationProperties.AutomationId="StatusDetailLastHandshakeDuration"/>
+                        </Grid>
+
+                        <Grid ColumnDefinitions="150,*"
+                              ColumnSpacing="8"
+                              IsVisible="{Binding #Root.ShowBridgeStateDetail}">
+                            <TextBlock Text="Bridge state"
+                                       Classes="appMuted"/>
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding #Root.BridgeStateText}"
+                                       TextWrapping="Wrap"
+                                       Classes="appMuted"
+                                       AutomationProperties.AutomationId="StatusDetailBridgeState"/>
+                        </Grid>
+
+                        <TextBlock Text="{Binding #Root.EffectiveDetailsText}"
+                                   IsVisible="{Binding #Root.ShowRawDetailsText}"
+                                   TextWrapping="Wrap"
+                                   FontFamily="Cascadia Mono,Consolas,Menlo,Monaco,monospace"
+                                   FontSize="12"
+                                   Classes="appMuted"/>
+                    </StackPanel>
+                </Border>
+            </Expander>
+        </StackPanel>
+    </Border>
+</UserControl>
