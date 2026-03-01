@@ -4,6 +4,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
+using NLink.App.Configuration;
 using NLink.App.Services;
 using NLink.App.ViewModels;
 using NLink.Core;
@@ -22,6 +23,10 @@ public partial class HelperPageView : UserControl
         AttachedToVisualTree += (_, _) => BindClipboardTopLevel();
         SyncViewModelSubscription();
     }
+
+    public bool UseSessionShellLayout => FeatureFlags.EnableSessionShellLayout;
+
+    public bool UseLegacyLayout => !FeatureFlags.EnableSessionShellLayout;
 
     private void OnViewPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
     {

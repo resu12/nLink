@@ -7,7 +7,7 @@
 #endif
 
 #ifndef AppVersion
-  #define AppVersion "0.2.0-beta.1"
+  #define AppVersion "0.2.0-beta.2"
 #endif
 
 #define MyAppName "nLink"

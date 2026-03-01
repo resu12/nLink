@@ -1127,8 +1127,13 @@ public sealed class SessionRuntime : IDisposable
                 snapshot.LastError,
                 lastDisconnectReason: snapshot.LastDisconnectReason,
                 fallbackMessage: "Connection lost.");
+            // Preserve the specific user-facing mapping here; the generic fallback is only for
+            // unmapped failures and must not clobber smoke-tested copy expectations.
+            var message = string.IsNullOrWhiteSpace(failure.Message)
+                ? "Connection lost."
+                : failure.Message;
             TransitionTo(TransportState.Failed, "transport_disconnected");
-            SetState(SessionRuntimeState.Failed, "Connection lost.");
+            SetState(SessionRuntimeState.Failed, message);
             LogTransportFailure(failure, "transport_disconnected");
         }
 

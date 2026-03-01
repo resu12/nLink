@@ -1,6 +1,6 @@
 # Release Runbook
 
-This runbook describes the exact steps to ship `0.2.0-beta.1`.
+This runbook describes the exact steps to ship `0.2.0-beta.2`.
 
 ## Preflight
 
@@ -32,7 +32,7 @@ Get-Content .\VERSION
 Current expected value:
 
 ```text
-0.2.0-beta.1
+0.2.0-beta.2
 ```
 
 Version-related files to verify:
@@ -63,15 +63,15 @@ powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunGuiSmo
 ```
 
 Expected release outputs:
-- `artifacts\releases\0.2.0-beta.1\nLink-Portable-win-x64-0.2.0-beta.1.zip`
-- `artifacts\releases\0.2.0-beta.1\nLink-Setup-win-x64-0.2.0-beta.1.exe`
-- `artifacts\releases\0.2.0-beta.1\SHA256SUMS.txt`
+- `artifacts\releases\0.2.0-beta.2\nLink-Portable-win-x64-0.2.0-beta.2.zip`
+- `artifacts\releases\0.2.0-beta.2\nLink-Setup-win-x64-0.2.0-beta.2.exe`
+- `artifacts\releases\0.2.0-beta.2\SHA256SUMS.txt`
 
 Verify artifacts:
 
 ```powershell
-Get-ChildItem .\artifacts\releases\0.2.0-beta.1
-Get-Content .\artifacts\releases\0.2.0-beta.1\SHA256SUMS.txt
+Get-ChildItem .\artifacts\releases\0.2.0-beta.2
+Get-Content .\artifacts\releases\0.2.0-beta.2\SHA256SUMS.txt
 ```
 
 ## Git Tag
@@ -79,24 +79,24 @@ Get-Content .\artifacts\releases\0.2.0-beta.1\SHA256SUMS.txt
 Create and push the release tag:
 
 ```powershell
-git tag v0.2.0-beta.1
-git push origin v0.2.0-beta.1
+git tag v0.2.0-beta.2
+git push origin v0.2.0-beta.2
 ```
 
 ## GitHub Release
 
 Create a GitHub pre-release with:
-- Tag: `v0.2.0-beta.1`
-- Title: `nLink 0.2.0-beta.1`
+- Tag: `v0.2.0-beta.2`
+- Title: `nLink 0.2.0-beta.2`
 - Mark as pre-release
 
 Attach:
-- `artifacts\releases\0.2.0-beta.1\nLink-Setup-win-x64-0.2.0-beta.1.exe`
-- `artifacts\releases\0.2.0-beta.1\nLink-Portable-win-x64-0.2.0-beta.1.zip`
-- `artifacts\releases\0.2.0-beta.1\SHA256SUMS.txt`
+- `artifacts\releases\0.2.0-beta.2\nLink-Setup-win-x64-0.2.0-beta.2.exe`
+- `artifacts\releases\0.2.0-beta.2\nLink-Portable-win-x64-0.2.0-beta.2.zip`
+- `artifacts\releases\0.2.0-beta.2\SHA256SUMS.txt`
 
 Paste release notes from:
-- `docs\releases\0.2.0-beta.1.md`
+- `docs\releases\0.2.0-beta.2.md`
 
 Link current beta issues guidance from:
 - `docs\KnownIssues.md`
@@ -106,7 +106,7 @@ Link current beta issues guidance from:
 Run a quick sanity install test:
 
 ```powershell
-Start-Process .\artifacts\installer\nLink-Setup-win-x64-0.2.0-beta.1.exe
+Start-Process .\artifacts\installer\nLink-Setup-win-x64-0.2.0-beta.2.exe
 ```
 
 Verify:
@@ -120,7 +120,7 @@ Verify:
 Portable sanity check:
 
 ```powershell
-Expand-Archive .\artifacts\releases\0.2.0-beta.1\nLink-Portable-win-x64-0.2.0-beta.1.zip -DestinationPath .\artifacts\portable-smoke -Force
+Expand-Archive .\artifacts\releases\0.2.0-beta.2\nLink-Portable-win-x64-0.2.0-beta.2.zip -DestinationPath .\artifacts\portable-smoke -Force
 Start-Process .\artifacts\portable-smoke\nLink.exe
 ```
 
@@ -130,8 +130,8 @@ Start-Process .\artifacts\portable-smoke\nLink.exe
 - If the tag was pushed incorrectly:
 
 ```powershell
-git tag -d v0.2.0-beta.1
-git push origin :refs/tags/v0.2.0-beta.1
+git tag -d v0.2.0-beta.2
+git push origin :refs/tags/v0.2.0-beta.2
 ```
 
 - If an installed build needs cleanup, use the generated uninstaller from the install directory or rerun the previous known-good installer.

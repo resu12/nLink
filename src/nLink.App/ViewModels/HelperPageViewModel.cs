@@ -1058,7 +1058,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                         "Request rejected",
                         "The other side declined the session.",
                         "Start new session");
-                    StatusText = UserErrorMapper.HelperRejected();
+                    StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
+                        ? UserErrorMapper.HelperRejected()
+                        : sessionRuntime.StatusText;
                     ConnectionState = "Rejected";
                     runtimeTerminalFailure = true;
                     break;
@@ -1074,7 +1076,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                         "Connection failed",
                         "The session ended due to a connection problem.",
                         "Retry");
-                    StatusText = UserErrorMapper.HelperDisconnected();
+                    StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
+                        ? UserErrorMapper.HelperDisconnected()
+                        : sessionRuntime.StatusText;
                     ConnectionState = "Failed";
                     runtimeTerminalFailure = true;
                     break;
@@ -1090,7 +1094,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                         "Connection failed",
                         "The session ended due to a connection problem.",
                         "Retry");
-                    StatusText = UserErrorMapper.HelperDisconnected();
+                    StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
+                        ? UserErrorMapper.HelperDisconnected()
+                        : sessionRuntime.StatusText;
                     ConnectionState = "Failed";
                     runtimeTerminalFailure = true;
                     break;
