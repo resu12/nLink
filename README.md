@@ -25,10 +25,10 @@ Open Diagnostics -> Copy diagnostics and include it when reporting issues.
 
 Notes:
 - Windows x64 only
-- Alpha pre-release (`0.1.0-alpha.5`)
+- Beta pre-release (`0.2.0-beta.1`)
 
 Versioning:
-- Release version uses SemVer (for example: `0.1.0-alpha.2`)
+- Release version uses SemVer (for example: `0.2.0-beta.1`)
 - The current release version is stored in the repo-root `VERSION` file
 
 License:

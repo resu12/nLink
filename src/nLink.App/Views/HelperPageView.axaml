@@ -73,13 +73,34 @@
                     <StackPanel Spacing="16">
                         <views:StatusBanner Status="{Binding BannerStatus}"
                                             ForceVisible="{Binding ShowStatusBanner}"
-                                            CopyDiagnosticsCommand="{Binding StatusBannerCopyDiagnosticsCommand}"
+                                            DetailsText="{Binding StatusBannerDetailsText}"
                                             CancelCommand="{Binding StatusBannerCancelCommand}"
                                             FailureCategory="{Binding StatusBannerFailureCategory}"
                                             SessionCorrelationId="{Binding StatusBannerSessionCorrelationId}"
                                             LastConnectDuration="{Binding StatusBannerLastConnectDuration}"
                                             LastHandshakeDuration="{Binding StatusBannerLastHandshakeDuration}"
                                             BridgeState="{Binding StatusBannerBridgeState}"/>
+
+                        <Border Classes="appPanel"
+                                Padding="10"
+                                IsVisible="{Binding ShowTransientBanner}">
+                            <Grid ColumnDefinitions="*,Auto"
+                                  ColumnSpacing="10">
+                                <TextBlock Text="{Binding TransientBannerText}"
+                                           Classes="appMuted"
+                                           TextWrapping="Wrap"
+                                           VerticalAlignment="Center"/>
+
+                                <Button Grid.Column="1"
+                                        Classes="appButton secondaryButton"
+                                        Content="Cancel"
+                                        Command="{Binding CancelTransientCommand}"
+                                        IsVisible="{Binding CanCancelTransient}"
+                                        IsEnabled="{Binding CanCancelTransient}"
+                                        Height="34"
+                                        MinWidth="88"/>
+                            </Grid>
+                        </Border>
 
                         <TextBlock Classes="appMuted"
                                    Text="{Binding HelperPageHelpText}"
@@ -100,6 +121,7 @@
                                  TabIndex="0"
                                  Height="74"
                                  HorizontalAlignment="Stretch"
+                                 IsEnabled="{Binding CanStartOrConnect}"
                                  IsVisible="{Binding ShowMainControls}"
                                  />
 
@@ -108,6 +130,7 @@
                                 Content="Connect"
                                 TabIndex="1"
                                 Command="{Binding ConnectCommand}"
+                                IsEnabled="{Binding CanStartOrConnect}"
                                 IsVisible="{Binding ShowConnectAction}"/>
 
                         <Button Classes="appButton secondaryButton action secondaryAction"
@@ -123,7 +146,6 @@
                                     Content="They don't have nLink?"
                                     TabIndex="2"
                                     Command="{Binding CopyInstallMessageCommand}"/>
-
                             <Button Classes="linkButton linkAction"
                                     Content="Use nFTP instead"
                                     TabIndex="3"
@@ -137,14 +159,6 @@
                                    HorizontalAlignment="Center"
                                    IsVisible="{Binding ShowCopyFeedbackInline}"/>
 
-                        <TextBlock Classes="appMuted"
-                                   AutomationProperties.AutomationId="Helper.Status"
-                                   Text="{Binding BannerStatus.Message}"
-                                   FontSize="14"
-                                   TextAlignment="Center"
-                                   HorizontalAlignment="Center"
-                                   IsVisible="{Binding ShowStatusBanner}"/>
-
                         <StackPanel Spacing="16"
                                     IsVisible="{Binding ShowConnectedPanel}">
                             <Border HorizontalAlignment="Center"
@@ -154,17 +168,13 @@
                             </Border>
                         </StackPanel>
 
-                        <Button Classes="linkButton linkAction"
-                                Content="Open diagnostics"
-                                Command="{Binding OpenDiagnosticsCommand}"
-                                HorizontalAlignment="Center"
-                                IsVisible="{Binding ShowOpenDiagnosticsLink}"/>
                     </StackPanel>
                 </Border>
 
                 <Button Classes="appButton secondaryButton backAction"
                         Content="Back"
                         Command="{Binding CancelCommand}"
+                        IsEnabled="{Binding CanEndSession}"
                         IsVisible="{Binding ShowBackButton}"/>
             </StackPanel>
         </ScrollViewer>

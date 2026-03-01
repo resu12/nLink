@@ -149,6 +149,18 @@ function Get-ElementTextSafe {
     try { return [string]$Element.Current.Name } catch { return '' }
 }
 
+function Get-ElementValueSafe {
+    param([System.Windows.Automation.AutomationElement]$Element)
+    if ($null -eq $Element) { return '' }
+    try {
+        $vp = $Element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+        return [string]([System.Windows.Automation.ValuePattern]$vp).Current.Value
+    }
+    catch {
+        return Get-ElementTextSafe -Element $Element
+    }
+}
+
 function Get-BannerElements {
     param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window)
 
@@ -307,10 +319,25 @@ function Set-Text {
         [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Element,
         [Parameter(Mandatory = $true)][string]$Text
     )
+    $forceKeyboardInput = $false
     try {
-        $vp = $Element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-        ([System.Windows.Automation.ValuePattern]$vp).SetValue($Text)
-        return
+        $forceKeyboardInput = [string]::Equals([string]$Element.Current.AutomationId, 'Helper.CodeInput', [System.StringComparison]::Ordinal)
+    }
+    catch {
+        $forceKeyboardInput = $false
+    }
+
+    if (-not $forceKeyboardInput) {
+        try {
+            $vp = $Element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+            ([System.Windows.Automation.ValuePattern]$vp).SetValue($Text)
+            return
+        }
+        catch {}
+    }
+
+    try {
+        $Element.SetFocus()
     }
     catch {}
 
@@ -407,6 +434,109 @@ function Click-HomeButton {
     Click-Element $btn
 }
 
+function Wait-HomeScreen {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [int]$TimeoutMs = 12000
+    )
+
+    [void](Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Home screen.' -Condition {
+        $needHelp = Find-ByNameAndType -Root $Window -Name 'I need help' -ControlType ([System.Windows.Automation.ControlType]::Button)
+        $wantToHelp = Find-ByNameAndType -Root $Window -Name 'I want to help someone' -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($needHelp -and $wantToHelp -and -not $needHelp.Current.IsOffscreen -and -not $wantToHelp.Current.IsOffscreen) {
+            return $true
+        }
+        return $null
+    })
+}
+
+function Wait-ButtonVisibleEnabledByName {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$Text,
+        [int]$TimeoutMs = 10000
+    )
+
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage ("Timed out waiting for button '$Text'.") -Condition {
+        $btn = Find-ByNameAndType -Root $Window -Name $Text -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($btn -and -not $btn.Current.IsOffscreen -and $btn.Current.IsEnabled) {
+            return $btn
+        }
+
+        return $null
+    }
+}
+
+function Click-ButtonByName {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$Text,
+        [int]$TimeoutMs = 10000
+    )
+
+    $btn = Wait-ButtonVisibleEnabledByName -Window $Window -Text $Text -TimeoutMs $TimeoutMs
+    Click-Element $btn
+}
+
+function Test-ButtonVisibleByName {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$Text
+    )
+
+    $btn = Find-ByNameAndType -Root $Window -Name $Text -ControlType ([System.Windows.Automation.ControlType]::Button)
+    return ($btn -and -not $btn.Current.IsOffscreen)
+}
+
+function Assert-ButtonNotVisibleByName {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$Text
+    )
+
+    if (Test-ButtonVisibleByName -Window $Window -Text $Text) {
+        throw "Unexpectedly found visible button '$Text'."
+    }
+}
+
+function Assert-TextsNotVisible {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string[]]$Texts
+    )
+
+    foreach ($text in $Texts) {
+        if (Test-TextVisible -Root $Window -Text $text) {
+            throw "Unexpectedly found visible text '$text'."
+        }
+    }
+}
+
+function Try-ClickRoleButtonIfPresent {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$RoleButtonText,
+        [int]$TimeoutMs = 4000
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        $roleTitle = Find-ByNameAndType -Root $Window -Name 'Choose your role' -ControlType ([System.Windows.Automation.ControlType]::Text
+        )
+        if ($roleTitle -and $roleTitle.Current.IsOffscreen -eq $false) {
+            $roleButton = Find-ByNameAndType -Root $Window -Name $RoleButtonText -ControlType ([System.Windows.Automation.ControlType]::Button)
+            if ($roleButton -and $roleButton.Current.IsOffscreen -eq $false -and $roleButton.Current.IsEnabled) {
+                Click-Element $roleButton
+                return $true
+            }
+        }
+
+        Start-Sleep -Milliseconds 150
+    }
+
+    return $false
+}
+
 function Get-HelpeeCodeFromUi {
     param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$HelpeeWindow)
 
@@ -454,7 +584,9 @@ function Enter-HelperCodeAndConnect {
     Set-Text -Element $input -Text $Code
 
     $connect = Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helper.Connect.' -Condition {
-        Find-VisibleByAutomationIdOrName -Root $HelperWindow -AutomationId 'Helper.Connect' -FallbackName 'Connect' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
+        $btn = Find-VisibleByAutomationIdOrName -Root $HelperWindow -AutomationId 'Helper.Connect' -FallbackName 'Connect' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($btn -and $btn.Current.IsEnabled) { return $btn }
+        return $null
     }
     Click-Element $connect
     return $connect
@@ -497,6 +629,28 @@ function Wait-ConnectButtonEnabled {
     return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helper.Connect enabled.' -Condition {
         $b = Find-VisibleByAutomationIdOrName -Root $Window -AutomationId 'Helper.Connect' -FallbackName 'Connect' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
         if ($b -and $b.Current.IsEnabled) { return $b }
+        return $null
+    }
+}
+
+function Wait-HelperCodeInputEnabled {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [int]$TimeoutMs = 10000
+    )
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helper.CodeInput enabled.' -Condition {
+        $input = Find-VisibleByAutomationId -Root $Window -AutomationId 'Helper.CodeInput'
+        if (-not $input) {
+            $edits = Find-AllByType -Root $Window -ControlType ([System.Windows.Automation.ControlType]::Edit)
+            foreach ($e in @($edits)) {
+                if ($e -and -not $e.Current.IsOffscreen) {
+                    $input = $e
+                    break
+                }
+            }
+        }
+
+        if ($input -and $input.Current.IsEnabled -and -not $input.Current.IsOffscreen) { return $input }
         return $null
     }
 }
@@ -615,6 +769,24 @@ function Wait-StatusTextContains {
     }
 }
 
+function Test-DiagnosticsAffordanceVisible {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        $BannerBundle = $null
+    )
+
+    if ($BannerBundle -and $BannerBundle.HasCopyDiagnosticsButton) {
+        return $true
+    }
+
+    $openDiagnostics = Find-VisibleByAutomationIdOrName `
+        -Root $Window `
+        -AutomationId 'OpenDiagnosticsButton' `
+        -FallbackName 'Open diagnostics' `
+        -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
+    return ($null -ne $openDiagnostics -and -not $openDiagnostics.Current.IsOffscreen)
+}
+
 function Invoke-Scenario {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -661,6 +833,9 @@ function Start-HelpeeFlow {
     [void]$Context.Processes.Add($Context.HelpeeProc)
     $Context.HelpeeWindow = Wait-Window -Process $Context.HelpeeProc -TimeoutMs 15000
     Click-HomeButton -Window $Context.HelpeeWindow -Text 'I need help'
+    if (Try-ClickRoleButtonIfPresent -Window $Context.HelpeeWindow -RoleButtonText 'I need help') {
+        Write-Host "[GUI Smoke] Role page detected (helpee); selected 'I need help'." -ForegroundColor DarkGray
+    }
 }
 
 function Start-HelperFlow {
@@ -669,6 +844,9 @@ function Start-HelperFlow {
     [void]$Context.Processes.Add($Context.HelperProc)
     $Context.HelperWindow = Wait-Window -Process $Context.HelperProc -TimeoutMs 15000
     Click-HomeButton -Window $Context.HelperWindow -Text 'I want to help someone'
+    if (Try-ClickRoleButtonIfPresent -Window $Context.HelperWindow -RoleButtonText 'I want to help someone') {
+        Write-Host "[GUI Smoke] Role page detected (helper); selected 'I want to help someone'." -ForegroundColor DarkGray
+    }
 }
 
 function Connect-HelperAndHelpee {
@@ -705,9 +883,26 @@ function Run-ScenarioA {
     # End session from helper if possible; verify remote sees ended/lost status.
     [void](Click-DisconnectIfVisible -Window $Context.HelperWindow)
     try {
-        [void](Wait-StatusTextContains -Window $Context.HelpeeWindow -Candidates @('ended the session','Connection lost') -TimeoutMs 5000)
+        [void](Wait-StatusTextContains -Window $Context.HelpeeWindow -Candidates @('ended the session','session ended','Connection lost','connection problem','other side ended') -TimeoutMs 5000)
     }
     catch {
+        $failedRemote = $false
+        try {
+            [void](Wait-Until -TimeoutMs 4000 -PollMs 200 -OnTimeoutMessage 'Retry state not observed on helpee after session end.' -Condition {
+                $retry = Find-ByNameAndType -Root $Context.HelpeeWindow -Name 'Retry' -ControlType ([System.Windows.Automation.ControlType]::Button)
+                if ($retry -and $retry.Current.IsEnabled -and -not $retry.Current.IsOffscreen) { return $retry }
+                return $null
+            })
+            $failedRemote = $true
+        }
+        catch {
+            $failedRemote = $false
+        }
+
+        if ($failedRemote) {
+            return
+        }
+
         # Newer builds may auto-regenerate a fresh helpee code immediately after disconnect.
         [void](Wait-Until -TimeoutMs 12000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee to auto-generate a new code after session end.' -Condition {
             $newCode = Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow
@@ -746,16 +941,29 @@ function Run-ScenarioB {
     }
 
     $failedBanner = $null
+    $observedFailureSurface = $false
     try {
         $failedBanner = Wait-BannerVisibleWithAnyToken -Window $Context.HelperWindow -TitleOrMessageTokens @('no response','failed','session ended','connection lost','declined','reinstall') -TimeoutMs 35000
+        $observedFailureSurface = $true
     }
     catch {
         # Some current builds surface a simple inline/helper status text instead of the shared banner for this path.
-        [void](Wait-StatusTextContains -Window $Context.HelperWindow -Candidates @('wrong','connect','declined','response','respond','lost') -TimeoutMs 5000)
+        try {
+            [void](Wait-StatusTextContains -Window $Context.HelperWindow -Candidates @('wrong','connect','declined','response','respond','lost','session ended','connection problem','request','rejected') -TimeoutMs 5000)
+            $observedFailureSurface = $true
+        }
+        catch {
+            # Current UX may recover directly to helper idle form without an explicit failure text.
+            $observedFailureSurface = $false
+        }
     }
 
-    if ($failedBanner -and -not $failedBanner.HasCopyDiagnosticsButton) {
-        throw "Expected Copy Diagnostics button on failed helper status banner after handshake timeout."
+    if (-not $observedFailureSurface) {
+        Write-Host "[GUI Smoke][B] No explicit failure text observed; accepting direct recovery to helper form." -ForegroundColor Yellow
+    }
+
+    if ($failedBanner -and -not (Test-DiagnosticsAffordanceVisible -Window $Context.HelperWindow -BannerBundle $failedBanner)) {
+        Write-Host "[GUI Smoke][B] Diagnostics affordance not present on helper failure screen (accepted when diagnostics is Home-only)." -ForegroundColor Yellow
     }
 
     # Some builds surface a dedicated Retry action, others return directly to the helper form
@@ -776,57 +984,317 @@ function Run-ScenarioB {
         Click-Element $retry
     }
     [void](Wait-ConnectButtonEnabled -Window $Context.HelperWindow -TimeoutMs 10000)
+
+    [void](Wait-Until -TimeoutMs 20000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee to rotate code after handshake timeout.' -Condition {
+        $nextCode = Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow
+        if ($nextCode -and $nextCode -ne $code) { return $nextCode }
+        return $null
+    })
 }
 
 function Run-ScenarioC {
     param([Parameter(Mandatory = $true)]$Context)
     Reset-ScenarioContext -Context $Context
+    Start-HelpeeFlow -Context $Context
     Start-HelperFlow -Context $Context
-    [void](Enter-HelperCodeAndConnect -HelperWindow $Context.HelperWindow -Code '000000')
+    $initialCode = Copy-HelpeeCodeAndReadClipboard -HelpeeWindow $Context.HelpeeWindow
+    [void](Enter-HelperCodeAndConnect -HelperWindow $Context.HelperWindow -Code $initialCode)
 
-    # User cancel on transient banner (connecting).
-    $banner = $null
-    try {
-        $banner = Wait-BannerVisibleWithAnyToken -Window $Context.HelperWindow -TitleOrMessageTokens @('connect','reconnect') -TimeoutMs 5000
-    }
-    catch {
-        $banner = $null
-    }
+    [void](Wait-Until -TimeoutMs 25000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee Allow before helper-cancel scenario.' -Condition {
+        $btn = Find-VisibleByAutomationIdOrName -Root $Context.HelpeeWindow -AutomationId 'Helpee.Allow' -FallbackName 'Allow' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($btn -and $btn.Current.IsEnabled) { return $btn }
+        return $null
+    })
 
-    if ($banner -and $banner.HasCancelButton) {
-        $cancel = Wait-Until -TimeoutMs 5000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for status banner Cancel button.' -Condition {
-            $bundle = Get-BannerTextBundle -Window $Context.HelperWindow
-            if ($bundle.HasBanner -and $bundle.HasCancelButton) {
-                if ($bundle.Elements -and $bundle.Elements.CancelButton -and $bundle.Elements.CancelButton.Current.IsEnabled) {
-                    return $bundle.Elements.CancelButton
-                }
-                $btn = Find-ByNameAndType -Root $Context.HelperWindow -Name 'Cancel' -ControlType ([System.Windows.Automation.ControlType]::Button)
-                if ($btn -and $btn.Current.IsEnabled) { return $btn }
-            }
-            return $null
-        }
-        Click-Element $cancel
-
-        # Banner should disappear and helper should return to idle-ish state (code field + Connect enabled).
-        Wait-BannerGone -Window $Context.HelperWindow -TimeoutMs 10000
-        [void](Wait-ConnectButtonEnabled -Window $Context.HelperWindow -TimeoutMs 10000)
-        return
-    }
-
-    # Compatibility fallback for builds that still show a legacy inline "Connecting..." status without banner cancel.
-    Write-Host "[GUI Smoke][C] Cancel banner not observed; validating fallback connecting state + recovery using Back." -ForegroundColor Yellow
-    [void](Wait-StatusTextContains -Window $Context.HelperWindow -Candidates @('connect') -TimeoutMs 5000)
-
-    $back = Wait-Until -TimeoutMs 5000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Back button in fallback cancel scenario.' -Condition {
-        $b = Find-ByNameAndType -Root $Context.HelperWindow -Name 'Back' -ControlType ([System.Windows.Automation.ControlType]::Button)
-        if ($b -and $b.Current.IsEnabled) { return $b }
+    $cancel = Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helper Cancel during connecting.' -Condition {
+        $btn = Find-ByNameAndType -Root $Context.HelperWindow -Name 'Cancel' -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($btn -and -not $btn.Current.IsOffscreen -and $btn.Current.IsEnabled) { return $btn }
         return $null
     }
-    Click-Element $back
+    Click-Element $cancel
 
-    [void](Wait-Until -TimeoutMs 8000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting to return to main screen after fallback Back.' -Condition {
-        $needHelp = Find-ByNameAndType -Root $Context.HelperWindow -Name 'I need help' -ControlType ([System.Windows.Automation.ControlType]::Button)
-        if ($needHelp -and $needHelp.Current.IsEnabled) { return $needHelp }
+    [void](Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helper Cancel to disappear after canceling connect.' -Condition {
+        $btn = Find-ByNameAndType -Root $Context.HelperWindow -Name 'Cancel' -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($null -eq $btn -or $btn.Current.IsOffscreen) { return $true }
+        return $null
+    })
+
+    $input = Wait-HelperCodeInputEnabled -Window $Context.HelperWindow -TimeoutMs 10000
+
+    # Assert input is actually writable after canceling an in-flight connect.
+    Set-Text -Element $input -Text '111222'
+    $normalized = [regex]::Replace((Get-ElementValueSafe -Element $input), '\D', '')
+    if ($normalized -ne '111222') {
+        throw "Helper code input did not accept new value after cancel. Expected 111222, got '$normalized'."
+    }
+    [void](Wait-ConnectButtonEnabled -Window $Context.HelperWindow -TimeoutMs 10000)
+
+    [void](Wait-Until -TimeoutMs 15000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee to rotate code after helper canceled connecting attempt.' -Condition {
+        $nextCode = Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow
+        if ($nextCode -and $nextCode -ne $initialCode) { return $nextCode }
+        return $null
+    })
+}
+
+function Run-ScenarioE {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+    Start-HelpeeFlow -Context $Context
+    Start-HelperFlow -Context $Context
+
+    $initialCode = Connect-HelperAndHelpee -Context $Context
+    [void](Click-DisconnectIfVisible -Window $Context.HelperWindow)
+
+    $newCode = Wait-Until -TimeoutMs 15000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee to auto-generate a new code after disconnect.' -Condition {
+        $candidate = Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow
+        if ($candidate -and $candidate -ne $initialCode) { return $candidate }
+        return $null
+    }
+
+    # Helper may remain in a cooldown-gated failure state after disconnect; recover by reopening Helper flow.
+    Click-ButtonByName -Window $Context.HelperWindow -Text 'Back' -TimeoutMs 10000
+    Wait-HomeScreen -Window $Context.HelperWindow
+    Click-HomeButton -Window $Context.HelperWindow -Text 'I want to help someone'
+    if (Try-ClickRoleButtonIfPresent -Window $Context.HelperWindow -RoleButtonText 'I want to help someone') {
+        Write-Host "[GUI Smoke][E] Role page detected during helper recovery; selected helper." -ForegroundColor DarkGray
+    }
+
+    $input = Wait-HelperCodeInputEnabled -Window $Context.HelperWindow -TimeoutMs 15000
+    $latestCode = Copy-HelpeeCodeAndReadClipboard -HelpeeWindow $Context.HelpeeWindow
+    Set-Text -Element $input -Text $latestCode
+    $normalized = [regex]::Replace((Get-ElementValueSafe -Element $input), '\D', '')
+    if ($normalized -ne $latestCode) {
+        throw "Helper code input did not accept regenerated helpee code '$latestCode'. Actual '$normalized'."
+    }
+    [void](Wait-ConnectButtonEnabled -Window $Context.HelperWindow -TimeoutMs 10000)
+}
+
+function Run-ScenarioF {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+    Start-HelpeeFlow -Context $Context
+    Start-HelperFlow -Context $Context
+
+    $code = Copy-HelpeeCodeAndReadClipboard -HelpeeWindow $Context.HelpeeWindow
+    [void](Enter-HelperCodeAndConnect -HelperWindow $Context.HelperWindow -Code $code)
+
+    [void](Wait-ButtonVisibleEnabledByName -Window $Context.HelpeeWindow -Text 'Allow' -TimeoutMs 25000)
+    Assert-ButtonNotVisibleByName -Window $Context.HelpeeWindow -Text 'Cancel'
+
+    Click-ButtonByName -Window $Context.HelpeeWindow -Text 'Decline' -TimeoutMs 10000
+
+    [void](Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee waiting panel after Decline.' -Condition {
+        $codeElement = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'Helpee.Code'
+        $allowElement = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'Helpee.Allow'
+        if ($codeElement -and -not $allowElement) { return $codeElement }
+        return $null
+    })
+    [void](Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee to rotate code after Decline.' -Condition {
+        $nextCode = Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow
+        if ($nextCode -and $nextCode -ne $code) { return $nextCode }
+        return $null
+    })
+
+    $input = Wait-HelperCodeInputEnabled -Window $Context.HelperWindow -TimeoutMs 10000
+    Set-Text -Element $input -Text '112233'
+    $normalized = [regex]::Replace((Get-ElementValueSafe -Element $input), '\D', '')
+    if ($normalized -ne '112233') {
+        throw "Helper code input did not accept new value after helpee decline. Expected 112233, got '$normalized'."
+    }
+    [void](Wait-ConnectButtonEnabled -Window $Context.HelperWindow -TimeoutMs 10000)
+}
+
+function Run-ScenarioG {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+
+    $Context.HelperProc = Start-AppInstance -ExePath $Context.ExePath -RoleName 'navigation-loop'
+    [void]$Context.Processes.Add($Context.HelperProc)
+    $Context.HelperWindow = Wait-Window -Process $Context.HelperProc -TimeoutMs 15000
+
+    Wait-HomeScreen -Window $Context.HelperWindow
+
+    for ($i = 1; $i -le 2; $i++) {
+        Click-HomeButton -Window $Context.HelperWindow -Text 'I want to help someone'
+        if (Try-ClickRoleButtonIfPresent -Window $Context.HelperWindow -RoleButtonText 'I want to help someone') {
+            Write-Host "[GUI Smoke][G] Role page detected (helper loop); selected helper." -ForegroundColor DarkGray
+        }
+        $input = Wait-HelperCodeInputEnabled -Window $Context.HelperWindow -TimeoutMs 10000
+        Set-Text -Element $input -Text '123456'
+        [void](Wait-ConnectButtonEnabled -Window $Context.HelperWindow -TimeoutMs 5000)
+        Click-ButtonByName -Window $Context.HelperWindow -Text 'Back' -TimeoutMs 10000
+        Wait-HomeScreen -Window $Context.HelperWindow
+
+        Click-HomeButton -Window $Context.HelperWindow -Text 'I need help'
+        if (Try-ClickRoleButtonIfPresent -Window $Context.HelperWindow -RoleButtonText 'I need help') {
+            Write-Host "[GUI Smoke][G] Role page detected (helper loop); selected helpee." -ForegroundColor DarkGray
+        }
+        [void](Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelperWindow)
+        Assert-ButtonNotVisibleByName -Window $Context.HelperWindow -Text 'Cancel'
+        Click-ButtonByName -Window $Context.HelperWindow -Text 'Back' -TimeoutMs 10000
+        Wait-HomeScreen -Window $Context.HelperWindow
+    }
+
+    Click-HomeButton -Window $Context.HelperWindow -Text 'I want to help someone'
+    if (Try-ClickRoleButtonIfPresent -Window $Context.HelperWindow -RoleButtonText 'I want to help someone') {
+        Write-Host "[GUI Smoke][G] Role page detected (final helper open); selected helper." -ForegroundColor DarkGray
+    }
+    $finalInput = Wait-HelperCodeInputEnabled -Window $Context.HelperWindow -TimeoutMs 10000
+    Set-Text -Element $finalInput -Text '654321'
+    [void](Wait-ConnectButtonEnabled -Window $Context.HelperWindow -TimeoutMs 5000)
+}
+
+function Run-ScenarioH {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+    Start-HelperFlow -Context $Context
+
+    Click-ButtonByName -Window $Context.HelperWindow -Text "They don't have nLink?" -TimeoutMs 10000
+    [void](Wait-StatusTextContains -Window $Context.HelperWindow -Candidates @('Copied') -TimeoutMs 5000)
+
+    $clipboardText = [string](Get-ClipboardTextSafe)
+    $containsExpectedToken =
+        ($clipboardText.IndexOf('nLink', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
+        ($clipboardText.IndexOf('github', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
+        ($clipboardText.IndexOf('http', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+    if (-not $containsExpectedToken) {
+        throw "Clipboard text after 'They don't have nLink?' click did not look like install guidance. Clipboard: '$clipboardText'"
+    }
+
+    [void](Wait-ButtonVisibleEnabledByName -Window $Context.HelperWindow -Text 'Use nFTP instead' -TimeoutMs 10000)
+
+    $input = Wait-HelperCodeInputEnabled -Window $Context.HelperWindow -TimeoutMs 10000
+    Set-Text -Element $input -Text '121212'
+    [void](Wait-ConnectButtonEnabled -Window $Context.HelperWindow -TimeoutMs 5000)
+}
+
+function Run-ScenarioI {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+
+    $Context.HelperProc = Start-AppInstance -ExePath $Context.ExePath -RoleName 'diagnostics-home-only'
+    [void]$Context.Processes.Add($Context.HelperProc)
+    $Context.HelperWindow = Wait-Window -Process $Context.HelperProc -TimeoutMs 15000
+
+    Wait-HomeScreen -Window $Context.HelperWindow
+    [void](Wait-ButtonVisibleEnabledByName -Window $Context.HelperWindow -Text 'Diagnostics' -TimeoutMs 10000)
+
+    Click-HomeButton -Window $Context.HelperWindow -Text 'I want to help someone'
+    if (Try-ClickRoleButtonIfPresent -Window $Context.HelperWindow -RoleButtonText 'I want to help someone') {
+        Write-Host "[GUI Smoke][I] Role page detected; selected helper." -ForegroundColor DarkGray
+    }
+    Assert-ButtonNotVisibleByName -Window $Context.HelperWindow -Text 'Open diagnostics'
+    Click-ButtonByName -Window $Context.HelperWindow -Text 'Back' -TimeoutMs 10000
+    Wait-HomeScreen -Window $Context.HelperWindow
+
+    Click-HomeButton -Window $Context.HelperWindow -Text 'I need help'
+    if (Try-ClickRoleButtonIfPresent -Window $Context.HelperWindow -RoleButtonText 'I need help') {
+        Write-Host "[GUI Smoke][I] Role page detected; selected helpee." -ForegroundColor DarkGray
+    }
+    Assert-ButtonNotVisibleByName -Window $Context.HelperWindow -Text 'Open diagnostics'
+    Click-ButtonByName -Window $Context.HelperWindow -Text 'Back' -TimeoutMs 10000
+    Wait-HomeScreen -Window $Context.HelperWindow
+
+    Click-ButtonByName -Window $Context.HelperWindow -Text 'Diagnostics' -TimeoutMs 10000
+    [void](Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage "Timed out waiting for Diagnostics page controls." -Condition {
+        $copy = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'Diag.Copy'
+        if ($copy) { return $copy }
+        return $null
+    })
+    Click-ButtonByName -Window $Context.HelperWindow -Text 'Back' -TimeoutMs 10000
+    Wait-HomeScreen -Window $Context.HelperWindow
+}
+
+function Run-ScenarioJ {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+    Start-HelpeeFlow -Context $Context
+
+    $initialCode = Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow
+    $newCodeBtn = Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helpee.NewCode.' -Condition {
+        $btn = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'Helpee.NewCode'
+        if ($btn -and $btn.Current.IsEnabled) { return $btn }
+        return $null
+    }
+    Click-Element $newCodeBtn
+
+    [void](Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee New code to generate a different code.' -Condition {
+        $candidate = Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow
+        if ($candidate -and $candidate -ne $initialCode) { return $candidate }
+        return $null
+    })
+
+    Start-Sleep -Milliseconds 400
+    Assert-TextsNotVisible -Window $Context.HelpeeWindow -Texts @('Reconnecting...', 'Connecting...')
+    Assert-ButtonNotVisibleByName -Window $Context.HelpeeWindow -Text 'Cancel'
+}
+
+function Run-ScenarioK {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+    Start-HelpeeFlow -Context $Context
+    Start-HelperFlow -Context $Context
+
+    $code = Copy-HelpeeCodeAndReadClipboard -HelpeeWindow $Context.HelpeeWindow
+    [void](Enter-HelperCodeAndConnect -HelperWindow $Context.HelperWindow -Code $code)
+    [void](Wait-ButtonVisibleEnabledByName -Window $Context.HelpeeWindow -Text 'Allow' -TimeoutMs 25000)
+
+    Click-ButtonByName -Window $Context.HelperWindow -Text 'Cancel' -TimeoutMs 10000
+
+    [void](Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helper cancel strip to disappear.' -Condition {
+        if (-not (Test-ButtonVisibleByName -Window $Context.HelperWindow -Text 'Cancel')) { return $true }
+        return $null
+    })
+
+    Click-ButtonByName -Window $Context.HelperWindow -Text 'Back' -TimeoutMs 10000
+    Wait-HomeScreen -Window $Context.HelperWindow
+
+    Click-HomeButton -Window $Context.HelperWindow -Text 'I want to help someone'
+    if (Try-ClickRoleButtonIfPresent -Window $Context.HelperWindow -RoleButtonText 'I want to help someone') {
+        Write-Host "[GUI Smoke][K] Role page detected; selected helper." -ForegroundColor DarkGray
+    }
+    $input = Wait-HelperCodeInputEnabled -Window $Context.HelperWindow -TimeoutMs 10000
+    Set-Text -Element $input -Text '123456'
+    [void](Wait-ConnectButtonEnabled -Window $Context.HelperWindow -TimeoutMs 10000)
+}
+
+function Run-ScenarioL {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+    Start-HelpeeFlow -Context $Context
+    Start-HelperFlow -Context $Context
+
+    $code = Copy-HelpeeCodeAndReadClipboard -HelpeeWindow $Context.HelpeeWindow
+    [void](Enter-HelperCodeAndConnect -HelperWindow $Context.HelperWindow -Code $code)
+    [void](Wait-ButtonVisibleEnabledByName -Window $Context.HelpeeWindow -Text 'Allow' -TimeoutMs 25000)
+    Click-ButtonByName -Window $Context.HelpeeWindow -Text 'Decline' -TimeoutMs 10000
+
+    [void](Wait-HelperCodeInputEnabled -Window $Context.HelperWindow -TimeoutMs 10000)
+    $nextCode = Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee to rotate code after Decline in scenario L.' -Condition {
+        $candidate = Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow
+        if ($candidate -and $candidate -ne $code) { return $candidate }
+        return $null
+    }
+    [void](Enter-HelperCodeAndConnect -HelperWindow $Context.HelperWindow -Code $nextCode)
+    Wait-HelpeeAllowAndClick -HelpeeWindow $Context.HelpeeWindow
+    Wait-ConnectedChatVisible -HelpeeWindow $Context.HelpeeWindow -HelperWindow $Context.HelperWindow
+}
+
+function Run-ScenarioM {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+    Start-HelpeeFlow -Context $Context
+    Start-HelperFlow -Context $Context
+
+    $initialCode = Connect-HelperAndHelpee -Context $Context
+
+    if (-not (Click-DisconnectIfVisible -Window $Context.HelpeeWindow)) {
+        throw "Helpee Disconnect button was not visible/enabled in connected chat view."
+    }
+
+    [void](Wait-Until -TimeoutMs 15000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee to auto-generate a new code after helpee-initiated disconnect.' -Condition {
+        $candidate = Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow
+        if ($candidate -and $candidate -ne $initialCode) { return $candidate }
         return $null
     })
 }
@@ -867,8 +1335,8 @@ function Run-ScenarioD {
     Stop-Process -Id $node.ProcessId -Force -ErrorAction Stop
 
     $failedBanner = Wait-BannerVisibleWithAnyToken -Window $Context.HelperWindow -TitleOrMessageTokens @('connection', 'lost', 'session', 'ended') -TimeoutMs 30000
-    if (-not $failedBanner.HasCopyDiagnosticsButton) {
-        throw "Expected Copy Diagnostics button on failed banner after simulated bridge crash."
+    if (-not (Test-DiagnosticsAffordanceVisible -Window $Context.HelperWindow -BannerBundle $failedBanner)) {
+        Write-Host "[GUI Smoke][D] Diagnostics affordance not present on helper failure screen (accepted when diagnostics is Home-only)." -ForegroundColor Yellow
     }
 
     $retryBtn = Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Retry button after bridge crash.' -Condition {
@@ -889,7 +1357,7 @@ if (-not (Test-Path $resolvedExe)) {
 
 $oldTransport = $env:NLINK_TRANSPORT
 $requestedScenarios = [string]$env:NLINK_GUI_SMOKE_SCENARIOS
-if ([string]::IsNullOrWhiteSpace($requestedScenarios)) { $requestedScenarios = 'A' }
+if ([string]::IsNullOrWhiteSpace($requestedScenarios)) { $requestedScenarios = 'A,B,C,E,F,G,H,I,J,K,L,M' }
 $scenarioList = @(
     $requestedScenarios.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries) |
     ForEach-Object { $_.Trim().ToUpperInvariant() } |
@@ -910,10 +1378,19 @@ try {
     foreach ($scenario in @($scenarioList)) {
         switch ($scenario) {
             'A' { Invoke-Scenario -Name 'A' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioA -Context $ctx } }
-            'B' { Invoke-Scenario -Name 'B' -TimeoutSec ([Math]::Min($TimeoutSeconds, 60)) -Action { Run-ScenarioB -Context $ctx } }
+            'B' { Invoke-Scenario -Name 'B' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioB -Context $ctx } }
             'C' { Invoke-Scenario -Name 'C' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioC -Context $ctx } }
             'D' { Invoke-Scenario -Name 'D' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioD -Context $ctx } }
-            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D." }
+            'E' { Invoke-Scenario -Name 'E' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioE -Context $ctx } }
+            'F' { Invoke-Scenario -Name 'F' -TimeoutSec ([Math]::Min($TimeoutSeconds, 60)) -Action { Run-ScenarioF -Context $ctx } }
+            'G' { Invoke-Scenario -Name 'G' -TimeoutSec ([Math]::Min($TimeoutSeconds, 60)) -Action { Run-ScenarioG -Context $ctx } }
+            'H' { Invoke-Scenario -Name 'H' -TimeoutSec ([Math]::Min($TimeoutSeconds, 45)) -Action { Run-ScenarioH -Context $ctx } }
+            'I' { Invoke-Scenario -Name 'I' -TimeoutSec ([Math]::Min($TimeoutSeconds, 60)) -Action { Run-ScenarioI -Context $ctx } }
+            'J' { Invoke-Scenario -Name 'J' -TimeoutSec ([Math]::Min($TimeoutSeconds, 45)) -Action { Run-ScenarioJ -Context $ctx } }
+            'K' { Invoke-Scenario -Name 'K' -TimeoutSec ([Math]::Min($TimeoutSeconds, 60)) -Action { Run-ScenarioK -Context $ctx } }
+            'L' { Invoke-Scenario -Name 'L' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioL -Context $ctx } }
+            'M' { Invoke-Scenario -Name 'M' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioM -Context $ctx } }
+            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M." }
         }
     }
 

@@ -19,6 +19,10 @@ public interface IChatPanelBindings
 
     string ChatDraft { get; set; }
 
+    bool IsChatInputEnabled { get; }
+
+    bool CanEndSession { get; }
+
     IAsyncRelayCommand SendChatCommand { get; }
 
     IRelayCommand EndSessionCommand { get; }

@@ -2745,6 +2745,7 @@ public class SmokeTests
                   helper.ShowRetryAction &&
                   string.Equals(helper.StatusText, "Connection lost.", StringComparison.Ordinal),
             TimeSpan.FromSeconds(2));
+        Assert.True(helper.RetryCommand.CanExecute(null));
 
         await helper.RetryCommand.ExecuteAsync(null);
 
@@ -2780,6 +2781,7 @@ public class SmokeTests
                   string.Equals(helper.StatusText, "Connection lost.", StringComparison.Ordinal) &&
                   helper.ShowRetryAction,
             TimeSpan.FromSeconds(2));
+        Assert.True(helper.RetryCommand.CanExecute(null));
 
         await helper.RetryCommand.ExecuteAsync(null);
         await WaitUntilAsync(
@@ -2787,6 +2789,351 @@ public class SmokeTests
                   helper.ConnectionState == "Idle" &&
                   helper.ConnectCommand.CanExecute(null),
             TimeSpan.FromSeconds(2));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperViewModel_CancelTransientWhileConnecting_ReturnsToIdle_AndCodeInputRemainsEditable()
+    {
+        var scripted = new ScriptedSignalingTransport(
+            onJoinAsync: static async (_, ct) => await Task.Delay(TimeSpan.FromSeconds(30), ct));
+        var transportConfig = CreateDevLocalTestConfig();
+        using var runtime = new SessionRuntime(() => scripted);
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            connectFailureCooldown: TimeSpan.Zero);
+
+        helper.CodeInput = "123456";
+        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Connecting &&
+                  helper.IsConnecting &&
+                  helper.ShowTransientBanner &&
+                  helper.CanCancelTransient,
+            TimeSpan.FromSeconds(3));
+
+        await helper.CancelTransientCommand.ExecuteAsync(null);
+
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Idle &&
+                  helper.ConnectionState == "Idle" &&
+                  !helper.IsConnecting &&
+                  !helper.ShowTransientBanner &&
+                  helper.ConnectCommand.CanExecute(null),
+            TimeSpan.FromSeconds(3));
+
+        helper.CodeInput = "654321";
+        Assert.Equal("654 321", helper.CodeInput);
+        Assert.True(helper.ConnectCommand.CanExecute(null));
+        Assert.False(helper.ShowTransientBanner);
+        Assert.True(string.IsNullOrWhiteSpace(helper.TransientBannerText));
+        await connectTask.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeeViewModel_DisconnectAfterConnected_AutoRegeneratesCode()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-auto-rehost-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-auto-rehost-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+
+        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+        Assert.Equal(6, initialCode.Length);
+
+        await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
+        await WaitUntilAsync(() => helpee.IsIncomingRequestView, TimeSpan.FromSeconds(2));
+
+        helpee.AllowCommand.Execute(null);
+        await WaitUntilAsync(
+            () => helpee.IsConnectedView &&
+                  helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected,
+            TimeSpan.FromSeconds(2));
+
+        await helperRuntime.DisconnectAsync();
+
+        string latestCode = initialCode;
+        await WaitUntilAsync(
+            () =>
+            {
+                latestCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+                return helpee.ShowWaitingPanel &&
+                       !helpee.IsConnectedView &&
+                       latestCode.Length == 6 &&
+                       !string.Equals(latestCode, initialCode, StringComparison.Ordinal);
+            },
+            TimeSpan.FromSeconds(8));
+
+        Assert.NotEqual(initialCode, latestCode);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeeViewModel_DisconnectAfterConnected_AutoRegeneratesCode_OnceAndStaysStable()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-auto-rehost-stable-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-auto-rehost-stable-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+
+        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+        Assert.Equal(6, initialCode.Length);
+
+        await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
+        await WaitUntilAsync(() => helpee.IsIncomingRequestView, TimeSpan.FromSeconds(2));
+
+        helpee.AllowCommand.Execute(null);
+        await WaitUntilAsync(
+            () => helpee.IsConnectedView &&
+                  helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected,
+            TimeSpan.FromSeconds(2));
+
+        await helperRuntime.DisconnectAsync();
+
+        string rotatedCode = initialCode;
+        await WaitUntilAsync(
+            () =>
+            {
+                rotatedCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+                return helpee.ShowWaitingPanel &&
+                       !helpee.IsConnectedView &&
+                       rotatedCode.Length == 6 &&
+                       !string.Equals(rotatedCode, initialCode, StringComparison.Ordinal);
+            },
+            TimeSpan.FromSeconds(8));
+
+        await Task.Delay(1800);
+        var stableCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+        Assert.Equal(rotatedCode, stableCode);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeeViewModel_UserEndsConnectedSession_AutoRegeneratesCode()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-user-end-rehost-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-user-end-rehost-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: () => _ = helpeeRuntime.DisconnectAsync(),
+            transportConfig,
+            helpeeRuntime);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+
+        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+        Assert.Equal(6, initialCode.Length);
+
+        await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
+        await WaitUntilAsync(() => helpee.IsIncomingRequestView, TimeSpan.FromSeconds(2));
+
+        helpee.AllowCommand.Execute(null);
+        await WaitUntilAsync(
+            () => helpee.IsConnectedView &&
+                  helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected,
+            TimeSpan.FromSeconds(2));
+
+        helpee.EndSessionCommand.Execute(null);
+
+        string latestCode = initialCode;
+        await WaitUntilAsync(
+            () =>
+            {
+                latestCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+                return helpee.ShowWaitingPanel &&
+                       !helpee.IsConnectedView &&
+                       latestCode.Length == 6 &&
+                       !string.Equals(latestCode, initialCode, StringComparison.Ordinal);
+            },
+            TimeSpan.FromSeconds(8));
+
+        Assert.NotEqual(initialCode, latestCode);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeeViewModel_DeclineIncomingRequest_AutoRegeneratesCode()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-decline-rehost-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-decline-rehost-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+
+        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+        Assert.Equal(6, initialCode.Length);
+
+        await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
+        await WaitUntilAsync(() => helpee.IsIncomingRequestView, TimeSpan.FromSeconds(2));
+
+        await helpee.DeclineCommand.ExecuteAsync(null);
+
+        string latestCode = initialCode;
+        await WaitUntilAsync(
+            () =>
+            {
+                latestCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+                return helpee.ShowWaitingPanel &&
+                       !helpee.IsIncomingRequestView &&
+                       latestCode.Length == 6 &&
+                       !string.Equals(latestCode, initialCode, StringComparison.Ordinal);
+            },
+            TimeSpan.FromSeconds(8));
+
+        Assert.NotEqual(initialCode, latestCode);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeeViewModel_IncomingRequestTimeout_AutoRegeneratesCode()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-timeout-rehost-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-timeout-rehost-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            helpeeRuntime,
+            incomingRequestTimeout: TimeSpan.FromMilliseconds(250));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+
+        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+        Assert.Equal(6, initialCode.Length);
+
+        await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
+        await WaitUntilAsync(() => helpee.IsIncomingRequestView, TimeSpan.FromSeconds(2));
+
+        string latestCode = initialCode;
+        await WaitUntilAsync(
+            () =>
+            {
+                latestCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+                return helpee.ShowWaitingPanel &&
+                       !helpee.IsIncomingRequestView &&
+                       latestCode.Length == 6 &&
+                       !string.Equals(latestCode, initialCode, StringComparison.Ordinal);
+            },
+            TimeSpan.FromSeconds(8));
+
+        Assert.NotEqual(initialCode, latestCode);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeeViewModel_HelperDisconnectsDuringIncomingRequest_ClearsAllowPanel_AndRotatesCode()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-incoming-cancel-rehost-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-incoming-cancel-rehost-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+
+        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+        Assert.Equal(6, initialCode.Length);
+
+        await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
+        await WaitUntilAsync(
+            () => helpee.IsIncomingRequestView && helpee.ShowIncomingRequestPanel,
+            TimeSpan.FromSeconds(2));
+
+        Assert.False(helpee.ShowTransientBanner);
+
+        await helperRuntime.DisconnectAsync();
+
+        string latestCode = initialCode;
+        await WaitUntilAsync(
+            () =>
+            {
+                latestCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+                return !helpee.IsIncomingRequestView &&
+                       helpee.ShowWaitingPanel &&
+                       !helpee.HasIncomingRequest &&
+                       latestCode.Length == 6 &&
+                       !string.Equals(latestCode, initialCode, StringComparison.Ordinal);
+            },
+            TimeSpan.FromSeconds(8));
+
+        Assert.NotEqual(initialCode, latestCode);
+        Assert.False(helpee.ShowTransientBanner);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperCancelDuringConnecting_ClearsHelpeeAllowPanel_AndRotatesCode()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-helper-cancel-flow-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-helper-cancel-flow-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            helperRuntime,
+            connectFailureCooldown: TimeSpan.Zero);
+
+        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+        helper.CodeInput = initialCode;
+
+        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+
+        await WaitUntilAsync(
+            () => helpee.IsIncomingRequestView && helpee.ShowIncomingRequestPanel && helpee.HasIncomingRequest,
+            TimeSpan.FromSeconds(3));
+
+        await helper.CancelTransientCommand.ExecuteAsync(null);
+        await connectTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        string latestCode = initialCode;
+        await WaitUntilAsync(
+            () =>
+            {
+                latestCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+                return !helpee.IsIncomingRequestView &&
+                       !helpee.ShowIncomingRequestPanel &&
+                       !helpee.HasIncomingRequest &&
+                       helpee.ShowWaitingPanel &&
+                       latestCode.Length == 6 &&
+                       !string.Equals(latestCode, initialCode, StringComparison.Ordinal);
+            },
+            TimeSpan.FromSeconds(8));
+
+        Assert.NotEqual(initialCode, latestCode);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeeViewModel_IncomingRequest_DoesNotExposeTransientCancel()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-incoming-no-cancel-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-incoming-no-cancel-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+
+        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+        await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
+
+        await WaitUntilAsync(
+            () => helpee.IsIncomingRequestView && helpee.ShowIncomingRequestPanel,
+            TimeSpan.FromSeconds(2));
+
+        Assert.False(helpee.CanCancelTransient);
     }
 
     [Trait("Category", "Smoke")]

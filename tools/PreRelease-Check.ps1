@@ -1,6 +1,6 @@
 param(
     [switch]$RunGuiSmoke,
-    [string]$GuiScenarios = "A",
+    [string]$GuiScenarios = "A,B,C,E,F,G,H,I,J,K,L,M",
     [switch]$RunFormatCheck,
     [switch]$RunResources,
     [switch]$RunLeakCheck,

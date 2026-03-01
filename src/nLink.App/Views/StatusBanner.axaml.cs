@@ -109,7 +109,7 @@ public partial class StatusBanner : UserControl, INotifyPropertyChanged
 
     public string StatusMessage => Current.Message ?? string.Empty;
 
-    public bool ShowRetryCountdown => Current.Attempt.HasValue || Current.NextRetryInSeconds.HasValue;
+    public bool ShowRetryCountdown => Current.NextRetryInSeconds.HasValue;
 
     public string RetryCountdownText
     {
@@ -118,16 +118,6 @@ public partial class StatusBanner : UserControl, INotifyPropertyChanged
             if (!ShowRetryCountdown)
             {
                 return string.Empty;
-            }
-
-            if (Current.Attempt.HasValue && Current.NextRetryInSeconds.HasValue)
-            {
-                return $"Attempt {Current.Attempt.Value} • Next retry in {Current.NextRetryInSeconds.Value}s";
-            }
-
-            if (Current.Attempt.HasValue)
-            {
-                return $"Attempt {Current.Attempt.Value}";
             }
 
             return $"Next retry in {Current.NextRetryInSeconds!.Value}s";

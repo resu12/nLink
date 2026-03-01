@@ -1,5 +1,8 @@
 using System;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.ComponentModel;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.Input;
@@ -16,8 +19,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 {
     private static readonly TimeSpan DefaultConnectFailureCooldown = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultApprovalTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
+    private static readonly Regex AttemptLabelRegex = new(@"\s*\(?attempt\s+\d+(?:,\s*next retry in \d+s)?\)?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private readonly Action cancelAction;
+    private readonly Action backAction;
     private readonly Action? openDiagnosticsAction;
     private readonly TransportRuntimeConfig transportConfig;
     private readonly SessionRuntime sessionRuntime;
@@ -25,6 +31,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly bool ownsStatusPresenter;
     private readonly IClipboardService? clipboardService;
     private readonly ShareMessageConfig shareMessageConfig;
+    private readonly SessionUiStateStore? uiStateStore;
 
     private string codeInput = string.Empty;
     private string statusText = string.Empty;
@@ -36,10 +43,29 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool showTransientBanner;
     private string transientBannerText = string.Empty;
     private bool canCancelTransient;
+    private bool hasUiRecoveryTransient;
+    private string uiRecoveryTransientText = string.Empty;
+    private bool uiRecoveryTransientCanCancel;
+    private DateTimeOffset nextUiRecoveryBannerAllowedAt = DateTimeOffset.MinValue;
+    private string uiRecoveryTransientKey = string.Empty;
+    private bool uiRecoveryTransientDismissed;
     private bool isConnecting;
     private bool showChatNotice;
     private bool startupBlocked;
     private UserFacingStatus bannerStatus = UserFacingStatus.IdleStatus;
+    private UserFacingStatus presenterBannerStatus = UserFacingStatus.IdleStatus;
+    private bool showStatusBanner;
+    private string? statusBannerDetailsText;
+    private bool canStartOrConnect = true;
+    private bool canEndSession = true;
+    private bool canOpenDiagnostics;
+    private bool canSendFiles;
+    private bool isChatInputEnabled;
+    private bool endInvoked;
+    private bool wasConnected;
+    private SessionEndReason? endReason;
+    private bool endSessionRequested;
+    private bool endSessionCancelInvoked;
     private CancellationTokenSource? connectCts;
     private readonly InlineTransientText copyFeedback = new();
     private readonly Func<DateTimeOffset> nowProvider;
@@ -48,6 +74,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private DateTimeOffset lastFailedAttemptUtc = DateTimeOffset.MinValue;
     private TaskCompletionSource<HelperConnectOutcome>? connectOutcome;
     private SessionReliabilityAttempt? reliabilityAttempt;
+    private SessionUiPhase lastObservedUiPhase;
     private bool disposed;
 
     public HelperPageViewModel(
@@ -60,9 +87,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         StatusPresenter? statusPresenter = null,
         TimeSpan? approvalTimeout = null,
         TimeSpan? connectFailureCooldown = null,
-        Func<DateTimeOffset>? nowProvider = null)
+        Func<DateTimeOffset>? nowProvider = null,
+        SessionUiStateStore? uiStateStore = null,
+        Action? backAction = null)
     {
         this.cancelAction = cancelAction;
+        this.backAction = backAction ?? cancelAction;
         this.openDiagnosticsAction = openDiagnosticsAction;
         this.transportConfig = transportConfig;
         this.sessionRuntime = sessionRuntime;
@@ -70,9 +100,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         ownsStatusPresenter = statusPresenter is null;
         this.clipboardService = clipboardService;
         this.shareMessageConfig = shareMessageConfig ?? new ShareMessageConfig(null);
+        this.uiStateStore = uiStateStore;
         this.approvalTimeout = approvalTimeout ?? DefaultApprovalTimeout;
         this.connectFailureCooldown = connectFailureCooldown ?? DefaultConnectFailureCooldown;
         this.nowProvider = nowProvider ?? (() => DateTimeOffset.UtcNow);
+        lastObservedUiPhase = uiStateStore?.Phase ?? SessionUiPhase.Idle;
 
         ChatMessages = new ObservableCollection<ChatLineViewModel>();
 
@@ -86,6 +118,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.ChatStateChanged += OnChatStateChanged;
         this.statusPresenter.StatusChanged += OnStatusPresenterChanged;
         copyFeedback.PropertyChanged += OnCopyFeedbackPropertyChanged;
+        if (this.uiStateStore is not null)
+        {
+            this.uiStateStore.PropertyChanged += OnUiStateStorePropertyChanged;
+        }
 
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
         CopyInstallMessageCommand = new AsyncRelayCommand(CopyInstallMessageAsync);
@@ -93,12 +129,19 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         SendChatCommand = new AsyncRelayCommand(SendChatAsync, CanSendChat);
         RetryCommand = new AsyncRelayCommand(RetryAsync, CanRetry);
         CancelTransientCommand = new AsyncRelayCommand(CancelTransientAsync, CanCancelTransientOperation);
-        OpenDiagnosticsCommand = new RelayCommand(OpenDiagnostics, CanOpenDiagnostics);
+        OpenDiagnosticsCommand = new RelayCommand(OpenDiagnostics, CanOpenDiagnosticsCommand);
         CancelCommand = new RelayCommand(CancelAndGoBack);
+        EndSessionCommand = new RelayCommand(EndSession, CanTriggerEndSession);
 
         InitializeStartupAvailabilityState();
-        BannerStatus = this.statusPresenter.CurrentStatus;
+        presenterBannerStatus = NormalizeStatusForDisplay(this.statusPresenter.CurrentStatus);
+        BannerStatus = presenterBannerStatus;
         SyncTransientStatusFromRuntime();
+        if (this.uiStateStore is not null && this.uiStateStore.Phase == SessionUiPhase.Idle)
+        {
+            this.uiStateStore.SetPhase(SessionUiPhase.Waiting, "Constructor:HelperSeed");
+        }
+        ApplySessionBannerPolicy();
     }
 
     public string PageTitle => "Enter the 6-digit code";
@@ -197,16 +240,21 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public UserFacingStatus BannerStatus
     {
         get => bannerStatus;
-        private set
-        {
-            if (SetProperty(ref bannerStatus, value))
-            {
-                OnPropertyChanged(nameof(ShowStatusBanner));
-            }
-        }
+        private set => SetProperty(ref bannerStatus, value);
     }
 
-    public bool ShowStatusBanner => BannerStatus.Kind is not UserStatusKind.Idle and not UserStatusKind.Connected;
+    public bool ShowStatusBanner
+    {
+        get => showStatusBanner;
+        private set => SetProperty(ref showStatusBanner, value);
+    }
+
+    public string? StatusBannerDetailsText
+    {
+        get => statusBannerDetailsText;
+        private set => SetProperty(ref statusBannerDetailsText, value);
+    }
+
     public string? StatusBannerFailureCategory => NormalizeBannerDetail(sessionRuntime.LastTransportFailure?.Category.ToString());
     public string? StatusBannerSessionCorrelationId => NormalizeBannerDetail(sessionRuntime.LastTransportFailure?.CorrelationId);
     public string? StatusBannerLastConnectDuration => FormatBannerDuration(sessionRuntime.GetDiagnosticsSnapshot().LastConnectDurationMs);
@@ -292,6 +340,36 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public bool IsChatReady => sessionRuntime.CanSendChat;
 
+    public bool CanStartOrConnect
+    {
+        get => canStartOrConnect;
+        private set => SetProperty(ref canStartOrConnect, value);
+    }
+
+    public bool CanEndSession
+    {
+        get => canEndSession;
+        private set => SetProperty(ref canEndSession, value);
+    }
+
+    public bool CanOpenDiagnostics
+    {
+        get => canOpenDiagnostics;
+        private set => SetProperty(ref canOpenDiagnostics, value);
+    }
+
+    public bool CanSendFiles
+    {
+        get => canSendFiles;
+        private set => SetProperty(ref canSendFiles, value);
+    }
+
+    public bool IsChatInputEnabled
+    {
+        get => isChatInputEnabled;
+        private set => SetProperty(ref isChatInputEnabled, value);
+    }
+
     public IAsyncRelayCommand ConnectCommand { get; }
 
     public IAsyncRelayCommand CopyInstallMessageCommand { get; }
@@ -306,7 +384,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public IRelayCommand OpenDiagnosticsCommand { get; }
 
     public IRelayCommand CancelCommand { get; }
-    public IRelayCommand EndSessionCommand => CancelCommand;
+    public IRelayCommand EndSessionCommand { get; }
     public IRelayCommand StatusBannerCopyDiagnosticsCommand => OpenDiagnosticsCommand;
     public IAsyncRelayCommand StatusBannerCancelCommand => CancelTransientCommand;
 
@@ -316,9 +394,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                                    string.Equals(ConnectionState, "Failed", StringComparison.Ordinal) &&
                                    string.Equals(StatusText, "Connection lost.", StringComparison.Ordinal);
 
-    public bool ShowOpenDiagnosticsLink =>
-        openDiagnosticsAction is not null &&
-        (IsStartupBlocked || string.Equals(StatusText, UserErrorMapper.NknStartFailedReinstall(), StringComparison.Ordinal));
+    public bool ShowOpenDiagnosticsLink => CanOpenDiagnostics;
 
     public InlineTransientText CopyFeedback => copyFeedback;
     public bool ShowCopyFeedbackInline => ShowMainControls && copyFeedback.IsVisible;
@@ -367,6 +443,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.ChatStateChanged -= OnChatStateChanged;
         statusPresenter.StatusChanged -= OnStatusPresenterChanged;
         copyFeedback.PropertyChanged -= OnCopyFeedbackPropertyChanged;
+        if (uiStateStore is not null)
+        {
+            uiStateStore.PropertyChanged -= OnUiStateStorePropertyChanged;
+        }
         if (ownsStatusPresenter)
         {
             statusPresenter.Dispose();
@@ -382,7 +462,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private bool CanConnect()
     {
-        return !IsStartupBlocked && !IsConnecting && SessionCode.TryParse(CodeInput, out _);
+        return CanStartOrConnect && !IsStartupBlocked && !IsConnecting && SessionCode.TryParse(CodeInput, out _);
     }
 
     private bool CanCancelTransientOperation()
@@ -392,6 +472,35 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private async Task CancelTransientAsync()
     {
+        uiRecoveryTransientDismissed = true;
+        ClearUiRecoveryTransient();
+        ShowTransientBanner = false;
+        TransientBannerText = string.Empty;
+        CanCancelTransient = false;
+        if (IsConnecting ||
+            string.Equals(ConnectionState, "Connecting", StringComparison.Ordinal) ||
+            sessionRuntime.State == SessionRuntimeState.Connecting)
+        {
+            try
+            {
+                await sessionRuntime.DisconnectAsync();
+            }
+            catch
+            {
+                // best effort UX action
+            }
+            uiStateStore?.SetPhase(SessionUiPhase.Waiting, "Transient:CancelledWhileConnecting");
+            ApplySessionBannerPolicy();
+            await RetryAsync();
+            return;
+        }
+
+        if (uiStateStore?.Phase == SessionUiPhase.Recovering)
+        {
+            uiStateStore.SetPhase(SessionUiPhase.Failed, "Transient:CancelledByUser");
+            ApplySessionBannerPolicy();
+        }
+
         try
         {
             await sessionRuntime.CancelTransientAsync();
@@ -408,21 +517,37 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private bool CanSendChat()
     {
-        return !string.IsNullOrWhiteSpace(ChatDraft) && sessionRuntime.CanSendChat;
+        return IsChatInputEnabled && !string.IsNullOrWhiteSpace(ChatDraft) && sessionRuntime.CanSendChat;
     }
 
     private bool CanRetry()
     {
-        return !IsConnecting;
+        if (IsStartupBlocked)
+        {
+            return false;
+        }
+
+        var isRetryState = string.Equals(ConnectionState, "Failed", StringComparison.Ordinal) ||
+            string.Equals(ConnectionState, "Disconnected", StringComparison.Ordinal) ||
+            string.Equals(ConnectionState, "Rejected", StringComparison.Ordinal);
+        return (CanStartOrConnect || isRetryState) && (!IsConnecting || isRetryState);
     }
 
-    private bool CanOpenDiagnostics()
+    private bool CanTriggerEndSession()
     {
-        return openDiagnosticsAction is not null;
+        return CanEndSession && !endInvoked;
+    }
+
+    private bool CanOpenDiagnosticsCommand()
+    {
+        return CanOpenDiagnostics;
     }
 
     private async Task ConnectAsync()
     {
+        PrepareForNewSession();
+        uiRecoveryTransientDismissed = false;
+
         if (IsStartupBlocked)
         {
             return;
@@ -512,6 +637,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private async Task RetryAsync()
     {
+        PrepareForNewSession();
+
         connectCts?.Cancel();
         connectCts?.Dispose();
         connectCts = null;
@@ -575,6 +702,35 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void CancelAndGoBack()
     {
+        backAction();
+    }
+
+    private void EndSession()
+    {
+        if (endInvoked)
+        {
+            return;
+        }
+
+        endInvoked = true;
+        EndSessionCommand.NotifyCanExecuteChanged();
+        endSessionRequested = true;
+        endReason = SessionEndReason.UserEnded;
+        uiRecoveryTransientDismissed = true;
+        ClearUiRecoveryTransient();
+        ShowTransientBanner = false;
+        TransientBannerText = string.Empty;
+        CanCancelTransient = false;
+        uiStateStore?.SetPhase(SessionUiPhase.Ended, "UserEndSession");
+        EndSessionCommand.NotifyCanExecuteChanged();
+        AssertUiConsistency();
+
+        if (endSessionCancelInvoked)
+        {
+            return;
+        }
+
+        endSessionCancelInvoked = true;
         cancelAction();
     }
 
@@ -619,6 +775,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void OnApproved(object? sender, EventArgs e)
     {
+        wasConnected = true;
+        endReason = null;
         connectOutcome?.TrySetResult(HelperConnectOutcome.Approved);
         _ = UiThreadDispatch.RunAsync(() =>
         {
@@ -636,6 +794,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         connectOutcome?.TrySetResult(HelperConnectOutcome.Rejected);
         _ = UiThreadDispatch.RunAsync(() =>
         {
+            IsConnecting = false;
             StatusText = UserErrorMapper.HelperRejected();
             ConnectionState = "Rejected";
             LogReliability(SessionReliabilityStage.Rejected, "rejected", "They did not allow the connection.");
@@ -654,6 +813,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         _ = UiThreadDispatch.RunAsync(() =>
         {
+            IsConnecting = false;
             var runtimeStatus = sessionRuntime.StatusText;
             if (string.IsNullOrWhiteSpace(runtimeStatus))
             {
@@ -748,6 +908,28 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         _ = UiThreadDispatch.RunAsync(SyncTransientStatusFromRuntime);
     }
 
+    private void OnUiStateStorePropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (disposed || uiStateStore is null || e.PropertyName != nameof(SessionUiStateStore.Phase))
+        {
+            return;
+        }
+
+        var nextPhase = uiStateStore.Phase;
+        var previousPhase = lastObservedUiPhase;
+        lastObservedUiPhase = nextPhase;
+
+        _ = UiThreadDispatch.RunAsync(() =>
+        {
+            SessionUiDebug.LogPhaseChange(
+                nameof(HelperPageViewModel),
+                previousPhase,
+                nextPhase,
+                sessionRuntime.State);
+            UpdateUiFromSnapshot();
+        });
+    }
+
     private void OnStatusPresenterChanged(object? sender, UserFacingStatusChangedEventArgs e)
     {
         if (disposed)
@@ -757,8 +939,38 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         _ = UiThreadDispatch.RunAsync(() =>
         {
-            BannerStatus = e.Status;
+            presenterBannerStatus = NormalizeStatusForDisplay(e.Status);
+            BannerStatus = presenterBannerStatus;
+            var p = SessionUxPhaseMapper.FromBannerStatus(e.Status);
+            if (p is SessionUiPhase bannerPhase)
+            {
+                uiStateStore?.SetPhase(bannerPhase, $"StatusPresenter:{e.Status}");
+            }
+
+            if (e.Status.Kind == UserStatusKind.Reconnecting)
+            {
+                TryShowUiRecoveryTransient(
+                    "status:reconnecting",
+                    string.IsNullOrWhiteSpace(e.Status.Message) ? "Connection lost. Reconnecting…" : SanitizeTransientText(e.Status.Message),
+                    canCancel: e.Status.CanCancel || sessionRuntime.CanCancelTransientStatus);
+            }
+            else if (e.Status.Kind == UserStatusKind.Failed &&
+                     sessionRuntime.State is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected)
+            {
+                TryShowUiRecoveryTransient(
+                    "status:failed",
+                    BuildRecoveryTransientText(isRecovering: false),
+                    canCancel: false);
+            }
+            else if (e.Status.Kind == UserStatusKind.Connected)
+            {
+                uiRecoveryTransientDismissed = false;
+                ClearUiRecoveryTransient();
+            }
+
+            ApplySessionBannerPolicy();
             NotifyStatusBannerDetailChanged();
+            SyncTransientStatusFromRuntime();
         });
     }
 
@@ -811,39 +1023,148 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void SyncFromRuntime()
     {
-        switch (sessionRuntime.State)
+        var runtimeTerminalFailure = false;
+        if (endSessionRequested)
         {
-            case SessionRuntimeState.Connecting:
-                ClearFailurePresentation();
-                StatusText = "Connecting…";
-                ConnectionState = "Connecting";
-                break;
-            case SessionRuntimeState.Connected:
-                ClearFailurePresentation();
-                StatusText = transportConfig.ApprovedStatusText;
-                ConnectionState = "Connected";
-                ShowChatNotice = false;
-                break;
-            case SessionRuntimeState.Rejected:
-                ClearFailurePresentation();
-                StatusText = UserErrorMapper.HelperRejected();
-                ConnectionState = "Rejected";
-                break;
-            case SessionRuntimeState.Failed:
-                StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
-                    ? UserErrorMapper.HelperGenericConnectFailure()
-                    : sessionRuntime.StatusText;
-                ConnectionState = "Failed";
-                ApplyFailurePresentation();
-                break;
-            case SessionRuntimeState.Disconnected:
-                StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
-                    ? "Connection lost."
-                    : sessionRuntime.StatusText;
-                ConnectionState = "Failed";
-                ApplyFailurePresentation();
-                break;
+            ApplyEndReasonPresentation(SessionEndReason.UserEnded);
         }
+        else
+        {
+            switch (sessionRuntime.State)
+            {
+                case SessionRuntimeState.Connecting:
+                    endReason = null;
+                    ClearFailurePresentation();
+                    StatusText = "Connecting…";
+                    ConnectionState = "Connecting";
+                    break;
+                case SessionRuntimeState.Connected:
+                    wasConnected = true;
+                    endReason = null;
+                    ClearFailurePresentation();
+                    StatusText = transportConfig.ApprovedStatusText;
+                    ConnectionState = "Connected";
+                    ShowChatNotice = false;
+                    break;
+                case SessionRuntimeState.Rejected:
+                    IsConnecting = false;
+                    if (endInvoked)
+                    {
+                        break;
+                    }
+
+                    endReason = SessionEndReason.Failed;
+                    EnsureFailurePresentation(
+                        "Request rejected",
+                        "The other side declined the session.",
+                        "Start new session");
+                    StatusText = UserErrorMapper.HelperRejected();
+                    ConnectionState = "Rejected";
+                    runtimeTerminalFailure = true;
+                    break;
+                case SessionRuntimeState.Failed:
+                    IsConnecting = false;
+                    if (endInvoked)
+                    {
+                        break;
+                    }
+
+                    endReason = SessionEndReason.Failed;
+                    EnsureFailurePresentation(
+                        "Connection failed",
+                        "The session ended due to a connection problem.",
+                        "Retry");
+                    StatusText = UserErrorMapper.HelperDisconnected();
+                    ConnectionState = "Failed";
+                    runtimeTerminalFailure = true;
+                    break;
+                case SessionRuntimeState.Disconnected:
+                    IsConnecting = false;
+                    if (endInvoked)
+                    {
+                        break;
+                    }
+
+                    endReason = SessionEndReason.Failed;
+                    EnsureFailurePresentation(
+                        "Connection failed",
+                        "The session ended due to a connection problem.",
+                        "Retry");
+                    StatusText = UserErrorMapper.HelperDisconnected();
+                    ConnectionState = "Failed";
+                    runtimeTerminalFailure = true;
+                    break;
+            }
+        }
+
+        var phaseReason = $"SyncFromRuntime:{sessionRuntime.State}";
+        var phase = endSessionRequested
+            ? SessionUiPhase.Ended
+            : SessionUxPhaseMapper.FromRuntimeState(sessionRuntime.State, isHelper: true);
+        if (runtimeTerminalFailure)
+        {
+            phase = SessionUiPhase.Failed;
+            phaseReason = $"RuntimeTerminal:{sessionRuntime.State}";
+        }
+        else if (!endSessionRequested && endReason == SessionEndReason.PeerEnded)
+        {
+            phase = SessionUiPhase.Ended;
+            phaseReason += ":PeerEnded";
+        }
+        else if (!endSessionRequested &&
+                 endReason == SessionEndReason.Failed &&
+                 sessionRuntime.State is (SessionRuntimeState.Failed or SessionRuntimeState.Disconnected))
+        {
+            var shouldRecover = sessionRuntime.IsTransientStatusVisible || BannerStatus.Kind == UserStatusKind.Reconnecting;
+            phase = shouldRecover ? SessionUiPhase.Recovering : SessionUiPhase.Failed;
+            phaseReason += shouldRecover ? ":Recovering" : ":Failed";
+            TryShowUiRecoveryTransient(
+                $"runtime:{sessionRuntime.State}:{phase}",
+                BuildRecoveryTransientText(shouldRecover),
+                canCancel: shouldRecover || sessionRuntime.CanCancelTransientStatus);
+        }
+        else if (!endSessionRequested &&
+                 sessionRuntime.State is (SessionRuntimeState.Failed or SessionRuntimeState.Disconnected))
+        {
+            var shouldRecover = sessionRuntime.IsTransientStatusVisible || BannerStatus.Kind == UserStatusKind.Reconnecting;
+            phase = shouldRecover ? SessionUiPhase.Recovering : SessionUiPhase.Failed;
+            TryShowUiRecoveryTransient(
+                $"runtime:{sessionRuntime.State}:{phase}",
+                BuildRecoveryTransientText(shouldRecover),
+                canCancel: shouldRecover || sessionRuntime.CanCancelTransientStatus);
+        }
+        else if (!endSessionRequested &&
+                 phase is (SessionUiPhase.Idle or SessionUiPhase.Waiting) &&
+                 (string.Equals(ConnectionState, "Failed", StringComparison.Ordinal) ||
+                  string.Equals(ConnectionState, "Rejected", StringComparison.Ordinal)))
+        {
+            phase = SessionUiPhase.Failed;
+        }
+        else if (phase is SessionUiPhase.Connected or SessionUiPhase.Waiting or SessionUiPhase.Idle)
+        {
+            if (!sessionRuntime.IsTransientStatusVisible)
+            {
+                uiRecoveryTransientDismissed = false;
+            }
+            ClearUiRecoveryTransient();
+        }
+
+        SessionUxContext? phaseContext = null;
+        if (runtimeTerminalFailure)
+        {
+            phaseContext = new SessionUxContext(FailureTitle, FailureMessage, FailureActionText);
+        }
+        else if (phase == SessionUiPhase.Failed &&
+            (!string.IsNullOrWhiteSpace(FailureTitle) ||
+             !string.IsNullOrWhiteSpace(FailureMessage) ||
+             !string.IsNullOrWhiteSpace(FailureActionText)))
+        {
+            phaseContext = new SessionUxContext(FailureTitle, FailureMessage, FailureActionText);
+        }
+
+        uiStateStore?.SetPhase(phase, phaseReason, phaseContext);
+        ApplySessionBannerPolicy();
+        UpdateUiFromSnapshot();
 
         OnPropertyChanged(nameof(ShowChatConnectionHint));
         OnPropertyChanged(nameof(IsChatReady));
@@ -857,25 +1178,107 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         SendChatCommand.NotifyCanExecuteChanged();
         RetryCommand.NotifyCanExecuteChanged();
         OpenDiagnosticsCommand.NotifyCanExecuteChanged();
+        EndSessionCommand.NotifyCanExecuteChanged();
         SyncTransientStatusFromRuntime();
         NotifyStatusBannerDetailChanged();
     }
 
     private void SyncTransientStatusFromRuntime()
     {
-        ShowTransientBanner = sessionRuntime.IsTransientStatusVisible && !IsConnectedView;
-        TransientBannerText = sessionRuntime.TransientStatusText;
-        CanCancelTransient = sessionRuntime.CanCancelTransientStatus;
+        if (IsConnectedView)
+        {
+            ClearUiRecoveryTransient();
+            ShowTransientBanner = false;
+            TransientBannerText = string.Empty;
+            CanCancelTransient = false;
+            return;
+        }
+
+        if (sessionRuntime.IsTransientStatusVisible)
+        {
+            var suppressAfterUserCancel =
+                uiRecoveryTransientDismissed &&
+                !IsConnecting &&
+                sessionRuntime.State != SessionRuntimeState.Connecting;
+            if (suppressAfterUserCancel)
+            {
+                ShowTransientBanner = false;
+                TransientBannerText = string.Empty;
+                CanCancelTransient = false;
+                return;
+            }
+
+            ShowTransientBanner = true;
+            TransientBannerText = SanitizeTransientText(sessionRuntime.TransientStatusText);
+            CanCancelTransient = sessionRuntime.CanCancelTransientStatus;
+            return;
+        }
+
+        if (hasUiRecoveryTransient && !uiRecoveryTransientDismissed)
+        {
+            ShowTransientBanner = true;
+            TransientBannerText = SanitizeTransientText(uiRecoveryTransientText);
+            CanCancelTransient = uiRecoveryTransientCanCancel;
+            return;
+        }
+
+        ShowTransientBanner = false;
+        TransientBannerText = string.Empty;
+        CanCancelTransient = false;
     }
 
-    private void ApplyFailurePresentation()
+    private void ApplyFailurePresentation(SessionRuntimeState runtimeState)
     {
-        // Error presentation is handled centrally by StatusPresenter -> StatusBanner.
+        var presentation = FailurePresentationPolicy.Resolve(runtimeState, ConnectionState, BannerStatus);
+        if (presentation is null)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(FailureTitle))
+        {
+            FailureTitle = presentation.Title;
+        }
+
+        if (string.IsNullOrWhiteSpace(FailureMessage))
+        {
+            FailureMessage = presentation.Message;
+        }
+
+        if (string.IsNullOrWhiteSpace(FailureActionText))
+        {
+            FailureActionText = presentation.ActionText;
+        }
+
+        uiStateStore?.SetPhase(
+            SessionUiPhase.Failed,
+            $"SyncFromRuntime:{runtimeState}",
+            new SessionUxContext(FailureTitle, FailureMessage, FailureActionText));
     }
 
     private void ClearFailurePresentation()
     {
-        // Error presentation is handled centrally by StatusPresenter -> StatusBanner.
+        FailureTitle = string.Empty;
+        FailureMessage = string.Empty;
+        FailureActionText = string.Empty;
+    }
+
+    private void EnsureFailurePresentation(string title, string message, string actionText)
+    {
+        if (string.IsNullOrWhiteSpace(FailureTitle))
+        {
+            FailureTitle = title;
+        }
+
+        if (string.IsNullOrWhiteSpace(FailureMessage))
+        {
+            FailureMessage = message;
+        }
+
+        if (string.IsNullOrWhiteSpace(FailureActionText))
+        {
+            FailureActionText = actionText;
+        }
     }
 
     private bool IsInFailureCooldown()
@@ -973,6 +1376,121 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(StatusBannerLastConnectDuration));
         OnPropertyChanged(nameof(StatusBannerLastHandshakeDuration));
         OnPropertyChanged(nameof(StatusBannerBridgeState));
+        ApplySessionBannerPolicy();
+    }
+
+    private void ApplySessionBannerPolicy()
+    {
+        var phase = uiStateStore?.Phase ?? SessionUxPhaseMapper.FromRuntimeState(sessionRuntime.State, isHelper: true);
+        var context = uiStateStore?.Context;
+        var overrideStatus = SessionBannerPolicy.BuildPhaseStatusOverride(
+            phase,
+            presenterBannerStatus,
+            context,
+            StatusText);
+        var effectiveStatus = overrideStatus ?? presenterBannerStatus;
+        BannerStatus = effectiveStatus;
+
+        var forceVisible = SessionBannerPolicy.ShouldForceVisible(phase);
+        var statusVisible = BannerStatus.Kind is not UserStatusKind.Idle and not UserStatusKind.Connected;
+        ShowStatusBanner = forceVisible || statusVisible || SessionBannerPolicy.ShouldShowStatusBanner(phase);
+        StatusBannerDetailsText = SessionBannerPolicy.BuildDetailsText(
+            phase,
+            StatusBannerFailureCategory,
+            StatusBannerSessionCorrelationId,
+            StatusBannerLastConnectDuration,
+            StatusBannerLastHandshakeDuration,
+            StatusBannerBridgeState,
+            context);
+
+        var forceRetryState = string.Equals(ConnectionState, "Failed", StringComparison.Ordinal) ||
+            string.Equals(ConnectionState, "Disconnected", StringComparison.Ordinal) ||
+            string.Equals(ConnectionState, "Rejected", StringComparison.Ordinal);
+        var nextCanStartOrConnect = forceRetryState || phase is SessionUiPhase.Idle
+            or SessionUiPhase.Waiting
+            or SessionUiPhase.Recovering
+            or SessionUiPhase.Failed
+            or SessionUiPhase.Ended;
+
+        CanStartOrConnect = nextCanStartOrConnect;
+        ConnectCommand.NotifyCanExecuteChanged();
+        RetryCommand.NotifyCanExecuteChanged();
+    }
+
+    private void UpdateUiFromSnapshot()
+    {
+        bool nextChatEnabled;
+        bool nextCanSendFiles;
+        bool nextCanEndSession;
+        bool nextCanOpenDiagnostics;
+
+        if (!FeatureFlags.UsePhaseDrivenGating || uiStateStore is null)
+        {
+            var phase = uiStateStore?.Phase ?? SessionUxPhaseMapper.FromRuntimeState(sessionRuntime.State, isHelper: true);
+            nextCanEndSession = phase is SessionUiPhase.Connecting
+                or SessionUiPhase.Connected
+                or SessionUiPhase.Recovering
+                or SessionUiPhase.Failed
+                or SessionUiPhase.Ended
+                or SessionUiPhase.Idle
+                or SessionUiPhase.Waiting;
+            nextCanOpenDiagnostics = openDiagnosticsAction is not null &&
+                phase is SessionUiPhase.Connecting
+                    or SessionUiPhase.Connected
+                    or SessionUiPhase.Recovering
+                    or SessionUiPhase.Failed
+                    or SessionUiPhase.Ended;
+            nextCanSendFiles = phase is SessionUiPhase.Idle
+                or SessionUiPhase.Waiting
+                or SessionUiPhase.Connected
+                or SessionUiPhase.Failed;
+            nextChatEnabled = phase == SessionUiPhase.Connected;
+        }
+        else
+        {
+            switch (uiStateStore.Phase)
+            {
+                case SessionUiPhase.Connected:
+                    nextChatEnabled = true;
+                    nextCanSendFiles = true;
+                    nextCanEndSession = true;
+                    nextCanOpenDiagnostics = openDiagnosticsAction is not null;
+                    break;
+
+                case SessionUiPhase.Connecting:
+                    nextChatEnabled = false;
+                    nextCanSendFiles = false;
+                    nextCanEndSession = true;
+                    nextCanOpenDiagnostics = openDiagnosticsAction is not null;
+                    break;
+
+                case SessionUiPhase.Failed:
+                case SessionUiPhase.Ended:
+                    nextChatEnabled = false;
+                    nextCanSendFiles = false;
+                    nextCanEndSession = false;
+                    nextCanOpenDiagnostics = openDiagnosticsAction is not null;
+                    break;
+
+                default:
+                    nextChatEnabled = false;
+                    nextCanSendFiles = false;
+                    nextCanEndSession = true;
+                    nextCanOpenDiagnostics = openDiagnosticsAction is not null;
+                    break;
+            }
+        }
+
+        IsChatInputEnabled = nextChatEnabled;
+        CanSendFiles = nextCanSendFiles;
+        CanEndSession = nextCanEndSession;
+        CanOpenDiagnostics = nextCanOpenDiagnostics;
+
+        OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
+        SendChatCommand.NotifyCanExecuteChanged();
+        OpenDiagnosticsCommand.NotifyCanExecuteChanged();
+        EndSessionCommand.NotifyCanExecuteChanged();
+        AssertUiConsistency();
     }
 
     private string? BuildBannerBridgeState()
@@ -1009,4 +1527,209 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         => string.IsNullOrWhiteSpace(value) || string.Equals(value, "(none)", StringComparison.OrdinalIgnoreCase)
             ? null
             : value;
+
+    private void TryShowUiRecoveryTransient(string key, string text, bool canCancel)
+    {
+        if (uiRecoveryTransientDismissed)
+        {
+            return;
+        }
+
+        var now = nowProvider();
+        var normalizedKey = key ?? string.Empty;
+        if (now < nextUiRecoveryBannerAllowedAt &&
+            string.Equals(uiRecoveryTransientKey, normalizedKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        hasUiRecoveryTransient = true;
+        uiRecoveryTransientText = SanitizeTransientText(text);
+        uiRecoveryTransientCanCancel = canCancel;
+        uiRecoveryTransientKey = normalizedKey;
+        nextUiRecoveryBannerAllowedAt = now + RecoveryTransientThrottle;
+    }
+
+    private void ClearUiRecoveryTransient()
+    {
+        hasUiRecoveryTransient = false;
+        uiRecoveryTransientText = string.Empty;
+        uiRecoveryTransientCanCancel = false;
+        uiRecoveryTransientKey = string.Empty;
+    }
+
+    private string BuildRecoveryTransientText(bool isRecovering)
+    {
+        var baseText = isRecovering
+            ? "Connection lost. Reconnecting…"
+            : "Connection failed. You can retry.";
+        if (!IsInFailureCooldown())
+        {
+            return baseText;
+        }
+
+        var remaining = connectFailureCooldown - (nowProvider() - lastFailedAttemptUtc);
+        if (remaining <= TimeSpan.Zero)
+        {
+            return baseText;
+        }
+
+        var seconds = Math.Max(1, (int)Math.Ceiling(remaining.TotalSeconds));
+        return $"{baseText} Retry available in {seconds}s.";
+    }
+
+    private static string SanitizeTransientText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        var withoutAttempt = AttemptLabelRegex.Replace(text, string.Empty).Trim();
+        return string.IsNullOrWhiteSpace(withoutAttempt) ? text : withoutAttempt;
+    }
+
+    private static UserFacingStatus NormalizeStatusForDisplay(UserFacingStatus status)
+    {
+        return status with
+        {
+            Message = SanitizeTransientText(status.Message),
+            Attempt = null
+        };
+    }
+
+    [Conditional("DEBUG")]
+    private void AssertUiConsistency()
+    {
+        if (IsConnectedView && ShowMainControls)
+        {
+            throw new InvalidOperationException("Helper UI invariant failed: connected view cannot show main controls.");
+        }
+
+        if (ShowConnectedPanel && !IsConnectedView)
+        {
+            throw new InvalidOperationException("Helper UI invariant failed: connected panel requires connected view.");
+        }
+
+        if (ShowChatPanel && !IsConnectedView)
+        {
+            throw new InvalidOperationException("Helper UI invariant failed: chat panel requires connected view.");
+        }
+
+        if (ShowFailurePanel && IsConnectedView)
+        {
+            throw new InvalidOperationException("Helper UI invariant failed: failure panel cannot be visible while connected.");
+        }
+
+        if (uiStateStore is not null && uiStateStore.Phase == SessionUiPhase.Connected &&
+            !string.Equals(ConnectionState, "Connected", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Helper UI invariant failed: Connected phase requires ConnectionState=Connected.");
+        }
+
+        if (uiStateStore is not null && uiStateStore.Phase == SessionUiPhase.Failed && IsChatInputEnabled)
+        {
+            throw new InvalidOperationException("Helper UI invariant failed: Failed phase requires disabled chat input.");
+        }
+
+        if (endInvoked && ShowTransientBanner)
+        {
+            throw new InvalidOperationException("Helper UI invariant failed: end-invoked state must not show transient banner.");
+        }
+
+        if (uiStateStore is not null &&
+            uiStateStore.Phase is SessionUiPhase.Ended or SessionUiPhase.Failed &&
+            IsChatInputEnabled)
+        {
+            throw new InvalidOperationException("Helper UI invariant failed: Ended/Failed phase requires disabled chat input.");
+        }
+    }
+
+    private void PrepareForNewSession()
+    {
+        if (!endSessionRequested && !endSessionCancelInvoked && endReason is null)
+        {
+            return;
+        }
+
+        wasConnected = false;
+        endInvoked = false;
+        endReason = null;
+        endSessionRequested = false;
+        endSessionCancelInvoked = false;
+        if (uiStateStore?.Phase == SessionUiPhase.Ended)
+        {
+            uiStateStore.SetPhase(SessionUiPhase.Waiting, "StartNewSession:Helper");
+            ApplySessionBannerPolicy();
+        }
+    }
+
+    private SessionEndReason ClassifyEndReasonForRuntimeState(SessionRuntimeState state)
+    {
+        if (state is not (SessionRuntimeState.Failed or SessionRuntimeState.Disconnected))
+        {
+            return SessionEndReason.Failed;
+        }
+
+        if (!wasConnected)
+        {
+            return SessionEndReason.Failed;
+        }
+
+        var inferredPeerEnded =
+            sessionRuntime.LastDisconnectWasRemoteEnd ||
+            (state == SessionRuntimeState.Disconnected && sessionRuntime.LastTransportFailure is null);
+        return inferredPeerEnded ? SessionEndReason.PeerEnded : SessionEndReason.Failed;
+    }
+
+    private void ApplyEndReasonPresentation(SessionEndReason reason)
+    {
+        ClearUiRecoveryTransient();
+        ShowTransientBanner = false;
+        TransientBannerText = string.Empty;
+        CanCancelTransient = false;
+
+        switch (reason)
+        {
+            case SessionEndReason.UserEnded:
+                uiRecoveryTransientDismissed = true;
+                ClearFailurePresentation();
+                ShowChatNotice = false;
+                StatusText = "You ended the session.";
+                ConnectionState = "Idle";
+                break;
+            case SessionEndReason.PeerEnded:
+                uiRecoveryTransientDismissed = true;
+                ClearFailurePresentation();
+                ShowChatNotice = false;
+                CodeInput = string.Empty;
+                StatusText = "The other side ended the session.";
+                ConnectionState = "Idle";
+                break;
+            case SessionEndReason.Failed:
+                uiRecoveryTransientDismissed = false;
+                if (wasConnected)
+                {
+                    CodeInput = string.Empty;
+                }
+                if (string.IsNullOrWhiteSpace(FailureTitle))
+                {
+                    FailureTitle = "Session ended";
+                }
+
+                if (string.IsNullOrWhiteSpace(FailureMessage))
+                {
+                    FailureMessage = "The session ended due to a connection problem.";
+                }
+
+                if (string.IsNullOrWhiteSpace(FailureActionText))
+                {
+                    FailureActionText = "Retry";
+                }
+
+                StatusText = "The session ended due to a connection problem.";
+                ConnectionState = "Failed";
+                break;
+        }
+    }
 }

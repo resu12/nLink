@@ -83,6 +83,7 @@
                         Classes="appButton secondaryButton"
                         Content="Disconnect"
                         Command="{Binding EndSessionCommand}"
+                        IsEnabled="{Binding CanEndSession}"
                         Height="36"
                         MinWidth="104"
                         Padding="12,0"/>
@@ -145,6 +146,7 @@
                      AutomationProperties.AutomationId="Chat.Input"
                      Classes="chatInput"
                      Text="{Binding ChatDraft, Mode=TwoWay}"
+                     IsEnabled="{Binding IsChatInputEnabled}"
                      Watermark="Type a message"
                      AcceptsReturn="True"
                      TextWrapping="Wrap"
@@ -156,6 +158,7 @@
                     Classes="appButton primaryButton"
                     Content="Send"
                     Command="{Binding SendChatCommand}"
+                    IsEnabled="{Binding IsChatInputEnabled}"
                     Width="104"
                     Height="48"/>
         </Grid>

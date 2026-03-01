@@ -13,6 +13,7 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
     private readonly IClipboardService clipboardService;
     private readonly SessionRuntime sessionRuntime;
     private readonly StatusPresenter statusPresenter;
+    private readonly SessionUiStateStore sessionUiStateStore;
     private readonly MetricsRegistry metricsRegistry;
     private readonly DebugMetricsPanelViewModel debugPanel;
     private readonly ResourceRuntimeTracker resourceRuntimeTracker;
@@ -21,6 +22,7 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
     private readonly INetworkEventSource networkEventSource;
     private readonly NetworkResilienceCoordinator networkResilienceCoordinator;
     private readonly HomePageViewModel homePage;
+    private ViewModelBase? lastNonDiagnosticsPage;
     private ViewModelBase currentPage;
     private bool disposed;
 
@@ -39,6 +41,7 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
             telemetrySink: new MetricsTelemetrySink(metricsRegistry),
             bridgeReusePolicy: transportConfig.BridgeReusePolicy);
         statusPresenter = new StatusPresenter(sessionRuntime);
+        sessionUiStateStore = new SessionUiStateStore();
         debugPanel = new DebugMetricsPanelViewModel(sessionRuntime, metricsRegistry);
         hangReportService = new HangReportService(sessionRuntime, resourceRuntimeTracker);
         uiFreezeWatchdog = new UiFreezeWatchdog(hangReportService);
@@ -47,6 +50,7 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
             networkEventSource,
             sessionRuntime.HandleExternalRecoveryAsync);
         homePage = new HomePageViewModel(ShowHelpeePage, ShowHelperPage, ShowDiagnosticsPage, transportConfig);
+        lastNonDiagnosticsPage = homePage;
         currentPage = homePage;
     }
 
@@ -65,18 +69,46 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
 
     private void ShowHelpeePage()
     {
-        NavigateTo(new HelpeePageViewModel(ShowHomePage, transportConfig, sessionRuntime, ShowDiagnosticsPage, clipboardService, shareMessageConfig, statusPresenter));
+        NavigateTo(new HelpeePageViewModel(
+            EndSessionOnly,
+            transportConfig,
+            sessionRuntime,
+            ShowDiagnosticsPage,
+            clipboardService,
+            shareMessageConfig,
+            statusPresenter,
+            incomingRequestTimeout: null,
+            uiStateStore: sessionUiStateStore,
+            backAction: ShowHomePage));
     }
 
     private void ShowHelperPage()
     {
-        NavigateTo(new HelperPageViewModel(ShowHomePage, transportConfig, sessionRuntime, ShowDiagnosticsPage, clipboardService, shareMessageConfig, statusPresenter));
+        sessionUiStateStore.SetPhase(SessionUiPhase.Waiting, "Navigation:ShowHelperPage");
+        NavigateTo(new HelperPageViewModel(
+            EndSessionOnly,
+            transportConfig,
+            sessionRuntime,
+            ShowDiagnosticsPage,
+            clipboardService,
+            shareMessageConfig,
+            statusPresenter,
+            approvalTimeout: null,
+            connectFailureCooldown: null,
+            nowProvider: null,
+            uiStateStore: sessionUiStateStore,
+            backAction: ShowHomePage));
+    }
+
+    private void EndSessionOnly()
+    {
+        _ = sessionRuntime.DisconnectAsync();
     }
 
     private void ShowDiagnosticsPage()
     {
         NavigateTo(new DiagnosticsPageViewModel(
-            ShowHomePage,
+            () => NavigateTo(lastNonDiagnosticsPage ?? homePage),
             transportConfig,
             shareMessageConfig,
             sessionRuntime,
@@ -97,7 +129,18 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
             return;
         }
 
-        if (CurrentPage is IDisposable disposablePage)
+        var navigatingToDiagnostics = nextPage is DiagnosticsPageViewModel;
+        if (!navigatingToDiagnostics)
+        {
+            lastNonDiagnosticsPage = nextPage;
+        }
+
+        var preserveCurrentForDiagnosticsBack = navigatingToDiagnostics &&
+            CurrentPage is not DiagnosticsPageViewModel;
+
+        if (!ReferenceEquals(CurrentPage, homePage) &&
+            !preserveCurrentForDiagnosticsBack &&
+            CurrentPage is IDisposable disposablePage)
         {
             disposablePage.Dispose();
         }

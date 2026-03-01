@@ -53,13 +53,34 @@
                     <StackPanel Spacing="16">
                         <views:StatusBanner Status="{Binding BannerStatus}"
                                             ForceVisible="{Binding ShowStatusBanner}"
-                                            CopyDiagnosticsCommand="{Binding StatusBannerCopyDiagnosticsCommand}"
+                                            DetailsText="{Binding StatusBannerDetailsText}"
                                             CancelCommand="{Binding StatusBannerCancelCommand}"
                                             FailureCategory="{Binding StatusBannerFailureCategory}"
                                             SessionCorrelationId="{Binding StatusBannerSessionCorrelationId}"
                                             LastConnectDuration="{Binding StatusBannerLastConnectDuration}"
                                             LastHandshakeDuration="{Binding StatusBannerLastHandshakeDuration}"
                                             BridgeState="{Binding StatusBannerBridgeState}"/>
+
+                        <Border Classes="appPanel"
+                                Padding="10"
+                                IsVisible="{Binding ShowTransientBanner}">
+                            <Grid ColumnDefinitions="*,Auto"
+                                  ColumnSpacing="10">
+                                <TextBlock Text="{Binding TransientBannerText}"
+                                           Classes="appMuted"
+                                           TextWrapping="Wrap"
+                                           VerticalAlignment="Center"/>
+
+                                <Button Grid.Column="1"
+                                        Classes="appButton secondaryButton"
+                                        Content="Cancel"
+                                        Command="{Binding CancelTransientCommand}"
+                                        IsVisible="{Binding CanCancelTransient}"
+                                        IsEnabled="{Binding CanCancelTransient}"
+                                        Height="34"
+                                        MinWidth="88"/>
+                            </Grid>
+                        </Border>
 
                         <!-- State A: waiting/hosting -->
                         <StackPanel Spacing="16"
@@ -85,6 +106,7 @@
                                         Classes="appButton primaryButton action"
                                         Content="Copy code"
                                         Command="{Binding CopyCodeCommand}"
+                                        IsEnabled="{Binding CanStartOrConnect}"
                                         HorizontalAlignment="Stretch"/>
 
                                 <Button Grid.Column="1"
@@ -92,6 +114,7 @@
                                         Classes="appButton secondaryButton action"
                                         Content="New code"
                                         Command="{Binding RegenerateCodeCommand}"
+                                        IsEnabled="{Binding CanStartOrConnect}"
                                         HorizontalAlignment="Stretch"/>
                             </Grid>
 
@@ -105,6 +128,7 @@
                             <Button Classes="appButton secondaryButton action"
                                     Content="Retry"
                                     Command="{Binding RetryCommand}"
+                                    IsEnabled="{Binding CanStartOrConnect}"
                                     IsVisible="{Binding ShowRetryAction}"/>
 
                             <TextBlock Classes="appMuted"
@@ -157,43 +181,15 @@
                     </StackPanel>
                 </Border>
 
-                <Button Classes="linkButton"
-                        Content="Open diagnostics"
-                        Command="{Binding OpenDiagnosticsCommand}"
-                        HorizontalAlignment="Center"
-                        IsVisible="{Binding ShowOpenDiagnosticsLink}"/>
-
                 <Button Classes="appButton secondaryButton"
                         Content="Back"
                         Command="{Binding CancelCommand}"
                         Height="44"
                         MinWidth="180"
                         HorizontalAlignment="Center"
+                        IsEnabled="{Binding CanEndSession}"
                         IsVisible="{Binding ShowBackButton}"/>
 
-                <StackPanel Spacing="8"
-                            HorizontalAlignment="Center"
-                            MaxWidth="720"
-                            IsVisible="{Binding ShowDevTroubleshooting}">
-                    <Button Classes="linkButton"
-                            Content="Troubleshooting"
-                            Command="{Binding ToggleTroubleshootingCommand}"
-                            HorizontalAlignment="Center"
-                            FontSize="14"/>
-
-                    <Border Classes="appCard"
-                            CornerRadius="10"
-                            Padding="12"
-                            IsVisible="{Binding ShowTroubleshooting}">
-                        <Button Classes="appButton secondaryButton"
-                                Content="Test incoming request"
-                                Command="{Binding SimulateIncomingRequestCommand}"
-                                Height="40"
-                                MinWidth="240"
-                                FontSize="15"
-                                HorizontalAlignment="Center"/>
-                    </Border>
-                </StackPanel>
             </StackPanel>
         </ScrollViewer>
     </Grid>

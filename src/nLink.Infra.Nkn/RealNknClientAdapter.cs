@@ -1036,7 +1036,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
             return plusIndex > 0 ? informational[..plusIndex] : informational;
         }
 
-        return assembly.GetName().Version?.ToString() ?? "0.1.0";
+        return assembly.GetName().Version?.ToString() ?? "0.2.0";
     }
 
     private static string GetBridgeRid()
