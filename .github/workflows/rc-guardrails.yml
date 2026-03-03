@@ -1,0 +1,64 @@
+name: RC Guardrails
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  rc-guardrails:
+    runs-on: ubuntu-latest
+
+    env:
+      RC_GUARD_BASE: ${{ github.event.pull_request.base.sha }}
+      RC_GUARD_HEAD: ${{ github.event.pull_request.head.sha }}
+      RC_GUARD_OVERRIDE: ${{ contains(github.event.pull_request.labels.*.name, 'rc-override') }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run RC guard
+        id: guard
+        shell: bash
+        run: |
+          set +e
+          bash build/rc-guard.sh \
+            --base "$RC_GUARD_BASE" \
+            --head "$RC_GUARD_HEAD" \
+            --override "$RC_GUARD_OVERRIDE" \
+            --rules build/rc-guard.rules | tee rc-guard-output.md
+          status=${PIPESTATUS[0]}
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write step summary
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          {
+            if [[ "${{ steps.guard.outputs.exit_code }}" != "0" ]]; then
+              echo "Blocked changes detected"
+              echo
+              cat rc-guard-output.md
+              echo
+              echo "To override for this PR, add the \`rc-override\` label."
+            elif [[ "$RC_GUARD_OVERRIDE" == "true" ]]; then
+              echo "Blocked changes detected (override)"
+              echo
+              cat rc-guard-output.md
+            else
+              echo "No blocked changes detected"
+              echo
+              cat rc-guard-output.md
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on blocked changes
+        if: ${{ steps.guard.outputs.exit_code != '0' }}
+        shell: bash
+        run: exit 1

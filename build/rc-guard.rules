@@ -1,0 +1,16 @@
+# RC guardrail deny rules
+PATH_PREFIX:src/nLink.Infra.Nkn/
+PATH_PREFIX:tools/
+NAME_KEYWORD:BridgeSupervisor
+NAME_KEYWORD:NodeBridge
+NAME_KEYWORD:MultiClient
+NAME_KEYWORD:Jsonl
+NAME_KEYWORD:Protocol
+NAME_KEYWORD:Contract
+NAME_KEYWORD:Wire
+NAME_KEYWORD:Bridge
+
+# Always-ignore paths
+IGNORE_PREFIX:artifacts/
+IGNORE_CONTAINS:/bin/
+IGNORE_CONTAINS:/obj/

@@ -106,7 +106,7 @@ internal static class GuiSmokeHarness
     {
         var parsed = (scenarios ?? Array.Empty<string>())
             .Select(x => x?.Trim().ToUpperInvariant())
-            .Where(x => x is "A" or "B" or "C" or "D" or "E" or "F" or "G" or "H" or "I" or "J" or "K" or "L" or "M" or "HEADER_CHAT_COHERENCE" or "END_SESSION_DISABLES_CHAT" or "SCREENSHARE_BUTTON_VISIBILITY")
+            .Where(x => x is "A" or "B" or "C" or "D" or "E" or "F" or "G" or "H" or "I" or "J" or "K" or "L" or "M" or "HEADER_CHAT_COHERENCE" or "END_SESSION_DISABLES_CHAT" or "SCREENSHARE_BUTTON_VISIBILITY" or "STATUS_TEXT_GUARDRAILS")
             .Cast<string>()
             .Distinct()
             .ToArray();
@@ -133,6 +133,7 @@ internal static class GuiSmokeHarness
                 "HEADER_CHAT_COHERENCE" => 90,
                 "END_SESSION_DISABLES_CHAT" => 90,
                 "SCREENSHARE_BUTTON_VISIBILITY" => 90,
+                "STATUS_TEXT_GUARDRAILS" => 90,
                 "E" => 120,
                 _ => 90
             };

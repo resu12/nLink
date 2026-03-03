@@ -4,6 +4,14 @@ Simple help for family and friends.
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
+## Release Candidate (0.2.0-rc.1)
+
+`0.2.0-rc.1` is a stabilization RC focused on validation, packaging hardening, and deterministic test coverage.
+
+- Architecture is frozen for RC sign-off, including the existing bridge JSONL contract.
+- RC scope is limited to bug fixes, packaging verification, docs, and test hardening.
+- No transport redesign is included in this RC.
+
 ## Quick Start (Windows)
 
 1. Go to the GitHub Releases page and download the Installer (recommended) or Portable ZIP.
@@ -25,10 +33,11 @@ Open Diagnostics -> Copy diagnostics and include it when reporting issues.
 
 Notes:
 - Windows x64 only
-- Beta pre-release (`0.2.0-beta.5`)
+- Release candidate (`0.2.0-rc.1`)
+- Installer path: `%LOCALAPPDATA%\Programs\nLink Helper`
 
 Versioning:
-- Release version uses SemVer (for example: `0.2.0-beta.5`)
+- Release version uses SemVer (for example: `0.2.0-rc.1`)
 - The current release version is stored in the repo-root `VERSION` file
 
 License:

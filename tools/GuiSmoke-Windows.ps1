@@ -149,6 +149,80 @@ function Get-ElementTextSafe {
     try { return [string]$Element.Current.Name } catch { return '' }
 }
 
+function Wait-NonEmptyAutomationText {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$AutomationId,
+        [int]$TimeoutMs = 10000
+    )
+
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage "Timed out waiting for non-empty text in $AutomationId." -Condition {
+        $el = Find-VisibleByAutomationId -Root $Window -AutomationId $AutomationId
+        if (-not $el) { return $null }
+
+        $text = (Get-ElementTextSafe -Element $el).Trim()
+        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+
+        return [pscustomobject]@{
+            Element = $el
+            Text = $text
+        }
+    }
+}
+
+function Wait-AutomationTextInSet {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$AutomationId,
+        [Parameter(Mandatory = $true)][string[]]$AllowedTexts,
+        [int]$TimeoutMs = 10000
+    )
+
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage ("Timed out waiting for $AutomationId to match one of: " + ($AllowedTexts -join ', ')) -Condition {
+        $el = Find-VisibleByAutomationId -Root $Window -AutomationId $AutomationId
+        if (-not $el) { return $null }
+
+        $text = (Get-ElementTextSafe -Element $el).Trim()
+        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+
+        foreach ($allowed in $AllowedTexts) {
+            if ([string]::Equals($text, $allowed, [System.StringComparison]::Ordinal)) {
+                return [pscustomobject]@{
+                    Element = $el
+                    Text = $text
+                }
+            }
+        }
+
+        return $null
+    }
+}
+
+function Wait-AutomationTextEquals {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$AutomationId,
+        [Parameter(Mandatory = $true)][string]$ExpectedText,
+        [int]$TimeoutMs = 10000
+    )
+
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage "Timed out waiting for $AutomationId to equal '$ExpectedText'." -Condition {
+        $el = Find-VisibleByAutomationId -Root $Window -AutomationId $AutomationId
+        if (-not $el) { return $null }
+
+        $text = (Get-ElementTextSafe -Element $el).Trim()
+        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+        if ([string]::Equals($text, $ExpectedText, [System.StringComparison]::Ordinal)) {
+            return [pscustomobject]@{
+                Element = $el
+                Text = $text
+            }
+        }
+
+        return $null
+    }
+}
+
 function Get-ElementValueSafe {
     param([System.Windows.Automation.AutomationElement]$Element)
     if ($null -eq $Element) { return '' }
@@ -314,6 +388,42 @@ function Click-Element {
     [System.Windows.Forms.SendKeys]::SendWait(' ')
 }
 
+function Invoke-SendKeysTextDeterministic {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Element,
+        [Parameter(Mandatory = $true)][string]$Text,
+        [int]$TimeoutMs = 1000
+    )
+
+    $lastObservedValue = ''
+    $attempts = 0
+
+    [void](Wait-Until -TimeoutMs $TimeoutMs -PollMs 50 -OnTimeoutMessage "field did not accept text within $TimeoutMs ms. LastValue='$lastObservedValue'; Target='$Text'; Attempts=$attempts" -Condition {
+        try {
+            $Element.SetFocus()
+        }
+        catch {}
+
+        $attempts++
+        $currentValue = Get-ElementValueSafe -Element $Element
+        $lastObservedValue = $currentValue
+        if ([string]::Equals($currentValue, $Text, [System.StringComparison]::Ordinal)) {
+            return $true
+        }
+
+        [System.Windows.Forms.SendKeys]::SendWait('^a')
+        [System.Windows.Forms.SendKeys]::SendWait($Text)
+
+        $updatedValue = Get-ElementValueSafe -Element $Element
+        $lastObservedValue = $updatedValue
+        if ([string]::Equals($updatedValue, $Text, [System.StringComparison]::Ordinal)) {
+            return $true
+        }
+
+        return $null
+    })
+}
+
 function Set-Text {
     param(
         [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Element,
@@ -345,9 +455,7 @@ function Set-Text {
     if (-not $rect.IsEmpty) {
         [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point([int]($rect.Left + 10), [int]($rect.Top + $rect.Height/2))
     }
-    [System.Windows.Forms.SendKeys]::SendWait('^a')
-    Start-Sleep -Milliseconds 80
-    [System.Windows.Forms.SendKeys]::SendWait($Text)
+    Invoke-SendKeysTextDeterministic -Element $Element -Text $Text -TimeoutMs 1000
 }
 
 function Get-ClipboardTextSafe {
@@ -720,7 +828,19 @@ function Send-ChatMessage {
             $windowHandle = [IntPtr]::new([int64]$Window.Current.NativeWindowHandle)
             [void][Win32GuiSmoke]::SetForegroundWindow($windowHandle)
         } catch {}
-        Start-Sleep -Milliseconds 80
+
+        [void](Wait-Until -TimeoutMs 1000 -PollMs 50 -OnTimeoutMessage 'Window did not become ready for Enter send within 1000 ms.' -Condition {
+            try {
+                $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+                if ($focused -and $focused.Current.ProcessId -eq $Window.Current.ProcessId) {
+                    return $true
+                }
+            }
+            catch {}
+
+            return $null
+        })
+
         [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
         return
     }
@@ -1263,7 +1383,7 @@ function Run-ScenarioJ {
 
     [void](Wait-Until -TimeoutMs 5000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee New code flow to stay quiet.' -Condition {
         try {
-            Assert-TextsNotVisible -Window $Context.HelpeeWindow -Texts @('Reconnecting...', 'Connecting...')
+            Assert-TextsNotVisible -Window $Context.HelpeeWindow -Texts @('Reconnecting…', 'Connecting…')
             Assert-ButtonNotVisibleByName -Window $Context.HelpeeWindow -Text 'Cancel'
             return $true
         }
@@ -1390,6 +1510,32 @@ function Run-ScenarioHeaderChatCoherence {
         }
         return $null
     })
+}
+
+function Run-ScenarioStatusTextGuardrails {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+    Start-HelpeeFlow -Context $Context
+    Start-HelperFlow -Context $Context
+
+    $allowedPillTexts = @('Connected', 'Connecting…', 'Reconnecting…', 'Not connected')
+
+    [void](Wait-NonEmptyAutomationText -Window $Context.HelpeeWindow -AutomationId 'SessionHeader.StatusText' -TimeoutMs 10000)
+    [void](Wait-NonEmptyAutomationText -Window $Context.HelperWindow -AutomationId 'SessionHeader.StatusText' -TimeoutMs 10000)
+    [void](Wait-AutomationTextInSet -Window $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText' -AllowedTexts $allowedPillTexts -TimeoutMs 10000)
+
+    $code = Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow
+    [void](Enter-HelperCodeAndConnect -HelperWindow $Context.HelperWindow -Code $code)
+
+    [void](Wait-AutomationTextEquals -Window $Context.HelperWindow -AutomationId 'SessionHeader.StatusText' -ExpectedText 'Connecting…' -TimeoutMs 15000)
+    [void](Wait-AutomationTextEquals -Window $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText' -ExpectedText 'Connecting…' -TimeoutMs 15000)
+
+    Wait-HelpeeAllowAndClick -HelpeeWindow $Context.HelpeeWindow
+
+    [void](Wait-NonEmptyAutomationText -Window $Context.HelperWindow -AutomationId 'SessionHeader.StatusText' -TimeoutMs 20000)
+    [void](Wait-NonEmptyAutomationText -Window $Context.HelpeeWindow -AutomationId 'SessionHeader.StatusText' -TimeoutMs 20000)
+    [void](Wait-AutomationTextInSet -Window $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText' -AllowedTexts $allowedPillTexts -TimeoutMs 20000)
+    [void](Wait-AutomationTextInSet -Window $Context.HelpeeWindow -AutomationId 'Chat.ConnectionPillText' -AllowedTexts $allowedPillTexts -TimeoutMs 20000)
 }
 
 function Run-ScenarioEndSessionDisablesChat {
@@ -1563,7 +1709,8 @@ try {
             'END_SESSION_DISABLES_CHAT' { Invoke-Scenario -Name 'end_session_disables_chat' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioEndSessionDisablesChat -Context $ctx } }
             'HEADER_CHAT_COHERENCE' { Invoke-Scenario -Name 'header_chat_coherence' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioHeaderChatCoherence -Context $ctx } }
             'SCREENSHARE_BUTTON_VISIBILITY' { Invoke-Scenario -Name 'screenshare_button_visibility' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioScreenShareButtonVisibility -Context $ctx } }
-            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M,HEADER_CHAT_COHERENCE,END_SESSION_DISABLES_CHAT,SCREENSHARE_BUTTON_VISIBILITY." }
+            'STATUS_TEXT_GUARDRAILS' { Invoke-Scenario -Name 'status_text_guardrails' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioStatusTextGuardrails -Context $ctx } }
+            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M,HEADER_CHAT_COHERENCE,END_SESSION_DISABLES_CHAT,SCREENSHARE_BUTTON_VISIBILITY,STATUS_TEXT_GUARDRAILS." }
         }
     }
 

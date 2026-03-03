@@ -279,7 +279,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     public string HeaderStatusText =>
         EffectivePhase switch
         {
-            SessionUiPhase.Connecting => "Connecting",
+            SessionUiPhase.Connecting => "Connecting…",
+            SessionUiPhase.Recovering => "Reconnecting…",
             SessionUiPhase.Connected => "Connected",
             SessionUiPhase.Failed or SessionUiPhase.Ended => string.IsNullOrWhiteSpace(FailureTitle) ? "Connection failed" : FailureTitle,
             _ => !string.IsNullOrWhiteSpace(ConnectionStatus) ? ConnectionStatus : "Ready",
@@ -363,7 +364,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         EffectivePhase switch
         {
             SessionUiPhase.Connected => "Connected",
-            SessionUiPhase.Connecting or SessionUiPhase.Recovering => "Connecting",
+            SessionUiPhase.Connecting => "Connecting…",
+            SessionUiPhase.Recovering => "Reconnecting…",
             _ => "Not connected",
         };
 
