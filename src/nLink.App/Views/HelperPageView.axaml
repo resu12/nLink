@@ -86,7 +86,7 @@
 
                                     <Border Classes="appPanel"
                                             Padding="10"
-                                            IsVisible="{Binding ShowTransientBanner}">
+                                            IsVisible="{Binding ShowTransientStatusPanel}">
                                         <Grid ColumnDefinitions="*,Auto"
                                               ColumnSpacing="10">
                                             <TextBlock Text="{Binding TransientBannerText}"

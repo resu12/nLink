@@ -17,5 +17,30 @@ internal static class UiThreadDispatch
 
         return Dispatcher.UIThread.InvokeAsync(action).GetTask();
     }
+
+    public static Task RunAsync(Func<Task> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+
+        if (Application.Current is null)
+        {
+            return action();
+        }
+
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Dispatcher.UIThread.Post(async () =>
+        {
+            try
+            {
+                await action().ConfigureAwait(false);
+                completion.TrySetResult();
+            }
+            catch (Exception ex)
+            {
+                completion.TrySetException(ex);
+            }
+        });
+        return completion.Task;
+    }
 }
 

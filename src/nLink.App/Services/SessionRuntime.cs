@@ -8,6 +8,8 @@ using NLink.Core.Chat;
 using NLink.Core.Logging;
 using NLink.Core.Resources;
 using NLink.Core.Retry;
+using NLink.App.Configuration;
+using NLink.App.Services.ScreenCapture;
 using NLink.Infra.Nkn;
 
 namespace NLink.App.Services;
@@ -123,6 +125,7 @@ public sealed class SessionRuntime : IDisposable
     private readonly BridgeReusePolicy bridgeReusePolicy;
     private readonly Func<TimeSpan, CancellationToken, Task> bridgeIdleDelayAsync;
     private readonly RetryPolicy watchdogRetryPolicy;
+    private readonly TransportScreenShareCoordinator transportScreenShareCoordinator;
 
     private CancellationTokenSource? sessionCts;
     private ISignalingTransport? transport;
@@ -158,6 +161,7 @@ public sealed class SessionRuntime : IDisposable
     private bool activeConnectAttemptCounted;
     private bool lastDisconnectWasRemoteEnd;
     private int externalRecoveryInProgress;
+    private bool allowTransportScreenShareAutoStart = true;
 
     public SessionRuntime(Func<ISignalingTransport> createTransport)
         : this(createTransport, SessionRuntimeWatchdogOptions.Default, DefaultWatchdogDelayAsync, TransportTelemetry.Noop, BridgeReusePolicy.Default, null)
@@ -186,6 +190,9 @@ public sealed class SessionRuntime : IDisposable
                 JitterRatio: 0.10));
         watchdogRetryPolicy.EventEmitted += OnWatchdogRetryPolicyEvent;
         transportStateEntryTimestamps[transportState] = Stopwatch.GetTimestamp();
+        transportScreenShareCoordinator = new TransportScreenShareCoordinator(
+            ScreenCaptureFactory.CreateDefault,
+            SendScreenSharePayloadAsync);
 
         chatService.MessageReceived += OnChatMessageReceived;
         chatService.MessageReceivedBeforeApproved += OnChatMessageReceivedBeforeApproved;
@@ -273,6 +280,7 @@ public sealed class SessionRuntime : IDisposable
     public event EventHandler? Disconnected;
 
     internal event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
+    internal event EventHandler? ScreenShareStopped;
 
     public event EventHandler<ChatMessageEventArgs>? ChatMessageReceived;
 
@@ -356,6 +364,8 @@ public sealed class SessionRuntime : IDisposable
 
     internal TransportFailureCategory? GetLastFailureCategoryForTests() => lastTransportFailure?.Category;
 
+    internal bool CanAutoStartTransportScreenShareForTests => allowTransportScreenShareAutoStart;
+    internal bool IsTransportScreenShareActiveForTests => transportScreenShareCoordinator.IsActive;
     internal bool HasCachedBridgeTransportForTests() => cachedBridgeTransport is not null;
     internal void SetRoleForTests(SessionRuntimeRole value) => role = value;
 
@@ -753,6 +763,7 @@ public sealed class SessionRuntime : IDisposable
         }
 
         chatService.Dispose();
+        transportScreenShareCoordinator.DisposeAsync().AsTask().GetAwaiter().GetResult();
         watchdogRetryPolicy.EventEmitted -= OnWatchdogRetryPolicyEvent;
         lifecycleGate.Dispose();
     }
@@ -819,17 +830,32 @@ public sealed class SessionRuntime : IDisposable
                 TransitionTo(TransportState.Reconnecting, "reset");
             }
 
+            if (notifyRemoteSessionEnd)
+            {
+                await StopTransportScreenShareAsync(
+                    notifyRemoteStop: oldRole == SessionRuntimeRole.Helpee &&
+                                      oldState == SessionRuntimeState.Connected &&
+                                      oldTransport is NknSignalingTransport,
+                    reason: "session_end",
+                    CancellationToken.None).ConfigureAwait(false);
+                await TrySendRemoteSessionEndAsync(oldTransport, oldRole, oldState).ConfigureAwait(false);
+            }
+            else
+            {
+                await StopTransportScreenShareAsync(
+                    notifyRemoteStop: oldRole == SessionRuntimeRole.Helpee &&
+                                      oldState == SessionRuntimeState.Connected &&
+                                      oldTransport is NknSignalingTransport,
+                    reason: "reset",
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+
             sessionCts = null;
             transport = null;
             pendingJoinRequest = null;
             role = SessionRuntimeRole.None;
             currentCode = null;
             CancelWatchdog();
-
-            if (notifyRemoteSessionEnd)
-            {
-                await TrySendRemoteSessionEndAsync(oldTransport, oldRole, oldState).ConfigureAwait(false);
-            }
 
             if (oldTransport is not null)
             {
@@ -994,6 +1020,7 @@ public sealed class SessionRuntime : IDisposable
             nknTransport.RemoteSessionEnded += OnRemoteSessionEnded;
             nknTransport.BridgeLifecycle += OnBridgeLifecycle;
             nknTransport.ScreenShareFrameCompleted += OnTransportScreenShareFrameCompleted;
+            nknTransport.ScreenShareStopped += OnTransportScreenShareStopped;
         }
     }
 
@@ -1008,6 +1035,7 @@ public sealed class SessionRuntime : IDisposable
             nknTransport.RemoteSessionEnded -= OnRemoteSessionEnded;
             nknTransport.BridgeLifecycle -= OnBridgeLifecycle;
             nknTransport.ScreenShareFrameCompleted -= OnTransportScreenShareFrameCompleted;
+            nknTransport.ScreenShareStopped -= OnTransportScreenShareStopped;
         }
     }
 
@@ -1078,6 +1106,10 @@ public sealed class SessionRuntime : IDisposable
             return;
         }
 
+        allowTransportScreenShareAutoStart = false;
+        RunCountedBackgroundTask(
+            () => transportScreenShareCoordinator.HandleDisconnectedAsync(),
+            countAsTransportTask: false);
         pendingJoinRequest = null;
         SessionTimeline.Record("Rejected");
         TransitionTo(TransportState.Failed, "transport_rejected");
@@ -1091,6 +1123,11 @@ public sealed class SessionRuntime : IDisposable
         {
             return;
         }
+
+        allowTransportScreenShareAutoStart = false;
+        RunCountedBackgroundTask(
+            () => transportScreenShareCoordinator.HandleDisconnectedAsync(),
+            countAsTransportTask: false);
 
         if (disposed || resetInProgress || remoteSessionEndHandling || sessionCts?.IsCancellationRequested == true)
         {
@@ -1167,8 +1204,12 @@ public sealed class SessionRuntime : IDisposable
             return;
         }
 
+        allowTransportScreenShareAutoStart = false;
         remoteSessionEndHandling = true;
         lastDisconnectWasRemoteEnd = true;
+        RunCountedBackgroundTask(
+            () => transportScreenShareCoordinator.HandleDisconnectedAsync(),
+            countAsTransportTask: false);
 
         var message = role switch
         {
@@ -1205,6 +1246,16 @@ public sealed class SessionRuntime : IDisposable
         }
 
         ScreenShareFrameCompleted?.Invoke(this, e);
+    }
+
+    private void OnTransportScreenShareStopped(object? sender, EventArgs e)
+    {
+        if (!IsFromCurrentTransport(sender))
+        {
+            return;
+        }
+
+        ScreenShareStopped?.Invoke(this, EventArgs.Empty);
     }
 
     private bool ShouldQuietlyRecoverHelpeeHostStartFailure(TransportFailure failure, SessionCode code)
@@ -1954,6 +2005,7 @@ public sealed class SessionRuntime : IDisposable
     private void BeginConnectAttempt(SessionRuntimeRole nextRole, SessionCode code)
     {
         lastDisconnectWasRemoteEnd = false;
+        allowTransportScreenShareAutoStart = true;
         MarkActiveSession();
         MarkActiveConnectAttempt();
 
@@ -2189,6 +2241,46 @@ public sealed class SessionRuntime : IDisposable
         {
             // Best-effort only.
         }
+    }
+
+    private async Task SendScreenSharePayloadAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
+    {
+        if (!FeatureFlags.EnableScreenShareTransport)
+        {
+            return;
+        }
+
+        if (transport is not NknSignalingTransport nknTransport)
+        {
+            return;
+        }
+
+        await nknTransport.SendScreenSharePayloadAsync(payload, ct).ConfigureAwait(false);
+    }
+
+    private Task StopTransportScreenShareAsync(bool notifyRemoteStop, string reason, CancellationToken ct)
+    {
+        return transportScreenShareCoordinator.StopAsync(notifyRemoteStop, reason, ct);
+    }
+
+    internal Task StartTransportScreenShareAsync(CancellationToken ct = default)
+    {
+        if (disposed ||
+            role != SessionRuntimeRole.Helpee ||
+            state != SessionRuntimeState.Connected ||
+            !FeatureFlags.EnableScreenShareTransport ||
+            !FeatureFlags.EnableScreenShareCapture ||
+            string.IsNullOrWhiteSpace(sessionId))
+        {
+            return Task.CompletedTask;
+        }
+
+        return transportScreenShareCoordinator.StartAsync(sessionId, sessionCts?.Token ?? ct);
+    }
+
+    internal Task StopTransportScreenShareAsync(string reason, CancellationToken ct = default)
+    {
+        return transportScreenShareCoordinator.StopAsync(sendStopMessage: true, reason, ct);
     }
 
     private static string SanitizeStatusForLog(string? text)

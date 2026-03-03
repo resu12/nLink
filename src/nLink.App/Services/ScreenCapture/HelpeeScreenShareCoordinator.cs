@@ -15,8 +15,9 @@ internal sealed class HelpeeScreenShareCoordinator
     private readonly Func<bool> isDisposed;
     private readonly Func<bool> canShowScreenShareAction;
     private readonly Func<bool> isPreviewActive;
-    private readonly Func<IScreenCaptureSource> captureSourceFactory;
+    private readonly IScreenCaptureSourceFactory captureSourceFactory;
     private readonly Action<bool> setPreviewActive;
+    private readonly Action<ScreenShareStatus> setStatus;
     private readonly Func<Bitmap?> getPreviewFrame;
     private readonly Action<Bitmap?> setPreviewFrame;
     private readonly Func<byte[], Bitmap> decodeFrame;
@@ -33,8 +34,9 @@ internal sealed class HelpeeScreenShareCoordinator
         Func<bool> isDisposed,
         Func<bool> canShowScreenShareAction,
         Func<bool> isPreviewActive,
-        Func<IScreenCaptureSource> captureSourceFactory,
+        IScreenCaptureSourceFactory captureSourceFactory,
         Action<bool> setPreviewActive,
+        Action<ScreenShareStatus> setStatus,
         Func<Bitmap?> getPreviewFrame,
         Action<Bitmap?> setPreviewFrame,
         Func<byte[], Bitmap>? decodeFrame = null)
@@ -44,6 +46,7 @@ internal sealed class HelpeeScreenShareCoordinator
         this.isPreviewActive = isPreviewActive ?? throw new ArgumentNullException(nameof(isPreviewActive));
         this.captureSourceFactory = captureSourceFactory ?? throw new ArgumentNullException(nameof(captureSourceFactory));
         this.setPreviewActive = setPreviewActive ?? throw new ArgumentNullException(nameof(setPreviewActive));
+        this.setStatus = setStatus ?? throw new ArgumentNullException(nameof(setStatus));
         this.getPreviewFrame = getPreviewFrame ?? throw new ArgumentNullException(nameof(getPreviewFrame));
         this.setPreviewFrame = setPreviewFrame ?? throw new ArgumentNullException(nameof(setPreviewFrame));
         this.decodeFrame = decodeFrame ?? DecodeFrame;
@@ -56,7 +59,7 @@ internal sealed class HelpeeScreenShareCoordinator
             return;
         }
 
-        var toggleTask = Task.Run(ToggleAsync);
+        var toggleTask = UiThreadDispatch.RunAsync(ToggleAsync);
         screenSharePreviewToggleTask = toggleTask;
     }
 
@@ -98,6 +101,10 @@ internal sealed class HelpeeScreenShareCoordinator
 
         cts?.Cancel();
 
+        await ClearScreenSharePreviewFrameAsync().ConfigureAwait(false);
+        await SetPreviewActiveAsync(false).ConfigureAwait(false);
+        await SetStatusAsync(ScreenShareState.Off).ConfigureAwait(false);
+
         try
         {
             if (captureSource is not null)
@@ -116,9 +123,6 @@ internal sealed class HelpeeScreenShareCoordinator
                 await asyncDisposable.DisposeAsync();
             }
         }
-
-        await ClearScreenSharePreviewFrameAsync();
-        setPreviewActive(false);
 
         var decodeTask = screenSharePreviewDecodeTask;
         if (decodeTask is not null &&
@@ -158,9 +162,11 @@ internal sealed class HelpeeScreenShareCoordinator
 
             await StartAsync();
         }
-        catch
+        catch (Exception ex)
         {
+            LogDebug($"Preview capture start failed: {ex.GetType().Name}: {ex.Message}");
             await StopAsyncCore(awaitToggleCompletion: false);
+            await SetStatusAsync(ScreenShareState.Failed, "Screen sharing failed to start").ConfigureAwait(false);
         }
         finally
         {
@@ -177,8 +183,9 @@ internal sealed class HelpeeScreenShareCoordinator
         }
 
         await StopAsyncCore(awaitToggleCompletion: false);
+        SetStatus(ScreenShareState.Starting);
 
-        var captureSource = captureSourceFactory();
+        var captureSource = captureSourceFactory.Create();
         if (!captureSource.IsSupported)
         {
             if (captureSource is IAsyncDisposable unsupportedAsyncDisposable)
@@ -186,6 +193,7 @@ internal sealed class HelpeeScreenShareCoordinator
                 await unsupportedAsyncDisposable.DisposeAsync();
             }
 
+            SetStatus(ScreenShareState.Off);
             return;
         }
 
@@ -200,7 +208,8 @@ internal sealed class HelpeeScreenShareCoordinator
         try
         {
             await captureSource.StartAsync(cts.Token);
-            setPreviewActive(true);
+            await SetPreviewActiveAsync(true).ConfigureAwait(false);
+            await SetStatusAsync(ScreenShareState.Active).ConfigureAwait(false);
             LogDebug("Preview capture started.");
         }
         catch
@@ -209,9 +218,41 @@ internal sealed class HelpeeScreenShareCoordinator
             screenSharePreviewCaptureSource = null;
             screenSharePreviewCts = null;
             cts.Dispose();
+            if (captureSource is IAsyncDisposable failedAsyncDisposable)
+            {
+                await failedAsyncDisposable.DisposeAsync();
+            }
+
             Interlocked.Increment(ref screenSharePreviewGeneration);
             throw;
         }
+    }
+
+    private void SetStatus(ScreenShareState state, string? userMessage = null)
+    {
+        setStatus(new ScreenShareStatus(state, userMessage, DateTimeOffset.UtcNow));
+    }
+
+    private Task SetPreviewActiveAsync(bool value)
+    {
+        if (Application.Current is null || Dispatcher.UIThread.CheckAccess())
+        {
+            setPreviewActive(value);
+            return Task.CompletedTask;
+        }
+
+        return UiThreadDispatch.RunAsync(() => setPreviewActive(value));
+    }
+
+    private Task SetStatusAsync(ScreenShareState state, string? userMessage = null)
+    {
+        if (Application.Current is null || Dispatcher.UIThread.CheckAccess())
+        {
+            SetStatus(state, userMessage);
+            return Task.CompletedTask;
+        }
+
+        return UiThreadDispatch.RunAsync(() => SetStatus(state, userMessage));
     }
 
     private void OnScreenSharePreviewFrameArrived(object? sender, ScreenCaptureFrameEventArgs e)

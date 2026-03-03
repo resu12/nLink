@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.3.0] - 2026-03-03
+
+### Added
+
+- Final `0.3.0` release notes under `docs/releases/`.
+- Manual screenshare soak harness and release-facing screenshare validation docs.
+
+### Changed
+
+- README and release docs now reflect `0.3.0` as the current release.
+- Session shell and header copy were tightened so screenshare state reads more clearly across helper and helpee flows.
+- Screenshare delivery is now paced and bounded for stability over the existing bridge/message transport.
+
+### Fixed
+
+- Screenshare start/stop, disconnect, chat coexistence, and end-session cleanup regressions across helper and helpee flows.
+- Helper and helpee status presentation now avoids duplicate transient status chrome and incorrect failure copy for remote-ended sessions.
+- GUI/input timing and screenshare viewer state transitions were hardened with deterministic waits and regression coverage.
+
+### CI
+
+- Added a short Release performance gate for bounded screenshare pressure handling.
+- Release validation now covers screenshare coexistence, packaging verification, and GUI smoke regressions.
+
+### Packaging
+
+- Windows installer and portable release assets for `0.3.0` are verified together with `SHA256SUMS.txt`.
+
 ## [0.2.0] - 2026-03-03
 
 ### Added

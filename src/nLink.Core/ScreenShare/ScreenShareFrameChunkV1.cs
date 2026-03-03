@@ -4,6 +4,9 @@ namespace NLink.Core.ScreenShare;
 
 public sealed record ScreenShareFrameChunkV1
 {
+    [JsonPropertyName("kind")]
+    public string Kind { get; init; } = "screenshare";
+
     [JsonPropertyName("type")]
     public string Type { get; init; } = ScreenSharePayloadCodec.ScreenShareFrameTypeV1;
 
@@ -18,6 +21,9 @@ public sealed record ScreenShareFrameChunkV1
 
     [JsonPropertyName("height")]
     public int Height { get; init; }
+
+    [JsonPropertyName("timestampUnixMilliseconds")]
+    public long TimestampUnixMilliseconds { get; init; }
 
     [JsonPropertyName("encoding")]
     public string Encoding { get; init; } = "jpeg";

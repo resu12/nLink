@@ -5,7 +5,10 @@ namespace NLink.Core.ScreenShare;
 public static class ScreenSharePayloadCodec
 {
     public const string ScreenShareFrameTypeV1 = "screenshare.frame.v1";
-    public const int MaxChunkRawBytes = 32_000;
+    public const string ScreenShareStopTypeV1 = "screenshare.stop.v1";
+    // Keep each serialized screenshare message comfortably below the NKN bridge
+    // payload sizes that have been observed to destabilize active sessions.
+    public const int MaxChunkRawBytes = 8_000;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -14,6 +17,12 @@ public static class ScreenSharePayloadCodec
     };
 
     public static byte[] Serialize(ScreenShareFrameChunkV1 msg)
+    {
+        ArgumentNullException.ThrowIfNull(msg);
+        return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
+    }
+
+    public static byte[] SerializeStop(ScreenShareStopMessageV1 msg)
     {
         ArgumentNullException.ThrowIfNull(msg);
         return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
@@ -32,6 +41,12 @@ public static class ScreenSharePayloadCodec
         {
             var parsed = JsonSerializer.Deserialize<ScreenShareFrameChunkV1>(utf8Json, JsonOptions);
             if (parsed is null)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(parsed.Kind) &&
+                !string.Equals(parsed.Kind, "screenshare", StringComparison.Ordinal))
             {
                 return false;
             }
@@ -69,8 +84,56 @@ public static class ScreenSharePayloadCodec
 
             msg = parsed with
             {
+                Kind = string.IsNullOrWhiteSpace(parsed.Kind) ? "screenshare" : parsed.Kind.Trim(),
                 SessionId = parsed.SessionId.Trim(),
                 Encoding = parsed.Encoding.Trim(),
+            };
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool TryDeserializeStop(ReadOnlySpan<byte> utf8Json, out ScreenShareStopMessageV1 msg)
+    {
+        msg = default!;
+
+        if (utf8Json.IsEmpty)
+        {
+            return false;
+        }
+
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<ScreenShareStopMessageV1>(utf8Json, JsonOptions);
+            if (parsed is null)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(parsed.Kind) &&
+                !string.Equals(parsed.Kind, "screenshare", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (!string.Equals(parsed.Type, ScreenShareStopTypeV1, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(parsed.SessionId))
+            {
+                return false;
+            }
+
+            msg = parsed with
+            {
+                Kind = string.IsNullOrWhiteSpace(parsed.Kind) ? "screenshare" : parsed.Kind.Trim(),
+                SessionId = parsed.SessionId.Trim(),
+                Reason = string.IsNullOrWhiteSpace(parsed.Reason) ? null : parsed.Reason.Trim(),
             };
             return true;
         }

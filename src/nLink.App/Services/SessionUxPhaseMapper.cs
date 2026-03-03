@@ -52,9 +52,25 @@ public static class SessionUxPhaseMapper
 
         return status.Kind switch
         {
-            UserStatusKind.Failed => SessionUiPhase.Failed,
+            UserStatusKind.Failed => IsSessionEndedStatus(status) ? SessionUiPhase.Ended : SessionUiPhase.Failed,
             UserStatusKind.Reconnecting => SessionUiPhase.Recovering,
             _ => null,
         };
+    }
+
+    private static bool IsSessionEndedStatus(UserFacingStatus status)
+    {
+        return ContainsEndedPhrase(status.Title) || ContainsEndedPhrase(status.Message);
+    }
+
+    private static bool ContainsEndedPhrase(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        return text.Contains("ended the session", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("session ended", StringComparison.OrdinalIgnoreCase);
     }
 }

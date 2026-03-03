@@ -54,6 +54,16 @@ public sealed class BetaUxGuiSmokeTests
 
     [GuiSmokeFact]
     [Trait("Category", "GuiSmoke")]
+    public Task Windows_GuiSmoke_BetaUx_ScreenShareViewer_TogglesVisibility_WhenScaffoldEnabled()
+        => GuiSmokeHarness.RunScenariosAsync(output, "screenshare_viewer_toggle");
+
+    [GuiSmokeFact]
+    [Trait("Category", "GuiSmoke")]
+    public Task Windows_GuiSmoke_BetaUx_ScreenShare_AndChat_Coexist_WhenScaffoldEnabled()
+        => GuiSmokeHarness.RunScenariosAsync(output, "screenshare_chat_coexistence");
+
+    [GuiSmokeFact]
+    [Trait("Category", "GuiSmoke")]
     public Task Windows_GuiSmoke_BetaUx_StatusTextGuardrails()
         => GuiSmokeHarness.RunScenariosAsync(output, "status_text_guardrails");
 }

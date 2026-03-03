@@ -30,7 +30,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
     private readonly BridgeSupervisor bridgeSupervisor;
     private readonly BridgeProtocolClient protocolClient;
     private readonly BridgeProtocolEventRouter protocolEventRouter;
-    private readonly ScreenShareFrameAssembler screenShareFrameAssembler = new();
+    private readonly ScreenShareFrameReassembler screenShareFrameReassembler = new();
 
     private readonly ConnectAttemptCoordinator connectAttempts = new();
     private TimeSpan? connectReadyTimeoutOverrideForTests;
@@ -111,6 +111,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
             onHelloOk: root => protocolEventRouter.HandleHelloOk(root),
             onPong: root => protocolEventRouter.HandlePong(root),
             onUnmatchedBridgeError: reason => SignalDisconnected("bridge_error:" + reason));
+
+        screenShareFrameReassembler.FrameReady += OnScreenShareFrameReady;
     }
 
     public string Address
@@ -128,14 +130,23 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
 
     internal event EventHandler<ScreenShareFrameChunkV1>? ScreenShareFrameChunkReceived
     {
-        add => screenShareFrameAssembler.ChunkReceived += value;
-        remove => screenShareFrameAssembler.ChunkReceived -= value;
+        add => screenShareFrameReassembler.ChunkAccepted += value;
+        remove => screenShareFrameReassembler.ChunkAccepted -= value;
     }
+
+    private event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompletedCore;
+    private event EventHandler<string>? ScreenShareStoppedCore;
 
     internal event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted
     {
-        add => screenShareFrameAssembler.FrameCompleted += value;
-        remove => screenShareFrameAssembler.FrameCompleted -= value;
+        add => ScreenShareFrameCompletedCore += value;
+        remove => ScreenShareFrameCompletedCore -= value;
+    }
+
+    internal event EventHandler<string>? ScreenShareStopped
+    {
+        add => ScreenShareStoppedCore += value;
+        remove => ScreenShareStoppedCore -= value;
     }
 
     public event EventHandler? Disconnected;
@@ -612,36 +623,45 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
 
     private bool TryHandleScreenSharePayload(byte[] payloadBytes)
     {
-        try
+        if (!ScreenSharePayloadCodec.TryDeserialize(payloadBytes, out var chunk))
         {
-            using var doc = JsonDocument.Parse(payloadBytes);
-            var root = doc.RootElement;
-            if (root.ValueKind != JsonValueKind.Object)
+            if (!ScreenSharePayloadCodec.TryDeserializeStop(payloadBytes, out var stop))
             {
                 return false;
             }
 
-            if (!TryGetString(root, "type", out var type) || string.IsNullOrWhiteSpace(type))
+            screenShareFrameReassembler.ClearSession(stop.SessionId);
+            try
             {
-                return false;
+                ScreenShareStoppedCore?.Invoke(this, stop.SessionId);
             }
-
-            if (!string.Equals(type, ScreenSharePayloadCodec.ScreenShareFrameTypeV1, StringComparison.Ordinal))
+            catch (Exception ex)
             {
-                return true;
+                Log($"Bridge screenshare stop dispatch failed ({ex.GetType().Name})");
             }
-
-            if (!ScreenSharePayloadCodec.TryDeserialize(payloadBytes, out var chunk))
-            {
-                return true;
-            }
-
-            screenShareFrameAssembler.OnChunk(chunk);
             return true;
         }
-        catch (JsonException)
+
+        screenShareFrameReassembler.OnChunk(chunk);
+        return true;
+    }
+
+    private void OnScreenShareFrameReady(object? sender, ScreenShareFrameReadyEventArgs e)
+    {
+        try
         {
-            return false;
+            ScreenShareFrameCompletedCore?.Invoke(
+                this,
+                new ScreenShareFrameCompletedEventArgs(
+                    e.FrameId,
+                    e.Width,
+                    e.Height,
+                    e.Encoding,
+                    e.EncodedFrameBytes));
+        }
+        catch (Exception ex)
+        {
+            Log($"Bridge screenshare frame dispatch failed ({ex.GetType().Name})");
         }
     }
 
@@ -658,6 +678,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         {
             return;
         }
+
+        screenShareFrameReassembler.ClearAll();
 
         if (!string.Equals(reason, "shutdown", StringComparison.OrdinalIgnoreCase))
         {

@@ -142,6 +142,8 @@ public sealed class ChatViewScrollTests : IClassFixture<ChatViewScrollFixture>
 
         public string ChatConnectionPillText => "Connected";
 
+        public bool ShowChatConnectionPill => true;
+
         public bool ShowChatNotice => false;
 
         public string ChatNoticeText => string.Empty;

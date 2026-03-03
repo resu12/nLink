@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using System.Reflection;
+using System.Threading;
 using NLink.App.Services.ScreenCapture;
 
 namespace NLink.SmokeTests;
@@ -8,7 +8,7 @@ public sealed class WindowsScreenCaptureSourceLifecycleTests
 {
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task WindowsScreenCaptureSource_StartStopDispose_IsIdempotent_AndStopsLogging()
+    public async Task WindowsScreenCaptureSource_StartStopDispose_IsIdempotent_AndStopsFrames()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -16,148 +16,149 @@ public sealed class WindowsScreenCaptureSourceLifecycleTests
         }
 
         await using var source = new WindowsScreenCaptureSource();
-        using var writer = new StringWriter();
-        using var listener = new TextWriterTraceListener(writer);
-        Trace.Listeners.Add(listener);
+        var firstFrameArrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var frameCount = 0;
 
+        source.FrameArrived += (_, _) =>
+        {
+            Interlocked.Increment(ref frameCount);
+            firstFrameArrived.TrySetResult(true);
+        };
+
+        await source.StartAsync(CancellationToken.None);
+        await WaitForFirstFrameAsync(firstFrameArrived.Task, () => Volatile.Read(ref frameCount));
+
+        await source.StopAsync();
+        var countAfterFirstStop = Volatile.Read(ref frameCount);
+        var stableAfterFirstStop = await WaitForStableValueAsync(
+            getValue: () => Volatile.Read(ref frameCount),
+            timeout: TimeSpan.FromSeconds(1),
+            pollInterval: TimeSpan.FromMilliseconds(50),
+            stableSamples: 5,
+            failureMessage: "Timed out waiting for frame count to stabilize after first StopAsync.");
+        Assert.Equal(countAfterFirstStop, stableAfterFirstStop);
+
+        await source.StopAsync();
+        var countAfterSecondStop = Volatile.Read(ref frameCount);
+        var stableAfterSecondStop = await WaitForStableValueAsync(
+            getValue: () => Volatile.Read(ref frameCount),
+            timeout: TimeSpan.FromSeconds(1),
+            pollInterval: TimeSpan.FromMilliseconds(50),
+            stableSamples: 5,
+            failureMessage: "Timed out waiting for frame count to stabilize after second StopAsync.");
+        Assert.Equal(countAfterSecondStop, stableAfterSecondStop);
+
+        await source.DisposeAsync();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => source.StartAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task WindowsScreenCaptureSource_StartStop_25Cycles_RemainsStable()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        await using var source = new WindowsScreenCaptureSource();
+        var frameCount = 0;
+        var firstFrameArrived = CreateFirstFrameSignal();
+
+        source.FrameArrived += (_, _) =>
+        {
+            Interlocked.Increment(ref frameCount);
+            firstFrameArrived.TrySetResult(true);
+        };
+
+        for (var cycle = 1; cycle <= 25; cycle++)
+        {
+            var countBeforeStart = Volatile.Read(ref frameCount);
+            if (firstFrameArrived.Task.IsCompleted)
+            {
+                firstFrameArrived = CreateFirstFrameSignal();
+            }
+
+            await source.StartAsync(CancellationToken.None);
+            await WaitForFirstFrameAsync(
+                firstFrameArrived.Task,
+                () => Volatile.Read(ref frameCount),
+                cycle,
+                TimeSpan.FromSeconds(cycle == 1 ? 2 : 1));
+
+            Assert.True(
+                Volatile.Read(ref frameCount) > countBeforeStart,
+                $"Expected at least one new frame during cycle {cycle}. Count before start={countBeforeStart}, current={Volatile.Read(ref frameCount)}.");
+
+            await source.StopAsync();
+            var countAfterStop = Volatile.Read(ref frameCount);
+            var stableAfterStop = await WaitForStableValueAsync(
+                getValue: () => Volatile.Read(ref frameCount),
+                timeout: TimeSpan.FromSeconds(1),
+                pollInterval: TimeSpan.FromMilliseconds(50),
+                stableSamples: 5,
+                failureMessage: $"Timed out waiting for frame count to stabilize after StopAsync in cycle {cycle}.");
+            Assert.Equal(countAfterStop, stableAfterStop);
+        }
+    }
+
+    private static TaskCompletionSource<bool> CreateFirstFrameSignal()
+        => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static async Task WaitForFirstFrameAsync(
+        Task firstFrameTask,
+        Func<int> getCurrentCount,
+        int? cycle = null,
+        TimeSpan? timeout = null)
+    {
         try
         {
-            await source.StartAsync(CancellationToken.None);
-            if (ShouldExpectScreenCaptureTraceLogs())
-            {
-                await WaitUntilAsync(
-                    condition: () => GetCurrentScreenCaptureLogLines(writer, listener).Count > 0,
-                    timeout: TimeSpan.FromSeconds(2),
-                    pollInterval: TimeSpan.FromMilliseconds(50),
-                    failureMessage: () => $"Expected capture logs after StartAsync. State: {DescribeLogState(writer, listener)}");
-            }
-
-            await source.StopAsync();
-            if (ShouldExpectScreenCaptureTraceLogs())
-            {
-                await WaitUntilAsync(
-                    condition: () => GetCurrentScreenCaptureLogLines(writer, listener)
-                        .Any(line => line.Contains("Capture loop stopped and resources released.", StringComparison.Ordinal)),
-                    timeout: TimeSpan.FromSeconds(2),
-                    pollInterval: TimeSpan.FromMilliseconds(50),
-                    failureMessage: () => $"Expected stop marker after first StopAsync. State: {DescribeLogState(writer, listener)}");
-            }
-
-            await WaitForStableLogCountAsync(
-                getCount: () => GetCurrentScreenCaptureLogLines(writer, listener).Count,
-                timeout: TimeSpan.FromSeconds(2),
-                pollInterval: TimeSpan.FromMilliseconds(50),
-                stablePolls: 5,
-                failureMessage: "Timed out waiting for screen-capture logs to stabilize after first StopAsync.");
-
-            await source.StopAsync();
-            var logAfterSecondStop = GetCurrentScreenCaptureLogLines(writer, listener);
-
-            await WaitForStableLogCountAsync(
-                getCount: () => GetCurrentScreenCaptureLogLines(writer, listener).Count,
-                timeout: TimeSpan.FromSeconds(2),
-                pollInterval: TimeSpan.FromMilliseconds(50),
-                stablePolls: 5,
-                failureMessage: "Timed out waiting for screen-capture logs to stabilize after second StopAsync.");
-
-            var logAfterWait = GetCurrentScreenCaptureLogLines(writer, listener);
-
-            await source.DisposeAsync();
-
-            await Assert.ThrowsAsync<ObjectDisposedException>(() => source.StartAsync(CancellationToken.None));
-
-            Assert.Equal(logAfterSecondStop, logAfterWait);
+            await firstFrameTask.WaitAsync(timeout ?? TimeSpan.FromSeconds(2));
         }
-        finally
+        catch (TimeoutException)
         {
-            Trace.Listeners.Remove(listener);
+            var cycleSuffix = cycle.HasValue ? $" in cycle {cycle.Value}" : string.Empty;
+            Assert.Fail($"Expected FrameArrived within {(timeout ?? TimeSpan.FromSeconds(2)).TotalSeconds:N0} seconds{cycleSuffix}. Last observed frame count={getCurrentCount()}.");
         }
     }
 
-    private static IReadOnlyList<string> GetCurrentScreenCaptureLogLines(StringWriter writer, TextWriterTraceListener listener)
-    {
-        listener.Flush();
-        return GetScreenCaptureLogLines(writer.ToString());
-    }
-
-    private static IReadOnlyList<string> GetScreenCaptureLogLines(string rawLogs)
-    {
-        return rawLogs
-            .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
-            .Where(line => line.Contains("[ScreenCapture]", StringComparison.Ordinal))
-            .ToArray();
-    }
-
-    private static bool ShouldExpectScreenCaptureTraceLogs()
-    {
-        var configuration = typeof(WindowsScreenCaptureSource).Assembly
-            .GetCustomAttribute<AssemblyConfigurationAttribute>()
-            ?.Configuration;
-
-        return string.Equals(configuration, "Debug", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static async Task WaitUntilAsync(
-        Func<bool> condition,
+    private static async Task<int> WaitForStableValueAsync(
+        Func<int> getValue,
         TimeSpan timeout,
         TimeSpan pollInterval,
-        Func<string> failureMessage)
-    {
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            if (condition())
-            {
-                return;
-            }
-
-            await Task.Delay(pollInterval);
-        }
-
-        Assert.True(condition(), failureMessage());
-    }
-
-    private static async Task WaitForStableLogCountAsync(
-        Func<int> getCount,
-        TimeSpan timeout,
-        TimeSpan pollInterval,
-        int stablePolls,
+        int stableSamples,
         string failureMessage)
     {
-        var deadline = DateTime.UtcNow + timeout;
+        var deadline = Stopwatch.StartNew();
         var samples = new List<int>();
         int? previous = null;
-        var stableCount = 0;
+        var consecutiveStableSamples = 0;
 
-        while (DateTime.UtcNow < deadline)
+        while (deadline.Elapsed < timeout)
         {
-            var current = getCount();
+            var current = getValue();
             samples.Add(current);
 
-            if (previous.HasValue && previous.Value == current)
+            if (previous == current)
             {
-                stableCount++;
+                consecutiveStableSamples++;
             }
             else
             {
-                stableCount = 1;
+                consecutiveStableSamples = 1;
             }
 
-            if (stableCount >= stablePolls)
+            if (consecutiveStableSamples >= stableSamples)
             {
-                return;
+                return current;
             }
 
             previous = current;
             await Task.Delay(pollInterval);
         }
 
-        Assert.Fail($"{failureMessage} Samples: {string.Join(", ", samples.TakeLast(10))}");
-    }
-
-    private static string DescribeLogState(StringWriter writer, TextWriterTraceListener listener)
-    {
-        var lines = GetCurrentScreenCaptureLogLines(writer, listener);
-        return $"count={lines.Count}; lastLines={string.Join(" | ", lines.TakeLast(5))}";
+        Assert.Fail($"{failureMessage} Last observed value={samples.LastOrDefault()}; samples={string.Join(", ", samples.TakeLast(10))}");
+        return samples.LastOrDefault();
     }
 }

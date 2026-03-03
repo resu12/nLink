@@ -16,13 +16,13 @@ public static class FeatureFlags
         ReadBoolEnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCAFFOLD", defaultValue: true);
 
     public static bool EnableScreenShareCapture { get; } =
-        ReadBoolEnvironmentOverride("NLINK_FEATURE_SCREENCAP_CAPTURE", defaultValue: false);
+        ReadBoolEnvironmentOverride("NLINK_FEATURE_SCREENCAP_CAPTURE", defaultValue: true);
 
     public static bool EnableScreenSharePreview { get; } =
-        ReadBoolEnvironmentOverride("NLINK_FEATURE_SCREENCAP_PREVIEW", defaultValue: false);
+        ReadBoolEnvironmentOverride("NLINK_FEATURE_SCREENCAP_PREVIEW", defaultValue: true);
 
     public static bool EnableScreenShareTransport { get; } =
-        ReadBoolEnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT", defaultValue: false);
+        ReadBoolEnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT", defaultValue: true);
 
     public static bool EnableSessionHeader { get; } =
         ReadBoolEnvironmentOverride("NLINK_FEATURE_SESSION_HEADER", defaultValue: true);

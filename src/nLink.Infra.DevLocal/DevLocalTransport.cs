@@ -285,14 +285,14 @@ public sealed class DevLocalTransport : ISignalingTransport
 
                 if (string.Equals(frame.Type, ApproveFrameType, StringComparison.Ordinal))
                 {
-                    Approved?.Invoke(this, EventArgs.Empty);
+                    SafeRaiseApproved();
                     continue;
                 }
 
                 if (string.Equals(frame.Type, RejectFrameType, StringComparison.Ordinal))
                 {
                     rejected = true;
-                    Rejected?.Invoke(this, EventArgs.Empty);
+                    SafeRaiseRejected();
                     connection.Dispose();
                     break;
                 }
@@ -301,7 +301,7 @@ public sealed class DevLocalTransport : ISignalingTransport
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes))
                     {
-                        ChatMessageReceived?.Invoke(this, new TransportChatMessageEventArgs(payloadBytes));
+                        SafeRaiseChatMessageReceived(payloadBytes);
                     }
 
                     continue;
@@ -350,7 +350,7 @@ public sealed class DevLocalTransport : ISignalingTransport
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes))
                     {
-                        ChatMessageReceived?.Invoke(this, new TransportChatMessageEventArgs(payloadBytes));
+                        SafeRaiseChatMessageReceived(payloadBytes);
                     }
 
                     continue;
@@ -372,19 +372,52 @@ public sealed class DevLocalTransport : ISignalingTransport
     private async Task ApproveHostJoinAsync(SessionConnection connection, CancellationToken ct)
     {
         await connection.WriteFrameAsync(new TransportFrame { Type = ApproveFrameType }, ct);
-        Approved?.Invoke(this, EventArgs.Empty);
+        SafeRaiseApproved();
     }
 
     private async Task RejectHostJoinAsync(SessionConnection connection, CancellationToken ct)
     {
         await connection.WriteFrameAsync(new TransportFrame { Type = RejectFrameType }, ct);
-        Rejected?.Invoke(this, EventArgs.Empty);
+        SafeRaiseRejected();
         connection.Dispose();
     }
 
     private void OnDisconnected()
     {
         Disconnected?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void SafeRaiseApproved()
+    {
+        try
+        {
+            Approved?.Invoke(this, EventArgs.Empty);
+        }
+        catch
+        {
+        }
+    }
+
+    private void SafeRaiseRejected()
+    {
+        try
+        {
+            Rejected?.Invoke(this, EventArgs.Empty);
+        }
+        catch
+        {
+        }
+    }
+
+    private void SafeRaiseChatMessageReceived(byte[] payloadBytes)
+    {
+        try
+        {
+            ChatMessageReceived?.Invoke(this, new TransportChatMessageEventArgs(payloadBytes));
+        }
+        catch
+        {
+        }
     }
 
     private void ThrowIfDisposed()

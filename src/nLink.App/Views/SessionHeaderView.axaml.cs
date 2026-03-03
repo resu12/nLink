@@ -1,6 +1,7 @@
 using System.Windows.Input;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Interactivity;
 namespace NLink.App.Views;
 
 public partial class SessionHeaderView : UserControl
@@ -13,6 +14,9 @@ public partial class SessionHeaderView : UserControl
     public static readonly StyledProperty<ICommand?> EndSessionCommandProperty =
         AvaloniaProperty.Register<SessionHeaderView, ICommand?>(nameof(EndSessionCommand));
 
+    public static readonly StyledProperty<bool> CanEndSessionProperty =
+        AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(CanEndSession), false);
+
     public static readonly StyledProperty<bool> ShowEndSessionProperty =
         AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(ShowEndSession), true);
 
@@ -24,6 +28,9 @@ public partial class SessionHeaderView : UserControl
 
     public static readonly StyledProperty<ICommand?> ScreenShareCommandProperty =
         AvaloniaProperty.Register<SessionHeaderView, ICommand?>(nameof(ScreenShareCommand));
+
+    public static readonly StyledProperty<string> ScreenShareButtonTextProperty =
+        AvaloniaProperty.Register<SessionHeaderView, string>(nameof(ScreenShareButtonText), "Share screen");
 
     public static readonly DirectProperty<SessionHeaderView, bool> HasRoleTextProperty =
         AvaloniaProperty.RegisterDirect<SessionHeaderView, bool>(
@@ -54,6 +61,12 @@ public partial class SessionHeaderView : UserControl
         set => SetValue(EndSessionCommandProperty, value);
     }
 
+    public bool CanEndSession
+    {
+        get => GetValue(CanEndSessionProperty);
+        set => SetValue(CanEndSessionProperty, value);
+    }
+
     public bool ShowEndSession
     {
         get => GetValue(ShowEndSessionProperty);
@@ -78,11 +91,28 @@ public partial class SessionHeaderView : UserControl
         set => SetValue(ScreenShareCommandProperty, value);
     }
 
+    public string ScreenShareButtonText
+    {
+        get => GetValue(ScreenShareButtonTextProperty);
+        set => SetValue(ScreenShareButtonTextProperty, value);
+    }
+
     public bool HasRoleText => hasRoleText;
 
     private void UpdateHasRoleText()
     {
         var next = !string.IsNullOrWhiteSpace(RoleText);
         SetAndRaise(HasRoleTextProperty, ref hasRoleText, next);
+    }
+
+    private void ShareScreenButton_Click(object? sender, RoutedEventArgs e)
+    {
+        var command = ScreenShareCommand;
+        if (command is null || !command.CanExecute(null))
+        {
+            return;
+        }
+
+        command.Execute(null);
     }
 }

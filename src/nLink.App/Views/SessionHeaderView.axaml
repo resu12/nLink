@@ -40,10 +40,11 @@
                    MaxLines="1"/>
 
         <Button Grid.Column="2"
+                x:Name="ShareScreenButton"
                 Classes="appButton secondaryButton"
                 AutomationProperties.AutomationId="SessionHeader.ShareScreen"
-                Content="Share screen"
-                Command="{Binding #Root.ScreenShareCommand}"
+                Content="{Binding #Root.ScreenShareButtonText}"
+                Click="ShareScreenButton_Click"
                 IsVisible="{Binding #Root.ShowScreenShare}"
                 HorizontalAlignment="Stretch"
                 Height="34"
@@ -54,6 +55,7 @@
                 Classes="appButton secondaryButton"
                 Content="End session"
                 Command="{Binding #Root.EndSessionCommand}"
+                IsEnabled="{Binding #Root.CanEndSession}"
                 IsVisible="{Binding #Root.ShowEndSession}"
                 HorizontalAlignment="Stretch"
                 Height="34"

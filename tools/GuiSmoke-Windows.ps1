@@ -14,8 +14,14 @@ Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public static class Win32GuiSmoke {
+    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
 }
 "@
 
@@ -223,6 +229,90 @@ function Wait-AutomationTextEquals {
     }
 }
 
+function Wait-AutomationElementVisibleState {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$AutomationId,
+        [Parameter(Mandatory = $true)][bool]$IsVisible,
+        [int]$TimeoutMs = 10000
+    )
+
+    $stateLabel = if ($IsVisible) { 'visible' } else { 'hidden' }
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage "Timed out waiting for $AutomationId to become $stateLabel." -Condition {
+        $element = Find-VisibleByAutomationId -Root $Window -AutomationId $AutomationId
+        if ($IsVisible) {
+            if ($element) { return $element }
+            return $null
+        }
+
+        if (-not $element) { return $true }
+        return $null
+    }
+}
+
+function Find-ScreenShareViewer {
+    param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window)
+
+    $viewer = Find-VisibleByAutomationId -Root $Window -AutomationId 'ScreenShare.Viewer'
+    if ($viewer) {
+        return $viewer
+    }
+
+    $placeholder = Find-VisibleByAutomationId -Root $Window -AutomationId 'PlaceholderText'
+    if ($placeholder) {
+        return $placeholder
+    }
+
+    $viewerMessage = Find-VisibleByAutomationId -Root $Window -AutomationId 'ScreenShare.ViewerMessage'
+    if ($viewerMessage) {
+        return $viewerMessage
+    }
+
+    return $null
+}
+
+function Wait-ScreenShareButtonText {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$ExpectedText,
+        [int]$TimeoutMs = 10000
+    )
+
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage "Timed out waiting for SessionHeader.ShareScreen text '$ExpectedText'." -Condition {
+        $button = Find-VisibleByAutomationId -Root $Window -AutomationId 'SessionHeader.ShareScreen'
+        if (-not $button -or -not $button.Current.IsEnabled) {
+            return $null
+        }
+
+        $text = (Get-ElementTextSafe -Element $button).Trim()
+        if ([string]::Equals($text, $ExpectedText, [System.StringComparison]::Ordinal)) {
+            return $button
+        }
+
+        return $null
+    }
+}
+
+function Wait-ScreenShareViewerVisibleState {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][bool]$IsVisible,
+        [int]$TimeoutMs = 10000
+    )
+
+    $stateLabel = if ($IsVisible) { 'visible' } else { 'hidden' }
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage "Timed out waiting for ScreenShare.Viewer to become $stateLabel." -Condition {
+        $viewer = Find-ScreenShareViewer -Window $Window
+        if ($IsVisible) {
+            if ($viewer) { return $viewer }
+            return $null
+        }
+
+        if (-not $viewer) { return $true }
+        return $null
+    }
+}
+
 function Get-ElementValueSafe {
     param([System.Windows.Automation.AutomationElement]$Element)
     if ($null -eq $Element) { return '' }
@@ -382,10 +472,27 @@ function Click-Element {
     }
     catch {}
 
+    try {
+        $window = Get-WindowElementByProcessId -ProcessId $Element.Current.ProcessId
+        if ($window) {
+            $windowHandle = [IntPtr]::new([int64]$window.Current.NativeWindowHandle)
+            [void][Win32GuiSmoke]::SetForegroundWindow($windowHandle)
+        }
+    }
+    catch {}
+
+    try {
+        $Element.SetFocus()
+        [System.Windows.Forms.SendKeys]::SendWait(' ')
+        return
+    }
+    catch {}
+
     $rect = $Element.Current.BoundingRectangle
     if ($rect.IsEmpty) { throw "Cannot click element without bounds." }
     [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point([int]($rect.Left + $rect.Width/2), [int]($rect.Top + $rect.Height/2))
-    [System.Windows.Forms.SendKeys]::SendWait(' ')
+    [Win32GuiSmoke]::mouse_event([Win32GuiSmoke]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+    [Win32GuiSmoke]::mouse_event([Win32GuiSmoke]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
 }
 
 function Test-ElementValueMatchesText {
@@ -419,7 +526,7 @@ function Test-ElementValueMatchesText {
     }
 }
 
-function Invoke-SendKeysTextDeterministic {
+function Invoke-SendKeysReplaceText {
     param(
         [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Element,
         [Parameter(Mandatory = $true)][string]$Text,
@@ -462,7 +569,7 @@ function Invoke-SendKeysTextDeterministic {
         })
     }
     catch {
-        throw "field did not accept text within $TimeoutMs ms. LastValue='$lastObservedValue'; LastComparable='$lastComparableValue'; Target='$Text'; ExpectedComparable='$expectedComparable'; Attempts=$attempts"
+        throw "field did not accept replacement text within $TimeoutMs ms. LastValue='$lastObservedValue'; LastComparable='$lastComparableValue'; Target='$Text'; ExpectedComparable='$expectedComparable'; Attempts=$attempts"
     }
 }
 
@@ -506,7 +613,7 @@ function Set-Text {
     if (-not $rect.IsEmpty) {
         [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point([int]($rect.Left + 10), [int]($rect.Top + $rect.Height/2))
     }
-    Invoke-SendKeysTextDeterministic -Element $Element -Text $Text -TimeoutMs 1000
+    Invoke-SendKeysReplaceText -Element $Element -Text $Text -TimeoutMs 1000
 }
 
 function Get-ClipboardTextSafe {
@@ -1666,6 +1773,99 @@ function Run-ScenarioScreenShareButtonVisibility {
     }
 }
 
+function Run-ScenarioScreenShareViewerToggle {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+
+    $previousScaffold = $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD
+    try {
+        $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD = '1'
+
+        Start-HelpeeFlow -Context $Context
+        Start-HelperFlow -Context $Context
+        [void](Connect-HelperAndHelpee -Context $Context)
+
+        $shareButton = Wait-Until -TimeoutMs 15000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee Share screen button for viewer toggle scenario.' -Condition {
+            $button = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'SessionHeader.ShareScreen'
+            if ($button -and $button.Current.IsEnabled) {
+                return $button
+            }
+
+            return $null
+        }
+
+        [void](Wait-ScreenShareViewerVisibleState -Window $Context.HelpeeWindow -IsVisible $false -TimeoutMs 5000)
+
+        Click-Element $shareButton
+        $shareButton = Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for screenshare start to succeed.' -Condition {
+            $error = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'ScreenShare.ViewerMessage'
+            if ($error) {
+                $message = (Get-ElementTextSafe -Element $error).Trim()
+                throw "Screen sharing failed to start: $message"
+            }
+
+            $button = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'SessionHeader.ShareScreen'
+            if ($button -and $button.Current.IsEnabled) {
+                $text = (Get-ElementTextSafe -Element $button).Trim()
+                if ([string]::Equals($text, 'Stop sharing', [System.StringComparison]::Ordinal)) {
+                    return $button
+                }
+            }
+
+            return $null
+        }
+
+        Click-Element $shareButton
+        [void](Wait-ScreenShareButtonText -Window $Context.HelpeeWindow -ExpectedText 'Share screen' -TimeoutMs 10000)
+        [void](Wait-ScreenShareViewerVisibleState -Window $Context.HelpeeWindow -IsVisible $false -TimeoutMs 10000)
+    }
+    finally {
+        if ($null -eq $previousScaffold) {
+            Remove-Item Env:NLINK_FEATURE_SCREENCAP_SCAFFOLD -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD = $previousScaffold
+        }
+    }
+}
+
+function Run-ScenarioScreenShareChatCoexistence {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+
+    $previousScaffold = $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD
+    try {
+        $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD = '1'
+
+        Start-HelpeeFlow -Context $Context
+        Start-HelperFlow -Context $Context
+        [void](Connect-HelperAndHelpee -Context $Context)
+
+        $shareButton = Wait-Until -TimeoutMs 15000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee Share screen button for chat coexistence scenario.' -Condition {
+            $button = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'SessionHeader.ShareScreen'
+            if ($button -and $button.Current.IsEnabled) { return $button }
+            return $null
+        }
+
+        Click-Element $shareButton
+        [void](Wait-ScreenShareViewerVisibleState -Window $Context.HelpeeWindow -IsVisible $true -TimeoutMs 10000)
+
+        $message = "screenshare chat coexist"
+        Send-ChatMessage -Window $Context.HelpeeWindow -Text $message
+        Wait-MessageVisible -Window $Context.HelperWindow -MessageText $message -TimeoutMs 10000
+        [void](Wait-AutomationTextEquals -Window $Context.HelperWindow -AutomationId 'SessionHeader.StatusText' -ExpectedText 'Connected' -TimeoutMs 5000)
+        [void](Wait-AutomationTextEquals -Window $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText' -ExpectedText 'Connected' -TimeoutMs 5000)
+    }
+    finally {
+        if ($null -eq $previousScaffold) {
+            Remove-Item Env:NLINK_FEATURE_SCREENCAP_SCAFFOLD -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD = $previousScaffold
+        }
+    }
+}
+
 function Get-ChildNodeProcesses {
     param([int]$ParentPid)
     try {
@@ -1760,8 +1960,10 @@ try {
             'END_SESSION_DISABLES_CHAT' { Invoke-Scenario -Name 'end_session_disables_chat' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioEndSessionDisablesChat -Context $ctx } }
             'HEADER_CHAT_COHERENCE' { Invoke-Scenario -Name 'header_chat_coherence' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioHeaderChatCoherence -Context $ctx } }
             'SCREENSHARE_BUTTON_VISIBILITY' { Invoke-Scenario -Name 'screenshare_button_visibility' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioScreenShareButtonVisibility -Context $ctx } }
+            'SCREENSHARE_VIEWER_TOGGLE' { Invoke-Scenario -Name 'screenshare_viewer_toggle' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioScreenShareViewerToggle -Context $ctx } }
+            'SCREENSHARE_CHAT_COEXISTENCE' { Invoke-Scenario -Name 'screenshare_chat_coexistence' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioScreenShareChatCoexistence -Context $ctx } }
             'STATUS_TEXT_GUARDRAILS' { Invoke-Scenario -Name 'status_text_guardrails' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioStatusTextGuardrails -Context $ctx } }
-            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M,HEADER_CHAT_COHERENCE,END_SESSION_DISABLES_CHAT,SCREENSHARE_BUTTON_VISIBILITY,STATUS_TEXT_GUARDRAILS." }
+            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M,HEADER_CHAT_COHERENCE,END_SESSION_DISABLES_CHAT,SCREENSHARE_BUTTON_VISIBILITY,SCREENSHARE_VIEWER_TOGGLE,SCREENSHARE_CHAT_COEXISTENCE,STATUS_TEXT_GUARDRAILS." }
         }
     }
 

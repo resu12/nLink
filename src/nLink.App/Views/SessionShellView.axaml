@@ -12,9 +12,11 @@
         <views:SessionHeaderView Grid.Row="0"
                                  StatusText="{ReflectionBinding HeaderStatusText}"
                                  EndSessionCommand="{ReflectionBinding EndSessionCommand}"
+                                 CanEndSession="{ReflectionBinding CanEndSession}"
                                  ShowEndSession="True"
                                  ShowScreenShare="{Binding #Root.EffectiveShowScreenShareAction}"
                                  ScreenShareCommand="{Binding #Root.ScreenShareCommand}"
+                                 ScreenShareButtonText="{Binding #Root.ScreenShareButtonText}"
                                  RoleText="{Binding #Root.RoleText}"
                                  IsVisible="{Binding #Root.UseSessionHeader}"/>
 

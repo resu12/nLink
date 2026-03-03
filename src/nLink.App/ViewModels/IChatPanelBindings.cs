@@ -9,6 +9,8 @@ public interface IChatPanelBindings
 
     string ChatConnectionPillText { get; }
 
+    bool ShowChatConnectionPill { get; }
+
     bool ShowChatNotice { get; }
 
     string ChatNoticeText { get; }

@@ -1,11 +1,16 @@
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Collections.Concurrent;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using Avalonia.Media.Imaging;
 using NLink.App;
 using NLink.App.Configuration;
 using NLink.App.Services;
+using NLink.App.Services.ScreenCapture;
 using NLink.App.ViewModels;
 using NLink.Core;
 using NLink.Core.Chat;
@@ -13,8 +18,10 @@ using NLink.Core.Logging;
 using NLink.Core.Metrics;
 using NLink.Core.Resources;
 using NLink.Core.Retry;
+using NLink.Core.ScreenShare;
 using NLink.Infra.DevLocal;
 using NLink.Infra.Nkn;
+using NLink.SmokeTests.Fakes;
 
 namespace NLink.SmokeTests;
 
@@ -22,10 +29,12 @@ public class SmokeTests
 {
     [Trait("Category", "Smoke")]
     [Fact]
-    public void FeatureFlags_DefaultsMatchBeta3UiRollout_WhenNoEnvironmentOverridesArePresent()
+    public void FeatureFlags_DefaultsMatchScreenShareReleaseRollout_WhenNoEnvironmentOverridesArePresent()
     {
         Assert.True(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NLINK_FEATURE_CHAT_HARDENING")));
         Assert.True(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD")));
+        Assert.True(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_CAPTURE")));
+        Assert.True(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_PREVIEW")));
         Assert.True(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT")));
         Assert.True(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NLINK_FEATURE_RESPONSIVE_LAYOUT")));
         Assert.True(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NLINK_FEATURE_SESSION_HEADER")));
@@ -33,7 +42,9 @@ public class SmokeTests
         Assert.True(FeatureFlags.EnableChatHardening);
         Assert.True(FeatureFlags.EnableResponsiveLayout);
         Assert.True(FeatureFlags.EnableScreenShareScaffold);
-        Assert.False(FeatureFlags.EnableScreenShareTransport);
+        Assert.True(FeatureFlags.EnableScreenShareCapture);
+        Assert.True(FeatureFlags.EnableScreenSharePreview);
+        Assert.True(FeatureFlags.EnableScreenShareTransport);
         Assert.True(FeatureFlags.EnableSessionHeader);
     }
 
@@ -1169,6 +1180,23 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void Program_Parses_ScreenShareSoak_Argument()
+    {
+        var programType = typeof(NLink.App.App).Assembly.GetType("NLink.App.Program");
+        Assert.NotNull(programType);
+
+        var method = programType!.GetMethod("HasScreenShareSoakArgument", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var hasSoak = (bool)method!.Invoke(null, new object[] { new[] { "--screenshare-soak" } })!;
+        var noSoak = (bool)method.Invoke(null, new object[] { new[] { "--something-else" } })!;
+
+        Assert.True(hasSoak);
+        Assert.False(noSoak);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void BenchmarkRunner_Parses_Defaults_And_Overrides()
     {
         Assert.True(BenchmarkRunner.TryParseOptionsForTests(new[] { "--bench" }, out var defaults, out var defaultError));
@@ -1227,6 +1255,26 @@ public class SmokeTests
         Assert.Contains("--bridge-reuse-mode", mappedArgs);
         Assert.Contains("persession", mappedArgs);
         Assert.Contains("--reliability-gate", mappedArgs);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void ScreenShareSoakRunner_Parses_Defaults_And_Overrides()
+    {
+        Assert.True(ScreenShareSoakRunner.TryParseOptionsForTests(new[] { "--screenshare-soak" }, out var defaults, out var defaultError));
+        Assert.NotNull(defaults);
+        Assert.Equal(string.Empty, defaultError);
+        Assert.Equal(TimeSpan.FromMinutes(5), defaults!.Duration);
+        Assert.Equal(TimeSpan.FromSeconds(5), defaults.SampleInterval);
+
+        Assert.True(ScreenShareSoakRunner.TryParseOptionsForTests(
+            new[] { "--screenshare-soak", "--seconds", "90", "--sample-interval-seconds", "15" },
+            out var custom,
+            out var customError));
+        Assert.NotNull(custom);
+        Assert.Equal(string.Empty, customError);
+        Assert.Equal(TimeSpan.FromSeconds(90), custom!.Duration);
+        Assert.Equal(TimeSpan.FromSeconds(15), custom.SampleInterval);
     }
 
     [Trait("Category", "Smoke")]
@@ -2213,6 +2261,61 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task DevLocalTransport_ChatSubscriberThrow_DoesNotDisconnectSession()
+    {
+        var code = CreateTestCode();
+        using var hostTransport = new DevLocalTransport();
+        using var helperTransport = new DevLocalTransport();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        IncomingJoinRequestEventArgs? pendingJoin = null;
+        var joinRaised = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hostReceived = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hostDisconnected = 0;
+        var helperDisconnected = 0;
+        var receiveAttempts = 0;
+
+        hostTransport.IncomingJoinRequest += (_, e) =>
+        {
+            pendingJoin = e;
+            joinRaised.TrySetResult();
+        };
+        hostTransport.Approved += (_, _) => hostApproved.TrySetResult();
+        helperTransport.Approved += (_, _) => helperApproved.TrySetResult();
+        hostTransport.Disconnected += (_, _) => Interlocked.Increment(ref hostDisconnected);
+        helperTransport.Disconnected += (_, _) => Interlocked.Increment(ref helperDisconnected);
+        hostTransport.ChatMessageReceived += (_, e) =>
+        {
+            if (Interlocked.Increment(ref receiveAttempts) == 1)
+            {
+                throw new InvalidOperationException("boom");
+            }
+
+            hostReceived.TrySetResult(Encoding.UTF8.GetString(e.Payload));
+        };
+
+        _ = hostTransport.HostAsync(code, cts.Token);
+        await helperTransport.JoinAsync(code, cts.Token).WaitAsync(TimeSpan.FromSeconds(3));
+        await joinRaised.Task.WaitAsync(cts.Token);
+
+        await pendingJoin!.ApproveAsync(cts.Token);
+        await helperApproved.Task.WaitAsync(cts.Token);
+        await hostApproved.Task.WaitAsync(cts.Token);
+
+        await helperTransport.SendChatMessageAsync(Encoding.UTF8.GetBytes("first"), cts.Token);
+        await helperTransport.SendChatMessageAsync(Encoding.UTF8.GetBytes("second"), cts.Token);
+
+        var received = await hostReceived.Task.WaitAsync(cts.Token);
+        Assert.Equal("second", received);
+        Assert.Equal(2, Volatile.Read(ref receiveAttempts));
+        Assert.Equal(0, Volatile.Read(ref hostDisconnected));
+        Assert.Equal(0, Volatile.Read(ref helperDisconnected));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task SessionChatService_ValidReceivedPayload_IncrementsChatReceived()
     {
         ChatRuntimeCounters.ResetForTests();
@@ -2289,6 +2392,96 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task ScreenShareAndChat_Coexist_WithoutStarvingChatProcessing()
+    {
+        ChatRuntimeCounters.ResetForTests();
+
+        var network = new FakeSessionTransportNetwork();
+        using var hostTransport = network.CreateTransport("helpee");
+        using var helperTransport = network.CreateTransport("helper");
+        using var helpeeChat = new SessionChatService(() => new DateTimeOffset(2026, 3, 3, 18, 0, 0, TimeSpan.Zero));
+        using var helperChat = new SessionChatService(() => new DateTimeOffset(2026, 3, 3, 18, 0, 5, TimeSpan.Zero));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var screenShareClock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 3, 18, 0, 0, TimeSpan.Zero));
+        var reassembler = new ScreenShareFrameReassembler();
+        var receivedChatTexts = new ConcurrentQueue<string>();
+        var allChatReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completedFrameCount = 0;
+
+        helpeeChat.AttachTransport(hostTransport);
+        helperChat.AttachTransport(helperTransport);
+        helpeeChat.MessageReceived += (_, e) =>
+        {
+            receivedChatTexts.Enqueue(e.Message.Text);
+            if (receivedChatTexts.Count >= 50)
+            {
+                allChatReceived.TrySetResult();
+            }
+        };
+        reassembler.FrameReady += (_, _) => Interlocked.Increment(ref completedFrameCount);
+
+        IncomingJoinRequestEventArgs? pendingJoin = null;
+        var joinRaised = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        hostTransport.IncomingJoinRequest += (_, e) =>
+        {
+            pendingJoin = e;
+            joinRaised.TrySetResult();
+        };
+
+        var code = CreateTestCode();
+        _ = hostTransport.HostAsync(code, cts.Token);
+        await helperTransport.JoinAsync(code, cts.Token).WaitAsync(TimeSpan.FromSeconds(2));
+        await joinRaised.Task.WaitAsync(cts.Token);
+        await pendingJoin!.ApproveAsync(cts.Token);
+        await WaitUntilAsync(() => helperChat.IsApproved && helpeeChat.IsApproved, TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(() => helperChat.HasSessionKey && helpeeChat.HasSessionKey, TimeSpan.FromSeconds(2));
+
+        await using var pipeline = new ScreenShareFrameSendPipeline(
+            sendChunkAsync: async (chunk, _) =>
+            {
+                reassembler.OnChunk(chunk);
+                await Task.Yield();
+            },
+            capacity: ScreenShareFrameSendPipeline.MaxBufferedFrames,
+            clock: screenShareClock);
+
+        var chatTask = Task.WhenAll(
+            Enumerable.Range(0, 50).Select(i => helperChat.TrySendTextAsync($"chat-{i:D2}", cts.Token)));
+        var screenShareTask = Task.Run(async () =>
+        {
+            for (var i = 0; i < 5; i++)
+            {
+                screenShareClock.Advance(TimeSpan.FromMilliseconds(125));
+                await pipeline.EnqueueFrameAsync(
+                    sessionId: "session-chat-share",
+                    width: 640 + i,
+                    height: 360 + i,
+                    encoding: "jpeg",
+                    encodedFrameBytes: new byte[] { (byte)(i + 1), (byte)(i + 2), (byte)(i + 3) },
+                    timestampUnixMilliseconds: 1000 + i,
+                    cancellationToken: cts.Token);
+                await Task.Yield();
+            }
+        }, cts.Token);
+
+        await Task.WhenAll(chatTask, screenShareTask);
+        await allChatReceived.Task.WaitAsync(cts.Token);
+        await WaitUntilAsync(() => Volatile.Read(ref completedFrameCount) >= 1, TimeSpan.FromSeconds(2));
+
+        Assert.Equal(50, receivedChatTexts.Count);
+        Assert.True(Volatile.Read(ref completedFrameCount) >= 1);
+        Assert.DoesNotContain(chatTask.Result, record => record is null);
+
+        var senderMetrics = pipeline.GetMetricsSnapshot();
+        Assert.Equal(50, ChatRuntimeCounters.Snapshot().ChatReceived);
+        Assert.Equal(5, senderMetrics.FramesCaptured);
+        Assert.True(senderMetrics.FramesQueued >= 1);
+        Assert.True(senderMetrics.ChunksSent >= 1);
+        Assert.True(reassembler.GetMetricsSnapshot().FramesCompleted >= 1);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task ViewModelFlow_HelpeeApproves_HelperAndHelpeeReachConnectedState()
     {
         var transportConfig = CreateDevLocalTestConfig();
@@ -2334,6 +2527,77 @@ public class SmokeTests
         SetPrivateField(helper, "statusText", string.Empty);
         Assert.Equal("Ready", helper.HeaderStatusText);
         Assert.False(string.IsNullOrWhiteSpace(helper.HeaderStatusText));
+
+        SetPrivateField(helper, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateField(helper.ScreenShareViewer, "isActive", true);
+        Assert.Equal("Connected • Screen sharing", helper.HeaderStatusText);
+        Assert.False(helper.ShowChatConnectionPill);
+
+        SetPrivateField(helper, "effectivePhase", SessionUiPhase.Recovering);
+        Assert.Equal("Reconnecting… • Screen sharing", helper.HeaderStatusText);
+        Assert.False(helper.ShowChatConnectionPill);
+
+        SetPrivateField(helper, "effectivePhase", SessionUiPhase.Failed);
+        SetPrivateField(helper, "failureTitle", "Connection failed");
+        Assert.Equal("Connection failed", helper.HeaderStatusText);
+        Assert.True(helper.ShowChatConnectionPill);
+
+        SetPrivateField(helper, "failureTitle", string.Empty);
+        SetPrivateField(helper, "statusText", "The other person ended the session.");
+        SetPrivateField(helper, "effectivePhase", SessionUiPhase.Ended);
+        Assert.Equal("The other person ended the session.", helper.HeaderStatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperPageViewModel_TransientStatusPanel_HidesWhenItDuplicatesHeader()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        SetPrivateField(helper, "effectivePhase", SessionUiPhase.Connecting);
+        SetPrivateField(helper, "showTransientBanner", true);
+        SetPrivateField(helper, "transientBannerText", "Connecting…");
+
+        Assert.False(helper.ShowTransientStatusPanel);
+
+        SetPrivateField(helper, "transientBannerText", "Trying bridge fallback");
+        Assert.True(helper.ShowTransientStatusPanel);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperPageViewModel_RemoteEnd_UsesSessionEndedCopy_NotConnectionFailed()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        SetPrivateField(helper, "wasConnected", true);
+        SetPrivateField(helperRuntime, "state", SessionRuntimeState.Failed);
+        SetPrivateField(helperRuntime, "statusText", "The other person ended the session.");
+        SetPrivateField(helperRuntime, "lastDisconnectWasRemoteEnd", true);
+
+        InvokePrivateMethod(helper, "SyncFromRuntime");
+
+        Assert.Equal("The other person ended the session.", helper.StatusText);
+        Assert.Equal("Idle", helper.ConnectionState);
+        Assert.Equal("The other person ended the session.", helper.HeaderStatusText);
+        Assert.False(helper.ShowFailurePanel);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionUxPhaseMapper_SessionEndedBannerStatus_MapsToEndedPhase()
+    {
+        var status = new UserFacingStatus(
+            UserStatusKind.Failed,
+            "Session ended",
+            "The other person ended the session.",
+            FailureSeverity.Error);
+
+        Assert.Equal(SessionUiPhase.Ended, SessionUxPhaseMapper.FromBannerStatus(status));
     }
 
     [Trait("Category", "Smoke")]
@@ -2352,6 +2616,130 @@ public class SmokeTests
         SetPrivateField(helpee, "connectionStatus", string.Empty);
         Assert.Equal("Ready", helpee.HeaderStatusText);
         Assert.False(string.IsNullOrWhiteSpace(helpee.HeaderStatusText));
+
+        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateField(helpee, "isScreenSharingPreviewActive", false);
+        Assert.Equal("Connected", helpee.HeaderStatusText);
+        Assert.False(helpee.ShowChatConnectionPill);
+
+        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateField(helpee, "isScreenSharingPreviewActive", true);
+        Assert.Equal("Connected • Viewing screen", helpee.HeaderStatusText);
+        Assert.False(helpee.ShowChatConnectionPill);
+
+        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connecting);
+        Assert.Equal("Connecting… • Viewing screen", helpee.HeaderStatusText);
+        Assert.False(helpee.ShowChatConnectionPill);
+
+        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Failed);
+        SetPrivateField(helpee, "failureTitle", "Connection failed");
+        Assert.Equal("Connection failed", helpee.HeaderStatusText);
+        Assert.True(helpee.ShowChatConnectionPill);
+
+        SetPrivateField(helpee, "failureTitle", string.Empty);
+        SetPrivateField(helpee, "connectionStatus", "The helper ended the session.");
+        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Ended);
+        Assert.Equal("The helper ended the session.", helpee.HeaderStatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeePageViewModel_TransientStatusPanel_HidesWhenItDuplicatesHeader()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+
+        SetPrivateField(helpee, "connectionStatus", "Waiting for helper…");
+        SetPrivateField(helpee, "showTransientBanner", true);
+        SetPrivateField(helpee, "transientBannerText", "Waiting for helper…");
+
+        Assert.False(helpee.ShowTransientStatusPanel);
+
+        SetPrivateField(helpee, "transientBannerText", "Recovering session");
+        Assert.True(helpee.ShowTransientStatusPanel);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeePageViewModel_PreviewFrames_DoNotReRaiseShellVisibility_WhenVisibilityStaysTrue()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        var visibilityChangedCount = 0;
+
+        helpee.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(HelpeePageViewModel.ShowScreenSharePreviewFrame))
+            {
+                visibilityChangedCount++;
+            }
+        };
+
+        SetPrivateField(
+            helpee,
+            "screenSharePreviewStatus",
+            new ScreenShareStatus(ScreenShareState.Active, null, DateTimeOffset.UtcNow));
+
+        SetPrivateProperty(helpee, "ScreenSharePreviewFrame", CreateTestBitmap(1, 1));
+        SetPrivateProperty(helpee, "ScreenSharePreviewFrame", CreateTestBitmap(2, 1));
+
+        Assert.True(helpee.ShowScreenSharePreviewFrame);
+        Assert.Equal(1, visibilityChangedCount);
+
+        SetPrivateProperty(helpee, "ScreenSharePreviewFrame", null);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperPageViewModel_RemoteFrames_DoNotReRaiseShellVisibility_WhenVisibilityStaysTrue()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+        var visibilityChangedCount = 0;
+
+        helper.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(HelperPageViewModel.ShowRemoteScreenShareFrame))
+            {
+                visibilityChangedCount++;
+            }
+        };
+
+        SetPrivateField(helper.ScreenShareViewer, "isActive", true);
+        SetPrivateField(helper.ScreenShareViewer, "currentFrame", CreateTestBitmap(1, 1));
+        InvokePrivateMethod(helper, "OnScreenShareViewerPropertyChanged", helper.ScreenShareViewer, new PropertyChangedEventArgs(nameof(ScreenShareViewerViewModel.CurrentFrame)));
+
+        SetPrivateField(helper.ScreenShareViewer, "currentFrame", CreateTestBitmap(2, 1));
+        InvokePrivateMethod(helper, "OnScreenShareViewerPropertyChanged", helper.ScreenShareViewer, new PropertyChangedEventArgs(nameof(ScreenShareViewerViewModel.CurrentFrame)));
+
+        Assert.True(helper.ShowRemoteScreenShareFrame);
+        Assert.Equal(1, visibilityChangedCount);
+
+        SetPrivateField(helper.ScreenShareViewer, "currentFrame", null);
+        SetPrivateField(helper.ScreenShareViewer, "isActive", false);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperPageViewModel_ScreenShareStopped_ClearsRemoteViewer()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        SetPrivateField(helper.ScreenShareViewer, "isActive", true);
+        SetPrivateField(helper.ScreenShareViewer, "currentFrame", CreateTestBitmap(1, 1));
+        InvokePrivateMethod(helper, "OnScreenShareViewerPropertyChanged", helper.ScreenShareViewer, new PropertyChangedEventArgs(nameof(ScreenShareViewerViewModel.CurrentFrame)));
+
+        Assert.True(helper.ShowRemoteScreenShareFrame);
+
+        InvokePrivateMethod(helper, "OnScreenShareStopped", helperRuntime, EventArgs.Empty);
+
+        Assert.False(helper.ShowRemoteScreenShareFrame);
+        Assert.Null(helper.RemoteScreenShareFrame);
     }
 
     [Trait("Category", "Smoke")]
@@ -2412,7 +2800,7 @@ public class SmokeTests
                   helper.IsChatInputEnabled,
             TimeSpan.FromSeconds(5));
 
-        Assert.Equal("Connected", helper.HeaderStatusText);
+        Assert.StartsWith("Connected", helper.HeaderStatusText);
         Assert.Equal("Connected", helper.ChatConnectionPillText);
         Assert.True(helper.IsChatInputEnabled);
 
@@ -2461,6 +2849,133 @@ public class SmokeTests
         Assert.False(helper.IsChatInputEnabled);
         Assert.False(helper.CanEndSession);
         Assert.False(string.IsNullOrWhiteSpace(helper.HeaderStatusText));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperPageViewModel_EndSession_DeactivatesViewer_AndResetsSession()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: () => _ = helpeeRuntime.DisconnectAsync(),
+            transportConfig,
+            helpeeRuntime);
+        using var helper = new HelperPageViewModel(
+            cancelAction: () => _ = helperRuntime.DisconnectAsync(),
+            transportConfig,
+            helperRuntime);
+
+        helper.CodeInput = helpee.ShareCode;
+        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+
+        await WaitUntilAsync(
+            () => helpee.HasIncomingRequest && helpee.ConnectionState == "IncomingRequest",
+            TimeSpan.FromSeconds(5));
+
+        helpee.AllowCommand.Execute(null);
+        await connectTask;
+
+        await WaitUntilAsync(
+            () => helper.EffectivePhase == SessionUiPhase.Connected &&
+                  helper.IsChatInputEnabled &&
+                  helper.CanEndSession,
+            TimeSpan.FromSeconds(5));
+
+        SetPrivateField(helper.ScreenShareViewer, "isActive", true);
+        Assert.True(helper.ScreenShareViewer.IsActive);
+
+        helper.EndSessionCommand.Execute(null);
+
+        await WaitUntilAsync(
+            () => !helper.ScreenShareViewer.IsActive &&
+                  !helper.IsChatInputEnabled &&
+                  helperRuntime.State == SessionRuntimeState.Idle,
+            TimeSpan.FromSeconds(5));
+
+        Assert.False(helper.CanEndSession);
+        Assert.False(helper.ShowRemoteScreenShareFrame);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_EndSession_StopsPreviewCapture_AndClearsPreviewState()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var runtime = new SessionRuntime(() => new DevLocalTransport());
+        var fakeSource = new FakeScreenCaptureSource();
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            screenCaptureSourceFactory: new FixedCaptureSourceFactory(fakeSource));
+        using var previewCts = new CancellationTokenSource();
+
+        var coordinatorField = typeof(HelpeePageViewModel).GetField("screenShareCoordinator", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(coordinatorField);
+        var coordinator = coordinatorField!.GetValue(helpee);
+        Assert.NotNull(coordinator);
+
+        SetPrivateField(helpee, "connectionState", "Connected");
+        SetPrivateField(helpee, "wasConnected", true);
+        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateField(helpee, "isScreenSharingPreviewActive", true);
+        SetPrivateField(
+            helpee,
+            "screenSharePreviewStatus",
+            new ScreenShareStatus(ScreenShareState.Active, null, DateTimeOffset.UtcNow));
+        SetPrivateFieldDynamic(coordinator!, "screenSharePreviewCaptureSource", fakeSource);
+        SetPrivateFieldDynamic(coordinator!, "screenSharePreviewCts", previewCts);
+
+        helpee.EndSessionCommand.Execute(null);
+
+        await WaitUntilAsync(
+            () => !helpee.IsScreenSharingPreviewActive &&
+                  helpee.ScreenSharePreviewStatus.State == ScreenShareState.Off,
+            TimeSpan.FromSeconds(2));
+
+        Assert.True(fakeSource.StopCallCount >= 1);
+        Assert.True(fakeSource.DisposeCallCount >= 1);
+        Assert.False(fakeSource.IsStarted);
+        Assert.False(helpee.CanEndSession);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_SendChatFailure_RestoresDraft_AndKeepsSessionConnected()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var scripted = new ScriptedSignalingTransport(
+            onSendChatAsync: static (_, _) => throw new TimeoutException("Ack was not received."));
+        using var runtime = new SessionRuntime(() => scripted);
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, runtime);
+
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "role", SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+
+        var chatServiceField = typeof(SessionRuntime).GetField("chatService", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(chatServiceField);
+        var chatService = chatServiceField!.GetValue(runtime);
+        Assert.NotNull(chatService);
+        SetPrivateFieldDynamic(chatService!, "transport", scripted);
+        SetPrivateFieldDynamic(chatService!, "sessionKey", Enumerable.Repeat((byte)7, 32).ToArray());
+        SetPrivateFieldDynamic(chatService!, "isApproved", true);
+
+        SetPrivateField(helpee, "isChatInputEnabled", true);
+        SetPrivateField(helpee, "connectionState", "Connected");
+        SetPrivateField(helpee, "connectionStatus", "Connected");
+        helpee.ChatDraft = "hello during screenshare";
+
+        var sendTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helpee, "SendChatAsync"));
+        await sendTask;
+
+        Assert.Equal("hello during screenshare", helpee.ChatDraft);
+        Assert.Empty(helpee.ChatMessages);
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal("Connected", runtime.StatusText);
     }
 
     [Trait("Category", "Smoke")]
@@ -3026,6 +3541,50 @@ public class SmokeTests
 
         Assert.Equal("No response yet.", runtime.StatusText);
         Assert.Equal(SessionRuntimeState.Failed, runtime.State);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_TransportApproved_DoesNotAutoStartTransportScreenShare()
+    {
+        using var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted);
+
+        runtime.SetRoleForTests(SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connecting);
+        SetPrivateField(runtime, "statusText", "Connecting…");
+
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal("Connected", runtime.StatusText);
+        Assert.False(runtime.IsTransportScreenShareActiveForTests);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_TransportDisconnect_DisablesScreenShareAutoStart_ForLaterApproval()
+    {
+        using var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted);
+
+        runtime.SetRoleForTests(SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+
+        Assert.True(runtime.CanAutoStartTransportScreenShareForTests);
+
+        InvokePrivateMethod(runtime, "OnTransportDisconnected", scripted, EventArgs.Empty);
+
+        Assert.False(runtime.CanAutoStartTransportScreenShareForTests);
+
+        InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
+
+        Assert.False(runtime.CanAutoStartTransportScreenShareForTests);
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal("Connected", runtime.StatusText);
     }
 
     [Trait("Category", "Smoke")]
@@ -4793,11 +5352,25 @@ rl.on('line', (line) => {
         field!.SetValue(target, value);
     }
 
+    private static void SetPrivateFieldDynamic(object target, string fieldName, object? value)
+    {
+        var field = target.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        field!.SetValue(target, value);
+    }
+
     private static object? InvokePrivateMethod(object target, string methodName, params object?[] args)
     {
         var method = target.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(method);
         return method!.Invoke(target, args);
+    }
+
+    private static void SetPrivateProperty(object target, string propertyName, object? value)
+    {
+        var property = target.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        Assert.NotNull(property);
+        property!.SetValue(target, value);
     }
 
     private static bool InvokeCanEndForPhase(Type viewModelType, SessionUiPhase phase)
@@ -4833,6 +5406,13 @@ rl.on('line', (line) => {
         var buffer = new byte[length];
         Array.Copy(source, buffer, length);
         return buffer;
+    }
+
+    private static Bitmap CreateTestBitmap(int width, int height)
+    {
+        _ = width;
+        _ = height;
+        return (Bitmap)RuntimeHelpers.GetUninitializedObject(typeof(Bitmap));
     }
 
     private static byte[] CreateEncryptedChatEnvelopeBytes(
@@ -5035,6 +5615,18 @@ rl.on('line', (line) => {
         }
     }
 
+    private sealed class FixedCaptureSourceFactory : IScreenCaptureSourceFactory
+    {
+        private readonly IScreenCaptureSource source;
+
+        public FixedCaptureSourceFactory(IScreenCaptureSource source)
+        {
+            this.source = source;
+        }
+
+        public IScreenCaptureSource Create() => source;
+    }
+
     private sealed class ControlledDelayScheduler
     {
         private readonly object gate = new();
@@ -5083,6 +5675,23 @@ rl.on('line', (line) => {
             }
 
             throw new InvalidOperationException("No pending delay task to complete.");
+        }
+    }
+
+    private sealed class FakeScreenShareClock : IScreenShareClock
+    {
+        private DateTimeOffset utcNow;
+
+        public FakeScreenShareClock(DateTimeOffset initialUtcNow)
+        {
+            utcNow = initialUtcNow;
+        }
+
+        public DateTimeOffset UtcNow => utcNow;
+
+        public void Advance(TimeSpan by)
+        {
+            utcNow = utcNow.Add(by);
         }
     }
 

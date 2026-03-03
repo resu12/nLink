@@ -26,6 +26,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
     private readonly INknClient client;
     private readonly LruMessageIdCache seenMessageIds = new(500);
     private readonly ConcurrentDictionary<string, PendingAckWait> pendingAcks = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim outboundSendGate = new(1, 1);
     private readonly object gate = new();
 
     private SessionCode? currentCode;
@@ -81,6 +82,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
     internal event EventHandler<BridgeLifecycleEvent>? BridgeLifecycle;
     internal event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
+    internal event EventHandler? ScreenShareStopped;
 
     public bool CanSendSessionEnd => !disposed && currentCode is not null && !string.IsNullOrWhiteSpace(remoteEndpoint);
 
@@ -141,6 +143,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
         {
             realClient.BridgeLifecycle -= OnBridgeLifecycle;
             realClient.ScreenShareFrameCompleted -= OnScreenShareFrameCompleted;
+            realClient.ScreenShareStopped -= OnScreenShareStopped;
         }
 
         CleanupAsync().GetAwaiter().GetResult();
@@ -316,6 +319,42 @@ public sealed class NknSignalingTransport : ISignalingTransport
         Log($"SendChatMessageAsync sent Chat with Ack (payload_len={payload.Length}, msg_id={envelope.MessageId})");
     }
 
+    internal async Task SendScreenSharePayloadAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
+    {
+        ThrowIfDisposed();
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        var destination = remoteEndpoint;
+        if (string.IsNullOrWhiteSpace(destination))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_no_remote_endpoint");
+            Log($"SendScreenSharePayloadAsync failed (payload_len={payload.Length}, reason=no_remote_endpoint)");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        if (!await outboundSendGate.WaitAsync(0, ct).ConfigureAwait(false))
+        {
+            Log($"SendScreenSharePayloadAsync dropped (payload_len={payload.Length}, reason=outbound_busy)");
+            return;
+        }
+
+        try
+        {
+            await client.SendAsync(destination, payload.ToArray(), ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            outboundSendGate.Release();
+        }
+
+        Log($"SendScreenSharePayloadAsync sent screenshare payload (payload_len={payload.Length})");
+    }
+
     public async Task SendSessionEndAsync(CancellationToken ct)
     {
         ThrowIfDisposed();
@@ -350,6 +389,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
         {
             realClient.BridgeLifecycle += OnBridgeLifecycle;
             realClient.ScreenShareFrameCompleted += OnScreenShareFrameCompleted;
+            realClient.ScreenShareStopped += OnScreenShareStopped;
         }
     }
 
@@ -361,6 +401,11 @@ public sealed class NknSignalingTransport : ISignalingTransport
     private void OnScreenShareFrameCompleted(object? sender, ScreenShareFrameCompletedEventArgs e)
     {
         ScreenShareFrameCompleted?.Invoke(this, e);
+    }
+
+    private void OnScreenShareStopped(object? sender, string sessionId)
+    {
+        ScreenShareStopped?.Invoke(this, EventArgs.Empty);
     }
 
     private void OnClientDisconnected(object? sender, EventArgs e)
@@ -856,8 +901,16 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
         try
         {
+            await outboundSendGate.WaitAsync(ct).ConfigureAwait(false);
             NknRuntimeDiagnostics.IncrementMessagesSent();
-            await client.PublishAsync(BuildPresenceTopic(envelope.Code), bytes, ct);
+            try
+            {
+                await client.PublishAsync(BuildPresenceTopic(envelope.Code), bytes, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                outboundSendGate.Release();
+            }
             Log($"Envelope published (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
         }
         catch (Exception ex)
@@ -874,8 +927,16 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
         try
         {
+            await outboundSendGate.WaitAsync(ct).ConfigureAwait(false);
             NknRuntimeDiagnostics.IncrementMessagesSent();
-            await client.SendAsync(destination, bytes, ct);
+            try
+            {
+                await client.SendAsync(destination, bytes, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                outboundSendGate.Release();
+            }
             Log($"Envelope sent (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
         }
         catch (Exception ex)
@@ -915,7 +976,10 @@ public sealed class NknSignalingTransport : ISignalingTransport
                     {
                         NknRuntimeDiagnostics.SetLastError("ack_timeout");
                         Log($"Ack timeout (msg_id={envelope.MessageId}, type={envelope.Type}, attempts={attempt + 1})");
-                        Disconnected?.Invoke(this, EventArgs.Empty);
+                        if (envelope.Type != MsgType.Chat)
+                        {
+                            Disconnected?.Invoke(this, EventArgs.Empty);
+                        }
                         throw new TimeoutException("Ack was not received.");
                     }
 

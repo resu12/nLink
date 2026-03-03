@@ -9,7 +9,6 @@ using Avalonia.Media.Imaging;
 using CommunityToolkit.Mvvm.Input;
 using NLink.App.Configuration;
 using NLink.App.Services;
-using NLink.App.Services.ScreenCapture;
 using NLink.App.Threading;
 using NLink.Core;
 using NLink.Core.Chat;
@@ -34,7 +33,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly IClipboardService? clipboardService;
     private readonly ShareMessageConfig shareMessageConfig;
     private readonly SessionUiStateStore? uiStateStore;
-    private readonly HelperScreenShareCoordinator screenShareCoordinator;
 
     private string codeInput = string.Empty;
     private string statusText = string.Empty;
@@ -70,7 +68,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private SessionEndReason? endReason;
     private bool endSessionRequested;
     private bool endSessionCancelInvoked;
-    private Bitmap? remoteScreenShareFrame;
     private CancellationTokenSource? connectCts;
     private readonly InlineTransientText copyFeedback = new();
     private readonly Func<DateTimeOffset> nowProvider;
@@ -80,6 +77,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private TaskCompletionSource<HelperConnectOutcome>? connectOutcome;
     private SessionReliabilityAttempt? reliabilityAttempt;
     private SessionUiPhase lastObservedUiPhase;
+    private SessionUiPhase fallbackUiPhase;
+    private bool lastKnownShowRemoteScreenShareFrame;
+    private bool lastKnownShowHelperMainContent = true;
+    private string lastKnownHeaderStatusText = "Ready";
     private bool disposed;
 
     public HelperPageViewModel(
@@ -110,11 +111,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         this.connectFailureCooldown = connectFailureCooldown ?? DefaultConnectFailureCooldown;
         this.nowProvider = nowProvider ?? (() => DateTimeOffset.UtcNow);
         lastObservedUiPhase = uiStateStore?.Phase ?? SessionUiPhase.Idle;
-        screenShareCoordinator = new HelperScreenShareCoordinator(
-            isDisposed: () => disposed,
-            isTransportEnabled: () => FeatureFlags.EnableScreenShareTransport,
-            getRemoteFrame: () => remoteScreenShareFrame,
-            setRemoteFrame: frame => RemoteScreenShareFrame = frame);
+        fallbackUiPhase = lastObservedUiPhase;
+        ScreenShareViewer = new ScreenShareViewerViewModel();
+        lastKnownShowRemoteScreenShareFrame = ShowRemoteScreenShareFrame;
+        lastKnownShowHelperMainContent = ShowHelperMainContent;
+        lastKnownHeaderStatusText = HeaderStatusText;
 
         ChatMessages = new ObservableCollection<ChatLineViewModel>();
 
@@ -124,11 +125,13 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.Rejected += OnRejected;
         sessionRuntime.Disconnected += OnDisconnected;
         sessionRuntime.ScreenShareFrameCompleted += OnScreenShareFrameCompleted;
+        sessionRuntime.ScreenShareStopped += OnScreenShareStopped;
         sessionRuntime.ChatMessageReceived += OnChatMessageReceived;
         sessionRuntime.ChatMessageReceivedBeforeApproved += OnChatMessageReceivedBeforeApproved;
         sessionRuntime.ChatStateChanged += OnChatStateChanged;
         this.statusPresenter.StatusChanged += OnStatusPresenterChanged;
         copyFeedback.PropertyChanged += OnCopyFeedbackPropertyChanged;
+        ScreenShareViewer.PropertyChanged += OnScreenShareViewerPropertyChanged;
         if (this.uiStateStore is not null)
         {
             this.uiStateStore.PropertyChanged += OnUiStateStorePropertyChanged;
@@ -153,6 +156,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             this.uiStateStore.SetPhase(SessionUiPhase.Waiting, "Constructor:HelperSeed");
         }
         ApplySessionBannerPolicy();
+        UpdateUiFromSnapshot();
     }
 
     public string CodeInput
@@ -194,6 +198,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowStatusText));
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ChatConnectionPillText));
+                OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
     }
@@ -218,6 +224,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowBackButton));
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ChatConnectionPillText));
+                OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
     }
@@ -307,6 +315,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref failureTitle, value))
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
+                OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
     }
@@ -319,6 +329,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref failureMessage, value))
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
+                OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
     }
@@ -350,6 +362,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             _ => "Not connected",
         };
 
+    public bool ShowChatConnectionPill => !HeaderStatusText.StartsWith(ChatConnectionPillText, StringComparison.Ordinal);
+
     public string ChatDraft
     {
         get => chatDraft;
@@ -370,15 +384,20 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public string ChatNoticeText => "You received a message";
 
-    public string HeaderStatusText =>
+    public string HeaderStatusText => AppendScreenShareSuffix(
         EffectivePhase switch
         {
             SessionUiPhase.Connecting => "Connecting…",
             SessionUiPhase.Recovering => "Reconnecting…",
             SessionUiPhase.Connected => "Connected",
-            SessionUiPhase.Failed or SessionUiPhase.Ended => string.IsNullOrWhiteSpace(FailureTitle) ? "Connection failed" : FailureTitle,
+            SessionUiPhase.Failed => string.IsNullOrWhiteSpace(FailureTitle) ? "Connection failed" : FailureTitle,
+            SessionUiPhase.Ended => !string.IsNullOrWhiteSpace(StatusText)
+                ? StatusText
+                : !string.IsNullOrWhiteSpace(FailureTitle)
+                    ? FailureTitle
+                    : "Session ended",
             _ => !string.IsNullOrWhiteSpace(StatusText) ? StatusText : "Ready",
-        };
+        });
 
     public SessionUiPhase EffectivePhase
     {
@@ -389,26 +408,27 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ChatConnectionPillText));
+                OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
     }
+
+    public ScreenShareViewerViewModel ScreenShareViewer { get; }
 
     public bool IsChatReady => sessionRuntime.CanSendChat;
 
-    public Bitmap? RemoteScreenShareFrame
-    {
-        get => remoteScreenShareFrame;
-        private set
-        {
-            if (SetProperty(ref remoteScreenShareFrame, value))
-            {
-                OnPropertyChanged(nameof(ShowRemoteScreenShareFrame));
-                OnPropertyChanged(nameof(ShowHelperMainContent));
-            }
-        }
-    }
+    public Bitmap? RemoteScreenShareFrame => ScreenShareViewer.CurrentFrame as Bitmap;
 
-    public bool ShowRemoteScreenShareFrame => FeatureFlags.EnableScreenShareTransport && RemoteScreenShareFrame is not null;
+    public bool ShowRemoteScreenShareFrame =>
+        ScreenShareViewer.IsActive &&
+        RemoteScreenShareFrame is not null;
+
+    public bool ShowDefaultScreenSharePlaceholder => !ShowRemoteScreenShareFrame;
+
+    public bool ShowScreenShareViewerError => false;
+
+    public string ScreenShareViewerMessage => string.Empty;
 
     public bool ShowHelperMainContent => !ShowRemoteScreenShareFrame;
 
@@ -475,14 +495,28 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool ShowTransientBanner
     {
         get => showTransientBanner;
-        private set => SetProperty(ref showTransientBanner, value);
+        private set
+        {
+            if (SetProperty(ref showTransientBanner, value))
+            {
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
+            }
+        }
     }
 
     public string TransientBannerText
     {
         get => transientBannerText;
-        private set => SetProperty(ref transientBannerText, value);
+        private set
+        {
+            if (SetProperty(ref transientBannerText, value))
+            {
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
+            }
+        }
     }
+
+    public bool ShowTransientStatusPanel => ShowTransientBanner && !IsTransientBannerDuplicateWithHeader();
 
     public bool CanCancelTransient
     {
@@ -511,11 +545,13 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.Rejected -= OnRejected;
         sessionRuntime.Disconnected -= OnDisconnected;
         sessionRuntime.ScreenShareFrameCompleted -= OnScreenShareFrameCompleted;
+        sessionRuntime.ScreenShareStopped -= OnScreenShareStopped;
         sessionRuntime.ChatMessageReceived -= OnChatMessageReceived;
         sessionRuntime.ChatMessageReceivedBeforeApproved -= OnChatMessageReceivedBeforeApproved;
         sessionRuntime.ChatStateChanged -= OnChatStateChanged;
         statusPresenter.StatusChanged -= OnStatusPresenterChanged;
         copyFeedback.PropertyChanged -= OnCopyFeedbackPropertyChanged;
+        ScreenShareViewer.PropertyChanged -= OnScreenShareViewerPropertyChanged;
         if (uiStateStore is not null)
         {
             uiStateStore.PropertyChanged -= OnUiStateStorePropertyChanged;
@@ -530,14 +566,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         connectCts?.Cancel();
         connectCts?.Dispose();
         connectCts = null;
-        if (Avalonia.Application.Current is null || !Avalonia.Threading.Dispatcher.UIThread.CheckAccess())
-        {
-            screenShareCoordinator.StopAsync().GetAwaiter().GetResult();
-        }
-        else
-        {
-            screenShareCoordinator.Clear();
-        }
+        ScreenShareViewer.Dispose();
         copyFeedback.Dispose();
     }
 
@@ -765,15 +794,23 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         ShowChatNotice = false;
         var optimisticLine = AddChatLine(optimisticText, isLocal: true);
 
-        var message = await sessionRuntime.TrySendChatTextAsync(draft, CancellationToken.None);
-        if (message is null)
+        try
         {
-            RemoveChatLine(optimisticLine);
-            if (string.IsNullOrWhiteSpace(ChatDraft))
+            var message = await sessionRuntime.TrySendChatTextAsync(draft, CancellationToken.None);
+            if (message is not null)
             {
-                ChatDraft = draft;
+                return;
             }
-            return;
+        }
+        catch
+        {
+            // Keep the session alive on chat send failure; the user can retry the draft.
+        }
+
+        RemoveChatLine(optimisticLine);
+        if (string.IsNullOrWhiteSpace(ChatDraft))
+        {
+            ChatDraft = draft;
         }
     }
 
@@ -897,6 +934,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         _ = UiThreadDispatch.RunAsync(() =>
         {
+            ClearRemoteScreenShareFrame();
             IsConnecting = false;
             var runtimeStatus = sessionRuntime.StatusText;
             if (string.IsNullOrWhiteSpace(runtimeStatus))
@@ -984,7 +1022,55 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void OnScreenShareFrameCompleted(object? sender, ScreenShareFrameCompletedEventArgs e)
     {
-        screenShareCoordinator.OnFrameCompleted(e);
+        ScreenShareViewer.OnJpegFrame(e.EncodedFrameBytes);
+    }
+
+    private void OnScreenShareStopped(object? sender, EventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(() =>
+        {
+            ClearRemoteScreenShareFrame();
+        });
+    }
+
+    private void OnScreenShareViewerPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(ScreenShareViewerViewModel.CurrentFrame) or nameof(ScreenShareViewerViewModel.IsActive))
+        {
+            var previousShowRemoteScreenShareFrame = lastKnownShowRemoteScreenShareFrame;
+            var previousShowHelperMainContent = lastKnownShowHelperMainContent;
+            var previousHeaderStatusText = lastKnownHeaderStatusText;
+
+            OnPropertyChanged(nameof(RemoteScreenShareFrame));
+
+            var nextShowRemoteScreenShareFrame = ShowRemoteScreenShareFrame;
+            if (previousShowRemoteScreenShareFrame != nextShowRemoteScreenShareFrame)
+            {
+                OnPropertyChanged(nameof(ShowRemoteScreenShareFrame));
+                lastKnownShowRemoteScreenShareFrame = nextShowRemoteScreenShareFrame;
+            }
+
+            var nextShowHelperMainContent = ShowHelperMainContent;
+            if (previousShowHelperMainContent != nextShowHelperMainContent)
+            {
+                OnPropertyChanged(nameof(ShowHelperMainContent));
+                lastKnownShowHelperMainContent = nextShowHelperMainContent;
+            }
+
+            var nextHeaderStatusText = HeaderStatusText;
+            if (!string.Equals(previousHeaderStatusText, nextHeaderStatusText, StringComparison.Ordinal))
+            {
+                OnPropertyChanged(nameof(HeaderStatusText));
+                lastKnownHeaderStatusText = nextHeaderStatusText;
+                OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
+            }
+        }
     }
 
     private void OnTransientStatusChanged(object? sender, SessionRuntimeTransientStatusChangedEventArgs e)
@@ -1044,6 +1130,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                     canCancel: e.Status.CanCancel || sessionRuntime.CanCancelTransientStatus);
             }
             else if (e.Status.Kind == UserStatusKind.Failed &&
+                     p != SessionUiPhase.Ended &&
                      sessionRuntime.State is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected)
             {
                 TryShowUiRecoveryTransient(
@@ -1191,16 +1278,23 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                         break;
                     }
 
-                    endReason = SessionEndReason.Failed;
-                    EnsureFailurePresentation(
-                        "Connection failed",
-                        "The session ended due to a connection problem.",
-                        "Retry");
-                    StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
-                        ? UserErrorMapper.HelperDisconnected()
-                        : sessionRuntime.StatusText;
-                    ConnectionState = "Failed";
-                    runtimeTerminalFailure = true;
+                    endReason = ClassifyEndReasonForRuntimeState(SessionRuntimeState.Failed);
+                    if (endReason == SessionEndReason.PeerEnded)
+                    {
+                        ApplyEndReasonPresentation(SessionEndReason.PeerEnded);
+                    }
+                    else
+                    {
+                        EnsureFailurePresentation(
+                            "Connection failed",
+                            "The session ended due to a connection problem.",
+                            "Retry");
+                        StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
+                            ? UserErrorMapper.HelperDisconnected()
+                            : sessionRuntime.StatusText;
+                        ConnectionState = "Failed";
+                        runtimeTerminalFailure = true;
+                    }
                     break;
                 case SessionRuntimeState.Disconnected:
                     IsConnecting = false;
@@ -1209,16 +1303,23 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                         break;
                     }
 
-                    endReason = SessionEndReason.Failed;
-                    EnsureFailurePresentation(
-                        "Connection failed",
-                        "The session ended due to a connection problem.",
-                        "Retry");
-                    StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
-                        ? UserErrorMapper.HelperDisconnected()
-                        : sessionRuntime.StatusText;
-                    ConnectionState = "Failed";
-                    runtimeTerminalFailure = true;
+                    endReason = ClassifyEndReasonForRuntimeState(SessionRuntimeState.Disconnected);
+                    if (endReason == SessionEndReason.PeerEnded)
+                    {
+                        ApplyEndReasonPresentation(SessionEndReason.PeerEnded);
+                    }
+                    else
+                    {
+                        EnsureFailurePresentation(
+                            "Connection failed",
+                            "The session ended due to a connection problem.",
+                            "Retry");
+                        StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
+                            ? UserErrorMapper.HelperDisconnected()
+                            : sessionRuntime.StatusText;
+                        ConnectionState = "Failed";
+                        runtimeTerminalFailure = true;
+                    }
                     break;
             }
         }
@@ -1295,6 +1396,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         uiStateStore?.SetPhase(phase, phaseReason, phaseContext);
+        fallbackUiPhase = phase;
         ApplySessionBannerPolicy();
         UpdateUiFromSnapshot();
 
@@ -1628,7 +1730,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return uiStateStore.Phase;
         }
 
-        return SessionUxPhaseMapper.FromRuntimeState(sessionRuntime.State, isHelper: true);
+        return fallbackUiPhase;
     }
 
     private string? BuildBannerBridgeState()
@@ -1796,7 +1898,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             throw new InvalidOperationException("Helper UI invariant failed: Ended/Failed phase requires disabled chat input.");
         }
 
-        if (string.Equals(HeaderStatusText, "Connected", StringComparison.Ordinal) && !IsChatInputEnabled)
+        if (HeaderStatusText.StartsWith("Connected", StringComparison.Ordinal) && !IsChatInputEnabled)
         {
             throw new InvalidOperationException("UI invariant failed: Connected header requires chat enabled.");
         }
@@ -1867,7 +1969,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 ClearFailurePresentation();
                 ShowChatNotice = false;
                 CodeInput = string.Empty;
-                StatusText = "The other side ended the session.";
+                StatusText = "The other person ended the session.";
                 ConnectionState = "Idle";
                 break;
             case SessionEndReason.Failed:
@@ -1899,6 +2001,29 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void ClearRemoteScreenShareFrame()
     {
-        screenShareCoordinator.Clear();
+        ScreenShareViewer.Clear();
+    }
+
+    private string AppendScreenShareSuffix(string text)
+    {
+        if (!ScreenShareViewer.IsActive)
+        {
+            return text;
+        }
+
+        return EffectivePhase is SessionUiPhase.Failed or SessionUiPhase.Ended
+            ? text
+            : $"{text} • Screen sharing";
+    }
+
+    private bool IsTransientBannerDuplicateWithHeader()
+    {
+        if (!ShowTransientBanner || string.IsNullOrWhiteSpace(TransientBannerText) || string.IsNullOrWhiteSpace(HeaderStatusText))
+        {
+            return false;
+        }
+
+        return HeaderStatusText.StartsWith(TransientBannerText, StringComparison.Ordinal) ||
+               TransientBannerText.StartsWith(HeaderStatusText, StringComparison.Ordinal);
     }
 }

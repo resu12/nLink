@@ -12,6 +12,10 @@ internal sealed class FakeNknClient : INknClient
     private bool connected;
     private bool disposed;
 
+    public Func<string, byte[], CancellationToken, Task>? BeforeSendAsync { get; set; }
+
+    public Func<string, byte[], CancellationToken, Task>? BeforePublishAsync { get; set; }
+
     public FakeNknClient(string address)
     {
         Address = address ?? throw new ArgumentNullException(nameof(address));
@@ -135,11 +139,17 @@ internal sealed class FakeNknClient : INknClient
         return Task.CompletedTask;
     }
 
-    public Task PublishAsync(string topic, byte[] payload, CancellationToken ct)
+    public async Task PublishAsync(string topic, byte[] payload, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         ThrowIfDisposed();
         EnsureConnected();
+
+        var beforePublishAsync = BeforePublishAsync;
+        if (beforePublishAsync is not null)
+        {
+            await beforePublishAsync(topic, payload, ct).ConfigureAwait(false);
+        }
 
         List<FakeNknClient> recipients;
         lock (Gate)
@@ -158,14 +168,20 @@ internal sealed class FakeNknClient : INknClient
                 topic: topic));
         }
 
-        return Task.CompletedTask;
+        await Task.CompletedTask;
     }
 
-    public Task SendAsync(string destination, byte[] payload, CancellationToken ct)
+    public async Task SendAsync(string destination, byte[] payload, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         ThrowIfDisposed();
         EnsureConnected();
+
+        var beforeSendAsync = BeforeSendAsync;
+        if (beforeSendAsync is not null)
+        {
+            await beforeSendAsync(destination, payload, ct).ConfigureAwait(false);
+        }
 
         FakeNknClient? recipient;
         lock (Gate)
@@ -184,7 +200,7 @@ internal sealed class FakeNknClient : INknClient
             isTopic: false,
             topic: null));
 
-        return Task.CompletedTask;
+        await Task.CompletedTask;
     }
 
     public void Dispose()

@@ -2,18 +2,41 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:views="using:NLink.App.Views"
              mc:Ignorable="d"
              x:Class="NLink.App.Views.ScreenSharePlaceholderView">
 
-    <Border Background="{StaticResource AppSurfaceBrush}"
+    <Border Background="{StaticResource AppMutedPanelBrush}"
             BorderBrush="{StaticResource AppCardBorderBrush}"
-            BorderThickness="0"
+            BorderThickness="1"
             CornerRadius="10"
-            MinHeight="200">
-        <TextBlock x:Name="PlaceholderText"
-                   Text="Screen share"
-                   Classes="appMuted"
-                   HorizontalAlignment="Center"
-                   VerticalAlignment="Center"/>
+            MinHeight="200"
+            AutomationProperties.AutomationId="ScreenShare.Viewer">
+        <Grid AutomationProperties.AutomationId="ScreenShare.Viewer"
+              ClipToBounds="True">
+            <Image AutomationProperties.AutomationId="ScreenShare.Viewer"
+                   Source="{ReflectionBinding ScreenShareViewer.CurrentFrame}"
+                   Stretch="Uniform"
+                   IsVisible="{ReflectionBinding ShowRemoteScreenShareFrame}"/>
+
+            <Image AutomationProperties.AutomationId="ScreenShare.Viewer"
+                   Source="{ReflectionBinding ScreenSharePreviewFrame}"
+                   Stretch="Uniform"
+                   IsVisible="{ReflectionBinding ShowScreenSharePreviewFrame}"/>
+
+            <Border Background="#66000000"
+                    Padding="12,8"
+                    CornerRadius="8"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    IsVisible="{ReflectionBinding ShowScreenShareViewerError}">
+                <TextBlock Text="{ReflectionBinding ScreenShareViewerMessage}"
+                           Classes="appMuted"
+                           AutomationProperties.AutomationId="ScreenShare.ViewerMessage"
+                           TextWrapping="Wrap"
+                           TextAlignment="Center"
+                           MaxWidth="320"/>
+            </Border>
+        </Grid>
     </Border>
 </UserControl>

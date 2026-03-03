@@ -44,6 +44,11 @@ public partial class SessionShellView : UserControl
             nameof(EffectiveShowScreenShareAction),
             o => o.EffectiveShowScreenShareAction);
 
+    public static readonly DirectProperty<SessionShellView, string> ScreenShareButtonTextProperty =
+        AvaloniaProperty.RegisterDirect<SessionShellView, string>(
+            nameof(ScreenShareButtonText),
+            o => o.ScreenShareButtonText);
+
     public static readonly DirectProperty<SessionShellView, bool> ShowChatPaneProperty =
         AvaloniaProperty.RegisterDirect<SessionShellView, bool>(
             nameof(ShowChatPane),
@@ -92,8 +97,10 @@ public partial class SessionShellView : UserControl
     private bool showScreenSharePane;
     private bool effectiveShowScreenShareAction;
     private bool showChatPane;
+    private string screenShareButtonText = "Share screen";
     private INotifyPropertyChanged? observedDataContext;
     private bool showMainPane = true;
+    private bool screenSharePaneAutoActivated;
 
     public SessionShellView()
     {
@@ -181,6 +188,12 @@ public partial class SessionShellView : UserControl
     {
         get => showChatPane;
         private set => SetAndRaise(ShowChatPaneProperty, ref showChatPane, value);
+    }
+
+    public string ScreenShareButtonText
+    {
+        get => screenShareButtonText;
+        private set => SetAndRaise(ScreenShareButtonTextProperty, ref screenShareButtonText, value);
     }
 
     public bool IsNarrow
@@ -300,6 +313,8 @@ public partial class SessionShellView : UserControl
             string.Equals(e.PropertyName, "HeaderStatusText", StringComparison.Ordinal) ||
             string.Equals(e.PropertyName, "ConnectionState", StringComparison.Ordinal) ||
             string.Equals(e.PropertyName, "ShowConnectedPanel", StringComparison.Ordinal) ||
+            string.Equals(e.PropertyName, "CanShowScreenShareAction", StringComparison.Ordinal) ||
+            string.Equals(e.PropertyName, "IsScreenSharingPreviewActive", StringComparison.Ordinal) ||
             string.Equals(e.PropertyName, "ShowScreenSharePreviewFrame", StringComparison.Ordinal) ||
             string.Equals(e.PropertyName, "ShowRemoteScreenShareFrame", StringComparison.Ordinal))
         {
@@ -432,6 +447,26 @@ public partial class SessionShellView : UserControl
             return;
         }
 
+        var dataContext = DataContext;
+        var dataContextScreenShareCommand = dataContext is null
+            ? null
+            : TryGetCommandPropertyValue(dataContext, "ToggleScreenSharePreviewCommand");
+        if (dataContextScreenShareCommand is not null)
+        {
+            var isActive = HasLocalScreenSharePreviewActive();
+            if (!dataContextScreenShareCommand.CanExecute(null))
+            {
+                return;
+            }
+
+            dataContextScreenShareCommand.Execute(null);
+            screenSharePaneAutoActivated = false;
+            IsScreenSharePaneActive = !isActive;
+            UpdateScreenShareComputedProperties();
+            return;
+        }
+
+        screenSharePaneAutoActivated = false;
         IsScreenSharePaneActive = !IsScreenSharePaneActive;
         UpdateScreenShareComputedProperties();
     }
@@ -456,18 +491,54 @@ public partial class SessionShellView : UserControl
 
     private void UpdateScreenShareComputedProperties()
     {
-        var showAction = UseScreenShareScaffold && ShowScreenShareAction && IsConnectedFromDataContext();
+        var dataContext = DataContext;
+        var canShowDataContextScreenShareAction = dataContext is not null &&
+                                                 TryGetBoolPropertyValue(dataContext, "CanShowScreenShareAction") == true;
+        var dataContextScreenShareCommand = dataContext is null
+            ? null
+            : TryGetCommandPropertyValue(dataContext, "ToggleScreenSharePreviewCommand");
+        var hasLocalScreenSharePreviewActive = UseScreenShareScaffold && HasLocalScreenSharePreviewActive();
+        var hasVisibleScreenShareFrame = UseScreenShareScaffold && HasVisibleScreenShareFrame();
+        var hasActiveScreenShare = dataContextScreenShareCommand is not null
+            ? hasLocalScreenSharePreviewActive || hasVisibleScreenShareFrame
+            : UseScreenShareScaffold && HasActiveScreenShare();
+        var showAction = UseScreenShareScaffold &&
+                         ShowScreenShareAction &&
+                         IsConnectedFromDataContext() &&
+                         (dataContextScreenShareCommand is null || canShowDataContextScreenShareAction);
         EffectiveShowScreenShareAction = showAction;
         ScreenShareCommand = ToggleScreenSharePaneCommand;
+        ScreenShareButtonText = dataContextScreenShareCommand is not null
+            ? (hasLocalScreenSharePreviewActive ? "Stop sharing" : "Share screen")
+            : hasActiveScreenShare || ShowScreenSharePane || hasVisibleScreenShareFrame || IsScreenSharePaneActive
+                ? "Stop sharing"
+                : "Share screen";
 
-        if (!showAction && IsScreenSharePaneActive)
+        if (hasActiveScreenShare && !IsScreenSharePaneActive)
+        {
+            IsScreenSharePaneActive = true;
+            screenSharePaneAutoActivated = true;
+        }
+        else if (!hasActiveScreenShare && screenSharePaneAutoActivated)
         {
             IsScreenSharePaneActive = false;
+            screenSharePaneAutoActivated = false;
+        }
+
+        if (!showAction && !hasActiveScreenShare && IsScreenSharePaneActive)
+        {
+            IsScreenSharePaneActive = false;
+            screenSharePaneAutoActivated = false;
         }
 
         ShowChatPane = HasVisibleChatPane();
         ShowScreenSharePane = UseScreenShareScaffold && IsScreenSharePaneActive;
-        ShowMainPane = !ShowChatPane || ShowScreenSharePane || HasVisibleScreenShareFrame();
+        ScreenShareButtonText = dataContextScreenShareCommand is not null
+            ? (hasLocalScreenSharePreviewActive ? "Stop sharing" : "Share screen")
+            : hasActiveScreenShare || ShowScreenSharePane || hasVisibleScreenShareFrame || IsScreenSharePaneActive
+                ? "Stop sharing"
+                : "Share screen";
+        ShowMainPane = !ShowChatPane || ShowScreenSharePane || hasVisibleScreenShareFrame;
         UpdateLayoutVisibility();
         // ShowConnectedPanel can arrive after the header flips to Connected. Refresh presenters
         // on every recompute so the chat pane is attached even when the main-pane mode is unchanged.
@@ -504,6 +575,29 @@ public partial class SessionShellView : UserControl
                TryGetBoolPropertyValue(dataContext, "ShowRemoteScreenShareFrame") == true;
     }
 
+    private bool HasActiveScreenShare()
+    {
+        var dataContext = DataContext;
+        if (dataContext is null)
+        {
+            return false;
+        }
+
+        return TryGetBoolPropertyValue(dataContext, "IsScreenSharingPreviewActive") == true ||
+               HasVisibleScreenShareFrame();
+    }
+
+    private bool HasLocalScreenSharePreviewActive()
+    {
+        var dataContext = DataContext;
+        if (dataContext is null)
+        {
+            return false;
+        }
+
+        return TryGetBoolPropertyValue(dataContext, "IsScreenSharingPreviewActive") == true;
+    }
+
     private bool HasVisibleChatPane()
     {
         return ShowChatPaneRequested || IsConnectedFromDataContext();
@@ -529,6 +623,17 @@ public partial class SessionShellView : UserControl
         }
 
         return property.GetValue(instance) as bool?;
+    }
+
+    private static ICommand? TryGetCommandPropertyValue(object instance, string propertyName)
+    {
+        var property = instance.GetType().GetProperty(propertyName);
+        if (property is null || !typeof(ICommand).IsAssignableFrom(property.PropertyType))
+        {
+            return null;
+        }
+
+        return property.GetValue(instance) as ICommand;
     }
 
     private static bool IsScreenShareScaffoldEnabled()
@@ -567,14 +672,15 @@ public partial class SessionShellView : UserControl
         }
 
 #if DEBUG
-        ContentPlaceholderText.IsVisible = MainContent is null;
+        var showPlaceholder = MainContent is null && !ShowScreenSharePane;
+        ContentPlaceholderText.IsVisible = showPlaceholder;
         if (ResponsiveContentPlaceholderText is not null)
         {
-            ResponsiveContentPlaceholderText.IsVisible = MainContent is null;
+            ResponsiveContentPlaceholderText.IsVisible = showPlaceholder;
         }
         if (NarrowContentPlaceholderText is not null)
         {
-            NarrowContentPlaceholderText.IsVisible = MainContent is null;
+            NarrowContentPlaceholderText.IsVisible = showPlaceholder;
         }
 #else
         ContentPlaceholderText.IsVisible = false;

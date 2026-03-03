@@ -70,6 +70,7 @@
                   VerticalAlignment="Center">
                 <Border Grid.Column="0"
                         Classes="chatStatusPill"
+                        IsVisible="{Binding ShowChatConnectionPill}"
                         VerticalAlignment="Center">
                     <TextBlock Classes="appMuted"
                                AutomationProperties.AutomationId="Chat.ConnectionPillText"

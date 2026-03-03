@@ -4,13 +4,13 @@ Simple help for family and friends.
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
-## Current Release (0.2.0)
+## Current Release (0.3.0)
 
-`0.2.0` is the current stabilized release. Packaging, install/upgrade validation, and deterministic smoke coverage are in place for the frozen bridge-based architecture.
+`0.3.0` is the current stabilized release. It keeps the existing bridge-based transport architecture and adds the first complete bounded screensharing flow on top of it.
 
 - Architecture remains stable, including the existing bridge JSONL contract.
-- Recent work focused on packaging verification, docs, and deterministic test hardening.
-- No transport redesign is included in `0.2.0`.
+- `0.3.0` focused on screensharing completion, bounded resource usage, deterministic tests, and release packaging.
+- No transport redesign is included in `0.3.0`.
 
 ## Quick Start (Windows)
 
@@ -20,11 +20,11 @@ Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke
 4. Helpee clicks `Allow`.
 5. Chat opens on both sides.
 
-Helper (UI screenshot, may vary slightly by pre-release):
+Helper (UI screenshot, may vary slightly from the current release):
 
 ![Helper screen](docs/images/helper-alpha3.png)
 
-Helpee (UI screenshot, may vary slightly by pre-release):
+Helpee (UI screenshot, may vary slightly from the current release):
 
 ![Helpee screen](docs/images/helpee-alpha3.png)
 
@@ -33,11 +33,11 @@ Open Diagnostics -> Copy diagnostics and include it when reporting issues.
 
 Notes:
 - Windows x64 only
-- Current release (`0.2.0`)
+- Current release (`0.3.0`)
 - Installer path: `%LOCALAPPDATA%\Programs\nLink Helper`
 
 Versioning:
-- Release version uses SemVer (for example: `0.2.0`)
+- Release version uses SemVer (for example: `0.3.0`)
 - The current release version is stored in the repo-root `VERSION` file
 
 License:
@@ -73,8 +73,12 @@ License:
 - Output release assets:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
-- Release checklist:
-  [`docs/release/rc-validation-checklist.md`](docs/release/rc-validation-checklist.md)
+- Final release notes:
+  [`docs/releases/0.3.0.md`](docs/releases/0.3.0.md)
+- Screenshare RC/final validation checklist:
+  [`docs/release/0.3.0-rc-validation-checklist.md`](docs/release/0.3.0-rc-validation-checklist.md)
+- Promotion criteria:
+  [`docs/release/0.3.0-promotion.md`](docs/release/0.3.0-promotion.md)
 - Optional beta hardening extras (offline/permissions/installer upgrade rollback/hang checks):
   see `docs/BETA_HARDENING_EXTRAS.md`
 
@@ -101,6 +105,15 @@ License:
   `--leak-growth-fail-percent 20`
 - Pre-release helpers:
   `powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunResources -RunLeakCheck`
+
+### ScreenShare Soak (Manual, Non-CI)
+
+- Long-run manual screenshare soak:
+  `dotnet run --project src/nLink.App -c Release -- --screenshare-soak --seconds 300`
+- Optional sample interval override:
+  `--sample-interval-seconds 10`
+- Maintainer notes:
+  [`docs/screenshare-soak.md`](docs/screenshare-soak.md)
 
 ### Building Portable EXE (ZIP Release)
 

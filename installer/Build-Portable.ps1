@@ -238,6 +238,26 @@ function Assert-PortableStagePayload {
     Assert-NoDebugOnlyPayload -StageDir $StageDir
 }
 
+function Ensure-PortableConfigFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$StageDir
+    )
+
+    $stageAppSettings = Join-Path $StageDir "appsettings.json"
+    if (Test-Path $stageAppSettings) {
+        return
+    }
+
+    $sourceAppSettings = Join-Path $RepoRoot "src\nLink.App\appsettings.json"
+    if (-not (Test-Path $sourceAppSettings)) {
+        throw "Source appsettings.json not found: $sourceAppSettings"
+    }
+
+    Copy-Item -Force $sourceAppSettings $stageAppSettings
+    Write-Host "[nLink] Staged appsettings.json into portable output: $stageAppSettings" -ForegroundColor Green
+}
+
 function Copy-BridgeBundleToPortable {
     param(
         [Parameter(Mandatory = $true)][string]$BridgeDir,
@@ -271,7 +291,9 @@ function Copy-BridgeBundleToPortable {
     }
 
     New-Item -ItemType Directory -Force -Path $destination | Out-Null
-    Copy-Item -Recurse -Force (Join-Path $BridgeDir "*") $destination
+    Invoke-WithRetry -OperationName "copy bundled bridge folder" -DelayMilliseconds 700 -Action {
+        Copy-Item -Recurse -Force (Join-Path $BridgeDir "*") $destination
+    }
     Assert-BridgeBundleRuntime -BridgeDir $destination
     Write-Host "[nLink] Bundled bridge runtime into canonical portable: $destination" -ForegroundColor Green
 }
@@ -307,6 +329,8 @@ if (-not $SkipBridgeBundle) {
     Assert-BridgeBundleRuntime -BridgeDir $bridgeBundleAbs
     Copy-BridgeBundleToPortable -BridgeDir $bridgeBundleAbs -PortableOutDir $canonicalOutAbs -Runtime $Runtime
 }
+
+Ensure-PortableConfigFile -RepoRoot $repoRoot -StageDir $canonicalOutAbs
 
 # Safe size reduction in final artifact only (keep bin/obj untouched).
 Remove-StagedDebugFiles -RootDir $canonicalOutAbs

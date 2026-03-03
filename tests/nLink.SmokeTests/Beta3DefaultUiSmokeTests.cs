@@ -1,14 +1,19 @@
 using System.Diagnostics;
 using System.ComponentModel;
 using System.Reflection;
+using System.IO;
+using System.Windows.Input;
 using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.LogicalTree;
+using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using CommunityToolkit.Mvvm.Input;
 using NLink.App.Services;
+using NLink.App.Services.ScreenCapture;
 using NLink.App.ViewModels;
 using NLink.App.Views;
 using NLink.Core.Metrics;
@@ -224,6 +229,48 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task HelperPage_DefaultShell_EndSessionButton_StartsDisabled()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+            using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
+            using var helper = new HelperPageViewModel(
+                cancelAction: static () => { },
+                transportConfig,
+                runtime,
+                openDiagnosticsAction: static () => { },
+                clipboardService: new TestClipboardService(),
+                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null));
+
+            var view = new HelperPageView { DataContext = helper };
+            var window = new Window { Width = 1080, Height = 760, Content = view };
+            try
+            {
+                window.Show();
+                await FlushUiAsync();
+
+                var header = FindFirstDescendant<SessionHeaderView>(window);
+                Assert.NotNull(header);
+                var endButton = header.GetVisualDescendants().OfType<Button>().FirstOrDefault(b =>
+                    string.Equals(b.Content?.ToString(), "End session", StringComparison.Ordinal));
+
+                Assert.NotNull(endButton);
+                Assert.False(helper.CanEndSession);
+                Assert.False(endButton!.IsEnabled);
+            }
+            finally
+            {
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task HelpeePage_WhenConnected_ShowsVisibleChatImmediately()
     {
         await fixture.Session.Dispatch(async () =>
@@ -366,6 +413,123 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task SessionShell_WhenScreenSharePaneVisible_HidesContentPlaceholder()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var previous = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD");
+            try
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", "1");
+                var shell = new SessionShellView
+                {
+                    ShowScreenShareAction = true,
+                    DataContext = new ConnectedShellContext(),
+                };
+
+                var window = new Window { Width = 1080, Height = 760, Content = shell };
+                window.Show();
+
+                try
+                {
+                    await FlushUiAsync();
+
+                    var placeholder = window.GetVisualDescendants()
+                        .OfType<TextBlock>()
+                        .FirstOrDefault(x => string.Equals(x.Text, "Content", StringComparison.Ordinal));
+                    Assert.NotNull(placeholder);
+
+                    shell.ScreenShareCommand?.Execute(null);
+                    await FlushUiAsync();
+
+                    Assert.True(shell.ShowScreenSharePane);
+                    Assert.False(placeholder!.IsVisible);
+                }
+                finally
+                {
+                    window.Close();
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", previous);
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task SessionShell_WhenMainContentExists_PlaceholderStaysHidden_BeforeAndAfterScreenShareStops()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var previous = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD");
+            try
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", "1");
+                var context = new MutableConnectedScreenShareShellContext
+                {
+                    HeaderStatusText = "Connected",
+                    ShowConnectedPanel = true,
+                    CanShowScreenShareAction = true,
+                };
+
+                var shell = new SessionShellView
+                {
+                    Width = 1080,
+                    ShowScreenShareAction = true,
+                    MainContent = new Border
+                    {
+                        [AutomationProperties.AutomationIdProperty] = "Shell.Main",
+                    },
+                    ChatContent = new Border
+                    {
+                        [AutomationProperties.AutomationIdProperty] = "Shell.Chat",
+                    },
+                    DataContext = context,
+                };
+
+                var window = new Window { Width = 1080, Height = 760, Content = shell };
+                window.Show();
+
+                try
+                {
+                    await FlushUiAsync();
+
+                    var placeholder = window.GetVisualDescendants()
+                        .OfType<TextBlock>()
+                        .FirstOrDefault(x => string.Equals(x.Text, "Content", StringComparison.Ordinal));
+                    Assert.NotNull(placeholder);
+                    Assert.False(placeholder!.IsVisible);
+
+                    shell.ScreenShareCommand?.Execute(null);
+                    await WaitUntilAsync(() => shell.ShowScreenSharePane, TimeSpan.FromSeconds(2));
+                    await FlushUiAsync();
+                    Assert.False(placeholder.IsVisible);
+
+                    shell.ScreenShareCommand?.Execute(null);
+                    await WaitUntilAsync(() => !shell.ShowScreenSharePane, TimeSpan.FromSeconds(2));
+                    await FlushUiAsync();
+                    Assert.False(placeholder.IsVisible);
+                }
+                finally
+                {
+                    window.Close();
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", previous);
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task SessionShell_WhenConnected_HidesMainPaneUntilScreenShareIsToggled()
     {
         await fixture.Session.Dispatch(async () =>
@@ -411,6 +575,314 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                     Assert.False(shell.ShowResponsiveNarrowChatOnlyLayout);
                     Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Shell.Main"));
                     Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Shell.Chat"));
+                }
+                finally
+                {
+                    window.Close();
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", previous);
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task SessionShell_WhenHelperReceivesFrame_AutoShowsViewer_AndClearsOnStop()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var previous = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD");
+            try
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", "1");
+                EnsureAppServices();
+                var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+                using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
+                using var helper = new HelperPageViewModel(
+                    cancelAction: static () => { },
+                    transportConfig,
+                    runtime,
+                    openDiagnosticsAction: static () => { },
+                    clipboardService: new TestClipboardService(),
+                    shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null));
+
+                var shell = new SessionShellView
+                {
+                    Width = 1080,
+                    ShowScreenShareAction = true,
+                    MainContent = new Border
+                    {
+                        [AutomationProperties.AutomationIdProperty] = "Shell.Main",
+                    },
+                    ChatContent = new Border
+                    {
+                        [AutomationProperties.AutomationIdProperty] = "Shell.Chat",
+                    },
+                    DataContext = helper,
+                };
+
+                var window = new Window { Width = 1080, Height = 760, Content = shell };
+                window.Show();
+
+                try
+                {
+                    await FlushUiAsync();
+                    Assert.False(shell.ShowScreenSharePane);
+
+                    InvokePrivate(
+                        helper,
+                        "OnScreenShareFrameCompleted",
+                        null,
+                        new NLink.Infra.Nkn.ScreenShareFrameCompletedEventArgs(1, 1, 1, "jpeg", CreateTinyImageBytes()));
+
+                    await WaitUntilAsync(() => helper.ScreenShareViewer.CurrentFrame is not null, TimeSpan.FromSeconds(2));
+                    await WaitUntilAsync(() => helper.ShowRemoteScreenShareFrame, TimeSpan.FromSeconds(2));
+                    await WaitUntilAsync(() => shell.ShowScreenSharePane, TimeSpan.FromSeconds(2));
+
+                    InvokePrivate(helper, "ClearRemoteScreenShareFrame");
+
+                    await WaitUntilAsync(() => helper.ScreenShareViewer.CurrentFrame is null, TimeSpan.FromSeconds(2));
+                    await WaitUntilAsync(() => !helper.ShowRemoteScreenShareFrame, TimeSpan.FromSeconds(2));
+                    await WaitUntilAsync(() => !shell.ShowScreenSharePane, TimeSpan.FromSeconds(2));
+                }
+                finally
+                {
+                    window.Close();
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", previous);
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task SessionShell_WhenHelpeePreviewStarts_AutoShowsViewer_AndLeavesChatOnlyLayout()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var previousScaffold = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD");
+            try
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", "1");
+                var context = new MutableConnectedScreenShareShellContext
+                {
+                    HeaderStatusText = "Connected",
+                    ShowConnectedPanel = true,
+                };
+
+                var shell = new SessionShellView
+                {
+                    Width = 1080,
+                    ShowScreenShareAction = true,
+                    MainContent = new Border
+                    {
+                        [AutomationProperties.AutomationIdProperty] = "Shell.Main",
+                    },
+                    ChatContent = new Border
+                    {
+                        [AutomationProperties.AutomationIdProperty] = "Shell.Chat",
+                    },
+                    DataContext = context,
+                };
+
+                var window = new Window { Width = 1080, Height = 760, Content = shell };
+                window.Show();
+
+                try
+                {
+                    await FlushUiAsync();
+                    Assert.False(shell.ShowScreenSharePane);
+
+                    context.ShowScreenSharePreviewFrame = true;
+
+                    await WaitUntilAsync(() => context.ShowScreenSharePreviewFrame, TimeSpan.FromSeconds(2));
+                    await WaitUntilAsync(() => shell.ShowScreenSharePane, TimeSpan.FromSeconds(2));
+
+                    Assert.True(shell.ShowFixedShellLayout || shell.ShowResponsiveWideLayout || shell.ShowResponsiveNarrowLayout);
+                    Assert.False(shell.ShowFixedChatOnlyLayout || shell.ShowResponsiveWideChatOnlyLayout || shell.ShowResponsiveNarrowChatOnlyLayout);
+                }
+                finally
+                {
+                    window.Close();
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", previousScaffold);
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task SessionShell_WhenDisconnected_AndLaterApproved_KeepsScreenShareInactive_UntilNewFrameArrives()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var previous = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD");
+            try
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", "1");
+                EnsureAppServices();
+                var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+                using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
+                using var helper = new HelperPageViewModel(
+                    cancelAction: static () => { },
+                    transportConfig,
+                    runtime,
+                    openDiagnosticsAction: static () => { },
+                    clipboardService: new TestClipboardService(),
+                    shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null));
+
+                var shell = new SessionShellView
+                {
+                    Width = 1080,
+                    ShowScreenShareAction = true,
+                    MainContent = new Border
+                    {
+                        [AutomationProperties.AutomationIdProperty] = "Shell.Main",
+                    },
+                    ChatContent = new Border
+                    {
+                        [AutomationProperties.AutomationIdProperty] = "Shell.Chat",
+                    },
+                    DataContext = helper,
+                };
+
+                var window = new Window { Width = 1080, Height = 760, Content = shell };
+                window.Show();
+
+                try
+                {
+                    await FlushUiAsync();
+
+                    InvokePrivate(
+                        helper,
+                        "OnScreenShareFrameCompleted",
+                        null,
+                        new NLink.Infra.Nkn.ScreenShareFrameCompletedEventArgs(1, 1, 1, "jpeg", CreateTinyImageBytes()));
+
+                    await WaitUntilAsync(() => helper.ScreenShareViewer.CurrentFrame is not null, TimeSpan.FromSeconds(2));
+                    await WaitUntilAsync(() => helper.ShowRemoteScreenShareFrame, TimeSpan.FromSeconds(2));
+                    await WaitUntilAsync(() => shell.ShowScreenSharePane, TimeSpan.FromSeconds(2));
+
+                    InvokePrivate(helper, "OnDisconnected", null, EventArgs.Empty);
+
+                    await WaitUntilAsync(() => helper.ScreenShareViewer.CurrentFrame is null, TimeSpan.FromSeconds(2));
+                    await WaitUntilAsync(() => !helper.ShowRemoteScreenShareFrame, TimeSpan.FromSeconds(2));
+                    await WaitUntilAsync(() => !shell.ShowScreenSharePane, TimeSpan.FromSeconds(2));
+
+                    InvokePrivate(helper, "OnApproved", null, EventArgs.Empty);
+                    await FlushUiAsync();
+
+                    Assert.Null(helper.ScreenShareViewer.CurrentFrame);
+                    Assert.False(helper.ShowRemoteScreenShareFrame);
+                    Assert.False(shell.ShowScreenSharePane);
+                }
+                finally
+                {
+                    window.Close();
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", previous);
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task SessionShell_WhenNotConnected_ScreenShareCommand_NoOps()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var previous = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD");
+            try
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", "1");
+                var shell = new SessionShellView
+                {
+                    ShowScreenShareAction = true,
+                    DataContext = new StaleDisconnectedShellContext(),
+                };
+
+                await FlushUiAsync();
+
+                shell.ScreenShareCommand?.Execute(null);
+                await FlushUiAsync();
+
+                Assert.False(shell.EffectiveShowScreenShareAction);
+                Assert.False(shell.ShowScreenSharePane);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", previous);
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task SessionShell_ScreenShareHeaderButton_TogglesBetweenShareAndStop()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var previous = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD");
+            try
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", "1");
+                var context = new MutableConnectedScreenShareShellContext
+                {
+                    HeaderStatusText = "Connected",
+                    ShowConnectedPanel = true,
+                    CanShowScreenShareAction = true,
+                };
+                var shell = new SessionShellView
+                {
+                    Width = 760,
+                    ShowScreenShareAction = true,
+                    DataContext = context,
+                };
+
+                var window = new Window { Width = 760, Height = 240, Content = shell };
+                window.Show();
+
+                try
+                {
+                    await FlushUiAsync();
+
+                    var shareButton = Assert.IsType<Button>(FindFirstControlByAutomationId(window, "SessionHeader.ShareScreen"));
+                    Assert.Equal("Share screen", Assert.IsType<string>(shareButton.Content));
+                    Assert.False(shell.ShowScreenSharePane);
+
+                    shell.ScreenShareCommand?.Execute(null);
+                    await WaitUntilAsync(() => context.IsScreenSharingPreviewActive, TimeSpan.FromSeconds(2));
+                    await WaitUntilAsync(() => shell.ShowScreenSharePane, TimeSpan.FromSeconds(2));
+                    await FlushUiAsync();
+                    Assert.Equal("Stop sharing", Assert.IsType<string>(shareButton.Content));
+
+                    shell.ScreenShareCommand?.Execute(null);
+                    await WaitUntilAsync(() => !context.IsScreenSharingPreviewActive, TimeSpan.FromSeconds(2));
+                    await WaitUntilAsync(() => !shell.ShowScreenSharePane, TimeSpan.FromSeconds(2));
+                    await FlushUiAsync();
+                    Assert.Equal("Share screen", Assert.IsType<string>(shareButton.Content));
                 }
                 finally
                 {
@@ -560,6 +1032,31 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
         method!.Invoke(target, null);
     }
 
+    private static void InvokePrivate(object target, string methodName, params object?[]? args)
+    {
+        var method = target.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(target, args);
+    }
+
+    private static byte[] CreateTinyImageBytes()
+    {
+        return Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/a5kAAAAASUVORK5CYII=");
+    }
+
+    private static Bitmap CreateTinyBitmap()
+    {
+        using var stream = new MemoryStream(CreateTinyImageBytes(), writable: false);
+        return new Bitmap(stream);
+    }
+
+    private static void SetPrivateProperty(object target, string propertyName, object? value)
+    {
+        var property = target.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        Assert.NotNull(property);
+        property!.SetValue(target, value);
+    }
+
     private static async Task<ConnectedSessionContext> CreateConnectedSessionContextAsync()
     {
         var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
@@ -651,6 +1148,103 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowConnectedPanel)));
             }
         }
+    }
+
+    private sealed class MutableConnectedScreenShareShellContext : INotifyPropertyChanged
+    {
+        private string headerStatusText = "Ready";
+        private bool showConnectedPanel;
+        private bool showScreenSharePreviewFrame;
+        private bool isScreenSharingPreviewActive;
+        private bool canShowScreenShareAction;
+
+        public MutableConnectedScreenShareShellContext()
+        {
+            ToggleScreenSharePreviewCommand = new RelayCommand(() =>
+            {
+                IsScreenSharingPreviewActive = !IsScreenSharingPreviewActive;
+                ShowScreenSharePreviewFrame = IsScreenSharingPreviewActive;
+            });
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        public string HeaderStatusText
+        {
+            get => headerStatusText;
+            set
+            {
+                if (string.Equals(headerStatusText, value, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                headerStatusText = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HeaderStatusText)));
+            }
+        }
+
+        public bool ShowConnectedPanel
+        {
+            get => showConnectedPanel;
+            set
+            {
+                if (showConnectedPanel == value)
+                {
+                    return;
+                }
+
+                showConnectedPanel = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowConnectedPanel)));
+            }
+        }
+
+        public bool CanShowScreenShareAction
+        {
+            get => canShowScreenShareAction;
+            set
+            {
+                if (canShowScreenShareAction == value)
+                {
+                    return;
+                }
+
+                canShowScreenShareAction = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanShowScreenShareAction)));
+            }
+        }
+
+        public bool IsScreenSharingPreviewActive
+        {
+            get => isScreenSharingPreviewActive;
+            set
+            {
+                if (isScreenSharingPreviewActive == value)
+                {
+                    return;
+                }
+
+                isScreenSharingPreviewActive = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsScreenSharingPreviewActive)));
+            }
+        }
+
+        public bool ShowScreenSharePreviewFrame
+        {
+            get => showScreenSharePreviewFrame;
+            set
+            {
+                if (showScreenSharePreviewFrame == value)
+                {
+                    return;
+                }
+
+                showScreenSharePreviewFrame = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowScreenSharePreviewFrame)));
+            }
+        }
+
+        public ICommand ToggleScreenSharePreviewCommand { get; }
     }
 
     private sealed class StaleDisconnectedShellContext

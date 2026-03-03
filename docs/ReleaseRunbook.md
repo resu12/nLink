@@ -1,6 +1,6 @@
 # Release Runbook
 
-This runbook describes the exact steps to ship `0.2.0`.
+This runbook describes the exact steps to ship `0.3.0`.
 
 ## Preflight
 
@@ -20,6 +20,7 @@ Expected outcome:
 - smoke tests pass
 - GUI smoke passes
 - BetaReadiness reports `PASS`
+- performance gate passes
 
 ## Version Bump Locations
 
@@ -32,7 +33,7 @@ Get-Content .\VERSION
 Current expected value:
 
 ```text
-0.2.0
+0.3.0
 ```
 
 Version-related files to verify:
@@ -63,15 +64,15 @@ powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunGuiSmo
 ```
 
 Expected release outputs:
-- `artifacts\releases\0.2.0\nLink-Portable-win-x64-0.2.0.zip`
-- `artifacts\releases\0.2.0\nLink-Setup-win-x64-0.2.0.exe`
-- `artifacts\releases\0.2.0\SHA256SUMS.txt`
+- `artifacts\releases\0.3.0\nLink-Portable-win-x64-0.3.0.zip`
+- `artifacts\releases\0.3.0\nLink-Setup-win-x64-0.3.0.exe`
+- `artifacts\releases\0.3.0\SHA256SUMS.txt`
 
 Verify artifacts:
 
 ```powershell
-Get-ChildItem .\artifacts\releases\0.2.0
-Get-Content .\artifacts\releases\0.2.0\SHA256SUMS.txt
+Get-ChildItem .\artifacts\releases\0.3.0
+Get-Content .\artifacts\releases\0.3.0\SHA256SUMS.txt
 ```
 
 ## Git Tag
@@ -79,23 +80,23 @@ Get-Content .\artifacts\releases\0.2.0\SHA256SUMS.txt
 Create and push the release tag:
 
 ```powershell
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 ## GitHub Release
 
 Create a GitHub release with:
-- Tag: `v0.2.0`
-- Title: `nLink 0.2.0`
+- Tag: `v0.3.0`
+- Title: `nLink 0.3.0`
 
 Attach:
-- `artifacts\releases\0.2.0\nLink-Setup-win-x64-0.2.0.exe`
-- `artifacts\releases\0.2.0\nLink-Portable-win-x64-0.2.0.zip`
-- `artifacts\releases\0.2.0\SHA256SUMS.txt`
+- `artifacts\releases\0.3.0\nLink-Setup-win-x64-0.3.0.exe`
+- `artifacts\releases\0.3.0\nLink-Portable-win-x64-0.3.0.zip`
+- `artifacts\releases\0.3.0\SHA256SUMS.txt`
 
 Paste release notes from:
-- `docs\releases\0.2.0.md`
+- `docs\releases\0.3.0.md`
 
 Link current beta issues guidance from:
 - `docs\KnownIssues.md`
@@ -105,7 +106,7 @@ Link current beta issues guidance from:
 Run a quick sanity install test:
 
 ```powershell
-Start-Process .\artifacts\installer\nLink-Setup-win-x64-0.2.0.exe
+Start-Process .\artifacts\installer\nLink-Setup-win-x64-0.3.0.exe
 ```
 
 Verify:
@@ -120,18 +121,18 @@ Verify:
 Portable sanity check:
 
 ```powershell
-Expand-Archive .\artifacts\releases\0.2.0\nLink-Portable-win-x64-0.2.0.zip -DestinationPath .\artifacts\portable-smoke -Force
+Expand-Archive .\artifacts\releases\0.3.0\nLink-Portable-win-x64-0.3.0.zip -DestinationPath .\artifacts\portable-smoke -Force
 Start-Process .\artifacts\portable-smoke\nLink.exe
 ```
 
 ## Rollback Notes
 
-- If the GitHub pre-release is wrong, delete the draft/pre-release and re-upload corrected assets.
+- If the GitHub release draft is wrong, delete the draft release and re-upload corrected assets.
 - If the tag was pushed incorrectly:
 
 ```powershell
-git tag -d v0.2.0
-git push origin :refs/tags/v0.2.0
+git tag -d v0.3.0
+git push origin :refs/tags/v0.3.0
 ```
 
 - If an installed build needs cleanup, use the generated uninstaller from the install directory or rerun the previous known-good installer.

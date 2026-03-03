@@ -6,6 +6,8 @@ on:
     tags:
       - v0.2.0
       - v0.2.0-rc.*
+      - v0.3.0
+      - v0.3.0-rc.*
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -88,6 +90,9 @@ jobs:
       - name: Smoke tests
         run: dotnet test -c Release --filter Category=Smoke --no-build --logger "trx;LogFileName=smoke-results.trx"
 
+      - name: Performance tests
+        run: dotnet test -c Release --filter "Category=Performance&Category!=ManualSoak" --no-build --logger "trx;LogFileName=performance-results.trx"
+
       - name: Reliability gate (DevLocal benchmark, fast)
         run: dotnet run -c Release --no-build --project src/nLink.App -- --bench --cycles 20 --delay-ms 0 --transport devlocal --bridge-reuse-mode persession --reliability-gate
 
@@ -136,9 +141,17 @@ jobs:
           path: artifacts/bench/**
           if-no-files-found: ignore
 
+      - name: Upload performance test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-test-results
+          path: '**/performance-results.trx'
+          if-no-files-found: ignore
+
       - name: Upload release assets
         uses: actions/upload-artifact@v4
-        if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/tags/v0.2.0' || startsWith(github.ref, 'refs/tags/v0.2.0-rc.') }}
+        if: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/tags/v0.2.0' || startsWith(github.ref, 'refs/tags/v0.2.0-rc.') || github.ref == 'refs/tags/v0.3.0' || startsWith(github.ref, 'refs/tags/v0.3.0-rc.') }}
         with:
           name: release-assets
           path: artifacts/releases/${{ env.NLINK_VERSION }}/**

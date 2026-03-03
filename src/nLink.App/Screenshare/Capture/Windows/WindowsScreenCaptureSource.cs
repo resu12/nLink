@@ -59,7 +59,8 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
             LogDebug("Capture loop started.");
         }
 
-        TryCaptureAndRaiseFrame();
+        // A transient failure on the first capture should not fail startup if the loop can recover.
+        CaptureAndRaiseFrame(swallowFailures: true);
 
         return Task.CompletedTask;
     }
@@ -127,7 +128,7 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
         while (!cancellationToken.IsCancellationRequested)
         {
             var frameStartedAt = DateTime.UtcNow;
-            TryCaptureAndRaiseFrame();
+            CaptureAndRaiseFrame(swallowFailures: true);
 
             var remaining = FrameInterval - (DateTime.UtcNow - frameStartedAt);
             if (remaining > TimeSpan.Zero)
@@ -139,7 +140,7 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
         LogDebug("Capture loop exited.");
     }
 
-    private void TryCaptureAndRaiseFrame()
+    private void CaptureAndRaiseFrame(bool swallowFailures)
     {
         try
         {
@@ -151,10 +152,18 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
         catch (OperationCanceledException)
         {
             LogDebug("Capture loop canceled.");
+            if (!swallowFailures)
+            {
+                throw;
+            }
         }
         catch (Exception ex)
         {
             LogDebug($"Capture loop frame failed: {ex.GetType().Name}: {ex.Message}");
+            if (!swallowFailures)
+            {
+                throw;
+            }
         }
     }
 

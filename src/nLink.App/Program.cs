@@ -28,6 +28,15 @@ sealed class Program
             return;
         }
 
+        if (HasScreenShareSoakArgument(args))
+        {
+            var exitCode = ScreenShareSoakRunner.RunAsync(args, Console.Out, Console.Error, CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+            Environment.ExitCode = exitCode;
+            return;
+        }
+
         if (HasSelfTestArgument(args))
         {
             var exitCode = BridgeSelfTestRunner.RunAsync(Console.Out, Console.Error, CancellationToken.None)
@@ -62,6 +71,11 @@ sealed class Program
     internal static bool HasSoakArgument(string[] args)
     {
         return args.Any(a => string.Equals(a, "--soak", StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal static bool HasScreenShareSoakArgument(string[] args)
+    {
+        return args.Any(a => string.Equals(a, "--screenshare-soak", StringComparison.OrdinalIgnoreCase));
     }
 
     internal static bool HasResourceRunnerArgument(string[] args)

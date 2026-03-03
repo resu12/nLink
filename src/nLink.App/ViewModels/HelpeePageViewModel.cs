@@ -73,8 +73,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool pendingAutoRegenerateAfterDisconnect;
     private SessionUiPhase lastObservedUiPhase;
     private readonly HelpeeScreenShareCoordinator screenShareCoordinator;
+    private readonly bool isScreenCaptureSupported;
     private bool isScreenSharingPreviewActive;
     private Bitmap? screenSharePreviewFrame;
+    private ScreenShareStatus screenSharePreviewStatus = new(ScreenShareState.Off, null, DateTimeOffset.UtcNow);
     private bool disposed;
 
     public HelpeePageViewModel(
@@ -87,7 +89,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         StatusPresenter? statusPresenter = null,
         TimeSpan? incomingRequestTimeout = null,
         SessionUiStateStore? uiStateStore = null,
-        Action? backAction = null)
+        Action? backAction = null,
+        IScreenCaptureSourceFactory? screenCaptureSourceFactory = null)
     {
         this.cancelAction = cancelAction;
         this.backAction = backAction ?? cancelAction;
@@ -99,14 +102,17 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         this.clipboardService = clipboardService;
         this.incomingRequestTimeout = incomingRequestTimeout ?? DefaultIncomingRequestTimeout;
         this.uiStateStore = uiStateStore;
+        var resolvedCaptureSourceFactory = screenCaptureSourceFactory ?? new DefaultScreenCaptureSourceFactory();
+        isScreenCaptureSupported = DetermineIsCaptureSupported(resolvedCaptureSourceFactory);
         lastObservedUiPhase = uiStateStore?.Phase ?? SessionUiPhase.Idle;
         _ = shareMessageConfig;
         screenShareCoordinator = new HelpeeScreenShareCoordinator(
             isDisposed: () => disposed,
             canShowScreenShareAction: () => CanShowScreenShareAction,
             isPreviewActive: () => IsScreenSharingPreviewActive,
-            captureSourceFactory: ScreenCaptureFactory.CreateDefault,
+            captureSourceFactory: resolvedCaptureSourceFactory,
             setPreviewActive: value => IsScreenSharingPreviewActive = value,
+            setStatus: value => ScreenSharePreviewStatus = value,
             getPreviewFrame: () => ScreenSharePreviewFrame,
             setPreviewFrame: value => ScreenSharePreviewFrame = value);
 
@@ -152,6 +158,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 "Constructor:HelpeeSeed");
         }
         ApplySessionBannerPolicy();
+        UpdateUiFromSnapshot();
     }
 
     public string ShareCode => sessionCode.DisplayText;
@@ -196,6 +203,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ChatConnectionPillText));
+                OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
     }
@@ -223,6 +232,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowFailurePanel));
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ChatConnectionPillText));
+                OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
                 ApplySessionBannerPolicy();
             }
         }
@@ -276,15 +287,20 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public string SecondaryActionText => IsConnectedView ? "Disconnect" : "New code";
 
-    public string HeaderStatusText =>
+    public string HeaderStatusText => AppendScreenShareSuffix(
         EffectivePhase switch
         {
             SessionUiPhase.Connecting => "Connecting…",
             SessionUiPhase.Recovering => "Reconnecting…",
             SessionUiPhase.Connected => "Connected",
-            SessionUiPhase.Failed or SessionUiPhase.Ended => string.IsNullOrWhiteSpace(FailureTitle) ? "Connection failed" : FailureTitle,
+            SessionUiPhase.Failed => string.IsNullOrWhiteSpace(FailureTitle) ? "Connection failed" : FailureTitle,
+            SessionUiPhase.Ended => !string.IsNullOrWhiteSpace(ConnectionStatus)
+                ? ConnectionStatus
+                : !string.IsNullOrWhiteSpace(FailureTitle)
+                    ? FailureTitle
+                    : "Session ended",
             _ => !string.IsNullOrWhiteSpace(ConnectionStatus) ? ConnectionStatus : "Ready",
-        };
+        });
 
     public string FailureTitle
     {
@@ -294,6 +310,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref failureTitle, value))
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
+                OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
     }
@@ -306,6 +324,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref failureMessage, value))
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
+                OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
     }
@@ -369,6 +389,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             _ => "Not connected",
         };
 
+    public bool ShowChatConnectionPill => !HeaderStatusText.StartsWith(ChatConnectionPillText, StringComparison.Ordinal);
+
     public SessionUiPhase EffectivePhase
     {
         get => effectivePhase;
@@ -378,6 +400,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ChatConnectionPillText));
+                OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
     }
@@ -415,12 +439,21 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             FeatureFlags.EnableScreenShareScaffold,
             FeatureFlags.EnableScreenShareCapture,
             FeatureFlags.EnableScreenSharePreview,
-            ScreenCaptureFactory.CreateDefault().IsSupported);
+            isScreenCaptureSupported);
 
     public bool IsScreenSharingPreviewActive
     {
         get => isScreenSharingPreviewActive;
-        private set => SetProperty(ref isScreenSharingPreviewActive, value);
+        private set
+        {
+            if (SetProperty(ref isScreenSharingPreviewActive, value))
+            {
+                OnPropertyChanged(nameof(HeaderStatusText));
+                OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
+                SyncTransportScreenShareWithPreview(value);
+            }
+        }
     }
 
     public Bitmap? ScreenSharePreviewFrame
@@ -428,15 +461,75 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         get => screenSharePreviewFrame;
         private set
         {
+            var previousShowPreviewFrame = ShowScreenSharePreviewFrame;
+            var previousShowMainContent = ShowHelpeeMainContent;
+            var previousShowDefaultPlaceholder = ShowDefaultScreenSharePlaceholder;
             if (SetProperty(ref screenSharePreviewFrame, value))
             {
-                OnPropertyChanged(nameof(ShowScreenSharePreviewFrame));
-                OnPropertyChanged(nameof(ShowHelpeeMainContent));
+                if (previousShowPreviewFrame != ShowScreenSharePreviewFrame)
+                {
+                    OnPropertyChanged(nameof(ShowScreenSharePreviewFrame));
+                }
+
+                if (previousShowMainContent != ShowHelpeeMainContent)
+                {
+                    OnPropertyChanged(nameof(ShowHelpeeMainContent));
+                }
+
+                if (previousShowDefaultPlaceholder != ShowDefaultScreenSharePlaceholder)
+                {
+                    OnPropertyChanged(nameof(ShowDefaultScreenSharePlaceholder));
+                }
             }
         }
     }
 
-    public bool ShowScreenSharePreviewFrame => FeatureFlags.EnableScreenSharePreview && ScreenSharePreviewFrame is not null;
+    public ScreenShareStatus ScreenSharePreviewStatus
+    {
+        get => screenSharePreviewStatus;
+        private set
+        {
+            var previousShowPreviewFrame = ShowScreenSharePreviewFrame;
+            var previousShowDefaultPlaceholder = ShowDefaultScreenSharePlaceholder;
+            var previousShowViewerError = ShowScreenShareViewerError;
+            var previousViewerMessage = ScreenShareViewerMessage;
+            if (SetProperty(ref screenSharePreviewStatus, value))
+            {
+                if (previousShowPreviewFrame != ShowScreenSharePreviewFrame)
+                {
+                    OnPropertyChanged(nameof(ShowScreenSharePreviewFrame));
+                }
+
+                if (previousShowDefaultPlaceholder != ShowDefaultScreenSharePlaceholder)
+                {
+                    OnPropertyChanged(nameof(ShowDefaultScreenSharePlaceholder));
+                }
+
+                if (previousShowViewerError != ShowScreenShareViewerError)
+                {
+                    OnPropertyChanged(nameof(ShowScreenShareViewerError));
+                }
+
+                if (!string.Equals(previousViewerMessage, ScreenShareViewerMessage, StringComparison.Ordinal))
+                {
+                    OnPropertyChanged(nameof(ScreenShareViewerMessage));
+                }
+            }
+        }
+    }
+
+    public bool ShowScreenSharePreviewFrame =>
+        FeatureFlags.EnableScreenSharePreview &&
+        ScreenSharePreviewFrame is not null &&
+        ScreenSharePreviewStatus.State != ScreenShareState.Failed;
+
+    public bool ShowDefaultScreenSharePlaceholder => !ShowScreenSharePreviewFrame && !ShowScreenShareViewerError;
+
+    public bool ShowScreenShareViewerError =>
+        ScreenSharePreviewStatus.State == ScreenShareState.Failed &&
+        !string.IsNullOrWhiteSpace(ScreenShareViewerMessage);
+
+    public string ScreenShareViewerMessage => ScreenSharePreviewStatus.UserMessage ?? string.Empty;
 
     public bool ShowHelpeeMainContent => !ShowScreenSharePreviewFrame;
 
@@ -479,14 +572,28 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool ShowTransientBanner
     {
         get => showTransientBanner;
-        private set => SetProperty(ref showTransientBanner, value);
+        private set
+        {
+            if (SetProperty(ref showTransientBanner, value))
+            {
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
+            }
+        }
     }
 
     public string TransientBannerText
     {
         get => transientBannerText;
-        private set => SetProperty(ref transientBannerText, value);
+        private set
+        {
+            if (SetProperty(ref transientBannerText, value))
+            {
+                OnPropertyChanged(nameof(ShowTransientStatusPanel));
+            }
+        }
     }
+
+    public bool ShowTransientStatusPanel => ShowTransientBanner && !IsTransientBannerDuplicateWithHeader();
 
     public bool CanCancelTransient
     {
@@ -715,15 +822,23 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         ShowChatNotice = false;
         var optimisticLine = AddChatLine(optimisticText, isLocal: true);
 
-        var sent = await sessionRuntime.TrySendChatTextAsync(draft, CancellationToken.None);
-        if (sent is null)
+        try
         {
-            RemoveChatLine(optimisticLine);
-            if (string.IsNullOrWhiteSpace(ChatDraft))
+            var sent = await sessionRuntime.TrySendChatTextAsync(draft, CancellationToken.None);
+            if (sent is not null)
             {
-                ChatDraft = draft;
+                return;
             }
-            return;
+        }
+        catch
+        {
+            // Keep the session alive on chat send failure; the user can retry the draft.
+        }
+
+        RemoveChatLine(optimisticLine);
+        if (string.IsNullOrWhiteSpace(ChatDraft))
+        {
+            ChatDraft = draft;
         }
     }
 
@@ -1041,6 +1156,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                     canCancel: e.Status.CanCancel || sessionRuntime.CanCancelTransientStatus);
             }
             else if (e.Status.Kind == UserStatusKind.Failed &&
+                     p != SessionUiPhase.Ended &&
                      sessionRuntime.State is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected)
             {
                 TryShowUiRecoveryTransient(
@@ -1762,7 +1878,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             throw new InvalidOperationException("Helpee UI invariant failed: Ended/Failed phase requires disabled chat input.");
         }
 
-        if (string.Equals(HeaderStatusText, "Connected", StringComparison.Ordinal) && !IsChatInputEnabled)
+        if (HeaderStatusText.StartsWith("Connected", StringComparison.Ordinal) && !IsChatInputEnabled)
         {
             throw new InvalidOperationException("UI invariant failed: Connected header requires chat enabled.");
         }
@@ -1998,5 +2114,75 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private void StopScreenSharePreview()
     {
         screenShareCoordinator.StopAsync().GetAwaiter().GetResult();
+    }
+
+    private void SyncTransportScreenShareWithPreview(bool isPreviewActive)
+    {
+        if (disposed ||
+            !FeatureFlags.EnableScreenShareTransport ||
+            !FeatureFlags.EnableScreenShareCapture)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (isPreviewActive)
+                {
+                    await sessionRuntime.StartTransportScreenShareAsync().ConfigureAwait(false);
+                }
+                else
+                {
+                    await sessionRuntime.StopTransportScreenShareAsync("preview_stopped").ConfigureAwait(false);
+                }
+            }
+            catch
+            {
+                // Best-effort: the local preview remains the user-visible source of truth.
+            }
+        });
+    }
+
+    private static bool DetermineIsCaptureSupported(IScreenCaptureSourceFactory captureSourceFactory)
+    {
+        ArgumentNullException.ThrowIfNull(captureSourceFactory);
+
+        var source = captureSourceFactory.Create();
+        try
+        {
+            return source.IsSupported;
+        }
+        finally
+        {
+            if (source is IAsyncDisposable asyncDisposable)
+            {
+                asyncDisposable.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            }
+        }
+    }
+
+    private string AppendScreenShareSuffix(string text)
+    {
+        if (!IsScreenSharingPreviewActive)
+        {
+            return text;
+        }
+
+        return EffectivePhase is SessionUiPhase.Failed or SessionUiPhase.Ended
+            ? text
+            : $"{text} • Viewing screen";
+    }
+
+    private bool IsTransientBannerDuplicateWithHeader()
+    {
+        if (!ShowTransientBanner || string.IsNullOrWhiteSpace(TransientBannerText) || string.IsNullOrWhiteSpace(HeaderStatusText))
+        {
+            return false;
+        }
+
+        return HeaderStatusText.StartsWith(TransientBannerText, StringComparison.Ordinal) ||
+               TransientBannerText.StartsWith(HeaderStatusText, StringComparison.Ordinal);
     }
 }
