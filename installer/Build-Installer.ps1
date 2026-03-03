@@ -122,6 +122,51 @@ function Assert-BridgeBundleRuntime {
     }
 }
 
+function Assert-NoDebugOnlyPayload {
+    param(
+        [Parameter(Mandatory = $true)][string]$StageDir
+    )
+
+    $forbiddenFiles = @(
+        "Avalonia.Diagnostics.dll",
+        "nLink.runtimeconfig.dev.json"
+    )
+
+    foreach ($fileName in $forbiddenFiles) {
+        $matches = @(Get-ChildItem -Path $StageDir -Recurse -File -Filter $fileName -ErrorAction SilentlyContinue)
+        if ($matches.Count -gt 0) {
+            $paths = @($matches | ForEach-Object { $_.FullName }) -join ", "
+            throw "Release staging contains debug-only dependency '$fileName': $paths"
+        }
+    }
+
+    $symbolLikeFiles = @(Get-ChildItem -Path $StageDir -Recurse -File -Include *.pdb,*.xml -ErrorAction SilentlyContinue)
+    if ($symbolLikeFiles.Count -gt 0) {
+        $paths = @($symbolLikeFiles | ForEach-Object { $_.FullName }) -join ", "
+        throw "Release staging contains debug-only files: $paths"
+    }
+}
+
+function Assert-InstallerStagePayload {
+    param(
+        [Parameter(Mandatory = $true)][string]$StageDir,
+        [Parameter(Mandatory = $true)][string]$Runtime
+    )
+
+    $appExe = Join-Path $StageDir "nLink.exe"
+    $appSettings = Join-Path $StageDir "appsettings.json"
+    if (-not (Test-Path $appExe)) {
+        throw "Installer staging app executable not found: $appExe"
+    }
+
+    if (-not (Test-Path $appSettings)) {
+        throw "Installer staging appsettings.json not found: $appSettings"
+    }
+
+    Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $StageDir "bridge") $Runtime)
+    Assert-NoDebugOnlyPayload -StageDir $StageDir
+}
+
 function Remove-StagedDebugFiles {
     param(
         [Parameter(Mandatory = $true)][string]$RootDir
@@ -279,6 +324,7 @@ Copy-BridgeBundleToStaging -BridgeDir $bridgeBundleAbs -PublishOutDir $helperPor
 
 # Safe size reduction in installer staging only (leave bin/obj untouched).
 Remove-StagedDebugFiles -RootDir $helperPortableOutAbs
+Assert-InstallerStagePayload -StageDir $helperPortableOutAbs -Runtime $Runtime
 
 $isccPath = Resolve-IsccPath
 if (-not $isccPath) {

@@ -189,6 +189,55 @@ function Assert-BridgeBundleRuntime {
     }
 }
 
+function Assert-NoDebugOnlyPayload {
+    param(
+        [Parameter(Mandatory = $true)][string]$StageDir
+    )
+
+    $forbiddenFiles = @(
+        "Avalonia.Diagnostics.dll",
+        "nLink.runtimeconfig.dev.json"
+    )
+
+    foreach ($fileName in $forbiddenFiles) {
+        $matches = @(Get-ChildItem -Path $StageDir -Recurse -File -Filter $fileName -ErrorAction SilentlyContinue)
+        if ($matches.Count -gt 0) {
+            $paths = @($matches | ForEach-Object { $_.FullName }) -join ", "
+            throw "Release staging contains debug-only dependency '$fileName': $paths"
+        }
+    }
+
+    $symbolLikeFiles = @(Get-ChildItem -Path $StageDir -Recurse -File -Include *.pdb,*.xml -ErrorAction SilentlyContinue)
+    if ($symbolLikeFiles.Count -gt 0) {
+        $paths = @($symbolLikeFiles | ForEach-Object { $_.FullName }) -join ", "
+        throw "Release staging contains debug-only files: $paths"
+    }
+}
+
+function Assert-PortableStagePayload {
+    param(
+        [Parameter(Mandatory = $true)][string]$StageDir,
+        [Parameter(Mandatory = $true)][string]$Runtime,
+        [bool]$RequireBridge = $true
+    )
+
+    $appExe = Join-Path $StageDir "nLink.exe"
+    $appSettings = Join-Path $StageDir "appsettings.json"
+    if (-not (Test-Path $appExe)) {
+        throw "Portable app executable not found: $appExe"
+    }
+
+    if (-not (Test-Path $appSettings)) {
+        throw "Portable appsettings.json not found: $appSettings"
+    }
+
+    if ($RequireBridge) {
+        Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $StageDir "bridge") $Runtime)
+    }
+
+    Assert-NoDebugOnlyPayload -StageDir $StageDir
+}
+
 function Copy-BridgeBundleToPortable {
     param(
         [Parameter(Mandatory = $true)][string]$BridgeDir,
@@ -261,6 +310,7 @@ if (-not $SkipBridgeBundle) {
 
 # Safe size reduction in final artifact only (keep bin/obj untouched).
 Remove-StagedDebugFiles -RootDir $canonicalOutAbs
+Assert-PortableStagePayload -StageDir $canonicalOutAbs -Runtime $Runtime -RequireBridge:(-not $SkipBridgeBundle)
 
 if (Test-Path $zipOutAbs) {
     Invoke-WithRetry -OperationName "remove portable zip" -Action {
