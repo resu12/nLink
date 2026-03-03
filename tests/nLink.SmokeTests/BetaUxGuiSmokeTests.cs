@@ -46,4 +46,9 @@ public sealed class BetaUxGuiSmokeTests
     [Trait("Category", "GuiSmoke")]
     public Task Windows_GuiSmoke_BetaUx_EndSessionDisablesChat()
         => GuiSmokeHarness.RunScenariosAsync(output, "end_session_disables_chat");
+
+    [GuiSmokeFact]
+    [Trait("Category", "GuiSmoke")]
+    public Task Windows_GuiSmoke_BetaUx_ScreenShareButtonVisibility_WhenScaffoldEnabled()
+        => GuiSmokeHarness.RunScenariosAsync(output, "screenshare_button_visibility");
 }

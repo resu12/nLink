@@ -41,6 +41,7 @@
 
         <Button Grid.Column="2"
                 Classes="appButton secondaryButton"
+                AutomationProperties.AutomationId="SessionHeader.ShareScreen"
                 Content="Share screen"
                 Command="{Binding #Root.ScreenShareCommand}"
                 IsVisible="{Binding #Root.ShowScreenShare}"

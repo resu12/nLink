@@ -1261,9 +1261,16 @@ function Run-ScenarioJ {
         return $null
     })
 
-    Start-Sleep -Milliseconds 400
-    Assert-TextsNotVisible -Window $Context.HelpeeWindow -Texts @('Reconnecting...', 'Connecting...')
-    Assert-ButtonNotVisibleByName -Window $Context.HelpeeWindow -Text 'Cancel'
+    [void](Wait-Until -TimeoutMs 5000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee New code flow to stay quiet.' -Condition {
+        try {
+            Assert-TextsNotVisible -Window $Context.HelpeeWindow -Texts @('Reconnecting...', 'Connecting...')
+            Assert-ButtonNotVisibleByName -Window $Context.HelpeeWindow -Text 'Cancel'
+            return $true
+        }
+        catch {
+            return $null
+        }
+    })
 }
 
 function Run-ScenarioK {
@@ -1422,6 +1429,46 @@ function Run-ScenarioEndSessionDisablesChat {
     }
 }
 
+function Run-ScenarioScreenShareButtonVisibility {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+
+    $previousScaffold = $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD
+    try {
+        $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD = '1'
+
+        Start-HelpeeFlow -Context $Context
+
+        if (Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'SessionHeader.ShareScreen') {
+            throw "Helpee Share screen button was visible before the session connected."
+        }
+
+        Start-HelperFlow -Context $Context
+        [void](Connect-HelperAndHelpee -Context $Context)
+
+        [void](Wait-Until -TimeoutMs 15000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee Share screen button.' -Condition {
+            $button = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'SessionHeader.ShareScreen'
+            if ($button -and $button.Current.IsEnabled) {
+                return $button
+            }
+
+            return $null
+        })
+
+        if (Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'SessionHeader.ShareScreen') {
+            throw "Helper Share screen button was visible, but only the helpee flow should surface it."
+        }
+    }
+    finally {
+        if ($null -eq $previousScaffold) {
+            Remove-Item Env:NLINK_FEATURE_SCREENCAP_SCAFFOLD -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD = $previousScaffold
+        }
+    }
+}
+
 function Get-ChildNodeProcesses {
     param([int]$ParentPid)
     try {
@@ -1515,7 +1562,8 @@ try {
             'M' { Invoke-Scenario -Name 'M' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioM -Context $ctx } }
             'END_SESSION_DISABLES_CHAT' { Invoke-Scenario -Name 'end_session_disables_chat' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioEndSessionDisablesChat -Context $ctx } }
             'HEADER_CHAT_COHERENCE' { Invoke-Scenario -Name 'header_chat_coherence' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioHeaderChatCoherence -Context $ctx } }
-            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M,HEADER_CHAT_COHERENCE,END_SESSION_DISABLES_CHAT." }
+            'SCREENSHARE_BUTTON_VISIBILITY' { Invoke-Scenario -Name 'screenshare_button_visibility' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioScreenShareButtonVisibility -Context $ctx } }
+            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M,HEADER_CHAT_COHERENCE,END_SESSION_DISABLES_CHAT,SCREENSHARE_BUTTON_VISIBILITY." }
         }
     }
 
