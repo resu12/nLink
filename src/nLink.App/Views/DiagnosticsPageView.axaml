@@ -196,6 +196,26 @@
                     </StackPanel>
                 </Border>
 
+                <Border Classes="appCard" Padding="20">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="Feature Flags"
+                                   Foreground="{StaticResource AppTextBrush}"
+                                   FontSize="22"
+                                   FontWeight="SemiBold"/>
+
+                        <Grid ColumnDefinitions="220,*"
+                              RowDefinitions="Auto,Auto"
+                              RowSpacing="8"
+                              ColumnSpacing="12">
+                            <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="ScreenShareScaffold"/>
+                            <TextBlock Grid.Row="0" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareScaffold}" FontSize="16"/>
+
+                            <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="SessionHeader"/>
+                            <TextBlock Grid.Row="1" Grid.Column="1" Classes="appBody" Text="{Binding SessionHeader}" FontSize="16"/>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
                 <StackPanel Spacing="8"
                             MaxWidth="820">
                     <WrapPanel HorizontalAlignment="Center">

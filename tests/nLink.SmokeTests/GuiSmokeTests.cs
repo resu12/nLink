@@ -2,6 +2,7 @@ using Xunit.Abstractions;
 
 namespace NLink.SmokeTests;
 
+[Collection(GuiSmokeCollection.Name)]
 public sealed class GuiSmokeTests
 {
     private readonly ITestOutputHelper output;

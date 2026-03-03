@@ -1,0 +1,50 @@
+name: RC Readiness
+description: Track readiness for an nLink release candidate
+title: "RC readiness: 0.2.0-rc.X"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use the RC checklist: [docs/release/0.2.0-rc-readiness.md](../blob/main/docs/release/0.2.0-rc-readiness.md)
+
+  - type: input
+    attributes:
+      label: RC tag
+      placeholder: v0.2.0-rc.1
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Commit SHA
+      placeholder: 40-character commit SHA
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Platform tested
+      placeholder: Windows 11 x64
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Smoke test run link
+      description: Optional CI run or artifact link
+
+  - type: checkboxes
+    attributes:
+      label: RC readiness checklist
+      description: Keep this in sync with docs/release/0.2.0-rc-readiness.md
+      options:
+        - label: Branching and versioning checked
+        - label: Feature flags and defaults reviewed
+        - label: UX coherence checked for Helper and Helpee
+        - label: Failure mapping lockdown verified
+        - label: Screenshare readiness reviewed (video-only)
+        - label: Performance and resource sanity checked
+        - label: Testing gates passed
+        - label: Packaging and distribution artifacts verified
+        - label: Logging and diagnostics verified
+        - label: Manual RC acceptance run completed

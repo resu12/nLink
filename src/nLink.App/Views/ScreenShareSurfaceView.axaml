@@ -1,0 +1,8 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:controls="using:NLink.App.Views"
+             x:Class="NLink.App.Views.ScreenShareSurfaceView"
+             x:Name="Root">
+    <Image Source="{Binding Frame, ElementName=Root}"
+           Stretch="Uniform"/>
+</UserControl>

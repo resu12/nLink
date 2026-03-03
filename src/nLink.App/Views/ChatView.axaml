@@ -5,6 +5,7 @@
              xmlns:vm="using:NLink.App.ViewModels"
              mc:Ignorable="d"
              x:Class="NLink.App.Views.ChatView"
+             x:Name="Root"
              x:DataType="vm:IChatPanelBindings">
 
     <UserControl.Styles>
@@ -26,7 +27,7 @@
 
         <Style Selector="Border.chatShell">
             <Setter Property="Background" Value="{StaticResource AppMutedPanelBrush}"/>
-            <Setter Property="CornerRadius" Value="16"/>
+            <Setter Property="CornerRadius" Value="14"/>
             <Setter Property="BorderThickness" Value="0"/>
         </Style>
 
@@ -60,7 +61,7 @@
     </UserControl.Styles>
 
     <Grid RowDefinitions="Auto,*,Auto"
-          RowSpacing="12"
+          RowSpacing="10"
           MinHeight="320">
         <Border Grid.Row="0"
                 Classes="chatTopBar">
@@ -71,7 +72,8 @@
                         Classes="chatStatusPill"
                         VerticalAlignment="Center">
                     <TextBlock Classes="appMuted"
-                               Text="Connected"
+                               AutomationProperties.AutomationId="Chat.ConnectionPillText"
+                               Text="{Binding ChatConnectionPillText}"
                                FontSize="13"
                                FontWeight="SemiBold"/>
                 </Border>
@@ -83,6 +85,7 @@
                         Classes="appButton secondaryButton"
                         Content="Disconnect"
                         Command="{Binding EndSessionCommand}"
+                        IsVisible="{Binding #Root.ShowInlineEndSession}"
                         IsEnabled="{Binding CanEndSession}"
                         Height="36"
                         MinWidth="104"
@@ -97,7 +100,7 @@
                           AutomationProperties.AutomationId="Chat.Messages"
                           VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled"
-                          Padding="18,16">
+                          Padding="16,14">
                 <Grid RowDefinitions="Auto,*"
                       RowSpacing="12">
                     <TextBlock Grid.Row="0"
@@ -123,7 +126,7 @@
                                                 MaxWidth="{Binding Bounds.Width, ElementName=MessagesScrollViewer, Converter={StaticResource MultiplyConverter}, ConverterParameter=0.65}"
                                                 Classes.remoteBubble="{Binding IsRemote}"
                                                 Classes.localBubble="{Binding IsLocal}">
-                                            <TextBlock Text="{Binding Text}"
+                                            <TextBlock Text="{Binding DisplayText}"
                                                        Foreground="{StaticResource AppTextBrush}"
                                                        FontSize="16"
                                                        TextWrapping="Wrap"/>

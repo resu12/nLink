@@ -1,0 +1,62 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:views="using:NLink.App.Views"
+             mc:Ignorable="d"
+             x:Class="NLink.App.Views.SessionHeaderView"
+             x:Name="Root">
+
+    <UserControl.Styles>
+        <Style Selector="TextBlock.headerRole">
+            <Setter Property="Foreground" Value="{StaticResource AppMutedTextBrush}"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="Medium"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+        </Style>
+
+        <Style Selector="TextBlock.headerStatus">
+            <Setter Property="Foreground" Value="{StaticResource AppTextBrush}"/>
+            <Setter Property="FontSize" Value="15"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+        </Style>
+    </UserControl.Styles>
+
+    <Grid ColumnDefinitions="Auto,*,132,112"
+          ColumnSpacing="10"
+          MinHeight="38">
+        <TextBlock Grid.Column="0"
+                   Classes="headerRole"
+                   Text="{Binding #Root.RoleText}"
+                   IsVisible="{Binding #Root.HasRoleText}"/>
+
+        <TextBlock Grid.Column="1"
+                   Classes="headerStatus"
+                   AutomationProperties.AutomationId="SessionHeader.StatusText"
+                   Text="{Binding #Root.StatusText}"
+                   MaxLines="1"/>
+
+        <Button Grid.Column="2"
+                Classes="appButton secondaryButton"
+                Content="Share screen"
+                Command="{Binding #Root.ScreenShareCommand}"
+                IsVisible="{Binding #Root.ShowScreenShare}"
+                HorizontalAlignment="Stretch"
+                Height="34"
+                MinWidth="132"
+                Padding="10,0"/>
+
+        <Button Grid.Column="3"
+                Classes="appButton secondaryButton"
+                Content="End session"
+                Command="{Binding #Root.EndSessionCommand}"
+                IsVisible="{Binding #Root.ShowEndSession}"
+                HorizontalAlignment="Stretch"
+                Height="34"
+                MinWidth="112"
+                Padding="10,0"/>
+    </Grid>
+</UserControl>

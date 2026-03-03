@@ -11,9 +11,21 @@
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <IsWindows Condition="'$(OS)' == 'Windows_NT'">true</IsWindows>
+  </PropertyGroup>
+
   <ItemGroup>
     <Folder Include="Models\" />
     <AvaloniaResource Include="Assets\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="Screenshare\Capture\Windows\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(IsWindows)' == 'true'">
+    <Compile Include="Screenshare\Capture\Windows\**\*.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -34,6 +46,11 @@
       <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
     </PackageReference>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.1" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(IsWindows)' == 'true'">
+    <PackageReference Include="Microsoft.Windows.SDK.NET" Version="10.0.18362.6-preview" />
+    <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>

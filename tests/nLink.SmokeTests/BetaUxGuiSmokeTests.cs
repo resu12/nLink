@@ -2,6 +2,7 @@ using Xunit.Abstractions;
 
 namespace NLink.SmokeTests;
 
+[Collection(GuiSmokeCollection.Name)]
 public sealed class BetaUxGuiSmokeTests
 {
     private readonly ITestOutputHelper output;
@@ -35,4 +36,14 @@ public sealed class BetaUxGuiSmokeTests
     [Trait("Category", "GuiSmoke")]
     public Task Windows_GuiSmoke_BetaUx_DeclinePath_RecoversWithoutDeadEnd()
         => GuiSmokeHarness.RunScenariosAsync(output, "F");
+
+    [GuiSmokeFact]
+    [Trait("Category", "GuiSmoke")]
+    public Task Windows_GuiSmoke_BetaUx_HeaderChatCoherence()
+        => GuiSmokeHarness.RunScenariosAsync(output, "header_chat_coherence");
+
+    [GuiSmokeFact]
+    [Trait("Category", "GuiSmoke")]
+    public Task Windows_GuiSmoke_BetaUx_EndSessionDisablesChat()
+        => GuiSmokeHarness.RunScenariosAsync(output, "end_session_disables_chat");
 }

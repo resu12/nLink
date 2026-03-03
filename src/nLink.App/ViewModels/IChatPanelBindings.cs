@@ -7,6 +7,8 @@ public interface IChatPanelBindings
 {
     string ChatPanelTitle { get; }
 
+    string ChatConnectionPillText { get; }
+
     bool ShowChatNotice { get; }
 
     string ChatNoticeText { get; }

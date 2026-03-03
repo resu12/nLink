@@ -80,6 +80,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
     public event EventHandler? RemoteSessionEnded;
 
     internal event EventHandler<BridgeLifecycleEvent>? BridgeLifecycle;
+    internal event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
 
     public bool CanSendSessionEnd => !disposed && currentCode is not null && !string.IsNullOrWhiteSpace(remoteEndpoint);
 
@@ -139,6 +140,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
         if (client is RealNknClientAdapter realClient)
         {
             realClient.BridgeLifecycle -= OnBridgeLifecycle;
+            realClient.ScreenShareFrameCompleted -= OnScreenShareFrameCompleted;
         }
 
         CleanupAsync().GetAwaiter().GetResult();
@@ -347,12 +349,18 @@ public sealed class NknSignalingTransport : ISignalingTransport
         if (client is RealNknClientAdapter realClient)
         {
             realClient.BridgeLifecycle += OnBridgeLifecycle;
+            realClient.ScreenShareFrameCompleted += OnScreenShareFrameCompleted;
         }
     }
 
     private void OnBridgeLifecycle(object? sender, BridgeLifecycleEvent e)
     {
         BridgeLifecycle?.Invoke(this, e);
+    }
+
+    private void OnScreenShareFrameCompleted(object? sender, ScreenShareFrameCompletedEventArgs e)
+    {
+        ScreenShareFrameCompleted?.Invoke(this, e);
     }
 
     private void OnClientDisconnected(object? sender, EventArgs e)

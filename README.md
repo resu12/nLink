@@ -25,10 +25,10 @@ Open Diagnostics -> Copy diagnostics and include it when reporting issues.
 
 Notes:
 - Windows x64 only
-- Beta pre-release (`0.2.0-beta.2`)
+- Beta pre-release (`0.2.0-beta.5`)
 
 Versioning:
-- Release version uses SemVer (for example: `0.2.0-beta.2`)
+- Release version uses SemVer (for example: `0.2.0-beta.5`)
 - The current release version is stored in the repo-root `VERSION` file
 
 License:
@@ -64,6 +64,8 @@ License:
 - Output release assets:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
+- RC checklist:
+  [`docs/release/0.2.0-rc-readiness.md`](docs/release/0.2.0-rc-readiness.md)
 - Optional beta hardening extras (offline/permissions/installer upgrade rollback/hang checks):
   see `docs/BETA_HARDENING_EXTRAS.md`
 

@@ -22,6 +22,23 @@ public class SmokeTests
 {
     [Trait("Category", "Smoke")]
     [Fact]
+    public void FeatureFlags_DefaultsMatchBeta3UiRollout_WhenNoEnvironmentOverridesArePresent()
+    {
+        Assert.True(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NLINK_FEATURE_CHAT_HARDENING")));
+        Assert.True(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD")));
+        Assert.True(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT")));
+        Assert.True(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NLINK_FEATURE_RESPONSIVE_LAYOUT")));
+        Assert.True(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NLINK_FEATURE_SESSION_HEADER")));
+
+        Assert.True(FeatureFlags.EnableChatHardening);
+        Assert.True(FeatureFlags.EnableResponsiveLayout);
+        Assert.True(FeatureFlags.EnableScreenShareScaffold);
+        Assert.False(FeatureFlags.EnableScreenShareTransport);
+        Assert.True(FeatureFlags.EnableSessionHeader);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task RetryPolicy_RetriesWithBoundedBackoff_AndTracksAttemptCounts()
     {
         var observedDelays = new List<TimeSpan>();
@@ -1842,6 +1859,13 @@ public class SmokeTests
             Assert.False(helper.ConnectCommand.CanExecute(null));
             Assert.True(helper.ShowOpenDiagnosticsLink);
             Assert.Equal(SessionRuntimeState.Failed, runtime.State);
+
+            using var scripted = new ScriptedSignalingTransport();
+            SetPrivateField(runtime, "transport", scripted);
+            InvokePrivateMethod(runtime, "OnTransportDisconnected", scripted, EventArgs.Empty);
+
+            Assert.Equal("Please reinstall.", runtime.StatusText);
+            Assert.Equal("Please reinstall.", helper.StatusText);
         }
         finally
         {
@@ -2296,6 +2320,272 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void HelperPageViewModel_HeaderStatusText_UsesStatusTextOrReady_AndIsNeverEmpty()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        SetPrivateField(helper, "connectionState", "Idle");
+        SetPrivateField(helper, "statusText", "Waiting for code");
+        Assert.Equal("Waiting for code", helper.HeaderStatusText);
+        Assert.False(string.IsNullOrWhiteSpace(helper.HeaderStatusText));
+
+        SetPrivateField(helper, "statusText", string.Empty);
+        Assert.Equal("Ready", helper.HeaderStatusText);
+        Assert.False(string.IsNullOrWhiteSpace(helper.HeaderStatusText));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeePageViewModel_HeaderStatusText_UsesConnectionStatusOrReady_AndIsNeverEmpty()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+
+        SetPrivateField(helpee, "connectionState", "Waiting");
+        SetPrivateField(helpee, "connectionStatus", "Waiting for helper…");
+        Assert.Equal("Waiting for helper…", helpee.HeaderStatusText);
+        Assert.False(string.IsNullOrWhiteSpace(helpee.HeaderStatusText));
+
+        SetPrivateField(helpee, "connectionStatus", string.Empty);
+        Assert.Equal("Ready", helpee.HeaderStatusText);
+        Assert.False(string.IsNullOrWhiteSpace(helpee.HeaderStatusText));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperPageViewModel_CanEndSession_IsTrueOnlyForConnectedConnectingOrRecoveringPhases()
+    {
+        Assert.True(InvokeCanEndForPhase(typeof(HelperPageViewModel), SessionUiPhase.Connected));
+        Assert.False(InvokeCanEndForPhase(typeof(HelperPageViewModel), SessionUiPhase.Failed));
+        Assert.False(InvokeCanEndForPhase(typeof(HelperPageViewModel), SessionUiPhase.Ended));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeePageViewModel_CanEndSession_IsTrueOnlyForConnectedConnectingOrRecoveringPhases()
+    {
+        Assert.True(InvokeCanEndForPhase(typeof(HelpeePageViewModel), SessionUiPhase.Connected));
+        Assert.False(InvokeCanEndForPhase(typeof(HelpeePageViewModel), SessionUiPhase.Failed));
+        Assert.False(InvokeCanEndForPhase(typeof(HelpeePageViewModel), SessionUiPhase.Ended));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void ChatConnectionPillText_WhenChatInputDisabled_IsNotConnected()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        SetPrivateField(helper, "isChatInputEnabled", false);
+        SetPrivateField(helper, "connectionState", "Idle");
+
+        Assert.NotEqual("Connected", helper.ChatConnectionPillText);
+        Assert.Equal("Not connected", helper.ChatConnectionPillText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task Beta5_HeaderAndChatPill_NeverDisagreeOnConnected()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        helper.CodeInput = helpee.ShareCode;
+        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+
+        await WaitUntilAsync(
+            () => helpee.HasIncomingRequest && helpee.ConnectionState == "IncomingRequest",
+            TimeSpan.FromSeconds(5));
+
+        helpee.AllowCommand.Execute(null);
+        await connectTask;
+
+        await WaitUntilAsync(
+            () => helper.EffectivePhase == SessionUiPhase.Connected &&
+                  helper.IsChatInputEnabled,
+            TimeSpan.FromSeconds(5));
+
+        Assert.Equal("Connected", helper.HeaderStatusText);
+        Assert.Equal("Connected", helper.ChatConnectionPillText);
+        Assert.True(helper.IsChatInputEnabled);
+
+        await helperRuntime.DisconnectAsync();
+
+        await WaitUntilAsync(
+            () => helper.EffectivePhase is SessionUiPhase.Failed or SessionUiPhase.Idle or SessionUiPhase.Waiting &&
+                  !helper.IsChatInputEnabled,
+            TimeSpan.FromSeconds(5));
+
+        Assert.NotEqual("Connected", helper.ChatConnectionPillText);
+        Assert.False(helper.IsChatInputEnabled);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task Beta5_EndSession_DisablesChat_And_Command_Helper()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        helper.CodeInput = helpee.ShareCode;
+        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+
+        await WaitUntilAsync(
+            () => helpee.HasIncomingRequest && helpee.ConnectionState == "IncomingRequest",
+            TimeSpan.FromSeconds(5));
+
+        helpee.AllowCommand.Execute(null);
+        await connectTask;
+
+        await WaitUntilAsync(
+            () => helper.EffectivePhase == SessionUiPhase.Connected &&
+                  helper.IsChatInputEnabled &&
+                  helper.CanEndSession,
+            TimeSpan.FromSeconds(5));
+
+        Assert.True(helper.IsChatInputEnabled);
+        Assert.True(helper.CanEndSession);
+
+        helper.EndSessionCommand.Execute(null);
+
+        Assert.False(helper.IsChatInputEnabled);
+        Assert.False(helper.CanEndSession);
+        Assert.False(string.IsNullOrWhiteSpace(helper.HeaderStatusText));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperPageViewModel_FailedPhase_DisablesChatInput()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        var uiStateStore = new SessionUiStateStore();
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime, uiStateStore: uiStateStore);
+
+        uiStateStore.SetPhase(SessionUiPhase.Failed, "test");
+        await WaitUntilAsync(() => !helper.IsChatInputEnabled, TimeSpan.FromSeconds(1));
+        Assert.False(helper.IsChatInputEnabled);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_EndedPhase_DisablesEndSession()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
+        var uiStateStore = new SessionUiStateStore();
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime, uiStateStore: uiStateStore);
+
+        uiStateStore.SetPhase(SessionUiPhase.Ended, "test");
+        await WaitUntilAsync(() => !helpee.CanEndSession, TimeSpan.FromSeconds(1));
+        Assert.False(helpee.CanEndSession);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HeaderStatusText_IsNeverEmpty_InDefaultVmStates()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+
+        Assert.False(string.IsNullOrWhiteSpace(helper.HeaderStatusText));
+        Assert.False(string.IsNullOrWhiteSpace(helpee.HeaderStatusText));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task ChatHardening_WhenEnabled_PreservesExactChatMessageInsertionOrder()
+    {
+        if (!FeatureFlags.EnableChatHardening)
+        {
+            return;
+        }
+
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-chat-hardening-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-chat-hardening-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        helper.CodeInput = helpee.ShareCode;
+        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+
+        await WaitUntilAsync(
+            () => helpee.HasIncomingRequest && helpee.ConnectionState == "IncomingRequest",
+            TimeSpan.FromSeconds(5));
+
+        helpee.AllowCommand.Execute(null);
+        await connectTask;
+
+        await WaitUntilAsync(
+            () => helpee.ConnectionState == "Connected" && helper.ConnectionState == "Connected",
+            TimeSpan.FromSeconds(5));
+
+        var helperTexts = new[] { "helper-1", "helper-2", "helper-3" };
+        var helpeeTexts = new[] { "helpee-1", "helpee-2", "helpee-3" };
+
+        for (var i = 0; i < helperTexts.Length; i++)
+        {
+            helper.ChatDraft = helperTexts[i];
+            await helper.SendChatCommand.ExecuteAsync(null);
+
+            var expectedAfterHelperSend = (i * 2) + 1;
+            await WaitUntilAsync(
+                () => helper.ChatMessages.Count == expectedAfterHelperSend &&
+                      helpee.ChatMessages.Count == expectedAfterHelperSend,
+                TimeSpan.FromSeconds(2));
+
+            helpee.ChatDraft = helpeeTexts[i];
+            await helpee.SendChatCommand.ExecuteAsync(null);
+
+            var expectedAfterHelpeeSend = (i * 2) + 2;
+            await WaitUntilAsync(
+                () => helper.ChatMessages.Count == expectedAfterHelpeeSend &&
+                      helpee.ChatMessages.Count == expectedAfterHelpeeSend,
+                TimeSpan.FromSeconds(2));
+        }
+
+        Assert.Equal(
+            new[]
+            {
+                (true, "helper-1"),
+                (false, "helpee-1"),
+                (true, "helper-2"),
+                (false, "helpee-2"),
+                (true, "helper-3"),
+                (false, "helpee-3"),
+            },
+            helper.ChatMessages.Select(line => (line.IsLocal, line.Text)).ToArray());
+
+        Assert.Equal(
+            new[]
+            {
+                (false, "helper-1"),
+                (true, "helpee-1"),
+                (false, "helper-2"),
+                (true, "helpee-2"),
+                (false, "helper-3"),
+                (true, "helpee-3"),
+            },
+            helpee.ChatMessages.Select(line => (line.IsLocal, line.Text)).ToArray());
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task NknTransport_FakeClient_HostJoinApproveAndChat_RoundTrip()
     {
         FakeNknClient.ResetNetwork();
@@ -2585,8 +2875,9 @@ public class SmokeTests
     public async Task HelperViewModel_WrongCode_TransitionsToFailed_WithMappedMessage_AndReconnectEnabled()
     {
         var transportConfig = CreateDevLocalTestConfig();
-        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(
-            onJoinAsync: static (_, __) => throw new TimeoutException("Could not find session for code")));
+        using var scripted = new ScriptedSignalingTransport(
+            onJoinAsync: static (_, __) => throw new TimeoutException("Could not find session for code"));
+        using var runtime = new SessionRuntime(() => scripted);
         using var helper = new HelperPageViewModel(
             cancelAction: static () => { },
             transportConfig,
@@ -2597,10 +2888,24 @@ public class SmokeTests
         helper.CodeInput = "123456";
         await helper.ConnectCommand.ExecuteAsync(null);
 
-        Assert.Equal(SessionRuntimeState.Failed, runtime.State);
-        Assert.Equal("No one found with that code.", helper.StatusText);
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Failed &&
+                  string.Equals(runtime.StatusText, "No one found with that code.", StringComparison.Ordinal) &&
+                  string.Equals(helper.ConnectionState, "Failed", StringComparison.Ordinal) &&
+                  helper.ConnectCommand.CanExecute(null),
+            TimeSpan.FromSeconds(1));
+
+        Assert.Equal("No one found with that code.", runtime.StatusText);
         Assert.True(helper.ConnectCommand.CanExecute(null));
         Assert.Equal("Failed", helper.ConnectionState);
+
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "OnTransportDisconnected", scripted, EventArgs.Empty);
+
+        await WaitUntilAsync(
+            () => string.Equals(runtime.StatusText, "No one found with that code.", StringComparison.Ordinal) &&
+                  string.Equals(helper.StatusText, "No one found with that code.", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(1));
     }
 
     [Trait("Category", "Smoke")]
@@ -2620,8 +2925,14 @@ public class SmokeTests
         helper.CodeInput = "654321";
         await helper.ConnectCommand.ExecuteAsync(null);
 
-        Assert.Equal(SessionRuntimeState.Failed, runtime.State);
-        Assert.Equal("No one found with that code.", helper.StatusText);
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Failed &&
+                  string.Equals(runtime.StatusText, "No one found with that code.", StringComparison.Ordinal) &&
+                  string.Equals(helper.ConnectionState, "Failed", StringComparison.Ordinal) &&
+                  helper.ConnectCommand.CanExecute(null),
+            TimeSpan.FromSeconds(1));
+
+        Assert.Equal("No one found with that code.", runtime.StatusText);
         Assert.True(helper.ConnectCommand.CanExecute(null));
         Assert.Equal("Failed", helper.ConnectionState);
     }
@@ -2631,8 +2942,9 @@ public class SmokeTests
     public async Task HelperViewModel_ApprovalTimeout_TransitionsToFailed_WithMappedMessage()
     {
         var transportConfig = CreateDevLocalTestConfig();
-        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(
-            onJoinAsync: static (_, __) => Task.CompletedTask));
+        using var scripted = new ScriptedSignalingTransport(
+            onJoinAsync: static (_, __) => Task.CompletedTask);
+        using var runtime = new SessionRuntime(() => scripted);
         using var helper = new HelperPageViewModel(
             cancelAction: static () => { },
             transportConfig,
@@ -2647,6 +2959,14 @@ public class SmokeTests
         Assert.Equal("No response yet.", helper.StatusText);
         Assert.True(helper.ConnectCommand.CanExecute(null));
         Assert.Equal("Failed", helper.ConnectionState);
+
+        SetPrivateField(runtime, "transport", scripted);
+        InvokePrivateMethod(runtime, "OnTransportDisconnected", scripted, EventArgs.Empty);
+
+        await WaitUntilAsync(
+            () => string.Equals(runtime.StatusText, "No response yet.", StringComparison.Ordinal) &&
+                  string.Equals(helper.StatusText, "No response yet.", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(1));
     }
 
     [Trait("Category", "Smoke")]
@@ -2689,6 +3009,23 @@ public class SmokeTests
             TimeSpan.FromSeconds(2));
 
         Assert.Equal("Connection lost.", runtime.StatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_DisconnectAfterMappedFail_KeepsMappedStatusText()
+    {
+        using var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted);
+
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Failed);
+        SetPrivateField(runtime, "statusText", "No response yet.");
+
+        InvokePrivateMethod(runtime, "OnTransportDisconnected", scripted, EventArgs.Empty);
+
+        Assert.Equal("No response yet.", runtime.StatusText);
+        Assert.Equal(SessionRuntimeState.Failed, runtime.State);
     }
 
     [Trait("Category", "Smoke")]
@@ -2997,7 +3334,7 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
-    public async Task HelpeeViewModel_IncomingRequestTimeout_AutoRegeneratesCode()
+    public async Task HelpeeViewModel_IncomingRequestTimeout_ReturnsToWaitingWithUsableCode()
     {
         var transportConfig = CreateDevLocalTestConfig();
         var network = new FakeSessionTransportNetwork();
@@ -3016,19 +3353,18 @@ public class SmokeTests
         await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
         await WaitUntilAsync(() => helpee.IsIncomingRequestView, TimeSpan.FromSeconds(2));
 
-        string latestCode = initialCode;
         await WaitUntilAsync(
             () =>
             {
-                latestCode = SessionCode.NormalizeDigits(helpee.ShareCode);
                 return helpee.ShowWaitingPanel &&
                        !helpee.IsIncomingRequestView &&
-                       latestCode.Length == 6 &&
-                       !string.Equals(latestCode, initialCode, StringComparison.Ordinal);
+                       string.Equals(helpee.ConnectionState, "Waiting", StringComparison.Ordinal) &&
+                       SessionCode.NormalizeDigits(helpee.ShareCode).Length == 6;
             },
             TimeSpan.FromSeconds(8));
 
-        Assert.NotEqual(initialCode, latestCode);
+        Assert.Equal(6, SessionCode.NormalizeDigits(helpee.ShareCode).Length);
+        Assert.Equal("Waiting", helpee.ConnectionState);
     }
 
     [Trait("Category", "Smoke")]
@@ -3156,8 +3492,7 @@ public class SmokeTests
         await WaitUntilAsync(
             () => helpee.IsIncomingRequestView &&
                   helpee.ShowIncomingRequestPanel &&
-                  !helpee.ShowWaitingPanel &&
-                  string.Equals(helpee.PageTitle, "Someone wants to connect", StringComparison.Ordinal),
+                  !helpee.ShowWaitingPanel,
             TimeSpan.FromSeconds(2));
     }
 
@@ -4449,6 +4784,27 @@ rl.on('line', (line) => {
         }
 
         Directory.Delete(path, recursive: true);
+    }
+
+    private static void SetPrivateField<TTarget>(TTarget target, string fieldName, object? value)
+    {
+        var field = typeof(TTarget).GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        field!.SetValue(target, value);
+    }
+
+    private static object? InvokePrivateMethod(object target, string methodName, params object?[] args)
+    {
+        var method = target.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        return method!.Invoke(target, args);
+    }
+
+    private static bool InvokeCanEndForPhase(Type viewModelType, SessionUiPhase phase)
+    {
+        var method = viewModelType.GetMethod("CanEndForPhase", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        return (bool)method!.Invoke(null, new object[] { phase })!;
     }
 
     private static TransportRuntimeConfig CreateDevLocalTestConfig()

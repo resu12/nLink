@@ -272,6 +272,8 @@ public sealed class SessionRuntime : IDisposable
 
     public event EventHandler? Disconnected;
 
+    internal event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
+
     public event EventHandler<ChatMessageEventArgs>? ChatMessageReceived;
 
     public event EventHandler? ChatMessageReceivedBeforeApproved;
@@ -991,6 +993,7 @@ public sealed class SessionRuntime : IDisposable
         {
             nknTransport.RemoteSessionEnded += OnRemoteSessionEnded;
             nknTransport.BridgeLifecycle += OnBridgeLifecycle;
+            nknTransport.ScreenShareFrameCompleted += OnTransportScreenShareFrameCompleted;
         }
     }
 
@@ -1004,6 +1007,7 @@ public sealed class SessionRuntime : IDisposable
         {
             nknTransport.RemoteSessionEnded -= OnRemoteSessionEnded;
             nknTransport.BridgeLifecycle -= OnBridgeLifecycle;
+            nknTransport.ScreenShareFrameCompleted -= OnTransportScreenShareFrameCompleted;
         }
     }
 
@@ -1112,12 +1116,16 @@ public sealed class SessionRuntime : IDisposable
             return;
         }
 
+        var alreadyFailedWithMappedStatus =
+            state == SessionRuntimeState.Failed &&
+            !string.IsNullOrWhiteSpace(StatusText);
+
         var shouldFail = state is SessionRuntimeState.Waiting
             or SessionRuntimeState.IncomingJoinRequest
             or SessionRuntimeState.Connecting
             or SessionRuntimeState.Connected;
 
-        if (shouldFail)
+        if (shouldFail || alreadyFailedWithMappedStatus)
         {
             lastDisconnectWasRemoteEnd = false;
             pendingJoinRequest = null;
@@ -1127,11 +1135,18 @@ public sealed class SessionRuntime : IDisposable
                 snapshot.LastError,
                 lastDisconnectReason: snapshot.LastDisconnectReason,
                 fallbackMessage: "Connection lost.");
-            // Preserve the specific user-facing mapping here; the generic fallback is only for
-            // unmapped failures and must not clobber smoke-tested copy expectations.
-            var message = string.IsNullOrWhiteSpace(failure.Message)
-                ? "Connection lost."
-                : failure.Message;
+            if (alreadyFailedWithMappedStatus)
+            {
+                LogTransportFailure(failure, "transport_disconnected");
+                Disconnected?.Invoke(this, EventArgs.Empty);
+                return;
+            }
+
+            // Preserve an already-mapped failure StatusText here; the generic fallback is only
+            // for unmapped failures and must not clobber smoke-tested copy expectations.
+            var message = ShouldPreserveMappedFailureStatusText(StatusText)
+                ? StatusText
+                : "Connection lost.";
             TransitionTo(TransportState.Failed, "transport_disconnected");
             SetState(SessionRuntimeState.Failed, message);
             LogTransportFailure(failure, "transport_disconnected");
@@ -1180,6 +1195,16 @@ public sealed class SessionRuntime : IDisposable
                 remoteSessionEndHandling = false;
             }
         });
+    }
+
+    private void OnTransportScreenShareFrameCompleted(object? sender, ScreenShareFrameCompletedEventArgs e)
+    {
+        if (!IsFromCurrentTransport(sender))
+        {
+            return;
+        }
+
+        ScreenShareFrameCompleted?.Invoke(this, e);
     }
 
     private bool ShouldQuietlyRecoverHelpeeHostStartFailure(TransportFailure failure, SessionCode code)
@@ -2175,5 +2200,18 @@ public sealed class SessionRuntime : IDisposable
 
         var trimmed = text.Trim();
         return trimmed.Length <= 120 ? trimmed : trimmed[..120];
+    }
+
+    private static bool ShouldPreserveMappedFailureStatusText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        return !string.Equals(text, "Connecting…", StringComparison.Ordinal) &&
+               !string.Equals(text, "Connected", StringComparison.Ordinal) &&
+               !string.Equals(text, "Waiting for helper…", StringComparison.Ordinal) &&
+               !string.Equals(text, "Helper on this PC wants to connect. Click Allow.", StringComparison.Ordinal);
     }
 }

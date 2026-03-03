@@ -6,6 +6,7 @@
              xmlns:views="using:NLink.App.Views"
              mc:Ignorable="d"
              x:Class="NLink.App.Views.HelpeePageView"
+             x:Name="Root"
              x:DataType="vm:HelpeePageViewModel">
 
     <UserControl.Styles>
@@ -25,6 +26,16 @@
             <Setter Property="VerticalContentAlignment" Value="Center"/>
             <Setter Property="Padding" Value="16,0"/>
         </Style>
+
+        <Style Selector="Button.backAction">
+            <Setter Property="FontSize" Value="18"/>
+            <Setter Property="Height" Value="52"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="MinWidth" Value="220"/>
+        </Style>
     </UserControl.Styles>
 
     <Grid Background="{StaticResource AppBackgroundBrush}">
@@ -32,162 +43,151 @@
                       VerticalScrollBarVisibility="Auto"
                       Margin="24">
             <StackPanel HorizontalAlignment="Center"
-                        MaxWidth="720"
+                        MaxWidth="1120"
                         Spacing="16">
 
-                <TextBlock Classes="appTitle"
-                           Text="{Binding PageTitle}"
-                           IsVisible="{Binding ShowPageHeader}"
-                           HorizontalAlignment="Center"
-                           TextAlignment="Center"/>
+                <views:SessionShellView RoleText="Helpee"
+                                        ShowScreenShareAction="True"
+                                        ShowChatPaneRequested="{Binding ShowConnectedPanel}">
+                    <views:SessionShellView.MainContent>
+                        <Grid>
+                            <views:ScreenShareSurfaceView Frame="{Binding ScreenSharePreviewFrame}"
+                                                          IsVisible="{Binding ShowScreenSharePreviewFrame}"/>
 
-                <TextBlock Classes="appBody"
-                           Text="{Binding PageSubtitle}"
-                           IsVisible="{Binding ShowPageSubtitle}"
-                           TextAlignment="Center"
-                           HorizontalAlignment="Center"
-                           MaxWidth="560"/>
+                            <Border Classes="appCard"
+                                    Padding="24"
+                                    IsVisible="{Binding ShowHelpeeMainContent}">
+                                <StackPanel Spacing="16">
+                                    <views:StatusBanner Status="{Binding BannerStatus}"
+                                                        ForceVisible="{Binding ShowStatusBanner}"
+                                                        DetailsText="{Binding StatusBannerDetailsText}"
+                                                        CancelCommand="{Binding StatusBannerCancelCommand}"
+                                                        FailureCategory="{Binding StatusBannerFailureCategory}"
+                                                        SessionCorrelationId="{Binding StatusBannerSessionCorrelationId}"
+                                                        LastConnectDuration="{Binding StatusBannerLastConnectDuration}"
+                                                        LastHandshakeDuration="{Binding StatusBannerLastHandshakeDuration}"
+                                                        BridgeState="{Binding StatusBannerBridgeState}"/>
 
-                <Border Classes="appCard"
-                        Padding="24">
-                    <StackPanel Spacing="16">
-                        <views:StatusBanner Status="{Binding BannerStatus}"
-                                            ForceVisible="{Binding ShowStatusBanner}"
-                                            DetailsText="{Binding StatusBannerDetailsText}"
-                                            CancelCommand="{Binding StatusBannerCancelCommand}"
-                                            FailureCategory="{Binding StatusBannerFailureCategory}"
-                                            SessionCorrelationId="{Binding StatusBannerSessionCorrelationId}"
-                                            LastConnectDuration="{Binding StatusBannerLastConnectDuration}"
-                                            LastHandshakeDuration="{Binding StatusBannerLastHandshakeDuration}"
-                                            BridgeState="{Binding StatusBannerBridgeState}"/>
+                                    <Border Classes="appPanel"
+                                            Padding="10"
+                                            IsVisible="{Binding ShowTransientBanner}">
+                                        <Grid ColumnDefinitions="*,Auto"
+                                              ColumnSpacing="10">
+                                            <TextBlock Text="{Binding TransientBannerText}"
+                                                       Classes="appMuted"
+                                                       TextWrapping="Wrap"
+                                                       VerticalAlignment="Center"/>
 
-                        <Border Classes="appPanel"
-                                Padding="10"
-                                IsVisible="{Binding ShowTransientBanner}">
-                            <Grid ColumnDefinitions="*,Auto"
-                                  ColumnSpacing="10">
-                                <TextBlock Text="{Binding TransientBannerText}"
-                                           Classes="appMuted"
-                                           TextWrapping="Wrap"
-                                           VerticalAlignment="Center"/>
+                                            <Button Grid.Column="1"
+                                                    Classes="appButton secondaryButton"
+                                                    Content="Cancel"
+                                                    Command="{Binding CancelTransientCommand}"
+                                                    IsVisible="{Binding CanCancelTransient}"
+                                                    IsEnabled="{Binding CanCancelTransient}"
+                                                    Height="34"
+                                                    MinWidth="88"/>
+                                        </Grid>
+                                    </Border>
 
-                                <Button Grid.Column="1"
-                                        Classes="appButton secondaryButton"
-                                        Content="Cancel"
-                                        Command="{Binding CancelTransientCommand}"
-                                        IsVisible="{Binding CanCancelTransient}"
-                                        IsEnabled="{Binding CanCancelTransient}"
-                                        Height="34"
-                                        MinWidth="88"/>
-                            </Grid>
+                                    <StackPanel Spacing="16"
+                                                IsVisible="{Binding ShowWaitingPanel}">
+                                        <Border Background="{StaticResource AppMutedPanelBrush}"
+                                                BorderBrush="{StaticResource AppCardBorderBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="12"
+                                                Padding="20"
+                                                Cursor="Hand"
+                                                PointerPressed="ShareCodeBorder_PointerPressed">
+                                            <TextBlock Classes="codeDigits"
+                                                       Text="{Binding ShareCode}"
+                                                       AutomationProperties.AutomationId="Helpee.Code"
+                                                       HorizontalAlignment="Center"/>
+                                        </Border>
+
+                                        <Grid ColumnDefinitions="*,*"
+                                              ColumnSpacing="10"
+                                              IsVisible="{Binding ShowWaitingCodeActions}">
+                                            <Button Grid.Column="0"
+                                                    AutomationProperties.AutomationId="Helpee.CopyCode"
+                                                    Classes="appButton primaryButton action"
+                                                    Content="Copy code"
+                                                    Command="{Binding CopyCodeCommand}"
+                                                    IsEnabled="{Binding CanStartOrConnect}"
+                                                    HorizontalAlignment="Stretch"/>
+
+                                            <Button Grid.Column="1"
+                                                    AutomationProperties.AutomationId="Helpee.NewCode"
+                                                    Classes="appButton secondaryButton action"
+                                                    Content="New code"
+                                                    Command="{Binding RegenerateCodeCommand}"
+                                                    IsEnabled="{Binding CanStartOrConnect}"
+                                                    HorizontalAlignment="Stretch"/>
+                                        </Grid>
+
+                                        <TextBlock Classes="appMuted"
+                                                   Text="{Binding CopyFeedback.Text}"
+                                                   FontSize="14"
+                                                   TextAlignment="Center"
+                                                   HorizontalAlignment="Center"
+                                                   IsVisible="{Binding CopyFeedback.IsVisible}"/>
+
+                                        <Button Classes="appButton secondaryButton action"
+                                                Content="Retry"
+                                                Command="{Binding RetryCommand}"
+                                                IsEnabled="{Binding CanStartOrConnect}"
+                                                IsVisible="{Binding ShowRetryAction}"/>
+
+                                        <TextBlock Classes="appMuted"
+                                                   AutomationProperties.AutomationId="Helpee.Status"
+                                                   Text="{Binding StatusLineText}"
+                                                   FontSize="15"
+                                                   TextAlignment="Center"
+                                                   HorizontalAlignment="Center"
+                                                   IsVisible="{Binding ShowWaitingStatusLine}"/>
+                                    </StackPanel>
+
+                                    <StackPanel Spacing="16"
+                                                IsVisible="{Binding ShowIncomingRequestPanel}">
+                                        <TextBlock Text="{Binding IncomingHelperName}"
+                                                   Foreground="{StaticResource AppTextBrush}"
+                                                   FontSize="18"
+                                                   FontWeight="SemiBold"
+                                                   TextAlignment="Center"
+                                                   HorizontalAlignment="Center"/>
+
+                                        <TextBlock Classes="appBody"
+                                                   AutomationProperties.AutomationId="Helpee.Status"
+                                                   Text="{Binding StatusLineText}"
+                                                   TextAlignment="Center"
+                                                   HorizontalAlignment="Center"/>
+
+                                        <Button Classes="appButton positiveButton action"
+                                                AutomationProperties.AutomationId="Helpee.Allow"
+                                                Content="Allow"
+                                                Command="{Binding AllowCommand}"
+                                                IsEnabled="{Binding HasIncomingRequest}"/>
+
+                                        <Button Classes="appButton secondaryButton action"
+                                                AutomationProperties.AutomationId="Helpee.Decline"
+                                                Content="Decline"
+                                                Command="{Binding DeclineCommand}"
+                                                IsEnabled="{Binding HasIncomingRequest}"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </views:SessionShellView.MainContent>
+
+                    <views:SessionShellView.ChatContent>
+                        <Border HorizontalAlignment="Stretch">
+                            <views:ChatView HorizontalAlignment="Stretch"/>
                         </Border>
+                    </views:SessionShellView.ChatContent>
+                </views:SessionShellView>
 
-                        <!-- State A: waiting/hosting -->
-                        <StackPanel Spacing="16"
-                                    IsVisible="{Binding ShowWaitingPanel}">
-                            <Border Background="{StaticResource AppMutedPanelBrush}"
-                                    BorderBrush="{StaticResource AppCardBorderBrush}"
-                                    BorderThickness="1"
-                                    CornerRadius="12"
-                                    Padding="20"
-                                    Cursor="Hand"
-                                    PointerPressed="ShareCodeBorder_PointerPressed">
-                                <TextBlock Classes="codeDigits"
-                                           Text="{Binding ShareCode}"
-                                           AutomationProperties.AutomationId="Helpee.Code"
-                                           HorizontalAlignment="Center"/>
-                            </Border>
-
-                            <Grid ColumnDefinitions="*,*"
-                                  ColumnSpacing="10"
-                                  IsVisible="{Binding ShowWaitingCodeActions}">
-                                <Button Grid.Column="0"
-                                        AutomationProperties.AutomationId="Helpee.CopyCode"
-                                        Classes="appButton primaryButton action"
-                                        Content="Copy code"
-                                        Command="{Binding CopyCodeCommand}"
-                                        IsEnabled="{Binding CanStartOrConnect}"
-                                        HorizontalAlignment="Stretch"/>
-
-                                <Button Grid.Column="1"
-                                        AutomationProperties.AutomationId="Helpee.NewCode"
-                                        Classes="appButton secondaryButton action"
-                                        Content="New code"
-                                        Command="{Binding RegenerateCodeCommand}"
-                                        IsEnabled="{Binding CanStartOrConnect}"
-                                        HorizontalAlignment="Stretch"/>
-                            </Grid>
-
-                            <TextBlock Classes="appMuted"
-                                       Text="{Binding CopyFeedback.Text}"
-                                       FontSize="14"
-                                       TextAlignment="Center"
-                                       HorizontalAlignment="Center"
-                                       IsVisible="{Binding CopyFeedback.IsVisible}"/>
-
-                            <Button Classes="appButton secondaryButton action"
-                                    Content="Retry"
-                                    Command="{Binding RetryCommand}"
-                                    IsEnabled="{Binding CanStartOrConnect}"
-                                    IsVisible="{Binding ShowRetryAction}"/>
-
-                            <TextBlock Classes="appMuted"
-                                       AutomationProperties.AutomationId="Helpee.Status"
-                                       Text="{Binding StatusLineText}"
-                                       FontSize="15"
-                                       TextAlignment="Center"
-                                       HorizontalAlignment="Center"
-                                       IsVisible="{Binding ShowWaitingStatusLine}"/>
-                        </StackPanel>
-
-                        <!-- State B: incoming request -->
-                        <StackPanel Spacing="16"
-                                    IsVisible="{Binding ShowIncomingRequestPanel}">
-                            <TextBlock Text="{Binding IncomingHelperName}"
-                                       Foreground="{StaticResource AppTextBrush}"
-                                       FontSize="18"
-                                       FontWeight="SemiBold"
-                                       TextAlignment="Center"
-                                       HorizontalAlignment="Center"/>
-
-                            <TextBlock Classes="appBody"
-                                       AutomationProperties.AutomationId="Helpee.Status"
-                                       Text="{Binding StatusLineText}"
-                                       TextAlignment="Center"
-                                       HorizontalAlignment="Center"/>
-
-                            <Button Classes="appButton positiveButton action"
-                                    AutomationProperties.AutomationId="Helpee.Allow"
-                                    Content="Allow"
-                                    Command="{Binding AllowCommand}"
-                                    IsEnabled="{Binding HasIncomingRequest}"/>
-
-                            <Button Classes="appButton secondaryButton action"
-                                    AutomationProperties.AutomationId="Helpee.Decline"
-                                    Content="Decline"
-                                    Command="{Binding DeclineCommand}"
-                                    IsEnabled="{Binding HasIncomingRequest}"/>
-                        </StackPanel>
-
-                        <!-- State C: connected -->
-                        <StackPanel Spacing="16"
-                                    IsVisible="{Binding ShowConnectedPanel}">
-                            <Border HorizontalAlignment="Center"
-                                    MinWidth="560"
-                                    MaxWidth="720">
-                                <views:ChatView HorizontalAlignment="Stretch"/>
-                            </Border>
-                        </StackPanel>
-                    </StackPanel>
-                </Border>
-
-                <Button Classes="appButton secondaryButton"
+                <Button Classes="appButton secondaryButton backAction"
                         Content="Back"
                         Command="{Binding CancelCommand}"
-                        Height="44"
-                        MinWidth="180"
-                        HorizontalAlignment="Center"
-                        IsEnabled="{Binding CanEndSession}"
                         IsVisible="{Binding ShowBackButton}"/>
 
             </StackPanel>

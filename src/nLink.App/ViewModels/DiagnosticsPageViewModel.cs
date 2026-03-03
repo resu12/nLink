@@ -55,6 +55,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         AutoSelected = transportConfig.AutoSelected ? "Yes" : "No";
         ForcedByEnvironment = transportConfig.ForcedByEnvironment ? "Yes" : "No";
         EmbeddedWebViewDefault = AppFeatureFlags.UseEmbeddedWebView ? "Enabled by default" : "Disabled by default";
+        ScreenShareScaffold = FormatFeatureFlag(FeatureFlags.EnableScreenShareScaffold);
+        SessionHeader = FormatFeatureFlag(FeatureFlags.EnableSessionHeader);
         AppVersion = ResolveAppVersion();
         OsDescription = RuntimeInformation.OSDescription;
         ProcessArchitecture = RuntimeInformation.ProcessArchitecture.ToString();
@@ -137,6 +139,10 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string ForcedByEnvironment { get; }
 
     public string EmbeddedWebViewDefault { get; }
+
+    public string ScreenShareScaffold { get; }
+
+    public string SessionHeader { get; }
 
     public string AppVersion { get; }
 
@@ -250,6 +256,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
         return $"Code {exitCode}: {safeReason}";
     }
+
+    private static string FormatFeatureFlag(bool enabled) => enabled ? "On" : "Off";
 
     private void RequestCopyReliabilityLog()
     {

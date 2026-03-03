@@ -1,16 +1,23 @@
+using System;
 using System.Collections.Specialized;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
+using NLink.App.Configuration;
 using NLink.App.ViewModels;
 
 namespace NLink.App.Views;
 
 public partial class ChatView : UserControl
 {
+    private const double StickyBottomThreshold = 32d;
+
     private INotifyCollectionChanged? observedCollection;
+    private bool isNearBottom = true;
+    private bool scrollToEndQueued;
+    private bool forceScrollToEndQueued;
 
     public ChatView()
     {
@@ -26,9 +33,19 @@ public partial class ChatView : UserControl
                 handledEventsToo: true);
         }
         PropertyChanged += OnViewPropertyChanged;
-        AttachedToVisualTree += (_, _) => HookMessagesCollection();
-        DetachedFromVisualTree += (_, _) => UnhookMessagesCollection();
+        AttachedToVisualTree += (_, _) =>
+        {
+            HookScrollViewer();
+            HookMessagesCollection();
+        };
+        DetachedFromVisualTree += (_, _) =>
+        {
+            UnhookMessagesCollection();
+            UnhookScrollViewer();
+        };
     }
+
+    public bool ShowInlineEndSession => !FeatureFlags.EnableSessionHeader;
 
     private void OnViewPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
     {
@@ -50,7 +67,7 @@ public partial class ChatView : UserControl
 
         observedCollection = collection;
         observedCollection.CollectionChanged += OnChatMessagesCollectionChanged;
-        ScrollToBottomBestEffort();
+        QueueScrollToEnd(force: true);
     }
 
     private void UnhookMessagesCollection()
@@ -66,16 +83,87 @@ public partial class ChatView : UserControl
 
     private void OnChatMessagesCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
-        ScrollToBottomBestEffort();
+        QueueScrollToEnd(force: false);
     }
 
-    private void ScrollToBottomBestEffort()
+    private void HookScrollViewer()
     {
+        if (MessagesScrollViewer is null)
+        {
+            return;
+        }
+
+        MessagesScrollViewer.PropertyChanged -= OnMessagesScrollViewerPropertyChanged;
+        MessagesScrollViewer.PropertyChanged += OnMessagesScrollViewerPropertyChanged;
+        UpdateIsNearBottom();
+    }
+
+    private void UnhookScrollViewer()
+    {
+        if (MessagesScrollViewer is null)
+        {
+            return;
+        }
+
+        MessagesScrollViewer.PropertyChanged -= OnMessagesScrollViewerPropertyChanged;
+        scrollToEndQueued = false;
+        forceScrollToEndQueued = false;
+    }
+
+    private void OnMessagesScrollViewerPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property == ScrollViewer.OffsetProperty ||
+            e.Property == ScrollViewer.ExtentProperty ||
+            e.Property == ScrollViewer.ViewportProperty)
+        {
+            UpdateIsNearBottom();
+        }
+    }
+
+    private void UpdateIsNearBottom()
+    {
+        if (MessagesScrollViewer is null)
+        {
+            isNearBottom = true;
+            return;
+        }
+
+        var extentHeight = MessagesScrollViewer.Extent.Height;
+        var viewportHeight = MessagesScrollViewer.Viewport.Height;
+        var offsetY = MessagesScrollViewer.Offset.Y;
+        if (extentHeight <= 0 || viewportHeight <= 0)
+        {
+            isNearBottom = true;
+            return;
+        }
+
+        var remaining = Math.Max(0d, extentHeight - viewportHeight - offsetY);
+        isNearBottom = remaining <= StickyBottomThreshold;
+    }
+
+    private void QueueScrollToEnd(bool force)
+    {
+        forceScrollToEndQueued |= force;
+        if (scrollToEndQueued)
+        {
+            return;
+        }
+
+        scrollToEndQueued = true;
         Dispatcher.UIThread.Post(() =>
         {
+            var forceNow = forceScrollToEndQueued;
+            scrollToEndQueued = false;
+            forceScrollToEndQueued = false;
+            if (!forceNow && !isNearBottom)
+            {
+                return;
+            }
+
             try
             {
                 MessagesScrollViewer?.ScrollToEnd();
+                UpdateIsNearBottom();
             }
             catch
             {

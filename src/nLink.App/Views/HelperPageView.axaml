@@ -59,239 +59,114 @@
     <Grid Background="{StaticResource AppBackgroundBrush}">
         <ScrollViewer HorizontalScrollBarVisibility="Disabled"
                       VerticalScrollBarVisibility="Auto"
-                      Margin="24"
-                      IsVisible="{Binding #Root.UseLegacyLayout}">
-            <StackPanel HorizontalAlignment="Center"
-                        MaxWidth="720"
-                        Spacing="16">
-                <TextBlock Classes="appTitle"
-                           Text="{Binding PageTitle}"
-                           IsVisible="{Binding ShowPageHeader}"
-                           HorizontalAlignment="Center"
-                           TextAlignment="Center"/>
-
-                <Border Classes="appCard"
-                        Padding="24">
-                    <StackPanel Spacing="16">
-                        <views:StatusBanner Status="{Binding BannerStatus}"
-                                            ForceVisible="{Binding ShowStatusBanner}"
-                                            DetailsText="{Binding StatusBannerDetailsText}"
-                                            CancelCommand="{Binding StatusBannerCancelCommand}"
-                                            FailureCategory="{Binding StatusBannerFailureCategory}"
-                                            SessionCorrelationId="{Binding StatusBannerSessionCorrelationId}"
-                                            LastConnectDuration="{Binding StatusBannerLastConnectDuration}"
-                                            LastHandshakeDuration="{Binding StatusBannerLastHandshakeDuration}"
-                                            BridgeState="{Binding StatusBannerBridgeState}"/>
-
-                        <Border Classes="appPanel"
-                                Padding="10"
-                                IsVisible="{Binding ShowTransientBanner}">
-                            <Grid ColumnDefinitions="*,Auto"
-                                  ColumnSpacing="10">
-                                <TextBlock Text="{Binding TransientBannerText}"
-                                           Classes="appMuted"
-                                           TextWrapping="Wrap"
-                                           VerticalAlignment="Center"/>
-
-                                <Button Grid.Column="1"
-                                        Classes="appButton secondaryButton"
-                                        Content="Cancel"
-                                        Command="{Binding CancelTransientCommand}"
-                                        IsVisible="{Binding CanCancelTransient}"
-                                        IsEnabled="{Binding CanCancelTransient}"
-                                        Height="34"
-                                        MinWidth="88"/>
-                            </Grid>
-                        </Border>
-
-                        <TextBlock Classes="appMuted"
-                                   Text="{Binding HelperPageHelpText}"
-                                   FontSize="16"
-                                   TextAlignment="Center"
-                                   HorizontalAlignment="Center"
-                                   MaxWidth="560"
-                                   IsVisible="{Binding ShowMainControls}"/>
-
-                        <TextBox Classes="appInput highContrastInput codeDigitsInput"
-                                 AutomationProperties.AutomationId="Helper.CodeInput"
-                                 Text="{Binding CodeInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 TextChanged="HelperCodeInput_TextChanged"
-                                 TextInput="HelperCodeInput_TextInput"
-                                 KeyDown="HelperCodeInput_KeyDown"
-                                 Watermark="123 456"
-                                 MaxLength="7"
-                                 TabIndex="0"
-                                 Height="74"
-                                 HorizontalAlignment="Stretch"
-                                 IsEnabled="{Binding CanStartOrConnect}"
-                                 IsVisible="{Binding ShowMainControls}"
-                                 />
-
-                        <Button Classes="appButton primaryButton action primaryAction"
-                                AutomationProperties.AutomationId="Helper.Connect"
-                                Content="Connect"
-                                TabIndex="1"
-                                Command="{Binding ConnectCommand}"
-                                IsEnabled="{Binding CanStartOrConnect}"
-                                IsVisible="{Binding ShowConnectAction}"/>
-
-                        <Button Classes="appButton secondaryButton action secondaryAction"
-                                Content="Retry"
-                                Command="{Binding RetryCommand}"
-                                IsVisible="{Binding ShowRetryAction}"/>
-
-                        <StackPanel Orientation="Horizontal"
-                                    Spacing="12"
-                                    HorizontalAlignment="Center"
-                                    IsVisible="{Binding ShowMainControls}">
-                            <Button Classes="linkButton linkAction"
-                                    Content="They don't have nLink?"
-                                    TabIndex="2"
-                                    Command="{Binding CopyInstallMessageCommand}"/>
-                            <Button Classes="linkButton linkAction"
-                                    Content="Use nFTP instead"
-                                    TabIndex="3"
-                                    Command="{Binding SendFileCommand}"/>
-                        </StackPanel>
-
-                        <TextBlock Classes="appMuted"
-                                   Text="{Binding CopyFeedback.Text}"
-                                   FontSize="14"
-                                   TextAlignment="Center"
-                                   HorizontalAlignment="Center"
-                                   IsVisible="{Binding ShowCopyFeedbackInline}"/>
-
-                        <StackPanel Spacing="16"
-                                    IsVisible="{Binding ShowConnectedPanel}">
-                            <Border HorizontalAlignment="Center"
-                                    MinWidth="560"
-                                    MaxWidth="720">
-                                <views:ChatView HorizontalAlignment="Stretch"/>
-                            </Border>
-                        </StackPanel>
-
-                    </StackPanel>
-                </Border>
-
-                <Button Classes="appButton secondaryButton backAction"
-                        Content="Back"
-                        Command="{Binding CancelCommand}"
-                        IsEnabled="{Binding CanEndSession}"
-                        IsVisible="{Binding ShowBackButton}"/>
-            </StackPanel>
-        </ScrollViewer>
-
-        <ScrollViewer HorizontalScrollBarVisibility="Disabled"
-                      VerticalScrollBarVisibility="Auto"
-                      Margin="24"
-                      IsVisible="{Binding #Root.UseSessionShellLayout}">
+                      Margin="24">
             <StackPanel HorizontalAlignment="Center"
                         MaxWidth="1120"
                         Spacing="16">
-                <TextBlock Classes="appTitle"
-                           Text="{Binding PageTitle}"
-                           IsVisible="{Binding ShowPageHeader}"
-                           HorizontalAlignment="Center"
-                           TextAlignment="Center"/>
-
-                <views:SessionShellView>
+                <views:SessionShellView RoleText="Helper"
+                                        ShowChatPaneRequested="{Binding ShowConnectedPanel}">
                     <views:SessionShellView.MainContent>
-                        <Border Classes="appCard"
-                                Padding="24">
-                            <StackPanel Spacing="16">
-                                <views:StatusBanner Status="{Binding BannerStatus}"
-                                                    ForceVisible="{Binding ShowStatusBanner}"
-                                                    DetailsText="{Binding StatusBannerDetailsText}"
-                                                    CancelCommand="{Binding StatusBannerCancelCommand}"
-                                                    FailureCategory="{Binding StatusBannerFailureCategory}"
-                                                    SessionCorrelationId="{Binding StatusBannerSessionCorrelationId}"
-                                                    LastConnectDuration="{Binding StatusBannerLastConnectDuration}"
-                                                    LastHandshakeDuration="{Binding StatusBannerLastHandshakeDuration}"
-                                                    BridgeState="{Binding StatusBannerBridgeState}"/>
+                        <Grid>
+                            <views:ScreenShareSurfaceView Frame="{Binding RemoteScreenShareFrame}"
+                                                          IsVisible="{Binding ShowRemoteScreenShareFrame}"/>
 
-                                <Border Classes="appPanel"
-                                        Padding="10"
-                                        IsVisible="{Binding ShowTransientBanner}">
-                                    <Grid ColumnDefinitions="*,Auto"
-                                          ColumnSpacing="10">
-                                        <TextBlock Text="{Binding TransientBannerText}"
-                                                   Classes="appMuted"
-                                                   TextWrapping="Wrap"
-                                                   VerticalAlignment="Center"/>
+                            <Border Classes="appCard"
+                                    Padding="24"
+                                    IsVisible="{Binding ShowHelperMainContent}">
+                                <StackPanel Spacing="16">
+                                    <views:StatusBanner Status="{Binding BannerStatus}"
+                                                        ForceVisible="{Binding ShowStatusBanner}"
+                                                        DetailsText="{Binding StatusBannerDetailsText}"
+                                                        CancelCommand="{Binding StatusBannerCancelCommand}"
+                                                        FailureCategory="{Binding StatusBannerFailureCategory}"
+                                                        SessionCorrelationId="{Binding StatusBannerSessionCorrelationId}"
+                                                        LastConnectDuration="{Binding StatusBannerLastConnectDuration}"
+                                                        LastHandshakeDuration="{Binding StatusBannerLastHandshakeDuration}"
+                                                        BridgeState="{Binding StatusBannerBridgeState}"/>
 
-                                        <Button Grid.Column="1"
-                                                Classes="appButton secondaryButton"
-                                                Content="Cancel"
-                                                Command="{Binding CancelTransientCommand}"
-                                                IsVisible="{Binding CanCancelTransient}"
-                                                IsEnabled="{Binding CanCancelTransient}"
-                                                Height="34"
-                                                MinWidth="88"/>
-                                    </Grid>
-                                </Border>
+                                    <Border Classes="appPanel"
+                                            Padding="10"
+                                            IsVisible="{Binding ShowTransientBanner}">
+                                        <Grid ColumnDefinitions="*,Auto"
+                                              ColumnSpacing="10">
+                                            <TextBlock Text="{Binding TransientBannerText}"
+                                                       Classes="appMuted"
+                                                       TextWrapping="Wrap"
+                                                       VerticalAlignment="Center"/>
 
-                                <TextBlock Classes="appMuted"
-                                           Text="{Binding HelperPageHelpText}"
-                                           FontSize="16"
-                                           TextAlignment="Center"
-                                           HorizontalAlignment="Center"
-                                           MaxWidth="560"
-                                           IsVisible="{Binding ShowMainControls}"/>
+                                            <Button Grid.Column="1"
+                                                    Classes="appButton secondaryButton"
+                                                    Content="Cancel"
+                                                    Command="{Binding CancelTransientCommand}"
+                                                    IsVisible="{Binding CanCancelTransient}"
+                                                    IsEnabled="{Binding CanCancelTransient}"
+                                                    Height="34"
+                                                    MinWidth="88"/>
+                                        </Grid>
+                                    </Border>
 
-                                <TextBox Classes="appInput highContrastInput codeDigitsInput"
-                                         AutomationProperties.AutomationId="Helper.CodeInput"
-                                         Text="{Binding CodeInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                         TextChanged="HelperCodeInput_TextChanged"
-                                         TextInput="HelperCodeInput_TextInput"
-                                         KeyDown="HelperCodeInput_KeyDown"
-                                         Watermark="123 456"
-                                         MaxLength="7"
-                                         TabIndex="0"
-                                         Height="74"
-                                         HorizontalAlignment="Stretch"
-                                         IsEnabled="{Binding CanStartOrConnect}"
-                                         IsVisible="{Binding ShowMainControls}"/>
+                                    <TextBlock Classes="appMuted"
+                                               Text="{Binding HelperPageHelpText}"
+                                               FontSize="16"
+                                               TextAlignment="Center"
+                                               HorizontalAlignment="Center"
+                                               MaxWidth="560"
+                                               IsVisible="{Binding ShowMainControls}"/>
 
-                                <Button Classes="appButton primaryButton action primaryAction"
-                                        AutomationProperties.AutomationId="Helper.Connect"
-                                        Content="Connect"
-                                        TabIndex="1"
-                                        Command="{Binding ConnectCommand}"
-                                        IsEnabled="{Binding CanStartOrConnect}"
-                                        IsVisible="{Binding ShowConnectAction}"/>
+                                    <TextBox Classes="appInput highContrastInput codeDigitsInput"
+                                             AutomationProperties.AutomationId="Helper.CodeInput"
+                                             Text="{Binding CodeInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                             TextChanged="HelperCodeInput_TextChanged"
+                                             TextInput="HelperCodeInput_TextInput"
+                                             KeyDown="HelperCodeInput_KeyDown"
+                                             Watermark="123 456"
+                                             MaxLength="7"
+                                             TabIndex="0"
+                                             Height="74"
+                                             HorizontalAlignment="Stretch"
+                                             IsEnabled="{Binding CanStartOrConnect}"
+                                             IsVisible="{Binding ShowMainControls}"/>
 
-                                <Button Classes="appButton secondaryButton action secondaryAction"
-                                        Content="Retry"
-                                        Command="{Binding RetryCommand}"
-                                        IsVisible="{Binding ShowRetryAction}"/>
+                                    <Button Classes="appButton primaryButton action primaryAction"
+                                            AutomationProperties.AutomationId="Helper.Connect"
+                                            Content="Connect"
+                                            TabIndex="1"
+                                            Command="{Binding ConnectCommand}"
+                                            IsEnabled="{Binding CanStartOrConnect}"
+                                            IsVisible="{Binding ShowConnectAction}"/>
 
-                                <StackPanel Orientation="Horizontal"
-                                            Spacing="12"
-                                            HorizontalAlignment="Center"
-                                            IsVisible="{Binding ShowMainControls}">
-                                    <Button Classes="linkButton linkAction"
-                                            Content="They don't have nLink?"
-                                            TabIndex="2"
-                                            Command="{Binding CopyInstallMessageCommand}"/>
-                                    <Button Classes="linkButton linkAction"
-                                            Content="Use nFTP instead"
-                                            TabIndex="3"
-                                            Command="{Binding SendFileCommand}"/>
+                                    <Button Classes="appButton secondaryButton action secondaryAction"
+                                            Content="Retry"
+                                            Command="{Binding RetryCommand}"
+                                            IsVisible="{Binding ShowRetryAction}"/>
+
+                                    <StackPanel Orientation="Horizontal"
+                                                Spacing="12"
+                                                HorizontalAlignment="Center"
+                                                IsVisible="{Binding ShowMainControls}">
+                                        <Button Classes="linkButton linkAction"
+                                                Content="They don't have nLink?"
+                                                TabIndex="2"
+                                                Command="{Binding CopyInstallMessageCommand}"/>
+                                        <Button Classes="linkButton linkAction"
+                                                Content="Use nFTP instead"
+                                                TabIndex="3"
+                                                Command="{Binding SendFileCommand}"/>
+                                    </StackPanel>
+
+                                    <TextBlock Classes="appMuted"
+                                               Text="{Binding CopyFeedback.Text}"
+                                               FontSize="14"
+                                               TextAlignment="Center"
+                                               HorizontalAlignment="Center"
+                                               IsVisible="{Binding ShowCopyFeedbackInline}"/>
                                 </StackPanel>
-
-                                <TextBlock Classes="appMuted"
-                                           Text="{Binding CopyFeedback.Text}"
-                                           FontSize="14"
-                                           TextAlignment="Center"
-                                           HorizontalAlignment="Center"
-                                           IsVisible="{Binding ShowCopyFeedbackInline}"/>
-                            </StackPanel>
-                        </Border>
+                            </Border>
+                        </Grid>
                     </views:SessionShellView.MainContent>
 
                     <views:SessionShellView.ChatContent>
-                        <Border HorizontalAlignment="Stretch"
-                                IsVisible="{Binding ShowConnectedPanel}">
+                        <Border HorizontalAlignment="Stretch">
                             <views:ChatView HorizontalAlignment="Stretch"/>
                         </Border>
                     </views:SessionShellView.ChatContent>
@@ -300,7 +175,6 @@
                 <Button Classes="appButton secondaryButton backAction"
                         Content="Back"
                         Command="{Binding CancelCommand}"
-                        IsEnabled="{Binding CanEndSession}"
                         IsVisible="{Binding ShowBackButton}"/>
             </StackPanel>
         </ScrollViewer>

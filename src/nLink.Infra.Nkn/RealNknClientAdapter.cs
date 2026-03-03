@@ -6,6 +6,7 @@ using System.Text.Json;
 using NLink.Core;
 using NLink.Core.Logging;
 using NLink.Core.Retry;
+using NLink.Core.ScreenShare;
 
 namespace NLink.Infra.Nkn;
 
@@ -29,6 +30,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
     private readonly BridgeSupervisor bridgeSupervisor;
     private readonly BridgeProtocolClient protocolClient;
     private readonly BridgeProtocolEventRouter protocolEventRouter;
+    private readonly ScreenShareFrameAssembler screenShareFrameAssembler = new();
 
     private readonly ConnectAttemptCoordinator connectAttempts = new();
     private TimeSpan? connectReadyTimeoutOverrideForTests;
@@ -123,6 +125,18 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
     }
 
     public event EventHandler<NknIncomingMessage>? MessageReceived;
+
+    internal event EventHandler<ScreenShareFrameChunkV1>? ScreenShareFrameChunkReceived
+    {
+        add => screenShareFrameAssembler.ChunkReceived += value;
+        remove => screenShareFrameAssembler.ChunkReceived -= value;
+    }
+
+    internal event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted
+    {
+        add => screenShareFrameAssembler.FrameCompleted += value;
+        remove => screenShareFrameAssembler.FrameCompleted -= value;
+    }
 
     public event EventHandler? Disconnected;
     internal event EventHandler<BridgeLifecycleEvent>? BridgeLifecycle;
@@ -563,12 +577,15 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         NknRuntimeDiagnostics.IncrementBridgeRawMessagesReceived();
         NknRuntimeDiagnostics.SetLastBridgeMessage(source, isTopic);
 
+        if (string.IsNullOrWhiteSpace(payloadBase64))
+        {
+            return;
+        }
+
         byte[] payloadBytes;
         try
         {
-            payloadBytes = string.IsNullOrWhiteSpace(payloadBase64)
-                ? Array.Empty<byte>()
-                : Convert.FromBase64String(payloadBase64);
+            payloadBytes = Convert.FromBase64String(payloadBase64);
         }
         catch (FormatException)
         {
@@ -583,8 +600,49 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
             return;
         }
 
+        if (TryHandleScreenSharePayload(payloadBytes))
+        {
+            Log($"Bridge screenshare message (source_len={source.Length}, payload_len={payloadBytes.Length}, is_topic={isTopic})");
+            return;
+        }
+
         Log($"Bridge message (source_len={source.Length}, payload_len={payloadBytes.Length}, is_topic={isTopic})");
         MessageReceived?.Invoke(this, new NknIncomingMessage(source, payloadBytes, isTopic, topic));
+    }
+
+    private bool TryHandleScreenSharePayload(byte[] payloadBytes)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(payloadBytes);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            if (!TryGetString(root, "type", out var type) || string.IsNullOrWhiteSpace(type))
+            {
+                return false;
+            }
+
+            if (!string.Equals(type, ScreenSharePayloadCodec.ScreenShareFrameTypeV1, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            if (!ScreenSharePayloadCodec.TryDeserialize(payloadBytes, out var chunk))
+            {
+                return true;
+            }
+
+            screenShareFrameAssembler.OnChunk(chunk);
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private void HandleBridgeDisconnected(JsonElement root)

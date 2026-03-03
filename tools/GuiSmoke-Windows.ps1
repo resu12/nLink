@@ -467,6 +467,37 @@ function Wait-ButtonVisibleEnabledByName {
     }
 }
 
+function Wait-ControlEnabledStateByAutomationId {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$AutomationId,
+        [Parameter(Mandatory = $true)][bool]$IsEnabled,
+        [int]$TimeoutMs = 10000
+    )
+
+    $targetStateText = if ($IsEnabled) { 'enabled' } else { 'disabled' }
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage "Timed out waiting for $AutomationId to become $targetStateText." -Condition {
+        $el = Find-VisibleByAutomationId -Root $Window -AutomationId $AutomationId
+        if ($el -and $el.Current.IsEnabled -eq $IsEnabled) { return $el }
+        return $null
+    }
+}
+
+function Wait-ControlDisabledOrGoneByAutomationId {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$AutomationId,
+        [int]$TimeoutMs = 10000
+    )
+
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 200 -OnTimeoutMessage "Timed out waiting for $AutomationId to become disabled or disappear." -Condition {
+        $el = Find-VisibleByAutomationId -Root $Window -AutomationId $AutomationId
+        if (-not $el) { return $true }
+        if ($el.Current.IsEnabled -eq $false) { return $el }
+        return $null
+    }
+}
+
 function Click-ButtonByName {
     param(
         [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
@@ -743,6 +774,12 @@ function Click-DisconnectIfVisible {
     $btn = Find-VisibleByAutomationIdOrName -Root $Window -AutomationId 'Helper.Disconnect' -FallbackName 'Disconnect' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
     if (-not $btn) {
         $btn = Find-VisibleByAutomationIdOrName -Root $Window -AutomationId 'Helpee.Disconnect' -FallbackName 'Disconnect' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
+    }
+    if (-not $btn) {
+        $btn = Find-ByNameAndType -Root $Window -Name 'End session' -ControlType ([System.Windows.Automation.ControlType]::Button)
+        if ($btn -and $btn.Current.IsOffscreen) {
+            $btn = $null
+        }
     }
     if ($btn -and $btn.Current.IsEnabled) {
         Click-Element $btn
@@ -1299,6 +1336,92 @@ function Run-ScenarioM {
     })
 }
 
+function Run-ScenarioHeaderChatCoherence {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+    Start-HelpeeFlow -Context $Context
+    Start-HelperFlow -Context $Context
+
+    $helperHeader = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'SessionHeader.StatusText'
+    if ($helperHeader) {
+        $headerText = Get-ElementTextSafe -Element $helperHeader
+        if ($headerText -eq 'Connected') {
+            throw "Helper header unexpectedly showed Connected before session connect."
+        }
+    }
+
+    $helperPill = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText'
+    if ($helperPill) {
+        $pillText = Get-ElementTextSafe -Element $helperPill
+        if ($pillText -eq 'Connected') {
+            throw "Helper chat pill unexpectedly showed Connected before session connect."
+        }
+    }
+
+    $code = Get-HelpeeCodeFromUi -HelpeeWindow $Context.HelpeeWindow
+    [void](Enter-HelperCodeAndConnect -HelperWindow $Context.HelperWindow -Code $code)
+    Wait-HelpeeAllowAndClick -HelpeeWindow $Context.HelpeeWindow
+
+    [void](Wait-Until -TimeoutMs 20000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helper header/chat coherence on Connected.' -Condition {
+        $header = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'SessionHeader.StatusText'
+        $pill = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText'
+        if ($header -and $pill -and
+            (Get-ElementTextSafe -Element $header) -eq 'Connected' -and
+            (Get-ElementTextSafe -Element $pill) -eq 'Connected') {
+            return $true
+        }
+        return $null
+    })
+
+    [void](Wait-Until -TimeoutMs 20000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee header/chat coherence on Connected.' -Condition {
+        $header = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'SessionHeader.StatusText'
+        $pill = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'Chat.ConnectionPillText'
+        if ($header -and $pill -and
+            (Get-ElementTextSafe -Element $header) -eq 'Connected' -and
+            (Get-ElementTextSafe -Element $pill) -eq 'Connected') {
+            return $true
+        }
+        return $null
+    })
+}
+
+function Run-ScenarioEndSessionDisablesChat {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+    Start-HelpeeFlow -Context $Context
+    Start-HelperFlow -Context $Context
+
+    [void](Connect-HelperAndHelpee -Context $Context)
+
+    $helperInput = Wait-ControlEnabledStateByAutomationId -Window $Context.HelperWindow -AutomationId 'Chat.Input' -IsEnabled $true -TimeoutMs 10000
+    $helpeeInput = Wait-ControlEnabledStateByAutomationId -Window $Context.HelpeeWindow -AutomationId 'Chat.Input' -IsEnabled $true -TimeoutMs 10000
+
+    Set-Text -Element $helperInput -Text 'end-session-smoke-prep'
+    [void](Wait-ControlEnabledStateByAutomationId -Window $Context.HelperWindow -AutomationId 'Chat.Send' -IsEnabled $true -TimeoutMs 10000)
+
+    Set-Text -Element $helpeeInput -Text 'end-session-smoke-reply'
+    [void](Wait-ControlEnabledStateByAutomationId -Window $Context.HelpeeWindow -AutomationId 'Chat.Send' -IsEnabled $true -TimeoutMs 10000)
+
+    if (-not (Click-DisconnectIfVisible -Window $Context.HelperWindow)) {
+        throw "Timed out waiting for helper end-session control."
+    }
+
+    [void](Wait-ControlDisabledOrGoneByAutomationId -Window $Context.HelperWindow -AutomationId 'Chat.Input' -TimeoutMs 15000)
+    [void](Wait-ControlDisabledOrGoneByAutomationId -Window $Context.HelperWindow -AutomationId 'Chat.Send' -TimeoutMs 15000)
+    [void](Wait-ControlDisabledOrGoneByAutomationId -Window $Context.HelpeeWindow -AutomationId 'Chat.Input' -TimeoutMs 15000)
+    [void](Wait-ControlDisabledOrGoneByAutomationId -Window $Context.HelpeeWindow -AutomationId 'Chat.Send' -TimeoutMs 15000)
+
+    $helperPill = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'Chat.ConnectionPillText'
+    if ($helperPill -and (Get-ElementTextSafe -Element $helperPill) -eq 'Connected') {
+        throw "Helper chat connection pill remained 'Connected' after end session."
+    }
+
+    $helpeePill = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'Chat.ConnectionPillText'
+    if ($helpeePill -and (Get-ElementTextSafe -Element $helpeePill) -eq 'Connected') {
+        throw "Helpee chat connection pill remained 'Connected' after end session."
+    }
+}
+
 function Get-ChildNodeProcesses {
     param([int]$ParentPid)
     try {
@@ -1390,7 +1513,9 @@ try {
             'K' { Invoke-Scenario -Name 'K' -TimeoutSec ([Math]::Min($TimeoutSeconds, 60)) -Action { Run-ScenarioK -Context $ctx } }
             'L' { Invoke-Scenario -Name 'L' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioL -Context $ctx } }
             'M' { Invoke-Scenario -Name 'M' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioM -Context $ctx } }
-            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M." }
+            'END_SESSION_DISABLES_CHAT' { Invoke-Scenario -Name 'end_session_disables_chat' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioEndSessionDisablesChat -Context $ctx } }
+            'HEADER_CHAT_COHERENCE' { Invoke-Scenario -Name 'header_chat_coherence' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioHeaderChatCoherence -Context $ctx } }
+            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M,HEADER_CHAT_COHERENCE,END_SESSION_DISABLES_CHAT." }
         }
     }
 

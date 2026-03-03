@@ -1,0 +1,19 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             x:Class="NLink.App.Views.ScreenSharePlaceholderView">
+
+    <Border Background="{StaticResource AppSurfaceBrush}"
+            BorderBrush="{StaticResource AppCardBorderBrush}"
+            BorderThickness="0"
+            CornerRadius="10"
+            MinHeight="200">
+        <TextBlock x:Name="PlaceholderText"
+                   Text="Screen share"
+                   Classes="appMuted"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Center"/>
+    </Border>
+</UserControl>
