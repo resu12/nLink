@@ -228,9 +228,9 @@ jobs:
             Remove-Item -Recurse -Force $dir
           }
 
-          & $installerExe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART "/DIR=$dir"
-          if ($LASTEXITCODE -ne 0) {
-            throw "Silent install failed with exit code $LASTEXITCODE."
+          $installProcess = Start-Process -FilePath $installerExe -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$dir") -Wait -PassThru
+          if ($installProcess.ExitCode -ne 0) {
+            throw "Silent install failed with exit code $($installProcess.ExitCode)."
           }
 
           $appExe = Join-Path $dir "nLink.exe"
@@ -243,9 +243,9 @@ jobs:
             throw "Uninstaller not found in install directory: $dir"
           }
 
-          & $unins.FullName /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-          if ($LASTEXITCODE -ne 0) {
-            throw "Silent uninstall failed with exit code $LASTEXITCODE."
+          $uninstallProcess = Start-Process -FilePath $unins.FullName -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+          if ($uninstallProcess.ExitCode -ne 0) {
+            throw "Silent uninstall failed with exit code $($uninstallProcess.ExitCode)."
           }
 
           if (Test-Path $appExe) {
