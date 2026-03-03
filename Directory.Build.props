@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <!-- RC track uses VERSION as the source of truth; CI/scripts may override NLinkVersion explicitly with the same value. -->
+    <!-- Release versioning uses VERSION as the source of truth; CI/scripts may override NLinkVersion explicitly with the same value. -->
     <NLinkVersion Condition="'$(NLinkVersion)' == '' and Exists('$(MSBuildThisFileDirectory)VERSION')">$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)VERSION').Trim())</NLinkVersion>
     <Version Condition="'$(NLinkVersion)' != ''">$(NLinkVersion)</Version>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>

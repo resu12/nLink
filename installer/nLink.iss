@@ -7,14 +7,14 @@
 #endif
 
 #ifndef AppVersion
-  #define AppVersion "0.2.0-beta.5"
+  #define AppVersion "0.2.0"
 #endif
 
 #define MyAppName "nLink"
 #define MyAppExeName "nLink.exe"
 
 [Setup]
-; Keep AppId stable across beta builds so silent upgrade/rollback tests exercise true in-place upgrades.
+; Keep AppId stable across releases so silent upgrade/rollback tests exercise true in-place upgrades.
 AppId={{9D5C9C2D-7D66-4E6E-8A5A-20F64C2F31A7}
 AppName={#MyAppName}
 AppVersion={#AppVersion}

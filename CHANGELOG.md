@@ -1,16 +1,16 @@
 # Changelog
 
-## [0.2.0-rc.1] - 2026-03-03
+## [0.2.0] - 2026-03-03
 
 ### Added
 
-- RC validation checklist for build, install, upgrade, UI sanity, and tag readiness.
-- GitHub-style `0.2.0-rc.1` release notes draft under `docs/release/`.
+- Release validation checklist for build, install, upgrade, UI sanity, and tag readiness.
+- Final `0.2.0` release notes draft under `docs/releases/`.
 
 ### Changed
 
 - Session header and chat connection pill copy now use consistent `Connecting…` and `Reconnecting…` text.
-- README now calls out the `0.2.0-rc.1` release-candidate scope and current installer path.
+- README now calls out the `0.2.0` release scope and current installer path.
 
 ### Fixed
 

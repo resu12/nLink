@@ -388,6 +388,37 @@ function Click-Element {
     [System.Windows.Forms.SendKeys]::SendWait(' ')
 }
 
+function Test-ElementValueMatchesText {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Element,
+        [Parameter(Mandatory = $true)][string]$ExpectedText
+    )
+
+    $rawValue = Get-ElementValueSafe -Element $Element
+    $actualComparable = $rawValue
+    $expectedComparable = $ExpectedText
+    $normalizeDigits = $false
+
+    try {
+        $normalizeDigits = [string]::Equals([string]$Element.Current.AutomationId, 'Helper.CodeInput', [System.StringComparison]::Ordinal)
+    }
+    catch {
+        $normalizeDigits = $false
+    }
+
+    if ($normalizeDigits) {
+        $actualComparable = [regex]::Replace($rawValue, '\D', '')
+        $expectedComparable = [regex]::Replace($ExpectedText, '\D', '')
+    }
+
+    return [pscustomobject]@{
+        RawValue = $rawValue
+        ActualComparable = $actualComparable
+        ExpectedComparable = $expectedComparable
+        IsMatch = [string]::Equals($actualComparable, $expectedComparable, [System.StringComparison]::Ordinal)
+    }
+}
+
 function Invoke-SendKeysTextDeterministic {
     param(
         [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Element,
@@ -396,32 +427,43 @@ function Invoke-SendKeysTextDeterministic {
     )
 
     $lastObservedValue = ''
+    $lastComparableValue = ''
+    $expectedComparable = $Text
     $attempts = 0
 
-    [void](Wait-Until -TimeoutMs $TimeoutMs -PollMs 50 -OnTimeoutMessage "field did not accept text within $TimeoutMs ms. LastValue='$lastObservedValue'; Target='$Text'; Attempts=$attempts" -Condition {
-        try {
-            $Element.SetFocus()
-        }
-        catch {}
+    try {
+        [void](Wait-Until -TimeoutMs $TimeoutMs -PollMs 50 -OnTimeoutMessage 'Timed out waiting for deterministic text entry.' -Condition {
+            try {
+                $Element.SetFocus()
+            }
+            catch {}
 
-        $attempts++
-        $currentValue = Get-ElementValueSafe -Element $Element
-        $lastObservedValue = $currentValue
-        if ([string]::Equals($currentValue, $Text, [System.StringComparison]::Ordinal)) {
-            return $true
-        }
+            $attempts++
+            $currentState = Test-ElementValueMatchesText -Element $Element -ExpectedText $Text
+            $lastObservedValue = $currentState.RawValue
+            $lastComparableValue = $currentState.ActualComparable
+            $expectedComparable = $currentState.ExpectedComparable
+            if ($currentState.IsMatch) {
+                return $true
+            }
 
-        [System.Windows.Forms.SendKeys]::SendWait('^a')
-        [System.Windows.Forms.SendKeys]::SendWait($Text)
+            [System.Windows.Forms.SendKeys]::SendWait('^a')
+            [System.Windows.Forms.SendKeys]::SendWait($Text)
 
-        $updatedValue = Get-ElementValueSafe -Element $Element
-        $lastObservedValue = $updatedValue
-        if ([string]::Equals($updatedValue, $Text, [System.StringComparison]::Ordinal)) {
-            return $true
-        }
+            $updatedState = Test-ElementValueMatchesText -Element $Element -ExpectedText $Text
+            $lastObservedValue = $updatedState.RawValue
+            $lastComparableValue = $updatedState.ActualComparable
+            $expectedComparable = $updatedState.ExpectedComparable
+            if ($updatedState.IsMatch) {
+                return $true
+            }
 
-        return $null
-    })
+            return $null
+        })
+    }
+    catch {
+        throw "field did not accept text within $TimeoutMs ms. LastValue='$lastObservedValue'; LastComparable='$lastComparableValue'; Target='$Text'; ExpectedComparable='$expectedComparable'; Attempts=$attempts"
+    }
 }
 
 function Set-Text {
@@ -445,6 +487,15 @@ function Set-Text {
         }
         catch {}
     }
+
+    try {
+        $window = Get-WindowElementByProcessId -ProcessId $Element.Current.ProcessId
+        if ($window) {
+            $windowHandle = [IntPtr]::new([int64]$window.Current.NativeWindowHandle)
+            [void][Win32GuiSmoke]::SetForegroundWindow($windowHandle)
+        }
+    }
+    catch {}
 
     try {
         $Element.SetFocus()
