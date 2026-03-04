@@ -10,8 +10,8 @@
     <Grid RowDefinitions="Auto,*"
           RowSpacing="12">
         <Border Grid.Row="0"
-                HorizontalAlignment="Center"
-                MaxWidth="1120"
+                HorizontalAlignment="{Binding #Root.MainPaneHorizontalAlignment}"
+                MaxWidth="{Binding #Root.MainPaneMaxWidth}"
                 MinWidth="420"
                 Margin="0,0,0,4">
             <views:SessionHeaderView StatusText="{ReflectionBinding HeaderStatusText}"

@@ -37,6 +37,7 @@
                        Classes="headerStatus"
                        AutomationProperties.AutomationId="SessionHeader.StatusText"
                        Text="{Binding #Root.StatusText}"
+                       HorizontalAlignment="Stretch"
                        MaxLines="1"
                        TextTrimming="CharacterEllipsis"
                        FontWeight="SemiBold"
