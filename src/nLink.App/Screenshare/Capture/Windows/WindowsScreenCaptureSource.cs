@@ -19,19 +19,44 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
 {
     private const int MaxFrameWidth = 1280;
     private const int MaxFramesPerSecond = 8;
-    private const long JpegQuality = 75L;
+    private const long JpegQuality = 70L;
+    private const double ScaleFull = 1d;
+    private const double ScaleReduced = 0.75d;
+    private const double ScaleMinimum = 0.5d;
     private const int SmCxScreen = 0;
     private const int SmCyScreen = 1;
 
     private static readonly TimeSpan FrameInterval = TimeSpan.FromMilliseconds(1000d / MaxFramesPerSecond);
+    private static readonly long EncodeScaleDownThresholdTimestampTicks = TimeSpanToStopwatchTicks(TimeSpan.FromMilliseconds(20));
+    private static readonly long EncodeScaleUpThresholdTimestampTicks = TimeSpanToStopwatchTicks(TimeSpan.FromMilliseconds(12));
     private static readonly ImageCodecInfo? JpegCodec = FindJpegCodec();
 
     private readonly object sync = new();
+    private readonly Func<long> getTimestamp;
+    private readonly Func<Bitmap, long, byte[]> encodeBitmap;
 
     private CancellationTokenSource? captureCts;
     private Task? captureLoopTask;
     private bool isStarted;
     private bool disposed;
+    private int adaptiveScaleIndex;
+    private long averageEncodeDurationTicks;
+    private long totalEncodeDurationTicks;
+    private long totalEncodedBytes;
+    private int encodedFrameCount;
+
+    public WindowsScreenCaptureSource()
+        : this(getTimestamp: null, encodeBitmap: null)
+    {
+    }
+
+    internal WindowsScreenCaptureSource(
+        Func<long>? getTimestamp = null,
+        Func<Bitmap, long, byte[]>? encodeBitmap = null)
+    {
+        this.getTimestamp = getTimestamp ?? Stopwatch.GetTimestamp;
+        this.encodeBitmap = encodeBitmap ?? EncodeBitmapToJpegBytes;
+    }
 
     /// <inheritdoc />
     public bool IsSupported => true;
@@ -167,7 +192,7 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
         }
     }
 
-    private static ScreenCaptureFrameEventArgs CaptureFrame()
+    private ScreenCaptureFrameEventArgs CaptureFrame()
     {
         var width = GetSystemMetrics(SmCxScreen);
         var height = GetSystemMetrics(SmCyScreen);
@@ -182,19 +207,64 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
             graphics.CopyFromScreen(0, 0, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
         }
 
-        var scale = width > MaxFrameWidth
-            ? (double)MaxFrameWidth / width
-            : 1d;
+        return EncodeFrame(sourceBitmap, width, height);
+    }
+
+    internal ScreenCaptureFrameEventArgs EncodeFrameForTesting(Bitmap sourceBitmap)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(sourceBitmap);
+        return EncodeFrame(sourceBitmap, sourceBitmap.Width, sourceBitmap.Height);
+    }
+
+    internal WindowsScreenCaptureEncodeMetricsSnapshot GetEncodeMetricsSnapshot()
+    {
+        lock (sync)
+        {
+            var averageEncodeDuration = encodedFrameCount == 0
+                ? TimeSpan.Zero
+                : TimeSpan.FromSeconds((double)totalEncodeDurationTicks / Stopwatch.Frequency / encodedFrameCount);
+            var ewmaEncodeDuration = averageEncodeDurationTicks == 0
+                ? TimeSpan.Zero
+                : TimeSpan.FromSeconds((double)averageEncodeDurationTicks / Stopwatch.Frequency);
+            var averageEncodedBytes = encodedFrameCount == 0
+                ? 0
+                : totalEncodedBytes / encodedFrameCount;
+
+            return new WindowsScreenCaptureEncodeMetricsSnapshot(
+                encodedFrameCount,
+                averageEncodedBytes,
+                averageEncodeDuration,
+                ewmaEncodeDuration,
+                GetAdaptiveScaleFactor(adaptiveScaleIndex),
+                JpegQuality);
+        }
+    }
+
+    internal static byte[] EncodeBitmapToJpegBytesForTesting(Bitmap bitmap, long quality)
+    {
+        ArgumentNullException.ThrowIfNull(bitmap);
+        return EncodeBitmapToJpegBytes(bitmap, quality);
+    }
+
+    internal static long DefaultJpegQualityForTesting => JpegQuality;
+
+    private ScreenCaptureFrameEventArgs EncodeFrame(Bitmap sourceBitmap, int width, int height)
+    {
+        var scale = GetBaseScale(width) * GetAdaptiveScaleFactorSnapshot();
         var scaledWidth = Math.Max(1, (int)Math.Round(width * scale));
         var scaledHeight = Math.Max(1, (int)Math.Round(height * scale));
 
         using var encodedBitmap = scale < 1d
             ? ResizeBitmap(sourceBitmap, scaledWidth, scaledHeight)
             : new Bitmap(sourceBitmap);
-
-        using var stream = new MemoryStream();
-        SaveJpeg(encodedBitmap, stream);
-        return new ScreenCaptureFrameEventArgs(scaledWidth, scaledHeight, stream.ToArray(), "jpeg");
+        var encodeStartedAt = getTimestamp();
+        var encodedBytes = encodeBitmap(encodedBitmap, JpegQuality);
+        var encodeCompletedAt = getTimestamp();
+        RecordEncodeMetrics(
+            elapsedTimestampTicks: encodeCompletedAt - encodeStartedAt,
+            encodedBytesLength: encodedBytes.Length);
+        return new ScreenCaptureFrameEventArgs(scaledWidth, scaledHeight, encodedBytes, "jpeg");
     }
 
     private static Bitmap ResizeBitmap(Bitmap source, int width, int height)
@@ -210,7 +280,7 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
         return target;
     }
 
-    private static void SaveJpeg(Bitmap bitmap, Stream output)
+    private static void SaveJpeg(Bitmap bitmap, Stream output, long quality)
     {
         if (JpegCodec is null)
         {
@@ -219,9 +289,63 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
         }
 
         using var parameters = new EncoderParameters(1);
-        parameters.Param[0] = new EncoderParameter(Encoder.Quality, JpegQuality);
+        parameters.Param[0] = new EncoderParameter(Encoder.Quality, quality);
         bitmap.Save(output, JpegCodec, parameters);
     }
+
+    private static byte[] EncodeBitmapToJpegBytes(Bitmap bitmap, long quality)
+    {
+        using var stream = new MemoryStream();
+        SaveJpeg(bitmap, stream, quality);
+        return stream.ToArray();
+    }
+
+    private static double GetBaseScale(int width)
+        => width > MaxFrameWidth
+            ? (double)MaxFrameWidth / width
+            : 1d;
+
+    private double GetAdaptiveScaleFactorSnapshot()
+    {
+        lock (sync)
+        {
+            return GetAdaptiveScaleFactor(adaptiveScaleIndex);
+        }
+    }
+
+    private static double GetAdaptiveScaleFactor(int scaleIndex)
+        => scaleIndex switch
+        {
+            0 => ScaleFull,
+            1 => ScaleReduced,
+            _ => ScaleMinimum,
+        };
+
+    private void RecordEncodeMetrics(long elapsedTimestampTicks, int encodedBytesLength)
+    {
+        lock (sync)
+        {
+            encodedFrameCount++;
+            totalEncodedBytes += encodedBytesLength;
+            totalEncodeDurationTicks += elapsedTimestampTicks;
+
+            averageEncodeDurationTicks = averageEncodeDurationTicks == 0
+                ? elapsedTimestampTicks
+                : ((averageEncodeDurationTicks * 3) + elapsedTimestampTicks) / 4;
+
+            if (averageEncodeDurationTicks > EncodeScaleDownThresholdTimestampTicks && adaptiveScaleIndex < 2)
+            {
+                adaptiveScaleIndex++;
+            }
+            else if (averageEncodeDurationTicks < EncodeScaleUpThresholdTimestampTicks && adaptiveScaleIndex > 0)
+            {
+                adaptiveScaleIndex--;
+            }
+        }
+    }
+
+    private static long TimeSpanToStopwatchTicks(TimeSpan value)
+        => (long)Math.Ceiling(value.TotalSeconds * Stopwatch.Frequency);
 
     private static ImageCodecInfo? FindJpegCodec()
     {
@@ -253,3 +377,11 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
         Trace.WriteLine($"[ScreenCapture] {message}");
     }
 }
+
+internal readonly record struct WindowsScreenCaptureEncodeMetricsSnapshot(
+    int EncodedFrames,
+    long AverageEncodedBytes,
+    TimeSpan AverageEncodeDuration,
+    TimeSpan CurrentAverageEncodeDuration,
+    double AdaptiveScaleFactor,
+    long JpegQuality);

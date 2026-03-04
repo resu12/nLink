@@ -24,7 +24,7 @@ public static class ScreenCaptureFactory
         {
             var type = Type.GetType("NLink.App.Services.ScreenCapture.WindowsScreenCaptureSource, nLink", throwOnError: false);
             if (type is not null &&
-                Activator.CreateInstance(type) is IScreenCaptureSource captureSource)
+                Activator.CreateInstance(type, nonPublic: true) is IScreenCaptureSource captureSource)
             {
                 return captureSource;
             }

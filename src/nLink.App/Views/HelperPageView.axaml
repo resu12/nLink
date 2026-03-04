@@ -61,6 +61,8 @@
     <Grid Background="{StaticResource AppBackgroundBrush}">
         <ScrollViewer HorizontalScrollBarVisibility="Disabled"
                       VerticalScrollBarVisibility="Auto"
+                      HorizontalContentAlignment="Stretch"
+                      VerticalContentAlignment="Stretch"
                       Margin="24">
             <Grid RowDefinitions="Auto,Auto"
                   RowSpacing="16">
@@ -73,10 +75,15 @@
                             <views:ScreenShareSurfaceView Frame="{Binding RemoteScreenShareFrame}"
                                                           IsVisible="{Binding ShowRemoteScreenShareFrame}"/>
 
-                            <Border Classes="appCard"
-                                    MaxWidth="1120"
-                                    Padding="24"
-                                    IsVisible="{Binding ShowHelperMainContent}">
+                            <Border Padding="0"
+                                    Background="Transparent"
+                                    BorderThickness="0"
+                                    IsVisible="{Binding ShowHelperMainContent}"
+                                    Margin="0,8,0,0"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    MaxWidth="620"
+                                    MinWidth="420">
                                 <StackPanel Spacing="16">
                                     <views:StatusBanner Status="{Binding BannerStatus}"
                                                         ForceVisible="{Binding ShowStatusBanner}"
@@ -109,61 +116,76 @@
                                         </Grid>
                                     </Border>
 
-                                    <TextBlock Classes="appMuted"
-                                               Text="{Binding HelperPageHelpText}"
-                                               FontSize="16"
-                                               TextAlignment="Center"
-                                               HorizontalAlignment="Center"
-                                               MaxWidth="560"
-                                               IsVisible="{Binding ShowMainControls}"/>
+                                    <Border Background="{StaticResource AppMutedPanelBrush}"
+                                            CornerRadius="16"
+                                            Padding="20"
+                                            IsVisible="{Binding ShowMainControls}">
+                                        <StackPanel Spacing="18">
+                                            <TextBlock Classes="appMuted"
+                                                       Text="{Binding HelperPageHelpText}"
+                                                       FontSize="16"
+                                                       TextAlignment="Center"
+                                                       HorizontalAlignment="Center"
+                                                       MaxWidth="560"
+                                                       IsVisible="{Binding ShowMainControls}"/>
 
-                                    <TextBox Classes="appInput highContrastInput codeDigitsInput"
-                                             AutomationProperties.AutomationId="Helper.CodeInput"
-                                             Text="{Binding CodeInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                             TextChanged="HelperCodeInput_TextChanged"
-                                             TextInput="HelperCodeInput_TextInput"
-                                             KeyDown="HelperCodeInput_KeyDown"
-                                             Watermark="123 456"
-                                             MaxLength="7"
-                                             TabIndex="0"
-                                             Height="74"
-                                             HorizontalAlignment="Stretch"
-                                             IsEnabled="{Binding CanStartOrConnect}"
-                                             IsVisible="{Binding ShowMainControls}"/>
+                                            <Border Background="{StaticResource AppSurfaceBrush}"
+                                                    CornerRadius="14"
+                                                    Padding="18"
+                                                    HorizontalAlignment="Stretch"
+                                                    IsVisible="{Binding ShowMainControls}">
+                                                <StackPanel Spacing="14">
+                                                    <TextBox Classes="appInput highContrastInput codeDigitsInput"
+                                                             x:Name="HelperCodeInputBox"
+                                                             AutomationProperties.AutomationId="Helper.CodeInput"
+                                                             Text="{Binding CodeInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                             TextChanged="HelperCodeInput_TextChanged"
+                                                             TextInput="HelperCodeInput_TextInput"
+                                                             KeyDown="HelperCodeInput_KeyDown"
+                                                             Watermark="123 456"
+                                                             MaxLength="7"
+                                                             TabIndex="0"
+                                                             Height="68"
+                                                             HorizontalAlignment="Stretch"
+                                                             IsEnabled="{Binding CanStartOrConnect}"/>
 
-                                    <Button Classes="appButton primaryButton action primaryAction"
-                                            AutomationProperties.AutomationId="Helper.Connect"
-                                            Content="Connect"
-                                            TabIndex="1"
-                                            Command="{Binding ConnectCommand}"
-                                            IsEnabled="{Binding CanStartOrConnect}"
-                                            IsVisible="{Binding ShowConnectAction}"/>
+                                                    <Button Classes="appButton primaryButton action primaryAction"
+                                                            AutomationProperties.AutomationId="Helper.Connect"
+                                                            Content="Connect"
+                                                            TabIndex="1"
+                                                            Command="{Binding ConnectCommand}"
+                                                            IsEnabled="{Binding CanStartOrConnect}"
+                                                            IsVisible="{Binding ShowConnectAction}"/>
 
-                                    <Button Classes="appButton secondaryButton action secondaryAction"
-                                            Content="Retry"
-                                            Command="{Binding RetryCommand}"
-                                            IsVisible="{Binding ShowRetryAction}"/>
+                                                    <Button Classes="appButton secondaryButton action secondaryAction"
+                                                            Content="Retry"
+                                                            Command="{Binding RetryCommand}"
+                                                            IsVisible="{Binding ShowRetryAction}"/>
+                                                </StackPanel>
+                                            </Border>
 
-                                    <StackPanel Orientation="Horizontal"
-                                                Spacing="12"
-                                                HorizontalAlignment="Center"
-                                                IsVisible="{Binding ShowMainControls}">
-                                        <Button Classes="linkButton linkAction"
-                                                Content="They don't have nLink?"
-                                                TabIndex="2"
-                                                Command="{Binding CopyInstallMessageCommand}"/>
-                                        <Button Classes="linkButton linkAction"
-                                                Content="Use nFTP instead"
-                                                TabIndex="3"
-                                                Command="{Binding SendFileCommand}"/>
-                                    </StackPanel>
+                                            <StackPanel Orientation="Horizontal"
+                                                        Spacing="12"
+                                                        HorizontalAlignment="Center"
+                                                        IsVisible="{Binding ShowMainControls}">
+                                                <Button Classes="linkButton linkAction"
+                                                        Content="They don't have nLink?"
+                                                        TabIndex="2"
+                                                        Command="{Binding CopyInstallMessageCommand}"/>
+                                                <Button Classes="linkButton linkAction"
+                                                        Content="Use nFTP instead"
+                                                        TabIndex="3"
+                                                        Command="{Binding SendFileCommand}"/>
+                                            </StackPanel>
 
-                                    <TextBlock Classes="appMuted"
-                                               Text="{Binding CopyFeedback.Text}"
-                                               FontSize="14"
-                                               TextAlignment="Center"
-                                               HorizontalAlignment="Center"
-                                               IsVisible="{Binding ShowCopyFeedbackInline}"/>
+                                            <TextBlock Classes="appMuted"
+                                                       Text="{Binding CopyFeedback.Text}"
+                                                       FontSize="14"
+                                                       TextAlignment="Center"
+                                                       HorizontalAlignment="Center"
+                                                       IsVisible="{Binding ShowCopyFeedbackInline}"/>
+                                        </StackPanel>
+                                    </Border>
                                 </StackPanel>
                             </Border>
                         </Grid>
@@ -180,7 +202,11 @@
                         Classes="appButton secondaryButton backAction"
                         Content="Back"
                         Command="{Binding CancelCommand}"
-                        IsVisible="{Binding ShowBackButton}"/>
+                        HorizontalAlignment="Center"
+                        IsVisible="{Binding ShowBackButton}"
+                        Height="48"
+                        MinWidth="200"
+                        Opacity="0.92"/>
             </Grid>
         </ScrollViewer>
     </Grid>

@@ -7,6 +7,9 @@ using Avalonia;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using NLink.App.Threading;
+#if DEBUG
+using NLink.Core.Diagnostics;
+#endif
 
 namespace NLink.App.Services.ScreenCapture;
 
@@ -33,6 +36,11 @@ internal sealed class HelpeeScreenShareCoordinator
     private Task? screenSharePreviewToggleTask;
     private byte[]? pendingPreviewFrameBytes;
     private long framesDecoded;
+#if DEBUG
+    private readonly DebugLatencyWindow previewDecodeDurationLatency = new();
+    private readonly DebugLatencyWindow previewEndToEndLatency = new();
+    private long pendingPreviewFrameReceivedUtcTicks;
+#endif
 
     public HelpeeScreenShareCoordinator(
         Func<bool> isDisposed,
@@ -77,6 +85,15 @@ internal sealed class HelpeeScreenShareCoordinator
     internal int DecodeTasksActive => Volatile.Read(ref screenSharePreviewDecodeInFlight);
 
     internal int MaxDecodeTasksActive => Volatile.Read(ref maxScreenSharePreviewDecodeTasksActive);
+
+#if DEBUG
+    internal (DebugLatencySummary EndToEnd, DebugLatencySummary DecodeDuration) GetDebugLatencySnapshotAndReset()
+    {
+        return (
+            previewEndToEndLatency.SnapshotAndReset(),
+            previewDecodeDurationLatency.SnapshotAndReset());
+    }
+#endif
 
     private async Task StopAsyncCore(bool awaitToggleCompletion)
     {
@@ -375,17 +392,22 @@ internal sealed class HelpeeScreenShareCoordinator
         while (true)
         {
             var generation = Volatile.Read(ref screenSharePreviewGeneration);
-            var encodedFrameData = TakePendingFrame();
+            var encodedFrameData = TakePendingFrame(out var receivedUtcTicks);
             if (encodedFrameData is null || isDisposed())
             {
                 return;
             }
 
             Bitmap? bitmap = null;
+            var decodeStartTimestamp = Stopwatch.GetTimestamp();
 
             try
             {
                 bitmap = decodeFrame(encodedFrameData);
+#if DEBUG
+                previewDecodeDurationLatency.RecordTimeSpanTicks(
+                    DebugLatencyWindow.StopwatchElapsedTimeSpanTicks(decodeStartTimestamp, Stopwatch.GetTimestamp()));
+#endif
                 LogDebug("Preview frame decoded to Avalonia bitmap.");
 
                 if (isDisposed() ||
@@ -400,10 +422,17 @@ internal sealed class HelpeeScreenShareCoordinator
                 await SetScreenSharePreviewFrameAsync(bitmap, generation).ConfigureAwait(false);
                 LogDebug("Preview frame applied.");
                 Interlocked.Increment(ref framesDecoded);
+#if DEBUG
+                previewEndToEndLatency.RecordTimeSpanTicks(DateTime.UtcNow.Ticks - receivedUtcTicks);
+#endif
                 bitmap = null;
             }
             catch (Exception ex)
             {
+#if DEBUG
+                previewDecodeDurationLatency.RecordTimeSpanTicks(
+                    DebugLatencyWindow.StopwatchElapsedTimeSpanTicks(decodeStartTimestamp, Stopwatch.GetTimestamp()));
+#endif
                 LogDebug($"Preview frame decode/apply failed: {ex.GetType().Name}: {ex.Message}");
                 bitmap?.Dispose();
             }
@@ -415,15 +444,24 @@ internal sealed class HelpeeScreenShareCoordinator
         lock (gate)
         {
             pendingPreviewFrameBytes = encodedFrameData;
+#if DEBUG
+            pendingPreviewFrameReceivedUtcTicks = encodedFrameData is null ? 0 : DateTime.UtcNow.Ticks;
+#endif
         }
     }
 
-    private byte[]? TakePendingFrame()
+    private byte[]? TakePendingFrame(out long receivedUtcTicks)
     {
         lock (gate)
         {
             var encodedFrameData = pendingPreviewFrameBytes;
             pendingPreviewFrameBytes = null;
+#if DEBUG
+            receivedUtcTicks = pendingPreviewFrameReceivedUtcTicks;
+            pendingPreviewFrameReceivedUtcTicks = 0;
+#else
+            receivedUtcTicks = 0;
+#endif
             return encodedFrameData;
         }
     }

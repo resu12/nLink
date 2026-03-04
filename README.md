@@ -1,16 +1,16 @@
 # nLink
 
-Simple help for family and friends.
+nLink is a private, secure, serverless, simple screen sharing application for helping family and friends.
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
-## Current Release (0.3.3)
+## Current Release (0.3.4)
 
-`0.3.3` is the current stabilized release. It keeps the existing bridge-based transport architecture and focuses on screensharing runtime reliability, bounded behavior, and release hygiene after `0.3.2`.
+`0.3.4` is the current stabilized release. It keeps the existing bridge-based transport architecture and focuses on UI clarity, layout consistency, and release hygiene after `0.3.3`.
 
 - Architecture remains stable, including the existing bridge JSONL contract.
-- `0.3.3` focuses on bug fixes, deterministic screenshare behavior, soak-tested stability, and release packaging polish.
-- No transport redesign is included in `0.3.3`.
+- `0.3.4` focuses on bug fixes, deterministic screenshare behavior, helper and helpee layout polish, and release packaging polish.
+- No transport redesign is included in `0.3.4`.
 
 ## Quick Start (Windows)
 
@@ -37,11 +37,11 @@ Open Diagnostics -> Copy diagnostics and include it when reporting issues.
 
 Notes:
 - Windows x64 only
-- Current release (`0.3.3`)
+- Current release (`0.3.4`)
 - Installer path: `%LOCALAPPDATA%\Programs\nLink Helper`
 
 Versioning:
-- Release version uses SemVer (for example: `0.3.3`)
+- Release version uses SemVer (for example: `0.3.4`)
 - The current release version is stored in the repo-root `VERSION` file
 
 License:
@@ -78,7 +78,7 @@ License:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
 - Final release notes:
-  [`docs/releases/0.3.3.md`](docs/releases/0.3.3.md)
+  [`docs/releases/0.3.4.md`](docs/releases/0.3.4.md)
 - Screenshare RC/final validation checklist:
   [`docs/release/0.3.0-rc-validation-checklist.md`](docs/release/0.3.0-rc-validation-checklist.md)
 - Promotion criteria:

@@ -43,6 +43,8 @@
     <Grid Background="{StaticResource AppBackgroundBrush}">
         <ScrollViewer HorizontalScrollBarVisibility="Disabled"
                       VerticalScrollBarVisibility="Auto"
+                      HorizontalContentAlignment="Stretch"
+                      VerticalContentAlignment="Stretch"
                       Margin="24">
             <Grid RowDefinitions="Auto,Auto"
                   RowSpacing="16">
@@ -57,10 +59,15 @@
                             <views:ScreenShareSurfaceView Frame="{Binding ScreenSharePreviewFrame}"
                                                           IsVisible="{Binding ShowScreenSharePreviewFrame}"/>
 
-                            <Border Classes="appCard"
-                                    MaxWidth="1120"
-                                    Padding="24"
-                                    IsVisible="{Binding ShowHelpeeMainContent}">
+                            <Border Padding="0"
+                                    Background="Transparent"
+                                    BorderThickness="0"
+                                    IsVisible="{Binding ShowHelpeeMainContent}"
+                                    Margin="0,16,0,0"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Top"
+                                    MaxWidth="560"
+                                    MinWidth="380">
                                 <StackPanel Spacing="16">
                                     <views:StatusBanner Status="{Binding BannerStatus}"
                                                         ForceVisible="{Binding ShowStatusBanner}"
@@ -93,62 +100,67 @@
                                         </Grid>
                                     </Border>
 
-                                    <StackPanel Spacing="16"
-                                                IsVisible="{Binding ShowWaitingPanel}">
-                                        <Border Background="{StaticResource AppMutedPanelBrush}"
-                                                BorderBrush="{StaticResource AppCardBorderBrush}"
-                                                BorderThickness="1"
-                                                CornerRadius="12"
-                                                Padding="20"
-                                                Cursor="Hand"
-                                                PointerPressed="ShareCodeBorder_PointerPressed">
-                                            <TextBlock Classes="codeDigits"
-                                                       Text="{Binding ShareCode}"
-                                                       AutomationProperties.AutomationId="Helpee.Code"
-                                                       HorizontalAlignment="Center"/>
-                                        </Border>
+                                    <Border Background="{StaticResource AppMutedPanelBrush}"
+                                            CornerRadius="16"
+                                            Padding="20"
+                                            IsVisible="{Binding ShowWaitingPanel}">
+                                        <StackPanel Spacing="18">
 
-                                        <Grid ColumnDefinitions="*,*"
-                                              ColumnSpacing="10"
-                                              IsVisible="{Binding ShowWaitingCodeActions}">
-                                            <Button Grid.Column="0"
-                                                    AutomationProperties.AutomationId="Helpee.CopyCode"
-                                                    Classes="appButton primaryButton action"
-                                                    Content="Copy code"
-                                                    Command="{Binding CopyCodeCommand}"
+                                            <!-- Clickable code hero (inset surface) -->
+                                            <Border Background="{StaticResource AppSurfaceBrush}"
+                                                    CornerRadius="14"
+                                                    Padding="22"
+                                                    HorizontalAlignment="Stretch"
+                                                    Cursor="Hand"
+                                                    PointerPressed="ShareCodeBorder_PointerPressed">
+                                                <StackPanel Spacing="12">
+                                                    <TextBlock Classes="codeDigits"
+                                                               Text="{Binding ShareCode}"
+                                                               AutomationProperties.AutomationId="Helpee.Code"
+                                                               HorizontalAlignment="Center"/>
+                                                    <TextBlock Text="Click to copy"
+                                                               Classes="appMuted"
+                                                               FontSize="14"
+                                                               HorizontalAlignment="Center"/>
+                                                </StackPanel>
+                                            </Border>
+
+                                            <!-- Actions -->
+                                            <Grid ColumnDefinitions="*,*"
+                                                  ColumnSpacing="10"
+                                                  IsVisible="{Binding ShowWaitingCodeActions}">
+                                                <Button Grid.Column="0"
+                                                        AutomationProperties.AutomationId="Helpee.CopyCode"
+                                                        Classes="appButton primaryButton action"
+                                                        Content="Copy code"
+                                                        Command="{Binding CopyCodeCommand}"
+                                                        IsEnabled="{Binding CanStartOrConnect}"
+                                                        HorizontalAlignment="Stretch"/>
+
+                                                <Button Grid.Column="1"
+                                                        AutomationProperties.AutomationId="Helpee.NewCode"
+                                                        Classes="appButton secondaryButton action"
+                                                        Content="New code"
+                                                        Command="{Binding RegenerateCodeCommand}"
+                                                        IsEnabled="{Binding CanStartOrConnect}"
+                                                        HorizontalAlignment="Stretch"/>
+                                            </Grid>
+
+                                            <TextBlock Classes="appMuted"
+                                                       Text="{Binding CopyFeedback.Text}"
+                                                       FontSize="14"
+                                                       TextAlignment="Center"
+                                                       HorizontalAlignment="Center"
+                                                       IsVisible="{Binding CopyFeedback.IsVisible}"/>
+
+                                            <Button Classes="appButton secondaryButton action"
+                                                    Content="Retry"
+                                                    Command="{Binding RetryCommand}"
                                                     IsEnabled="{Binding CanStartOrConnect}"
-                                                    HorizontalAlignment="Stretch"/>
+                                                    IsVisible="{Binding ShowRetryAction}"/>
 
-                                            <Button Grid.Column="1"
-                                                    AutomationProperties.AutomationId="Helpee.NewCode"
-                                                    Classes="appButton secondaryButton action"
-                                                    Content="New code"
-                                                    Command="{Binding RegenerateCodeCommand}"
-                                                    IsEnabled="{Binding CanStartOrConnect}"
-                                                    HorizontalAlignment="Stretch"/>
-                                        </Grid>
-
-                                        <TextBlock Classes="appMuted"
-                                                   Text="{Binding CopyFeedback.Text}"
-                                                   FontSize="14"
-                                                   TextAlignment="Center"
-                                                   HorizontalAlignment="Center"
-                                                   IsVisible="{Binding CopyFeedback.IsVisible}"/>
-
-                                        <Button Classes="appButton secondaryButton action"
-                                                Content="Retry"
-                                                Command="{Binding RetryCommand}"
-                                                IsEnabled="{Binding CanStartOrConnect}"
-                                                IsVisible="{Binding ShowRetryAction}"/>
-
-                                        <TextBlock Classes="appMuted"
-                                                   AutomationProperties.AutomationId="Helpee.Status"
-                                                   Text="{Binding StatusLineText}"
-                                                   FontSize="15"
-                                                   TextAlignment="Center"
-                                                   HorizontalAlignment="Center"
-                                                   IsVisible="{Binding ShowWaitingStatusLine}"/>
-                                    </StackPanel>
+                                        </StackPanel>
+                                    </Border>
 
                                     <StackPanel Spacing="16"
                                                 IsVisible="{Binding ShowIncomingRequestPanel}">
@@ -193,7 +205,11 @@
                         Classes="appButton secondaryButton backAction"
                         Content="Back"
                         Command="{Binding CancelCommand}"
-                        IsVisible="{Binding ShowBackButton}"/>
+                        HorizontalAlignment="Center"
+                        IsVisible="{Binding ShowBackButton}"
+                        Height="48"
+                        MinWidth="200"
+                        Opacity="0.92"/>
 
             </Grid>
         </ScrollViewer>

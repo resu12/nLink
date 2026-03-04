@@ -1,6 +1,9 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading.Channels;
+#if DEBUG
+using NLink.Core.Diagnostics;
+#endif
 
 namespace NLink.Core.ScreenShare;
 
@@ -13,8 +16,12 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
 {
     public const int MaxFramesPerSecond = 8;
     public const int MaxBufferedFrames = 2;
+#if DEBUG
+    private static readonly TimeSpan SnapshotInterval = TimeSpan.FromSeconds(10);
+#endif
 
     private readonly Func<ScreenShareFrameChunkV1, CancellationToken, Task> sendChunkAsync;
+    private readonly Func<TimeSpan, CancellationToken, Task> delayAsync;
     private readonly IScreenShareClock clock;
     private readonly ConcurrentDictionary<string, long> nextFrameIds = new(StringComparer.Ordinal);
     private readonly Queue<PendingFrame> pendingFrames = new();
@@ -25,6 +32,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
     private readonly int capacity;
     private readonly TimeSpan minimumFrameInterval;
     private DateTimeOffset lastQueuedFrameAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset lastSendStartedAtUtc = DateTimeOffset.MinValue;
     private long framesCaptured;
     private long framesQueued;
     private long framesDropped;
@@ -32,12 +40,41 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
     private long signalWriteAttempts;
     private long signalReadCount;
     private bool disposed;
+#if DEBUG
+    private readonly Queue<long> pendingEnqueueUtcTicks = new();
+    private readonly DebugLatencyWindow captureToEnqueueLatency = new();
+    private readonly DebugLatencyWindow enqueueToSendLatency = new();
+    private readonly DebugLatencyWindow sendDurationLatency = new();
+    private readonly DebugLatencyWindow endToEndLatency = new();
+    private Timer? snapshotTimer;
+    private int snapshotTickInFlight;
+#endif
 
     public ScreenShareFrameSendPipeline(
         Func<ScreenShareFrameChunkV1, CancellationToken, Task> sendChunkAsync,
         int capacity = 2,
         IScreenShareClock? clock = null,
         int maxFramesPerSecond = MaxFramesPerSecond)
+        : this(sendChunkAsync, capacity, clock, maxFramesPerSecond, delayAsync: null)
+    {
+    }
+
+    internal static ScreenShareFrameSendPipeline CreateForTesting(
+        Func<ScreenShareFrameChunkV1, CancellationToken, Task> sendChunkAsync,
+        int capacity = 2,
+        IScreenShareClock? clock = null,
+        int maxFramesPerSecond = MaxFramesPerSecond,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+    {
+        return new ScreenShareFrameSendPipeline(sendChunkAsync, capacity, clock, maxFramesPerSecond, delayAsync);
+    }
+
+    private ScreenShareFrameSendPipeline(
+        Func<ScreenShareFrameChunkV1, CancellationToken, Task> sendChunkAsync,
+        int capacity = 2,
+        IScreenShareClock? clock = null,
+        int maxFramesPerSecond = MaxFramesPerSecond,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
         this.sendChunkAsync = sendChunkAsync ?? throw new ArgumentNullException(nameof(sendChunkAsync));
         if (capacity <= 0 || capacity > MaxBufferedFrames)
@@ -52,6 +89,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
 
         this.capacity = capacity;
         this.clock = clock ?? SystemScreenShareClock.Instance;
+        this.delayAsync = delayAsync ?? Task.Delay;
         minimumFrameInterval = TimeSpan.FromMilliseconds(1000d / maxFramesPerSecond);
         pendingSignals = Channel.CreateBounded<bool>(new BoundedChannelOptions(1)
         {
@@ -61,6 +99,9 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
         });
 
         sendLoopTask = Task.Run(ProcessLoopAsync, CancellationToken.None);
+#if DEBUG
+        StartSnapshotTimer();
+#endif
     }
 
     public ScreenShareMetrics GetMetricsSnapshot()
@@ -83,6 +124,21 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
     internal long WakeSignalsRead => Interlocked.Read(ref signalReadCount);
 
     internal bool IsSendLoopCompleted => sendLoopTask.IsCompleted;
+
+#if DEBUG
+    internal (
+        DebugLatencySummary CaptureToEnqueue,
+        DebugLatencySummary EnqueueToSend,
+        DebugLatencySummary SendDuration,
+        DebugLatencySummary EndToEnd) GetDebugLatencySnapshotAndReset()
+    {
+        return (
+            captureToEnqueueLatency.SnapshotAndReset(),
+            enqueueToSendLatency.SnapshotAndReset(),
+            sendDurationLatency.SnapshotAndReset(),
+            endToEndLatency.SnapshotAndReset());
+    }
+#endif
 
     public Task EnqueueFrameAsync(
         string sessionId,
@@ -151,10 +207,18 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
             if (pendingFrames.Count >= capacity)
             {
                 pendingFrames.Dequeue();
+#if DEBUG
+                pendingEnqueueUtcTicks.Dequeue();
+#endif
                 Interlocked.Increment(ref framesDropped);
             }
 
             pendingFrames.Enqueue(frame);
+#if DEBUG
+            pendingEnqueueUtcTicks.Enqueue(now.UtcTicks);
+            captureToEnqueueLatency.RecordTimeSpanTicks(
+                now.UtcTicks - (timestampUnixMilliseconds * TimeSpan.TicksPerMillisecond));
+#endif
             AssertBufferBounds();
             lastQueuedFrameAtUtc = now;
             Interlocked.Increment(ref framesQueued);
@@ -179,6 +243,9 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
 
         disposeCts.Cancel();
         pendingSignals.Writer.TryComplete();
+#if DEBUG
+        StopSnapshotTimer();
+#endif
 
         try
         {
@@ -213,11 +280,17 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
                 while (true)
                 {
                     PendingFrame? frame = null;
+#if DEBUG
+                    var enqueueTimestampUtcTicks = 0L;
+#endif
                     lock (gate)
                     {
                         if (pendingFrames.Count > 0)
                         {
                             frame = pendingFrames.Dequeue();
+#if DEBUG
+                            enqueueTimestampUtcTicks = pendingEnqueueUtcTicks.Dequeue();
+#endif
                             AssertBufferBounds();
                         }
                     }
@@ -226,6 +299,8 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
                     {
                         break;
                     }
+
+                    await WaitForNextSendSlotAsync().ConfigureAwait(false);
 
                     var chunks = ScreenShareFrameChunker.ChunkFrame(
                         frame.SessionId,
@@ -236,12 +311,29 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
                         frame.TimestampUnixMilliseconds,
                         frame.EncodedFrameBytes);
 
+#if DEBUG
+                    var sendStartUtcTicks = clock.UtcNow.UtcTicks;
+                    if (enqueueTimestampUtcTicks != 0)
+                    {
+                        enqueueToSendLatency.RecordTimeSpanTicks(sendStartUtcTicks - enqueueTimestampUtcTicks);
+                    }
+
+                    var sendStartTimestamp = Stopwatch.GetTimestamp();
+#endif
                     foreach (var chunk in chunks)
                     {
                         disposeCts.Token.ThrowIfCancellationRequested();
                         await sendChunkAsync(chunk, disposeCts.Token).ConfigureAwait(false);
                         Interlocked.Increment(ref chunksSent);
                     }
+#if DEBUG
+                    var sendEndTimestamp = Stopwatch.GetTimestamp();
+                    var sendEndUtcTicks = clock.UtcNow.UtcTicks;
+                    sendDurationLatency.RecordTimeSpanTicks(
+                        DebugLatencyWindow.StopwatchElapsedTimeSpanTicks(sendStartTimestamp, sendEndTimestamp));
+                    endToEndLatency.RecordTimeSpanTicks(
+                        sendEndUtcTicks - (frame.TimestampUnixMilliseconds * TimeSpan.TicksPerMillisecond));
+#endif
                 }
             }
         }
@@ -264,6 +356,34 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
         long TimestampUnixMilliseconds,
         byte[] EncodedFrameBytes);
 
+    private async Task WaitForNextSendSlotAsync()
+    {
+        while (true)
+        {
+            var now = clock.UtcNow;
+            if (lastSendStartedAtUtc == DateTimeOffset.MinValue)
+            {
+                lastSendStartedAtUtc = now;
+                return;
+            }
+
+            var scheduledSendAtUtc = lastSendStartedAtUtc + minimumFrameInterval;
+            var remaining = scheduledSendAtUtc - now;
+            if (remaining <= TimeSpan.Zero)
+            {
+                lastSendStartedAtUtc = now;
+                return;
+            }
+
+            await delayAsync(remaining, disposeCts.Token).ConfigureAwait(false);
+            var resumedAtUtc = clock.UtcNow;
+            lastSendStartedAtUtc = resumedAtUtc >= scheduledSendAtUtc
+                ? resumedAtUtc
+                : scheduledSendAtUtc;
+            return;
+        }
+    }
+
     [Conditional("DEBUG")]
     private void AssertBufferBounds()
     {
@@ -278,4 +398,70 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
     {
         Trace.WriteLine($"[ScreenShareSendPipeline] {message}");
     }
+
+#if DEBUG
+    private void StartSnapshotTimer()
+    {
+        if (snapshotTimer is not null)
+        {
+            return;
+        }
+
+        snapshotTimer = new Timer(
+            static state => ((ScreenShareFrameSendPipeline)state!).OnSnapshotTimerTick(),
+            this,
+            SnapshotInterval,
+            SnapshotInterval);
+    }
+
+    private void StopSnapshotTimer()
+    {
+        Interlocked.Exchange(ref snapshotTickInFlight, 0);
+        var timer = Interlocked.Exchange(ref snapshotTimer, null);
+        timer?.Dispose();
+    }
+
+    private void OnSnapshotTimerTick()
+    {
+        if (Interlocked.Exchange(ref snapshotTickInFlight, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            var metrics = GetMetricsSnapshot();
+            var latency = GetDebugLatencySnapshotAndReset();
+            if (!latency.CaptureToEnqueue.HasSamples &&
+                !latency.EnqueueToSend.HasSamples &&
+                !latency.SendDuration.HasSamples &&
+                !latency.EndToEnd.HasSamples &&
+                metrics.FramesQueued == 0 &&
+                metrics.ChunksSent == 0)
+            {
+                return;
+            }
+
+            LogDebug(
+                $"Latency queued={metrics.FramesQueued} dropped={metrics.FramesDropped} sent={metrics.ChunksSent} " +
+                $"c2e={FormatLatency(latency.CaptureToEnqueue)} q2s={FormatLatency(latency.EnqueueToSend)} " +
+                $"send={FormatLatency(latency.SendDuration)} e2e={FormatLatency(latency.EndToEnd)}.");
+        }
+        catch (Exception ex)
+        {
+            LogDebug($"Latency snapshot failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref snapshotTickInFlight, 0);
+        }
+    }
+
+    private static string FormatLatency(DebugLatencySummary summary)
+    {
+        return !summary.HasSamples
+            ? "na"
+            : $"avg={summary.AverageMilliseconds:F1}ms p50={summary.P50Milliseconds:F1}ms p95={summary.P95Milliseconds:F1}ms n={summary.Count}";
+    }
+#endif
 }

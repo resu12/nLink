@@ -3,6 +3,9 @@ using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using NLink.Core.ScreenShare;
+#if DEBUG
+using NLink.Core.Diagnostics;
+#endif
 
 namespace NLink.App.Services.ScreenCapture;
 
@@ -303,7 +306,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                 e.Height,
                 e.Encoding,
                 e.EncodedFrameData,
-                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                clock.UtcNow.ToUnixTimeMilliseconds(),
                 CancellationToken.None).ConfigureAwait(false);
         }
         catch (ObjectDisposedException)
@@ -387,10 +390,13 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             }
 
             var metrics = currentPipeline.GetMetricsSnapshot();
+            var latency = currentPipeline.GetDebugLatencySnapshotAndReset();
             var heapBytes = GC.GetTotalMemory(false);
             using var process = Process.GetCurrentProcess();
             LogDebug(
-                $"Snapshot heap={heapBytes} ws={process.WorkingSet64} queued={metrics.FramesQueued} dropped={metrics.FramesDropped} sent={metrics.ChunksSent}.");
+                $"Snapshot heap={heapBytes} ws={process.WorkingSet64} queued={metrics.FramesQueued} dropped={metrics.FramesDropped} sent={metrics.ChunksSent} " +
+                $"c2e={FormatLatency(latency.CaptureToEnqueue)} q2s={FormatLatency(latency.EnqueueToSend)} " +
+                $"send={FormatLatency(latency.SendDuration)} e2e={FormatLatency(latency.EndToEnd)}.");
         }
         catch (Exception ex)
         {
@@ -408,4 +414,13 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
     {
         Trace.WriteLine($"[ScreenShareTransport] {message}");
     }
+
+#if DEBUG
+    private static string FormatLatency(DebugLatencySummary summary)
+    {
+        return !summary.HasSamples
+            ? "na"
+            : $"avg={summary.AverageMilliseconds:F1}ms p50={summary.P50Milliseconds:F1}ms p95={summary.P95Milliseconds:F1}ms n={summary.Count}";
+    }
+#endif
 }

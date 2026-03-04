@@ -4,6 +4,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Threading;
 using NLink.App.Services;
 using NLink.App.ViewModels;
 using NLink.Core;
@@ -12,6 +13,7 @@ namespace NLink.App.Views;
 
 public partial class HelperPageView : UserControl
 {
+    private const string HelperCodeInputElementName = "HelperCodeInputBox";
     private HelperPageViewModel? currentViewModel;
     private bool normalizingHelperCodeInput;
 
@@ -19,7 +21,11 @@ public partial class HelperPageView : UserControl
     {
         InitializeComponent();
         PropertyChanged += OnViewPropertyChanged;
-        AttachedToVisualTree += (_, _) => BindClipboardTopLevel();
+        AttachedToVisualTree += (_, _) =>
+        {
+            BindClipboardTopLevel();
+            ScheduleFocusHelperCodeInput();
+        };
         SyncViewModelSubscription();
     }
 
@@ -44,6 +50,8 @@ public partial class HelperPageView : UserControl
         {
             currentViewModel.SendFileRequested += OnSendFileRequested;
         }
+
+        ScheduleFocusHelperCodeInput();
     }
 
     private void OnSendFileRequested(object? sender, EventArgs e)
@@ -216,6 +224,23 @@ public partial class HelperPageView : UserControl
         {
             service.SetTopLevel(topLevel);
         }
+    }
+
+    private void ScheduleFocusHelperCodeInput()
+    {
+        Dispatcher.UIThread.Post(TryFocusHelperCodeInput, DispatcherPriority.Loaded);
+    }
+
+    private void TryFocusHelperCodeInput()
+    {
+        var codeInput = this.FindControl<TextBox>(HelperCodeInputElementName);
+        if (codeInput is null || !codeInput.IsVisible || !codeInput.IsEnabled)
+        {
+            return;
+        }
+
+        codeInput.Focus();
+        codeInput.CaretIndex = 0;
     }
 
     private static int CountDigitsBeforeIndex(string text, int caretIndex)

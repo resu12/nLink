@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Reflection;
 using NLink.Core.ScreenShare;
 
@@ -14,7 +15,7 @@ public sealed class ScreenShareFrameSendPipelineTests
         var twoFramesSent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 3, 12, 0, 0, TimeSpan.Zero));
 
-        await using var pipeline = new ScreenShareFrameSendPipeline(
+        await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
             sendChunkAsync: (chunk, _) =>
             {
                 sentFrameIds.Enqueue(chunk.FrameId);
@@ -26,7 +27,8 @@ public sealed class ScreenShareFrameSendPipelineTests
                 return Task.CompletedTask;
             },
             capacity: 2,
-            clock: clock);
+            clock: clock,
+            delayAsync: CreateAdvancingDelay(clock));
 
         await pipeline.EnqueueFrameAsync("stream-rate", 800, 600, "jpeg", [1], 1000, CancellationToken.None);
         clock.Advance(TimeSpan.FromMilliseconds(50));
@@ -57,7 +59,7 @@ public sealed class ScreenShareFrameSendPipelineTests
         var twoFramesSent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 3, 12, 2, 0, TimeSpan.Zero));
 
-        await using var pipeline = new ScreenShareFrameSendPipeline(
+        await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
             sendChunkAsync: (chunk, _) =>
             {
                 sentFrameIds.Enqueue(chunk.FrameId);
@@ -70,7 +72,8 @@ public sealed class ScreenShareFrameSendPipelineTests
             },
             capacity: 2,
             clock: clock,
-            maxFramesPerSecond: 5);
+            maxFramesPerSecond: 5,
+            delayAsync: CreateAdvancingDelay(clock));
 
         await pipeline.EnqueueFrameAsync("stream-fps-drop", 800, 600, "jpeg", [1], 1000, CancellationToken.None);
         clock.Advance(TimeSpan.FromMilliseconds(10));
@@ -101,7 +104,7 @@ public sealed class ScreenShareFrameSendPipelineTests
         var sentCount = 0;
         var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 3, 12, 3, 0, TimeSpan.Zero));
 
-        await using var pipeline = new ScreenShareFrameSendPipeline(
+        await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
             sendChunkAsync: (chunk, _) =>
             {
                 sentFrameIds.Enqueue(chunk.FrameId);
@@ -110,7 +113,8 @@ public sealed class ScreenShareFrameSendPipelineTests
             },
             capacity: 2,
             clock: clock,
-            maxFramesPerSecond: 5);
+            maxFramesPerSecond: 5,
+            delayAsync: CreateAdvancingDelay(clock));
 
         for (var i = 0; i < 5; i++)
         {
@@ -159,7 +163,7 @@ public sealed class ScreenShareFrameSendPipelineTests
         var sentFrameIds = new ConcurrentQueue<long>();
         var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 3, 12, 5, 0, TimeSpan.Zero));
 
-        await using var sender = new ScreenShareFrameSendPipeline(
+        await using var sender = ScreenShareFrameSendPipeline.CreateForTesting(
             sendChunkAsync: (chunk, _) =>
             {
                 sentFrameIds.Enqueue(chunk.FrameId);
@@ -179,8 +183,6 @@ public sealed class ScreenShareFrameSendPipelineTests
                 [(byte)(i % 251)],
                 2000 + i,
                 CancellationToken.None);
-
-            await Task.Yield();
 
             if (i < totalFrames - 1)
             {
@@ -214,7 +216,7 @@ public sealed class ScreenShareFrameSendPipelineTests
         var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 3, 12, 10, 0, TimeSpan.Zero));
         var sendCount = 0;
 
-        await using var pipeline = new ScreenShareFrameSendPipeline(
+        await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
             sendChunkAsync: async (chunk, _) =>
             {
                 sentFrameIds.Enqueue(chunk.FrameId);
@@ -231,7 +233,8 @@ public sealed class ScreenShareFrameSendPipelineTests
                 }
             },
             capacity: 2,
-            clock: clock);
+            clock: clock,
+            delayAsync: CreateAdvancingDelay(clock));
 
         await pipeline.EnqueueFrameAsync("stream-b", 800, 600, "jpeg", [1, 2, 3], 1000, CancellationToken.None);
         await AwaitCompletesAsync(
@@ -272,7 +275,7 @@ public sealed class ScreenShareFrameSendPipelineTests
         var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 3, 12, 30, 0, TimeSpan.Zero));
         var sendCount = 0;
 
-        await using var pipeline = new ScreenShareFrameSendPipeline(
+        await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
             sendChunkAsync: async (chunk, _) =>
             {
                 sentFrameIds.Enqueue(chunk.FrameId);
@@ -289,7 +292,8 @@ public sealed class ScreenShareFrameSendPipelineTests
                 }
             },
             capacity: ScreenShareFrameSendPipeline.MaxBufferedFrames,
-            clock: clock);
+            clock: clock,
+            delayAsync: CreateAdvancingDelay(clock));
 
         await pipeline.EnqueueFrameAsync("stream-pressure", 800, 600, "jpeg", [1], 1000, CancellationToken.None);
         await firstChunkStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
@@ -322,7 +326,7 @@ public sealed class ScreenShareFrameSendPipelineTests
     {
         var sendEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        await using var pipeline = new ScreenShareFrameSendPipeline(
+        await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
             sendChunkAsync: async (_, ct) =>
             {
                 sendEntered.TrySetResult(true);
@@ -357,7 +361,7 @@ public sealed class ScreenShareFrameSendPipelineTests
         var firstChunkStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var sendCanceled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        await using var pipeline = new ScreenShareFrameSendPipeline(
+        await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
             sendChunkAsync: async (_, ct) =>
             {
                 firstChunkStarted.TrySetResult(true);
@@ -392,7 +396,7 @@ public sealed class ScreenShareFrameSendPipelineTests
         var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 3, 12, 40, 0, TimeSpan.Zero));
         var sendCount = 0;
 
-        await using var pipeline = new ScreenShareFrameSendPipeline(
+        await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
             sendChunkAsync: async (_, ct) =>
             {
                 var currentSendCount = Interlocked.Increment(ref sendCount);
@@ -408,7 +412,8 @@ public sealed class ScreenShareFrameSendPipelineTests
                 }
             },
             capacity: ScreenShareFrameSendPipeline.MaxBufferedFrames,
-            clock: clock);
+            clock: clock,
+            delayAsync: CreateAdvancingDelay(clock));
 
         await pipeline.EnqueueFrameAsync("stream-signals", 800, 600, "jpeg", [1], 1000, CancellationToken.None);
         await AwaitCompletesAsync(
@@ -441,7 +446,7 @@ public sealed class ScreenShareFrameSendPipelineTests
     {
         var sendCount = 0;
 
-        await using var pipeline = new ScreenShareFrameSendPipeline(
+        await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
             sendChunkAsync: (_, _) =>
             {
                 Interlocked.Increment(ref sendCount);
@@ -467,7 +472,7 @@ public sealed class ScreenShareFrameSendPipelineTests
         var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 3, 12, 50, 0, TimeSpan.Zero));
         var chunksStarted = 0;
 
-        await using var pipeline = new ScreenShareFrameSendPipeline(
+        await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
             sendChunkAsync: async (_, ct) =>
             {
                 var current = Interlocked.Increment(ref chunksStarted);
@@ -484,7 +489,8 @@ public sealed class ScreenShareFrameSendPipelineTests
                 await semaphore.WaitAsync(ct);
             },
             clock: clock,
-            maxFramesPerSecond: ScreenShareFrameSendPipeline.MaxFramesPerSecond);
+            maxFramesPerSecond: ScreenShareFrameSendPipeline.MaxFramesPerSecond,
+            delayAsync: CreateAdvancingDelay(clock));
 
         await pipeline.EnqueueFrameAsync(
             "stream-slow-send",
@@ -543,7 +549,7 @@ public sealed class ScreenShareFrameSendPipelineTests
         for (var cycle = 1; cycle <= cycleCount; cycle++)
         {
             var probe = new ScreenShareSendProbe(startBlocked: true, respectCancellation: true);
-            await using var pipeline = new ScreenShareFrameSendPipeline(
+            await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
                 sendChunkAsync: probe.SendChunkAsync);
 
             await pipeline.EnqueueFrameAsync(
@@ -579,6 +585,120 @@ public sealed class ScreenShareFrameSendPipelineTests
         Assert.True(
             memoryDeltaBytes <= 4 * 1024 * 1024,
             $"Expected bounded memory growth after pipeline cycles. DeltaBytes={memoryDeltaBytes}, Cycles={cycleCount}, CanceledSends={totalCanceledSends}.");
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task FramePacing_IsStable_UnderBurstArrival()
+    {
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 3, 13, 0, 0, TimeSpan.Zero));
+        var sendStartedAt = new ConcurrentQueue<DateTimeOffset>();
+        var firstChunkStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstChunk = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var threeChunksStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sendCount = 0;
+
+        await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
+            sendChunkAsync: async (_, ct) =>
+            {
+                sendStartedAt.Enqueue(clock.UtcNow);
+                var currentSendCount = Interlocked.Increment(ref sendCount);
+                if (currentSendCount == 1)
+                {
+                    firstChunkStarted.TrySetResult(true);
+                    await releaseFirstChunk.Task.WaitAsync(ct);
+                }
+
+                if (currentSendCount >= 3)
+                {
+                    threeChunksStarted.TrySetResult(true);
+                }
+            },
+            capacity: ScreenShareFrameSendPipeline.MaxBufferedFrames,
+            clock: clock,
+            maxFramesPerSecond: ScreenShareFrameSendPipeline.MaxFramesPerSecond,
+            delayAsync: CreateAdvancingDelay(clock));
+
+        await pipeline.EnqueueFrameAsync("stream-pacing", 800, 600, "jpeg", [1], 1000, CancellationToken.None);
+        await AwaitCompletesAsync(
+            firstChunkStarted.Task,
+            TimeSpan.FromSeconds(2),
+            "first paced send entry");
+
+        for (var i = 1; i < 50; i++)
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(125));
+            await pipeline.EnqueueFrameAsync(
+                "stream-pacing",
+                800,
+                600,
+                "jpeg",
+                [(byte)(i % 251)],
+                1000 + i,
+                CancellationToken.None);
+        }
+
+        releaseFirstChunk.TrySetResult(true);
+
+        await AwaitCompletesAsync(
+            threeChunksStarted.Task,
+            TimeSpan.FromSeconds(2),
+            "paced sends after burst arrival");
+
+        var sendTimes = sendStartedAt.ToArray();
+        Assert.True(sendTimes.Length >= 3, $"Expected at least 3 sends, but saw {sendTimes.Length}.");
+        var secondToThirdGap = sendTimes[2] - sendTimes[1];
+        Assert.True(
+            secondToThirdGap >= TimeSpan.FromMilliseconds(125),
+            $"Expected second-to-third send gap >= 125ms, but was {secondToThirdGap.TotalMilliseconds:F1}ms. Sends={string.Join(", ", sendTimes)}");
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task SendPipeline_Processes100Frames_UnderTimeBudget()
+    {
+        const int frameCount = 100;
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 3, 13, 30, 0, TimeSpan.Zero));
+        var sentCount = 0;
+
+        await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
+            sendChunkAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref sentCount);
+                return Task.CompletedTask;
+            },
+            capacity: ScreenShareFrameSendPipeline.MaxBufferedFrames,
+            clock: clock,
+            maxFramesPerSecond: ScreenShareFrameSendPipeline.MaxFramesPerSecond,
+            delayAsync: CreateAdvancingDelay(clock));
+
+        var stopwatch = Stopwatch.StartNew();
+        for (var i = 0; i < frameCount; i++)
+        {
+            await pipeline.EnqueueFrameAsync(
+                "stream-throughput",
+                1280,
+                720,
+                "jpeg",
+                [(byte)(i % 251)],
+                6000 + i,
+                CancellationToken.None);
+
+            await AwaitConditionAsync(
+                () => Volatile.Read(ref sentCount) >= i + 1,
+                TimeSpan.FromSeconds(2),
+                $"frame {i + 1} to send in throughput budget test");
+
+            if (i < frameCount - 1)
+            {
+                clock.Advance(TimeSpan.FromMilliseconds(125));
+            }
+        }
+
+        stopwatch.Stop();
+        Assert.True(
+            stopwatch.Elapsed < TimeSpan.FromSeconds(5),
+            $"Expected 100 no-op frames to process quickly under fake-clock pacing, but it took {stopwatch.Elapsed.TotalMilliseconds:F1} ms.");
     }
 
     private static async Task WaitForSignalAsync(
@@ -639,6 +759,16 @@ public sealed class ScreenShareFrameSendPipelineTests
         {
             utcNow = utcNow.Add(by);
         }
+    }
+
+    private static Func<TimeSpan, CancellationToken, Task> CreateAdvancingDelay(FakeScreenShareClock clock)
+    {
+        return (delay, ct) =>
+        {
+            ct.ThrowIfCancellationRequested();
+            clock.Advance(delay);
+            return Task.CompletedTask;
+        };
     }
 
     private static int GetPendingFrameCount(ScreenShareFrameSendPipeline pipeline)

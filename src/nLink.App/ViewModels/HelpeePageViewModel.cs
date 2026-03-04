@@ -15,6 +15,9 @@ using NLink.App.Services.ScreenCapture;
 using NLink.App.Threading;
 using NLink.Core;
 using NLink.Core.Chat;
+#if DEBUG
+using NLink.Core.Diagnostics;
+#endif
 using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
@@ -814,8 +817,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
             var heapBytes = GC.GetTotalMemory(false);
             using var process = Process.GetCurrentProcess();
+            var latency = screenShareCoordinator.GetDebugLatencySnapshotAndReset();
             Debug.WriteLine(
-                $"[ScreenSharePreviewVm] Snapshot heap={heapBytes} ws={process.WorkingSet64} decoded={screenShareCoordinator.FramesDecoded} state={ScreenSharePreviewStatus.State}.");
+                $"[ScreenSharePreviewVm] Snapshot heap={heapBytes} ws={process.WorkingSet64} decoded={screenShareCoordinator.FramesDecoded} state={ScreenSharePreviewStatus.State} " +
+                $"decode={FormatLatency(latency.DecodeDuration)} e2e={FormatLatency(latency.EndToEnd)}.");
         }
         catch (Exception ex)
         {
@@ -2363,6 +2368,15 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             // Best-effort bounded cleanup.
         }
     }
+
+#if DEBUG
+    private static string FormatLatency(DebugLatencySummary summary)
+    {
+        return !summary.HasSamples
+            ? "na"
+            : $"avg={summary.AverageMilliseconds:F1}ms p50={summary.P50Milliseconds:F1}ms p95={summary.P95Milliseconds:F1}ms n={summary.Count}";
+    }
+#endif
 
     private string AppendScreenShareSuffix(string text)
     {

@@ -7,6 +7,9 @@ using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using NLink.Core.ScreenShare;
 using System.Diagnostics;
+#if DEBUG
+using NLink.Core.Diagnostics;
+#endif
 
 namespace NLink.App.ViewModels;
 
@@ -32,6 +35,9 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
     private long framesCoalesced;
     private bool disposed;
 #if DEBUG
+    private long pendingJpegBytesReceivedUtcTicks;
+    private readonly DebugLatencyWindow decodeDurationLatency = new();
+    private readonly DebugLatencyWindow endToEndLatency = new();
     private Timer? snapshotTimer;
     private int snapshotTickInFlight;
 #endif
@@ -142,7 +148,7 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
             while (iteration < MaxDecodeIterationsPerPass)
             {
                 var generationSnapshot = Volatile.Read(ref generation);
-                var jpegBytes = TakePendingFrame();
+                var jpegBytes = TakePendingFrame(out var receivedUtcTicks);
 
                 if (jpegBytes is null || disposed)
                 {
@@ -150,9 +156,14 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
                 }
 
                 Bitmap? bitmap = null;
+                var decodeStartTimestamp = Stopwatch.GetTimestamp();
                 try
                 {
                     bitmap = await Task.Run(() => decodeFrame(jpegBytes)).ConfigureAwait(false);
+#if DEBUG
+                    decodeDurationLatency.RecordTimeSpanTicks(
+                        DebugLatencyWindow.StopwatchElapsedTimeSpanTicks(decodeStartTimestamp, Stopwatch.GetTimestamp()));
+#endif
                     if (disposed || generationSnapshot != Volatile.Read(ref generation))
                     {
                         bitmap.Dispose();
@@ -171,11 +182,18 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
 
                         ReplaceCurrentFrame(nextBitmap);
                         Interlocked.Increment(ref framesDecoded);
+#if DEBUG
+                        endToEndLatency.RecordTimeSpanTicks(DateTime.UtcNow.Ticks - receivedUtcTicks);
+#endif
                     }).ConfigureAwait(false);
                     bitmap = null;
                 }
                 catch (Exception ex)
                 {
+#if DEBUG
+                    decodeDurationLatency.RecordTimeSpanTicks(
+                        DebugLatencyWindow.StopwatchElapsedTimeSpanTicks(decodeStartTimestamp, Stopwatch.GetTimestamp()));
+#endif
                     bitmap?.Dispose();
                     Interlocked.Increment(ref decodeErrors);
                     LogDebug($"Viewer frame decode/apply failed: {ex.GetType().Name}: {ex.Message}");
@@ -232,15 +250,24 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
             }
 
             pendingJpegBytes = jpegBytes;
+#if DEBUG
+            pendingJpegBytesReceivedUtcTicks = DateTime.UtcNow.Ticks;
+#endif
         }
     }
 
-    private byte[]? TakePendingFrame()
+    private byte[]? TakePendingFrame(out long receivedUtcTicks)
     {
         lock (gate)
         {
             var jpegBytes = pendingJpegBytes;
             pendingJpegBytes = null;
+#if DEBUG
+            receivedUtcTicks = pendingJpegBytesReceivedUtcTicks;
+            pendingJpegBytesReceivedUtcTicks = 0;
+#else
+            receivedUtcTicks = 0;
+#endif
             return jpegBytes;
         }
     }
@@ -312,10 +339,13 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
             }
 
             var metrics = GetMetricsSnapshot();
+            var decodeSummary = decodeDurationLatency.SnapshotAndReset();
+            var endToEndSummary = endToEndLatency.SnapshotAndReset();
             var heapBytes = GC.GetTotalMemory(false);
             using var process = Process.GetCurrentProcess();
             LogDebug(
-                $"Snapshot heap={heapBytes} ws={process.WorkingSet64} decoded={metrics.FramesDecoded} errors={metrics.DecodeErrors} inFlight={Volatile.Read(ref decodeInFlight)}.");
+                $"Snapshot heap={heapBytes} ws={process.WorkingSet64} decoded={metrics.FramesDecoded} errors={metrics.DecodeErrors} inFlight={Volatile.Read(ref decodeInFlight)} " +
+                $"decode={FormatLatency(decodeSummary)} e2e={FormatLatency(endToEndSummary)}.");
         }
         catch (Exception ex)
         {
@@ -333,4 +363,13 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
     {
         Trace.WriteLine($"[ScreenShareViewer] {message}");
     }
+
+#if DEBUG
+    private static string FormatLatency(DebugLatencySummary summary)
+    {
+        return !summary.HasSamples
+            ? "na"
+            : $"avg={summary.AverageMilliseconds:F1}ms p50={summary.P50Milliseconds:F1}ms p95={summary.P95Milliseconds:F1}ms n={summary.Count}";
+    }
+#endif
 }

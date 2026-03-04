@@ -8,23 +8,29 @@
              x:Name="Root">
 
     <Grid RowDefinitions="Auto,*"
-          RowSpacing="8">
-        <views:SessionHeaderView Grid.Row="0"
-                                 StatusText="{ReflectionBinding HeaderStatusText}"
-                                 EndSessionCommand="{ReflectionBinding EndSessionCommand}"
-                                 CanEndSession="{ReflectionBinding CanEndSession}"
-                                 ShowEndSession="True"
-                                 ShowScreenShare="{Binding #Root.EffectiveShowScreenShareAction}"
-                                 CanScreenShare="{Binding #Root.CanScreenShareAction}"
-                                 ScreenShareCommand="{Binding #Root.ScreenShareCommand}"
-                                 ScreenShareButtonText="{Binding #Root.ScreenShareButtonText}"
-                                 RoleText="{Binding #Root.RoleText}"
-                                 IsVisible="{Binding #Root.UseSessionHeader}"/>
+          RowSpacing="12">
+        <Border Grid.Row="0"
+                HorizontalAlignment="Center"
+                MaxWidth="1120"
+                MinWidth="420"
+                Margin="0,0,0,4">
+            <views:SessionHeaderView StatusText="{ReflectionBinding HeaderStatusText}"
+                                     EndSessionCommand="{ReflectionBinding EndSessionCommand}"
+                                     CanEndSession="{ReflectionBinding CanEndSession}"
+                                     ShowEndSession="True"
+                                     ShowScreenShare="{Binding #Root.EffectiveShowScreenShareAction}"
+                                     CanScreenShare="{Binding #Root.CanScreenShareAction}"
+                                     ScreenShareCommand="{Binding #Root.ScreenShareCommand}"
+                                     ScreenShareButtonText="{Binding #Root.ScreenShareButtonText}"
+                                     RoleText="{Binding #Root.RoleText}"
+                                     HorizontalAlignment="Stretch"
+                                     IsVisible="{Binding #Root.UseSessionHeader}"/>
+        </Border>
 
         <Grid x:Name="FixedShellLayout"
               Grid.Row="1"
               ColumnDefinitions="*,Auto"
-              ColumnSpacing="16"
+              ColumnSpacing="0"
               MinHeight="420"
               IsVisible="{Binding #Root.ShowFixedShellLayout}">
             <!--
@@ -69,6 +75,7 @@
                     BorderThickness="1"
                     CornerRadius="16"
                     Padding="16"
+                    Margin="16,0,0,0"
                     Width="360"
                     MinWidth="320"
                     MaxWidth="420"
@@ -99,7 +106,7 @@
         <Grid x:Name="ResponsiveWideShellLayout"
               Grid.Row="1"
               ColumnDefinitions="*,Auto,Auto"
-              ColumnSpacing="16"
+              ColumnSpacing="0"
               MinHeight="420"
               IsVisible="{Binding #Root.ShowResponsiveWideLayout}">
             <Border Grid.Column="0"
@@ -128,11 +135,12 @@
             <GridSplitter Grid.Column="1"
                           Width="8"
                           MinWidth="8"
+                          Margin="16,0,16,0"
                           HorizontalAlignment="Stretch"
                           VerticalAlignment="Stretch"
                           ResizeDirection="Columns"
                           ResizeBehavior="PreviousAndNext"
-                          IsVisible="{Binding #Root.UseResponsiveLayout}"/>
+                          IsVisible="{Binding #Root.ShowChatPane}"/>
 
             <Border Grid.Column="2"
                     Background="{StaticResource AppSurfaceBrush}"

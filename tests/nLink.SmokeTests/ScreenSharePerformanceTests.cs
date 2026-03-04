@@ -5,6 +5,7 @@ using Avalonia.Platform;
 using NLink.App.ViewModels;
 using NLink.Core.ScreenShare;
 using NLink.SmokeTests.Fakes;
+using Xunit.Abstractions;
 
 namespace NLink.SmokeTests;
 
@@ -12,10 +13,12 @@ namespace NLink.SmokeTests;
 public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoordinatorFixture>
 {
     private readonly ScreenShareCoordinatorFixture fixture;
+    private readonly ITestOutputHelper output;
 
-    public ScreenSharePerformanceTests(ScreenShareCoordinatorFixture fixture)
+    public ScreenSharePerformanceTests(ScreenShareCoordinatorFixture fixture, ITestOutputHelper output)
     {
         this.fixture = fixture;
+        this.output = output;
     }
 
     [Fact]
@@ -152,6 +155,142 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
         }
     }
 
+    [Fact]
+    [Trait("Category", "Performance")]
+    public async Task ScreenSharePipeline_SimulatedTwoMinuteShare_NoHang_NoRunawayMemory_AndContinuousDecode()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            const int totalFrames = 240; // 2 minutes simulated at 2 FPS
+            const int sampleStride = 24;
+            const int minimumCompletedFrames = totalFrames / 2;
+            const long maxTotalMemoryDeltaBytes = 12 * 1024 * 1024;
+            const long maxMonotonicGrowthDeltaBytes = 8 * 1024 * 1024;
+
+            var fakeCapture = new FakeScreenCaptureSource();
+            var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 4, 10, 0, 0, TimeSpan.Zero));
+            var reassembler = new ScreenShareFrameReassembler();
+            var decodeProgress = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var appliedFrames = 0;
+            var memorySamples = new List<long>();
+
+            await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
+                sendChunkAsync: (chunk, _) =>
+                {
+                    reassembler.OnChunk(chunk);
+                    return Task.CompletedTask;
+                },
+                capacity: ScreenShareFrameSendPipeline.MaxBufferedFrames,
+                clock: clock,
+                maxFramesPerSecond: ScreenShareFrameSendPipeline.MaxFramesPerSecond,
+                delayAsync: CreateAdvancingDelay(clock));
+
+            using var viewer = new ScreenShareViewerViewModel(
+                decodeFrame: _ =>
+                {
+                    Interlocked.Increment(ref appliedFrames);
+                    decodeProgress.TrySetResult(true);
+                    return CreateBitmap(2, 1);
+                },
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                });
+
+            reassembler.FrameReady += (_, frame) => viewer.OnJpegFrame(frame.EncodedFrameBytes);
+
+            EventHandler<NLink.App.Services.ScreenCapture.ScreenCaptureFrameEventArgs>? onFrameArrived = null;
+            onFrameArrived = (_, frame) =>
+            {
+                _ = pipeline.EnqueueFrameAsync(
+                    sessionId: "perf-two-minute",
+                    width: frame.Width,
+                    height: frame.Height,
+                    encoding: frame.Encoding,
+                    encodedFrameBytes: frame.EncodedFrameData,
+                    timestampUnixMilliseconds: clock.UtcNow.ToUnixTimeMilliseconds(),
+                    cancellationToken: CancellationToken.None);
+            };
+
+            fakeCapture.FrameArrived += onFrameArrived;
+            await fakeCapture.StartAsync(CancellationToken.None);
+
+            memorySamples.Add(GC.GetTotalMemory(forceFullCollection: true));
+
+            for (var frameIndex = 0; frameIndex < totalFrames; frameIndex++)
+            {
+                fakeCapture.RaiseFrame(
+                    640 + (frameIndex % 2),
+                    360 + (frameIndex % 2),
+                    new byte[] { (byte)(frameIndex % 251), 1, 2, 3 },
+                    "jpeg");
+
+                clock.Advance(TimeSpan.FromMilliseconds(500));
+                var expectedChunksSent = frameIndex + 1;
+                await WaitUntilAsync(
+                    () => pipeline.GetMetricsSnapshot().ChunksSent >= expectedChunksSent,
+                    TimeSpan.FromSeconds(2));
+
+                if ((frameIndex + 1) % sampleStride == 0)
+                {
+                    memorySamples.Add(GC.GetTotalMemory(forceFullCollection: true));
+                }
+            }
+
+            await WaitForSignalAsync(
+                decodeProgress.Task,
+                TimeSpan.FromSeconds(2),
+                () => "Expected at least one decoded frame during two-minute simulation.");
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var receiverMetrics = reassembler.GetMetricsSnapshot();
+                    var viewerProgress = viewer.GetMetricsSnapshot();
+                    return receiverMetrics.FramesCompleted >= minimumCompletedFrames &&
+                        viewerProgress.FramesDecoded >= minimumCompletedFrames;
+                },
+                TimeSpan.FromSeconds(2));
+
+            fakeCapture.FrameArrived -= onFrameArrived;
+            await fakeCapture.StopAsync();
+            viewer.Clear();
+            await WaitForSignalAsync(
+                WaitUntilAsync(() => viewer.IsIdleForDiagnostics, TimeSpan.FromSeconds(2)),
+                TimeSpan.FromSeconds(2),
+                () => "Viewer did not become idle after simulated two-minute run.");
+
+            var sender = pipeline.GetMetricsSnapshot();
+            var receiver = reassembler.GetMetricsSnapshot();
+            var viewerMetrics = viewer.GetMetricsSnapshot();
+            var memoryMin = memorySamples.Min();
+            var memoryMax = memorySamples.Max();
+            var memoryDelta = memorySamples[^1] - memorySamples[0];
+            var monotonicGrowth = IsStrictlyMonotonicIncrease(memorySamples);
+
+            Assert.Equal(totalFrames, sender.FramesCaptured);
+            Assert.True(sender.FramesQueued >= minimumCompletedFrames);
+            Assert.True(sender.FramesDropped <= totalFrames - minimumCompletedFrames);
+            Assert.True(sender.ChunksSent >= minimumCompletedFrames);
+            Assert.True(receiver.FramesCompleted >= minimumCompletedFrames);
+            Assert.Equal(0, receiver.FramesRejectedOversize);
+            Assert.True(viewerMetrics.FramesDecoded >= minimumCompletedFrames);
+            Assert.Equal(0, viewerMetrics.DecodeErrors);
+            Assert.True(
+                memoryMax - memoryMin <= maxTotalMemoryDeltaBytes,
+                $"Expected bounded memory spread. Min={memoryMin}, Max={memoryMax}, Spread={memoryMax - memoryMin}.");
+            Assert.False(
+                monotonicGrowth && memoryDelta > maxMonotonicGrowthDeltaBytes,
+                $"Expected no runaway monotonic memory growth. Samples={string.Join(", ", memorySamples)}");
+
+            output.WriteLine(
+                $"Sim2m sender={sender}; receiver={receiver}; viewer={viewerMetrics}; memDelta={memoryDelta}; memSpread={memoryMax - memoryMin}; samples={string.Join(',', memorySamples)}");
+
+            return true;
+        }, default);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
@@ -166,6 +305,19 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
         }
 
         Assert.True(predicate(), $"Condition not met within {timeout.TotalSeconds:N1}s.");
+    }
+
+    private static bool IsStrictlyMonotonicIncrease(IReadOnlyList<long> samples)
+    {
+        for (var i = 1; i < samples.Count; i++)
+        {
+            if (samples[i] <= samples[i - 1])
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static Bitmap CreateBitmap(int width, int height)
@@ -201,5 +353,19 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
         {
             utcNow = utcNow.Add(by);
         }
+    }
+
+    private static Func<TimeSpan, CancellationToken, Task> CreateAdvancingDelay(FakeScreenShareClock clock)
+    {
+        return (delay, cancellationToken) =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (delay > TimeSpan.Zero)
+            {
+                clock.Advance(delay);
+            }
+
+            return Task.CompletedTask;
+        };
     }
 }
