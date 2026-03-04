@@ -7,6 +7,8 @@
              mc:Ignorable="d"
              x:Class="NLink.App.Views.HelpeePageView"
              x:Name="Root"
+             HorizontalAlignment="Stretch"
+             VerticalAlignment="Stretch"
              x:DataType="vm:HelpeePageViewModel">
 
     <UserControl.Styles>
@@ -42,11 +44,12 @@
         <ScrollViewer HorizontalScrollBarVisibility="Disabled"
                       VerticalScrollBarVisibility="Auto"
                       Margin="24">
-            <StackPanel HorizontalAlignment="Center"
-                        MaxWidth="1120"
-                        Spacing="16">
+            <Grid RowDefinitions="Auto,Auto"
+                  RowSpacing="16">
 
                 <views:SessionShellView RoleText="Helpee"
+                                        HorizontalAlignment="Stretch"
+                                        VerticalAlignment="Stretch"
                                         ShowScreenShareAction="True"
                                         ShowChatPaneRequested="{Binding ShowConnectedPanel}">
                     <views:SessionShellView.MainContent>
@@ -55,6 +58,7 @@
                                                           IsVisible="{Binding ShowScreenSharePreviewFrame}"/>
 
                             <Border Classes="appCard"
+                                    MaxWidth="1120"
                                     Padding="24"
                                     IsVisible="{Binding ShowHelpeeMainContent}">
                                 <StackPanel Spacing="16">
@@ -185,12 +189,13 @@
                     </views:SessionShellView.ChatContent>
                 </views:SessionShellView>
 
-                <Button Classes="appButton secondaryButton backAction"
+                <Button Grid.Row="1"
+                        Classes="appButton secondaryButton backAction"
                         Content="Back"
                         Command="{Binding CancelCommand}"
                         IsVisible="{Binding ShowBackButton}"/>
 
-            </StackPanel>
+            </Grid>
         </ScrollViewer>
     </Grid>
 </UserControl>

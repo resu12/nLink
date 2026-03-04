@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.1] - 2026-03-03
+
+### Added
+
+- Final `0.3.1` release notes under `docs/releases/`.
+
+### Changed
+
+- README and release runbook now reflect `0.3.1` as the current release.
+- `0.3.1` is documented as a stabilization release for the bounded screensharing pipeline introduced in `0.3.0`.
+
+### Packaging
+
+- Versioned release examples and installer references now point to `0.3.1`.
+
 ## [0.3.0] - 2026-03-03
 
 ### Added

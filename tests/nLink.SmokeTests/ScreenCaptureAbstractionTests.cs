@@ -5,6 +5,7 @@ using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
 
+[Collection(FakeNknNetworkCollection.Name)]
 public sealed class ScreenCaptureAbstractionTests
 {
     [Fact]

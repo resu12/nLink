@@ -1,6 +1,4 @@
-using System.IO;
 using System.Runtime.InteropServices;
-using System.Threading;
 using Avalonia;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
@@ -21,6 +19,50 @@ public sealed class ScreenShareViewerViewModelTests : IClassFixture<ScreenShareC
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_DecodeFailure_DoesNotFreezeFutureFrames()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var decodeCalls = 0;
+
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ =>
+                {
+                    var next = Interlocked.Increment(ref decodeCalls);
+                    if (next == 1)
+                    {
+                        throw new InvalidDataException("invalid jpeg");
+                    }
+
+                    return CreateTinyBitmap();
+                },
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                });
+
+            vm.OnJpegFrame(new byte[] { 1 });
+            await WaitUntilAsync(
+                () => string.Equals(vm.StatusText, "Invalid frame received", StringComparison.Ordinal) && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnJpegFrame(new byte[] { 2 });
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is not null && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            Assert.NotNull(vm.CurrentFrame);
+            Assert.Equal("Live", vm.StatusText);
+            Assert.Equal(2, decodeCalls);
+            Assert.True(vm.IsIdleForDiagnostics, "Expected viewer decode loop to return to idle after recovery frame.");
+
+            return true;
+        }, default);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task ScreenShareViewerViewModel_RapidFrames_CoalescesDecodeAndPublishesFrame()
     {
         await fixture.Session.Dispatch(async () =>
@@ -36,7 +78,7 @@ public sealed class ScreenShareViewerViewModelTests : IClassFixture<ScreenShareC
                     if (call == 1)
                     {
                         decodeStarted.TrySetResult(true);
-                        releaseDecode.Task.GetAwaiter().GetResult();
+                        WaitForSignal(releaseDecode.Task, TimeSpan.FromSeconds(2));
                     }
 
                     return CreateTinyBitmap();
@@ -87,7 +129,7 @@ public sealed class ScreenShareViewerViewModelTests : IClassFixture<ScreenShareC
                     if (call == 1)
                     {
                         firstDecodeStarted.TrySetResult(true);
-                        releaseFirstDecode.Task.GetAwaiter().GetResult();
+                        WaitForSignal(releaseFirstDecode.Task, TimeSpan.FromSeconds(2));
                     }
 
                     return CreateBitmap(bytes[0], 1);
@@ -122,6 +164,193 @@ public sealed class ScreenShareViewerViewModelTests : IClassFixture<ScreenShareC
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_SlowDecode_AppliesLatestFrame()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var decodeGate = new SemaphoreSlim(0, 1);
+            var firstDecodeStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var decodeCallCount = 0;
+
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: bytes =>
+                {
+                    var call = Interlocked.Increment(ref decodeCallCount);
+                    if (call == 1)
+                    {
+                        firstDecodeStarted.TrySetResult(true);
+                        Assert.True(
+                            decodeGate.Wait(TimeSpan.FromSeconds(2)),
+                            "Timed out waiting to release the first viewer decode.");
+                    }
+
+                    return CreateBitmap(bytes[0], 1);
+                },
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                });
+
+            vm.OnJpegFrame(new byte[] { 1 });
+            await WaitUntilAsync(
+                () => firstDecodeStarted.Task.IsCompleted,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnJpegFrame(new byte[] { 2 });
+            vm.OnJpegFrame(new byte[] { 5 });
+
+            decodeGate.Release();
+
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap latest && latest.PixelSize.Width == 5 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            Assert.NotNull(vm.CurrentFrame);
+            Assert.Equal("Live", vm.StatusText);
+            Assert.InRange(decodeCallCount, 2, 3);
+            Assert.True(vm.IsIdleForDiagnostics, "Expected viewer decode loop to return to idle after applying the latest frame.");
+
+            return true;
+        }, default);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_CurrentFrame_Progresses_UnderRapidFrames_AndSlowDecode()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var decodeGate = new SemaphoreSlim(0, 6);
+            var appliedFrames = 0;
+
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: bytes =>
+                {
+                    Assert.True(
+                        decodeGate.Wait(TimeSpan.FromSeconds(2)),
+                        "Timed out waiting to release viewer decode.");
+                    return CreateBitmap(bytes[0], 1);
+                },
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                });
+
+            vm.PropertyChanged += (_, e) =>
+            {
+                if (!string.Equals(e.PropertyName, nameof(ScreenShareViewerViewModel.CurrentFrame), StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                if (vm.CurrentFrame is null)
+                {
+                    return;
+                }
+                Interlocked.Increment(ref appliedFrames);
+            };
+
+            for (byte i = 1; i <= 20; i++)
+            {
+                vm.OnJpegFrame(new byte[] { i });
+            }
+
+            decodeGate.Release(2);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 20 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            for (byte i = 21; i <= 35; i++)
+            {
+                vm.OnJpegFrame(new byte[] { i });
+            }
+
+            decodeGate.Release(2);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap second && second.PixelSize.Width == 35 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            for (byte i = 36; i <= 50; i++)
+            {
+                vm.OnJpegFrame(new byte[] { i });
+            }
+
+            decodeGate.Release(2);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap third && third.PixelSize.Width == 50 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+            await WaitUntilAsync(
+                () => vm.IsActive && string.Equals(vm.StatusText, "Live", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+
+            Assert.True(appliedFrames >= 3, $"Expected at least 3 applied frames, but saw {appliedFrames}.");
+            Assert.True(vm.IsActive);
+            Assert.Equal("Live", vm.StatusText);
+
+            return true;
+        }, default);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_CurrentFrame_AppliesLatestFrame_WhenDecodeSlowerThanArrival()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var decodeGate = new SemaphoreSlim(0, 2);
+            var firstDecodeStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var decodeCalls = 0;
+            var lastDecodedMarker = 0;
+
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: bytes =>
+                {
+                    var call = Interlocked.Increment(ref decodeCalls);
+                    Volatile.Write(ref lastDecodedMarker, bytes[0]);
+                    if (call == 1)
+                    {
+                        firstDecodeStarted.TrySetResult(true);
+                    }
+
+                    Assert.True(
+                        decodeGate.Wait(TimeSpan.FromSeconds(2)),
+                        $"Timed out waiting to release viewer decode {call}.");
+                    return CreateBitmap(bytes[0], 1);
+                },
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                });
+
+            vm.OnJpegFrame(new byte[] { 1 });
+            await firstDecodeStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            for (byte i = 2; i <= 20; i++)
+            {
+                vm.OnJpegFrame(new byte[] { i });
+            }
+
+            decodeGate.Release(2);
+
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap latest && latest.PixelSize.Width == 20 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            Assert.Equal(20, Volatile.Read(ref lastDecodedMarker));
+            Assert.InRange(decodeCalls, 2, 3);
+            Assert.NotNull(vm.CurrentFrame);
+            Assert.Equal("Live", vm.StatusText);
+            Assert.True(vm.IsIdleForDiagnostics, "Expected viewer decode loop to return to idle after applying the latest frame.");
+
+            return true;
+        }, default);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task ScreenShareViewerViewModel_ClearAndDispose_AreIdempotent()
     {
         await fixture.Session.Dispatch(async () =>
@@ -143,6 +372,58 @@ public sealed class ScreenShareViewerViewModelTests : IClassFixture<ScreenShareC
 
             Assert.False(vm.IsActive);
             Assert.Null(vm.CurrentFrame);
+
+            return true;
+        }, default);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task Viewer_Dispose_PreventsFurtherFrameApply()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var firstApplyObserved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var applyCount = 0;
+
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => CreateTinyBitmap(),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                });
+
+            vm.PropertyChanged += (_, e) =>
+            {
+                if (!string.Equals(e.PropertyName, nameof(ScreenShareViewerViewModel.CurrentFrame), StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                if (vm.CurrentFrame is null)
+                {
+                    return;
+                }
+
+                if (Interlocked.Increment(ref applyCount) == 1)
+                {
+                    firstApplyObserved.TrySetResult(true);
+                }
+            };
+
+            vm.OnJpegFrame(CreateTinyJpegBytes());
+            await firstApplyObserved.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            vm.Dispose();
+
+            var applyCountAfterDispose = Volatile.Read(ref applyCount);
+            var exception = Assert.Throws<ObjectDisposedException>(() => vm.OnJpegFrame(CreateTinyJpegBytes()));
+
+            Assert.Contains(nameof(ScreenShareViewerViewModel), exception.ObjectName ?? string.Empty, StringComparison.Ordinal);
+            Assert.Equal(applyCountAfterDispose, Volatile.Read(ref applyCount));
+            Assert.True(vm.IsIdleForDiagnostics, "Expected viewer decode loop to remain idle after dispose.");
 
             return true;
         }, default);
@@ -232,6 +513,19 @@ public sealed class ScreenShareViewerViewModelTests : IClassFixture<ScreenShareC
         }
 
         Assert.True(predicate(), $"Condition not met within {timeout.TotalSeconds:N1}s.");
+    }
+
+    private static void WaitForSignal(Task signal, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (!signal.IsCompleted && DateTime.UtcNow < deadline)
+        {
+            Thread.Yield();
+        }
+
+        Assert.True(signal.IsCompleted, $"Signal was not completed within {timeout.TotalSeconds:N1}s.");
+        Assert.False(signal.IsCanceled, "Signal was canceled unexpectedly.");
+        Assert.False(signal.IsFaulted, $"Signal faulted unexpectedly: {signal.Exception}");
     }
 
     private static Bitmap CreateTinyBitmap()

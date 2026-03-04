@@ -310,6 +310,8 @@ $bridgeBundleAbs = Join-Path $repoRoot $BridgeBundleDir
 $releasesRootAbs = Join-Path $repoRoot $ReleasesRootDir
 $helperAliasAbs = Join-Path $repoRoot $HelperAliasOutDir
 $helpeeAliasAbs = Join-Path $repoRoot $HelpeeAliasOutDir
+$verifyPackageManifestPath = Join-Path $repoRoot "build\verify-package-manifest.ps1"
+$packageManifestPath = Join-Path $repoRoot ("installer\package-manifest.{0}.txt" -f $Runtime)
 
 New-Item -ItemType Directory -Force -Path $canonicalOutAbs | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $zipOutAbs) | Out-Null
@@ -335,6 +337,7 @@ Ensure-PortableConfigFile -RepoRoot $repoRoot -StageDir $canonicalOutAbs
 # Safe size reduction in final artifact only (keep bin/obj untouched).
 Remove-StagedDebugFiles -RootDir $canonicalOutAbs
 Assert-PortableStagePayload -StageDir $canonicalOutAbs -Runtime $Runtime -RequireBridge:(-not $SkipBridgeBundle)
+& $verifyPackageManifestPath -StageDir $canonicalOutAbs -ManifestPath $packageManifestPath
 
 if (Test-Path $zipOutAbs) {
     Invoke-WithRetry -OperationName "remove portable zip" -Action {

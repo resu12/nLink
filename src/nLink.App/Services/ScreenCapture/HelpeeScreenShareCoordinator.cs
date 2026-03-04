@@ -21,14 +21,18 @@ internal sealed class HelpeeScreenShareCoordinator
     private readonly Func<Bitmap?> getPreviewFrame;
     private readonly Action<Bitmap?> setPreviewFrame;
     private readonly Func<byte[], Bitmap> decodeFrame;
+    private readonly object gate = new();
 
     private IScreenCaptureSource? screenSharePreviewCaptureSource;
     private CancellationTokenSource? screenSharePreviewCts;
     private int screenSharePreviewDecodeInFlight;
+    private int maxScreenSharePreviewDecodeTasksActive;
     private int screenSharePreviewGeneration;
     private int screenSharePreviewToggleInFlight;
     private Task? screenSharePreviewDecodeTask;
     private Task? screenSharePreviewToggleTask;
+    private byte[]? pendingPreviewFrameBytes;
+    private long framesDecoded;
 
     public HelpeeScreenShareCoordinator(
         Func<bool> isDisposed,
@@ -68,6 +72,12 @@ internal sealed class HelpeeScreenShareCoordinator
         await StopAsyncCore(awaitToggleCompletion: true).ConfigureAwait(false);
     }
 
+    internal long FramesDecoded => Interlocked.Read(ref framesDecoded);
+
+    internal int DecodeTasksActive => Volatile.Read(ref screenSharePreviewDecodeInFlight);
+
+    internal int MaxDecodeTasksActive => Volatile.Read(ref maxScreenSharePreviewDecodeTasksActive);
+
     private async Task StopAsyncCore(bool awaitToggleCompletion)
     {
         var captureSource = screenSharePreviewCaptureSource;
@@ -76,16 +86,18 @@ internal sealed class HelpeeScreenShareCoordinator
 
         if (captureSource is null && cts is null && !isPreviewActive() && getPreviewFrame() is null)
         {
-            if (toggleTask is not null &&
-                !(Application.Current is not null && Dispatcher.UIThread.CheckAccess()))
+            if (toggleTask is not null)
             {
                 try
                 {
                     await toggleTask.ConfigureAwait(false);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    LogDebug($"Preview toggle completion failed during stop: {ex.GetType().Name}: {ex.Message}");
                 }
+
+                await StopAsyncCore(awaitToggleCompletion: false).ConfigureAwait(false);
             }
             return;
         }
@@ -93,6 +105,7 @@ internal sealed class HelpeeScreenShareCoordinator
         Interlocked.Increment(ref screenSharePreviewGeneration);
         screenSharePreviewCaptureSource = null;
         screenSharePreviewCts = null;
+        ReplacePendingFrame(null);
 
         if (captureSource is not null)
         {
@@ -112,8 +125,9 @@ internal sealed class HelpeeScreenShareCoordinator
                 await captureSource.StopAsync();
             }
         }
-        catch
+        catch (Exception ex)
         {
+            LogDebug($"Preview capture stop failed during shutdown: {ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
@@ -125,27 +139,27 @@ internal sealed class HelpeeScreenShareCoordinator
         }
 
         var decodeTask = screenSharePreviewDecodeTask;
-        if (decodeTask is not null &&
-            !(Application.Current is not null && Dispatcher.UIThread.CheckAccess()))
+        if (decodeTask is not null)
         {
             try
             {
                 await decodeTask.ConfigureAwait(false);
             }
-            catch
+            catch (Exception ex)
             {
+                LogDebug($"Preview decode task completion failed during stop: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
-        if (toggleTask is not null &&
-            !(Application.Current is not null && Dispatcher.UIThread.CheckAccess()))
+        if (toggleTask is not null)
         {
             try
             {
                 await toggleTask.ConfigureAwait(false);
             }
-            catch
+            catch (Exception ex)
             {
+                LogDebug($"Preview toggle task completion failed during stop: {ex.GetType().Name}: {ex.Message}");
             }
         }
     }
@@ -208,12 +222,23 @@ internal sealed class HelpeeScreenShareCoordinator
         try
         {
             await captureSource.StartAsync(cts.Token);
+
+            if (isDisposed() ||
+                cts.IsCancellationRequested ||
+                !ReferenceEquals(screenSharePreviewCaptureSource, captureSource) ||
+                !ReferenceEquals(screenSharePreviewCts, cts))
+            {
+                LogDebug("Preview capture start completed after stop/reset; suppressing active state transition.");
+                return;
+            }
+
             await SetPreviewActiveAsync(true).ConfigureAwait(false);
             await SetStatusAsync(ScreenShareState.Active).ConfigureAwait(false);
             LogDebug("Preview capture started.");
         }
-        catch
+        catch (Exception ex)
         {
+            LogDebug($"Preview capture start failed during startup: {ex.GetType().Name}: {ex.Message}");
             captureSource.FrameArrived -= OnScreenSharePreviewFrameArrived;
             screenSharePreviewCaptureSource = null;
             screenSharePreviewCts = null;
@@ -258,55 +283,16 @@ internal sealed class HelpeeScreenShareCoordinator
     private void OnScreenSharePreviewFrameArrived(object? sender, ScreenCaptureFrameEventArgs e)
     {
         LogDebug($"Preview frame arrived encoding={e.Encoding} bytes={e.EncodedFrameData.Length} size={e.Width}x{e.Height}.");
-        // Only one preview decode may run at a time; dropped frames are safe because the
-        // generation check disposes stale bitmaps before they can be applied.
+        ReplacePendingFrame(e.EncodedFrameData);
+
+        // Only one preview decode loop may run at a time; new frames coalesce into a latest-wins slot.
         if (Interlocked.Exchange(ref screenSharePreviewDecodeInFlight, 1) == 1)
         {
-            LogDebug("Preview frame dropped because decode is already in flight.");
             return;
         }
 
-        var generation = Volatile.Read(ref screenSharePreviewGeneration);
-        var encodedFrameData = e.EncodedFrameData;
-
-        Task? decodeTask = null;
-        decodeTask = Task.Run(async () =>
-        {
-            Bitmap? bitmap = null;
-
-            try
-            {
-                bitmap = decodeFrame(encodedFrameData);
-                LogDebug("Preview frame decoded to Avalonia bitmap.");
-
-                if (isDisposed() ||
-                    screenSharePreviewCts?.IsCancellationRequested == true ||
-                    generation != Volatile.Read(ref screenSharePreviewGeneration))
-                {
-                    bitmap.Dispose();
-                    bitmap = null;
-                    return;
-                }
-
-                await SetScreenSharePreviewFrameAsync(bitmap, generation);
-                LogDebug("Preview frame applied.");
-                bitmap = null;
-            }
-            catch (Exception ex)
-            {
-                LogDebug($"Preview frame decode/apply failed: {ex.GetType().Name}: {ex.Message}");
-                bitmap?.Dispose();
-            }
-            finally
-            {
-                Interlocked.Exchange(ref screenSharePreviewDecodeInFlight, 0);
-                if (ReferenceEquals(screenSharePreviewDecodeTask, decodeTask))
-                {
-                    screenSharePreviewDecodeTask = null;
-                }
-            }
-        });
-        screenSharePreviewDecodeTask = decodeTask;
+        RecordDecodeTaskActivated();
+        StartDecodeLoopCore();
     }
 
     private Task SetScreenSharePreviewFrameAsync(Bitmap bitmap, int generation)
@@ -343,6 +329,120 @@ internal sealed class HelpeeScreenShareCoordinator
         var previousFrame = getPreviewFrame();
         setPreviewFrame(nextFrame);
         previousFrame?.Dispose();
+    }
+
+    private void StartDecodeLoopCore()
+    {
+        Task? decodeTask = null;
+        decodeTask = Task.Run(async () =>
+        {
+            try
+            {
+                await ProcessPendingDecodeLoopAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref screenSharePreviewDecodeInFlight, 0);
+                if (ReferenceEquals(screenSharePreviewDecodeTask, decodeTask))
+                {
+                    screenSharePreviewDecodeTask = null;
+                }
+
+                var restart = false;
+                lock (gate)
+                {
+                    if (!isDisposed() &&
+                        pendingPreviewFrameBytes is not null &&
+                        Interlocked.Exchange(ref screenSharePreviewDecodeInFlight, 1) == 0)
+                    {
+                        RecordDecodeTaskActivated();
+                        restart = true;
+                    }
+                }
+
+                if (restart)
+                {
+                    StartDecodeLoopCore();
+                }
+            }
+        });
+
+        screenSharePreviewDecodeTask = decodeTask;
+    }
+
+    private async Task ProcessPendingDecodeLoopAsync()
+    {
+        while (true)
+        {
+            var generation = Volatile.Read(ref screenSharePreviewGeneration);
+            var encodedFrameData = TakePendingFrame();
+            if (encodedFrameData is null || isDisposed())
+            {
+                return;
+            }
+
+            Bitmap? bitmap = null;
+
+            try
+            {
+                bitmap = decodeFrame(encodedFrameData);
+                LogDebug("Preview frame decoded to Avalonia bitmap.");
+
+                if (isDisposed() ||
+                    screenSharePreviewCts?.IsCancellationRequested == true ||
+                    generation != Volatile.Read(ref screenSharePreviewGeneration))
+                {
+                    bitmap.Dispose();
+                    bitmap = null;
+                    return;
+                }
+
+                await SetScreenSharePreviewFrameAsync(bitmap, generation).ConfigureAwait(false);
+                LogDebug("Preview frame applied.");
+                Interlocked.Increment(ref framesDecoded);
+                bitmap = null;
+            }
+            catch (Exception ex)
+            {
+                LogDebug($"Preview frame decode/apply failed: {ex.GetType().Name}: {ex.Message}");
+                bitmap?.Dispose();
+            }
+        }
+    }
+
+    private void ReplacePendingFrame(byte[]? encodedFrameData)
+    {
+        lock (gate)
+        {
+            pendingPreviewFrameBytes = encodedFrameData;
+        }
+    }
+
+    private byte[]? TakePendingFrame()
+    {
+        lock (gate)
+        {
+            var encodedFrameData = pendingPreviewFrameBytes;
+            pendingPreviewFrameBytes = null;
+            return encodedFrameData;
+        }
+    }
+
+    private void RecordDecodeTaskActivated()
+    {
+        while (true)
+        {
+            var currentMax = Volatile.Read(ref maxScreenSharePreviewDecodeTasksActive);
+            if (currentMax >= 1)
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref maxScreenSharePreviewDecodeTasksActive, 1, currentMax) == currentMax)
+            {
+                return;
+            }
+        }
     }
 
     [Conditional("DEBUG")]

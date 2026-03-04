@@ -4,6 +4,8 @@ namespace NLink.SmokeTests.Fakes;
 
 internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IAsyncDisposable
 {
+    private EventHandler<ScreenCaptureFrameEventArgs>? frameArrived;
+
     public bool IsSupported => true;
 
     public bool IsStarted { get; private set; }
@@ -14,9 +16,27 @@ internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IAsyncDisp
 
     public int DisposeCallCount { get; private set; }
 
-    public Exception? StartException { get; set; }
+    public int FrameSubscriberCount { get; private set; }
 
-    public event EventHandler<ScreenCaptureFrameEventArgs>? FrameArrived;
+    public Exception? StartException { get; set; }
+    public TaskCompletionSource<bool>? StopBlocker { get; set; }
+
+    public event EventHandler<ScreenCaptureFrameEventArgs>? FrameArrived
+    {
+        add
+        {
+            frameArrived += value;
+            FrameSubscriberCount++;
+        }
+        remove
+        {
+            frameArrived -= value;
+            if (FrameSubscriberCount > 0)
+            {
+                FrameSubscriberCount--;
+            }
+        }
+    }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
@@ -35,23 +55,25 @@ internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IAsyncDisp
     {
         StopCallCount++;
         IsStarted = false;
-        return Task.CompletedTask;
+        return StopBlocker?.Task ?? Task.CompletedTask;
     }
 
     public void RaiseFrame(ScreenCaptureFrameEventArgs frame)
     {
-        FrameArrived?.Invoke(this, frame);
+        frameArrived?.Invoke(this, frame);
     }
 
     public void RaiseFrame(int width, int height, byte[] encodedFrameData, string encoding)
     {
-        FrameArrived?.Invoke(this, new ScreenCaptureFrameEventArgs(width, height, encodedFrameData, encoding));
+        frameArrived?.Invoke(this, new ScreenCaptureFrameEventArgs(width, height, encodedFrameData, encoding));
     }
 
     public ValueTask DisposeAsync()
     {
         DisposeCallCount++;
         IsStarted = false;
+        frameArrived = null;
+        FrameSubscriberCount = 0;
         return ValueTask.CompletedTask;
     }
 }

@@ -1,5 +1,3 @@
-using Xunit;
-
 namespace NLink.SmokeTests;
 
 [CollectionDefinition(Name, DisableParallelization = true)]

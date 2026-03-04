@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,10 +18,15 @@ internal sealed class HelperScreenShareCoordinator
     private readonly Func<Bitmap?> getRemoteFrame;
     private readonly Action<Bitmap?> setRemoteFrame;
     private readonly Func<byte[], Bitmap> decodeFrame;
+    private readonly object gate = new();
 
     private int remoteScreenShareFrameGeneration;
     private int remoteScreenShareDecodeInFlight;
+    private int maxRemoteScreenShareDecodeTasksActive;
+    private int stopped;
     private Task? remoteScreenShareDecodeTask;
+    private byte[]? pendingEncodedFrameBytes;
+    private long framesDecoded;
 
     public HelperScreenShareCoordinator(
         Func<bool> isDisposed,
@@ -43,56 +49,20 @@ internal sealed class HelperScreenShareCoordinator
             throw new ArgumentNullException(nameof(e));
         }
 
-        if (isDisposed() || !isTransportEnabled())
+        if (isDisposed() || Volatile.Read(ref stopped) == 1 || !isTransportEnabled())
         {
             return;
         }
 
-        // Only one decode may run at a time; newer frames are dropped here and a generation
-        // mismatch disposes any stale bitmap before it can replace the current frame.
-        if (Interlocked.Exchange(ref remoteScreenShareDecodeInFlight, 1) == 1)
-        {
-            return;
-        }
-
-        var generation = Volatile.Read(ref remoteScreenShareFrameGeneration);
-        Task? decodeTask = null;
-        decodeTask = Task.Run(async () =>
-        {
-            Bitmap? bitmap = null;
-            try
-            {
-                bitmap = decodeFrame(e.EncodedFrameBytes);
-
-                if (isDisposed() || generation != Volatile.Read(ref remoteScreenShareFrameGeneration))
-                {
-                    bitmap.Dispose();
-                    bitmap = null;
-                    return;
-                }
-
-                await UiThreadDispatch.RunAsync(() => SetRemoteScreenShareFrameCore(bitmap, generation));
-                bitmap = null;
-            }
-            catch
-            {
-                bitmap?.Dispose();
-            }
-            finally
-            {
-                Interlocked.Exchange(ref remoteScreenShareDecodeInFlight, 0);
-                if (ReferenceEquals(remoteScreenShareDecodeTask, decodeTask))
-                {
-                    remoteScreenShareDecodeTask = null;
-                }
-            }
-        });
-        remoteScreenShareDecodeTask = decodeTask;
+        ReplacePendingFrame(e.EncodedFrameBytes);
+        StartDecodeLoopIfNeeded();
     }
 
     public void Clear()
     {
         Interlocked.Increment(ref remoteScreenShareFrameGeneration);
+        ReplacePendingFrame(null);
+
         if (Application.Current is null || Dispatcher.UIThread.CheckAccess())
         {
             ClearRemoteScreenShareFrameCore();
@@ -104,7 +74,9 @@ internal sealed class HelperScreenShareCoordinator
 
     public async Task StopAsync()
     {
+        Interlocked.Exchange(ref stopped, 1);
         Interlocked.Increment(ref remoteScreenShareFrameGeneration);
+        ReplacePendingFrame(null);
 
         if (Application.Current is null || Dispatcher.UIThread.CheckAccess())
         {
@@ -123,11 +95,18 @@ internal sealed class HelperScreenShareCoordinator
             {
                 await decodeTask.ConfigureAwait(false);
             }
-            catch
+            catch (Exception ex)
             {
+                LogDebug($"Remote frame decode task completion failed during stop: {ex.GetType().Name}: {ex.Message}");
             }
         }
     }
+
+    internal long FramesDecoded => Interlocked.Read(ref framesDecoded);
+
+    internal int DecodeTasksActive => Volatile.Read(ref remoteScreenShareDecodeInFlight);
+
+    internal int MaxDecodeTasksActive => Volatile.Read(ref maxRemoteScreenShareDecodeTasksActive);
 
     private void SetRemoteScreenShareFrameCore(Bitmap? nextFrame, int generation)
     {
@@ -153,5 +132,134 @@ internal sealed class HelperScreenShareCoordinator
     {
         using var stream = new MemoryStream(encodedFrameData, writable: false);
         return new Bitmap(stream);
+    }
+
+    private void StartDecodeLoopIfNeeded()
+    {
+        if (Interlocked.Exchange(ref remoteScreenShareDecodeInFlight, 1) != 0)
+        {
+            return;
+        }
+
+        RecordDecodeTaskActivated();
+        StartDecodeLoopCore();
+    }
+
+    private void StartDecodeLoopCore()
+    {
+        Task? decodeTask = null;
+        decodeTask = Task.Run(async () =>
+        {
+            try
+            {
+                await ProcessPendingDecodeLoopAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref remoteScreenShareDecodeInFlight, 0);
+                if (ReferenceEquals(remoteScreenShareDecodeTask, decodeTask))
+                {
+                    remoteScreenShareDecodeTask = null;
+                }
+
+                var restart = false;
+                lock (gate)
+                {
+                    if (!isDisposed() &&
+                        Volatile.Read(ref stopped) == 0 &&
+                        pendingEncodedFrameBytes is not null &&
+                        Interlocked.Exchange(ref remoteScreenShareDecodeInFlight, 1) == 0)
+                    {
+                        RecordDecodeTaskActivated();
+                        restart = true;
+                    }
+                }
+
+                if (restart)
+                {
+                    StartDecodeLoopCore();
+                }
+            }
+        });
+
+        remoteScreenShareDecodeTask = decodeTask;
+    }
+
+    private async Task ProcessPendingDecodeLoopAsync()
+    {
+        while (true)
+        {
+            var generation = Volatile.Read(ref remoteScreenShareFrameGeneration);
+            var encodedFrameBytes = TakePendingFrame();
+            if (encodedFrameBytes is null || isDisposed() || Volatile.Read(ref stopped) == 1)
+            {
+                return;
+            }
+
+            Bitmap? bitmap = null;
+            try
+            {
+                bitmap = decodeFrame(encodedFrameBytes);
+
+                if (isDisposed() ||
+                    Volatile.Read(ref stopped) == 1 ||
+                    generation != Volatile.Read(ref remoteScreenShareFrameGeneration))
+                {
+                    bitmap.Dispose();
+                    bitmap = null;
+                    return;
+                }
+
+                await UiThreadDispatch.RunAsync(() => SetRemoteScreenShareFrameCore(bitmap, generation));
+                Interlocked.Increment(ref framesDecoded);
+                bitmap = null;
+            }
+            catch (Exception ex)
+            {
+                bitmap?.Dispose();
+                LogDebug($"Remote frame decode/apply failed: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+    }
+
+    private void ReplacePendingFrame(byte[]? encodedFrameBytes)
+    {
+        lock (gate)
+        {
+            pendingEncodedFrameBytes = encodedFrameBytes;
+        }
+    }
+
+    private byte[]? TakePendingFrame()
+    {
+        lock (gate)
+        {
+            var encodedFrameBytes = pendingEncodedFrameBytes;
+            pendingEncodedFrameBytes = null;
+            return encodedFrameBytes;
+        }
+    }
+
+    private void RecordDecodeTaskActivated()
+    {
+        while (true)
+        {
+            var currentMax = Volatile.Read(ref maxRemoteScreenShareDecodeTasksActive);
+            if (currentMax >= 1)
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref maxRemoteScreenShareDecodeTasksActive, 1, currentMax) == currentMax)
+            {
+                return;
+            }
+        }
+    }
+
+    [Conditional("DEBUG")]
+    private static void LogDebug(string message)
+    {
+        Trace.WriteLine($"[ScreenShareRemote] {message}");
     }
 }

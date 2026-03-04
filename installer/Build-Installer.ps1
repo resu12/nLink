@@ -300,6 +300,8 @@ $installerOutAbs = Join-Path $repoRoot $InstallerOutDir
 $releasesRootAbs = Join-Path $repoRoot $ReleasesRootDir
 $issPath = Join-Path $PSScriptRoot "nLink.iss"
 $portableScriptPath = Join-Path $PSScriptRoot "Build-Portable.ps1"
+$verifyPackageManifestPath = Join-Path $repoRoot "build\verify-package-manifest.ps1"
+$packageManifestPath = Join-Path $repoRoot ("installer\package-manifest.{0}.txt" -f $Runtime)
 
 New-Item -ItemType Directory -Force -Path $canonicalPortableOutAbs | Out-Null
 New-Item -ItemType Directory -Force -Path $helperPortableOutAbs | Out-Null
@@ -325,6 +327,7 @@ Copy-BridgeBundleToStaging -BridgeDir $bridgeBundleAbs -PublishOutDir $helperPor
 # Safe size reduction in installer staging only (leave bin/obj untouched).
 Remove-StagedDebugFiles -RootDir $helperPortableOutAbs
 Assert-InstallerStagePayload -StageDir $helperPortableOutAbs -Runtime $Runtime
+& $verifyPackageManifestPath -StageDir $helperPortableOutAbs -ManifestPath $packageManifestPath
 
 $isccPath = Resolve-IsccPath
 if (-not $isccPath) {

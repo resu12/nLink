@@ -121,6 +121,12 @@ jobs:
             Stop-Transcript | Out-Null
           }
 
+      - name: Verify staged package manifests
+        shell: powershell
+        run: |
+          .\build\verify-package-manifest.ps1 -StageDir .\artifacts\portable\nLink\win-x64 -ManifestPath .\installer\package-manifest.win-x64.txt
+          .\build\verify-package-manifest.ps1 -StageDir .\artifacts\portable\helper\win-x64 -ManifestPath .\installer\package-manifest.win-x64.txt
+
       - name: Verify release assets
         shell: powershell
         run: .\build\verify-release-assets.ps1 -Version $env:NLINK_VERSION -Runtime win-x64
@@ -238,6 +244,21 @@ jobs:
             throw "Installed app executable not found: $appExe"
           }
 
+          $bridgeNode = Join-Path $dir "bridge/win-x64/node.exe"
+          $bridgeScript = Join-Path $dir "bridge/win-x64/index.js"
+          if (-not (Test-Path $bridgeNode)) {
+            throw "Installed bundled bridge node executable not found: $bridgeNode"
+          }
+
+          if (-not (Test-Path $bridgeScript)) {
+            throw "Installed bundled bridge script not found: $bridgeScript"
+          }
+
+          $selfTestProcess = Start-Process -FilePath $appExe -ArgumentList @('--self-test') -WorkingDirectory $dir -Wait -PassThru
+          if ($selfTestProcess.ExitCode -ne 0) {
+            throw "Installed app self-test failed with exit code $($selfTestProcess.ExitCode)."
+          }
+
           $unins = Get-ChildItem -Path $dir -Filter "unins*.exe" -File | Select-Object -First 1
           if (-not $unins) {
             throw "Uninstaller not found in install directory: $dir"
@@ -250,6 +271,14 @@ jobs:
 
           if (Test-Path $appExe) {
             throw "App executable still exists after uninstall: $appExe"
+          }
+
+          $remainingProcesses = @(Get-CimInstance Win32_Process | Where-Object {
+            $_.ExecutablePath -and $_.ExecutablePath.StartsWith($dir, [System.StringComparison]::OrdinalIgnoreCase)
+          })
+          if ($remainingProcesses.Count -gt 0) {
+            $details = @($remainingProcesses | ForEach-Object { "$($_.ExecutablePath) (pid=$($_.ProcessId))" }) -join "`n"
+            throw "Processes still running from install directory after uninstall:`n$details"
           }
 
           if (Test-Path $dir) {

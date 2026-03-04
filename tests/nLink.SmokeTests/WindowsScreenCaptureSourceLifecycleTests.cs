@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using System.Threading;
+using System.Runtime.Versioning;
 using NLink.App.Services.ScreenCapture;
 
 namespace NLink.SmokeTests;
@@ -8,6 +8,7 @@ public sealed class WindowsScreenCaptureSourceLifecycleTests
 {
     [Fact]
     [Trait("Category", "Smoke")]
+    [SupportedOSPlatform("windows")]
     public async Task WindowsScreenCaptureSource_StartStopDispose_IsIdempotent_AndStopsFrames()
     {
         if (!OperatingSystem.IsWindows())
@@ -55,6 +56,7 @@ public sealed class WindowsScreenCaptureSourceLifecycleTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    [SupportedOSPlatform("windows")]
     public async Task WindowsScreenCaptureSource_StartStop_25Cycles_RemainsStable()
     {
         if (!OperatingSystem.IsWindows())

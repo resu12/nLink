@@ -4,13 +4,13 @@ Simple help for family and friends.
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
-## Current Release (0.3.0)
+## Current Release (0.3.3)
 
-`0.3.0` is the current stabilized release. It keeps the existing bridge-based transport architecture and adds the first complete bounded screensharing flow on top of it.
+`0.3.3` is the current stabilized release. It keeps the existing bridge-based transport architecture and focuses on screensharing runtime reliability, bounded behavior, and release hygiene after `0.3.2`.
 
 - Architecture remains stable, including the existing bridge JSONL contract.
-- `0.3.0` focused on screensharing completion, bounded resource usage, deterministic tests, and release packaging.
-- No transport redesign is included in `0.3.0`.
+- `0.3.3` focuses on bug fixes, deterministic screenshare behavior, soak-tested stability, and release packaging polish.
+- No transport redesign is included in `0.3.3`.
 
 ## Quick Start (Windows)
 
@@ -20,24 +20,28 @@ Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke
 4. Helpee clicks `Allow`.
 5. Chat opens on both sides.
 
-Helper (UI screenshot, may vary slightly from the current release):
+Home:
 
-![Helper screen](docs/images/helper-alpha3.png)
+![Home screen](docs/images/home-0.3.3.png)
 
-Helpee (UI screenshot, may vary slightly from the current release):
+Helpee:
 
-![Helpee screen](docs/images/helpee-alpha3.png)
+![Helpee screen](docs/images/helpee-0.3.3.png)
+
+Screen sharing preview:
+
+![Screen sharing preview](docs/images/screenshare-preview-0.3.3.png)
 
 If connection fails:
 Open Diagnostics -> Copy diagnostics and include it when reporting issues.
 
 Notes:
 - Windows x64 only
-- Current release (`0.3.0`)
+- Current release (`0.3.3`)
 - Installer path: `%LOCALAPPDATA%\Programs\nLink Helper`
 
 Versioning:
-- Release version uses SemVer (for example: `0.3.0`)
+- Release version uses SemVer (for example: `0.3.3`)
 - The current release version is stored in the repo-root `VERSION` file
 
 License:
@@ -74,7 +78,7 @@ License:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
 - Final release notes:
-  [`docs/releases/0.3.0.md`](docs/releases/0.3.0.md)
+  [`docs/releases/0.3.3.md`](docs/releases/0.3.3.md)
 - Screenshare RC/final validation checklist:
   [`docs/release/0.3.0-rc-validation-checklist.md`](docs/release/0.3.0-rc-validation-checklist.md)
 - Promotion criteria:

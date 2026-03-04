@@ -1,4 +1,3 @@
-using System.IO;
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Media.Imaging;
@@ -31,6 +30,8 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
             var reassembler = new ScreenShareFrameReassembler();
             var firstChunkStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var releaseFirstChunk = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstFrameCompleted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstFrameDecoded = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var sentChunkCount = 0;
 
             await using var pipeline = new ScreenShareFrameSendPipeline(
@@ -48,14 +49,22 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
                 clock: clock);
 
             using var viewer = new ScreenShareViewerViewModel(
-                decodeFrame: _ => CreateBitmap(2, 1),
+                decodeFrame: _ =>
+                {
+                    firstFrameDecoded.TrySetResult(true);
+                    return CreateBitmap(2, 1);
+                },
                 postToUiAsync: action =>
                 {
                     action();
                     return Task.CompletedTask;
                 });
 
-            reassembler.FrameReady += (_, frame) => viewer.OnJpegFrame(frame.EncodedFrameBytes);
+            reassembler.FrameReady += (_, frame) =>
+            {
+                firstFrameCompleted.TrySetResult(true);
+                viewer.OnJpegFrame(frame.EncodedFrameBytes);
+            };
 
             EventHandler<NLink.App.Services.ScreenCapture.ScreenCaptureFrameEventArgs>? onFrameArrived = null;
             onFrameArrived = (_, frame) =>
@@ -84,11 +93,10 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
 
             releaseFirstChunk.TrySetResult(true);
 
-            await WaitUntilAsync(
-                condition: () => reassembler.GetMetricsSnapshot().FramesCompleted >= 1 && viewer.GetMetricsSnapshot().FramesDecoded >= 1,
-                timeout: TimeSpan.FromSeconds(2),
-                pollInterval: TimeSpan.FromMilliseconds(25),
-                failureMessage: () =>
+            await WaitForSignalAsync(
+                Task.WhenAll(firstFrameCompleted.Task, firstFrameDecoded.Task),
+                TimeSpan.FromSeconds(2),
+                () =>
                 {
                     var sender = pipeline.GetMetricsSnapshot();
                     var receiver = reassembler.GetMetricsSnapshot();
@@ -99,12 +107,10 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
             fakeCapture.FrameArrived -= onFrameArrived;
             await fakeCapture.StopAsync();
             viewer.Clear();
-
-            await WaitUntilAsync(
-                condition: () => viewer.IsIdleForDiagnostics,
-                timeout: TimeSpan.FromSeconds(2),
-                pollInterval: TimeSpan.FromMilliseconds(25),
-                failureMessage: () => "Viewer did not become idle after pressure run.");
+            await WaitForSignalAsync(
+                WaitUntilAsync(() => viewer.IsIdleForDiagnostics, TimeSpan.FromSeconds(2)),
+                TimeSpan.FromSeconds(2),
+                () => "Viewer did not become idle after pressure run.");
 
             var senderMetrics = pipeline.GetMetricsSnapshot();
             var receiverMetrics = reassembler.GetMetricsSnapshot();
@@ -131,24 +137,35 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
         }, default);
     }
 
-    private static async Task WaitUntilAsync(
-        Func<bool> condition,
+    private static async Task WaitForSignalAsync(
+        Task signal,
         TimeSpan timeout,
-        TimeSpan pollInterval,
         Func<string> failureMessage)
+    {
+        try
+        {
+            await signal.WaitAsync(timeout);
+        }
+        catch (TimeoutException)
+        {
+            Assert.Fail(failureMessage());
+        }
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
         {
-            if (condition())
+            if (predicate())
             {
                 return;
             }
 
-            await Task.Delay(pollInterval);
+            await Task.Yield();
         }
 
-        Assert.True(condition(), failureMessage());
+        Assert.True(predicate(), $"Condition not met within {timeout.TotalSeconds:N1}s.");
     }
 
     private static Bitmap CreateBitmap(int width, int height)

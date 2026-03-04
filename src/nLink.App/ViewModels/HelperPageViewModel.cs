@@ -426,9 +426,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public bool ShowDefaultScreenSharePlaceholder => !ShowRemoteScreenShareFrame;
 
-    public bool ShowScreenShareViewerError => false;
+    public bool ShowScreenShareViewerError =>
+        ScreenShareViewer.IsActive &&
+        RemoteScreenShareFrame is null &&
+        !string.IsNullOrWhiteSpace(ScreenShareViewerMessage);
 
-    public string ScreenShareViewerMessage => string.Empty;
+    public string ScreenShareViewerMessage => BuildScreenShareViewerMessage(ScreenShareViewer.StatusText);
 
     public bool ShowHelperMainContent => !ShowRemoteScreenShareFrame;
 
@@ -1040,11 +1043,15 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void OnScreenShareViewerPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(ScreenShareViewerViewModel.CurrentFrame) or nameof(ScreenShareViewerViewModel.IsActive))
+        if (e.PropertyName is nameof(ScreenShareViewerViewModel.CurrentFrame) or
+            nameof(ScreenShareViewerViewModel.IsActive) or
+            nameof(ScreenShareViewerViewModel.StatusText))
         {
             var previousShowRemoteScreenShareFrame = lastKnownShowRemoteScreenShareFrame;
             var previousShowHelperMainContent = lastKnownShowHelperMainContent;
             var previousHeaderStatusText = lastKnownHeaderStatusText;
+            var previousShowViewerError = ShowScreenShareViewerError;
+            var previousViewerMessage = ScreenShareViewerMessage;
 
             OnPropertyChanged(nameof(RemoteScreenShareFrame));
 
@@ -1060,6 +1067,16 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 OnPropertyChanged(nameof(ShowHelperMainContent));
                 lastKnownShowHelperMainContent = nextShowHelperMainContent;
+            }
+
+            if (previousShowViewerError != ShowScreenShareViewerError)
+            {
+                OnPropertyChanged(nameof(ShowScreenShareViewerError));
+            }
+
+            if (!string.Equals(previousViewerMessage, ScreenShareViewerMessage, StringComparison.Ordinal))
+            {
+                OnPropertyChanged(nameof(ScreenShareViewerMessage));
             }
 
             var nextHeaderStatusText = HeaderStatusText;
@@ -2004,6 +2021,19 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         ScreenShareViewer.Clear();
     }
 
+    private static string BuildScreenShareViewerMessage(string statusText)
+    {
+        if (string.IsNullOrWhiteSpace(statusText) ||
+            string.Equals(statusText, "Live", StringComparison.Ordinal))
+        {
+            return string.Empty;
+        }
+
+        return string.Equals(statusText, "Invalid frame received", StringComparison.Ordinal)
+            ? "Screen sharing is active, but the latest frame could not be displayed."
+            : statusText;
+    }
+
     private string AppendScreenShareSuffix(string text)
     {
         if (!ScreenShareViewer.IsActive)
@@ -2013,7 +2043,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         return EffectivePhase is SessionUiPhase.Failed or SessionUiPhase.Ended
             ? text
-            : $"{text} • Screen sharing";
+            : $"{text} • Viewing screen";
     }
 
     private bool IsTransientBannerDuplicateWithHeader()

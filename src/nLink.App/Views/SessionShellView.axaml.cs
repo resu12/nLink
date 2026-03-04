@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Windows.Input;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Layout;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.Input;
 using NLink.App.Configuration;
@@ -49,6 +50,11 @@ public partial class SessionShellView : UserControl
             nameof(ScreenShareButtonText),
             o => o.ScreenShareButtonText);
 
+    public static readonly DirectProperty<SessionShellView, bool> CanScreenShareActionProperty =
+        AvaloniaProperty.RegisterDirect<SessionShellView, bool>(
+            nameof(CanScreenShareAction),
+            o => o.CanScreenShareAction);
+
     public static readonly DirectProperty<SessionShellView, bool> ShowChatPaneProperty =
         AvaloniaProperty.RegisterDirect<SessionShellView, bool>(
             nameof(ShowChatPane),
@@ -87,6 +93,18 @@ public partial class SessionShellView : UserControl
             nameof(ShowResponsiveNarrowChatOnlyLayout),
             o => o.ShowResponsiveNarrowChatOnlyLayout);
 
+    public static readonly DirectProperty<SessionShellView, HorizontalAlignment> MainPaneHorizontalAlignmentProperty =
+        AvaloniaProperty.RegisterDirect<SessionShellView, HorizontalAlignment>(
+            nameof(MainPaneHorizontalAlignment),
+            o => o.MainPaneHorizontalAlignment);
+
+    public static readonly DirectProperty<SessionShellView, double> MainPaneMaxWidthProperty =
+        AvaloniaProperty.RegisterDirect<SessionShellView, double>(
+            nameof(MainPaneMaxWidth),
+            o => o.MainPaneMaxWidth);
+
+    private const double MainPaneContentMaxWidth = 1120d;
+
     private bool showFixedShellLayout;
     private bool showFixedChatOnlyLayout;
     private bool showResponsiveWideChatOnlyLayout;
@@ -96,16 +114,22 @@ public partial class SessionShellView : UserControl
     private bool isScreenSharePaneActive;
     private bool showScreenSharePane;
     private bool effectiveShowScreenShareAction;
+    private bool canScreenShareAction;
     private bool showChatPane;
     private string screenShareButtonText = "Share screen";
     private INotifyPropertyChanged? observedDataContext;
+    private ICommand? observedScreenShareCommand;
     private bool showMainPane = true;
     private bool screenSharePaneAutoActivated;
+    private HorizontalAlignment mainPaneHorizontalAlignment = HorizontalAlignment.Center;
+    private double mainPaneMaxWidth = MainPaneContentMaxWidth;
+    private readonly RelayCommand toggleScreenSharePaneCommand;
 
     public SessionShellView()
     {
         InitializeComponent();
-        ToggleScreenSharePaneCommand = new RelayCommand(ToggleScreenSharePane);
+        toggleScreenSharePaneCommand = new RelayCommand(ToggleScreenSharePane, CanToggleScreenSharePane);
+        ToggleScreenSharePaneCommand = toggleScreenSharePaneCommand;
         DataContextChanged += OnDataContextChanged;
         PropertyChanged += OnSessionShellViewPropertyChanged;
         OnDataContextChanged(this, EventArgs.Empty);
@@ -196,6 +220,12 @@ public partial class SessionShellView : UserControl
         private set => SetAndRaise(ScreenShareButtonTextProperty, ref screenShareButtonText, value);
     }
 
+    public bool CanScreenShareAction
+    {
+        get => canScreenShareAction;
+        private set => SetAndRaise(CanScreenShareActionProperty, ref canScreenShareAction, value);
+    }
+
     public bool IsNarrow
     {
         get => GetValue(IsNarrowProperty);
@@ -248,6 +278,18 @@ public partial class SessionShellView : UserControl
         private set => SetAndRaise(ShowResponsiveNarrowChatOnlyLayoutProperty, ref showResponsiveNarrowChatOnlyLayout, value);
     }
 
+    public HorizontalAlignment MainPaneHorizontalAlignment
+    {
+        get => mainPaneHorizontalAlignment;
+        private set => SetAndRaise(MainPaneHorizontalAlignmentProperty, ref mainPaneHorizontalAlignment, value);
+    }
+
+    public double MainPaneMaxWidth
+    {
+        get => mainPaneMaxWidth;
+        private set => SetAndRaise(MainPaneMaxWidthProperty, ref mainPaneMaxWidth, value);
+    }
+
     private bool ShowMainPane
     {
         get => showMainPane;
@@ -298,10 +340,23 @@ public partial class SessionShellView : UserControl
             observedDataContext.PropertyChanged -= OnObservedDataContextPropertyChanged;
         }
 
+        if (observedScreenShareCommand is not null)
+        {
+            observedScreenShareCommand.CanExecuteChanged -= OnObservedScreenShareCommandCanExecuteChanged;
+        }
+
         observedDataContext = DataContext as INotifyPropertyChanged;
         if (observedDataContext is not null)
         {
             observedDataContext.PropertyChanged += OnObservedDataContextPropertyChanged;
+        }
+
+        observedScreenShareCommand = DataContext is null
+            ? null
+            : TryGetCommandPropertyValue(DataContext, "ToggleScreenSharePreviewCommand");
+        if (observedScreenShareCommand is not null)
+        {
+            observedScreenShareCommand.CanExecuteChanged += OnObservedScreenShareCommandCanExecuteChanged;
         }
 
         UpdateScreenShareComputedProperties();
@@ -314,12 +369,18 @@ public partial class SessionShellView : UserControl
             string.Equals(e.PropertyName, "ConnectionState", StringComparison.Ordinal) ||
             string.Equals(e.PropertyName, "ShowConnectedPanel", StringComparison.Ordinal) ||
             string.Equals(e.PropertyName, "CanShowScreenShareAction", StringComparison.Ordinal) ||
+            string.Equals(e.PropertyName, "ScreenSharePreviewStatus", StringComparison.Ordinal) ||
             string.Equals(e.PropertyName, "IsScreenSharingPreviewActive", StringComparison.Ordinal) ||
             string.Equals(e.PropertyName, "ShowScreenSharePreviewFrame", StringComparison.Ordinal) ||
             string.Equals(e.PropertyName, "ShowRemoteScreenShareFrame", StringComparison.Ordinal))
         {
             UpdateScreenShareComputedProperties();
         }
+    }
+
+    private void OnObservedScreenShareCommandCanExecuteChanged(object? sender, EventArgs e)
+    {
+        UpdateScreenShareComputedProperties();
     }
 
     private void UpdateIsNarrow()
@@ -507,6 +568,8 @@ public partial class SessionShellView : UserControl
                          IsConnectedFromDataContext() &&
                          (dataContextScreenShareCommand is null || canShowDataContextScreenShareAction);
         EffectiveShowScreenShareAction = showAction;
+        toggleScreenSharePaneCommand.NotifyCanExecuteChanged();
+        CanScreenShareAction = toggleScreenSharePaneCommand.CanExecute(null);
         ScreenShareCommand = ToggleScreenSharePaneCommand;
         ScreenShareButtonText = dataContextScreenShareCommand is not null
             ? (hasLocalScreenSharePreviewActive ? "Stop sharing" : "Share screen")
@@ -533,6 +596,7 @@ public partial class SessionShellView : UserControl
 
         ShowChatPane = HasVisibleChatPane();
         ShowScreenSharePane = UseScreenShareScaffold && IsScreenSharePaneActive;
+        UpdateMainPaneSizing(ShowScreenSharePane);
         ScreenShareButtonText = dataContextScreenShareCommand is not null
             ? (hasLocalScreenSharePreviewActive ? "Stop sharing" : "Share screen")
             : hasActiveScreenShare || ShowScreenSharePane || hasVisibleScreenShareFrame || IsScreenSharePaneActive
@@ -550,6 +614,21 @@ public partial class SessionShellView : UserControl
         }, DispatcherPriority.Loaded);
     }
 
+    private bool CanToggleScreenSharePane()
+    {
+        if (!UseScreenShareScaffold || !EffectiveShowScreenShareAction)
+        {
+            return false;
+        }
+
+        var dataContext = DataContext;
+        var dataContextScreenShareCommand = dataContext is null
+            ? null
+            : TryGetCommandPropertyValue(dataContext, "ToggleScreenSharePreviewCommand");
+
+        return dataContextScreenShareCommand?.CanExecute(null) ?? true;
+    }
+
     private void UpdateLayoutVisibility()
     {
         var fixedLayout = !FeatureFlags.EnableResponsiveLayout;
@@ -561,6 +640,16 @@ public partial class SessionShellView : UserControl
         ShowResponsiveWideChatOnlyLayout = responsiveWide && !ShowMainPane && ShowChatPane;
         ShowResponsiveNarrowLayout = responsiveNarrow && ShowMainPane;
         ShowResponsiveNarrowChatOnlyLayout = responsiveNarrow && !ShowMainPane && ShowChatPane;
+    }
+
+    private void UpdateMainPaneSizing(bool stretchForScreenShare)
+    {
+        MainPaneHorizontalAlignment = stretchForScreenShare
+            ? HorizontalAlignment.Stretch
+            : HorizontalAlignment.Center;
+        MainPaneMaxWidth = stretchForScreenShare
+            ? double.PositiveInfinity
+            : MainPaneContentMaxWidth;
     }
 
     private bool HasVisibleScreenShareFrame()

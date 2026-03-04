@@ -1,19 +1,20 @@
-using System.Diagnostics;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Reflection;
-using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows.Input;
 using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Headless;
+using Avalonia.Layout;
 using Avalonia.LogicalTree;
 using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using CommunityToolkit.Mvvm.Input;
 using NLink.App.Services;
-using NLink.App.Services.ScreenCapture;
 using NLink.App.ViewModels;
 using NLink.App.Views;
 using NLink.Core.Metrics;
@@ -542,16 +543,16 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 {
                     Width = 760,
                     ShowScreenShareAction = true,
-                MainContent = new Border
-                {
-                    [AutomationProperties.AutomationIdProperty] = "Shell.Main",
-                },
-                ChatContent = new Border
-                {
-                    [AutomationProperties.AutomationIdProperty] = "Shell.Chat",
-                },
-                DataContext = new ConnectedChatShellContext(),
-            };
+                    MainContent = new Border
+                    {
+                        [AutomationProperties.AutomationIdProperty] = "Shell.Main",
+                    },
+                    ChatContent = new Border
+                    {
+                        [AutomationProperties.AutomationIdProperty] = "Shell.Chat",
+                    },
+                    DataContext = new ConnectedChatShellContext(),
+                };
 
                 var window = new Window { Width = 760, Height = 760, Content = shell };
                 window.Show();
@@ -710,6 +711,140 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
 
                     Assert.True(shell.ShowFixedShellLayout || shell.ShowResponsiveWideLayout || shell.ShowResponsiveNarrowLayout);
                     Assert.False(shell.ShowFixedChatOnlyLayout || shell.ShowResponsiveWideChatOnlyLayout || shell.ShowResponsiveNarrowChatOnlyLayout);
+                }
+                finally
+                {
+                    window.Close();
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", previousScaffold);
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task SessionShell_WhenWindowIsLarge_ScreenShareViewerExceedsExpectedBounds()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var previousScaffold = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD");
+            try
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", "1");
+                using var previewFrame = CreateBitmap(1280, 720);
+                var context = new MutableConnectedScreenShareShellContext
+                {
+                    HeaderStatusText = "Connected",
+                    ShowConnectedPanel = true,
+                    ShowScreenSharePreviewFrame = true,
+                    ScreenSharePreviewFrame = previewFrame,
+                };
+
+                var shell = new SessionShellView
+                {
+                    Width = 1400,
+                    ShowScreenShareAction = true,
+                    MainContent = new Border
+                    {
+                        [AutomationProperties.AutomationIdProperty] = "Shell.Main",
+                    },
+                    ChatContent = new Border
+                    {
+                        [AutomationProperties.AutomationIdProperty] = "Shell.Chat",
+                    },
+                    DataContext = context,
+                };
+
+                var window = new Window { Width = 1400, Height = 900, Content = shell };
+                window.Show();
+
+                try
+                {
+                    await WaitUntilAsync(() => shell.ShowScreenSharePane, TimeSpan.FromSeconds(2));
+
+                    var viewer = await WaitForLayoutConditionAsync(
+                        window,
+                        () => FindVisibleScreenShareViewer(window),
+                        TimeSpan.FromSeconds(2),
+                        "screen share viewer layout");
+
+                    Assert.True(
+                        viewer.Bounds.Width > 800,
+                        $"Expected large-window screenshare viewer width > 800, got {viewer.Bounds.Width:N1}.");
+                    Assert.True(
+                        viewer.Bounds.Height > 500,
+                        $"Expected large-window screenshare viewer height > 500, got {viewer.Bounds.Height:N1}.");
+                }
+                finally
+                {
+                    window.Close();
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", previousScaffold);
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task SessionShell_MainPaneWidthPolicy_OnlyStretchesWhenScreenShareIsVisible()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var previousScaffold = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD");
+            try
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", "1");
+                using var previewFrame = CreateBitmap(1280, 720);
+                var context = new MutableConnectedScreenShareShellContext
+                {
+                    HeaderStatusText = "Connected",
+                    ShowConnectedPanel = true,
+                };
+
+                var shell = new SessionShellView
+                {
+                    Width = 1600,
+                    Height = 900,
+                    ShowScreenShareAction = true,
+                    MainContent = new Border
+                    {
+                        Width = 900,
+                        Height = 400,
+                    },
+                    DataContext = context,
+                };
+
+                var window = new Window { Width = 1600, Height = 900, Content = shell };
+                window.Show();
+
+                try
+                {
+                    await WaitUntilAsync(
+                        () => shell.MainPaneHorizontalAlignment == HorizontalAlignment.Center,
+                        TimeSpan.FromSeconds(2));
+
+                    Assert.Equal(HorizontalAlignment.Center, shell.MainPaneHorizontalAlignment);
+                    Assert.Equal(1120d, shell.MainPaneMaxWidth);
+
+                    context.ScreenSharePreviewFrame = previewFrame;
+                    context.ShowScreenSharePreviewFrame = true;
+
+                    await WaitUntilAsync(
+                        () => shell.MainPaneHorizontalAlignment == HorizontalAlignment.Stretch,
+                        TimeSpan.FromSeconds(2));
+
+                    Assert.Equal(HorizontalAlignment.Stretch, shell.MainPaneHorizontalAlignment);
+                    Assert.True(double.IsPositiveInfinity(shell.MainPaneMaxWidth));
                 }
                 finally
                 {
@@ -900,6 +1035,60 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task SessionShell_ScreenShareHeaderButton_DisablesWhenToggleCommandCannotExecute()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var previous = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD");
+            try
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", "1");
+                var context = new MutableConnectedScreenShareShellContext
+                {
+                    HeaderStatusText = "Connected",
+                    ShowConnectedPanel = true,
+                    CanShowScreenShareAction = true,
+                    CanToggleScreenSharePreview = true,
+                };
+                var shell = new SessionShellView
+                {
+                    Width = 760,
+                    ShowScreenShareAction = true,
+                    DataContext = context,
+                };
+
+                var window = new Window { Width = 760, Height = 240, Content = shell };
+                window.Show();
+
+                try
+                {
+                    await FlushUiAsync();
+
+                    var shareButton = Assert.IsType<Button>(FindFirstControlByAutomationId(window, "SessionHeader.ShareScreen"));
+                    Assert.True(shareButton.IsEnabled);
+
+                    context.CanToggleScreenSharePreview = false;
+                    await WaitUntilAsync(() => !shareButton.IsEnabled, TimeSpan.FromSeconds(2));
+
+                    context.CanToggleScreenSharePreview = true;
+                    await WaitUntilAsync(() => shareButton.IsEnabled, TimeSpan.FromSeconds(2));
+                }
+                finally
+                {
+                    window.Close();
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCAFFOLD", previous);
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task SessionShell_WhenNotConnected_HidesChatPane_EvenIfDataContextPanelFlagIsStale()
     {
         await fixture.Session.Dispatch(async () =>
@@ -1025,6 +1214,62 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
         throw new TimeoutException($"Condition not met within {timeout.TotalSeconds:N1}s.");
     }
 
+    private static async Task<T> WaitForLayoutConditionAsync<T>(
+        Control root,
+        Func<T?> probe,
+        TimeSpan timeout,
+        string phase)
+        where T : class
+    {
+        var current = probe();
+        if (current is not null)
+        {
+            return current;
+        }
+
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void TryComplete()
+        {
+            var value = probe();
+            if (value is not null)
+            {
+                tcs.TrySetResult(value);
+            }
+        }
+
+        EventHandler? handler = null;
+        handler = (_, _) => TryComplete();
+        root.LayoutUpdated += handler;
+
+        try
+        {
+            await FlushUiAsync();
+            TryComplete();
+
+            using var timeoutCts = new CancellationTokenSource(timeout);
+            using var registration = timeoutCts.Token.Register(() =>
+                tcs.TrySetException(new TimeoutException($"Timed out waiting for {phase} after {timeout.TotalSeconds:N1}s.")));
+            return await tcs.Task;
+        }
+        finally
+        {
+            root.LayoutUpdated -= handler;
+        }
+    }
+
+    private static Image? FindVisibleScreenShareViewer(Control root)
+        => root.GetVisualDescendants()
+            .OfType<Image>()
+            .FirstOrDefault(control =>
+                control.IsVisible &&
+                string.Equals(
+                    AutomationProperties.GetAutomationId(control),
+                    "ScreenShare.Viewer",
+                    StringComparison.Ordinal) &&
+                control.Bounds.Width > 0 &&
+                control.Bounds.Height > 0);
+
     private static void InvokePrivate(object target, string methodName)
     {
         var method = target.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic);
@@ -1042,6 +1287,24 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
     private static byte[] CreateTinyImageBytes()
     {
         return Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/a5kAAAAASUVORK5CYII=");
+    }
+
+    private static Bitmap CreateBitmap(int width, int height)
+    {
+        var writeable = new WriteableBitmap(
+            new PixelSize(width, height),
+            new Vector(96, 96),
+            PixelFormat.Bgra8888,
+            AlphaFormat.Premul);
+
+        using (var locked = writeable.Lock())
+        {
+            var totalBytes = width * height * 4;
+            var pixels = new byte[totalBytes];
+            Marshal.Copy(pixels, 0, locked.Address, totalBytes);
+        }
+
+        return writeable;
     }
 
     private static Bitmap CreateTinyBitmap()
@@ -1155,16 +1418,20 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
         private string headerStatusText = "Ready";
         private bool showConnectedPanel;
         private bool showScreenSharePreviewFrame;
+        private Bitmap? screenSharePreviewFrame;
         private bool isScreenSharingPreviewActive;
         private bool canShowScreenShareAction;
+        private bool canToggleScreenSharePreview = true;
+        private readonly RelayCommand toggleScreenSharePreviewCommand;
 
         public MutableConnectedScreenShareShellContext()
         {
-            ToggleScreenSharePreviewCommand = new RelayCommand(() =>
+            toggleScreenSharePreviewCommand = new RelayCommand(() =>
             {
                 IsScreenSharingPreviewActive = !IsScreenSharingPreviewActive;
                 ShowScreenSharePreviewFrame = IsScreenSharingPreviewActive;
-            });
+            }, () => CanToggleScreenSharePreview);
+            ToggleScreenSharePreviewCommand = toggleScreenSharePreviewCommand;
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;
@@ -1241,6 +1508,37 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
 
                 showScreenSharePreviewFrame = value;
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowScreenSharePreviewFrame)));
+            }
+        }
+
+        public Bitmap? ScreenSharePreviewFrame
+        {
+            get => screenSharePreviewFrame;
+            set
+            {
+                if (ReferenceEquals(screenSharePreviewFrame, value))
+                {
+                    return;
+                }
+
+                screenSharePreviewFrame = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ScreenSharePreviewFrame)));
+            }
+        }
+
+        public bool CanToggleScreenSharePreview
+        {
+            get => canToggleScreenSharePreview;
+            set
+            {
+                if (canToggleScreenSharePreview == value)
+                {
+                    return;
+                }
+
+                canToggleScreenSharePreview = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanToggleScreenSharePreview)));
+                toggleScreenSharePreviewCommand.NotifyCanExecuteChanged();
             }
         }
 

@@ -10,21 +10,11 @@ public sealed class ScreenShareFrameSenderTests
     [Trait("Category", "Smoke")]
     public async Task ScreenShareFrameSender_ChunksFramePayload_AsUtf8JsonBytes()
     {
-        var sentPayloads = new List<byte[]>();
         var expectedChunkCount = 3;
-        var allChunksSent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var probe = new ScreenShareSendProbe(recentPayloadCapacity: expectedChunkCount);
 
         await using var sender = new ScreenShareFrameSender(
-            sendPayloadAsync: (payload, _) =>
-            {
-                sentPayloads.Add(payload);
-                if (sentPayloads.Count == expectedChunkCount)
-                {
-                    allChunksSent.TrySetResult(true);
-                }
-
-                return Task.CompletedTask;
-            },
+            sendPayloadAsync: probe.SendPayloadAsync,
             isTransportEnabled: true);
 
         var jpegBytes = Enumerable.Range(0, ScreenSharePayloadCodec.MaxChunkRawBytes * 2 + 17)
@@ -32,11 +22,13 @@ public sealed class ScreenShareFrameSenderTests
             .ToArray();
 
         await sender.EnqueueFrameAsync("session-a", 7, 1280, 720, "jpeg", jpegBytes, CancellationToken.None);
-        await allChunksSent.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await probe.WaitForPayloadCountAsync(expectedChunkCount, TimeSpan.FromSeconds(2));
 
-        Assert.Equal(expectedChunkCount, sentPayloads.Count);
+        var sentPayloads = probe.GetRecentPayloadsSnapshot();
+        Assert.Equal(expectedChunkCount, probe.PayloadsSent);
+        Assert.Equal(expectedChunkCount, sentPayloads.Length);
 
-        for (var i = 0; i < sentPayloads.Count; i++)
+        for (var i = 0; i < sentPayloads.Length; i++)
         {
             Assert.True(ScreenSharePayloadCodec.TryDeserialize(sentPayloads[i], out var chunk));
             Assert.Equal("session-a", chunk.SessionId);
@@ -53,41 +45,28 @@ public sealed class ScreenShareFrameSenderTests
     [Trait("Category", "Smoke")]
     public async Task ScreenShareFrameSender_WhenBusy_KeepsOnlyNewestPendingFrame()
     {
-        var sentFrameIds = new List<long>();
-        var firstChunkStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var releaseFirstSend = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var finalFramesSent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var startedCount = 0;
+        var probe = new ScreenShareSendProbe(recentPayloadCapacity: 4, maxInFlight: 1, startBlocked: true);
 
         await using var sender = new ScreenShareFrameSender(
-            sendPayloadAsync: async (payload, _) =>
-            {
-                Assert.True(ScreenSharePayloadCodec.TryDeserialize(payload, out var chunk));
-                lock (sentFrameIds)
-                {
-                    sentFrameIds.Add(chunk.FrameId);
-                    if (sentFrameIds.Count == 2)
-                    {
-                        finalFramesSent.TrySetResult(true);
-                    }
-                }
-
-                if (Interlocked.Increment(ref startedCount) == 1)
-                {
-                    firstChunkStarted.TrySetResult(true);
-                    await releaseFirstSend.Task;
-                }
-            },
+            sendPayloadAsync: probe.SendPayloadAsync,
             isTransportEnabled: true);
 
         await sender.EnqueueFrameAsync("session-b", 1, 800, 600, "jpeg", new byte[] { 1, 2, 3 }, CancellationToken.None);
-        await firstChunkStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await probe.FirstSendStarted.WaitAsync(TimeSpan.FromSeconds(2));
 
         await sender.EnqueueFrameAsync("session-b", 2, 800, 600, "jpeg", new byte[] { 4, 5, 6 }, CancellationToken.None);
         await sender.EnqueueFrameAsync("session-b", 3, 800, 600, "jpeg", new byte[] { 7, 8, 9 }, CancellationToken.None);
 
-        releaseFirstSend.TrySetResult(true);
-        await finalFramesSent.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        probe.ReleaseBlockedSends();
+        await probe.WaitForPayloadCountAsync(2, TimeSpan.FromSeconds(2));
+
+        var sentFrameIds = probe.GetRecentPayloadsSnapshot()
+            .Select(payload =>
+            {
+                Assert.True(ScreenSharePayloadCodec.TryDeserialize(payload, out var chunk));
+                return chunk.FrameId;
+            })
+            .ToArray();
 
         Assert.Equal(new long[] { 1, 3 }, sentFrameIds);
     }

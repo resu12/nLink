@@ -29,6 +29,9 @@ public partial class SessionHeaderView : UserControl
     public static readonly StyledProperty<ICommand?> ScreenShareCommandProperty =
         AvaloniaProperty.Register<SessionHeaderView, ICommand?>(nameof(ScreenShareCommand));
 
+    public static readonly StyledProperty<bool> CanScreenShareProperty =
+        AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(CanScreenShare), false);
+
     public static readonly StyledProperty<string> ScreenShareButtonTextProperty =
         AvaloniaProperty.Register<SessionHeaderView, string>(nameof(ScreenShareButtonText), "Share screen");
 
@@ -95,6 +98,12 @@ public partial class SessionHeaderView : UserControl
     {
         get => GetValue(ScreenShareButtonTextProperty);
         set => SetValue(ScreenShareButtonTextProperty, value);
+    }
+
+    public bool CanScreenShare
+    {
+        get => GetValue(CanScreenShareProperty);
+        set => SetValue(CanScreenShareProperty, value);
     }
 
     public bool HasRoleText => hasRoleText;

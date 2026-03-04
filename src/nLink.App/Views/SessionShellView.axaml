@@ -15,6 +15,7 @@
                                  CanEndSession="{ReflectionBinding CanEndSession}"
                                  ShowEndSession="True"
                                  ShowScreenShare="{Binding #Root.EffectiveShowScreenShareAction}"
+                                 CanScreenShare="{Binding #Root.CanScreenShareAction}"
                                  ScreenShareCommand="{Binding #Root.ScreenShareCommand}"
                                  ScreenShareButtonText="{Binding #Root.ScreenShareButtonText}"
                                  RoleText="{Binding #Root.RoleText}"
@@ -26,16 +27,33 @@
               ColumnSpacing="16"
               MinHeight="420"
               IsVisible="{Binding #Root.ShowFixedShellLayout}">
+            <!--
+                0.3.3 screenshare scaling spec:
+                - The screenshare surface fills the full available area of this left pane.
+                - Scaling preserves aspect ratio (Stretch=Uniform) and stays centered; letterboxing is allowed.
+                - This shell border is the only card frame. The viewer must not add an inner card/border.
+                - Viewer error text remains centered and readable over the surface.
+                - Transport, frame delivery, and decode behavior do not change.
+                Acceptance:
+                - Enlarging the window enlarges the visible screenshare surface.
+                - No distortion.
+                - Behavior is consistent in fixed, responsive-wide, and responsive-narrow shell layouts.
+                - Chat-only layouts do not change.
+            -->
             <Border Grid.Column="0"
                     Background="{StaticResource AppMutedPanelBrush}"
                     BorderBrush="{StaticResource AppCardBorderBrush}"
                     BorderThickness="1"
                     CornerRadius="16"
                     Padding="16"
+                    HorizontalAlignment="{Binding #Root.MainPaneHorizontalAlignment}"
+                    MaxWidth="{Binding #Root.MainPaneMaxWidth}"
                     MinWidth="320"
                     MinHeight="420">
                 <Grid>
-                    <views:ScreenSharePlaceholderView IsVisible="{Binding #Root.ShowScreenSharePane}"/>
+                    <views:ScreenSharePlaceholderView IsVisible="{Binding #Root.ShowScreenSharePane}"
+                                                      HorizontalAlignment="Stretch"
+                                                      VerticalAlignment="Stretch"/>
                     <ContentPresenter x:Name="FixedMainContentPresenter"/>
                     <TextBlock x:Name="ContentPlaceholderText"
                                Text="Content"
@@ -90,10 +108,14 @@
                     BorderThickness="1"
                     CornerRadius="16"
                     Padding="16"
+                    HorizontalAlignment="{Binding #Root.MainPaneHorizontalAlignment}"
+                    MaxWidth="{Binding #Root.MainPaneMaxWidth}"
                     MinWidth="320"
                     MinHeight="420">
                 <Grid>
-                    <views:ScreenSharePlaceholderView IsVisible="{Binding #Root.ShowScreenSharePane}"/>
+                    <views:ScreenSharePlaceholderView IsVisible="{Binding #Root.ShowScreenSharePane}"
+                                                      HorizontalAlignment="Stretch"
+                                                      VerticalAlignment="Stretch"/>
                     <ContentPresenter x:Name="ResponsiveWideMainContentPresenter"/>
                     <TextBlock x:Name="ResponsiveContentPlaceholderText"
                                Text="Content"
@@ -155,10 +177,14 @@
                     BorderThickness="1"
                     CornerRadius="16"
                     Padding="16"
+                    HorizontalAlignment="{Binding #Root.MainPaneHorizontalAlignment}"
+                    MaxWidth="{Binding #Root.MainPaneMaxWidth}"
                     MinWidth="320"
                     MinHeight="420">
                 <Grid>
-                    <views:ScreenSharePlaceholderView IsVisible="{Binding #Root.ShowScreenSharePane}"/>
+                    <views:ScreenSharePlaceholderView IsVisible="{Binding #Root.ShowScreenSharePane}"
+                                                      HorizontalAlignment="Stretch"
+                                                      VerticalAlignment="Stretch"/>
                     <ContentPresenter x:Name="ResponsiveNarrowMainContentPresenter"/>
                     <TextBlock x:Name="NarrowContentPlaceholderText"
                                Text="Content"

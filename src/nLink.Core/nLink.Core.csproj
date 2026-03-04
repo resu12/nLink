@@ -9,4 +9,10 @@
     <Product>nLink</Product>
   </PropertyGroup>
 
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>NLink.SmokeTests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>

@@ -1,6 +1,6 @@
 # Release Runbook
 
-This runbook describes the exact steps to ship `0.3.0`.
+This runbook describes the exact steps to ship `0.3.1`.
 
 ## Preflight
 
@@ -33,7 +33,7 @@ Get-Content .\VERSION
 Current expected value:
 
 ```text
-0.3.0
+0.3.1
 ```
 
 Version-related files to verify:
@@ -64,39 +64,54 @@ powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunGuiSmo
 ```
 
 Expected release outputs:
-- `artifacts\releases\0.3.0\nLink-Portable-win-x64-0.3.0.zip`
-- `artifacts\releases\0.3.0\nLink-Setup-win-x64-0.3.0.exe`
-- `artifacts\releases\0.3.0\SHA256SUMS.txt`
+- `artifacts\releases\0.3.1\nLink-Portable-win-x64-0.3.1.zip`
+- `artifacts\releases\0.3.1\nLink-Setup-win-x64-0.3.1.exe`
+- `artifacts\releases\0.3.1\SHA256SUMS.txt`
 
 Verify artifacts:
 
 ```powershell
-Get-ChildItem .\artifacts\releases\0.3.0
-Get-Content .\artifacts\releases\0.3.0\SHA256SUMS.txt
+Get-ChildItem .\artifacts\releases\0.3.1
+Get-Content .\artifacts\releases\0.3.1\SHA256SUMS.txt
 ```
+
+Packaging robustness checks:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build\verify-package-manifest.ps1 -StageDir .\artifacts\portable\nLink\win-x64 -ManifestPath .\installer\package-manifest.win-x64.txt
+powershell -ExecutionPolicy Bypass -File .\build\verify-package-manifest.ps1 -StageDir .\artifacts\portable\helper\win-x64 -ManifestPath .\installer\package-manifest.win-x64.txt
+Get-AuthenticodeSignature .\artifacts\releases\0.3.1\nLink-Setup-win-x64-0.3.1.exe | Format-List Status,StatusMessage,SignerCertificate
+Get-AuthenticodeSignature .\artifacts\portable\helper\win-x64\nLink.exe | Format-List Status,StatusMessage,SignerCertificate
+```
+
+Expected outcome for `0.3.1`:
+- package manifest checks pass
+- release staging contains no `.pdb`, `.xml`, `Avalonia.Diagnostics.dll`, or `nLink.runtimeconfig.dev.json`
+- Authenticode status is currently expected to be unsigned unless signing infrastructure is added in a later release
+- installer remains per-user and non-admin (`{localappdata}\Programs\nLink Helper`, `PrivilegesRequired=lowest`)
 
 ## Git Tag
 
 Create and push the release tag:
 
 ```powershell
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.3.1
+git push origin v0.3.1
 ```
 
 ## GitHub Release
 
 Create a GitHub release with:
-- Tag: `v0.3.0`
-- Title: `nLink 0.3.0`
+- Tag: `v0.3.1`
+- Title: `nLink 0.3.1`
 
 Attach:
-- `artifacts\releases\0.3.0\nLink-Setup-win-x64-0.3.0.exe`
-- `artifacts\releases\0.3.0\nLink-Portable-win-x64-0.3.0.zip`
-- `artifacts\releases\0.3.0\SHA256SUMS.txt`
+- `artifacts\releases\0.3.1\nLink-Setup-win-x64-0.3.1.exe`
+- `artifacts\releases\0.3.1\nLink-Portable-win-x64-0.3.1.zip`
+- `artifacts\releases\0.3.1\SHA256SUMS.txt`
 
 Paste release notes from:
-- `docs\releases\0.3.0.md`
+- `docs\releases\0.3.1.md`
 
 Link current beta issues guidance from:
 - `docs\KnownIssues.md`
@@ -106,23 +121,34 @@ Link current beta issues guidance from:
 Run a quick sanity install test:
 
 ```powershell
-Start-Process .\artifacts\installer\nLink-Setup-win-x64-0.3.0.exe
+Start-Process .\artifacts\installer\nLink-Setup-win-x64-0.3.1.exe
 ```
 
 Verify:
 - installer launches
 - app starts
+- installed app `--self-test` exits `0`
 - Home screen appears
 - Helper flow opens
 - Helpee flow opens
 - session pages show the shared header and shell layout
 - Diagnostics opens from Home
+- install does not request admin elevation
+- uninstall leaves no running processes from the install directory
 
 Portable sanity check:
 
 ```powershell
-Expand-Archive .\artifacts\releases\0.3.0\nLink-Portable-win-x64-0.3.0.zip -DestinationPath .\artifacts\portable-smoke -Force
+Expand-Archive .\artifacts\releases\0.3.1\nLink-Portable-win-x64-0.3.1.zip -DestinationPath .\artifacts\portable-smoke -Force
 Start-Process .\artifacts\portable-smoke\nLink.exe
+```
+
+Upgrade sanity check:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build\validate-upgrade-uninstall.ps1 `
+  -OldInstallerPath .\artifacts\releases\0.3.0\nLink-Setup-win-x64-0.3.0.exe `
+  -NewInstallerPath .\artifacts\releases\0.3.1\nLink-Setup-win-x64-0.3.1.exe
 ```
 
 ## Rollback Notes
@@ -131,8 +157,8 @@ Start-Process .\artifacts\portable-smoke\nLink.exe
 - If the tag was pushed incorrectly:
 
 ```powershell
-git tag -d v0.3.0
-git push origin :refs/tags/v0.3.0
+git tag -d v0.3.1
+git push origin :refs/tags/v0.3.1
 ```
 
 - If an installed build needs cleanup, use the generated uninstaller from the install directory or rerun the previous known-good installer.

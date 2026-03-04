@@ -6,12 +6,16 @@ using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using NLink.Core.ScreenShare;
+using System.Diagnostics;
 
 namespace NLink.App.ViewModels;
 
 public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
 {
     private const int MaxDecodeIterationsPerPass = 2;
+#if DEBUG
+    private static readonly TimeSpan SnapshotInterval = TimeSpan.FromSeconds(10);
+#endif
 
     private readonly Func<byte[], Bitmap> decodeFrame;
     private readonly Func<Action, Task> postToUiAsync;
@@ -27,6 +31,10 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
     private long decodeErrors;
     private long framesCoalesced;
     private bool disposed;
+#if DEBUG
+    private Timer? snapshotTimer;
+    private int snapshotTickInFlight;
+#endif
 
     public ScreenShareViewerViewModel(
         Func<byte[], Bitmap>? decodeFrame = null,
@@ -88,6 +96,9 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
 
         IsActive = true;
         StatusText = "Live";
+#if DEBUG
+        StartSnapshotTimer();
+#endif
 
         if (Interlocked.Exchange(ref decodeInFlight, 1) == 0)
         {
@@ -105,6 +116,9 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
 
         IsActive = false;
         StatusText = string.Empty;
+#if DEBUG
+        StopSnapshotTimer();
+#endif
         ReplaceCurrentFrame(null);
     }
 
@@ -160,10 +174,11 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
                     }).ConfigureAwait(false);
                     bitmap = null;
                 }
-                catch
+                catch (Exception ex)
                 {
                     bitmap?.Dispose();
                     Interlocked.Increment(ref decodeErrors);
+                    LogDebug($"Viewer frame decode/apply failed: {ex.GetType().Name}: {ex.Message}");
                     await postToUiAsync(() =>
                     {
                         if (!disposed && generationSnapshot == Volatile.Read(ref generation))
@@ -200,9 +215,9 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
             {
                 previous.Dispose();
             }
-            catch
+            catch (Exception ex)
             {
-                // Best-effort cleanup only. Failed disposal must not break viewer updates.
+                LogDebug($"Viewer previous-frame disposal failed: {ex.GetType().Name}: {ex.Message}");
             }
         }
     }
@@ -258,5 +273,64 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
     {
         using var stream = new MemoryStream(jpegBytes, writable: false);
         return new Bitmap(stream);
+    }
+
+#if DEBUG
+    private void StartSnapshotTimer()
+    {
+        if (snapshotTimer is not null)
+        {
+            return;
+        }
+
+        snapshotTimer = new Timer(
+            static state => ((ScreenShareViewerViewModel)state!).OnSnapshotTimerTick(),
+            this,
+            SnapshotInterval,
+            SnapshotInterval);
+    }
+
+    private void StopSnapshotTimer()
+    {
+        Interlocked.Exchange(ref snapshotTickInFlight, 0);
+        var timer = Interlocked.Exchange(ref snapshotTimer, null);
+        timer?.Dispose();
+    }
+
+    private void OnSnapshotTimerTick()
+    {
+        if (Interlocked.Exchange(ref snapshotTickInFlight, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!IsActive)
+            {
+                return;
+            }
+
+            var metrics = GetMetricsSnapshot();
+            var heapBytes = GC.GetTotalMemory(false);
+            using var process = Process.GetCurrentProcess();
+            LogDebug(
+                $"Snapshot heap={heapBytes} ws={process.WorkingSet64} decoded={metrics.FramesDecoded} errors={metrics.DecodeErrors} inFlight={Volatile.Read(ref decodeInFlight)}.");
+        }
+        catch (Exception ex)
+        {
+            LogDebug($"Viewer snapshot failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref snapshotTickInFlight, 0);
+        }
+    }
+#endif
+
+    [Conditional("DEBUG")]
+    private static void LogDebug(string message)
+    {
+        Trace.WriteLine($"[ScreenShareViewer] {message}");
     }
 }

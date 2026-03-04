@@ -30,7 +30,11 @@
                 CornerRadius="12"
                 ClipToBounds="True">
             <Grid>
-                <ContentControl Content="{Binding CurrentPage}"/>
+                <ContentControl Content="{Binding CurrentPage}"
+                                HorizontalAlignment="Stretch"
+                                VerticalAlignment="Stretch"
+                                HorizontalContentAlignment="Stretch"
+                                VerticalContentAlignment="Stretch"/>
 
                 <Image x:Name="NarwhalPeekImage"
                        Width="900"

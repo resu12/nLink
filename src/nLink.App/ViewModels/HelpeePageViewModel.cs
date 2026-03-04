@@ -5,7 +5,9 @@ using System.Diagnostics;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Avalonia;
 using Avalonia.Media.Imaging;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.Input;
 using NLink.App.Configuration;
 using NLink.App.Services;
@@ -21,6 +23,9 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 {
     private static readonly TimeSpan DefaultIncomingRequestTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
+#if DEBUG
+    private static readonly TimeSpan PreviewSnapshotInterval = TimeSpan.FromSeconds(10);
+#endif
     private static readonly Regex AttemptLabelRegex = new(@"\s*\(?attempt\s+\d+(?:,\s*next retry in \d+s)?\)?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private readonly Action cancelAction;
     private readonly Action backAction;
@@ -77,7 +82,12 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool isScreenSharingPreviewActive;
     private Bitmap? screenSharePreviewFrame;
     private ScreenShareStatus screenSharePreviewStatus = new(ScreenShareState.Off, null, DateTimeOffset.UtcNow);
+    private int screenSharePreviewStopInFlight;
     private bool disposed;
+#if DEBUG
+    private Timer? previewSnapshotTimer;
+    private int previewSnapshotTickInFlight;
+#endif
 
     public HelpeePageViewModel(
         Action cancelAction,
@@ -91,6 +101,35 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         SessionUiStateStore? uiStateStore = null,
         Action? backAction = null,
         IScreenCaptureSourceFactory? screenCaptureSourceFactory = null)
+        : this(
+            cancelAction,
+            transportConfig,
+            sessionRuntime,
+            openDiagnosticsAction,
+            clipboardService,
+            shareMessageConfig,
+            statusPresenter,
+            incomingRequestTimeout,
+            uiStateStore,
+            backAction,
+            screenCaptureSourceFactory,
+            decodeFrame: null)
+    {
+    }
+
+    internal HelpeePageViewModel(
+        Action cancelAction,
+        TransportRuntimeConfig transportConfig,
+        SessionRuntime sessionRuntime,
+        Action? openDiagnosticsAction,
+        IClipboardService? clipboardService,
+        ShareMessageConfig? shareMessageConfig,
+        StatusPresenter? statusPresenter,
+        TimeSpan? incomingRequestTimeout,
+        SessionUiStateStore? uiStateStore,
+        Action? backAction,
+        IScreenCaptureSourceFactory? screenCaptureSourceFactory,
+        Func<byte[], Bitmap>? decodeFrame)
     {
         this.cancelAction = cancelAction;
         this.backAction = backAction ?? cancelAction;
@@ -114,7 +153,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             setPreviewActive: value => IsScreenSharingPreviewActive = value,
             setStatus: value => ScreenSharePreviewStatus = value,
             getPreviewFrame: () => ScreenSharePreviewFrame,
-            setPreviewFrame: value => ScreenSharePreviewFrame = value);
+            setPreviewFrame: value => ScreenSharePreviewFrame = value,
+            decodeFrame: decodeFrame);
 
         ChatMessages = new ObservableCollection<ChatLineViewModel>();
 
@@ -141,7 +181,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         OpenDiagnosticsCommand = new RelayCommand(OpenDiagnostics, CanOpenDiagnosticsCommand);
         CancelCommand = new RelayCommand(CancelAndGoBack);
         EndSessionCommand = new RelayCommand(EndSession, CanTriggerEndSession);
-        ToggleScreenSharePreviewCommand = new RelayCommand(ToggleScreenSharePreview);
+        ToggleScreenSharePreviewCommand = new RelayCommand(ToggleScreenSharePreview, CanToggleScreenSharePreview);
 
         InitializeStartupAvailabilityState();
         presenterBannerStatus = NormalizeStatusForDisplay(this.statusPresenter.CurrentStatus);
@@ -287,20 +327,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public string SecondaryActionText => IsConnectedView ? "Disconnect" : "New code";
 
-    public string HeaderStatusText => AppendScreenShareSuffix(
-        EffectivePhase switch
-        {
-            SessionUiPhase.Connecting => "Connecting…",
-            SessionUiPhase.Recovering => "Reconnecting…",
-            SessionUiPhase.Connected => "Connected",
-            SessionUiPhase.Failed => string.IsNullOrWhiteSpace(FailureTitle) ? "Connection failed" : FailureTitle,
-            SessionUiPhase.Ended => !string.IsNullOrWhiteSpace(ConnectionStatus)
-                ? ConnectionStatus
-                : !string.IsNullOrWhiteSpace(FailureTitle)
-                    ? FailureTitle
-                    : "Session ended",
-            _ => !string.IsNullOrWhiteSpace(ConnectionStatus) ? ConnectionStatus : "Ready",
-        });
+    public string HeaderStatusText => BuildHeaderStatusText();
 
     public string FailureTitle
     {
@@ -451,6 +478,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ShowChatConnectionPill));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
+                ToggleScreenSharePreviewCommand.NotifyCanExecuteChanged();
+#if DEBUG
+                UpdatePreviewSnapshotTimer();
+#endif
                 SyncTransportScreenShareWithPreview(value);
             }
         }
@@ -493,6 +524,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             var previousShowDefaultPlaceholder = ShowDefaultScreenSharePlaceholder;
             var previousShowViewerError = ShowScreenShareViewerError;
             var previousViewerMessage = ScreenShareViewerMessage;
+            var previousHeaderStatusText = HeaderStatusText;
             if (SetProperty(ref screenSharePreviewStatus, value))
             {
                 if (previousShowPreviewFrame != ShowScreenSharePreviewFrame)
@@ -514,6 +546,15 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 {
                     OnPropertyChanged(nameof(ScreenShareViewerMessage));
                 }
+
+                if (!string.Equals(previousHeaderStatusText, HeaderStatusText, StringComparison.Ordinal))
+                {
+                    OnPropertyChanged(nameof(HeaderStatusText));
+                    OnPropertyChanged(nameof(ShowChatConnectionPill));
+                    OnPropertyChanged(nameof(ShowTransientStatusPanel));
+                }
+
+                ToggleScreenSharePreviewCommand.NotifyCanExecuteChanged();
             }
         }
     }
@@ -647,11 +688,14 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             statusPresenter.Dispose();
         }
         sessionRuntime.SetReliabilityAttempt(null);
-        screenShareCoordinator.StopAsync().GetAwaiter().GetResult();
+#if DEBUG
+        StopPreviewSnapshotTimer();
+#endif
+        RunBoundedSynchronousCleanup(screenShareCoordinator.StopAsync, TimeSpan.FromSeconds(2));
         copyFeedback.Dispose();
         incomingRequestTimeoutCts?.Cancel();
         incomingRequestTimeoutCts?.Dispose();
-        sessionRuntime.ResetAsync().GetAwaiter().GetResult();
+        RunSynchronousCleanup(sessionRuntime.ResetAsync);
     }
 
     private void RegenerateCode()
@@ -682,6 +726,16 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private void ToggleScreenSharePreview()
     {
         screenShareCoordinator.Toggle();
+    }
+
+    private bool CanToggleScreenSharePreview()
+    {
+        if (disposed || ScreenSharePreviewStatus.State == ScreenShareState.Starting)
+        {
+            return false;
+        }
+
+        return IsScreenSharingPreviewActive || CanShowScreenShareAction;
     }
 
     private async Task RetryAsync()
@@ -715,6 +769,64 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         return CanEndSession && !endInvoked;
     }
+
+#if DEBUG
+    private void UpdatePreviewSnapshotTimer()
+    {
+        if (IsScreenSharingPreviewActive)
+        {
+            if (previewSnapshotTimer is not null)
+            {
+                return;
+            }
+
+            previewSnapshotTimer = new Timer(
+                static state => ((HelpeePageViewModel)state!).OnPreviewSnapshotTimerTick(),
+                this,
+                PreviewSnapshotInterval,
+                PreviewSnapshotInterval);
+            return;
+        }
+
+        StopPreviewSnapshotTimer();
+    }
+
+    private void StopPreviewSnapshotTimer()
+    {
+        Interlocked.Exchange(ref previewSnapshotTickInFlight, 0);
+        var timer = Interlocked.Exchange(ref previewSnapshotTimer, null);
+        timer?.Dispose();
+    }
+
+    private void OnPreviewSnapshotTimerTick()
+    {
+        if (Interlocked.Exchange(ref previewSnapshotTickInFlight, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            if (!IsScreenSharingPreviewActive)
+            {
+                return;
+            }
+
+            var heapBytes = GC.GetTotalMemory(false);
+            using var process = Process.GetCurrentProcess();
+            Debug.WriteLine(
+                $"[ScreenSharePreviewVm] Snapshot heap={heapBytes} ws={process.WorkingSet64} decoded={screenShareCoordinator.FramesDecoded} state={ScreenSharePreviewStatus.State}.");
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[ScreenSharePreviewVm] Snapshot failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref previewSnapshotTickInFlight, 0);
+        }
+    }
+#endif
 
     private void OpenDiagnostics()
     {
@@ -844,7 +956,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void CancelAndGoBack()
     {
-        StopScreenSharePreview();
+        RequestStopScreenSharePreview();
         backAction();
     }
 
@@ -868,7 +980,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         ShowTransientBanner = false;
         TransientBannerText = string.Empty;
         CanCancelTransient = false;
-        StopScreenSharePreview();
+        RequestStopScreenSharePreview();
         uiStateStore?.SetPhase(SessionUiPhase.Ended, "UserEndSession");
         EffectivePhase = SessionUiPhase.Ended;
         IsChatInputEnabled = false;
@@ -1445,7 +1557,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         if (endSessionRequested ||
             sessionRuntime.State is SessionRuntimeState.Rejected or SessionRuntimeState.Failed or SessionRuntimeState.Disconnected)
         {
-            StopScreenSharePreview();
+            RequestStopScreenSharePreview();
         }
 
         SessionUxContext? phaseContext = null;
@@ -2022,7 +2134,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void PrepareForNewSession()
     {
-        StopScreenSharePreview();
+        RequestStopScreenSharePreview();
 
         if (!endSessionRequested && !endSessionCancelInvoked && endReason is null)
         {
@@ -2111,9 +2223,28 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
-    private void StopScreenSharePreview()
+    private void RequestStopScreenSharePreview()
     {
-        screenShareCoordinator.StopAsync().GetAwaiter().GetResult();
+        if (Interlocked.Exchange(ref screenSharePreviewStopInFlight, 1) == 1)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await screenShareCoordinator.StopAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best-effort teardown.
+            }
+            finally
+            {
+                Interlocked.Exchange(ref screenSharePreviewStopInFlight, 0);
+            }
+        });
     }
 
     private void SyncTransportScreenShareWithPreview(bool isPreviewActive)
@@ -2163,6 +2294,76 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
+    private string BuildHeaderStatusText()
+    {
+        var baseText = EffectivePhase switch
+        {
+            SessionUiPhase.Connecting => "Connecting…",
+            SessionUiPhase.Recovering => "Reconnecting…",
+            SessionUiPhase.Connected => "Connected",
+            SessionUiPhase.Failed => string.IsNullOrWhiteSpace(FailureTitle) ? "Connection failed" : FailureTitle,
+            SessionUiPhase.Ended => !string.IsNullOrWhiteSpace(ConnectionStatus)
+                ? ConnectionStatus
+                : !string.IsNullOrWhiteSpace(FailureTitle)
+                    ? FailureTitle
+                    : "Session ended",
+            _ => !string.IsNullOrWhiteSpace(ConnectionStatus) ? ConnectionStatus : "Ready",
+        };
+
+        if (ScreenSharePreviewStatus.State == ScreenShareState.Failed &&
+            !string.IsNullOrWhiteSpace(ScreenShareViewerMessage) &&
+            EffectivePhase is not (SessionUiPhase.Failed or SessionUiPhase.Ended))
+        {
+            return $"{baseText} • {ScreenShareViewerMessage}";
+        }
+
+        return AppendScreenShareSuffix(baseText);
+    }
+
+    private static void RunSynchronousCleanup(Func<Task> cleanup)
+    {
+        ArgumentNullException.ThrowIfNull(cleanup);
+
+        if (Application.Current is not null && Dispatcher.UIThread.CheckAccess())
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await cleanup().ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Best-effort sync dispose cleanup.
+                }
+            });
+            return;
+        }
+
+        try
+        {
+            cleanup().GetAwaiter().GetResult();
+        }
+        catch
+        {
+            // Best-effort sync dispose cleanup.
+        }
+    }
+
+    private static void RunBoundedSynchronousCleanup(Func<Task> cleanup, TimeSpan timeout)
+    {
+        ArgumentNullException.ThrowIfNull(cleanup);
+
+        try
+        {
+            cleanup().WaitAsync(timeout).GetAwaiter().GetResult();
+        }
+        catch
+        {
+            // Best-effort bounded cleanup.
+        }
+    }
+
     private string AppendScreenShareSuffix(string text)
     {
         if (!IsScreenSharingPreviewActive)
@@ -2172,7 +2373,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         return EffectivePhase is SessionUiPhase.Failed or SessionUiPhase.Ended
             ? text
-            : $"{text} • Viewing screen";
+            : $"{text} • Screen sharing";
     }
 
     private bool IsTransientBannerDuplicateWithHeader()

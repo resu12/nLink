@@ -29,6 +29,8 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
     private long framesQueued;
     private long framesDropped;
     private long chunksSent;
+    private long signalWriteAttempts;
+    private long signalReadCount;
     private bool disposed;
 
     public ScreenShareFrameSendPipeline(
@@ -51,10 +53,11 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
         this.capacity = capacity;
         this.clock = clock ?? SystemScreenShareClock.Instance;
         minimumFrameInterval = TimeSpan.FromMilliseconds(1000d / maxFramesPerSecond);
-        pendingSignals = Channel.CreateUnbounded<bool>(new UnboundedChannelOptions
+        pendingSignals = Channel.CreateBounded<bool>(new BoundedChannelOptions(1)
         {
             SingleReader = true,
             SingleWriter = false,
+            FullMode = BoundedChannelFullMode.DropWrite,
         });
 
         sendLoopTask = Task.Run(ProcessLoopAsync, CancellationToken.None);
@@ -68,6 +71,18 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
             FramesDropped: Interlocked.Read(ref framesDropped),
             ChunksSent: Interlocked.Read(ref chunksSent));
     }
+
+    internal int PendingSignalCount => pendingSignals.Reader.CanCount ? pendingSignals.Reader.Count : 0;
+
+    internal long SignalWriteAttempts => Interlocked.Read(ref signalWriteAttempts);
+
+    internal long SignalReadCount => Interlocked.Read(ref signalReadCount);
+
+    internal long WakeSignalsWritten => Interlocked.Read(ref signalWriteAttempts);
+
+    internal long WakeSignalsRead => Interlocked.Read(ref signalReadCount);
+
+    internal bool IsSendLoopCompleted => sendLoopTask.IsCompleted;
 
     public Task EnqueueFrameAsync(
         string sessionId,
@@ -143,6 +158,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
             AssertBufferBounds();
             lastQueuedFrameAtUtc = now;
             Interlocked.Increment(ref framesQueued);
+            Interlocked.Increment(ref signalWriteAttempts);
             pendingSignals.Writer.TryWrite(true);
         }
 
@@ -151,21 +167,30 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (disposed)
+        lock (gate)
         {
-            return;
+            if (disposed)
+            {
+                return;
+            }
+
+            disposed = true;
         }
 
-        disposed = true;
-        pendingSignals.Writer.TryComplete();
         disposeCts.Cancel();
+        pendingSignals.Writer.TryComplete();
 
         try
         {
             await sendLoopTask.ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (disposeCts.IsCancellationRequested)
+        catch (OperationCanceledException ex) when (disposeCts.IsCancellationRequested)
         {
+            LogDebug($"Send loop canceled during dispose: {ex.GetType().Name}: {ex.Message}");
+        }
+        catch (ChannelClosedException ex)
+        {
+            LogDebug($"Send loop completed with closed channel during dispose: {ex.GetType().Name}: {ex.Message}");
         }
 
         disposeCts.Dispose();
@@ -174,41 +199,59 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
 
     private async Task ProcessLoopAsync()
     {
-        await foreach (var _ in pendingSignals.Reader.ReadAllAsync(disposeCts.Token).ConfigureAwait(false))
+        try
         {
-            while (true)
+            await foreach (var signal in pendingSignals.Reader.ReadAllAsync(disposeCts.Token).ConfigureAwait(false))
             {
-                PendingFrame? frame = null;
-                lock (gate)
+                _ = signal;
+                Interlocked.Increment(ref signalReadCount);
+                while (pendingSignals.Reader.TryRead(out _))
                 {
-                    if (pendingFrames.Count > 0)
+                    Interlocked.Increment(ref signalReadCount);
+                }
+
+                while (true)
+                {
+                    PendingFrame? frame = null;
+                    lock (gate)
                     {
-                        frame = pendingFrames.Dequeue();
-                        AssertBufferBounds();
+                        if (pendingFrames.Count > 0)
+                        {
+                            frame = pendingFrames.Dequeue();
+                            AssertBufferBounds();
+                        }
+                    }
+
+                    if (frame is null)
+                    {
+                        break;
+                    }
+
+                    var chunks = ScreenShareFrameChunker.ChunkFrame(
+                        frame.SessionId,
+                        frame.FrameId,
+                        frame.Width,
+                        frame.Height,
+                        frame.Encoding,
+                        frame.TimestampUnixMilliseconds,
+                        frame.EncodedFrameBytes);
+
+                    foreach (var chunk in chunks)
+                    {
+                        disposeCts.Token.ThrowIfCancellationRequested();
+                        await sendChunkAsync(chunk, disposeCts.Token).ConfigureAwait(false);
+                        Interlocked.Increment(ref chunksSent);
                     }
                 }
-
-                if (frame is null)
-                {
-                    break;
-                }
-
-                var chunks = ScreenShareFrameChunker.ChunkFrame(
-                    frame.SessionId,
-                    frame.FrameId,
-                    frame.Width,
-                    frame.Height,
-                    frame.Encoding,
-                    frame.TimestampUnixMilliseconds,
-                    frame.EncodedFrameBytes);
-
-                foreach (var chunk in chunks)
-                {
-                    disposeCts.Token.ThrowIfCancellationRequested();
-                    await sendChunkAsync(chunk, disposeCts.Token).ConfigureAwait(false);
-                    Interlocked.Increment(ref chunksSent);
-                }
             }
+        }
+        catch (OperationCanceledException ex) when (disposeCts.IsCancellationRequested)
+        {
+            LogDebug($"Send loop canceled: {ex.GetType().Name}: {ex.Message}");
+        }
+        catch (ChannelClosedException ex)
+        {
+            LogDebug($"Send loop stopped because the signal channel closed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -228,5 +271,11 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
         {
             throw new InvalidOperationException($"Screenshare sender buffer exceeded max of {MaxBufferedFrames} frames.");
         }
+    }
+
+    [Conditional("DEBUG")]
+    private static void LogDebug(string message)
+    {
+        Trace.WriteLine($"[ScreenShareSendPipeline] {message}");
     }
 }

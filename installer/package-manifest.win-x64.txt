@@ -1,0 +1,9 @@
+# Required publish/install payload for the Windows helper package.
+nLink.exe
+appsettings.json
+bridge/win-x64/
+bridge/win-x64/index.js
+bridge/win-x64/node.exe
+bridge/win-x64/package.json
+bridge/win-x64/package-lock.json
+bridge/win-x64/node_modules/

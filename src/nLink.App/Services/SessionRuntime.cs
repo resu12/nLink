@@ -3,13 +3,13 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using NLink.App.Configuration;
+using NLink.App.Services.ScreenCapture;
 using NLink.Core;
 using NLink.Core.Chat;
 using NLink.Core.Logging;
 using NLink.Core.Resources;
 using NLink.Core.Retry;
-using NLink.App.Configuration;
-using NLink.App.Services.ScreenCapture;
 using NLink.Infra.Nkn;
 
 namespace NLink.App.Services;
@@ -547,6 +547,9 @@ public sealed class SessionRuntime : IDisposable
     {
         ObjectDisposedException.ThrowIf(disposed, this);
 
+        CancellationTokenSource? linkedCts = null;
+        ISignalingTransport? nextTransport = null;
+
         await lifecycleGate.WaitAsync(uiCt);
         try
         {
@@ -557,8 +560,8 @@ public sealed class SessionRuntime : IDisposable
             BeginConnectAttempt(SessionRuntimeRole.Helper, code);
             TransitionTo(TransportState.TransportInitializing, "start_helper");
 
-            var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(uiCt);
-            var nextTransport = AcquireTransportForNewSession(out var reusedCachedBridge);
+            linkedCts = CancellationTokenSource.CreateLinkedTokenSource(uiCt);
+            nextTransport = AcquireTransportForNewSession(out var reusedCachedBridge);
             sessionCts = linkedCts;
             transport = nextTransport;
             role = SessionRuntimeRole.Helper;
@@ -583,13 +586,30 @@ public sealed class SessionRuntime : IDisposable
             }
 
             SetState(SessionRuntimeState.Connecting, "Connecting…");
-
-            await nextTransport.JoinAsync(code, linkedCts.Token).ConfigureAwait(false);
-            TransitionTo(TransportState.Handshake, "join_request_sent");
         }
         finally
         {
             startInProgress = false;
+            lifecycleGate.Release();
+        }
+
+        await nextTransport.JoinAsync(code, linkedCts.Token).ConfigureAwait(false);
+
+        await lifecycleGate.WaitAsync(uiCt).ConfigureAwait(false);
+        try
+        {
+            if (disposed ||
+                linkedCts.IsCancellationRequested ||
+                !ReferenceEquals(transport, nextTransport) ||
+                !ReferenceEquals(sessionCts, linkedCts))
+            {
+                return;
+            }
+
+            TransitionTo(TransportState.Handshake, "join_request_sent");
+        }
+        finally
+        {
             lifecycleGate.Release();
         }
     }
