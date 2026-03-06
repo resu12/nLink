@@ -311,7 +311,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
-    public string HelperPageHelpText => "Paste invite or address.";
+    public string HelperPageHelpText => "Paste invite.";
 
     public string ConnectionMethodHint => transportConfig.HelperHintText;
 

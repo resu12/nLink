@@ -234,7 +234,7 @@
                                                     HorizontalAlignment="Stretch"
                                                     IsVisible="{Binding ShowMainControls}">
                                                 <StackPanel Spacing="16">
-                                                    <TextBlock Text="Paste invite or address"
+                                                    <TextBlock Text="Paste invite"
                                                                Foreground="{StaticResource AppTextBrush}"
                                                                FontSize="17"
                                                                FontWeight="SemiBold"
@@ -245,7 +245,7 @@
                                                              AutomationProperties.AutomationId="Helper.CodeInput"
                                                              Text="{Binding CodeInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                                              KeyDown="HelperCodeInput_KeyDown"
-                                                             Watermark="Paste invite or address"
+                                                             Watermark="Paste invite"
                                                              TabIndex="0"
                                                              HorizontalAlignment="Stretch"
                                                              IsEnabled="{Binding CanStartOrConnect}"/>

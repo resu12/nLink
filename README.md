@@ -12,7 +12,6 @@ Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke
 
 - Helpee shares an invite with QR, share, and copy actions.
 - Helper connects by pasting an invite, pasting from the clipboard, or scanning a QR code.
-- Direct NKN address entry remains available when needed.
 
 ## Quick Start (Windows)
 
@@ -206,11 +205,11 @@ Run the test (same PC, two app instances):
 1. Start the first app instance:
    `dotnet run --project src/nLink.App -c Release`
 2. Click `I need help`
-3. Copy the invite (or direct NKN address) shown on screen
+3. Copy the invite shown on screen
 4. Start the second app instance:
    `dotnet run --project src/nLink.App -c Release`
 5. Click `I want to help someone`
-6. Paste the invite or direct NKN address
+6. Paste the invite
 7. Click `Connect`
 8. On the first instance, click `Allow`
 9. Send chat messages both ways and confirm they appear on both sides
