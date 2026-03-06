@@ -144,6 +144,8 @@ public sealed class ChatViewScrollTests : IClassFixture<ChatViewScrollFixture>
 
         public bool ShowChatConnectionPill => true;
 
+        public bool ShowChatTopBar => ShowChatConnectionPill;
+
         public bool ShowChatNotice => false;
 
         public string ChatNoticeText => string.Empty;

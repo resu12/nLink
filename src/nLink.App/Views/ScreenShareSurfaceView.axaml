@@ -3,6 +3,9 @@
              xmlns:controls="using:NLink.App.Views"
              x:Class="NLink.App.Views.ScreenShareSurfaceView"
              x:Name="Root">
-    <Image Source="{Binding Frame, ElementName=Root}"
-           Stretch="Uniform"/>
+    <Grid Background="Transparent">
+        <Image Source="{Binding Frame, ElementName=Root}"
+               Stretch="Uniform"
+               IsHitTestVisible="False"/>
+    </Grid>
 </UserControl>

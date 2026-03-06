@@ -18,6 +18,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
     private static readonly TimeSpan ConnectReadyTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan PingInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan PingTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan ScreenShareBridgeLogInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan BridgeTrafficLogInterval = TimeSpan.FromSeconds(2);
     private static readonly RetryPolicyOptions UnexpectedExitRestartRetryOptions = new(
         MaxAttempts: 5,
         InitialDelay: TimeSpan.FromSeconds(1),
@@ -43,6 +45,19 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
     private bool shuttingDown;
     private bool disposed;
     private string reliabilityModeHint = "Helper";
+    private long screenShareBridgeMessageCountSinceLastLog;
+    private long screenShareBridgePayloadBytesSinceLastLog;
+    private long lastScreenShareBridgeSummaryLogTick;
+    private long bridgeSendCountSinceLastLog;
+    private long bridgeSendPayloadBytesSinceLastLog;
+    private long lastBridgeSendSummaryLogTick;
+    private long bridgeMessageCountSinceLastLog;
+    private long bridgeMessagePayloadBytesSinceLastLog;
+    private long lastBridgeMessageSummaryLogTick;
+    private bool inboundScreenShareEnabled;
+    private string? inboundScreenShareSessionId;
+    private string? inboundScreenShareSourceAddress;
+    private long inboundScreenShareExpiresAtUnixMs;
 
     public RealNknClientAdapter(NknIdentity identity, NknTransportOptions options)
     {
@@ -389,13 +404,62 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         ArgumentNullException.ThrowIfNull(payload);
         EnsurePayloadWithinLimit(payload, "send");
 
-        Log($"Bridge send (dest_len={destination.Length}, payload_len={payload.Length})");
+        MaybeLogBridgeSendSummary(payload.Length, destination.Length);
         return SendCommandAndWaitAckAsync(
             "send",
             new Dictionary<string, object?>
             {
                 ["destination"] = destination,
                 ["payloadBase64"] = Convert.ToBase64String(payload),
+            },
+            ct,
+            timeoutOverride: CommandAckTimeout);
+    }
+
+    internal Task UpdateInboundScreenSharePolicyAsync(
+        bool enabled,
+        string? sessionId,
+        string? sourceAddress,
+        DateTimeOffset? expiresAtUtc,
+        CancellationToken ct)
+    {
+        if (disposed)
+        {
+            return Task.CompletedTask;
+        }
+
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? null : sessionId.Trim();
+        var normalizedSourceAddress = string.IsNullOrWhiteSpace(sourceAddress) ? null : sourceAddress.Trim();
+        DateTimeOffset? normalizedExpiresAtUtc = expiresAtUtc is DateTimeOffset value ? value.ToUniversalTime() : null;
+        var effectiveEnabled =
+            enabled &&
+            !string.IsNullOrWhiteSpace(normalizedSessionId) &&
+            !string.IsNullOrWhiteSpace(normalizedSourceAddress) &&
+            normalizedExpiresAtUtc is DateTimeOffset;
+
+        lock (gate)
+        {
+            inboundScreenShareEnabled = effectiveEnabled;
+            inboundScreenShareSessionId = effectiveEnabled ? normalizedSessionId : null;
+            inboundScreenShareSourceAddress = effectiveEnabled ? normalizedSourceAddress : null;
+            inboundScreenShareExpiresAtUnixMs = effectiveEnabled
+                ? normalizedExpiresAtUtc!.Value.ToUnixTimeMilliseconds()
+                : 0L;
+        }
+
+        if (!bridgeSupervisor.IsProcessRunning)
+        {
+            return Task.CompletedTask;
+        }
+
+        return SendCommandAndWaitAckAsync(
+            "setScreenSharePolicy",
+            new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["enabled"] = effectiveEnabled,
+                ["sessionId"] = effectiveEnabled ? normalizedSessionId : null,
+                ["sourceAddress"] = effectiveEnabled ? normalizedSourceAddress : null,
+                ["expiresAtUnixMs"] = effectiveEnabled ? inboundScreenShareExpiresAtUnixMs : null,
             },
             ct,
             timeoutOverride: CommandAckTimeout);
@@ -611,23 +675,30 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
             return;
         }
 
-        if (TryHandleScreenSharePayload(payloadBytes))
+        if (TryHandleScreenSharePayload(payloadBytes, source))
         {
-            Log($"Bridge screenshare message (source_len={source.Length}, payload_len={payloadBytes.Length}, is_topic={isTopic})");
+            MaybeLogScreenShareMessageSummary(payloadBytes.Length, source.Length, isTopic);
             return;
         }
 
-        Log($"Bridge message (source_len={source.Length}, payload_len={payloadBytes.Length}, is_topic={isTopic})");
+        MaybeLogBridgeMessageSummary(payloadBytes.Length, source.Length, isTopic);
         MessageReceived?.Invoke(this, new NknIncomingMessage(source, payloadBytes, isTopic, topic));
     }
 
-    private bool TryHandleScreenSharePayload(byte[] payloadBytes)
+    private bool TryHandleScreenSharePayload(byte[] payloadBytes, string? source)
     {
         if (!ScreenSharePayloadCodec.TryDeserialize(payloadBytes, out var chunk))
         {
             if (!ScreenSharePayloadCodec.TryDeserializeStop(payloadBytes, out var stop))
             {
                 return false;
+            }
+
+            if (!TryAuthorizeInboundScreenShare(stop.SessionId, source, out var stopFailureReason))
+            {
+                screenShareFrameReassembler.ClearSession(stop.SessionId);
+                LogInboundScreenShareDropped(stopFailureReason, source, stop.SessionId, "stop");
+                return true;
             }
 
             screenShareFrameReassembler.ClearSession(stop.SessionId);
@@ -642,14 +713,177 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
             return true;
         }
 
+        if (!TryAuthorizeInboundScreenShare(chunk.SessionId, source, out var frameFailureReason))
+        {
+            screenShareFrameReassembler.ClearSession(chunk.SessionId);
+            LogInboundScreenShareDropped(frameFailureReason, source, chunk.SessionId, "frame");
+            return true;
+        }
+
         screenShareFrameReassembler.OnChunk(chunk);
         return true;
+    }
+
+    private bool TryAuthorizeInboundScreenShare(string? sessionId, string? source, out string failureReason)
+    {
+        bool enabled;
+        string? expectedSessionId;
+        string? expectedSourceAddress;
+        long expiresAtUnixMs;
+        lock (gate)
+        {
+            enabled = inboundScreenShareEnabled;
+            expectedSessionId = inboundScreenShareSessionId;
+            expectedSourceAddress = inboundScreenShareSourceAddress;
+            expiresAtUnixMs = inboundScreenShareExpiresAtUnixMs;
+        }
+
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? null : sessionId.Trim();
+        var normalizedSource = string.IsNullOrWhiteSpace(source) ? null : source.Trim();
+        var nowUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        if (!enabled)
+        {
+            failureReason = "policy_disabled";
+            return false;
+        }
+
+        if (expiresAtUnixMs <= 0 || nowUnixMs >= expiresAtUnixMs)
+        {
+            failureReason = "approval_expired";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            failureReason = "missing_session_id";
+            return false;
+        }
+
+        if (!string.Equals(normalizedSessionId, expectedSessionId, StringComparison.Ordinal))
+        {
+            failureReason = "session_id_mismatch";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(normalizedSource))
+        {
+            failureReason = "missing_source";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(expectedSourceAddress) ||
+            !NknSignalingTransport.AddressMatchesForSessionPolicy(normalizedSource, expectedSourceAddress))
+        {
+            failureReason = "source_mismatch";
+            return false;
+        }
+
+        failureReason = string.Empty;
+        return true;
+    }
+
+    private void LogInboundScreenShareDropped(string reason, string? source, string? sessionId, string messageType)
+    {
+        NknRuntimeDiagnostics.SetLastError($"bridge_screenshare_{reason}");
+        NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"bridge_screenshare_{reason}");
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=bridge_screenshare_dropped; message_type={messageType}; reason={reason}; session_id={sessionId ?? "(none)"}; source={source ?? "(none)"}");
+        Log(
+            $"Bridge screenshare dropped before dispatch (type={messageType}, reason={reason}, session_id={sessionId ?? "(none)"}, source={source ?? "(none)"})");
+    }
+
+    private void MaybeLogScreenShareMessageSummary(int payloadLength, int sourceLength, bool isTopic)
+    {
+        Interlocked.Increment(ref screenShareBridgeMessageCountSinceLastLog);
+        Interlocked.Add(ref screenShareBridgePayloadBytesSinceLastLog, payloadLength);
+
+        var nowTick = Stopwatch.GetTimestamp();
+        var previousTick = Volatile.Read(ref lastScreenShareBridgeSummaryLogTick);
+        if (previousTick == 0)
+        {
+            Interlocked.CompareExchange(ref lastScreenShareBridgeSummaryLogTick, nowTick, 0);
+            return;
+        }
+
+        if (Stopwatch.GetElapsedTime(previousTick, nowTick) < ScreenShareBridgeLogInterval)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref lastScreenShareBridgeSummaryLogTick, nowTick, previousTick) != previousTick)
+        {
+            return;
+        }
+
+        var messageCount = Interlocked.Exchange(ref screenShareBridgeMessageCountSinceLastLog, 0);
+        var totalPayloadBytes = Interlocked.Exchange(ref screenShareBridgePayloadBytesSinceLastLog, 0);
+        Log(
+            $"Bridge screenshare traffic (messages={messageCount}, payload_bytes={totalPayloadBytes}, source_len={sourceLength}, is_topic={isTopic})");
+    }
+
+    private void MaybeLogBridgeSendSummary(int payloadLength, int destinationLength)
+    {
+        Interlocked.Increment(ref bridgeSendCountSinceLastLog);
+        Interlocked.Add(ref bridgeSendPayloadBytesSinceLastLog, payloadLength);
+
+        var nowTick = Stopwatch.GetTimestamp();
+        var previousTick = Volatile.Read(ref lastBridgeSendSummaryLogTick);
+        if (previousTick == 0)
+        {
+            Interlocked.CompareExchange(ref lastBridgeSendSummaryLogTick, nowTick, 0);
+            return;
+        }
+
+        if (Stopwatch.GetElapsedTime(previousTick, nowTick) < BridgeTrafficLogInterval)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref lastBridgeSendSummaryLogTick, nowTick, previousTick) != previousTick)
+        {
+            return;
+        }
+
+        var messageCount = Interlocked.Exchange(ref bridgeSendCountSinceLastLog, 0);
+        var totalPayloadBytes = Interlocked.Exchange(ref bridgeSendPayloadBytesSinceLastLog, 0);
+        Log($"Bridge outbound traffic (messages={messageCount}, payload_bytes={totalPayloadBytes}, dest_len={destinationLength})");
+    }
+
+    private void MaybeLogBridgeMessageSummary(int payloadLength, int sourceLength, bool isTopic)
+    {
+        Interlocked.Increment(ref bridgeMessageCountSinceLastLog);
+        Interlocked.Add(ref bridgeMessagePayloadBytesSinceLastLog, payloadLength);
+
+        var nowTick = Stopwatch.GetTimestamp();
+        var previousTick = Volatile.Read(ref lastBridgeMessageSummaryLogTick);
+        if (previousTick == 0)
+        {
+            Interlocked.CompareExchange(ref lastBridgeMessageSummaryLogTick, nowTick, 0);
+            return;
+        }
+
+        if (Stopwatch.GetElapsedTime(previousTick, nowTick) < BridgeTrafficLogInterval)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref lastBridgeMessageSummaryLogTick, nowTick, previousTick) != previousTick)
+        {
+            return;
+        }
+
+        var messageCount = Interlocked.Exchange(ref bridgeMessageCountSinceLastLog, 0);
+        var totalPayloadBytes = Interlocked.Exchange(ref bridgeMessagePayloadBytesSinceLastLog, 0);
+        Log($"Bridge control/session traffic (messages={messageCount}, payload_bytes={totalPayloadBytes}, source_len={sourceLength}, is_topic={isTopic})");
     }
 
     private void OnScreenShareFrameReady(object? sender, ScreenShareFrameReadyEventArgs e)
     {
         try
         {
+            var metrics = screenShareFrameReassembler.GetMetricsSnapshot();
             ScreenShareFrameCompletedCore?.Invoke(
                 this,
                 new ScreenShareFrameCompletedEventArgs(
@@ -657,7 +891,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
                     e.Width,
                     e.Height,
                     e.Encoding,
-                    e.EncodedFrameBytes));
+                    e.EncodedFrameBytes,
+                    e.TimestampUnixMilliseconds,
+                    ChunksDroppedOlderFrame: metrics.FramesDropped,
+                    AssembliesExpired: 0,
+                    SessionId: e.SessionId));
         }
         catch (Exception ex)
         {

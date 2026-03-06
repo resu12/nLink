@@ -1,20 +1,29 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
+using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia;
+using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.Input;
 using NLink.App.Configuration;
 using NLink.App.Services;
+using NLink.App.Services.RemoteControl;
 using NLink.App.Services.ScreenCapture;
+using NLink.App.Services.SessionConnect;
 using NLink.App.Threading;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.RemoteControl;
+using NLink.Core.SessionConnect;
+using NLink.Core.SessionSecurity;
 #if DEBUG
 using NLink.Core.Diagnostics;
 #endif
@@ -26,10 +35,17 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 {
     private static readonly TimeSpan DefaultIncomingRequestTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan DefaultInviteLifetime = TimeSpan.FromMinutes(15);
 #if DEBUG
     private static readonly TimeSpan PreviewSnapshotInterval = TimeSpan.FromSeconds(10);
 #endif
     private static readonly Regex AttemptLabelRegex = new(@"\s*\(?attempt\s+\d+(?:,\s*next retry in \d+s)?\)?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly bool RemoteControlDebugOverlayEnabled =
+#if DEBUG
+        true;
+#else
+        false;
+#endif
     private readonly Action cancelAction;
     private readonly Action backAction;
     private readonly Action? openDiagnosticsAction;
@@ -38,8 +54,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly StatusPresenter statusPresenter;
     private readonly bool ownsStatusPresenter;
     private readonly IClipboardService? clipboardService;
+    private readonly IInviteShareService inviteShareService;
+    private readonly IInviteTokenFactory inviteTokenFactory;
+    private readonly IQrCodeService qrCodeService;
     private readonly SessionUiStateStore? uiStateStore;
-    private SessionCode sessionCode = SessionCode.CreateRandom();
     private bool hasIncomingRequest;
     private bool isRequestAllowed;
     private bool showChatNotice;
@@ -60,6 +78,26 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool uiRecoveryTransientDismissed;
     private SessionReliabilityAttempt? reliabilityAttempt;
     private readonly InlineTransientText copyFeedback = new();
+    private string shareInviteText = string.Empty;
+    private string shareAddressText = string.Empty;
+    private string shareInviteStatusText = "Preparing invite…";
+    private Bitmap? shareInviteQrBitmap;
+    private CancellationTokenSource? shareInviteQrRefreshCts;
+    private int shareInviteQrRefreshVersion;
+    private string lastInviteAddressForToken = string.Empty;
+    private DateTimeOffset shareInviteExpiresAtUtc = DateTimeOffset.MinValue;
+    private string shareInviteExpiryText = string.Empty;
+    private bool shareInviteAutoRefreshTriggered;
+    private string incomingHelperIdentity = string.Empty;
+    private string incomingSessionId = string.Empty;
+    private CapabilityGrant incomingRequestedCapabilities;
+    private string incomingApprovalSelectionKey = string.Empty;
+    private bool allowIncomingChatCapability;
+    private bool allowIncomingScreenShareCapability;
+    private bool allowIncomingRemoteControlCapability;
+    private bool allowIncomingFileTransferCapability;
+    private bool allowIncomingClipboardCapability;
+    private readonly DispatcherTimer shareInviteExpiryTimer;
     private CancellationTokenSource? incomingRequestTimeoutCts;
     private readonly TimeSpan incomingRequestTimeout;
     private bool startupBlocked;
@@ -86,6 +124,15 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private Bitmap? screenSharePreviewFrame;
     private ScreenShareStatus screenSharePreviewStatus = new(ScreenShareState.Off, null, DateTimeOffset.UtcNow);
     private int screenSharePreviewStopInFlight;
+#if DEBUG
+    private string remoteControlDebugLastPointerText = "n/a";
+    private string remoteControlDebugLastEventText = "n/a";
+    private string remoteControlDebugUpdatedText = "n/a";
+    private int remoteControlDebugEventsPerSecond;
+    private int remoteControlDebugEventsInWindow;
+    private long remoteControlDebugWindowStartTickMs;
+#endif
+    private bool remoteControlDebugPanelExpanded;
     private bool disposed;
 #if DEBUG
     private Timer? previewSnapshotTimer;
@@ -103,7 +150,9 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         TimeSpan? incomingRequestTimeout = null,
         SessionUiStateStore? uiStateStore = null,
         Action? backAction = null,
-        IScreenCaptureSourceFactory? screenCaptureSourceFactory = null)
+        IScreenCaptureSourceFactory? screenCaptureSourceFactory = null,
+        IInviteShareService? inviteShareService = null,
+        IQrCodeService? qrCodeService = null)
         : this(
             cancelAction,
             transportConfig,
@@ -116,7 +165,9 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             uiStateStore,
             backAction,
             screenCaptureSourceFactory,
-            decodeFrame: null)
+            decodeFrame: null,
+            inviteShareService: inviteShareService,
+            qrCodeService: qrCodeService)
     {
     }
 
@@ -132,7 +183,9 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         SessionUiStateStore? uiStateStore,
         Action? backAction,
         IScreenCaptureSourceFactory? screenCaptureSourceFactory,
-        Func<byte[], Bitmap>? decodeFrame)
+        Func<byte[], Bitmap>? decodeFrame,
+        IInviteShareService? inviteShareService = null,
+        IQrCodeService? qrCodeService = null)
     {
         this.cancelAction = cancelAction;
         this.backAction = backAction ?? cancelAction;
@@ -142,8 +195,16 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         this.statusPresenter = statusPresenter ?? new StatusPresenter(sessionRuntime);
         ownsStatusPresenter = statusPresenter is null;
         this.clipboardService = clipboardService;
+        this.inviteShareService = inviteShareService ?? new DefaultInviteShareService();
+        this.qrCodeService = qrCodeService ?? new QrCodeService();
+        inviteTokenFactory = ConnectInputResolverFactory.CreateInviteTokenFactory();
         this.incomingRequestTimeout = incomingRequestTimeout ?? DefaultIncomingRequestTimeout;
         this.uiStateStore = uiStateStore;
+        shareInviteExpiryTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1),
+        };
+        shareInviteExpiryTimer.Tick += OnShareInviteExpiryTimerTick;
         var resolvedCaptureSourceFactory = screenCaptureSourceFactory ?? new DefaultScreenCaptureSourceFactory();
         isScreenCaptureSupported = DetermineIsCaptureSupported(resolvedCaptureSourceFactory);
         lastObservedUiPhase = uiStateStore?.Phase ?? SessionUiPhase.Idle;
@@ -162,20 +223,27 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         ChatMessages = new ObservableCollection<ChatLineViewModel>();
 
         sessionRuntime.StateChanged += OnSessionRuntimeStateChanged;
+        sessionRuntime.SessionSecurityStateChanged += OnSessionSecurityStateChanged;
         sessionRuntime.TransientStatusChanged += OnTransientStatusChanged;
         sessionRuntime.IncomingJoinRequestAvailable += OnIncomingJoinRequestAvailable;
         sessionRuntime.Disconnected += OnRuntimeDisconnected;
         sessionRuntime.ChatMessageReceived += OnChatMessageReceived;
         sessionRuntime.ChatMessageReceivedBeforeApproved += OnChatMessageReceivedBeforeApproved;
         sessionRuntime.ChatStateChanged += OnChatStateChanged;
+        sessionRuntime.RemoteControlStateChanged += OnRemoteControlStateChanged;
+#if DEBUG
+        sessionRuntime.RemoteControlInputReceived += OnRemoteControlInputReceived;
+#endif
         this.statusPresenter.StatusChanged += OnStatusPresenterChanged;
         if (this.uiStateStore is not null)
         {
             this.uiStateStore.PropertyChanged += OnUiStateStorePropertyChanged;
         }
 
-        RegenerateCodeCommand = new RelayCommand(RegenerateCode);
-        CopyCodeCommand = new AsyncRelayCommand(CopyCodeAsync);
+        CopyInviteCommand = new AsyncRelayCommand(CopyInviteAsync);
+        CopyAddressCommand = new AsyncRelayCommand(CopyAddressAsync);
+        ShareInviteCommand = new AsyncRelayCommand(ShareInviteAsync);
+        RefreshInviteCommand = new RelayCommand(RefreshInvite);
         AllowCommand = new RelayCommand(AllowIncomingRequest, CanAllowIncomingRequest);
         DeclineCommand = new AsyncRelayCommand(DeclineIncomingRequestAsync, CanDeclineIncomingRequest);
         SendChatCommand = new AsyncRelayCommand(SendChatAsync, CanSendChat);
@@ -185,6 +253,13 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         CancelCommand = new RelayCommand(CancelAndGoBack);
         EndSessionCommand = new RelayCommand(EndSession, CanTriggerEndSession);
         ToggleScreenSharePreviewCommand = new RelayCommand(ToggleScreenSharePreview, CanToggleScreenSharePreview);
+        RequestControlCommand = new RelayCommand(RequestRemoteControl, CanRequestRemoteControlAction);
+        StopControlCommand = new RelayCommand(StopRemoteControl, CanStopRemoteControlAction);
+        RestartAsAdministratorCommand = new RelayCommand(RestartAsAdministrator, CanRestartAsAdministratorAction);
+        ToggleControlModeCommand = new RelayCommand(static () => { }, static () => false);
+        ToggleRemoteControlDebugPanelCommand = new RelayCommand(ToggleRemoteControlDebugPanel, CanToggleRemoteControlDebugPanel);
+        AllowControlConsentCommand = new AsyncRelayCommand(AllowControlConsentAsync, CanRespondToControlConsent);
+        DenyControlConsentCommand = new AsyncRelayCommand(DenyControlConsentAsync, CanRespondToControlConsent);
 
         InitializeStartupAvailabilityState();
         presenterBannerStatus = NormalizeStatusForDisplay(this.statusPresenter.CurrentStatus);
@@ -193,6 +268,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             StartHosting();
         }
+        EnsureInviteSnapshot(forceNewToken: false);
+        shareInviteExpiryTimer.Start();
         SyncTransientStatusFromRuntime();
         if (this.uiStateStore is not null && this.uiStateStore.Phase == SessionUiPhase.Idle)
         {
@@ -204,9 +281,74 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         UpdateUiFromSnapshot();
     }
 
-    public string ShareCode => sessionCode.DisplayText;
+    public string ShareInvite => shareInviteText;
+    public string ShareAddress => shareAddressText;
+    public string ShareInviteStatusText => shareInviteStatusText;
+    public Bitmap? ShareInviteQrImage => shareInviteQrBitmap;
+    public bool ShowShareInviteQr => ShareInviteQrImage is not null;
+    public bool ShowShareInviteQrPlaceholder => !ShowShareInviteQr;
+    public string ShareInviteExpiryText => shareInviteExpiryText;
+    public bool ShowShareInviteExpiry => HasShareInvite && !string.IsNullOrWhiteSpace(ShareInviteExpiryText);
+    public bool HasShareInvite => !string.IsNullOrWhiteSpace(ShareInvite);
+    public bool HasShareAddress => !string.IsNullOrWhiteSpace(ShareAddress);
 
-    public string IncomingHelperName => "Helper on this PC";
+    public string IncomingHelperName =>
+        string.IsNullOrWhiteSpace(incomingHelperIdentity)
+            ? "Verified helper"
+            : incomingHelperIdentity;
+
+    public string IncomingHelperIdentityText =>
+        string.IsNullOrWhiteSpace(incomingHelperIdentity)
+            ? "Waiting for verified helper identity."
+            : incomingHelperIdentity;
+
+    public string IncomingSessionIdText =>
+        string.IsNullOrWhiteSpace(incomingSessionId)
+            ? string.Empty
+            : $"Session {incomingSessionId}";
+
+    public string IncomingRequestedCapabilitiesText =>
+        BuildCapabilitySummary(incomingRequestedCapabilities);
+
+    public string IncomingApprovedCapabilitiesText =>
+        BuildCapabilitySummary(GetSelectedIncomingApprovalCapabilities());
+
+    public bool ShowIncomingRequestedCapabilities => incomingRequestedCapabilities != CapabilityGrant.None;
+    public bool ShowIncomingChatCapability => (incomingRequestedCapabilities & CapabilityGrant.Chat) == CapabilityGrant.Chat;
+    public bool ShowIncomingScreenShareCapability => (incomingRequestedCapabilities & CapabilityGrant.ScreenShare) == CapabilityGrant.ScreenShare;
+    public bool ShowIncomingRemoteControlCapability => (incomingRequestedCapabilities & CapabilityGrant.RemoteControl) == CapabilityGrant.RemoteControl;
+    public bool ShowIncomingFileTransferCapability => (incomingRequestedCapabilities & CapabilityGrant.FileTransfer) == CapabilityGrant.FileTransfer;
+    public bool ShowIncomingClipboardCapability => (incomingRequestedCapabilities & CapabilityGrant.Clipboard) == CapabilityGrant.Clipboard;
+
+    public bool AllowIncomingChatCapability
+    {
+        get => allowIncomingChatCapability;
+        set => SetIncomingCapabilitySelection(ref allowIncomingChatCapability, value, nameof(AllowIncomingChatCapability));
+    }
+
+    public bool AllowIncomingScreenShareCapability
+    {
+        get => allowIncomingScreenShareCapability;
+        set => SetIncomingCapabilitySelection(ref allowIncomingScreenShareCapability, value, nameof(AllowIncomingScreenShareCapability));
+    }
+
+    public bool AllowIncomingRemoteControlCapability
+    {
+        get => allowIncomingRemoteControlCapability;
+        set => SetIncomingCapabilitySelection(ref allowIncomingRemoteControlCapability, value, nameof(AllowIncomingRemoteControlCapability));
+    }
+
+    public bool AllowIncomingFileTransferCapability
+    {
+        get => allowIncomingFileTransferCapability;
+        set => SetIncomingCapabilitySelection(ref allowIncomingFileTransferCapability, value, nameof(AllowIncomingFileTransferCapability));
+    }
+
+    public bool AllowIncomingClipboardCapability
+    {
+        get => allowIncomingClipboardCapability;
+        set => SetIncomingCapabilitySelection(ref allowIncomingClipboardCapability, value, nameof(AllowIncomingClipboardCapability));
+    }
 
     public InlineTransientText CopyFeedback => copyFeedback;
     public bool ShowCopyFeedbackInline => ShowWaitingPanel && copyFeedback.IsVisible;
@@ -247,6 +389,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ChatConnectionPillText));
                 OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
@@ -267,7 +410,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowConnectedPanel));
                 OnPropertyChanged(nameof(ShowStartupBlockedPanel));
                 OnPropertyChanged(nameof(ShowWaitingStatusLine));
-                OnPropertyChanged(nameof(ShowWaitingCodeActions));
+                OnPropertyChanged(nameof(ShowWaitingInviteActions));
                 OnPropertyChanged(nameof(ShowBackButton));
                 OnPropertyChanged(nameof(StatusLineText));
                 OnPropertyChanged(nameof(SecondaryActionText));
@@ -276,7 +419,17 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ChatConnectionPillText));
                 OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
+                OnPropertyChanged(nameof(ShowStopControlAction));
+                OnPropertyChanged(nameof(CanStopControl));
+                OnPropertyChanged(nameof(ShowRemoteControlActiveStatus));
+                OnPropertyChanged(nameof(ShowRemoteControlPreviewActiveCue));
+                NotifyRemoteControlDiagnosticsChanged();
+                OnPropertyChanged(nameof(ShowRemoteControlConsentDialog));
+                StopControlCommand.NotifyCanExecuteChanged();
+                AllowControlConsentCommand.NotifyCanExecuteChanged();
+                DenyControlConsentCommand.NotifyCanExecuteChanged();
                 ApplySessionBannerPolicy();
             }
         }
@@ -328,7 +481,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             ? ConnectionStatus
             : ConnectionStatus;
 
-    public string SecondaryActionText => IsConnectedView ? "Disconnect" : "New code";
+    public string SecondaryActionText => IsConnectedView ? "Disconnect" : "Refresh invite";
 
     public string HeaderStatusText => BuildHeaderStatusText();
 
@@ -341,6 +494,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
@@ -355,6 +509,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
@@ -379,7 +534,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowConnectedPanel));
                 OnPropertyChanged(nameof(ShowStartupBlockedPanel));
                 OnPropertyChanged(nameof(ShowWaitingStatusLine));
-                OnPropertyChanged(nameof(ShowWaitingCodeActions));
+                OnPropertyChanged(nameof(ShowWaitingInviteActions));
                 OnPropertyChanged(nameof(ShowBackButton));
                 OnPropertyChanged(nameof(ShowRetryAction));
                 OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
@@ -390,7 +545,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     }
 
     public bool ShowHostingUi => !IsStartupBlocked;
-    public bool ShowWaitingCodeActions => ShowHostingUi && ConnectionState == "Waiting";
+    public bool ShowWaitingInviteActions => ShowHostingUi && ConnectionState == "Waiting";
 
     public ObservableCollection<ChatLineViewModel> ChatMessages { get; }
 
@@ -420,6 +575,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         };
 
     public bool ShowChatConnectionPill => !HeaderStatusText.StartsWith(ChatConnectionPillText, StringComparison.Ordinal);
+    public bool ShowChatTopBar => ShowChatConnectionPill || !FeatureFlags.EnableSessionHeader;
 
     public SessionUiPhase EffectivePhase
     {
@@ -431,6 +587,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ChatConnectionPillText));
                 OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
@@ -471,6 +628,82 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             FeatureFlags.EnableScreenSharePreview,
             isScreenCaptureSupported);
 
+    public bool SessionSupportsRemoteControl => sessionRuntime.SessionSupportsRemoteControl;
+    public bool ShowRequestControlAction => false;
+    public bool CanRequestControl => false;
+    public bool ShowStopControlAction => IsConnectedView && sessionRuntime.ControlState == ControlState.Active;
+    public string StopControlButtonText => "Stop control";
+    public bool CanStopControl => IsConnectedView && sessionRuntime.ControlState == ControlState.Active;
+    public bool ShowRemoteControlActiveStatus => sessionRuntime.ControlState == ControlState.Active;
+    public bool ShowRemoteControlAdminWarning => IsConnectedView && sessionRuntime.RemoteControlAdminRestartRequired;
+    public string RemoteControlAdminWarningText => sessionRuntime.RemoteControlAdminWarningText;
+    public bool CanRestartAsAdministrator =>
+        ShowRemoteControlAdminWarning &&
+        OperatingSystem.IsWindows() &&
+        !sessionRuntime.RemoteControlProcessElevated;
+    public bool ShowRemoteControlPreviewActiveCue => ShowScreenSharePreviewFrame && sessionRuntime.ControlState == ControlState.Active;
+    public bool ShowControlModeToggle => false;
+    public bool CanControlModeToggle => false;
+    public string ControlModeButtonText => "Control mode: Off";
+    public bool ShowRemoteControlDebugToggle =>
+        RemoteControlDebugOverlayEnabled &&
+        IsConnectedView &&
+        ShowScreenSharePreviewFrame;
+    public bool ShowRemoteControlDebugOverlay =>
+        ShowRemoteControlDebugToggle &&
+        remoteControlDebugPanelExpanded;
+    public string RemoteControlDebugToggleText => ShowRemoteControlDebugOverlay ? "Hide diagnostics" : "Show diagnostics";
+    public string RemoteControlDiagnosticsRoleText => "Helpee";
+    public string RemoteControlDiagnosticsControlStateText => sessionRuntime.ControlState.ToString();
+    public string RemoteControlDiagnosticsControlModeText => "n/a";
+    public string RemoteControlDiagnosticsDisplayText =>
+        sessionRuntime.RemoteControlMappingDisplayId is { Length: > 0 } displayId
+            ? $"{displayId}@{sessionRuntime.RemoteControlMappingRevision?.ToString(CultureInfo.InvariantCulture) ?? "n/a"}"
+            : "n/a";
+    public string RemoteControlDiagnosticsCaptureFrameText => FormatCaptureFrameText(GetRemoteControlDiagnosticsSnapshot());
+    public string RemoteControlDiagnosticsMoveStatsText => FormatMoveStatsText(GetRemoteControlDiagnosticsSnapshot());
+    public string RemoteControlDiagnosticsSuppressionsText => FormatSuppressionText(GetRemoteControlDiagnosticsSnapshot());
+    public string RemoteControlDiagnosticsLastMappedText => FormatLastMappedText(GetRemoteControlDiagnosticsSnapshot());
+    public string RemoteControlDebugPointerText =>
+#if DEBUG
+        remoteControlDebugLastPointerText;
+#else
+        "n/a";
+#endif
+    public string RemoteControlDebugEventText =>
+#if DEBUG
+        remoteControlDebugLastEventText;
+#else
+        "n/a";
+#endif
+    public string RemoteControlDebugRequestIdText => sessionRuntime.CurrentControlRequestId ?? "n/a";
+    public string RemoteControlDebugControllerPeerText => sessionRuntime.ControllerPeerId ?? "n/a";
+    public string RemoteControlDebugDisplayText => RemoteControlDiagnosticsDisplayText;
+    public string RemoteControlDebugInjectorText => sessionRuntime.RemoteControlInjectionSupported ? "supported" : "unsupported";
+    public string RemoteControlDebugQueueText =>
+        $"inj={sessionRuntime.RemoteControlInjectionQueueDepth}; move={sessionRuntime.RemoteControlOutgoingMouseMoveQueueDepth}";
+    public string RemoteControlDebugGuardrailCountersText =>
+        $"clamps={sessionRuntime.RemoteControlDebugMappingClampCount}; drops={sessionRuntime.RemoteControlDebugQueueDropCount}; suppressed={sessionRuntime.RemoteControlDebugInjectionSuppressedCount}; flushes={sessionRuntime.RemoteControlDebugQueueFlushCount}";
+#if DEBUG
+    internal RemoteControlDebugSnapshot RemoteControlDiagnosticsSnapshotForDebug =>
+        RemoteControlDebugDiagnostics.Snapshot(RemoteControlDiagnosticsRole.Helpee);
+#endif
+    public string RemoteControlDebugStatsText =>
+#if DEBUG
+        $"{remoteControlDebugEventsPerSecond} eps";
+#else
+        "0 eps";
+#endif
+    public string RemoteControlDebugUpdatedText =>
+#if DEBUG
+        remoteControlDebugUpdatedText;
+#else
+        "n/a";
+#endif
+    public bool ShowRemoteControlConsentDialog => IsConnectedView && sessionRuntime.HasPendingRemoteControlConsentPrompt;
+    public string RemoteControlConsentTitle => "Allow remote control?";
+    public string RemoteControlConsentMessage => "The helper is requesting control of your mouse and keyboard.";
+
     public bool IsScreenSharingPreviewActive
     {
         get => isScreenSharingPreviewActive;
@@ -480,6 +713,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
                 ToggleScreenSharePreviewCommand.NotifyCanExecuteChanged();
 #if DEBUG
@@ -503,6 +737,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 if (previousShowPreviewFrame != ShowScreenSharePreviewFrame)
                 {
                     OnPropertyChanged(nameof(ShowScreenSharePreviewFrame));
+                    OnPropertyChanged(nameof(ShowRemoteControlPreviewActiveCue));
+                    NotifyRemoteControlDiagnosticsChanged();
                 }
 
                 if (previousShowMainContent != ShowHelpeeMainContent)
@@ -533,6 +769,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 if (previousShowPreviewFrame != ShowScreenSharePreviewFrame)
                 {
                     OnPropertyChanged(nameof(ShowScreenSharePreviewFrame));
+                    OnPropertyChanged(nameof(ShowRemoteControlPreviewActiveCue));
+                    NotifyRemoteControlDiagnosticsChanged();
                 }
 
                 if (previousShowDefaultPlaceholder != ShowDefaultScreenSharePlaceholder)
@@ -554,6 +792,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 {
                     OnPropertyChanged(nameof(HeaderStatusText));
                     OnPropertyChanged(nameof(ShowChatConnectionPill));
+                    OnPropertyChanged(nameof(ShowChatTopBar));
                     OnPropertyChanged(nameof(ShowTransientStatusPanel));
                 }
 
@@ -591,9 +830,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public string ChatNoticeText => "You received a message";
 
-    public IRelayCommand RegenerateCodeCommand { get; }
-
-    public IAsyncRelayCommand CopyCodeCommand { get; }
+    public IAsyncRelayCommand CopyInviteCommand { get; }
+    public IAsyncRelayCommand CopyAddressCommand { get; }
+    public IAsyncRelayCommand ShareInviteCommand { get; }
+    public IRelayCommand RefreshInviteCommand { get; }
 
     public RelayCommand AllowCommand { get; }
 
@@ -609,6 +849,13 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     public IRelayCommand CancelCommand { get; }
     public IRelayCommand EndSessionCommand { get; }
     public IRelayCommand ToggleScreenSharePreviewCommand { get; }
+    public IRelayCommand RequestControlCommand { get; }
+    public IRelayCommand StopControlCommand { get; }
+    public IRelayCommand RestartAsAdministratorCommand { get; }
+    public IRelayCommand ToggleControlModeCommand { get; }
+    public IRelayCommand ToggleRemoteControlDebugPanelCommand { get; }
+    public IAsyncRelayCommand AllowControlConsentCommand { get; }
+    public IAsyncRelayCommand DenyControlConsentCommand { get; }
     public IRelayCommand StatusBannerCopyDiagnosticsCommand => OpenDiagnosticsCommand;
     public IAsyncRelayCommand StatusBannerCancelCommand => CancelTransientCommand;
 
@@ -674,13 +921,26 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         disposed = true;
 
+        shareInviteExpiryTimer.Stop();
+        shareInviteExpiryTimer.Tick -= OnShareInviteExpiryTimerTick;
+        shareInviteQrRefreshCts?.Cancel();
+        shareInviteQrRefreshCts?.Dispose();
+        shareInviteQrRefreshCts = null;
+        shareInviteQrBitmap?.Dispose();
+        shareInviteQrBitmap = null;
+
         sessionRuntime.StateChanged -= OnSessionRuntimeStateChanged;
+        sessionRuntime.SessionSecurityStateChanged -= OnSessionSecurityStateChanged;
         sessionRuntime.TransientStatusChanged -= OnTransientStatusChanged;
         sessionRuntime.IncomingJoinRequestAvailable -= OnIncomingJoinRequestAvailable;
         sessionRuntime.Disconnected -= OnRuntimeDisconnected;
         sessionRuntime.ChatMessageReceived -= OnChatMessageReceived;
         sessionRuntime.ChatMessageReceivedBeforeApproved -= OnChatMessageReceivedBeforeApproved;
         sessionRuntime.ChatStateChanged -= OnChatStateChanged;
+        sessionRuntime.RemoteControlStateChanged -= OnRemoteControlStateChanged;
+#if DEBUG
+        sessionRuntime.RemoteControlInputReceived -= OnRemoteControlInputReceived;
+#endif
         statusPresenter.StatusChanged -= OnStatusPresenterChanged;
         if (uiStateStore is not null)
         {
@@ -698,13 +958,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         copyFeedback.Dispose();
         incomingRequestTimeoutCts?.Cancel();
         incomingRequestTimeoutCts?.Dispose();
-        RunSynchronousCleanup(sessionRuntime.ResetAsync);
+        RunSynchronousCleanup(() => sessionRuntime.ResetAsync());
     }
 
-    private void RegenerateCode()
+    private void RestartWaitingSession()
     {
-        sessionCode = SessionCode.CreateRandom();
-        OnPropertyChanged(nameof(ShareCode));
         autoRegeneratingAfterDisconnect = false;
         pendingAutoRegenerateAfterDisconnect = false;
         wasConnected = false;
@@ -724,6 +982,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         ConnectionState = "Waiting";
 
         StartHosting();
+        EnsureInviteSnapshot(forceNewToken: true);
     }
 
     private void ToggleScreenSharePreview()
@@ -761,6 +1020,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         });
 
         StartHosting();
+        EnsureInviteSnapshot(forceNewToken: true);
     }
 
     private bool CanOpenDiagnosticsCommand()
@@ -870,38 +1130,115 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
-    public void NotifyCodeCopied()
-    {
-        copyFeedback.Show("Copied. Tell this code to your helper.");
-    }
-
-    public void NotifyCodeCopyFailed()
-    {
-        copyFeedback.Show("Could not copy the code. Please read it to your helper.");
-    }
-
-    private async Task CopyCodeAsync()
+    private async Task CopyInviteAsync()
     {
         if (clipboardService is null)
         {
-            NotifyCodeCopyFailed();
+            copyFeedback.Show("Couldn't copy the invite. Try again.");
+            return;
+        }
+
+        EnsureInviteSnapshot(forceNewToken: false);
+        if (string.IsNullOrWhiteSpace(ShareInvite))
+        {
+            copyFeedback.Show("Invite is not ready yet.");
             return;
         }
 
         try
         {
-            await clipboardService.SetTextAsync(ShareCode);
-            NotifyCodeCopied();
+            await clipboardService.SetTextAsync(ShareInvite);
+            copyFeedback.Show("Invite copied.");
         }
         catch
         {
-            NotifyCodeCopyFailed();
+            copyFeedback.Show("Couldn't copy the invite. Try again.");
         }
+    }
+
+    private async Task CopyAddressAsync()
+    {
+        if (clipboardService is null)
+        {
+            copyFeedback.Show("Could not copy address. Try again.");
+            return;
+        }
+
+        EnsureInviteSnapshot(forceNewToken: false);
+        if (string.IsNullOrWhiteSpace(ShareAddress))
+        {
+            copyFeedback.Show("Address is not ready yet.");
+            return;
+        }
+
+        try
+        {
+            await clipboardService.SetTextAsync(ShareAddress);
+            copyFeedback.Show("Address copied.");
+        }
+        catch
+        {
+            copyFeedback.Show("Could not copy address. Try again.");
+        }
+    }
+
+    private async Task ShareInviteAsync()
+    {
+        EnsureInviteSnapshot(forceNewToken: false);
+        if (string.IsNullOrWhiteSpace(ShareInvite))
+        {
+            copyFeedback.Show("Invite is not ready yet.");
+            return;
+        }
+
+        try
+        {
+            var shared = await inviteShareService.ShareInviteAsync(ShareInvite, CancellationToken.None);
+            if (shared.IsSuccess)
+            {
+                copyFeedback.Show("Choose how to share the invite.");
+                return;
+            }
+
+            if (clipboardService is not null)
+            {
+                await clipboardService.SetTextAsync(ShareInvite);
+                copyFeedback.Show("Share not available. Invite copied instead.");
+                return;
+            }
+
+            copyFeedback.Show(shared.Message ?? "Couldn't share the invite.");
+        }
+        catch
+        {
+            if (clipboardService is not null)
+            {
+                try
+                {
+                    await clipboardService.SetTextAsync(ShareInvite);
+                    copyFeedback.Show("Share not available. Invite copied instead.");
+                    return;
+                }
+                catch
+                {
+                    // ignore and fall through
+                }
+            }
+
+            copyFeedback.Show("Couldn't share the invite.");
+        }
+    }
+
+    private void RefreshInvite()
+    {
+        EnsureInviteSnapshot(forceNewToken: true);
     }
 
     private bool CanAllowIncomingRequest()
     {
-        return HasIncomingRequest && !IsRequestAllowed;
+        return HasIncomingRequest &&
+               !IsRequestAllowed &&
+               GetSelectedIncomingApprovalCapabilities() != CapabilityGrant.None;
     }
 
     private bool CanDeclineIncomingRequest()
@@ -1003,6 +1340,126 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         cancelAction();
     }
 
+    private void RequestRemoteControl()
+    {
+        // Helpee never initiates control in P2.
+    }
+
+    private void StopRemoteControl()
+    {
+        _ = StopRemoteControlAsync();
+    }
+
+    private async Task StopRemoteControlAsync()
+    {
+        if (!CanStopRemoteControlAction())
+        {
+            return;
+        }
+
+        await sessionRuntime.StopRemoteControlAsync("UserStop", CancellationToken.None);
+    }
+
+    private void ToggleRemoteControlDebugPanel()
+    {
+        if (!CanToggleRemoteControlDebugPanel())
+        {
+            return;
+        }
+
+        remoteControlDebugPanelExpanded = !remoteControlDebugPanelExpanded;
+        NotifyRemoteControlDiagnosticsChanged();
+    }
+
+    private bool CanToggleRemoteControlDebugPanel()
+    {
+        return ShowRemoteControlDebugToggle;
+    }
+
+    private async Task AllowControlConsentAsync()
+    {
+        if (!CanRespondToControlConsent())
+        {
+            return;
+        }
+
+        await sessionRuntime.RespondToRemoteControlRequestAsync(allow: true, CancellationToken.None);
+    }
+
+    private async Task DenyControlConsentAsync()
+    {
+        if (!CanRespondToControlConsent())
+        {
+            return;
+        }
+
+        await sessionRuntime.RespondToRemoteControlRequestAsync(allow: false, CancellationToken.None);
+    }
+
+    private bool CanRequestRemoteControlAction()
+    {
+        return false;
+    }
+
+    private bool CanStopRemoteControlAction()
+    {
+        return CanStopControl;
+    }
+
+    private bool CanRestartAsAdministratorAction()
+    {
+        return CanRestartAsAdministrator;
+    }
+
+    private void RestartAsAdministrator()
+    {
+        if (!CanRestartAsAdministratorAction())
+        {
+            return;
+        }
+
+        var processPath = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(processPath))
+        {
+            return;
+        }
+
+        try
+        {
+            Process.Start(
+                new ProcessStartInfo
+                {
+                    FileName = processPath,
+                    UseShellExecute = true,
+                    Verb = "runas",
+                    WorkingDirectory = AppContext.BaseDirectory,
+                });
+
+            if (Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+            {
+                desktop.Shutdown();
+                return;
+            }
+
+            Environment.Exit(0);
+        }
+        catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        {
+            // UAC prompt canceled by user.
+        }
+        catch
+        {
+            // Best-effort.
+        }
+    }
+
+    private bool CanRespondToControlConsent()
+    {
+        return ShowRemoteControlConsentDialog &&
+               sessionRuntime.ControlState == ControlState.Requesting &&
+               sessionRuntime.Role == SessionRuntimeRole.Helpee;
+    }
+
     private async Task DeclineIncomingRequestAsync()
     {
         if (!CanDeclineIncomingRequest())
@@ -1022,7 +1479,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         CancelIncomingRequestTimeout();
         HasIncomingRequest = false;
         IsRequestAllowed = false;
-        if (!RotateCodeAfterTerminalSession())
+        if (!RestartWaitingSessionAfterTerminalSession())
         {
             ConnectionStatus = "Waiting for helper…";
             ConnectionState = "Waiting";
@@ -1032,6 +1489,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private void StartHosting()
     {
         PrepareForNewSession();
+        EnsureInviteSnapshot(forceNewToken: false);
 
         if (IsStartupBlocked)
         {
@@ -1041,10 +1499,9 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         CancelIncomingRequestTimeout();
         reliabilityAttempt = SessionReliabilityLog.StartAttempt("Helpee", transportConfig.Key);
         sessionRuntime.SetReliabilityAttempt(reliabilityAttempt);
-        LogReliability(SessionReliabilityStage.CodeGenerated);
         LogReliability(SessionReliabilityStage.DiscoveryStarted);
 
-        AppLog.Info($"Helpee hosting using {transportConfig.Key} with code {sessionCode.Digits}");
+        AppLog.Info($"Helpee hosting using {transportConfig.Key} with address-native mode");
         _ = StartHostingAsync();
     }
 
@@ -1053,7 +1510,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         try
         {
             await sessionRuntime.ResetAsync();
-            await sessionRuntime.StartHelpeeAsync(sessionCode, CancellationToken.None);
+            await sessionRuntime.StartHelpeeAsync(CancellationToken.None);
         }
         catch (OperationCanceledException)
         {
@@ -1065,18 +1522,292 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 await UiThreadDispatch.RunAsync(() =>
                 {
-                    ConnectionStatus = "Could not start. Try a new code.";
+                    ConnectionStatus = "Could not start. Refresh invite and try again.";
                     ConnectionState = "Disconnected";
                 });
             }
         }
     }
 
+    private void EnsureInviteSnapshot(bool forceNewToken)
+    {
+        var candidateAddress = sessionRuntime.CurrentLocalPeerAddress?.Value;
+        if (!PeerAddress.TryParse(candidateAddress, out var peerAddress))
+        {
+            UpdateShareAddressText(string.Empty);
+            UpdateShareInviteText(string.Empty);
+            UpdateShareInviteStatusText("Preparing invite…");
+            shareInviteExpiresAtUtc = DateTimeOffset.MinValue;
+            shareInviteAutoRefreshTriggered = false;
+            UpdateShareInviteExpiryText(string.Empty);
+            lastInviteAddressForToken = string.Empty;
+            RefreshShareQrBitmaps();
+            return;
+        }
+
+        UpdateShareAddressText(peerAddress.Value);
+        if (!forceNewToken &&
+            string.Equals(lastInviteAddressForToken, peerAddress.Value, StringComparison.Ordinal) &&
+            !string.IsNullOrWhiteSpace(shareInviteText))
+        {
+            UpdateShareInviteStatusText("Invite ready");
+            return;
+        }
+
+        if (!SessionId.TryParse($"sess_{Guid.NewGuid():N}", out var sessionId))
+        {
+            UpdateShareInviteText(string.Empty);
+            UpdateShareInviteStatusText("Couldn't prepare the invite right now.");
+            shareInviteExpiresAtUtc = DateTimeOffset.MinValue;
+            shareInviteAutoRefreshTriggered = false;
+            UpdateShareInviteExpiryText(string.Empty);
+            RefreshShareQrBitmaps();
+            return;
+        }
+
+        var created = inviteTokenFactory.Create(
+            new InviteTokenCreateRequest(
+                IssuerAddress: peerAddress,
+                TargetAddress: peerAddress,
+                SessionId: sessionId,
+                Capabilities: InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl,
+                Lifetime: DefaultInviteLifetime),
+            DateTimeOffset.UtcNow);
+
+        if (!created.IsSuccess || string.IsNullOrWhiteSpace(created.Token))
+        {
+            UpdateShareInviteText(string.Empty);
+            UpdateShareInviteStatusText(
+                created.Error == InviteTokenCreateError.Throttled
+                    ? "Please wait a moment before refreshing again."
+                    : "Couldn't prepare the invite right now.");
+            shareInviteExpiresAtUtc = DateTimeOffset.MinValue;
+            shareInviteAutoRefreshTriggered = false;
+            UpdateShareInviteExpiryText(string.Empty);
+            AppLog.Info($"Helpee invite token refresh failed ({created.Error}): {created.Message ?? "(none)"}");
+            RefreshShareQrBitmaps();
+            return;
+        }
+
+        UpdateShareInviteText(created.Token!);
+        UpdateShareInviteStatusText("Invite ready");
+        shareInviteExpiresAtUtc = DateTimeOffset.FromUnixTimeMilliseconds(created.Payload!.ExpiresAtUtcMs);
+        shareInviteAutoRefreshTriggered = false;
+        UpdateShareInviteExpiryText(BuildInviteExpiryText(DateTimeOffset.UtcNow));
+        lastInviteAddressForToken = peerAddress.Value;
+        RefreshShareQrBitmaps();
+    }
+
+    private void UpdateShareInviteText(string value)
+    {
+        value ??= string.Empty;
+        if (SetProperty(ref shareInviteText, value, nameof(ShareInvite)))
+        {
+            OnPropertyChanged(nameof(HasShareInvite));
+            OnPropertyChanged(nameof(ShowShareInviteExpiry));
+        }
+    }
+
+    private void UpdateShareAddressText(string value)
+    {
+        value ??= string.Empty;
+        if (SetProperty(ref shareAddressText, value, nameof(ShareAddress)))
+        {
+            OnPropertyChanged(nameof(HasShareAddress));
+        }
+    }
+
+    private void UpdateShareInviteStatusText(string value)
+    {
+        value ??= string.Empty;
+        if (SetProperty(ref shareInviteStatusText, value, nameof(ShareInviteStatusText)))
+        {
+        }
+    }
+
+    private void UpdateShareInviteExpiryText(string value)
+    {
+        value ??= string.Empty;
+        if (SetProperty(ref shareInviteExpiryText, value, nameof(ShareInviteExpiryText)))
+        {
+            OnPropertyChanged(nameof(ShowShareInviteExpiry));
+        }
+    }
+
+    private void RefreshShareQrBitmaps()
+    {
+        RefreshShareInviteQrBitmap(ShareInvite);
+    }
+
+    private void RefreshShareInviteQrBitmap(string? text)
+    {
+        var previousRefresh = shareInviteQrRefreshCts;
+        shareInviteQrRefreshCts = null;
+        previousRefresh?.Cancel();
+        previousRefresh?.Dispose();
+
+        ReplaceShareQrBitmap(
+            ref shareInviteQrBitmap,
+            next: null,
+            nameof(ShareInviteQrImage),
+            nameof(ShowShareInviteQr),
+            nameof(ShowShareInviteQrPlaceholder));
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        var inviteSnapshot = text.Trim();
+        var refreshCts = new CancellationTokenSource();
+        var refreshVersion = unchecked(++shareInviteQrRefreshVersion);
+        shareInviteQrRefreshCts = refreshCts;
+        _ = RefreshShareInviteQrBitmapAsync(inviteSnapshot, refreshVersion, refreshCts);
+    }
+
+    private async Task RefreshShareInviteQrBitmapAsync(string inviteText, int refreshVersion, CancellationTokenSource refreshCts)
+    {
+        try
+        {
+            var pngBytes = await Task.Run(() =>
+            {
+                if (refreshCts.IsCancellationRequested ||
+                    !qrCodeService.TryCreatePng(inviteText, out var generatedBytes, out _))
+                {
+                    return Array.Empty<byte>();
+                }
+
+                return generatedBytes;
+            }, refreshCts.Token).ConfigureAwait(false);
+
+            if (disposed ||
+                refreshCts.IsCancellationRequested ||
+                refreshVersion != shareInviteQrRefreshVersion ||
+                pngBytes.Length == 0)
+            {
+                return;
+            }
+
+            using var stream = new MemoryStream(pngBytes);
+            var nextBitmap = new Bitmap(stream);
+
+            await UiThreadDispatch.RunAsync(() =>
+            {
+                if (disposed ||
+                    refreshCts.IsCancellationRequested ||
+                    refreshVersion != shareInviteQrRefreshVersion ||
+                    !string.Equals(ShareInvite, inviteText, StringComparison.Ordinal))
+                {
+                    nextBitmap.Dispose();
+                    return;
+                }
+
+                ReplaceShareQrBitmap(
+                    ref shareInviteQrBitmap,
+                    nextBitmap,
+                    nameof(ShareInviteQrImage),
+                    nameof(ShowShareInviteQr),
+                    nameof(ShowShareInviteQrPlaceholder));
+            }).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // No-op.
+        }
+        catch
+        {
+            // Leave the placeholder visible and let status text communicate invite readiness.
+        }
+        finally
+        {
+            if (ReferenceEquals(shareInviteQrRefreshCts, refreshCts))
+            {
+                shareInviteQrRefreshCts = null;
+            }
+
+            refreshCts.Dispose();
+        }
+    }
+
+    private void ReplaceShareQrBitmap(ref Bitmap? field, Bitmap? next, string bitmapPropertyName, string visiblePropertyName, string? placeholderPropertyName = null)
+    {
+        var previous = field;
+        field = next;
+        previous?.Dispose();
+        OnPropertyChanged(bitmapPropertyName);
+        OnPropertyChanged(visiblePropertyName);
+        if (!string.IsNullOrWhiteSpace(placeholderPropertyName))
+        {
+            OnPropertyChanged(placeholderPropertyName);
+        }
+    }
+
+    private void OnShareInviteExpiryTimerTick(object? sender, EventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        if (!HasShareInvite || shareInviteExpiresAtUtc == DateTimeOffset.MinValue)
+        {
+            UpdateShareInviteExpiryText(string.Empty);
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var remaining = shareInviteExpiresAtUtc - now;
+        if (remaining <= TimeSpan.Zero)
+        {
+            if (!shareInviteAutoRefreshTriggered)
+            {
+                shareInviteAutoRefreshTriggered = true;
+                EnsureInviteSnapshot(forceNewToken: true);
+            }
+
+            UpdateShareInviteExpiryText("Updating invite…");
+            return;
+        }
+
+        if (!shareInviteAutoRefreshTriggered && remaining <= TimeSpan.FromSeconds(10))
+        {
+            shareInviteAutoRefreshTriggered = true;
+            EnsureInviteSnapshot(forceNewToken: true);
+            UpdateShareInviteExpiryText("Updating invite…");
+            return;
+        }
+
+        UpdateShareInviteExpiryText(BuildInviteExpiryText(now));
+    }
+
+    private string BuildInviteExpiryText(DateTimeOffset now)
+    {
+        if (shareInviteExpiresAtUtc == DateTimeOffset.MinValue)
+        {
+            return string.Empty;
+        }
+
+        var remaining = shareInviteExpiresAtUtc - now;
+        if (remaining <= TimeSpan.Zero)
+        {
+            return "Invite expired.";
+        }
+
+        var minutes = (int)remaining.TotalMinutes;
+        var seconds = remaining.Seconds;
+        if (remaining <= TimeSpan.FromMinutes(1))
+        {
+            return $"Invite expires in {minutes:D2}:{seconds:D2} (auto-refreshing)";
+        }
+
+        return $"Invite expires in {minutes:D2}:{seconds:D2}";
+    }
+
     private async Task ApproveIncomingRequestAsync()
     {
         wasConnected = true;
         endReason = null;
-        await sessionRuntime.ApproveAsync(CancellationToken.None);
+        await sessionRuntime.ApproveAsync(GetSelectedIncomingApprovalCapabilities(), CancellationToken.None);
         await UiThreadDispatch.RunAsync(() =>
         {
             ShowChatNotice = false;
@@ -1109,7 +1840,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 CancelIncomingRequestTimeout();
                 HasIncomingRequest = false;
                 IsRequestAllowed = false;
-                if (!RotateCodeAfterTerminalSession())
+                if (!RestartWaitingSessionAfterTerminalSession())
                 {
                     ConnectionStatus = "Waiting for helper…";
                     ConnectionState = "Waiting";
@@ -1155,6 +1886,97 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             SendChatCommand.NotifyCanExecuteChanged();
         });
     }
+
+    private void OnRemoteControlStateChanged(object? sender, EventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(() =>
+        {
+            OnPropertyChanged(nameof(SessionSupportsRemoteControl));
+            OnPropertyChanged(nameof(ShowStopControlAction));
+            OnPropertyChanged(nameof(CanStopControl));
+            OnPropertyChanged(nameof(ShowRemoteControlActiveStatus));
+            OnPropertyChanged(nameof(ShowRemoteControlAdminWarning));
+            OnPropertyChanged(nameof(RemoteControlAdminWarningText));
+            OnPropertyChanged(nameof(CanRestartAsAdministrator));
+            OnPropertyChanged(nameof(ShowRemoteControlPreviewActiveCue));
+            NotifyRemoteControlDiagnosticsChanged();
+            OnPropertyChanged(nameof(ShowRemoteControlConsentDialog));
+            StopControlCommand.NotifyCanExecuteChanged();
+            RestartAsAdministratorCommand.NotifyCanExecuteChanged();
+            AllowControlConsentCommand.NotifyCanExecuteChanged();
+            DenyControlConsentCommand.NotifyCanExecuteChanged();
+        });
+    }
+
+#if DEBUG
+    private void OnRemoteControlInputReceived(object? sender, SessionRuntimeRemoteControlInputReceivedEventArgs e)
+    {
+        if (disposed || !RemoteControlDebugOverlayEnabled)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(() => UpdateRemoteControlDebugOverlay(e.Message));
+    }
+
+    private void UpdateRemoteControlDebugOverlay(ControlInputMessageV1 message)
+    {
+        if (!RemoteControlDebugOverlayEnabled)
+        {
+            return;
+        }
+
+        if (message.Nx.HasValue && message.Ny.HasValue)
+        {
+            remoteControlDebugLastPointerText = string.Create(
+                CultureInfo.InvariantCulture,
+                $"{message.Nx.Value:0.###}, {message.Ny.Value:0.###}");
+        }
+
+        remoteControlDebugLastEventText = BuildRemoteControlDebugEventText(message);
+        remoteControlDebugUpdatedText = DateTime.Now.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture);
+
+        var nowMs = Environment.TickCount64;
+        if (remoteControlDebugWindowStartTickMs == 0)
+        {
+            remoteControlDebugWindowStartTickMs = nowMs;
+        }
+
+        if (nowMs - remoteControlDebugWindowStartTickMs >= 1000)
+        {
+            remoteControlDebugEventsPerSecond = remoteControlDebugEventsInWindow;
+            remoteControlDebugEventsInWindow = 0;
+            remoteControlDebugWindowStartTickMs = nowMs;
+        }
+
+        remoteControlDebugEventsInWindow++;
+
+        OnPropertyChanged(nameof(RemoteControlDebugPointerText));
+        OnPropertyChanged(nameof(RemoteControlDebugEventText));
+        NotifyRemoteControlDiagnosticsChanged();
+        OnPropertyChanged(nameof(RemoteControlDebugStatsText));
+        OnPropertyChanged(nameof(RemoteControlDebugUpdatedText));
+    }
+
+    private static string BuildRemoteControlDebugEventText(ControlInputMessageV1 message)
+    {
+        return message.Kind switch
+        {
+            "mouse_move" => "move",
+            "mouse_button" => $"{message.Action ?? "button"} {message.Button ?? string.Empty}".Trim(),
+            "mouse_wheel" => string.Create(
+                CultureInfo.InvariantCulture,
+                $"wheel {message.DeltaX.GetValueOrDefault():0.##},{message.DeltaY.GetValueOrDefault():0.##}"),
+            "key" => $"{message.Action ?? "key"} {message.Key ?? "(none)"}",
+            _ => message.Kind ?? "(unknown)",
+        };
+    }
+#endif
 
     private ChatLineViewModel AddChatLine(string text, bool isLocal)
     {
@@ -1225,10 +2047,20 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return (null, null);
         }
 
-        return (lastError, "The connection stopped. Try a new code.");
+        return (lastError, "The connection stopped. Refresh invite and try again.");
     }
 
     private void OnSessionRuntimeStateChanged(object? sender, SessionRuntimeStateChangedEventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(SyncFromRuntime);
+    }
+
+    private void OnSessionSecurityStateChanged(object? sender, EventArgs e)
     {
         if (disposed)
         {
@@ -1245,7 +2077,13 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        _ = UiThreadDispatch.RunAsync(SyncTransientStatusFromRuntime);
+        _ = UiThreadDispatch.RunAsync(() =>
+        {
+            SyncTransientStatusFromRuntime();
+            OnPropertyChanged(nameof(HeaderStatusText));
+            OnPropertyChanged(nameof(ShowChatConnectionPill));
+            OnPropertyChanged(nameof(ShowChatTopBar));
+        });
     }
 
     private void OnStatusPresenterChanged(object? sender, UserFacingStatusChangedEventArgs e)
@@ -1317,6 +2155,9 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void SyncFromRuntime()
     {
+        EnsureInviteSnapshot(forceNewToken: false);
+        SyncIncomingApprovalRequestFromRuntime();
+
         var autoRegeneratedAfterDisconnect = false;
         var runtimeTerminalFailure = false;
         if (endSessionRequested)
@@ -1472,6 +2313,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                                 ? "Waiting for helper…"
                                 : sessionRuntime.StatusText;
                             ConnectionState = "Waiting";
+                            ResetIncomingApprovalRequestState();
                             ClearFailurePresentation();
                         }
                     }
@@ -1592,6 +2434,20 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         AllowCommand.NotifyCanExecuteChanged();
         DeclineCommand.NotifyCanExecuteChanged();
         EndSessionCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(SessionSupportsRemoteControl));
+        OnPropertyChanged(nameof(ShowStopControlAction));
+        OnPropertyChanged(nameof(CanStopControl));
+        OnPropertyChanged(nameof(ShowRemoteControlActiveStatus));
+        OnPropertyChanged(nameof(ShowRemoteControlAdminWarning));
+        OnPropertyChanged(nameof(RemoteControlAdminWarningText));
+        OnPropertyChanged(nameof(CanRestartAsAdministrator));
+        OnPropertyChanged(nameof(ShowRemoteControlPreviewActiveCue));
+        NotifyRemoteControlDiagnosticsChanged();
+        OnPropertyChanged(nameof(ShowRemoteControlConsentDialog));
+        StopControlCommand.NotifyCanExecuteChanged();
+        RestartAsAdministratorCommand.NotifyCanExecuteChanged();
+        AllowControlConsentCommand.NotifyCanExecuteChanged();
+        DenyControlConsentCommand.NotifyCanExecuteChanged();
         SyncTransientStatusFromRuntime();
         NotifyStatusBannerDetailChanged();
     }
@@ -1719,6 +2575,78 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
+    private void NotifyRemoteControlDiagnosticsChanged()
+    {
+        OnPropertyChanged(nameof(ShowRemoteControlDebugToggle));
+        OnPropertyChanged(nameof(ShowRemoteControlDebugOverlay));
+        OnPropertyChanged(nameof(RemoteControlDebugToggleText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsRoleText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsControlStateText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsControlModeText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsDisplayText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsCaptureFrameText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsMoveStatsText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsSuppressionsText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsLastMappedText));
+        OnPropertyChanged(nameof(RemoteControlDebugRequestIdText));
+        OnPropertyChanged(nameof(RemoteControlDebugControllerPeerText));
+        OnPropertyChanged(nameof(RemoteControlDebugDisplayText));
+        OnPropertyChanged(nameof(RemoteControlDebugInjectorText));
+        OnPropertyChanged(nameof(RemoteControlDebugQueueText));
+        OnPropertyChanged(nameof(RemoteControlDebugGuardrailCountersText));
+        ToggleRemoteControlDebugPanelCommand.NotifyCanExecuteChanged();
+    }
+
+    private RemoteControlDebugSnapshot GetRemoteControlDiagnosticsSnapshot()
+    {
+#if DEBUG
+        return RemoteControlDebugDiagnostics.Snapshot(RemoteControlDiagnosticsRole.Helpee);
+#else
+        return RemoteControlDebugSnapshot.Empty(RemoteControlDiagnosticsRole.Helpee);
+#endif
+    }
+
+    private static string FormatCaptureFrameText(RemoteControlDebugSnapshot snapshot)
+    {
+        var capture = snapshot.CaptureRegionPx.HasValue
+            ? string.Create(
+                CultureInfo.InvariantCulture,
+                $"{snapshot.CaptureRegionPx.Value.X},{snapshot.CaptureRegionPx.Value.Y},{snapshot.CaptureRegionPx.Value.Width}x{snapshot.CaptureRegionPx.Value.Height}")
+            : "n/a";
+        var frame = snapshot.FrameSizePx.HasValue
+            ? string.Create(CultureInfo.InvariantCulture, $"{snapshot.FrameSizePx.Value.Width}x{snapshot.FrameSizePx.Value.Height}")
+            : "n/a";
+        return $"capture={capture}; frame={frame}";
+    }
+
+    private string FormatMoveStatsText(RemoteControlDebugSnapshot snapshot)
+    {
+        var sentPerSecond = snapshot.MouseMoveSentPerSec?.ToString(CultureInfo.InvariantCulture) ?? "n/a";
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"sent={sentPerSecond}/s; dropped={snapshot.MouseMoveDropped}; clamps={snapshot.OutOfRangeClamps}");
+    }
+
+    private static string FormatSuppressionText(RemoteControlDebugSnapshot snapshot)
+    {
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"suppressed={snapshot.SuppressedInjections}; flushes={snapshot.QueueFlushes}; last_injected_seq={snapshot.LastInjectedSeq}; last_ack_seq={snapshot.LastAckSentSeq}; ack_sent={snapshot.AckSentCount}; snap_rx={snapshot.SnapshotReceivedCount}; snap_applied={snapshot.SnapshotAppliedCount}; snap_unstuck_buttons={snapshot.SnapshotUnstuckButtonsCount}; snap_unstuck_mods={snapshot.SnapshotUnstuckModifiersCount}; snap_last_rx={snapshot.HelpeeLastSnapshotReceivedSeq}({snapshot.HelpeeLastSnapshotReceivedModifiersMask}/{snapshot.HelpeeLastSnapshotReceivedMouseButtonsMask}); snap_last_applied={snapshot.HelpeeLastSnapshotAppliedSeq}({snapshot.HelpeeLastSnapshotAppliedModifiersMask}/{snapshot.HelpeeLastSnapshotAppliedMouseButtonsMask})");
+    }
+
+    private static string FormatLastMappedText(RemoteControlDebugSnapshot snapshot)
+    {
+        if (!snapshot.LastMapped.HasValue)
+        {
+            return "n/a";
+        }
+
+        var mapped = snapshot.LastMapped.Value;
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"nx={mapped.Nx:0.###}, ny={mapped.Ny:0.###} -> px={mapped.Px}, py={mapped.Py}");
+    }
+
     private void NotifyStatusBannerDetailChanged()
     {
         OnPropertyChanged(nameof(StatusBannerFailureCategory));
@@ -1830,6 +2758,152 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         AssertUiConsistency();
     }
 
+    private void SyncIncomingApprovalRequestFromRuntime()
+    {
+        var approvalRequest = sessionRuntime.PendingApprovalRequest;
+        if (approvalRequest is null)
+        {
+            ResetIncomingApprovalRequestState();
+            return;
+        }
+
+        var helperIdentity = approvalRequest.HelperIdentity.Value;
+        var sessionId = approvalRequest.SessionId.Value;
+        var requestedCapabilities = approvalRequest.RequestedCapabilities;
+        var selectionKey = string.Create(
+            CultureInfo.InvariantCulture,
+            $"{sessionId}|{helperIdentity}|{(int)requestedCapabilities}");
+
+        var selectionChanged = !string.Equals(incomingApprovalSelectionKey, selectionKey, StringComparison.Ordinal);
+        incomingApprovalSelectionKey = selectionKey;
+        UpdateIncomingApprovalMetadata(helperIdentity, sessionId, requestedCapabilities);
+        if (selectionChanged)
+        {
+            SetIncomingCapabilitySelections(requestedCapabilities);
+        }
+    }
+
+    private void ResetIncomingApprovalRequestState()
+    {
+        incomingApprovalSelectionKey = string.Empty;
+        UpdateIncomingApprovalMetadata(string.Empty, string.Empty, CapabilityGrant.None);
+        SetIncomingCapabilitySelections(CapabilityGrant.None);
+    }
+
+    private void UpdateIncomingApprovalMetadata(string helperIdentity, string sessionId, CapabilityGrant requestedCapabilities)
+    {
+        if (SetProperty(ref incomingHelperIdentity, helperIdentity ?? string.Empty, nameof(IncomingHelperIdentityText)))
+        {
+            OnPropertyChanged(nameof(IncomingHelperName));
+        }
+
+        SetProperty(ref incomingSessionId, sessionId ?? string.Empty, nameof(IncomingSessionIdText));
+        if (SetProperty(ref incomingRequestedCapabilities, requestedCapabilities, nameof(IncomingRequestedCapabilitiesText)))
+        {
+            OnPropertyChanged(nameof(ShowIncomingRequestedCapabilities));
+            OnPropertyChanged(nameof(ShowIncomingChatCapability));
+            OnPropertyChanged(nameof(ShowIncomingScreenShareCapability));
+            OnPropertyChanged(nameof(ShowIncomingRemoteControlCapability));
+            OnPropertyChanged(nameof(ShowIncomingFileTransferCapability));
+            OnPropertyChanged(nameof(ShowIncomingClipboardCapability));
+        }
+    }
+
+    private void SetIncomingCapabilitySelections(CapabilityGrant approvedCapabilities)
+    {
+        SetIncomingCapabilitySelectionCore(ref allowIncomingChatCapability, (approvedCapabilities & CapabilityGrant.Chat) == CapabilityGrant.Chat, nameof(AllowIncomingChatCapability));
+        SetIncomingCapabilitySelectionCore(ref allowIncomingScreenShareCapability, (approvedCapabilities & CapabilityGrant.ScreenShare) == CapabilityGrant.ScreenShare, nameof(AllowIncomingScreenShareCapability));
+        SetIncomingCapabilitySelectionCore(ref allowIncomingRemoteControlCapability, (approvedCapabilities & CapabilityGrant.RemoteControl) == CapabilityGrant.RemoteControl, nameof(AllowIncomingRemoteControlCapability));
+        SetIncomingCapabilitySelectionCore(ref allowIncomingFileTransferCapability, (approvedCapabilities & CapabilityGrant.FileTransfer) == CapabilityGrant.FileTransfer, nameof(AllowIncomingFileTransferCapability));
+        SetIncomingCapabilitySelectionCore(ref allowIncomingClipboardCapability, (approvedCapabilities & CapabilityGrant.Clipboard) == CapabilityGrant.Clipboard, nameof(AllowIncomingClipboardCapability));
+        OnIncomingCapabilitySelectionChanged();
+    }
+
+    private void SetIncomingCapabilitySelection(ref bool field, bool value, string propertyName)
+    {
+        SetIncomingCapabilitySelectionCore(ref field, value, propertyName);
+        OnIncomingCapabilitySelectionChanged();
+    }
+
+    private void SetIncomingCapabilitySelectionCore(ref bool field, bool value, string propertyName)
+    {
+        SetProperty(ref field, value, propertyName);
+    }
+
+    private void OnIncomingCapabilitySelectionChanged()
+    {
+        OnPropertyChanged(nameof(IncomingApprovedCapabilitiesText));
+        AllowCommand.NotifyCanExecuteChanged();
+    }
+
+    private CapabilityGrant GetSelectedIncomingApprovalCapabilities()
+    {
+        var selected = CapabilityGrant.None;
+
+        if (allowIncomingChatCapability)
+        {
+            selected |= CapabilityGrant.Chat;
+        }
+
+        if (allowIncomingScreenShareCapability)
+        {
+            selected |= CapabilityGrant.ScreenShare;
+        }
+
+        if (allowIncomingRemoteControlCapability)
+        {
+            selected |= CapabilityGrant.RemoteControl;
+        }
+
+        if (allowIncomingFileTransferCapability)
+        {
+            selected |= CapabilityGrant.FileTransfer;
+        }
+
+        if (allowIncomingClipboardCapability)
+        {
+            selected |= CapabilityGrant.Clipboard;
+        }
+
+        return selected & incomingRequestedCapabilities;
+    }
+
+    private static string BuildCapabilitySummary(CapabilityGrant capabilities)
+    {
+        if (capabilities == CapabilityGrant.None)
+        {
+            return "None";
+        }
+
+        var names = new List<string>(5);
+        if ((capabilities & CapabilityGrant.Chat) == CapabilityGrant.Chat)
+        {
+            names.Add("Chat");
+        }
+
+        if ((capabilities & CapabilityGrant.ScreenShare) == CapabilityGrant.ScreenShare)
+        {
+            names.Add("Screen view");
+        }
+
+        if ((capabilities & CapabilityGrant.RemoteControl) == CapabilityGrant.RemoteControl)
+        {
+            names.Add("Remote control");
+        }
+
+        if ((capabilities & CapabilityGrant.FileTransfer) == CapabilityGrant.FileTransfer)
+        {
+            names.Add("File transfer");
+        }
+
+        if ((capabilities & CapabilityGrant.Clipboard) == CapabilityGrant.Clipboard)
+        {
+            names.Add("Clipboard");
+        }
+
+        return string.Join(", ", names);
+    }
+
     private static bool CanEndForPhase(SessionUiPhase phase) =>
         phase is SessionUiPhase.Connecting
             or SessionUiPhase.Connected
@@ -1926,6 +3000,25 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         return string.IsNullOrWhiteSpace(withoutAttempt) ? text : withoutAttempt;
     }
 
+    private bool TryGetRemoteControlHeaderHint(out string hintText)
+    {
+        hintText = string.Empty;
+        if (!IsConnectedView || !sessionRuntime.IsTransientStatusVisible)
+        {
+            return false;
+        }
+
+        var transientText = sessionRuntime.TransientStatusText;
+        if (string.IsNullOrWhiteSpace(transientText) ||
+            !transientText.StartsWith("Screen changed", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        hintText = SanitizeTransientText(transientText);
+        return !string.IsNullOrWhiteSpace(hintText);
+    }
+
     private static UserFacingStatus NormalizeStatusForDisplay(UserFacingStatus status)
     {
         return status with
@@ -1995,7 +3088,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             throw new InvalidOperationException("Helpee UI invariant failed: Ended/Failed phase requires disabled chat input.");
         }
 
-        if (HeaderStatusText.StartsWith("Connected", StringComparison.Ordinal) && !IsChatInputEnabled)
+        if (!endInvoked &&
+            HeaderStatusText.StartsWith("Connected", StringComparison.Ordinal) &&
+            sessionRuntime.State == SessionRuntimeState.Connected &&
+            (IsConnectedView || uiStateStore?.Phase == SessionUiPhase.Connected) &&
+            !IsChatInputEnabled)
         {
             throw new InvalidOperationException("UI invariant failed: Connected header requires chat enabled.");
         }
@@ -2072,7 +3169,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 HasIncomingRequest = false;
                 IsRequestAllowed = false;
                 pendingAutoRegenerateAfterDisconnect = true;
-                if (!RotateCodeAfterTerminalSession())
+                if (!RestartWaitingSessionAfterTerminalSession())
                 {
                     ConnectionStatus = "No response yet.";
                     ConnectionState = "Waiting";
@@ -2099,7 +3196,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         autoRegeneratingAfterDisconnect = true;
         try
         {
-            RegenerateCode();
+            RestartWaitingSession();
             return true;
         }
         finally
@@ -2108,7 +3205,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
-    private bool RotateCodeAfterTerminalSession()
+    private bool RestartWaitingSessionAfterTerminalSession()
     {
         if (IsStartupBlocked || disposed)
         {
@@ -2301,19 +3398,21 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private string BuildHeaderStatusText()
     {
-        var baseText = EffectivePhase switch
-        {
-            SessionUiPhase.Connecting => "Connecting…",
-            SessionUiPhase.Recovering => "Reconnecting…",
-            SessionUiPhase.Connected => "Connected",
-            SessionUiPhase.Failed => string.IsNullOrWhiteSpace(FailureTitle) ? "Connection failed" : FailureTitle,
-            SessionUiPhase.Ended => !string.IsNullOrWhiteSpace(ConnectionStatus)
-                ? ConnectionStatus
-                : !string.IsNullOrWhiteSpace(FailureTitle)
-                    ? FailureTitle
-                    : "Session ended",
-            _ => !string.IsNullOrWhiteSpace(ConnectionStatus) ? ConnectionStatus : "Ready",
-        };
+        var baseText = TryGetRemoteControlHeaderHint(out var remoteControlHint)
+            ? remoteControlHint
+            : EffectivePhase switch
+            {
+                SessionUiPhase.Connecting => "Connecting…",
+                SessionUiPhase.Recovering => "Reconnecting…",
+                SessionUiPhase.Connected => "Connected",
+                SessionUiPhase.Failed => string.IsNullOrWhiteSpace(FailureTitle) ? "Connection failed" : FailureTitle,
+                SessionUiPhase.Ended => !string.IsNullOrWhiteSpace(ConnectionStatus)
+                    ? ConnectionStatus
+                    : !string.IsNullOrWhiteSpace(FailureTitle)
+                        ? FailureTitle
+                        : "Session ended",
+                _ => !string.IsNullOrWhiteSpace(ConnectionStatus) ? ConnectionStatus : "Ready",
+            };
 
         if (ScreenSharePreviewStatus.State == ScreenShareState.Failed &&
             !string.IsNullOrWhiteSpace(ScreenShareViewerMessage) &&

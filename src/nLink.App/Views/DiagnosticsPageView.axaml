@@ -216,59 +216,139 @@
                     </StackPanel>
                 </Border>
 
+                <Border Classes="appCard" Padding="20">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="ScreenShare Capture Tuning"
+                                   Foreground="{StaticResource AppTextBrush}"
+                                   FontSize="22"
+                                   FontWeight="SemiBold"/>
+
+                        <Grid ColumnDefinitions="220,*"
+                              RowDefinitions="Auto,Auto,Auto,Auto"
+                              RowSpacing="8"
+                              ColumnSpacing="12">
+                            <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Current max FPS"/>
+                            <TextBlock Grid.Row="0" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareCaptureMaxFps}" FontSize="16"/>
+
+                            <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="Transport max FPS"/>
+                            <TextBlock Grid.Row="1" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareTransportMaxFps}" FontSize="16"/>
+
+                            <TextBlock Grid.Row="2" Grid.Column="0" Classes="appLabel" Text="Current scale"/>
+                            <TextBlock Grid.Row="2" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareCaptureScale}" FontSize="16"/>
+
+                            <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="Current JPEG quality"/>
+                            <TextBlock Grid.Row="3" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareCaptureJpegQuality}" FontSize="16"/>
+                        </Grid>
+
+                        <Border Classes="appPanel"
+                                Background="{StaticResource AppMutedPanelBrush}"
+                                Padding="12">
+                            <StackPanel Spacing="6">
+                                <TextBlock Classes="appLabel" Text="Presets"/>
+                                <TextBlock Classes="appBody"
+                                           Text="{Binding ScreenSharePresetBalanced, StringFormat='Balanced default: {0}'}"
+                                           FontSize="14"/>
+                                <TextBlock Classes="appBody"
+                                           Text="{Binding ScreenSharePresetLowEnd, StringFormat='Low-end CPU/network: {0}'}"
+                                           FontSize="14"/>
+                                <TextBlock Classes="appBody"
+                                           Text="{Binding ScreenSharePresetHigherClarity, StringFormat='Higher clarity: {0}'}"
+                                           FontSize="14"/>
+                                <Grid ColumnDefinitions="*,*,*"
+                                      ColumnSpacing="8"
+                                      Margin="0,4,0,2">
+                                    <Button Grid.Column="0"
+                                            Classes="appButton secondaryButton"
+                                            Content="Apply balanced"
+                                            Command="{Binding ApplyBalancedScreenSharePresetCommand}"
+                                            Height="40"
+                                            FontSize="14"/>
+                                    <Button Grid.Column="1"
+                                            Classes="appButton secondaryButton"
+                                            Content="Apply low-end"
+                                            Command="{Binding ApplyLowEndScreenSharePresetCommand}"
+                                            Height="40"
+                                            FontSize="14"/>
+                                    <Button Grid.Column="2"
+                                            Classes="appButton secondaryButton"
+                                            Content="Apply clarity"
+                                            Command="{Binding ApplyHigherClarityScreenSharePresetCommand}"
+                                            Height="40"
+                                            FontSize="14"/>
+                                </Grid>
+                                <TextBlock Classes="appMuted"
+                                           Text="{Binding ScreenShareCaptureEnvHint}"
+                                           FontSize="12"
+                                           TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
                 <StackPanel Spacing="8"
                             MaxWidth="820">
-                    <WrapPanel HorizontalAlignment="Center">
-                        <Button AutomationProperties.AutomationId="Diag.Copy"
+                    <Grid ColumnDefinitions="*,*,*"
+                          RowDefinitions="Auto,Auto"
+                          ColumnSpacing="12"
+                          RowSpacing="12"
+                          HorizontalAlignment="Center"
+                          MaxWidth="780">
+                        <Button Grid.Row="0"
+                                Grid.Column="0"
+                                AutomationProperties.AutomationId="Diag.Copy"
                                 Classes="appButton secondaryButton"
                                 Content="Copy diagnostics"
                                 Command="{Binding CopyReliabilityLogCommand}"
-                                MinWidth="170"
                                 Height="52"
                                 FontSize="18"
-                                Margin="0,0,12,12"/>
+                                HorizontalAlignment="Stretch"/>
 
-                        <Button Classes="appButton secondaryButton"
+                        <Button Grid.Row="0"
+                                Grid.Column="1"
+                                Classes="appButton secondaryButton"
                                 Content="Export metrics JSON"
                                 Command="{Binding ExportMetricsJsonCommand}"
-                                MinWidth="190"
                                 Height="52"
                                 FontSize="18"
-                                Margin="0,0,12,12"/>
+                                HorizontalAlignment="Stretch"/>
 
-                        <Button Classes="appButton secondaryButton"
+                        <Button Grid.Row="0"
+                                Grid.Column="2"
+                                Classes="appButton secondaryButton"
                                 Content="Save Hang Report"
                                 Command="{Binding SaveHangReportCommand}"
-                                MinWidth="190"
                                 Height="52"
                                 FontSize="18"
-                                Margin="0,0,12,12"/>
+                                HorizontalAlignment="Stretch"/>
 
-                        <Button Classes="appButton secondaryButton"
+                        <Button Grid.Row="1"
+                                Grid.Column="0"
+                                Classes="appButton secondaryButton"
                                 Content="Report a bug"
                                 Command="{Binding ReportBugCommand}"
-                                MinWidth="160"
                                 Height="52"
                                 FontSize="18"
-                                Margin="0,0,12,12"/>
+                                HorizontalAlignment="Stretch"/>
 
-                        <Button AutomationProperties.AutomationId="Diag.OpenLogs"
+                        <Button Grid.Row="1"
+                                Grid.Column="1"
+                                AutomationProperties.AutomationId="Diag.OpenLogs"
                                 Classes="appButton secondaryButton"
                                 Content="Open logs folder"
                                 Command="{Binding OpenLogsFolderCommand}"
-                                MinWidth="180"
                                 Height="52"
                                 FontSize="18"
-                                Margin="0,0,12,12"/>
+                                HorizontalAlignment="Stretch"/>
 
-                        <Button Classes="appButton secondaryButton"
+                        <Button Grid.Row="1"
+                                Grid.Column="2"
+                                Classes="appButton secondaryButton"
                                 Content="Back"
                                 Command="{Binding BackCommand}"
-                                MinWidth="140"
                                 Height="52"
                                 FontSize="18"
-                                Margin="0,0,12,12"/>
-                    </WrapPanel>
+                                HorizontalAlignment="Stretch"/>
+                    </Grid>
 
                     <TextBlock Classes="appMuted"
                                Text="{Binding CopyFeedback.Text}"
@@ -276,6 +356,22 @@
                                HorizontalAlignment="Center"
                                TextAlignment="Center"
                                IsVisible="{Binding CopyFeedback.IsVisible}"/>
+
+                    <StackPanel Orientation="Horizontal"
+                                Spacing="4"
+                                HorizontalAlignment="Center"
+                                Margin="0,4,0,0">
+                        <TextBlock Classes="appMuted"
+                                   Text="Powered by"
+                                   FontSize="12"
+                                   VerticalAlignment="Center"/>
+                        <Button Classes="linkButton"
+                                Content="NKN"
+                                Click="PoweredByNknLink_Click"
+                                FontSize="12"
+                                Padding="4,0"
+                                VerticalAlignment="Center"/>
+                    </StackPanel>
                 </StackPanel>
             </StackPanel>
         </ScrollViewer>

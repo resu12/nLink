@@ -35,6 +35,42 @@ public partial class SessionHeaderView : UserControl
     public static readonly StyledProperty<string> ScreenShareButtonTextProperty =
         AvaloniaProperty.Register<SessionHeaderView, string>(nameof(ScreenShareButtonText), "Share screen");
 
+    public static readonly StyledProperty<bool> ShowRequestControlProperty =
+        AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(ShowRequestControl), false);
+
+    public static readonly StyledProperty<ICommand?> RequestControlCommandProperty =
+        AvaloniaProperty.Register<SessionHeaderView, ICommand?>(nameof(RequestControlCommand));
+
+    public static readonly StyledProperty<bool> CanRequestControlProperty =
+        AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(CanRequestControl), false);
+
+    public static readonly StyledProperty<bool> ShowStopControlProperty =
+        AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(ShowStopControl), false);
+
+    public static readonly StyledProperty<ICommand?> StopControlCommandProperty =
+        AvaloniaProperty.Register<SessionHeaderView, ICommand?>(nameof(StopControlCommand));
+
+    public static readonly StyledProperty<string> StopControlButtonTextProperty =
+        AvaloniaProperty.Register<SessionHeaderView, string>(nameof(StopControlButtonText), "Stop control");
+
+    public static readonly StyledProperty<bool> CanStopControlProperty =
+        AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(CanStopControl), false);
+
+    public static readonly StyledProperty<bool> ShowRemoteControlActiveStatusProperty =
+        AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(ShowRemoteControlActiveStatus), false);
+
+    public static readonly StyledProperty<bool> ShowControlModeToggleProperty =
+        AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(ShowControlModeToggle), false);
+
+    public static readonly StyledProperty<ICommand?> ControlModeToggleCommandProperty =
+        AvaloniaProperty.Register<SessionHeaderView, ICommand?>(nameof(ControlModeToggleCommand));
+
+    public static readonly StyledProperty<string> ControlModeButtonTextProperty =
+        AvaloniaProperty.Register<SessionHeaderView, string>(nameof(ControlModeButtonText), "Control mode: Off");
+
+    public static readonly StyledProperty<bool> CanControlModeToggleProperty =
+        AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(CanControlModeToggle), false);
+
     public static readonly DirectProperty<SessionHeaderView, bool> HasRoleTextProperty =
         AvaloniaProperty.RegisterDirect<SessionHeaderView, bool>(
             nameof(HasRoleText),
@@ -104,6 +140,78 @@ public partial class SessionHeaderView : UserControl
     {
         get => GetValue(CanScreenShareProperty);
         set => SetValue(CanScreenShareProperty, value);
+    }
+
+    public bool ShowRequestControl
+    {
+        get => GetValue(ShowRequestControlProperty);
+        set => SetValue(ShowRequestControlProperty, value);
+    }
+
+    public ICommand? RequestControlCommand
+    {
+        get => GetValue(RequestControlCommandProperty);
+        set => SetValue(RequestControlCommandProperty, value);
+    }
+
+    public bool CanRequestControl
+    {
+        get => GetValue(CanRequestControlProperty);
+        set => SetValue(CanRequestControlProperty, value);
+    }
+
+    public bool ShowStopControl
+    {
+        get => GetValue(ShowStopControlProperty);
+        set => SetValue(ShowStopControlProperty, value);
+    }
+
+    public ICommand? StopControlCommand
+    {
+        get => GetValue(StopControlCommandProperty);
+        set => SetValue(StopControlCommandProperty, value);
+    }
+
+    public string StopControlButtonText
+    {
+        get => GetValue(StopControlButtonTextProperty);
+        set => SetValue(StopControlButtonTextProperty, value);
+    }
+
+    public bool CanStopControl
+    {
+        get => GetValue(CanStopControlProperty);
+        set => SetValue(CanStopControlProperty, value);
+    }
+
+    public bool ShowRemoteControlActiveStatus
+    {
+        get => GetValue(ShowRemoteControlActiveStatusProperty);
+        set => SetValue(ShowRemoteControlActiveStatusProperty, value);
+    }
+
+    public bool ShowControlModeToggle
+    {
+        get => GetValue(ShowControlModeToggleProperty);
+        set => SetValue(ShowControlModeToggleProperty, value);
+    }
+
+    public ICommand? ControlModeToggleCommand
+    {
+        get => GetValue(ControlModeToggleCommandProperty);
+        set => SetValue(ControlModeToggleCommandProperty, value);
+    }
+
+    public string ControlModeButtonText
+    {
+        get => GetValue(ControlModeButtonTextProperty);
+        set => SetValue(ControlModeButtonTextProperty, value);
+    }
+
+    public bool CanControlModeToggle
+    {
+        get => GetValue(CanControlModeToggleProperty);
+        set => SetValue(CanControlModeToggleProperty, value);
     }
 
     public bool HasRoleText => hasRoleText;

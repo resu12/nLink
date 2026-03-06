@@ -22,6 +22,8 @@ public static class ScreenCaptureFactory
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
+            // TODO(v0.5.0-P7): resolve capture source from monitor/region selection once
+            // the selection UI and persisted capture-target settings are implemented.
             var type = Type.GetType("NLink.App.Services.ScreenCapture.WindowsScreenCaptureSource, nLink", throwOnError: false);
             if (type is not null &&
                 Activator.CreateInstance(type, nonPublic: true) is IScreenCaptureSource captureSource)

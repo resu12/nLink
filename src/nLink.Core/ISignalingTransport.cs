@@ -1,4 +1,7 @@
-﻿namespace NLink.Core;
+using NLink.Core.SessionConnect;
+using NLink.Core.SessionSecurity;
+
+namespace NLink.Core;
 
 public interface ISignalingTransport : IDisposable
 {
@@ -14,37 +17,92 @@ public interface ISignalingTransport : IDisposable
 
     event EventHandler? Disconnected;
 
-    Task HostAsync(SessionCode code, CancellationToken ct);
-
-    Task JoinAsync(SessionCode code, CancellationToken ct);
-
     Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct);
+}
+
+public interface IAddressTargetSignalingTransport
+{
+    Task JoinByAddressAsync(string peerAddress, CancellationToken ct);
+}
+
+public interface IInviteTargetSignalingTransport
+{
+    Task JoinByInviteAsync(string inviteToken, ValidatedInviteV1 invite, CancellationToken ct);
+}
+
+public interface IAddressHostSignalingTransport
+{
+    Task HostByAddressAsync(CancellationToken ct);
+}
+
+public interface IHostReadySignalingTransport
+{
+    Task WaitUntilHostReadyAsync(CancellationToken ct);
+}
+
+public interface ILocalPeerAddressSignalingTransport
+{
+    string LocalPeerAddress { get; }
+}
+
+public interface ISessionSecuritySignalingTransport
+{
+    event EventHandler<TransportSessionSecurityStateChangedEventArgs>? SessionSecurityStateChanged;
+
+    SessionSecurityState CurrentSessionSecurityState { get; }
 }
 
 public sealed class IncomingJoinRequestEventArgs : EventArgs
 {
-    private readonly Func<CancellationToken, Task> approveAsync;
+    private readonly Func<ApprovalDecision?, CancellationToken, Task> approveAsync;
     private readonly Func<CancellationToken, Task> rejectAsync;
     private int handled;
 
     public IncomingJoinRequestEventArgs(
         Func<CancellationToken, Task> approveAsync,
-        Func<CancellationToken, Task> rejectAsync)
+        Func<CancellationToken, Task> rejectAsync,
+        ApprovalRequest? approvalRequest = null)
+        : this((_, ct) => approveAsync(ct), rejectAsync, approvalRequest)
+    {
+    }
+
+    public IncomingJoinRequestEventArgs(
+        Func<ApprovalDecision?, CancellationToken, Task> approveAsync,
+        Func<CancellationToken, Task> rejectAsync,
+        ApprovalRequest? approvalRequest = null)
     {
         this.approveAsync = approveAsync;
         this.rejectAsync = rejectAsync;
+        ApprovalRequest = approvalRequest;
     }
 
     public bool IsHandled => handled != 0;
+    public ApprovalRequest? ApprovalRequest { get; }
+    public bool RequiresExplicitApprovalDecision => ApprovalRequest is not null;
 
     public Task ApproveAsync(CancellationToken ct = default)
     {
+        if (RequiresExplicitApprovalDecision)
+        {
+            throw new InvalidOperationException("Explicit approval decision is required for security-scoped join approval.");
+        }
+
+        return ApproveAsync(decision: null, ct);
+    }
+
+    public Task ApproveAsync(ApprovalDecision? decision, CancellationToken ct = default)
+    {
+        if (RequiresExplicitApprovalDecision && decision is null)
+        {
+            throw new InvalidOperationException("Explicit approval decision is required for security-scoped join approval.");
+        }
+
         if (Interlocked.Exchange(ref handled, 1) != 0)
         {
             return Task.CompletedTask;
         }
 
-        return approveAsync(ct);
+        return approveAsync(decision, ct);
     }
 
     public Task RejectAsync(CancellationToken ct = default)
@@ -78,3 +136,12 @@ public sealed class TransportChatMessageEventArgs : EventArgs
     public byte[] Payload { get; }
 }
 
+public sealed class TransportSessionSecurityStateChangedEventArgs : EventArgs
+{
+    public TransportSessionSecurityStateChangedEventArgs(SessionSecurityState state)
+    {
+        State = state ?? throw new ArgumentNullException(nameof(state));
+    }
+
+    public SessionSecurityState State { get; }
+}

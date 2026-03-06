@@ -1,19 +1,26 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using NLink.Core;
+using NLink.Core.Logging;
+using NLink.Core.RemoteControl;
+using NLink.Core.ScreenShare;
+using NLink.Core.SessionConnect;
+using NLink.Core.SessionSecurity;
 
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed class NknSignalingTransport : ISignalingTransport
+public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport
 {
     private const int EnvelopeVersion = 1;
-    private static readonly TimeSpan PresenceInterval = TimeSpan.FromSeconds(3);
-    private static readonly TimeSpan PresenceTtl = TimeSpan.FromSeconds(15);
-    private static readonly TimeSpan JoinPresenceWaitTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan AckWaitTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan PendingJoinTimeout = TimeSpan.FromSeconds(6);
+    private static readonly TimeSpan ControlInputReceiveLogWindow = TimeSpan.FromSeconds(1);
+    private const int ControlInputReceiveLogBurst = 5;
+    private const int LowPriorityControlLaneCapacity = 256;
     private static readonly TimeSpan[] AckRetryDelays =
     {
         TimeSpan.FromMilliseconds(300),
@@ -24,22 +31,43 @@ public sealed class NknSignalingTransport : ISignalingTransport
     private readonly NknTransportOptions options;
     private readonly NknIdentity identity;
     private readonly INknClient client;
+    private readonly IInviteTokenValidator inviteTokenValidator;
+    private readonly IInviteValidationThrottle inviteValidationThrottle;
+    private readonly ISessionHandshakeReplayCache handshakeReplayCache;
     private readonly LruMessageIdCache seenMessageIds = new(500);
     private readonly ConcurrentDictionary<string, PendingAckWait> pendingAcks = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim outboundSendGate = new(1, 1);
+    private readonly object controlOutboundQueueGate = new();
+    private readonly object controlInputReceiveLogGate = new();
+    private readonly object hostReadyGate = new();
+    private readonly LinkedList<QueuedControlEnvelope> highPriorityControlOutboundQueue = new();
+    private readonly LinkedList<QueuedControlEnvelope> lowPriorityControlOutboundQueue = new();
     private readonly object gate = new();
+    private const bool LocalRemoteControlSupported = true;
 
-    private SessionCode? currentCode;
-    private string? currentTopic;
+    private string? currentEnvelopeCode;
     private string? remoteEndpoint;
     private string? lastPeerAddress;
-    private CancellationTokenSource? presenceLoopCts;
-    private Task? presenceLoopTask;
-    private TaskCompletionSource<PresenceAnnouncement>? pendingPresenceWait;
     private SessionEcdhKeyPair? helpeeHostEcdhKeyPair;
     private SessionEcdhKeyPair? helperJoinEcdhKeyPair;
     private string? helperJoinRequestMessageId;
     private PendingJoinRequestState? pendingJoinRequest;
+    private PendingInboundHandshakeState? pendingInboundHandshake;
+    private PendingOutboundHandshakeState? pendingOutboundHandshake;
+    private Timer? pendingInboundHandshakeTimeoutTimer;
+    private long pendingInboundHandshakeTimeoutGeneration;
+    private bool remoteSupportsRemoteControl;
+    private RemoteControlSessionState transportRemoteControlState = RemoteControlSessionState.Default;
+    private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
+    private LinkedListNode<QueuedControlEnvelope>? queuedLowPriorityMouseMoveNode;
+    private bool controlOutboundDrainerActive;
+    private long lowLaneDroppedMoves;
+    private long lowLaneEnqueuedMoves;
+    private int lowLaneMaxDepthSeen;
+    private long controlInputReceiveLogWindowStartTicks;
+    private int controlInputReceiveLogCount;
+    private int controlInputReceiveLogSuppressed;
+    private TaskCompletionSource<bool> hostReadyTcs = CreateHostReadyTcs();
     private bool disposed;
 
     public NknSignalingTransport()
@@ -47,6 +75,9 @@ public sealed class NknSignalingTransport : ISignalingTransport
         options = NknTransportOptions.Load();
         identity = NknIdentityStore.LoadOrCreate(options);
         client = new RealNknClientAdapter(identity, options);
+        inviteTokenValidator = InviteTokenServiceFactory.CreateInviteTokenValidator();
+        inviteValidationThrottle = InviteTokenServiceFactory.CreateInviteValidationThrottle();
+        handshakeReplayCache = new InMemorySessionHandshakeReplayCache();
         SubscribeClientEvents();
 
         NknRuntimeDiagnostics.SetIdentity(
@@ -63,6 +94,9 @@ public sealed class NknSignalingTransport : ISignalingTransport
         this.client = client ?? throw new ArgumentNullException(nameof(client));
         this.options = options ?? throw new ArgumentNullException(nameof(options));
         this.identity = identity ?? throw new ArgumentNullException(nameof(identity));
+        inviteTokenValidator = InviteTokenServiceFactory.CreateInviteTokenValidator();
+        inviteValidationThrottle = InviteTokenServiceFactory.CreateInviteValidationThrottle();
+        handshakeReplayCache = new InMemorySessionHandshakeReplayCache();
         SubscribeClientEvents();
     }
 
@@ -77,14 +111,48 @@ public sealed class NknSignalingTransport : ISignalingTransport
     public event EventHandler? Rejected;
 
     public event EventHandler? Disconnected;
+    public event EventHandler<TransportSessionSecurityStateChangedEventArgs>? SessionSecurityStateChanged;
 
     public event EventHandler? RemoteSessionEnded;
+    public event EventHandler<RemoteControlRequestReceivedEventArgs>? RemoteControlRequestReceived;
+    public event EventHandler<RemoteControlResponseReceivedEventArgs>? RemoteControlResponseReceived;
+    public event EventHandler<RemoteControlStartReceivedEventArgs>? RemoteControlStartReceived;
+    public event EventHandler<RemoteControlStopReceivedEventArgs>? RemoteControlStopReceived;
+    public event EventHandler<RemoteControlInputReceivedEventArgs>? RemoteControlInputReceived;
+    public event EventHandler<RemoteControlAckReceivedEventArgs>? RemoteControlAckReceived;
+    public event EventHandler<RemoteControlDisplayInfoReceivedEventArgs>? RemoteControlDisplayInfoReceived;
+    public event EventHandler<RemoteControlStateSnapshotReceivedEventArgs>? RemoteControlStateSnapshotReceived;
 
     internal event EventHandler<BridgeLifecycleEvent>? BridgeLifecycle;
     internal event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
     internal event EventHandler? ScreenShareStopped;
 
-    public bool CanSendSessionEnd => !disposed && currentCode is not null && !string.IsNullOrWhiteSpace(remoteEndpoint);
+    public string LocalPeerAddress => string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address;
+    public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
+    public bool CanSendSessionEnd => !disposed && !string.IsNullOrWhiteSpace(currentEnvelopeCode) && !string.IsNullOrWhiteSpace(remoteEndpoint);
+    public bool LocalSupportsRemoteControl => LocalRemoteControlSupported;
+    public bool RemoteSupportsRemoteControl => remoteSupportsRemoteControl;
+    public bool SessionSupportsRemoteControl => LocalSupportsRemoteControl && RemoteSupportsRemoteControl;
+    internal long LowLaneDroppedMoves => Interlocked.Read(ref lowLaneDroppedMoves);
+    internal long LowLaneEnqueuedMoves => Interlocked.Read(ref lowLaneEnqueuedMoves);
+    internal int LowLaneMaxDepthSeen => Volatile.Read(ref lowLaneMaxDepthSeen);
+
+    public Task WaitUntilHostReadyAsync(CancellationToken ct)
+    {
+        Task readyTask;
+        lock (hostReadyGate)
+        {
+            readyTask = hostReadyTcs.Task;
+        }
+
+        return readyTask.WaitAsync(ct);
+    }
+
+    private enum ControlOutboundLane
+    {
+        High = 0,
+        Low = 1,
+    }
 
     public async Task<bool> TryPingBridgeHealthAsync(CancellationToken ct)
     {
@@ -112,19 +180,56 @@ public sealed class NknSignalingTransport : ISignalingTransport
         }
     }
 
-    internal async Task PrepareForReuseAsync()
+    internal Task PrepareForReuseAsync()
     {
         ThrowIfDisposed();
 
-        await StopPresenceLoopAsync();
-        await BestEffortUnsubscribeCurrentTopicAsync();
         CancelPendingAcks();
+        CancelPendingInboundHandshakeTimeout();
         ResetSessionTracking();
         seenMessageIds.Clear();
-        currentCode = null;
+        currentEnvelopeCode = null;
         lastPeerAddress = null;
 
         Log("Prepared for reuse");
+        return Task.CompletedTask;
+    }
+
+    private static TaskCompletionSource<bool> CreateHostReadyTcs()
+    {
+        return new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private void ResetHostReady()
+    {
+        lock (hostReadyGate)
+        {
+            hostReadyTcs = CreateHostReadyTcs();
+        }
+    }
+
+    private void TrySetHostReady()
+    {
+        lock (hostReadyGate)
+        {
+            hostReadyTcs.TrySetResult(true);
+        }
+    }
+
+    private void TryCancelHostReady()
+    {
+        lock (hostReadyGate)
+        {
+            hostReadyTcs.TrySetCanceled();
+        }
+    }
+
+    private void TryFailHostReady(Exception ex)
+    {
+        lock (hostReadyGate)
+        {
+            hostReadyTcs.TrySetException(ex);
+        }
     }
 
     public void Dispose()
@@ -135,6 +240,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
         }
 
         disposed = true;
+        TryCancelHostReady();
 
         // Avoid treating normal cleanup as a disconnection.
         client.MessageReceived -= OnClientMessageReceived;
@@ -152,16 +258,13 @@ public sealed class NknSignalingTransport : ISignalingTransport
         Log("Disposed");
     }
 
-    public async Task HostAsync(SessionCode code, CancellationToken ct)
+    public async Task HostByAddressAsync(CancellationToken ct)
     {
         ThrowIfDisposed();
+        ResetHostReady();
 
-        await StopPresenceLoopAsync();
-        await BestEffortUnsubscribeCurrentTopicAsync();
         ResetSessionTracking();
 
-        currentCode = code;
-        currentTopic = BuildPresenceTopic(code);
         seenMessageIds.Clear();
         ReplaceHelpeeHostKeyPair(CreateSessionEcdhKeyPair());
 
@@ -175,37 +278,92 @@ public sealed class NknSignalingTransport : ISignalingTransport
                 identifier: identity.Identifier,
                 keyPath: options.KeyPath,
                 seedRpc: options.SeedRpc);
-            await client.SubscribeAsync(currentTopic, ct);
-            StartPresenceLoop(code, currentTopic, ct);
-            Log($"HostAsync ready (code={code.Digits}, topic={currentTopic})");
+            UpdateSessionSecurityState(SessionSecurityState.CreateHelpeeWaiting(new PeerAddress(LocalPeerAddress)));
+            TrySetHostReady();
+            Log("HostByAddressAsync ready (address-native)");
         }
         catch (Exception ex)
         {
+            TryFailHostReady(ex);
             NknRuntimeDiagnostics.SetLastError(ex);
-            Log($"HostAsync failed ({ex.GetType().Name})");
+            Log($"HostByAddressAsync failed ({ex.GetType().Name})");
             throw;
         }
     }
 
-    public async Task JoinAsync(SessionCode code, CancellationToken ct)
+    public Task JoinByAddressAsync(string peerAddress, CancellationToken ct)
+    {
+        return Task.FromException(new NotSupportedException("Raw address helper connect is disabled for NKN. Use invite-targeted connect."));
+    }
+
+    public Task JoinByInviteAsync(string inviteToken, ValidatedInviteV1 invite, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(inviteToken))
+        {
+            throw new ArgumentException("Invite token is required.", nameof(inviteToken));
+        }
+
+        ArgumentNullException.ThrowIfNull(invite);
+        var normalizedInviteToken = inviteToken.Trim();
+        var validation = inviteTokenValidator.Validate(normalizedInviteToken, DateTimeOffset.UtcNow, InviteValidationMode.InspectOnly);
+        if (!validation.IsSuccess || validation.Invite is null)
+        {
+            UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(SessionHandshakeState.Failed, validation.Result.ToFailureCode()));
+            Log($"JoinByInviteAsync rejected before join (result={validation.Result}, parse={validation.ParseError})");
+            throw new InvalidOperationException(validation.Message ?? "Invite token is invalid.");
+        }
+
+        if (validation.Invite.SessionId != invite.SessionId ||
+            validation.Invite.TargetAddress != invite.TargetAddress ||
+            validation.Invite.IssuerAddress != invite.IssuerAddress)
+        {
+            UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(SessionHandshakeState.Failed, "invite_binding_mismatch"));
+            Log("JoinByInviteAsync rejected before join (reason=invite_binding_mismatch)");
+            throw new InvalidOperationException("Invite token does not match the provided invite context.");
+        }
+
+        var helperAddress = new PeerAddress(string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address);
+        if (validation.Invite.BoundHelperAddress is not null &&
+            validation.Invite.BoundHelperAddress != helperAddress)
+        {
+            UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(SessionHandshakeState.Failed, "invite_helper_mismatch"));
+            Log("JoinByInviteAsync rejected before join (reason=invite_helper_mismatch)");
+            throw new InvalidOperationException("Invite token is bound to a different helper identity.");
+        }
+
+        var pendingHandshake = new PendingOutboundHandshakeState(
+            invite.SessionId,
+            helperAddress,
+            invite.TargetAddress,
+            InviteValidated: true,
+            RequestedCapabilities: invite.Payload.Capabilities.ToCapabilityGrant(),
+            InviteToken: normalizedInviteToken);
+        return JoinCoreAsync(invite.TargetAddress.Value, pendingHandshake, ct);
+    }
+
+    private async Task JoinCoreAsync(string peerAddress, PendingOutboundHandshakeState outboundHandshake, CancellationToken ct)
     {
         ThrowIfDisposed();
 
-        await StopPresenceLoopAsync();
-        await BestEffortUnsubscribeCurrentTopicAsync();
+        if (string.IsNullOrWhiteSpace(peerAddress))
+        {
+            throw new ArgumentException("Peer address is required.", nameof(peerAddress));
+        }
+
         ResetSessionTracking();
 
-        currentCode = code;
-        currentTopic = BuildPresenceTopic(code);
+        var sessionContextCode = CreateAddressSessionContextCode();
+        currentEnvelopeCode = sessionContextCode;
         seenMessageIds.Clear();
         ReplaceHelperJoinKeyPair(CreateSessionEcdhKeyPair());
+        pendingOutboundHandshake = outboundHandshake;
+        UpdateSessionSecurityState(SessionSecurityState.CreateHelperPending(
+            outboundHandshake.SessionId,
+            outboundHandshake.HelpeeAddress,
+            outboundHandshake.HelperAddress,
+            outboundHandshake.InviteValidated));
 
-        TaskCompletionSource<PresenceAnnouncement> presenceWait;
-        lock (gate)
-        {
-            pendingPresenceWait = new TaskCompletionSource<PresenceAnnouncement>(TaskCreationOptions.RunContinuationsAsynchronously);
-            presenceWait = pendingPresenceWait;
-        }
+        var destination = peerAddress.Trim();
 
         try
         {
@@ -217,58 +375,42 @@ public sealed class NknSignalingTransport : ISignalingTransport
                 identifier: identity.Identifier,
                 keyPath: options.KeyPath,
                 seedRpc: options.SeedRpc);
-            await client.SubscribeAsync(currentTopic, ct);
-            Log($"JoinAsync waiting for Presence (code={code.Digits}, topic={currentTopic})");
+            var effectiveHelperAddress = new PeerAddress(string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address);
+            pendingOutboundHandshake = outboundHandshake with { HelperAddress = effectiveHelperAddress };
+            UpdateSessionSecurityState(SessionSecurityState.CreateHelperPending(
+                outboundHandshake.SessionId,
+                outboundHandshake.HelpeeAddress,
+                effectiveHelperAddress,
+                outboundHandshake.InviteValidated));
 
-            PresenceAnnouncement announcement;
-            try
-            {
-                announcement = await presenceWait.Task.WaitAsync(JoinPresenceWaitTimeout, ct);
-            }
-            catch (TimeoutException)
-            {
-                NknRuntimeDiagnostics.SetLastError("Could not find session for code");
-                SessionTimeline.Record("DiscoveryTimeout");
-                SessionReliabilityLog.RecordStandalone(
-                    "Helper",
-                    "NKN",
-                    SessionReliabilityStage.DiscoveryTimeout,
-                    errorCode: "timeout",
-                    errorHint: "Could not find that code. Ask them to try a new code.");
-                Log($"JoinAsync timeout waiting for Presence (code={code.Digits})");
-                await BestEffortUnsubscribeCurrentTopicAsync();
-                Disconnected?.Invoke(this, EventArgs.Empty);
-                return;
-            }
-
-            remoteEndpoint = announcement.Endpoint;
-            lastPeerAddress = announcement.Endpoint;
+            remoteEndpoint = destination;
+            lastPeerAddress = destination;
             SessionTimeline.Record("DiscoveryFound");
-            Log($"JoinAsync presence found (endpoint_len={announcement.Endpoint.Length}, identifier_len={announcement.Identifier.Length})");
-
-            await BestEffortUnsubscribeCurrentTopicAsync();
+            Log($"JoinByAddressAsync target accepted (endpoint_len={destination.Length})");
 
             var helperKeyPair = GetHelperJoinKeyPairOrThrow();
 
             var joinPayload = new JoinRequestPayload
             {
-                helperEndpoint = string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address,
+                helperEndpoint = effectiveHelperAddress.Value,
                 helperIdentifier = identity.Identifier,
                 helperEcdhPublicKey = Convert.ToBase64String(helperKeyPair.PublicKey),
+                remoteControlSupported = LocalSupportsRemoteControl,
             };
 
             var joinEnvelope = CreateEnvelope(
-                code.Digits,
+                sessionContextCode,
                 MsgType.JoinRequest,
                 JsonSerializer.SerializeToUtf8Bytes(joinPayload),
                 replyTo: null);
 
             helperJoinRequestMessageId = joinEnvelope.MessageId;
-            await SendEnvelopeWithAckRetryAsync(remoteEndpoint, joinEnvelope, ct);
+            await SendEnvelopeWithAckRetryAsync(destination, joinEnvelope, ct);
+            await SendHandshakeStartAsync(destination, pendingOutboundHandshake ?? outboundHandshake, ct).ConfigureAwait(false);
             SessionTimeline.Record("JoinRequestSent");
             SessionReliabilityLog.RecordStandalone("Helper", "NKN", SessionReliabilityStage.DiscoveryFoundHost);
             SessionReliabilityLog.RecordStandalone("Helper", "NKN", SessionReliabilityStage.JoinRequestSent);
-            Log($"JoinAsync sent JoinRequest with Ack (code={code.Digits}, msg_id={joinEnvelope.MessageId})");
+            Log($"JoinByAddressAsync sent JoinRequest with Ack (msg_id={joinEnvelope.MessageId})");
         }
         catch (OperationCanceledException)
         {
@@ -277,15 +419,8 @@ public sealed class NknSignalingTransport : ISignalingTransport
         catch (Exception ex)
         {
             NknRuntimeDiagnostics.SetLastError(ex);
-            Log($"JoinAsync failed ({ex.GetType().Name})");
+            Log($"JoinByAddressAsync failed ({ex.GetType().Name})");
             throw;
-        }
-        finally
-        {
-            lock (gate)
-            {
-                pendingPresenceWait = null;
-            }
         }
     }
 
@@ -299,11 +434,11 @@ public sealed class NknSignalingTransport : ISignalingTransport
             return;
         }
 
-        if (currentCode is null)
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
         {
-            NknRuntimeDiagnostics.SetLastError("chat_no_session_code");
-            Log($"SendChatMessageAsync failed (payload_len={payload.Length}, reason=no_session_code)");
-            throw new InvalidOperationException("No active session code.");
+            NknRuntimeDiagnostics.SetLastError("chat_no_session_context");
+            Log($"SendChatMessageAsync failed (payload_len={payload.Length}, reason=no_session_context)");
+            throw new InvalidOperationException("No active session context.");
         }
 
         var destination = remoteEndpoint;
@@ -314,7 +449,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
             throw new InvalidOperationException("Remote endpoint is not known yet.");
         }
 
-        var envelope = CreateEnvelope(currentCode.Value.Digits, MsgType.Chat, payload.ToArray(), replyTo: null);
+        var envelope = CreateEnvelope(envelopeCode, MsgType.Chat, payload.ToArray(), replyTo: null);
         await SendEnvelopeWithAckRetryAsync(destination, envelope, ct);
         Log($"SendChatMessageAsync sent Chat with Ack (payload_len={payload.Length}, msg_id={envelope.MessageId})");
     }
@@ -326,6 +461,18 @@ public sealed class NknSignalingTransport : ISignalingTransport
         if (ct.IsCancellationRequested)
         {
             await Task.FromCanceled(ct);
+            return;
+        }
+
+        if (!TryParseScreenSharePayload(payload.Span, out var messageType, out var messageSessionId))
+        {
+            LogScreenShareRejected("send", "payload_invalid", sessionId: null);
+            return;
+        }
+
+        if (!TryValidateScreenShareSession(messageType, messageSessionId) ||
+            !IsScreenShareAuthorizedForDispatch(messageType, messageSessionId))
+        {
             return;
         }
 
@@ -365,20 +512,546 @@ public sealed class NknSignalingTransport : ISignalingTransport
             return;
         }
 
-        if (currentCode is null || string.IsNullOrWhiteSpace(remoteEndpoint))
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode) ||
+            string.IsNullOrWhiteSpace(remoteEndpoint) ||
+            currentSessionSecurityState.SessionId is not SessionId sessionId)
         {
             return;
         }
 
         var payload = JsonSerializer.SerializeToUtf8Bytes(new SessionEndPayload
         {
+            sessionId = sessionId.Value,
             reason = "user_exit",
         });
 
-        var envelope = CreateEnvelope(currentCode.Value.Digits, MsgType.SessionEnd, payload, replyTo: null);
+        var envelope = CreateEnvelope(envelopeCode, MsgType.SessionEnd, payload, replyTo: null);
         SessionTimeline.Record("SessionEndSent");
         await SendEnvelopeAsync(remoteEndpoint, envelope, ct);
         Log($"SendSessionEndAsync sent SessionEnd (msg_id={envelope.MessageId})");
+    }
+
+    public async Task SendControlRequestAsync(ControlRequestMessageV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+        message = EnsureControlSessionId(message);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlrequest_no_session_context");
+            Log("SendControlRequestAsync failed (reason=no_session_context)");
+            throw new InvalidOperationException("Session context is not set.");
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlrequest_no_remote_endpoint");
+            Log("SendControlRequestAsync failed (reason=no_remote_endpoint)");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        var payload = RemoteControlPayloadCodec.Serialize(message);
+        var envelope = CreateEnvelope(envelopeCode, MsgType.ControlRequest, payload, replyTo: null);
+        await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        Log($"SendControlRequestAsync sent ControlRequest (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length})");
+    }
+
+    public async Task SendControlResponseAsync(ControlResponseMessageV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+        message = EnsureControlSessionId(message);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlresponse_no_session_context");
+            Log("SendControlResponseAsync failed (reason=no_session_context)");
+            throw new InvalidOperationException("Session context is not set.");
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlresponse_no_remote_endpoint");
+            Log("SendControlResponseAsync failed (reason=no_remote_endpoint)");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        var payload = RemoteControlPayloadCodec.Serialize(message);
+        var envelope = CreateEnvelope(envelopeCode, MsgType.ControlResponse, payload, replyTo: null);
+        await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        Log($"SendControlResponseAsync sent ControlResponse (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length}, decision={message.Decision})");
+    }
+
+    public async Task SendControlStartAsync(ControlStartMessageV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+        message = EnsureControlSessionId(message);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlstart_no_session_context");
+            Log("SendControlStartAsync failed (reason=no_session_context)");
+            throw new InvalidOperationException("Session context is not set.");
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlstart_no_remote_endpoint");
+            Log("SendControlStartAsync failed (reason=no_remote_endpoint)");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        var payload = RemoteControlPayloadCodec.Serialize(message);
+        var envelope = CreateEnvelope(envelopeCode, MsgType.ControlStart, payload, replyTo: null);
+        await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        Log($"SendControlStartAsync sent ControlStart (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length})");
+    }
+
+    public async Task SendControlStopAsync(ControlStopMessageV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+        message = EnsureControlSessionId(message);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlstop_no_session_context");
+            Log("SendControlStopAsync failed (reason=no_session_context)");
+            throw new InvalidOperationException("Session context is not set.");
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlstop_no_remote_endpoint");
+            Log("SendControlStopAsync failed (reason=no_remote_endpoint)");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        var payload = RemoteControlPayloadCodec.Serialize(message);
+        var envelope = CreateEnvelope(envelopeCode, MsgType.ControlStop, payload, replyTo: null);
+        FlushLowPriorityControlOutboundQueue("control_stop");
+        await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        Log($"SendControlStopAsync sent ControlStop (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length}, has_reason={message.Reason is not null})");
+    }
+
+    public async Task SendControlInputAsync(ControlInputMessageV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+        message = EnsureControlSessionId(message);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlinput_no_session_context");
+            Log("SendControlInputAsync failed (reason=no_session_context)");
+            throw new InvalidOperationException("Session context is not set.");
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlinput_no_remote_endpoint");
+            Log("SendControlInputAsync failed (reason=no_remote_endpoint)");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        var payload = RemoteControlPayloadCodec.Serialize(message);
+        var envelope = CreateEnvelope(envelopeCode, MsgType.ControlInput, payload, replyTo: null);
+        var isMouseMove = IsLowPriorityControlInput(message);
+        await QueueControlEnvelopeAsync(
+                remoteEndpoint,
+                envelope,
+                ResolveControlOutboundLane(MsgType.ControlInput, isLowPriorityMouseMove: isMouseMove),
+                ct,
+                isLowPriorityMouseMove: isMouseMove)
+            .ConfigureAwait(false);
+        Log($"SendControlInputAsync sent ControlInput (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length}, kind={message.Kind}, seq={message.Seq})");
+    }
+
+    public async Task SendControlAckAsync(ControlInputAckV1 ack, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(ack);
+        ThrowIfDisposed();
+        ack = EnsureControlSessionId(ack);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlack_no_session_context");
+            Log("SendControlAckAsync failed (reason=no_session_context)");
+            throw new InvalidOperationException("Session context is not set.");
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlack_no_remote_endpoint");
+            Log("SendControlAckAsync failed (reason=no_remote_endpoint)");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        var payload = RemoteControlPayloadCodec.Serialize(ack);
+        var envelope = CreateEnvelope(envelopeCode, MsgType.ControlAck, payload, replyTo: null);
+        await QueueControlEnvelopeAsync(
+                remoteEndpoint,
+                envelope,
+                ResolveControlOutboundLane(MsgType.ControlAck),
+                ct)
+            .ConfigureAwait(false);
+        Log($"SendControlAckAsync sent ControlAck (msg_id={envelope.MessageId}, request_id_len={ack.RequestId.Length}, ack_seq={ack.AckSeq})");
+    }
+
+    public async Task SendControlDisplayInfoAsync(ControlDisplayInfoMessageV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+        message = EnsureControlSessionId(message);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("controldisplayinfo_no_session_context");
+            Log("SendControlDisplayInfoAsync failed (reason=no_session_context)");
+            throw new InvalidOperationException("Session context is not set.");
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("controldisplayinfo_no_remote_endpoint");
+            Log("SendControlDisplayInfoAsync failed (reason=no_remote_endpoint)");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        var payload = RemoteControlPayloadCodec.Serialize(message);
+        var envelope = CreateEnvelope(envelopeCode, MsgType.ControlDisplayInfo, payload, replyTo: null);
+        await QueueControlEnvelopeAsync(
+                remoteEndpoint,
+                envelope,
+                ResolveControlOutboundLane(MsgType.ControlDisplayInfo),
+                ct)
+            .ConfigureAwait(false);
+        Log($"SendControlDisplayInfoAsync sent ControlDisplayInfo (msg_id={envelope.MessageId}, display_id_len={message.DisplayId.Length}, revision={message.Revision}, frame={message.FrameWidth}x{message.FrameHeight})");
+    }
+
+    public async Task SendControlStateSnapshotAsync(ControlStateSnapshotV1 snapshot, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ThrowIfDisposed();
+        snapshot = EnsureControlSessionId(snapshot);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlstatesnapshot_no_session_context");
+            Log("SendControlStateSnapshotAsync failed (reason=no_session_context)");
+            throw new InvalidOperationException("Session context is not set.");
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlstatesnapshot_no_remote_endpoint");
+            Log("SendControlStateSnapshotAsync failed (reason=no_remote_endpoint)");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        var payload = RemoteControlPayloadCodec.Serialize(snapshot);
+        var envelope = CreateEnvelope(envelopeCode, MsgType.ControlStateSnapshot, payload, replyTo: null);
+        await QueueControlEnvelopeAsync(
+                remoteEndpoint,
+                envelope,
+                ResolveControlOutboundLane(MsgType.ControlStateSnapshot),
+                ct)
+            .ConfigureAwait(false);
+        Log($"SendControlStateSnapshotAsync sent ControlStateSnapshot (msg_id={envelope.MessageId}, request_id_len={snapshot.RequestId.Length}, seq={snapshot.Seq}, buttons_mask={snapshot.MouseButtonsMask}, modifiers_mask={snapshot.ModifiersMask})");
+    }
+
+    private static ControlOutboundLane ResolveControlOutboundLane(MsgType messageType, bool isLowPriorityMouseMove = false)
+    {
+        return messageType switch
+        {
+            MsgType.ControlInput when isLowPriorityMouseMove => ControlOutboundLane.Low,
+            // DisplayInfoChanged is represented as ControlDisplayInfo with a newer revision.
+            MsgType.ControlDisplayInfo => ControlOutboundLane.High,
+            MsgType.ControlRequest or
+                MsgType.ControlResponse or
+                MsgType.ControlStart or
+                MsgType.ControlStop or
+                MsgType.ControlAck or
+                MsgType.ControlStateSnapshot => ControlOutboundLane.High,
+            _ => ControlOutboundLane.High,
+        };
+    }
+
+    private Task QueueControlEnvelopeAsync(
+        string destination,
+        Envelope envelope,
+        ControlOutboundLane lane,
+        CancellationToken ct,
+        bool isLowPriorityMouseMove = false)
+    {
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var queued = new QueuedControlEnvelope(destination, envelope, completion, ct, isLowPriorityMouseMove);
+        List<TaskCompletionSource<bool>>? droppedCompletions = null;
+        var shouldStartDrainer = false;
+
+        lock (controlOutboundQueueGate)
+        {
+            if (lane == ControlOutboundLane.Low)
+            {
+                if (isLowPriorityMouseMove)
+                {
+                    Interlocked.Increment(ref lowLaneEnqueuedMoves);
+                }
+
+                if (isLowPriorityMouseMove && queuedLowPriorityMouseMoveNode is not null)
+                {
+                    droppedCompletions ??= new List<TaskCompletionSource<bool>>();
+                    droppedCompletions.Add(queuedLowPriorityMouseMoveNode.Value.Completion);
+                    Interlocked.Increment(ref lowLaneDroppedMoves);
+                    queuedLowPriorityMouseMoveNode.Value = queued;
+                }
+                else
+                {
+                    while (lowPriorityControlOutboundQueue.Count >= LowPriorityControlLaneCapacity)
+                    {
+                        var droppedNode = lowPriorityControlOutboundQueue.First;
+                        if (droppedNode is null)
+                        {
+                            break;
+                        }
+
+                        lowPriorityControlOutboundQueue.RemoveFirst();
+                        if (ReferenceEquals(droppedNode, queuedLowPriorityMouseMoveNode))
+                        {
+                            queuedLowPriorityMouseMoveNode = null;
+                        }
+
+                        droppedCompletions ??= new List<TaskCompletionSource<bool>>();
+                        droppedCompletions.Add(droppedNode.Value.Completion);
+                        if (droppedNode.Value.IsLowPriorityMouseMove)
+                        {
+                            Interlocked.Increment(ref lowLaneDroppedMoves);
+                        }
+                    }
+
+                    var inserted = lowPriorityControlOutboundQueue.AddLast(queued);
+                    if (isLowPriorityMouseMove)
+                    {
+                        queuedLowPriorityMouseMoveNode = inserted;
+                    }
+                }
+
+                if (lowPriorityControlOutboundQueue.Count > lowLaneMaxDepthSeen)
+                {
+                    lowLaneMaxDepthSeen = lowPriorityControlOutboundQueue.Count;
+                }
+            }
+            else
+            {
+                highPriorityControlOutboundQueue.AddLast(queued);
+            }
+
+            if (!controlOutboundDrainerActive)
+            {
+                controlOutboundDrainerActive = true;
+                shouldStartDrainer = true;
+            }
+        }
+
+        if (droppedCompletions is not null)
+        {
+            foreach (var dropped in droppedCompletions)
+            {
+                dropped.TrySetResult(false);
+            }
+
+            Log($"Control outbound low lane dropped stale message(s) (count={droppedCompletions.Count})");
+        }
+
+        if (shouldStartDrainer)
+        {
+            _ = Task.Run(DrainControlOutboundQueueAsync);
+        }
+
+        return completion.Task;
+    }
+
+    private async Task DrainControlOutboundQueueAsync()
+    {
+        while (true)
+        {
+            QueuedControlEnvelope queued;
+            lock (controlOutboundQueueGate)
+            {
+                LinkedListNode<QueuedControlEnvelope>? nextNode = null;
+                if (highPriorityControlOutboundQueue.First is not null)
+                {
+                    nextNode = highPriorityControlOutboundQueue.First;
+                    highPriorityControlOutboundQueue.RemoveFirst();
+                }
+                else if (lowPriorityControlOutboundQueue.First is not null)
+                {
+                    nextNode = lowPriorityControlOutboundQueue.First;
+                    lowPriorityControlOutboundQueue.RemoveFirst();
+                    if (ReferenceEquals(nextNode, queuedLowPriorityMouseMoveNode))
+                    {
+                        queuedLowPriorityMouseMoveNode = null;
+                    }
+                }
+                else
+                {
+                    controlOutboundDrainerActive = false;
+                    return;
+                }
+
+                queued = nextNode.Value;
+            }
+
+            if (queued.CancellationToken.IsCancellationRequested)
+            {
+                queued.Completion.TrySetCanceled(queued.CancellationToken);
+                continue;
+            }
+
+            try
+            {
+                await SendEnvelopeAsync(queued.Destination, queued.Envelope, queued.CancellationToken).ConfigureAwait(false);
+                queued.Completion.TrySetResult(true);
+            }
+            catch (OperationCanceledException) when (queued.CancellationToken.IsCancellationRequested)
+            {
+                queued.Completion.TrySetCanceled(queued.CancellationToken);
+            }
+            catch (Exception ex)
+            {
+                queued.Completion.TrySetException(ex);
+            }
+        }
+    }
+
+    private void FlushLowPriorityControlOutboundQueue(string reason)
+    {
+        List<TaskCompletionSource<bool>>? droppedCompletions = null;
+
+        lock (controlOutboundQueueGate)
+        {
+            while (lowPriorityControlOutboundQueue.First is not null)
+            {
+                var droppedNode = lowPriorityControlOutboundQueue.First;
+                lowPriorityControlOutboundQueue.RemoveFirst();
+                droppedCompletions ??= new List<TaskCompletionSource<bool>>();
+                droppedCompletions.Add(droppedNode.Value.Completion);
+            }
+
+            queuedLowPriorityMouseMoveNode = null;
+        }
+
+        if (droppedCompletions is null)
+        {
+            return;
+        }
+
+        foreach (var dropped in droppedCompletions)
+        {
+            dropped.TrySetResult(false);
+        }
+
+        Log($"Control outbound low lane flushed (reason={reason}, dropped={droppedCompletions.Count})");
+    }
+
+    private void FlushAllControlOutboundQueues(string reason)
+    {
+        List<TaskCompletionSource<bool>>? droppedCompletions = null;
+
+        lock (controlOutboundQueueGate)
+        {
+            while (highPriorityControlOutboundQueue.First is not null)
+            {
+                var droppedNode = highPriorityControlOutboundQueue.First;
+                highPriorityControlOutboundQueue.RemoveFirst();
+                droppedCompletions ??= new List<TaskCompletionSource<bool>>();
+                droppedCompletions.Add(droppedNode.Value.Completion);
+            }
+
+            while (lowPriorityControlOutboundQueue.First is not null)
+            {
+                var droppedNode = lowPriorityControlOutboundQueue.First;
+                lowPriorityControlOutboundQueue.RemoveFirst();
+                droppedCompletions ??= new List<TaskCompletionSource<bool>>();
+                droppedCompletions.Add(droppedNode.Value.Completion);
+            }
+
+            queuedLowPriorityMouseMoveNode = null;
+        }
+
+        if (droppedCompletions is null)
+        {
+            return;
+        }
+
+        foreach (var dropped in droppedCompletions)
+        {
+            dropped.TrySetCanceled();
+        }
+
+        Log($"Control outbound lanes flushed (reason={reason}, dropped={droppedCompletions.Count})");
+    }
+
+    private static bool IsLowPriorityControlInput(ControlInputMessageV1 message)
+    {
+        var kind = message.Kind;
+        if (string.IsNullOrWhiteSpace(kind))
+        {
+            return false;
+        }
+
+        // Keep clicks, wheel and keyboard in high lane for responsiveness.
+        return string.Equals(kind.Trim(), "mouse_move", StringComparison.Ordinal);
     }
 
     private void SubscribeClientEvents()
@@ -400,11 +1073,22 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
     private void OnScreenShareFrameCompleted(object? sender, ScreenShareFrameCompletedEventArgs e)
     {
+        if (!TryValidateScreenShareSession("frame", e.SessionId) ||
+            !IsScreenShareAuthorizedForDispatch("frame", e.SessionId))
+        {
+            return;
+        }
+
         ScreenShareFrameCompleted?.Invoke(this, e);
     }
 
     private void OnScreenShareStopped(object? sender, string sessionId)
     {
+        if (!TryValidateScreenShareSession("stop", sessionId))
+        {
+            return;
+        }
+
         ScreenShareStopped?.Invoke(this, EventArgs.Empty);
     }
 
@@ -416,6 +1100,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
         }
 
         NknRuntimeDiagnostics.SetLastError("nkn_client_disconnected");
+        UpdateSessionSecurityState(currentSessionSecurityState.Invalidate("transport_disconnected"));
         Log("Client disconnected");
         Disconnected?.Invoke(this, EventArgs.Empty);
     }
@@ -449,9 +1134,10 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
         NknRuntimeDiagnostics.SetLastEnvelopeType(env.Type.ToString());
 
-        if (!string.IsNullOrWhiteSpace(env.Code) &&
-            currentCode is not null &&
-            !string.Equals(env.Code, currentCode.Value.Digits, StringComparison.Ordinal))
+        if (env.Type != MsgType.JoinRequest &&
+            !string.IsNullOrWhiteSpace(env.Code) &&
+            TryGetCurrentEnvelopeCode(out var expectedEnvelopeCode) &&
+            !string.Equals(env.Code, expectedEnvelopeCode, StringComparison.Ordinal))
         {
             NknRuntimeDiagnostics.SetLastError("envelope_code_mismatch");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("code_mismatch");
@@ -480,17 +1166,14 @@ public sealed class NknSignalingTransport : ISignalingTransport
         {
             switch (env.Type)
             {
-                case MsgType.Presence:
-                    HandlePresence(env);
-                    break;
                 case MsgType.JoinRequest:
                     HandleJoinRequest(e.Source, env);
                     break;
                 case MsgType.Approve:
-                    HandleApprove(env);
+                    HandleApprove(e.Source, env);
                     break;
                 case MsgType.Reject:
-                    HandleReject(env);
+                    HandleReject(e.Source, env);
                     break;
                 case MsgType.Chat:
                     HandleChat(e.Source, env);
@@ -500,6 +1183,42 @@ public sealed class NknSignalingTransport : ISignalingTransport
                     break;
                 case MsgType.SessionEnd:
                     HandleSessionEnd(e.Source, env);
+                    break;
+                case MsgType.ControlRequest:
+                    HandleControlRequest(e.Source, env);
+                    break;
+                case MsgType.ControlResponse:
+                    HandleControlResponse(e.Source, env);
+                    break;
+                case MsgType.ControlStart:
+                    HandleControlStart(e.Source, env);
+                    break;
+                case MsgType.ControlStop:
+                    HandleControlStop(e.Source, env);
+                    break;
+                case MsgType.ControlInput:
+                    HandleControlInput(e.Source, env);
+                    break;
+                case MsgType.ControlAck:
+                    HandleControlAck(e.Source, env);
+                    break;
+                case MsgType.ControlStateSnapshot:
+                    HandleControlStateSnapshot(e.Source, env);
+                    break;
+                case MsgType.ControlDisplayInfo:
+                    HandleControlDisplayInfo(e.Source, env);
+                    break;
+                case MsgType.SessionHandshakeStart:
+                    HandleSessionHandshakeStart(e.Source, env);
+                    break;
+                case MsgType.SessionHandshakeChallenge:
+                    HandleSessionHandshakeChallenge(e.Source, env);
+                    break;
+                case MsgType.SessionHandshakeResponse:
+                    HandleSessionHandshakeResponse(e.Source, env);
+                    break;
+                case MsgType.SessionHandshakeResult:
+                    HandleSessionHandshakeResult(e.Source, env);
                     break;
                 default:
                     NknRuntimeDiagnostics.SetLastError("unexpected_message_type");
@@ -514,40 +1233,6 @@ public sealed class NknSignalingTransport : ISignalingTransport
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"dispatch_{ex.GetType().Name}");
             Log($"Envelope dispatch failed (type={env.Type}, msg_id={env.MessageId}, ex={ex.GetType().Name})");
         }
-    }
-
-    private void HandlePresence(Envelope env)
-    {
-        if (!TryParsePresencePayload(env.Payload, out var presence))
-        {
-            NknRuntimeDiagnostics.SetLastError("presence_payload_invalid");
-            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("presence_payload_invalid");
-            Log($"Presence payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
-            return;
-        }
-
-        var nowUnixMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        if (presence.ExpiresAtMs <= nowUnixMs)
-        {
-            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("presence_expired");
-            Log($"Presence expired ignored (msg_id={env.MessageId}, expires_at={presence.ExpiresAtMs})");
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(presence.Endpoint))
-        {
-            NknRuntimeDiagnostics.SetLastError("presence_missing_endpoint");
-            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("presence_missing_endpoint");
-            Log($"Presence missing endpoint (msg_id={env.MessageId})");
-            return;
-        }
-
-        lock (gate)
-        {
-            pendingPresenceWait?.TrySetResult(presence);
-        }
-
-        Log($"Presence accepted (msg_id={env.MessageId}, endpoint_len={presence.Endpoint.Length}, identifier_len={presence.Identifier.Length})");
     }
 
     private void HandleJoinRequest(string source, Envelope env)
@@ -584,8 +1269,29 @@ public sealed class NknSignalingTransport : ISignalingTransport
             return;
         }
 
+        if (pendingJoinRequest is not null || pendingInboundHandshake is not null)
+        {
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("joinrequest_already_pending");
+            Log($"JoinRequest ignored (msg_id={env.MessageId}, reason=join_already_pending)");
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(remoteEndpoint) &&
+            !AddressesLikelySamePeer(remoteEndpoint, join.helperEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("joinrequest_active_session");
+            Log($"JoinRequest ignored (msg_id={env.MessageId}, reason=active_session)");
+            return;
+        }
+
         remoteEndpoint = join.helperEndpoint;
         lastPeerAddress = string.IsNullOrWhiteSpace(source) ? join.helperEndpoint : source;
+        remoteSupportsRemoteControl = join.remoteControlSupported == true;
+        transportRemoteControlState = transportRemoteControlState with
+        {
+            SupportsRemoteControl = LocalSupportsRemoteControl,
+            PeerSupportsRemoteControl = remoteSupportsRemoteControl,
+        };
 
         if (!TryGetHelpeeHostKeyPair(out _))
         {
@@ -596,53 +1302,470 @@ public sealed class NknSignalingTransport : ISignalingTransport
             return;
         }
 
-        ReplacePendingJoinRequest(new PendingJoinRequestState(
+        var joinEnvelopeCode = ResolveInboundEnvelopeCode(env.Code);
+        currentEnvelopeCode = joinEnvelopeCode;
+
+        ReplacePendingInboundHandshake(new PendingInboundHandshakeState(
             joinRequestMessageId: env.MessageId,
             remoteEndpoint: join.helperEndpoint,
-            helperEcdhPublicKey: helperPubKey));
+            helperAddress: new PeerAddress(join.helperEndpoint),
+            helperEcdhPublicKey: helperPubKey,
+            envelopeCode: joinEnvelopeCode));
 
         if (!string.IsNullOrWhiteSpace(source))
         {
             SendAckFireAndForget(source, env.Code, env.MessageId);
         }
 
-        IncomingJoinRequest?.Invoke(
-            this,
-            new IncomingJoinRequestEventArgs(
-                approveAsync: ct => ApproveJoinRequestAsync(env.MessageId, ct),
-                rejectAsync: ct => RejectJoinRequestAsync(env.MessageId, ct)));
-        NknRuntimeDiagnostics.IncrementIncomingJoinRequestRaised();
-
         Log($"JoinRequest accepted (msg_id={env.MessageId}, helper_endpoint_len={join.helperEndpoint.Length}, helper_id_len={(join.helperIdentifier ?? string.Empty).Length})");
     }
 
-    private void HandleApprove(Envelope env)
+    private void HandleSessionHandshakeStart(string source, Envelope env)
+    {
+        if (!TryGetPendingInboundHandshake(out var pending) || pending is null)
+        {
+            Log($"SessionHandshakeStart ignored (msg_id={env.MessageId}, reason=no_pending_join)");
+            return;
+        }
+
+        if (!TryParseHandshakeStartPayload(env.Payload, out var start))
+        {
+            FailInboundHandshake(pending, "handshake_start_invalid", source);
+            return;
+        }
+
+        if (!string.Equals(pending.JoinRequestMessageId, env.ReplyTo, StringComparison.Ordinal))
+        {
+            FailInboundHandshake(pending, "handshake_start_replyto_mismatch", source);
+            return;
+        }
+
+        if (!AddressesLikelySamePeer(start.HelperAddress.Value, pending.HelperAddress.Value) ||
+            (!string.IsNullOrWhiteSpace(source) && !AddressesLikelySamePeer(source, pending.RemoteEndpoint)))
+        {
+            FailInboundHandshake(pending, "handshake_start_helper_mismatch", source);
+            return;
+        }
+
+        var localAddress = new PeerAddress(LocalPeerAddress);
+        var inviteValidated = false;
+        var requestedCapabilities = CapabilityGrant.None;
+
+        if (!string.IsNullOrWhiteSpace(start.InviteToken))
+        {
+            var nowUtc = DateTimeOffset.UtcNow;
+            var validationScopeKey = PersistentInviteSecurityStore.BuildValidationScopeKey(
+                localAddress,
+                !string.IsNullOrWhiteSpace(source) ? source : start.HelperAddress.Value);
+            if (!inviteValidationThrottle.TryAcquire(validationScopeKey, nowUtc, out var retryAfter))
+            {
+                LocalOperationalLog.Warn(
+                    "InviteValidation",
+                    $"result=Throttled; mode={InviteValidationMode.ConsumeIfValid}; session_id={start.SessionId.Value}; target={localAddress.Value}; helper={start.HelperAddress.Value}; retry_after_ms={(long)Math.Ceiling(retryAfter.TotalMilliseconds)}");
+                FailInboundHandshake(pending, "invite_validation_throttled", source, start.SessionId);
+                return;
+            }
+
+            var validation = inviteTokenValidator.Validate(start.InviteToken, nowUtc, InviteValidationMode.ConsumeIfValid);
+            if (!validation.IsSuccess || validation.Invite is null)
+            {
+                FailInboundHandshake(pending, validation.Result.ToFailureCode(), source, start.SessionId);
+                return;
+            }
+
+            if (validation.Invite.SessionId != start.SessionId ||
+                validation.Invite.TargetAddress != localAddress)
+            {
+                FailInboundHandshake(pending, "invite_binding_mismatch", source, start.SessionId);
+                return;
+            }
+
+            if (validation.Invite.BoundHelperAddress is not null &&
+                !AddressesLikelySamePeer(validation.Invite.BoundHelperAddress.Value.Value, start.HelperAddress.Value))
+            {
+                FailInboundHandshake(pending, "invite_helper_mismatch", source, start.SessionId);
+                return;
+            }
+
+            inviteValidated = true;
+            requestedCapabilities = validation.Invite.Payload.Capabilities.ToCapabilityGrant();
+        }
+
+        if (!TryGetHelpeeHostKeyPair(out var helpeeKeyPair) || helpeeKeyPair is null)
+        {
+            FailInboundHandshake(pending, "host_ecdh_not_ready", source, start.SessionId);
+            return;
+        }
+
+        var expiresAtUtc = DateTimeOffset.UtcNow.Add(SessionSecurityDefaults.HandshakeTimeout);
+        var challenge = new SessionHandshakeChallenge(
+            start.SessionId,
+            localAddress,
+            SessionHandshakeProtocol.CreateChallengeNonce(),
+            expiresAtUtc.ToUnixTimeMilliseconds(),
+            Convert.ToBase64String(helpeeKeyPair.PublicKey));
+
+        if (!handshakeReplayCache.TryTrackChallenge(
+                start.SessionId,
+                start.HelperAddress,
+                localAddress,
+                challenge.ChallengeNonce,
+                expiresAtUtc,
+                DateTimeOffset.UtcNow))
+        {
+            FailInboundHandshake(pending, "handshake_challenge_replay_detected", source, start.SessionId);
+            return;
+        }
+
+        UpdatePendingInboundHandshake(pending.WithChallenge(start.SessionId, inviteValidated, requestedCapabilities, challenge.ChallengeNonce, expiresAtUtc, localAddress));
+        UpdateSessionSecurityState(
+            SessionSecurityState.CreateHelpeeWaiting(localAddress).WithHandshakeChallenge(
+                start.SessionId,
+                localAddress,
+                pending.HelperAddress,
+                inviteValidated,
+                expiresAtUtc));
+
+        var envelope = CreateEnvelope(pending.EnvelopeCode, MsgType.SessionHandshakeChallenge, SessionHandshakeProtocol.Serialize(challenge), env.MessageId);
+        _ = SendEnvelopeAsync(pending.RemoteEndpoint, envelope, CancellationToken.None);
+    }
+
+    private void HandleSessionHandshakeChallenge(string source, Envelope env)
+    {
+        if (pendingOutboundHandshake is null)
+        {
+            Log($"SessionHandshakeChallenge ignored (msg_id={env.MessageId}, reason=no_outbound_handshake)");
+            return;
+        }
+
+        if (!TryParseHandshakeChallengePayload(env.Payload, out var challenge))
+        {
+            AbortOutboundHandshake("handshake_challenge_invalid");
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(source) &&
+            !AddressesLikelySamePeer(source, pendingOutboundHandshake.HelpeeAddress.Value))
+        {
+            AbortOutboundHandshake("handshake_challenge_source_mismatch");
+            return;
+        }
+
+        if (challenge.SessionId != pendingOutboundHandshake.SessionId ||
+            challenge.HelpeeAddress != pendingOutboundHandshake.HelpeeAddress)
+        {
+            AbortOutboundHandshake("handshake_challenge_binding_mismatch");
+            return;
+        }
+
+        if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= challenge.ExpiresAtUtcMs)
+        {
+            AbortOutboundHandshake("handshake_challenge_expired", SessionHandshakeState.Expired);
+            return;
+        }
+
+        var helperKeyPair = GetHelperJoinKeyPairOrThrow();
+        if (!TryGetCurrentEnvelopeCode(out var sessionContextCode))
+        {
+            AbortOutboundHandshake("handshake_no_session_context");
+            return;
+        }
+
+        byte[] helpeePubKey;
+        try
+        {
+            helpeePubKey = Convert.FromBase64String(challenge.HelpeeEcdhPublicKeyBase64);
+        }
+        catch (FormatException)
+        {
+            AbortOutboundHandshake("handshake_bad_host_pubkey");
+            return;
+        }
+
+        byte[] macKey;
+        try
+        {
+            macKey = DeriveSessionKey(helperKeyPair, helpeePubKey, sessionContextCode);
+        }
+        catch (Exception ex) when (ex is CryptographicException or ArgumentException)
+        {
+            NknRuntimeDiagnostics.SetLastError("handshake_key_derivation_failed");
+            Log($"SessionHandshakeChallenge key derivation failed (msg_id={env.MessageId}, ex={ex.GetType().Name})");
+            AbortOutboundHandshake("handshake_key_derivation_failed");
+            return;
+        }
+
+        var mac = SessionHandshakeProtocol.ComputeResponseMac(
+            macKey,
+            challenge.SessionId,
+            pendingOutboundHandshake.HelperAddress,
+            challenge.HelpeeAddress,
+            challenge.ChallengeNonce);
+        var response = new SessionHandshakeResponse(
+            challenge.SessionId,
+            pendingOutboundHandshake.HelperAddress,
+            challenge.ChallengeNonce,
+            Convert.ToBase64String(mac));
+        pendingOutboundHandshake = pendingOutboundHandshake.WithChallenge(challenge.ChallengeNonce, DateTimeOffset.FromUnixTimeMilliseconds(challenge.ExpiresAtUtcMs));
+        UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeChallenge(
+            challenge.SessionId,
+            challenge.HelpeeAddress,
+            pendingOutboundHandshake.HelperAddress,
+            pendingOutboundHandshake.InviteValidated,
+            DateTimeOffset.FromUnixTimeMilliseconds(challenge.ExpiresAtUtcMs)));
+
+        var envelope = CreateEnvelope(sessionContextCode, MsgType.SessionHandshakeResponse, SessionHandshakeProtocol.Serialize(response), env.MessageId);
+        _ = SendEnvelopeAsync(pendingOutboundHandshake.HelpeeAddress.Value, envelope, CancellationToken.None);
+    }
+
+    private void HandleSessionHandshakeResponse(string source, Envelope env)
+    {
+        if (!TryGetPendingInboundHandshake(out var pending) || pending is null)
+        {
+            if (TryParseHandshakeResponsePayload(env.Payload, out var replayResponse) &&
+                PeerAddress.TryParse(LocalPeerAddress, out var localAddress) &&
+                handshakeReplayCache.WasChallengeConsumed(
+                    replayResponse.SessionId,
+                    replayResponse.HelperAddress,
+                    localAddress,
+                    replayResponse.ChallengeNonce,
+                    DateTimeOffset.UtcNow))
+            {
+                NknRuntimeDiagnostics.SetLastError("handshake_response_replay_detected");
+                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("handshake_response_replay_detected");
+                LocalOperationalLog.Warn(
+                    "SessionHandshake",
+                    $"event=failure; direction=inbound; reason=handshake_response_replay_detected; session_id={replayResponse.SessionId.Value}; helper_identity={replayResponse.HelperAddress.Value}; peer_id={source ?? "(none)"}");
+                Log($"SessionHandshakeResponse rejected (msg_id={env.MessageId}, reason=replay_detected)");
+                return;
+            }
+
+            Log($"SessionHandshakeResponse ignored (msg_id={env.MessageId}, reason=no_pending_challenge)");
+            return;
+        }
+
+        if (!TryParseHandshakeResponsePayload(env.Payload, out var response))
+        {
+            FailInboundHandshake(pending, "handshake_response_invalid", source);
+            return;
+        }
+
+        if (pending.SessionId is not SessionId sessionId ||
+            pending.ChallengeNonce is null ||
+            pending.HelpeeAddress is not PeerAddress helpeeAddress ||
+            pending.ChallengeExpiresAtUtc is not DateTimeOffset expiresAtUtc)
+        {
+            FailInboundHandshake(pending, "handshake_response_without_challenge", source);
+            return;
+        }
+
+        if (DateTimeOffset.UtcNow >= expiresAtUtc)
+        {
+            FailInboundHandshake(pending, "handshake_response_expired", source, sessionId, SessionHandshakeState.Expired);
+            return;
+        }
+
+        if (response.SessionId != sessionId ||
+            response.HelperAddress != pending.HelperAddress ||
+            !string.Equals(response.ChallengeNonce, pending.ChallengeNonce, StringComparison.Ordinal))
+        {
+            FailInboundHandshake(pending, "handshake_response_binding_mismatch", source, sessionId);
+            return;
+        }
+
+        byte[] candidateMac;
+        try
+        {
+            candidateMac = Convert.FromBase64String(response.MacBase64);
+        }
+        catch (FormatException)
+        {
+            FailInboundHandshake(pending, "handshake_response_mac_invalid", source, sessionId);
+            return;
+        }
+
+        if (!TryGetHelpeeHostKeyPair(out var helpeeKeyPair) || helpeeKeyPair is null)
+        {
+            FailInboundHandshake(pending, "host_ecdh_not_ready", source, sessionId);
+            return;
+        }
+
+        byte[] macKey;
+        try
+        {
+            macKey = DeriveSessionKey(helpeeKeyPair, pending.HelperEcdhPublicKey, pending.EnvelopeCode);
+        }
+        catch (Exception ex) when (ex is CryptographicException or ArgumentException)
+        {
+            NknRuntimeDiagnostics.SetLastError("handshake_key_derivation_failed");
+            Log($"SessionHandshakeResponse key derivation failed (msg_id={env.MessageId}, ex={ex.GetType().Name})");
+            FailInboundHandshake(pending, "handshake_key_derivation_failed", source, sessionId);
+            return;
+        }
+
+        if (!SessionHandshakeProtocol.VerifyResponseMac(macKey, sessionId, pending.HelperAddress, helpeeAddress, pending.ChallengeNonce, candidateMac))
+        {
+            FailInboundHandshake(pending, "handshake_response_mac_mismatch", source, sessionId);
+            return;
+        }
+
+        if (!handshakeReplayCache.TryConsumeChallenge(
+                sessionId,
+                pending.HelperAddress,
+                helpeeAddress,
+                pending.ChallengeNonce,
+                DateTimeOffset.UtcNow))
+        {
+            FailInboundHandshake(pending, "handshake_response_replay_detected", source, sessionId);
+            return;
+        }
+
+        var result = new SessionHandshakeResult(sessionId, Verified: true, FailureReason: null);
+        var resultEnvelope = CreateEnvelope(pending.EnvelopeCode, MsgType.SessionHandshakeResult, SessionHandshakeProtocol.Serialize(result), env.MessageId);
+        _ = SendEnvelopeAsync(pending.RemoteEndpoint, resultEnvelope, CancellationToken.None);
+
+        var approvalRequest = pending.InviteValidated &&
+                              pending.RequestedCapabilities != CapabilityGrant.None
+            ? new ApprovalRequest(
+                pending.HelperAddress,
+                pending.RequestedCapabilities,
+                sessionId)
+            : null;
+
+        ReplacePendingJoinRequest(new PendingJoinRequestState(
+            pending.JoinRequestMessageId,
+            pending.RemoteEndpoint,
+            pending.HelperAddress,
+            pending.HelperEcdhPublicKey,
+            pending.EnvelopeCode,
+            sessionId,
+            approvalRequest));
+        ClearPendingInboundHandshake(pending.JoinRequestMessageId);
+        UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeVerified(pending.HelperAddress));
+
+        IncomingJoinRequest?.Invoke(
+            this,
+            new IncomingJoinRequestEventArgs(
+                approveAsync: (decision, ct) => ApproveJoinRequestAsync(pending.JoinRequestMessageId, decision, ct),
+                rejectAsync: ct => RejectJoinRequestAsync(pending.JoinRequestMessageId, ct),
+                approvalRequest: approvalRequest));
+        NknRuntimeDiagnostics.IncrementIncomingJoinRequestRaised();
+    }
+
+    private void HandleSessionHandshakeResult(string source, Envelope env)
+    {
+        if (pendingOutboundHandshake is null)
+        {
+            Log($"SessionHandshakeResult ignored (msg_id={env.MessageId}, reason=no_outbound_handshake)");
+            return;
+        }
+
+        if (!TryParseHandshakeResultPayload(env.Payload, out var result))
+        {
+            AbortOutboundHandshake("handshake_result_invalid");
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(source) &&
+            !AddressesLikelySamePeer(source, pendingOutboundHandshake.HelpeeAddress.Value))
+        {
+            AbortOutboundHandshake("handshake_result_source_mismatch");
+            return;
+        }
+
+        if (result.SessionId != pendingOutboundHandshake.SessionId)
+        {
+            AbortOutboundHandshake("handshake_result_session_mismatch");
+            return;
+        }
+
+        if (!result.Verified)
+        {
+            AbortOutboundHandshake(result.FailureReason ?? "handshake_rejected");
+            return;
+        }
+
+        UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeVerified(pendingOutboundHandshake.HelperAddress));
+    }
+
+    private void HandleApprove(string source, Envelope env)
     {
         if (!TryParseApprovePayload(env.Payload, out var approve))
         {
             NknRuntimeDiagnostics.SetLastError("approve_payload_invalid");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_payload_invalid");
             Log($"Approve payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
-            Disconnected?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        ApprovalDecision decision;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(approve.approvalDecisionBase64) ||
+                !SessionHandshakeProtocol.TryDeserializeApprovalDecision(
+                    Convert.FromBase64String(approve.approvalDecisionBase64),
+                    out decision))
+            {
+                NknRuntimeDiagnostics.SetLastError("approve_decision_invalid");
+                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_decision_invalid");
+                Log($"Approve decision invalid (msg_id={env.MessageId})");
+                return;
+            }
+        }
+        catch (FormatException)
+        {
+            NknRuntimeDiagnostics.SetLastError("approve_decision_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_decision_invalid");
+            Log($"Approve decision invalid base64 (msg_id={env.MessageId})");
             return;
         }
 
         SessionEcdhKeyPair? helperKeyPair;
         string? expectedJoinRequestId;
+        PendingOutboundHandshakeState? outboundHandshake;
         lock (gate)
         {
             helperKeyPair = helperJoinEcdhKeyPair;
             expectedJoinRequestId = helperJoinRequestMessageId;
-            helperJoinEcdhKeyPair = null;
-            helperJoinRequestMessageId = null;
+            outboundHandshake = pendingOutboundHandshake;
         }
 
-        if (helperKeyPair is null)
+        if (helperKeyPair is null || outboundHandshake is null)
         {
             NknRuntimeDiagnostics.SetLastError("approve_missing_helper_ecdh");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_missing_helper_ecdh");
             Log($"Approve ignored (msg_id={env.MessageId}, reason=no_helper_key)");
-            Disconnected?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        if (!TryValidatePendingOutboundLifecycleMessage(
+                "approve",
+                decision.SessionId.Value,
+                env.MessageId,
+                env.ReplyTo,
+                source,
+                outboundHandshake,
+                expectedJoinRequestId))
+        {
+            return;
+        }
+
+        remoteSupportsRemoteControl = approve.remoteControlSupported == true;
+        transportRemoteControlState = transportRemoteControlState with
+        {
+            SupportsRemoteControl = LocalSupportsRemoteControl,
+            PeerSupportsRemoteControl = remoteSupportsRemoteControl,
+        };
+
+        if (decision.SessionId != outboundHandshake.SessionId ||
+            decision.HelperIdentity != outboundHandshake.HelperAddress ||
+            decision.ExpiresAtUtc <= DateTimeOffset.UtcNow ||
+            (decision.ApprovedCapabilities & ~outboundHandshake.RequestedCapabilities) != 0)
+        {
+            NknRuntimeDiagnostics.SetLastError("approve_decision_mismatch");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_decision_mismatch");
+            Log($"Approve decision mismatch (msg_id={env.MessageId})");
+            AbortOutboundHandshake("approve_decision_mismatch");
             return;
         }
 
@@ -659,43 +1782,47 @@ public sealed class NknSignalingTransport : ISignalingTransport
                 NknRuntimeDiagnostics.SetLastError("approve_bad_pubkey");
                 NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_bad_pubkey");
                 Log($"Approve public key invalid (msg_id={env.MessageId})");
-                Disconnected?.Invoke(this, EventArgs.Empty);
+                AbortOutboundHandshake("approve_bad_pubkey");
                 return;
             }
 
-            if (!string.IsNullOrWhiteSpace(env.ReplyTo) && !string.IsNullOrWhiteSpace(expectedJoinRequestId) &&
-                !string.Equals(env.ReplyTo, expectedJoinRequestId, StringComparison.Ordinal))
+            if (!TryGetCurrentEnvelopeCode(out var sessionContextCode))
             {
-                NknRuntimeDiagnostics.SetLastError("approve_replyto_mismatch");
-                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_replyto_mismatch");
-                Log($"Approve reply_to mismatch (msg_id={env.MessageId}, reply_to={env.ReplyTo})");
-                Disconnected?.Invoke(this, EventArgs.Empty);
-                return;
-            }
-
-            var codeDigits = currentCode?.Digits;
-            if (string.IsNullOrWhiteSpace(codeDigits))
-            {
-                NknRuntimeDiagnostics.SetLastError("approve_missing_session_code");
-                Log($"Approve ignored (msg_id={env.MessageId}, reason=no_session_code)");
-                Disconnected?.Invoke(this, EventArgs.Empty);
+                NknRuntimeDiagnostics.SetLastError("approve_missing_session_context");
+                Log($"Approve ignored (msg_id={env.MessageId}, reason=no_session_context)");
+                AbortOutboundHandshake("approve_missing_session_context");
                 return;
             }
 
             byte[] sharedKey;
             try
             {
-                sharedKey = DeriveSessionKey(helperKeyPair, helpeePubKey, codeDigits);
+                sharedKey = DeriveSessionKey(helperKeyPair, helpeePubKey, sessionContextCode);
             }
             catch (Exception ex) when (ex is CryptographicException or ArgumentException)
             {
                 NknRuntimeDiagnostics.SetLastError("approve_key_derivation_failed");
                 Log($"Approve key derivation failed (msg_id={env.MessageId}, ex={ex.GetType().Name})");
-                Disconnected?.Invoke(this, EventArgs.Empty);
+                AbortOutboundHandshake("approve_key_derivation_failed");
                 return;
             }
 
+            lock (gate)
+            {
+                if (ReferenceEquals(helperJoinEcdhKeyPair, helperKeyPair))
+                {
+                    helperJoinEcdhKeyPair = null;
+                }
+
+                if (string.Equals(helperJoinRequestMessageId, expectedJoinRequestId, StringComparison.Ordinal))
+                {
+                    helperJoinRequestMessageId = null;
+                }
+            }
+
+            UpdateSessionSecurityState(currentSessionSecurityState.WithApproval(decision.ToGrant()));
             SessionKeyReady?.Invoke(this, new TransportSessionKeyReadyEventArgs(sharedKey));
+            pendingOutboundHandshake = null;
             Approved?.Invoke(this, EventArgs.Empty);
             Log($"Approve dispatched (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
         }
@@ -705,8 +1832,47 @@ public sealed class NknSignalingTransport : ISignalingTransport
         }
     }
 
-    private void HandleReject(Envelope env)
+    private void HandleReject(string source, Envelope env)
     {
+        if (!TryParseRejectPayload(env.Payload, out var reject))
+        {
+            NknRuntimeDiagnostics.SetLastError("reject_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("reject_payload_invalid");
+            Log($"Reject payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        PendingOutboundHandshakeState? outboundHandshake;
+        string? expectedJoinRequestId;
+        lock (gate)
+        {
+            outboundHandshake = pendingOutboundHandshake;
+            expectedJoinRequestId = helperJoinRequestMessageId;
+        }
+
+        if (outboundHandshake is null)
+        {
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("reject_no_outbound_handshake");
+            Log($"Reject ignored (msg_id={env.MessageId}, reason=no_outbound_handshake)");
+            return;
+        }
+
+        if (!TryValidatePendingOutboundLifecycleMessage(
+                "reject",
+                reject.sessionId,
+                env.MessageId,
+                env.ReplyTo,
+                source,
+                outboundHandshake,
+                expectedJoinRequestId))
+        {
+            return;
+        }
+
+        pendingOutboundHandshake = null;
+        UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(
+            SessionHandshakeState.Invalidated,
+            string.IsNullOrWhiteSpace(reject.reason) ? "join_rejected" : reject.reason));
         ClearHelperJoinKeyPair();
         Rejected?.Invoke(this, EventArgs.Empty);
         Log($"Reject dispatched (msg_id={env.MessageId})");
@@ -725,6 +1891,24 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
     private void HandleSessionEnd(string source, Envelope env)
     {
+        if (!TryParseSessionEndPayload(env.Payload, out var sessionEnd))
+        {
+            NknRuntimeDiagnostics.SetLastError("session_end_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("session_end_payload_invalid");
+            Log($"SessionEnd payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlMessageSession(
+                "session_end",
+                sessionEnd.sessionId,
+                env.MessageId,
+                requestId: null,
+                source))
+        {
+            return;
+        }
+
         SessionTimeline.Record("SessionEndReceived");
         if (!string.IsNullOrWhiteSpace(source))
         {
@@ -733,6 +1917,511 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
         Log($"SessionEnd dispatched (msg_id={env.MessageId})");
         RemoteSessionEnded?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void HandleControlRequest(string source, Envelope env)
+    {
+        if (!RemoteControlPayloadCodec.TryDeserializeControlRequest(env.Payload, out var request))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlrequest_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controlrequest_payload_invalid");
+            Log($"ControlRequest payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlMessageSession(
+                "control_request",
+                request.SessionId,
+                env.MessageId,
+                request.RequestId,
+                source))
+        {
+            return;
+        }
+
+        transportRemoteControlState = TransportRemoteControlCoordinator.Apply(
+            transportRemoteControlState,
+            new TransportRemoteControlEvent(
+                TransportRemoteControlEventKind.ControlRequestReceived,
+                request.RequestId,
+                source,
+                Decision: null));
+        Log($"ControlRequest received (msg_id={env.MessageId}, request_id_len={request.RequestId.Length}, has_reason={request.Reason is not null})");
+        RemoteControlRequestReceived?.Invoke(this, new RemoteControlRequestReceivedEventArgs(request, source));
+    }
+
+    private void HandleControlResponse(string source, Envelope env)
+    {
+        if (!RemoteControlPayloadCodec.TryDeserializeControlResponse(env.Payload, out var response))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlresponse_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controlresponse_payload_invalid");
+            Log($"ControlResponse payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlMessageSession(
+                "control_response",
+                response.SessionId,
+                env.MessageId,
+                response.RequestId,
+                source))
+        {
+            return;
+        }
+
+        transportRemoteControlState = TransportRemoteControlCoordinator.Apply(
+            transportRemoteControlState,
+            new TransportRemoteControlEvent(
+                TransportRemoteControlEventKind.ControlResponseReceived,
+                response.RequestId,
+                source,
+                response.Decision));
+        Log($"ControlResponse received (msg_id={env.MessageId}, request_id_len={response.RequestId.Length}, decision={response.Decision})");
+        RemoteControlResponseReceived?.Invoke(this, new RemoteControlResponseReceivedEventArgs(response, source));
+    }
+
+    private void HandleControlStart(string source, Envelope env)
+    {
+        if (!RemoteControlPayloadCodec.TryDeserializeControlStart(env.Payload, out var start))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlstart_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controlstart_payload_invalid");
+            Log($"ControlStart payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlMessageSession(
+                "control_start",
+                start.SessionId,
+                env.MessageId,
+                start.RequestId,
+                source))
+        {
+            return;
+        }
+
+        transportRemoteControlState = TransportRemoteControlCoordinator.Apply(
+            transportRemoteControlState,
+            new TransportRemoteControlEvent(
+                TransportRemoteControlEventKind.ControlStartReceived,
+                start.RequestId,
+                source,
+                Decision: null));
+        Log($"ControlStart received (msg_id={env.MessageId}, request_id_len={start.RequestId.Length}, has_token={start.ConsentToken is not null})");
+        RemoteControlStartReceived?.Invoke(this, new RemoteControlStartReceivedEventArgs(start, source));
+    }
+
+    private void HandleControlStop(string source, Envelope env)
+    {
+        if (!RemoteControlPayloadCodec.TryDeserializeControlStop(env.Payload, out var stop))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlstop_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controlstop_payload_invalid");
+            Log($"ControlStop payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlMessageSession(
+                "control_stop",
+                stop.SessionId,
+                env.MessageId,
+                stop.RequestId,
+                source))
+        {
+            return;
+        }
+
+        transportRemoteControlState = TransportRemoteControlCoordinator.Apply(
+            transportRemoteControlState,
+            new TransportRemoteControlEvent(
+                TransportRemoteControlEventKind.ControlStopReceived,
+                stop.RequestId,
+                source,
+                Decision: null));
+        Log($"ControlStop received (msg_id={env.MessageId}, request_id_len={stop.RequestId.Length}, has_reason={stop.Reason is not null})");
+        RemoteControlStopReceived?.Invoke(this, new RemoteControlStopReceivedEventArgs(stop, source));
+    }
+
+    private void HandleControlInput(string source, Envelope env)
+    {
+        if (!RemoteControlPayloadCodec.TryDeserializeControlInput(env.Payload, out var input))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlinput_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controlinput_payload_invalid");
+            Log($"ControlInput payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlMessageSession(
+                "control_input",
+                input.SessionId,
+                env.MessageId,
+                input.RequestId,
+                source))
+        {
+            return;
+        }
+
+        LogControlInputReceived(env, input);
+        RemoteControlInputReceived?.Invoke(this, new RemoteControlInputReceivedEventArgs(input, source));
+    }
+
+    private void HandleControlAck(string source, Envelope env)
+    {
+        if (!RemoteControlPayloadCodec.TryDeserializeControlAck(env.Payload, out var ack))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlack_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controlack_payload_invalid");
+            Log($"ControlAck payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlMessageSession(
+                "control_ack",
+                ack.SessionId,
+                env.MessageId,
+                ack.RequestId,
+                source))
+        {
+            return;
+        }
+
+        Log($"ControlAck received (msg_id={env.MessageId}, request_id_len={ack.RequestId.Length}, ack_seq={ack.AckSeq})");
+        RemoteControlAckReceived?.Invoke(this, new RemoteControlAckReceivedEventArgs(ack, source));
+    }
+
+    private void HandleControlStateSnapshot(string source, Envelope env)
+    {
+        if (!RemoteControlPayloadCodec.TryDeserializeControlStateSnapshot(env.Payload, out var snapshot))
+        {
+            NknRuntimeDiagnostics.SetLastError("controlstatesnapshot_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controlstatesnapshot_payload_invalid");
+            Log($"ControlStateSnapshot payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlMessageSession(
+                "control_state_snapshot",
+                snapshot.SessionId,
+                env.MessageId,
+                snapshot.RequestId,
+                source))
+        {
+            return;
+        }
+
+        Log($"ControlStateSnapshot received (msg_id={env.MessageId}, request_id_len={snapshot.RequestId.Length}, seq={snapshot.Seq}, buttons_mask={snapshot.MouseButtonsMask}, modifiers_mask={snapshot.ModifiersMask})");
+        RemoteControlStateSnapshotReceived?.Invoke(this, new RemoteControlStateSnapshotReceivedEventArgs(snapshot, source));
+    }
+
+    private void LogControlInputReceived(Envelope env, ControlInputMessageV1 input)
+    {
+        var nowTicks = Stopwatch.GetTimestamp();
+        var shouldLogInput = false;
+        var suppressedCountToReport = 0;
+
+        lock (controlInputReceiveLogGate)
+        {
+            if (controlInputReceiveLogWindowStartTicks == 0)
+            {
+                controlInputReceiveLogWindowStartTicks = nowTicks;
+            }
+            else if (Stopwatch.GetElapsedTime(controlInputReceiveLogWindowStartTicks, nowTicks) >= ControlInputReceiveLogWindow)
+            {
+                suppressedCountToReport = controlInputReceiveLogSuppressed;
+                controlInputReceiveLogSuppressed = 0;
+                controlInputReceiveLogCount = 0;
+                controlInputReceiveLogWindowStartTicks = nowTicks;
+            }
+
+            if (controlInputReceiveLogCount < ControlInputReceiveLogBurst)
+            {
+                controlInputReceiveLogCount++;
+                shouldLogInput = true;
+            }
+            else
+            {
+                controlInputReceiveLogSuppressed++;
+            }
+        }
+
+        if (suppressedCountToReport > 0)
+        {
+            Log($"ControlInput received (suppressed={suppressedCountToReport} in previous {ControlInputReceiveLogWindow.TotalSeconds:0.#}s window)");
+        }
+
+        if (shouldLogInput)
+        {
+            Log($"ControlInput received (msg_id={env.MessageId}, request_id_len={input.RequestId.Length}, kind={input.Kind}, seq={input.Seq})");
+        }
+    }
+
+    private void HandleControlDisplayInfo(string source, Envelope env)
+    {
+        if (!RemoteControlPayloadCodec.TryDeserializeControlDisplayInfo(env.Payload, out var displayInfo))
+        {
+            NknRuntimeDiagnostics.SetLastError("controldisplayinfo_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controldisplayinfo_payload_invalid");
+            Log($"ControlDisplayInfo payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlMessageSession(
+                "control_display_info",
+                displayInfo.SessionId,
+                env.MessageId,
+                transportRemoteControlState.CurrentControlRequestId,
+                source))
+        {
+            return;
+        }
+
+        transportRemoteControlState = TransportRemoteControlCoordinator.Apply(
+            transportRemoteControlState,
+            new TransportRemoteControlEvent(
+                TransportRemoteControlEventKind.DisplayInfoChanged,
+                transportRemoteControlState.CurrentControlRequestId,
+                source,
+                Decision: null));
+        Log($"ControlDisplayInfo received (msg_id={env.MessageId}, display_id={displayInfo.DisplayId}, revision={displayInfo.Revision}, frame={displayInfo.FrameWidth}x{displayInfo.FrameHeight})");
+        RemoteControlDisplayInfoReceived?.Invoke(this, new RemoteControlDisplayInfoReceivedEventArgs(displayInfo, source));
+    }
+
+    private bool TryValidateControlMessageSession(
+        string messageType,
+        string? messageSessionId,
+        string messageId,
+        string? requestId,
+        string? source)
+    {
+        var expectedSessionId = currentSessionSecurityState.SessionId?.Value;
+        var expectedSource = ResolveExpectedRemotePeerAddressForCurrentSession();
+        var normalizedMessageSessionId = string.IsNullOrWhiteSpace(messageSessionId) ? null : messageSessionId.Trim();
+        var normalizedSource = string.IsNullOrWhiteSpace(source) ? null : source.Trim();
+        string failureReason;
+
+        if (string.IsNullOrWhiteSpace(normalizedMessageSessionId))
+        {
+            failureReason = "missing_session_id";
+        }
+        else if (string.IsNullOrWhiteSpace(expectedSessionId))
+        {
+            failureReason = "session_unavailable";
+        }
+        else if (!string.Equals(normalizedMessageSessionId, expectedSessionId, StringComparison.Ordinal))
+        {
+            failureReason = "session_id_mismatch";
+        }
+        else if (!string.IsNullOrWhiteSpace(expectedSource) && string.IsNullOrWhiteSpace(normalizedSource))
+        {
+            failureReason = "missing_source_identity";
+        }
+        else if (!string.IsNullOrWhiteSpace(expectedSource) &&
+                 !AddressMatchesForSessionPolicy(normalizedSource, expectedSource))
+        {
+            failureReason = "source_identity_mismatch";
+        }
+        else
+        {
+            return true;
+        }
+
+        NknRuntimeDiagnostics.SetLastError($"{messageType}_{failureReason}");
+        NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageType}_{failureReason}");
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=control_message_rejected; message_type={messageType}; reason={failureReason}; session_id={normalizedMessageSessionId ?? "(none)"}; expected_session_id={expectedSessionId ?? "(none)"}; request_id={requestId ?? "(none)"}; source={normalizedSource ?? "(none)"}; expected_source={expectedSource ?? "(none)"}");
+        Log($"Control message rejected (type={messageType}, msg_id={messageId}, reason={failureReason}, request_id={requestId ?? "(none)"})");
+        return false;
+    }
+
+    private bool TryValidatePendingOutboundLifecycleMessage(
+        string messageType,
+        string? messageSessionId,
+        string messageId,
+        string? replyTo,
+        string? source,
+        PendingOutboundHandshakeState pending,
+        string? expectedJoinRequestId)
+    {
+        var normalizedMessageSessionId = string.IsNullOrWhiteSpace(messageSessionId) ? null : messageSessionId.Trim();
+        var normalizedSource = string.IsNullOrWhiteSpace(source) ? null : source.Trim();
+        string failureReason;
+
+        if (string.IsNullOrWhiteSpace(normalizedMessageSessionId))
+        {
+            failureReason = "missing_session_id";
+        }
+        else if (!string.Equals(normalizedMessageSessionId, pending.SessionId.Value, StringComparison.Ordinal))
+        {
+            failureReason = "session_id_mismatch";
+        }
+        else if (string.IsNullOrWhiteSpace(normalizedSource))
+        {
+            failureReason = "missing_source_identity";
+        }
+        else if (!AddressMatchesForSessionPolicy(normalizedSource, pending.HelpeeAddress.Value))
+        {
+            failureReason = "source_identity_mismatch";
+        }
+        else if (!string.IsNullOrWhiteSpace(expectedJoinRequestId) && string.IsNullOrWhiteSpace(replyTo))
+        {
+            failureReason = "missing_replyto";
+        }
+        else if (!string.IsNullOrWhiteSpace(expectedJoinRequestId) &&
+                 !string.IsNullOrWhiteSpace(replyTo) &&
+                 !string.Equals(replyTo, expectedJoinRequestId, StringComparison.Ordinal))
+        {
+            failureReason = "replyto_mismatch";
+        }
+        else
+        {
+            return true;
+        }
+
+        NknRuntimeDiagnostics.SetLastError($"{messageType}_{failureReason}");
+        NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageType}_{failureReason}");
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=lifecycle_message_rejected; message_type={messageType}; reason={failureReason}; session_id={normalizedMessageSessionId ?? "(none)"}; expected_session_id={pending.SessionId.Value}; source={normalizedSource ?? "(none)"}; expected_source={pending.HelpeeAddress.Value}; reply_to={replyTo ?? "(none)"}; expected_reply_to={expectedJoinRequestId ?? "(none)"}");
+        Log($"Lifecycle message rejected (type={messageType}, msg_id={messageId}, reason={failureReason})");
+        return false;
+    }
+
+    private string? ResolveExpectedRemotePeerAddressForCurrentSession()
+    {
+        var localAddress = LocalPeerAddress;
+
+        if (currentSessionSecurityState.HelperAddress is PeerAddress helperAddress &&
+            !AddressesLikelySamePeer(helperAddress.Value, localAddress))
+        {
+            return helperAddress.Value;
+        }
+
+        if (currentSessionSecurityState.HelpeeAddress is PeerAddress helpeeAddress &&
+            !AddressesLikelySamePeer(helpeeAddress.Value, localAddress))
+        {
+            return helpeeAddress.Value;
+        }
+
+        return string.IsNullOrWhiteSpace(remoteEndpoint) ? null : remoteEndpoint;
+    }
+
+    private bool TryValidateScreenShareSession(string messageType, string? messageSessionId)
+    {
+        var expectedSessionId = currentSessionSecurityState.SessionId?.Value;
+        var normalizedMessageSessionId = string.IsNullOrWhiteSpace(messageSessionId) ? null : messageSessionId.Trim();
+        string failureReason;
+
+        if (string.IsNullOrWhiteSpace(normalizedMessageSessionId))
+        {
+            failureReason = "missing_session_id";
+        }
+        else if (string.IsNullOrWhiteSpace(expectedSessionId))
+        {
+            failureReason = "session_unavailable";
+        }
+        else if (!string.Equals(normalizedMessageSessionId, expectedSessionId, StringComparison.Ordinal))
+        {
+            failureReason = "session_id_mismatch";
+        }
+        else
+        {
+            return true;
+        }
+
+        LogScreenShareRejected(messageType, failureReason, normalizedMessageSessionId);
+        return false;
+    }
+
+    private bool IsScreenShareAuthorizedForDispatch(string messageType, string? messageSessionId)
+    {
+        var nowUtc = DateTimeOffset.UtcNow;
+        string failureReason;
+
+        if (!currentSessionSecurityState.InviteValidated)
+        {
+            failureReason = "invite_not_validated";
+        }
+        else if (!currentSessionSecurityState.HandshakeCompleted ||
+                 currentSessionSecurityState.HandshakeState != SessionHandshakeState.Verified)
+        {
+            failureReason = "handshake_not_verified";
+        }
+        else if (!currentSessionSecurityState.HasCapability(CapabilityGrant.ScreenShare, nowUtc))
+        {
+            failureReason = currentSessionSecurityState.ApprovalGranted ? "capability_missing" : "approval_missing";
+        }
+        else
+        {
+            return true;
+        }
+
+        LogScreenShareRejected(messageType, failureReason, messageSessionId);
+        return false;
+    }
+
+    private void LogScreenShareRejected(string messageType, string reason, string? sessionId)
+    {
+        NknRuntimeDiagnostics.SetLastError($"screenshare_{reason}");
+        NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"screenshare_{reason}");
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=screen_share_message_rejected; message_type={messageType}; reason={reason}; session_id={sessionId ?? "(none)"}; expected_session_id={currentSessionSecurityState.SessionId?.Value ?? "(none)"}; helper_identity={currentSessionSecurityState.HelperAddress?.Value ?? "(none)"}");
+        Log($"Screen share message rejected (type={messageType}, reason={reason}, session_id={sessionId ?? "(none)"})");
+    }
+
+    private static bool TryParseScreenSharePayload(ReadOnlySpan<byte> payload, out string messageType, out string? messageSessionId)
+    {
+        if (ScreenSharePayloadCodec.TryDeserialize(payload, out var chunk))
+        {
+            messageType = "frame";
+            messageSessionId = chunk.SessionId;
+            return true;
+        }
+
+        if (ScreenSharePayloadCodec.TryDeserializeStop(payload, out var stop))
+        {
+            messageType = "stop";
+            messageSessionId = stop.SessionId;
+            return true;
+        }
+
+        messageType = "payload";
+        messageSessionId = null;
+        return false;
+    }
+
+    private ControlRequestMessageV1 EnsureControlSessionId(ControlRequestMessageV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private ControlResponseMessageV1 EnsureControlSessionId(ControlResponseMessageV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private ControlStartMessageV1 EnsureControlSessionId(ControlStartMessageV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private ControlStopMessageV1 EnsureControlSessionId(ControlStopMessageV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private ControlInputMessageV1 EnsureControlSessionId(ControlInputMessageV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private ControlInputAckV1 EnsureControlSessionId(ControlInputAckV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private ControlStateSnapshotV1 EnsureControlSessionId(ControlStateSnapshotV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private ControlDisplayInfoMessageV1 EnsureControlSessionId(ControlDisplayInfoMessageV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private string ResolveControlSessionId(string? current)
+    {
+        return string.IsNullOrWhiteSpace(current)
+            ? currentSessionSecurityState.SessionId?.Value ?? string.Empty
+            : current.Trim();
     }
 
     private void HandleAck(string source, Envelope env)
@@ -769,7 +2458,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
         Log($"Ack handled (msg_id={env.MessageId}, reply_to={env.ReplyTo})");
     }
 
-    private async Task ApproveJoinRequestAsync(string joinRequestMessageId, CancellationToken ct)
+    private async Task ApproveJoinRequestAsync(string joinRequestMessageId, ApprovalDecision? decision, CancellationToken ct)
     {
         PendingJoinRequestState? pending;
         if (!TryBeginPendingJoinDecision(joinRequestMessageId, out pending))
@@ -781,6 +2470,30 @@ public sealed class NknSignalingTransport : ISignalingTransport
         try
         {
             var pendingState = pending!;
+            if (pendingState.ApprovalRequest is null)
+            {
+                LocalOperationalLog.Warn("SessionSecurity", "event=approval_denied; reason=approval_request_missing");
+                throw new InvalidOperationException("Approval decision does not match the pending join request.");
+            }
+
+            if (decision is null)
+            {
+                LocalOperationalLog.Warn(
+                    "SessionSecurity",
+                    $"event=approval_denied; reason=approval_decision_missing; session_id={pendingState.ApprovalRequest.SessionId.Value}; helper_identity={pendingState.ApprovalRequest.HelperIdentity.Value}; requested_capabilities={pendingState.ApprovalRequest.RequestedCapabilities}");
+                throw new InvalidOperationException("Explicit approval decision is required.");
+            }
+
+            if (decision.SessionId != pendingState.ApprovalRequest.SessionId ||
+                decision.HelperIdentity != pendingState.ApprovalRequest.HelperIdentity ||
+                decision.ExpiresAtUtc <= DateTimeOffset.UtcNow ||
+                (decision.ApprovedCapabilities & ~pendingState.ApprovalRequest.RequestedCapabilities) != 0)
+            {
+                LocalOperationalLog.Warn(
+                    "SessionSecurity",
+                    $"event=approval_denied; reason=approval_decision_mismatch; session_id={decision.SessionId.Value}; helper_identity={decision.HelperIdentity.Value}; approved_capabilities={decision.ApprovedCapabilities}; requested_capabilities={pendingState.ApprovalRequest.RequestedCapabilities}");
+                throw new InvalidOperationException("Approval decision does not match the pending join request.");
+            }
 
             if (!TryGetHelpeeHostKeyPair(out var helpeeKeyPair) || helpeeKeyPair is null)
             {
@@ -793,17 +2506,18 @@ public sealed class NknSignalingTransport : ISignalingTransport
             var approvePayload = new ApprovePayload
             {
                 helpeeEcdhPublicKey = Convert.ToBase64String(helpeeKeyPair.PublicKey),
+                remoteControlSupported = LocalSupportsRemoteControl,
+                approvalDecisionBase64 = Convert.ToBase64String(SessionHandshakeProtocol.Serialize(decision)),
             };
 
             var payloadBytes = JsonSerializer.SerializeToUtf8Bytes(approvePayload);
-            var envelope = CreateEnvelope(currentCode?.Digits ?? "000000", MsgType.Approve, payloadBytes, joinRequestMessageId);
+            var envelope = CreateEnvelope(pendingState.EnvelopeCode, MsgType.Approve, payloadBytes, joinRequestMessageId);
             await SendEnvelopeAsync(pendingState.RemoteEndpoint, envelope, ct);
 
-            var codeDigits = currentCode?.Digits;
-            if (string.IsNullOrWhiteSpace(codeDigits))
+            if (string.IsNullOrWhiteSpace(pendingState.EnvelopeCode))
             {
-                NknRuntimeDiagnostics.SetLastError("approve_missing_session_code");
-                Log($"Approve failed (join_msg_id={joinRequestMessageId}, reason=no_session_code)");
+                NknRuntimeDiagnostics.SetLastError("approve_missing_session_context");
+                Log($"Approve failed (join_msg_id={joinRequestMessageId}, reason=no_session_context)");
                 Disconnected?.Invoke(this, EventArgs.Empty);
                 return;
             }
@@ -811,7 +2525,7 @@ public sealed class NknSignalingTransport : ISignalingTransport
             byte[] sharedKey;
             try
             {
-                sharedKey = DeriveSessionKey(helpeeKeyPair, pendingState.HelperEcdhPublicKey, codeDigits);
+                sharedKey = DeriveSessionKey(helpeeKeyPair, pendingState.HelperEcdhPublicKey, pendingState.EnvelopeCode);
             }
             catch (Exception ex) when (ex is CryptographicException or ArgumentException)
             {
@@ -821,6 +2535,10 @@ public sealed class NknSignalingTransport : ISignalingTransport
                 return;
             }
 
+            UpdateSessionSecurityState(currentSessionSecurityState.WithApproval(decision.ToGrant()));
+            LocalOperationalLog.Info(
+                "SessionSecurity",
+                $"event=approval_granted; session_id={decision.SessionId.Value}; helper_identity={decision.HelperIdentity.Value}; capabilities={decision.ApprovedCapabilities}; expires_at_utc={decision.ExpiresAtUtc:O}");
             SessionKeyReady?.Invoke(this, new TransportSessionKeyReadyEventArgs(sharedKey));
             Approved?.Invoke(this, EventArgs.Empty);
             Log($"Approve sent (msg_id={envelope.MessageId}, reply_to={envelope.ReplyTo})");
@@ -842,82 +2560,29 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
         try
         {
-            var envelope = CreateEnvelope(currentCode?.Digits ?? "000000", MsgType.Reject, Array.Empty<byte>(), joinRequestMessageId);
+            var rejectPayload = new RejectPayload
+            {
+                sessionId = pending!.SessionId.Value,
+                reason = "join_rejected",
+            };
+            var envelope = CreateEnvelope(
+                pending.EnvelopeCode,
+                MsgType.Reject,
+                JsonSerializer.SerializeToUtf8Bytes(rejectPayload),
+                joinRequestMessageId);
             await SendEnvelopeAsync(pending!.RemoteEndpoint, envelope, ct);
+            if (pending.ApprovalRequest is ApprovalRequest approvalRequest)
+            {
+                LocalOperationalLog.Info(
+                    "SessionSecurity",
+                    $"event=approval_denied; reason=local_reject; session_id={approvalRequest.SessionId.Value}; helper_identity={approvalRequest.HelperIdentity.Value}; requested_capabilities={approvalRequest.RequestedCapabilities}");
+            }
             Rejected?.Invoke(this, EventArgs.Empty);
             Log($"Reject sent (msg_id={envelope.MessageId}, reply_to={envelope.ReplyTo})");
         }
         finally
         {
             ClearPendingJoinRequest(joinRequestMessageId);
-        }
-    }
-
-    private void StartPresenceLoop(SessionCode code, string topic, CancellationToken externalCt)
-    {
-        var cts = CancellationTokenSource.CreateLinkedTokenSource(externalCt);
-        var previous = Interlocked.Exchange(ref presenceLoopCts, cts);
-        previous?.Cancel();
-        previous?.Dispose();
-
-        presenceLoopTask = Task.Run(() => PresenceLoopAsync(code, topic, cts.Token), CancellationToken.None);
-    }
-
-    private async Task PresenceLoopAsync(SessionCode code, string topic, CancellationToken ct)
-    {
-        try
-        {
-            while (!ct.IsCancellationRequested && !disposed)
-            {
-                var presencePayload = new PresencePayload
-                {
-                    endpoint = string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address,
-                    expiresAtMs = DateTimeOffset.UtcNow.Add(PresenceTtl).ToUnixTimeMilliseconds(),
-                    identifier = identity.Identifier,
-                };
-
-                var payloadBytes = JsonSerializer.SerializeToUtf8Bytes(presencePayload);
-                var envelope = CreateEnvelope(code.Digits, MsgType.Presence, payloadBytes, replyTo: null);
-                await PublishEnvelopeAsync(envelope, ct);
-                Log($"Presence published (msg_id={envelope.MessageId}, payload_len={payloadBytes.Length}, topic={topic})");
-
-                await Task.Delay(PresenceInterval, ct);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // Normal shutdown/cancel path.
-        }
-        catch (Exception ex)
-        {
-            NknRuntimeDiagnostics.SetLastError(ex);
-            Log($"Presence loop failed ({ex.GetType().Name})");
-        }
-    }
-
-    private async Task PublishEnvelopeAsync(Envelope envelope, CancellationToken ct)
-    {
-        var bytes = EnvelopeCodec.Serialize(envelope);
-
-        try
-        {
-            await outboundSendGate.WaitAsync(ct).ConfigureAwait(false);
-            NknRuntimeDiagnostics.IncrementMessagesSent();
-            try
-            {
-                await client.PublishAsync(BuildPresenceTopic(envelope.Code), bytes, ct).ConfigureAwait(false);
-            }
-            finally
-            {
-                outboundSendGate.Release();
-            }
-            Log($"Envelope published (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
-        }
-        catch (Exception ex)
-        {
-            NknRuntimeDiagnostics.SetLastError(ex);
-            Log($"Envelope publish failed (type={envelope.Type}, msg_id={envelope.MessageId}, ex={ex.GetType().Name})");
-            throw;
         }
     }
 
@@ -1002,7 +2667,9 @@ public sealed class NknSignalingTransport : ISignalingTransport
             return;
         }
 
-        var ackCode = string.IsNullOrWhiteSpace(code) ? currentCode?.Digits ?? "000000" : code;
+        var ackCode = string.IsNullOrWhiteSpace(code)
+            ? (TryGetCurrentEnvelopeCode(out var currentContextCode) ? currentContextCode : "000000")
+            : code;
         var ackEnvelope = CreateEnvelope(ackCode, MsgType.Ack, Array.Empty<byte>(), replyToMessageId);
 
         _ = Task.Run(async () =>
@@ -1022,8 +2689,6 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
     private async Task CleanupAsync()
     {
-        await StopPresenceLoopAsync();
-        await BestEffortUnsubscribeCurrentTopicAsync();
         CancelPendingAcks();
         ResetSessionTracking();
 
@@ -1037,96 +2702,56 @@ public sealed class NknSignalingTransport : ISignalingTransport
         }
     }
 
-    private async Task StopPresenceLoopAsync()
-    {
-        var cts = Interlocked.Exchange(ref presenceLoopCts, null);
-        if (cts is null)
-        {
-            return;
-        }
-
-        try
-        {
-            cts.Cancel();
-        }
-        catch
-        {
-            // ignore
-        }
-
-        try
-        {
-            if (presenceLoopTask is not null)
-            {
-                await presenceLoopTask;
-            }
-        }
-        catch
-        {
-            // Presence loop errors already recorded.
-        }
-        finally
-        {
-            cts.Dispose();
-            presenceLoopTask = null;
-        }
-    }
-
-    private async Task BestEffortUnsubscribeCurrentTopicAsync()
-    {
-        var topic = currentTopic;
-        if (string.IsNullOrWhiteSpace(topic))
-        {
-            return;
-        }
-
-        try
-        {
-            await client.UnsubscribeAsync(topic);
-            Log($"Unsubscribed topic (topic={topic})");
-        }
-        catch (Exception ex)
-        {
-            Log($"UnsubscribeAsync failed ({ex.GetType().Name}, topic={topic})");
-        }
-        finally
-        {
-            currentTopic = null;
-        }
-    }
-
     private void ResetSessionTracking()
     {
+        FlushAllControlOutboundQueues("reset_session_tracking");
         remoteEndpoint = null;
+        currentEnvelopeCode = null;
         lastPeerAddress = null;
         helperJoinRequestMessageId = null;
-
-        lock (gate)
-        {
-            pendingPresenceWait = null;
-        }
+        pendingOutboundHandshake = null;
+        remoteSupportsRemoteControl = false;
+        transportRemoteControlState = RemoteControlSessionState.Default;
 
         DisposeEphemeralKeyState();
+        UpdateSessionSecurityState(SessionSecurityState.Empty);
     }
 
-    private void DisposeEphemeralKeyState()
+    private void DisposeEphemeralKeyState(bool preserveHelpeeHostKeyPair = false)
     {
         SessionEcdhKeyPair? helperKeyToDispose = null;
         SessionEcdhKeyPair? helpeeHostKeyToDispose = null;
+        CancelPendingInboundHandshakeTimeout();
 
         lock (gate)
         {
-            helpeeHostKeyToDispose = helpeeHostEcdhKeyPair;
-            helpeeHostEcdhKeyPair = null;
+            if (!preserveHelpeeHostKeyPair)
+            {
+                helpeeHostKeyToDispose = helpeeHostEcdhKeyPair;
+                helpeeHostEcdhKeyPair = null;
+            }
 
             helperKeyToDispose = helperJoinEcdhKeyPair;
             helperJoinEcdhKeyPair = null;
 
             pendingJoinRequest = null;
+            pendingInboundHandshake = null;
         }
 
         helperKeyToDispose?.Dispose();
         helpeeHostKeyToDispose?.Dispose();
+    }
+
+    private void ClearActivePeerSessionTracking(bool preserveHelpeeHostKeyPair)
+    {
+        remoteEndpoint = null;
+        currentEnvelopeCode = null;
+        lastPeerAddress = null;
+        helperJoinRequestMessageId = null;
+        pendingOutboundHandshake = null;
+        remoteSupportsRemoteControl = false;
+        transportRemoteControlState = RemoteControlSessionState.Default;
+        DisposeEphemeralKeyState(preserveHelpeeHostKeyPair);
     }
 
     private void CancelPendingAcks()
@@ -1196,11 +2821,38 @@ public sealed class NknSignalingTransport : ISignalingTransport
 
     private void ReplacePendingJoinRequest(PendingJoinRequestState state)
     {
-        PendingJoinRequestState? previous = null;
         lock (gate)
         {
-            previous = pendingJoinRequest;
             pendingJoinRequest = state;
+        }
+    }
+
+    private void ReplacePendingInboundHandshake(PendingInboundHandshakeState state)
+    {
+        lock (gate)
+        {
+            pendingInboundHandshake = state;
+        }
+
+        SchedulePendingInboundHandshakeTimeout(state);
+    }
+
+    private void UpdatePendingInboundHandshake(PendingInboundHandshakeState state)
+    {
+        lock (gate)
+        {
+            pendingInboundHandshake = state;
+        }
+
+        SchedulePendingInboundHandshakeTimeout(state);
+    }
+
+    private bool TryGetPendingInboundHandshake(out PendingInboundHandshakeState? state)
+    {
+        lock (gate)
+        {
+            state = pendingInboundHandshake;
+            return state is not null;
         }
     }
 
@@ -1249,33 +2901,258 @@ public sealed class NknSignalingTransport : ISignalingTransport
         }
     }
 
-    private static bool TryParsePresencePayload(byte[] payload, out PresenceAnnouncement presence)
+    private void ClearPendingInboundHandshake(string joinRequestMessageId)
     {
-        presence = default!;
-
-        if (payload is null || payload.Length == 0)
+        var cleared = false;
+        lock (gate)
         {
-            return false;
-        }
-
-        try
-        {
-            var dto = JsonSerializer.Deserialize<PresencePayload>(payload);
-            if (dto is null || string.IsNullOrWhiteSpace(dto.endpoint))
+            if (pendingInboundHandshake is null)
             {
-                return false;
+                return;
             }
 
-            presence = new PresenceAnnouncement(
-                dto.endpoint.Trim(),
-                dto.expiresAtMs,
-                string.IsNullOrWhiteSpace(dto.identifier) ? string.Empty : dto.identifier.Trim());
-            return true;
+            if (!string.Equals(pendingInboundHandshake.JoinRequestMessageId, joinRequestMessageId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            pendingInboundHandshake = null;
+            cleared = true;
         }
-        catch
+
+        if (cleared)
         {
-            return false;
+            CancelPendingInboundHandshakeTimeout();
         }
+    }
+
+    private void SchedulePendingInboundHandshakeTimeout(PendingInboundHandshakeState state)
+    {
+        CancelPendingInboundHandshakeTimeout();
+
+        if (disposed)
+        {
+            return;
+        }
+
+        var deadlineUtc = GetPendingInboundHandshakeDeadlineUtc(state);
+        var delay = deadlineUtc - DateTimeOffset.UtcNow;
+        if (delay < TimeSpan.FromMilliseconds(1))
+        {
+            delay = TimeSpan.FromMilliseconds(1);
+        }
+
+        var generation = Interlocked.Increment(ref pendingInboundHandshakeTimeoutGeneration);
+        pendingInboundHandshakeTimeoutTimer = new Timer(
+            static s =>
+            {
+                var state = (Tuple<NknSignalingTransport, long>)s!;
+                state.Item1.OnPendingInboundHandshakeTimeout(state.Item2);
+            },
+            Tuple.Create(this, generation),
+            delay,
+            Timeout.InfiniteTimeSpan);
+    }
+
+    private void CancelPendingInboundHandshakeTimeout()
+    {
+        Interlocked.Increment(ref pendingInboundHandshakeTimeoutGeneration);
+        var timer = Interlocked.Exchange(ref pendingInboundHandshakeTimeoutTimer, null);
+        timer?.Dispose();
+    }
+
+    private void OnPendingInboundHandshakeTimeout(long generation)
+    {
+        if (disposed || generation != Volatile.Read(ref pendingInboundHandshakeTimeoutGeneration))
+        {
+            return;
+        }
+
+        PendingInboundHandshakeState? pending;
+        lock (gate)
+        {
+            pending = pendingInboundHandshake;
+        }
+
+        if (pending is null)
+        {
+            return;
+        }
+
+        var deadlineUtc = GetPendingInboundHandshakeDeadlineUtc(pending);
+        if (DateTimeOffset.UtcNow < deadlineUtc)
+        {
+            SchedulePendingInboundHandshakeTimeout(pending);
+            return;
+        }
+
+        if (pending.ChallengeNonce is not null && pending.SessionId is SessionId challengeSessionId)
+        {
+            FailInboundHandshake(
+                pending,
+                "handshake_response_expired",
+                source: null,
+                challengeSessionId,
+                SessionHandshakeState.Expired);
+            return;
+        }
+
+        FailInboundHandshake(
+            pending,
+            "handshake_start_timeout",
+            source: null,
+            sessionId: pending.SessionId,
+            failureState: SessionHandshakeState.Expired);
+    }
+
+    private static DateTimeOffset GetPendingInboundHandshakeDeadlineUtc(PendingInboundHandshakeState state)
+    {
+        return state.ChallengeExpiresAtUtc ?? state.CreatedAtUtc.Add(PendingJoinTimeout);
+    }
+
+    private void UpdateSessionSecurityState(SessionSecurityState nextState)
+    {
+        if (nextState is null)
+        {
+            throw new ArgumentNullException(nameof(nextState));
+        }
+
+        if (Equals(currentSessionSecurityState, nextState))
+        {
+            return;
+        }
+
+        currentSessionSecurityState = nextState;
+        SyncInboundScreenSharePolicyToBridge(nextState);
+        SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(nextState));
+    }
+
+    private void SyncInboundScreenSharePolicyToBridge(SessionSecurityState nextState)
+    {
+        if (client is not RealNknClientAdapter realClient)
+        {
+            return;
+        }
+
+        var shouldEnable = false;
+        string? allowedSessionId = null;
+        string? allowedSourceAddress = null;
+        DateTimeOffset? policyExpiresAtUtc = null;
+        var nowUtc = DateTimeOffset.UtcNow;
+
+        if (nextState.InviteValidated &&
+            nextState.HandshakeCompleted &&
+            nextState.HandshakeState == SessionHandshakeState.Verified &&
+            nextState.ApprovalGranted &&
+            nextState.ApprovalExpiresAt is DateTimeOffset expiresAtUtc &&
+            nextState.SessionId is SessionId sessionId &&
+            nextState.HelpeeAddress is PeerAddress helpeeAddress &&
+            nextState.HelperAddress is PeerAddress helperAddress &&
+            AddressMatchesForSessionPolicy(helperAddress.Value, LocalPeerAddress) &&
+            nextState.HasCapability(CapabilityGrant.ScreenShare, nowUtc))
+        {
+            shouldEnable = true;
+            allowedSessionId = sessionId.Value;
+            allowedSourceAddress = helpeeAddress.Value;
+            policyExpiresAtUtc = expiresAtUtc;
+        }
+
+        _ = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await realClient.UpdateInboundScreenSharePolicyAsync(
+                            shouldEnable,
+                            allowedSessionId,
+                            allowedSourceAddress,
+                            policyExpiresAtUtc,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+                catch (InvalidOperationException)
+                {
+                    // Bridge may not be running yet; the adapter still applies the local fail-closed policy.
+                }
+                catch (Exception ex)
+                {
+                    Log($"Bridge screenshare policy sync failed ({ex.GetType().Name})");
+                }
+            },
+            CancellationToken.None);
+    }
+
+    private void AbortOutboundHandshake(string reason, SessionHandshakeState failureState = SessionHandshakeState.Failed)
+    {
+        LocalOperationalLog.Warn(
+            "SessionHandshake",
+            $"event=failure; direction=outbound; reason={reason}; session_id={currentSessionSecurityState.SessionId?.Value ?? "(none)"}; helper_identity={currentSessionSecurityState.HelperAddress?.Value ?? "(none)"}");
+        pendingOutboundHandshake = null;
+        UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(failureState, reason));
+        ClearActivePeerSessionTracking(preserveHelpeeHostKeyPair: false);
+        Disconnected?.Invoke(this, EventArgs.Empty);
+    }
+
+    private async Task SendHandshakeStartAsync(string destination, PendingOutboundHandshakeState outboundHandshake, CancellationToken ct)
+    {
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            throw new InvalidOperationException("No active session context.");
+        }
+
+        var start = new SessionHandshakeStart(
+            outboundHandshake.SessionId,
+            outboundHandshake.HelperAddress,
+            outboundHandshake.InviteToken);
+        var payload = SessionHandshakeProtocol.Serialize(start);
+        var envelope = CreateEnvelope(envelopeCode, MsgType.SessionHandshakeStart, payload, helperJoinRequestMessageId);
+        await SendEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
+    }
+
+    private void FailInboundHandshake(
+        PendingInboundHandshakeState pending,
+        string reason,
+        string? source,
+        SessionId? sessionId = null,
+        SessionHandshakeState failureState = SessionHandshakeState.Failed)
+    {
+        var effectiveSessionId = sessionId ?? pending.SessionId ?? SessionHandshakeProtocol.CreateSessionId();
+        var result = new SessionHandshakeResult(effectiveSessionId, Verified: false, FailureReason: reason);
+        var envelope = CreateEnvelope(
+            pending.EnvelopeCode,
+            MsgType.SessionHandshakeResult,
+            SessionHandshakeProtocol.Serialize(result),
+            pending.JoinRequestMessageId);
+        _ = SendEnvelopeAsync(pending.RemoteEndpoint, envelope, CancellationToken.None);
+
+        if (pending.HelpeeAddress is PeerAddress helpeeAddress)
+        {
+            LocalOperationalLog.Warn(
+                "SessionHandshake",
+                $"event=failure; direction=inbound; reason={reason}; session_id={effectiveSessionId.Value}; helper_identity={pending.HelperAddress.Value}; peer_id={source ?? "(none)"}");
+            UpdateSessionSecurityState(
+                SessionSecurityState.CreateHelpeeWaiting(helpeeAddress)
+                    .WithHandshakeChallenge(
+                        effectiveSessionId,
+                        helpeeAddress,
+                        pending.HelperAddress,
+                        pending.InviteValidated,
+                        DateTimeOffset.UtcNow)
+                    .WithHandshakeFailure(failureState, reason));
+        }
+        else
+        {
+            LocalOperationalLog.Warn(
+                "SessionHandshake",
+                $"event=failure; direction=inbound; reason={reason}; session_id={effectiveSessionId.Value}; helper_identity={pending.HelperAddress.Value}; peer_id={source ?? "(none)"}");
+            UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(failureState, reason));
+        }
+
+        ClearPendingInboundHandshake(pending.JoinRequestMessageId);
+        ClearActivePeerSessionTracking(preserveHelpeeHostKeyPair: true);
     }
 
     private static bool TryParseJoinRequestPayload(byte[] payload, out JoinRequestPayload parsed)
@@ -1421,9 +3298,39 @@ public sealed class NknSignalingTransport : ISignalingTransport
             ReplyTo: replyTo);
     }
 
-    private static string BuildPresenceTopic(SessionCode code) => "nlink.help." + code.Digits;
+    private bool TryGetCurrentEnvelopeCode(out string envelopeCode)
+    {
+        if (!string.IsNullOrWhiteSpace(currentEnvelopeCode))
+        {
+            envelopeCode = currentEnvelopeCode;
+            return true;
+        }
 
-    private static string BuildPresenceTopic(string code) => "nlink.help." + code;
+        envelopeCode = string.Empty;
+        return false;
+    }
+
+    private string ResolveInboundEnvelopeCode(string? envelopeCode)
+    {
+        if (!string.IsNullOrWhiteSpace(envelopeCode))
+        {
+            return envelopeCode.Trim();
+        }
+
+        if (TryGetCurrentEnvelopeCode(out var current))
+        {
+            return current;
+        }
+
+        return "000000";
+    }
+
+    private static string CreateAddressSessionContextCode()
+    {
+        Span<byte> bytes = stackalloc byte[8];
+        RandomNumberGenerator.Fill(bytes);
+        return $"addr.{Convert.ToHexString(bytes).ToLowerInvariant()}";
+    }
 
     private bool IsSelfSource(string? source)
     {
@@ -1454,6 +3361,11 @@ public sealed class NknSignalingTransport : ISignalingTransport
                LooksLikeNknPubKeyTail(rightTail) &&
                !string.IsNullOrWhiteSpace(rightTail) &&
                string.Equals(leftTail, rightTail, StringComparison.Ordinal);
+    }
+
+    internal static bool AddressMatchesForSessionPolicy(string? left, string? right)
+    {
+        return AddressesLikelySamePeer(left, right);
     }
 
     private static string GetAddressTail(string address)
@@ -1513,43 +3425,335 @@ public sealed class NknSignalingTransport : ISignalingTransport
         Console.WriteLine($"[nLink][NKN] {message}");
     }
 
-    private sealed class PresencePayload
+    private enum TransportRemoteControlEventKind
     {
-        public string? endpoint { get; set; }
-        public long expiresAtMs { get; set; }
-        public string? identifier { get; set; }
+        ControlRequestReceived = 0,
+        ControlResponseReceived = 1,
+        ControlStartReceived = 2,
+        ControlStopReceived = 3,
+        DisplayInfoChanged = 4,
     }
+
+    private readonly record struct TransportRemoteControlEvent(
+        TransportRemoteControlEventKind Kind,
+        string? RequestId,
+        string? PeerId,
+        string? Decision);
+
+    private static class TransportRemoteControlCoordinator
+    {
+        public static RemoteControlSessionState Apply(
+            RemoteControlSessionState current,
+            in TransportRemoteControlEvent evt)
+        {
+            var requestId = string.IsNullOrWhiteSpace(evt.RequestId) ? null : evt.RequestId.Trim();
+            var peerId = string.IsNullOrWhiteSpace(evt.PeerId) ? null : evt.PeerId.Trim();
+
+            return evt.Kind switch
+            {
+                TransportRemoteControlEventKind.ControlRequestReceived => current with
+                {
+                    ControlState = ControlState.Requesting,
+                    CurrentControlRequestId = requestId,
+                    ControllerPeerId = peerId,
+                    ConsentToken = null,
+                },
+                TransportRemoteControlEventKind.ControlResponseReceived when IsAllow(evt.Decision) => current with
+                {
+                    ControlState = ControlState.Active,
+                    CurrentControlRequestId = requestId ?? current.CurrentControlRequestId,
+                    ControllerPeerId = current.ControllerPeerId ?? peerId,
+                    ConsentToken = null,
+                },
+                TransportRemoteControlEventKind.ControlResponseReceived when IsDeny(evt.Decision) => current with
+                {
+                    ControlState = ControlState.Denied,
+                    CurrentControlRequestId = requestId ?? current.CurrentControlRequestId,
+                    ControllerPeerId = null,
+                    ConsentToken = null,
+                },
+                TransportRemoteControlEventKind.ControlStartReceived => current with
+                {
+                    ControlState = ControlState.Active,
+                    CurrentControlRequestId = requestId ?? current.CurrentControlRequestId,
+                    ControllerPeerId = current.ControllerPeerId ?? peerId,
+                    ConsentToken = null,
+                },
+                TransportRemoteControlEventKind.ControlStopReceived => current with
+                {
+                    ControlState = ControlState.Off,
+                    CurrentControlRequestId = null,
+                    ControllerPeerId = null,
+                    ConsentToken = null,
+                },
+                TransportRemoteControlEventKind.DisplayInfoChanged when current.ControlState == ControlState.Active => current with
+                {
+                    ControlState = ControlState.Off,
+                    CurrentControlRequestId = null,
+                    ControllerPeerId = null,
+                    ConsentToken = null,
+                },
+                _ => current,
+            };
+        }
+
+        private static bool IsAllow(string? decision)
+        {
+            return string.Equals(decision?.Trim(), "allow", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsDeny(string? decision)
+        {
+            var normalized = decision?.Trim();
+            return string.Equals(normalized, "deny", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(normalized, "denied", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private static bool TryParseRejectPayload(byte[] payload, out RejectPayload parsed)
+    {
+        parsed = default!;
+
+        if (payload is null || payload.Length == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            parsed = JsonSerializer.Deserialize<RejectPayload>(payload);
+            return parsed is not null && !string.IsNullOrWhiteSpace(parsed.sessionId);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryParseSessionEndPayload(byte[] payload, out SessionEndPayload parsed)
+    {
+        parsed = default!;
+
+        if (payload is null || payload.Length == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            parsed = JsonSerializer.Deserialize<SessionEndPayload>(payload);
+            return parsed is not null && !string.IsNullOrWhiteSpace(parsed.sessionId);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryParseHandshakeStartPayload(byte[] payload, out SessionHandshakeStart parsed)
+    {
+        parsed = default!;
+
+        if (payload is null || payload.Length == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            return SessionHandshakeProtocol.TryDeserializeStart(payload, out parsed);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryParseHandshakeChallengePayload(byte[] payload, out SessionHandshakeChallenge parsed)
+    {
+        parsed = default!;
+
+        if (payload is null || payload.Length == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            return SessionHandshakeProtocol.TryDeserializeChallenge(payload, out parsed);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryParseHandshakeResponsePayload(byte[] payload, out SessionHandshakeResponse parsed)
+    {
+        parsed = default!;
+
+        if (payload is null || payload.Length == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            return SessionHandshakeProtocol.TryDeserializeResponse(payload, out parsed);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryParseHandshakeResultPayload(byte[] payload, out SessionHandshakeResult parsed)
+    {
+        parsed = default!;
+
+        if (payload is null || payload.Length == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            return SessionHandshakeProtocol.TryDeserializeResult(payload, out parsed);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private readonly record struct QueuedControlEnvelope(
+        string Destination,
+        Envelope Envelope,
+        TaskCompletionSource<bool> Completion,
+        CancellationToken CancellationToken,
+        bool IsLowPriorityMouseMove);
 
     private sealed class JoinRequestPayload
     {
         public string? helperEndpoint { get; set; }
         public string? helperIdentifier { get; set; }
         public string? helperEcdhPublicKey { get; set; }
+        public bool? remoteControlSupported { get; set; }
     }
 
     private sealed class ApprovePayload
     {
         public string? helpeeEcdhPublicKey { get; set; }
+        public bool? remoteControlSupported { get; set; }
+        public string? approvalDecisionBase64 { get; set; }
     }
 
     private sealed class SessionEndPayload
     {
+        public string? sessionId { get; set; }
+        public string? reason { get; set; }
+    }
+
+    private sealed class RejectPayload
+    {
+        public string? sessionId { get; set; }
         public string? reason { get; set; }
     }
 
     private sealed class PendingJoinRequestState
     {
-        public PendingJoinRequestState(string joinRequestMessageId, string remoteEndpoint, byte[] helperEcdhPublicKey)
+        public PendingJoinRequestState(
+            string joinRequestMessageId,
+            string remoteEndpoint,
+            PeerAddress helperAddress,
+            byte[] helperEcdhPublicKey,
+            string envelopeCode,
+            SessionId sessionId,
+            ApprovalRequest? approvalRequest)
         {
             JoinRequestMessageId = joinRequestMessageId;
             RemoteEndpoint = remoteEndpoint;
+            HelperAddress = helperAddress;
             HelperEcdhPublicKey = helperEcdhPublicKey;
+            EnvelopeCode = envelopeCode;
+            SessionId = sessionId;
+            ApprovalRequest = approvalRequest;
         }
 
         public string JoinRequestMessageId { get; }
         public string RemoteEndpoint { get; }
+        public PeerAddress HelperAddress { get; }
         public byte[] HelperEcdhPublicKey { get; }
+        public string EnvelopeCode { get; }
+        public SessionId SessionId { get; }
+        public ApprovalRequest? ApprovalRequest { get; }
         public bool DecisionSent { get; set; }
+    }
+
+    private sealed record PendingInboundHandshakeState
+    {
+        public PendingInboundHandshakeState(string joinRequestMessageId, string remoteEndpoint, PeerAddress helperAddress, byte[] helperEcdhPublicKey, string envelopeCode)
+        {
+            JoinRequestMessageId = joinRequestMessageId;
+            RemoteEndpoint = remoteEndpoint;
+            HelperAddress = helperAddress;
+            HelperEcdhPublicKey = helperEcdhPublicKey;
+            EnvelopeCode = envelopeCode;
+            CreatedAtUtc = DateTimeOffset.UtcNow;
+        }
+
+        public string JoinRequestMessageId { get; }
+        public string RemoteEndpoint { get; }
+        public PeerAddress HelperAddress { get; }
+        public byte[] HelperEcdhPublicKey { get; }
+        public string EnvelopeCode { get; }
+        public DateTimeOffset CreatedAtUtc { get; }
+        public SessionId? SessionId { get; private init; }
+        public bool InviteValidated { get; private init; }
+        public CapabilityGrant RequestedCapabilities { get; private init; }
+        public string? ChallengeNonce { get; private init; }
+        public DateTimeOffset? ChallengeExpiresAtUtc { get; private init; }
+        public PeerAddress? HelpeeAddress { get; private init; }
+
+        public PendingInboundHandshakeState WithChallenge(
+            SessionId sessionId,
+            bool inviteValidated,
+            CapabilityGrant requestedCapabilities,
+            string challengeNonce,
+            DateTimeOffset challengeExpiresAtUtc,
+            PeerAddress helpeeAddress)
+        {
+            return this with
+            {
+                SessionId = sessionId,
+                InviteValidated = inviteValidated,
+                RequestedCapabilities = requestedCapabilities,
+                ChallengeNonce = challengeNonce,
+                ChallengeExpiresAtUtc = challengeExpiresAtUtc,
+                HelpeeAddress = helpeeAddress,
+            };
+        }
+    }
+
+    private sealed record PendingOutboundHandshakeState(
+        SessionId SessionId,
+        PeerAddress HelperAddress,
+        PeerAddress HelpeeAddress,
+        bool InviteValidated,
+        CapabilityGrant RequestedCapabilities,
+        string? InviteToken)
+    {
+        public string? ChallengeNonce { get; init; }
+        public DateTimeOffset? ChallengeExpiresAtUtc { get; init; }
+
+        public PendingOutboundHandshakeState WithChallenge(string challengeNonce, DateTimeOffset challengeExpiresAtUtc)
+        {
+            return this with
+            {
+                ChallengeNonce = challengeNonce,
+                ChallengeExpiresAtUtc = challengeExpiresAtUtc,
+            };
+        }
     }
 
     private sealed class PendingAckWait
@@ -1580,7 +3784,5 @@ public sealed class NknSignalingTransport : ISignalingTransport
             Ecdh.Dispose();
         }
     }
-
-    private readonly record struct PresenceAnnouncement(string Endpoint, long ExpiresAtMs, string Identifier);
 }
 #pragma warning restore CS0067

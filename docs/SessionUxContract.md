@@ -10,7 +10,7 @@ This contract defines UI-facing session semantics only. It is intentionally addi
 - `Connected`: session is established.
 - `Recovering`: session is attempting to recover (for example retry/reconnect).
 - `Ended`: a session flow ended without an active recovery loop.
-- `Failed`: terminal failure that requires user action (retry/new code/diagnostics).
+- `Failed`: terminal failure that requires user action (retry/refresh invite or address/diagnostics).
 
 ## Runtime State Mapping
 Base phase comes from `SessionRuntimeState` via `SessionUxPhaseMapper.FromRuntimeState(state, isHelper)`.

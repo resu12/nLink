@@ -2,16 +2,23 @@ using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Media.Imaging;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.Input;
 using NLink.App.Configuration;
 using NLink.App.Services;
+using NLink.App.Services.RemoteControl;
+using NLink.App.Services.SessionConnect;
 using NLink.App.Threading;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.RemoteControl;
+using NLink.Core.SessionConnect;
+using NLink.Core.SessionSecurity;
 using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
@@ -21,7 +28,15 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private static readonly TimeSpan DefaultConnectFailureCooldown = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultApprovalTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan EndSessionAfterControlStopGuard = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan RemoteControlSnapshotKeepAliveInterval = TimeSpan.FromMilliseconds(250);
     private static readonly Regex AttemptLabelRegex = new(@"\s*\(?attempt\s+\d+(?:,\s*next retry in \d+s)?\)?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly bool RemoteControlDebugPanelEnabled =
+#if DEBUG
+        true;
+#else
+        false;
+#endif
 
     private readonly Action cancelAction;
     private readonly Action backAction;
@@ -32,7 +47,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly bool ownsStatusPresenter;
     private readonly IClipboardService? clipboardService;
     private readonly ShareMessageConfig shareMessageConfig;
+    private readonly IRecentConnectTargetsStore? recentConnectTargetsStore;
     private readonly SessionUiStateStore? uiStateStore;
+    private readonly IConnectInputResolver connectInputResolver;
+    private readonly DispatcherTimer remoteControlStateSnapshotTimer;
 
     private string codeInput = string.Empty;
     private string statusText = string.Empty;
@@ -62,15 +80,18 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool canOpenDiagnostics;
     private bool canSendFiles;
     private bool isChatInputEnabled;
+    private bool controlModeEnabled;
     private SessionUiPhase effectivePhase;
     private bool endInvoked;
     private bool wasConnected;
     private SessionEndReason? endReason;
     private bool endSessionRequested;
     private bool endSessionCancelInvoked;
+    private DateTimeOffset endSessionGuardUntilUtc = DateTimeOffset.MinValue;
     private CancellationTokenSource? connectCts;
     private readonly InlineTransientText copyFeedback = new();
     private readonly Func<DateTimeOffset> nowProvider;
+    private readonly ObservableCollection<string> recentTargets = new();
     private readonly TimeSpan connectFailureCooldown;
     private readonly TimeSpan approvalTimeout;
     private DateTimeOffset lastFailedAttemptUtc = DateTimeOffset.MinValue;
@@ -81,6 +102,23 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool lastKnownShowRemoteScreenShareFrame;
     private bool lastKnownShowHelperMainContent = true;
     private string lastKnownHeaderStatusText = "Ready";
+    private int remoteControlDebugMouseMovesPerSecond;
+    private int remoteControlDebugMouseMovesInWindow;
+    private long remoteControlDebugMouseMoveWindowStartTickMs;
+    private RemoteControlModifiersMask remoteControlHeldModifiersMask = RemoteControlModifiersMask.None;
+    private RemoteControlMouseButtonsMask remoteControlHeldMouseButtonsMask = RemoteControlMouseButtonsMask.None;
+    private RemoteControlModifiersMask remoteControlLastSentModifiersMask = RemoteControlModifiersMask.None;
+    private RemoteControlMouseButtonsMask remoteControlLastSentMouseButtonsMask = RemoteControlMouseButtonsMask.None;
+    private bool remoteControlSnapshotHasSent;
+    private long remoteControlLastSnapshotSentTickMs;
+    private bool remoteControlSnapshotImmediateRequested;
+    private bool remoteControlSnapshotSendInProgress;
+    private long remoteControlSnapshotSequence;
+    private long remoteControlLastSnapshotSentSeq;
+    private int remoteControlSnapshotSendsPerSecond;
+    private int remoteControlSnapshotSendsInWindow;
+    private long remoteControlSnapshotSendWindowStartTickMs;
+    private bool remoteControlDebugPanelExpanded;
     private bool disposed;
 
     public HelperPageViewModel(
@@ -95,7 +133,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         TimeSpan? connectFailureCooldown = null,
         Func<DateTimeOffset>? nowProvider = null,
         SessionUiStateStore? uiStateStore = null,
-        Action? backAction = null)
+        Action? backAction = null,
+        IConnectInputResolver? connectInputResolver = null,
+        IRecentConnectTargetsStore? recentConnectTargetsStore = null)
     {
         this.cancelAction = cancelAction;
         this.backAction = backAction ?? cancelAction;
@@ -107,19 +147,28 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         this.clipboardService = clipboardService;
         this.shareMessageConfig = shareMessageConfig ?? new ShareMessageConfig(null);
         this.uiStateStore = uiStateStore;
+        this.connectInputResolver = connectInputResolver ?? ConnectInputResolverFactory.CreateDefault();
+        this.recentConnectTargetsStore = recentConnectTargetsStore;
         this.approvalTimeout = approvalTimeout ?? DefaultApprovalTimeout;
         this.connectFailureCooldown = connectFailureCooldown ?? DefaultConnectFailureCooldown;
         this.nowProvider = nowProvider ?? (() => DateTimeOffset.UtcNow);
         lastObservedUiPhase = uiStateStore?.Phase ?? SessionUiPhase.Idle;
         fallbackUiPhase = lastObservedUiPhase;
         ScreenShareViewer = new ScreenShareViewerViewModel();
+        remoteControlStateSnapshotTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(FeatureFlags.RemoteControlStateSnapshotIntervalMs),
+        };
+        remoteControlStateSnapshotTimer.Tick += OnRemoteControlStateSnapshotTimerTick;
         lastKnownShowRemoteScreenShareFrame = ShowRemoteScreenShareFrame;
         lastKnownShowHelperMainContent = ShowHelperMainContent;
         lastKnownHeaderStatusText = HeaderStatusText;
 
         ChatMessages = new ObservableCollection<ChatLineViewModel>();
+        recentTargets.CollectionChanged += (_, _) => OnPropertyChanged(nameof(ShowRecentTargets));
 
         sessionRuntime.StateChanged += OnSessionRuntimeStateChanged;
+        sessionRuntime.SessionSecurityStateChanged += OnSessionSecurityStateChanged;
         sessionRuntime.TransientStatusChanged += OnTransientStatusChanged;
         sessionRuntime.Approved += OnApproved;
         sessionRuntime.Rejected += OnRejected;
@@ -129,6 +178,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.ChatMessageReceived += OnChatMessageReceived;
         sessionRuntime.ChatMessageReceivedBeforeApproved += OnChatMessageReceivedBeforeApproved;
         sessionRuntime.ChatStateChanged += OnChatStateChanged;
+        sessionRuntime.RemoteControlStateChanged += OnRemoteControlStateChanged;
         this.statusPresenter.StatusChanged += OnStatusPresenterChanged;
         copyFeedback.PropertyChanged += OnCopyFeedbackPropertyChanged;
         ScreenShareViewer.PropertyChanged += OnScreenShareViewerPropertyChanged;
@@ -139,13 +189,22 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
         CopyInstallMessageCommand = new AsyncRelayCommand(CopyInstallMessageAsync);
-        SendFileCommand = new RelayCommand(RequestSendFileWindow);
+        SendFileCommand = new RelayCommand(RequestSendFileWindow, CanSendFileAction);
         SendChatCommand = new AsyncRelayCommand(SendChatAsync, CanSendChat);
         RetryCommand = new AsyncRelayCommand(RetryAsync, CanRetry);
         CancelTransientCommand = new AsyncRelayCommand(CancelTransientAsync, CanCancelTransientOperation);
         OpenDiagnosticsCommand = new RelayCommand(OpenDiagnostics, CanOpenDiagnosticsCommand);
         CancelCommand = new RelayCommand(CancelAndGoBack);
         EndSessionCommand = new RelayCommand(EndSession, CanTriggerEndSession);
+        ScanQrFromFileCommand = new RelayCommand(RequestScanQrFromFile, () => ShowMainControls);
+        ScanQrFromCameraCommand = new RelayCommand(RequestScanQrFromCamera, () => ShowMainControls);
+        UseRecentTargetCommand = new RelayCommand<string>(UseRecentTarget);
+        ClearRecentTargetsCommand = new RelayCommand(ClearRecentTargets, () => recentTargets.Count > 0);
+        RequestControlCommand = new RelayCommand(RequestRemoteControl, CanRequestRemoteControlAction);
+        StopControlCommand = new RelayCommand(StopRemoteControl, CanStopRemoteControlAction);
+        ToggleControlModeCommand = new RelayCommand(ToggleControlMode, CanToggleControlModeAction);
+        ToggleRemoteControlDebugPanelCommand = new RelayCommand(ToggleRemoteControlDebugPanel, CanToggleRemoteControlDebugPanel);
+        LoadRecentTargets();
 
         InitializeStartupAvailabilityState();
         presenterBannerStatus = NormalizeStatusForDisplay(this.statusPresenter.CurrentStatus);
@@ -164,26 +223,15 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         get => codeInput;
         set
         {
-            var incoming = value ?? string.Empty;
-            var digits = SessionCode.NormalizeDigits(value);
-            if (digits.Length > 6)
-            {
-                digits = digits[..6];
-            }
-
-            var formatted = SessionCode.FormatPartial(digits);
-            if (SetProperty(ref codeInput, formatted))
+            var normalized = NormalizeConnectInputForDisplay(value ?? string.Empty);
+            if (SetProperty(ref codeInput, normalized))
             {
                 ConnectCommand.NotifyCanExecuteChanged();
                 SendChatCommand.NotifyCanExecuteChanged();
+                ScanQrFromFileCommand.NotifyCanExecuteChanged();
+                ScanQrFromCameraCommand.NotifyCanExecuteChanged();
                 OnPropertyChanged(nameof(ShowChatPanel));
                 OnPropertyChanged(nameof(ShowChatConnectionHint));
-            }
-            else if (!string.Equals(incoming, formatted, StringComparison.Ordinal))
-            {
-                // Force the TextBox to rebind to the canonical 6-digit formatted value
-                // when the user types/pastes extra digits that normalize to the same text.
-                OnPropertyChanged(nameof(CodeInput));
             }
         }
     }
@@ -199,7 +247,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ChatConnectionPillText));
                 OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
+                OnPropertyChanged(nameof(ShowRequestControlAction));
             }
         }
     }
@@ -216,6 +266,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowChatPanel));
                 OnPropertyChanged(nameof(ShowChatConnectionHint));
                 OnPropertyChanged(nameof(ShowMainControls));
+                OnPropertyChanged(nameof(ShowRecentTargets));
                 OnPropertyChanged(nameof(ShowConnectAction));
                 OnPropertyChanged(nameof(ShowStartupBlockedPanel));
                 OnPropertyChanged(nameof(ShowInlineStatusText));
@@ -225,7 +276,25 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ChatConnectionPillText));
                 OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
+                OnPropertyChanged(nameof(ShowRequestControlAction));
+                OnPropertyChanged(nameof(CanRequestControl));
+                OnPropertyChanged(nameof(ShowStopControlAction));
+                OnPropertyChanged(nameof(CanStopControl));
+                OnPropertyChanged(nameof(IsRemoteControlInputCaptureEnabled));
+                OnPropertyChanged(nameof(ShowControlModeToggle));
+                OnPropertyChanged(nameof(CanControlModeToggle));
+                OnPropertyChanged(nameof(ControlModeButtonText));
+                OnPropertyChanged(nameof(IsRemoteControlKeyboardCaptureEnabled));
+                NotifyRemoteControlDiagnosticsChanged();
+                RequestControlCommand.NotifyCanExecuteChanged();
+                StopControlCommand.NotifyCanExecuteChanged();
+                ToggleControlModeCommand.NotifyCanExecuteChanged();
+                ScanQrFromFileCommand.NotifyCanExecuteChanged();
+                ScanQrFromCameraCommand.NotifyCanExecuteChanged();
+                ClearRecentTargetsCommand.NotifyCanExecuteChanged();
+                EnsureControlModeConsistency();
             }
         }
     }
@@ -242,7 +311,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
-    public string HelperPageHelpText => "Ask them for the 6-digit code on their screen.";
+    public string HelperPageHelpText => "Paste invite or address.";
 
     public string ConnectionMethodHint => transportConfig.HelperHintText;
 
@@ -288,6 +357,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref startupBlocked, value))
             {
                 OnPropertyChanged(nameof(ShowMainControls));
+                OnPropertyChanged(nameof(ShowRecentTargets));
                 OnPropertyChanged(nameof(ShowConnectAction));
                 OnPropertyChanged(nameof(ShowRetryAction));
                 OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
@@ -298,11 +368,15 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 ConnectCommand.NotifyCanExecuteChanged();
                 RetryCommand.NotifyCanExecuteChanged();
                 OpenDiagnosticsCommand.NotifyCanExecuteChanged();
+                ScanQrFromFileCommand.NotifyCanExecuteChanged();
+                ScanQrFromCameraCommand.NotifyCanExecuteChanged();
             }
         }
     }
 
     public bool ShowMainControls => !IsStartupBlocked && !ShowRetryAction && !IsConnectedView;
+    public ObservableCollection<string> RecentTargets => recentTargets;
+    public bool ShowRecentTargets => ShowMainControls && recentTargets.Count > 0;
 
     public bool ShowConnectAction => ShowMainControls && !ShowRetryAction;
     public bool ShowStartupBlockedPanel => IsStartupBlocked && !ShowFailurePanel;
@@ -316,6 +390,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
@@ -330,6 +405,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
@@ -363,6 +439,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         };
 
     public bool ShowChatConnectionPill => !HeaderStatusText.StartsWith(ChatConnectionPillText, StringComparison.Ordinal);
+    public bool ShowChatTopBar => ShowChatConnectionPill || !FeatureFlags.EnableSessionHeader;
 
     public string ChatDraft
     {
@@ -385,19 +462,25 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public string ChatNoticeText => "You received a message";
 
     public string HeaderStatusText => AppendScreenShareSuffix(
-        EffectivePhase switch
-        {
-            SessionUiPhase.Connecting => "Connecting…",
-            SessionUiPhase.Recovering => "Reconnecting…",
-            SessionUiPhase.Connected => "Connected",
-            SessionUiPhase.Failed => string.IsNullOrWhiteSpace(FailureTitle) ? "Connection failed" : FailureTitle,
-            SessionUiPhase.Ended => !string.IsNullOrWhiteSpace(StatusText)
-                ? StatusText
-                : !string.IsNullOrWhiteSpace(FailureTitle)
-                    ? FailureTitle
-                    : "Session ended",
-            _ => !string.IsNullOrWhiteSpace(StatusText) ? StatusText : "Ready",
-        });
+        TryGetRemoteControlHeaderHint(out var remoteControlHint)
+            ? remoteControlHint
+            : EffectivePhase switch
+            {
+                SessionUiPhase.Connecting => "Connecting…",
+                SessionUiPhase.Recovering => "Reconnecting…",
+                SessionUiPhase.Connected when sessionRuntime.ControlState == ControlState.Active && !sessionRuntime.RemoteControlMappingAvailable
+                    => "Remote control mapping unavailable",
+                SessionUiPhase.Connected => sessionRuntime.ControlState == ControlState.Requesting
+                    ? "Waiting for approval…"
+                    : "Connected",
+                SessionUiPhase.Failed => string.IsNullOrWhiteSpace(FailureTitle) ? "Connection failed" : FailureTitle,
+                SessionUiPhase.Ended => !string.IsNullOrWhiteSpace(StatusText)
+                    ? StatusText
+                    : !string.IsNullOrWhiteSpace(FailureTitle)
+                        ? FailureTitle
+                        : "Session ended",
+                _ => !string.IsNullOrWhiteSpace(StatusText) ? StatusText : "Ready",
+            });
 
     public SessionUiPhase EffectivePhase
     {
@@ -409,6 +492,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ChatConnectionPillText));
                 OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
@@ -443,7 +527,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public bool CanEndSession
     {
-        get => canEndSession;
+        get => canEndSession && sessionRuntime.ControlState != ControlState.Active;
         private set => SetProperty(ref canEndSession, value);
     }
 
@@ -458,6 +542,76 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         get => canSendFiles;
         private set => SetProperty(ref canSendFiles, value);
     }
+
+    public bool SessionSupportsRemoteControl => sessionRuntime.SessionSupportsRemoteControl;
+    public bool RemoteControlMappingAvailable => sessionRuntime.RemoteControlMappingAvailable;
+    public bool ShowRequestControlAction =>
+        IsConnectedView &&
+        sessionRuntime.RemoteControlAvailable &&
+        ShowRemoteScreenShareFrame &&
+        sessionRuntime.ControlState == ControlState.Off;
+    public bool CanRequestControl =>
+        sessionRuntime.RemoteControlAvailable &&
+        IsConnectedView &&
+        ShowRemoteScreenShareFrame &&
+        sessionRuntime.ControlState == ControlState.Off;
+    public bool ShowStopControlAction =>
+        IsConnectedView &&
+        ShowRemoteScreenShareFrame &&
+        sessionRuntime.ControlState is ControlState.Requesting or ControlState.Active;
+    public string StopControlButtonText => sessionRuntime.ControlState == ControlState.Requesting ? "Cancel request" : "Stop control";
+    public bool CanStopControl =>
+        SessionSupportsRemoteControl &&
+        IsConnectedView &&
+        ShowRemoteScreenShareFrame &&
+        sessionRuntime.ControlState is ControlState.Requesting or ControlState.Active;
+    public bool ShowRemoteControlActiveStatus => sessionRuntime.ControlState == ControlState.Active;
+    public bool ShowControlModeToggle => IsRemoteControlInputCaptureEnabled;
+    public bool CanControlModeToggle => ShowControlModeToggle;
+    public string ControlModeButtonText => controlModeEnabled ? "Keyboard to remote: On" : "Keyboard to remote: Off";
+    public int RemoteControlMouseMoveRateHz => 90;
+    public bool ShowRemoteControlDebugToggle =>
+        RemoteControlDebugPanelEnabled &&
+        IsConnectedView &&
+        ShowRemoteScreenShareFrame;
+    public bool ShowRemoteControlDebugPanel =>
+        ShowRemoteControlDebugToggle &&
+        remoteControlDebugPanelExpanded;
+    public string RemoteControlDebugToggleText => ShowRemoteControlDebugPanel ? "Hide diagnostics" : "Show diagnostics";
+    public string RemoteControlDiagnosticsRoleText => "Helper";
+    public string RemoteControlDiagnosticsControlStateText => sessionRuntime.ControlState.ToString();
+    public string RemoteControlDiagnosticsControlModeText => controlModeEnabled ? "On" : "Off";
+    public string RemoteControlDiagnosticsDisplayText =>
+        sessionRuntime.RemoteControlMappingDisplayId is { Length: > 0 } displayId
+            ? $"{displayId}@{sessionRuntime.RemoteControlMappingRevision?.ToString(CultureInfo.InvariantCulture) ?? "n/a"}"
+            : "n/a";
+    public string RemoteControlDiagnosticsCaptureFrameText => FormatCaptureFrameText(GetRemoteControlDiagnosticsSnapshot());
+    public string RemoteControlDiagnosticsMoveStatsText => FormatMoveStatsText(GetRemoteControlDiagnosticsSnapshot());
+    public string RemoteControlDiagnosticsSuppressionsText => FormatSuppressionText(GetRemoteControlDiagnosticsSnapshot());
+    public string RemoteControlDiagnosticsLastMappedText => FormatLastMappedText(GetRemoteControlDiagnosticsSnapshot());
+    public string RemoteControlDebugControlStateText => RemoteControlDiagnosticsControlStateText;
+    public string RemoteControlDebugDisplayRevisionText =>
+        sessionRuntime.RemoteControlMappingRevision?.ToString(CultureInfo.InvariantCulture) ?? "n/a";
+    public string RemoteControlDebugRequestIdText => sessionRuntime.CurrentControlRequestId ?? "n/a";
+    public string RemoteControlDebugControllerPeerText => sessionRuntime.ControllerPeerId ?? "n/a";
+    public string RemoteControlDebugMappingDisplayText => RemoteControlDiagnosticsDisplayText;
+    public string RemoteControlDebugControlModeText => RemoteControlDiagnosticsControlModeText;
+    public string RemoteControlDebugMouseMoveRateText => $"{remoteControlDebugMouseMovesPerSecond}/s";
+    public string RemoteControlDebugGuardrailCountersText =>
+        $"clamps={sessionRuntime.RemoteControlDebugMappingClampCount}; drops={sessionRuntime.RemoteControlDebugQueueDropCount}; suppressed={sessionRuntime.RemoteControlDebugInjectionSuppressedCount}; flushes={sessionRuntime.RemoteControlDebugQueueFlushCount}";
+#if DEBUG
+    internal RemoteControlDebugSnapshot RemoteControlDiagnosticsSnapshotForDebug =>
+        RemoteControlDebugDiagnostics.Snapshot(RemoteControlDiagnosticsRole.Helper);
+#endif
+    public bool IsRemoteControlInputCaptureEnabled =>
+        sessionRuntime.RemoteControlAvailable &&
+        RemoteControlMappingAvailable &&
+        IsConnectedView &&
+        ShowRemoteScreenShareFrame &&
+        sessionRuntime.ControlState == ControlState.Active;
+    public bool IsRemoteControlKeyboardCaptureEnabled =>
+        IsRemoteControlInputCaptureEnabled &&
+        controlModeEnabled;
 
     public bool IsChatInputEnabled
     {
@@ -480,10 +634,21 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public IRelayCommand CancelCommand { get; }
     public IRelayCommand EndSessionCommand { get; }
+    public IRelayCommand ScanQrFromFileCommand { get; }
+    public IRelayCommand ScanQrFromCameraCommand { get; }
+    public IRelayCommand<string> UseRecentTargetCommand { get; }
+    public IRelayCommand ClearRecentTargetsCommand { get; }
+    public IRelayCommand RequestControlCommand { get; }
+    public IRelayCommand StopControlCommand { get; }
+    public IRelayCommand ToggleControlModeCommand { get; }
+    public IRelayCommand ToggleRemoteControlDebugPanelCommand { get; }
     public IRelayCommand StatusBannerCopyDiagnosticsCommand => OpenDiagnosticsCommand;
     public IAsyncRelayCommand StatusBannerCancelCommand => CancelTransientCommand;
 
     public event EventHandler? SendFileRequested;
+    public event EventHandler? RemoteControlViewerFocusRequested;
+    public event EventHandler? ScanQrFromFileRequested;
+    public event EventHandler? ScanQrFromCameraRequested;
 
     public bool ShowRetryAction => !IsStartupBlocked &&
                                    string.Equals(ConnectionState, "Failed", StringComparison.Ordinal) &&
@@ -542,7 +707,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         disposed = true;
 
+        remoteControlStateSnapshotTimer.Stop();
+        remoteControlStateSnapshotTimer.Tick -= OnRemoteControlStateSnapshotTimerTick;
+
         sessionRuntime.StateChanged -= OnSessionRuntimeStateChanged;
+        sessionRuntime.SessionSecurityStateChanged -= OnSessionSecurityStateChanged;
         sessionRuntime.TransientStatusChanged -= OnTransientStatusChanged;
         sessionRuntime.Approved -= OnApproved;
         sessionRuntime.Rejected -= OnRejected;
@@ -552,6 +721,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.ChatMessageReceived -= OnChatMessageReceived;
         sessionRuntime.ChatMessageReceivedBeforeApproved -= OnChatMessageReceivedBeforeApproved;
         sessionRuntime.ChatStateChanged -= OnChatStateChanged;
+        sessionRuntime.RemoteControlStateChanged -= OnRemoteControlStateChanged;
         statusPresenter.StatusChanged -= OnStatusPresenterChanged;
         copyFeedback.PropertyChanged -= OnCopyFeedbackPropertyChanged;
         ScreenShareViewer.PropertyChanged -= OnScreenShareViewerPropertyChanged;
@@ -575,7 +745,145 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private bool CanConnect()
     {
-        return CanStartOrConnect && !IsStartupBlocked && !IsConnecting && SessionCode.TryParse(CodeInput, out _);
+        return CanStartOrConnect && !IsStartupBlocked && !IsConnecting && ResolveConnectInput().IsValid;
+    }
+
+    private ConnectInputResolution ResolveConnectInput()
+    {
+        return connectInputResolver.Resolve(CodeInput, nowProvider());
+    }
+
+    private static string NormalizeConnectInputForDisplay(string incoming)
+    {
+        return incoming;
+    }
+
+    private void LoadRecentTargets()
+    {
+        recentTargets.Clear();
+        if (recentConnectTargetsStore is null)
+        {
+            ClearRecentTargetsCommand.NotifyCanExecuteChanged();
+            return;
+        }
+
+        foreach (var target in recentConnectTargetsStore.LoadTargets())
+        {
+            if (PeerAddress.TryParse(target, out var parsed))
+            {
+                recentTargets.Add(parsed.Value);
+            }
+        }
+
+        OnPropertyChanged(nameof(ShowRecentTargets));
+        ClearRecentTargetsCommand.NotifyCanExecuteChanged();
+    }
+
+    private void AddRecentTarget(string targetAddress)
+    {
+        if (!PeerAddress.TryParse(targetAddress, out var parsed))
+        {
+            return;
+        }
+
+        var existingIndex = -1;
+        for (var i = 0; i < recentTargets.Count; i++)
+        {
+            if (string.Equals(recentTargets[i], parsed.Value, StringComparison.OrdinalIgnoreCase))
+            {
+                existingIndex = i;
+                break;
+            }
+        }
+
+        if (existingIndex >= 0)
+        {
+            recentTargets.RemoveAt(existingIndex);
+        }
+
+        recentTargets.Insert(0, parsed.Value);
+        while (recentTargets.Count > 8)
+        {
+            recentTargets.RemoveAt(recentTargets.Count - 1);
+        }
+
+        PersistRecentTargets();
+        OnPropertyChanged(nameof(ShowRecentTargets));
+        ClearRecentTargetsCommand.NotifyCanExecuteChanged();
+    }
+
+    private void PersistRecentTargets()
+    {
+        recentConnectTargetsStore?.SaveTargets(recentTargets);
+    }
+
+    private void UseRecentTarget(string? target)
+    {
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            return;
+        }
+
+        CodeInput = target.Trim();
+    }
+
+    private void ClearRecentTargets()
+    {
+        if (recentTargets.Count == 0)
+        {
+            return;
+        }
+
+        recentTargets.Clear();
+        PersistRecentTargets();
+        OnPropertyChanged(nameof(ShowRecentTargets));
+        ClearRecentTargetsCommand.NotifyCanExecuteChanged();
+    }
+
+    private void RequestScanQrFromFile()
+    {
+        if (!ShowMainControls)
+        {
+            return;
+        }
+
+        ScanQrFromFileRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void RequestScanQrFromCamera()
+    {
+        if (!ShowMainControls)
+        {
+            return;
+        }
+
+        ScanQrFromCameraRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    public void ApplyExternalConnectInput(string input, string sourceLabel)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return;
+        }
+
+        CodeInput = input.Trim();
+        copyFeedback.Show(sourceLabel switch
+        {
+            "clipboard" => "Pasted from clipboard.",
+            "qr" => "Scanned from QR code.",
+            _ => "Added."
+        });
+    }
+
+    public void NotifyExternalInputError(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return;
+        }
+
+        copyFeedback.Show(message);
     }
 
     private bool CanCancelTransientOperation()
@@ -671,10 +979,32 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        if (!SessionCode.TryParse(CodeInput, out var code))
+        var connectInput = ResolveConnectInput();
+        if (!connectInput.IsValid)
         {
-            StatusText = UserErrorMapper.HelperInvalidCode();
-            ConnectionState = "InvalidCode";
+            LogInvalidConnectInput(connectInput);
+            StatusText = connectInput.Message ?? UserErrorMapper.HelperInvalidConnectInput();
+            ConnectionState = "InvalidInput";
+            OnPropertyChanged(nameof(ShowChatConnectionHint));
+            return;
+        }
+
+        if (connectInput.Kind == ConnectInputKind.PeerAddress)
+        {
+            var rawTarget = connectInput.TargetAddress?.Value ?? CodeInput.Trim();
+            AppLog.Info($"Helper join rejected using {transportConfig.Key}; reason=invite_required; target={rawTarget}");
+            StatusText = UserErrorMapper.HelperInviteRequired();
+            ConnectionState = "InvalidInput";
+            OnPropertyChanged(nameof(ShowChatConnectionHint));
+            return;
+        }
+
+        if (connectInput.Kind != ConnectInputKind.InviteToken ||
+            connectInput.Invite is null ||
+            connectInput.TargetAddress is not PeerAddress targetAddress)
+        {
+            StatusText = UserErrorMapper.HelperInvalidConnectInput();
+            ConnectionState = "InvalidInput";
             OnPropertyChanged(nameof(ShowChatConnectionHint));
             return;
         }
@@ -688,8 +1018,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         await sessionRuntime.ResetAsync();
 
-        AppLog.Info($"Helper join requested using {transportConfig.Key} with code {code.Digits}");
-
         IsConnecting = true;
         StatusText = "Connecting…";
         ConnectionState = "Connecting";
@@ -698,7 +1026,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         try
         {
-            await sessionRuntime.StartHelperAsync(code, connectCts.Token);
+            var inviteExpiry = connectInput.Invite.Payload.ExpiresAtUtcMs.ToString(CultureInfo.InvariantCulture);
+            AddRecentTarget(targetAddress.Value);
+            AppLog.Info($"Helper join requested using {transportConfig.Key} with validated_invite target {targetAddress.Value}; invite_exp_utc_ms={inviteExpiry}");
+            await sessionRuntime.StartHelperAsync(CodeInput.Trim(), connectInput.Invite, connectCts.Token);
+
             // NKN transport logs these stages after JoinRequest Ack to avoid optimistic duplicates.
             if (!string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase))
             {
@@ -721,10 +1053,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
         catch (TimeoutException ex)
         {
-            LogReliability(SessionReliabilityStage.DiscoveryTimeout, "timeout", "No one found with that code.");
+            LogReliability(SessionReliabilityStage.DiscoveryTimeout, "timeout", "No response from target.");
             var snapshot = NknRuntimeDiagnostics.Snapshot();
             var failure = TransportFailureMapper.FromException(ex, snapshot.LastError, snapshot.LastDisconnectReason);
-            await sessionRuntime.FailAsync(failure, UserErrorMapper.FromHelperTimeoutException(ex));
+            var uiMessage = UserErrorMapper.FromHelperTimeoutException(ex);
+            await sessionRuntime.FailAsync(failure, uiMessage);
             MarkFailedAttemptNow();
             OnPropertyChanged(nameof(ShowChatConnectionHint));
         }
@@ -766,11 +1099,15 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             ConnectionState = "Idle";
             ShowChatNotice = false;
             OnPropertyChanged(nameof(ShowMainControls));
+            OnPropertyChanged(nameof(ShowRecentTargets));
             OnPropertyChanged(nameof(ShowConnectAction));
             OnPropertyChanged(nameof(ShowRetryAction));
             OnPropertyChanged(nameof(ShowCopyFeedbackInline));
             ConnectCommand.NotifyCanExecuteChanged();
             RetryCommand.NotifyCanExecuteChanged();
+            ScanQrFromFileCommand.NotifyCanExecuteChanged();
+            ScanQrFromCameraCommand.NotifyCanExecuteChanged();
+            ClearRecentTargetsCommand.NotifyCanExecuteChanged();
         });
     }
 
@@ -781,7 +1118,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        if (!sessionRuntime.CanSendChat && !IsConnecting && SessionCode.TryParse(CodeInput, out _))
+        if (!sessionRuntime.CanSendChat && !IsConnecting && ResolveConnectInput().IsValid)
         {
             await ConnectAsync();
         }
@@ -825,6 +1162,20 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void EndSession()
     {
+        var now = nowProvider();
+        if (now < endSessionGuardUntilUtc)
+        {
+            var remainingMs = Math.Max(0, (int)Math.Ceiling((endSessionGuardUntilUtc - now).TotalMilliseconds));
+            AppLog.Info($"Helper end session ignored during post-stop guard window ({remainingMs}ms remaining).");
+            return;
+        }
+
+        if (sessionRuntime.ControlState == ControlState.Active)
+        {
+            AppLog.Info("Helper end session ignored while remote control is active.");
+            return;
+        }
+
         if (endInvoked)
         {
             return;
@@ -858,9 +1209,395 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         cancelAction();
     }
 
+    private void RequestRemoteControl()
+    {
+        _ = RequestRemoteControlAsync();
+    }
+
+    private void StopRemoteControl()
+    {
+        endSessionGuardUntilUtc = nowProvider() + EndSessionAfterControlStopGuard;
+        _ = StopRemoteControlAsync("helper_stop");
+    }
+
+    private async Task RequestRemoteControlAsync()
+    {
+        if (!CanRequestRemoteControlAction())
+        {
+            return;
+        }
+
+        var ok = await sessionRuntime.DispatchRemoteControlHelperEventAsync(
+            RemoteControlReducerEventKind.HelperRequestClicked,
+            "helper_request",
+            CancellationToken.None);
+        if (!ok)
+        {
+            AppLog.Info("Remote control request failed");
+        }
+    }
+
+    private static void LogInvalidConnectInput(ConnectInputResolution resolution)
+    {
+        var reason = resolution.Error switch
+        {
+            ConnectInputValidationError.ExpiredInviteToken => "expired_invite",
+            ConnectInputValidationError.InvalidInviteToken when resolution.InviteValidationError == InviteTokenValidationError.SignatureInvalid => "invite_signature_verification_failed",
+            ConnectInputValidationError.InvalidInviteToken when resolution.InviteValidationError == InviteTokenValidationError.UnsupportedVersion => "invite_version_unsupported",
+            ConnectInputValidationError.InvalidInviteToken when resolution.InviteValidationError == InviteTokenValidationError.ReplayDetected => "invite_replay_detected",
+            ConnectInputValidationError.InvalidInviteToken when resolution.InviteValidationError == InviteTokenValidationError.Revoked => "invite_revoked",
+            ConnectInputValidationError.InvalidInviteToken when resolution.InviteValidationError == InviteTokenValidationError.ParseFailed => "invite_parse_failed",
+            ConnectInputValidationError.InvalidInviteToken => "invite_invalid",
+            ConnectInputValidationError.Empty => "empty_input",
+            ConnectInputValidationError.UnsupportedInput => "unsupported_input",
+            ConnectInputValidationError.InvalidAddress => "invalid_address",
+            _ => "invalid_input",
+        };
+
+        AppLog.Warn(
+            $"Helper connect input rejected; reason={reason}; error={resolution.Error}; invite_validation={resolution.InviteValidationError}; invite_parse={resolution.InviteParseError}; message={resolution.Message ?? "(none)"}");
+    }
+
+    private async Task StopRemoteControlAsync(string reason)
+    {
+        if (!CanStopRemoteControlAction())
+        {
+            return;
+        }
+
+        await sessionRuntime.DispatchRemoteControlHelperEventAsync(
+            RemoteControlReducerEventKind.HelperStopClicked,
+            reason,
+            CancellationToken.None);
+    }
+
+    public void PostRemoteControlInput(ControlInputMessageV1 message)
+    {
+        if (!IsRemoteControlInputCaptureEnabled)
+        {
+            return;
+        }
+
+        if (string.Equals(message.Kind, "key", StringComparison.Ordinal) &&
+            !IsRemoteControlKeyboardCaptureEnabled)
+        {
+            return;
+        }
+
+        TrackRemoteControlDebugMetrics(message);
+        _ = sessionRuntime.SendRemoteControlInputAsync(message, CancellationToken.None);
+    }
+
+    public void UpdateRemoteControlHeldState(
+        RemoteControlModifiersMask modifiersMask,
+        RemoteControlMouseButtonsMask mouseButtonsMask,
+        bool immediateReleaseAll)
+    {
+        var buttonsChanged = remoteControlHeldMouseButtonsMask != mouseButtonsMask;
+        remoteControlHeldModifiersMask = modifiersMask;
+        remoteControlHeldMouseButtonsMask = mouseButtonsMask;
+        SyncRemoteControlStateSnapshotPump();
+
+        if (!FeatureFlags.RemoteControlStateSnapshotEnabled)
+        {
+            return;
+        }
+
+        if (immediateReleaseAll || buttonsChanged)
+        {
+            remoteControlSnapshotImmediateRequested = true;
+            _ = TrySendRemoteControlStateSnapshotAsync(forceSend: true);
+        }
+    }
+
+    public void ExitControlMode()
+    {
+        SetControlModeEnabled(false);
+    }
+
+    private bool CanRequestRemoteControlAction()
+    {
+        return CanRequestControl;
+    }
+
+    private bool CanStopRemoteControlAction()
+    {
+        return CanStopControl;
+    }
+
+    private void ToggleControlMode()
+    {
+        if (!CanToggleControlModeAction())
+        {
+            return;
+        }
+
+        controlModeEnabled = !controlModeEnabled;
+        OnPropertyChanged(nameof(ControlModeButtonText));
+        OnPropertyChanged(nameof(RemoteControlDebugControlModeText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsControlModeText));
+        OnPropertyChanged(nameof(IsRemoteControlKeyboardCaptureEnabled));
+        ToggleControlModeCommand.NotifyCanExecuteChanged();
+
+        if (controlModeEnabled && IsRemoteControlKeyboardCaptureEnabled)
+        {
+            RemoteControlViewerFocusRequested?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    private bool CanToggleControlModeAction()
+    {
+        return CanControlModeToggle;
+    }
+
+    private void SetControlModeEnabled(bool enabled)
+    {
+        if (controlModeEnabled == enabled)
+        {
+            return;
+        }
+
+        controlModeEnabled = enabled;
+        OnPropertyChanged(nameof(ControlModeButtonText));
+        OnPropertyChanged(nameof(RemoteControlDebugControlModeText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsControlModeText));
+        OnPropertyChanged(nameof(IsRemoteControlKeyboardCaptureEnabled));
+        ToggleControlModeCommand.NotifyCanExecuteChanged();
+    }
+
+    private void ToggleRemoteControlDebugPanel()
+    {
+        if (!CanToggleRemoteControlDebugPanel())
+        {
+            return;
+        }
+
+        remoteControlDebugPanelExpanded = !remoteControlDebugPanelExpanded;
+        NotifyRemoteControlDiagnosticsChanged();
+    }
+
+    private bool CanToggleRemoteControlDebugPanel()
+    {
+        return ShowRemoteControlDebugToggle;
+    }
+
+    private void EnsureControlModeConsistency()
+    {
+        if (IsRemoteControlInputCaptureEnabled)
+        {
+            SyncRemoteControlStateSnapshotPump();
+            return;
+        }
+
+        SetControlModeEnabled(false);
+        ResetRemoteControlDebugMetrics();
+        SyncRemoteControlStateSnapshotPump();
+    }
+
+    private void OnRemoteControlStateSnapshotTimerTick(object? sender, EventArgs e)
+    {
+        _ = TrySendRemoteControlStateSnapshotAsync(forceSend: false);
+    }
+
+    private void SyncRemoteControlStateSnapshotPump()
+    {
+        var shouldRun = FeatureFlags.RemoteControlStateSnapshotEnabled &&
+                        IsRemoteControlInputCaptureEnabled &&
+                        sessionRuntime.ControlState == ControlState.Active;
+        if (!shouldRun)
+        {
+            remoteControlStateSnapshotTimer.Stop();
+            remoteControlSnapshotHasSent = false;
+            remoteControlLastSnapshotSentTickMs = 0;
+            remoteControlSnapshotImmediateRequested = false;
+            remoteControlSnapshotSendInProgress = false;
+            ResetRemoteControlSnapshotDebugMetrics();
+            return;
+        }
+
+        if (!remoteControlStateSnapshotTimer.IsEnabled)
+        {
+            remoteControlStateSnapshotTimer.Start();
+            _ = TrySendRemoteControlStateSnapshotAsync(forceSend: true);
+        }
+    }
+
+    private async Task TrySendRemoteControlStateSnapshotAsync(bool forceSend)
+    {
+        if (!FeatureFlags.RemoteControlStateSnapshotEnabled)
+        {
+            return;
+        }
+
+        if (remoteControlSnapshotSendInProgress)
+        {
+            if (forceSend)
+            {
+                remoteControlSnapshotImmediateRequested = true;
+            }
+            return;
+        }
+
+        if (!IsRemoteControlInputCaptureEnabled ||
+            sessionRuntime.ControlState != ControlState.Active)
+        {
+            return;
+        }
+
+        var requestId = sessionRuntime.CurrentControlRequestId;
+        if (string.IsNullOrWhiteSpace(requestId))
+        {
+            return;
+        }
+
+        var nowTickMs = Environment.TickCount64;
+        var modifiersMask = remoteControlHeldModifiersMask;
+        var mouseButtonsMask = remoteControlHeldMouseButtonsMask;
+        var masksChanged = !remoteControlSnapshotHasSent ||
+                           modifiersMask != remoteControlLastSentModifiersMask ||
+                           mouseButtonsMask != remoteControlLastSentMouseButtonsMask;
+        var keepAliveDue = !remoteControlSnapshotHasSent ||
+                           nowTickMs - remoteControlLastSnapshotSentTickMs >= (long)RemoteControlSnapshotKeepAliveInterval.TotalMilliseconds;
+        var shouldSend = forceSend || remoteControlSnapshotImmediateRequested || masksChanged || keepAliveDue;
+        if (!shouldSend)
+        {
+            return;
+        }
+
+        var snapshot = new ControlStateSnapshotV1
+        {
+            RequestId = requestId,
+            Seq = Interlocked.Increment(ref remoteControlSnapshotSequence),
+            TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            ModifiersMask = (int)modifiersMask,
+            MouseButtonsMask = (int)mouseButtonsMask,
+        };
+
+        remoteControlSnapshotSendInProgress = true;
+        try
+        {
+            var sent = await sessionRuntime.SendRemoteControlStateSnapshotAsync(snapshot, CancellationToken.None);
+            if (!sent)
+            {
+                return;
+            }
+
+            remoteControlSnapshotHasSent = true;
+            remoteControlLastSnapshotSentTickMs = Environment.TickCount64;
+            remoteControlLastSentModifiersMask = modifiersMask;
+            remoteControlLastSentMouseButtonsMask = mouseButtonsMask;
+            remoteControlLastSnapshotSentSeq = snapshot.Seq;
+            RecordRemoteControlSnapshotSentForDebug();
+            remoteControlSnapshotImmediateRequested = false;
+        }
+        finally
+        {
+            remoteControlSnapshotSendInProgress = false;
+        }
+    }
+
+    [Conditional("DEBUG")]
+    private void RecordRemoteControlSnapshotSentForDebug()
+    {
+        var nowMs = Environment.TickCount64;
+        if (remoteControlSnapshotSendWindowStartTickMs == 0)
+        {
+            remoteControlSnapshotSendWindowStartTickMs = nowMs;
+        }
+
+        if (nowMs - remoteControlSnapshotSendWindowStartTickMs >= 1000)
+        {
+            remoteControlSnapshotSendsPerSecond = remoteControlSnapshotSendsInWindow;
+            remoteControlSnapshotSendsInWindow = 0;
+            remoteControlSnapshotSendWindowStartTickMs = nowMs;
+        }
+
+        remoteControlSnapshotSendsInWindow++;
+        RemoteControlDebugDiagnostics.SetHelperSnapshotRuntime(
+            lastSentSeq: remoteControlLastSnapshotSentSeq,
+            lastSentModifiersMask: (int)remoteControlLastSentModifiersMask,
+            lastSentMouseButtonsMask: (int)remoteControlLastSentMouseButtonsMask,
+            sentPerSec: remoteControlSnapshotSendsPerSecond);
+        NotifyRemoteControlDiagnosticsChanged();
+    }
+
+    [Conditional("DEBUG")]
+    private void ResetRemoteControlSnapshotDebugMetrics()
+    {
+        remoteControlLastSnapshotSentSeq = 0;
+        remoteControlSnapshotSendsPerSecond = 0;
+        remoteControlSnapshotSendsInWindow = 0;
+        remoteControlSnapshotSendWindowStartTickMs = 0;
+        RemoteControlDebugDiagnostics.SetHelperSnapshotRuntime(
+            lastSentSeq: 0,
+            lastSentModifiersMask: (int)RemoteControlModifiersMask.None,
+            lastSentMouseButtonsMask: (int)RemoteControlMouseButtonsMask.None,
+            sentPerSec: 0);
+        NotifyRemoteControlDiagnosticsChanged();
+    }
+
+    [Conditional("DEBUG")]
+    private void TrackRemoteControlDebugMetrics(ControlInputMessageV1 message)
+    {
+        if (!RemoteControlDebugPanelEnabled ||
+            !string.Equals(message.Kind, "mouse_move", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var nowMs = Environment.TickCount64;
+        if (remoteControlDebugMouseMoveWindowStartTickMs == 0)
+        {
+            remoteControlDebugMouseMoveWindowStartTickMs = nowMs;
+        }
+
+        if (nowMs - remoteControlDebugMouseMoveWindowStartTickMs >= 1000)
+        {
+            remoteControlDebugMouseMovesPerSecond = remoteControlDebugMouseMovesInWindow;
+            remoteControlDebugMouseMovesInWindow = 0;
+            remoteControlDebugMouseMoveWindowStartTickMs = nowMs;
+            OnPropertyChanged(nameof(RemoteControlDebugMouseMoveRateText));
+            OnPropertyChanged(nameof(RemoteControlDiagnosticsMoveStatsText));
+        }
+
+        remoteControlDebugMouseMovesInWindow++;
+    }
+
+    [Conditional("DEBUG")]
+    private void ResetRemoteControlDebugMetrics()
+    {
+        remoteControlDebugMouseMoveWindowStartTickMs = 0;
+        remoteControlDebugMouseMovesInWindow = 0;
+        if (remoteControlDebugMouseMovesPerSecond == 0)
+        {
+            return;
+        }
+
+        remoteControlDebugMouseMovesPerSecond = 0;
+        OnPropertyChanged(nameof(RemoteControlDebugMouseMoveRateText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsMoveStatsText));
+    }
+
     private void RequestSendFileWindow()
     {
+        if (!CanSendFileAction())
+        {
+            return;
+        }
+
+        if (!sessionRuntime.TryAuthorizeFileTransferSend())
+        {
+            CanSendFiles = false;
+            SendFileCommand.NotifyCanExecuteChanged();
+            return;
+        }
+
         SendFileRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private bool CanSendFileAction()
+    {
+        return CanSendFiles;
     }
 
     private void OpenDiagnostics()
@@ -975,10 +1712,14 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             }
             OnPropertyChanged(nameof(ShowChatConnectionHint));
             OnPropertyChanged(nameof(ShowMainControls));
+            OnPropertyChanged(nameof(ShowRecentTargets));
             OnPropertyChanged(nameof(ShowConnectAction));
             OnPropertyChanged(nameof(ShowRetryAction));
             OnPropertyChanged(nameof(ShowInlineStatusText));
             OnPropertyChanged(nameof(ShowCopyFeedbackInline));
+            ScanQrFromFileCommand.NotifyCanExecuteChanged();
+            ScanQrFromCameraCommand.NotifyCanExecuteChanged();
+            ClearRecentTargetsCommand.NotifyCanExecuteChanged();
         });
     }
 
@@ -1010,6 +1751,45 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         });
     }
 
+    private void OnRemoteControlStateChanged(object? sender, EventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(() =>
+        {
+            OnPropertyChanged(nameof(HeaderStatusText));
+            OnPropertyChanged(nameof(ShowChatConnectionPill));
+            OnPropertyChanged(nameof(ShowChatTopBar));
+            OnPropertyChanged(nameof(SessionSupportsRemoteControl));
+            OnPropertyChanged(nameof(RemoteControlMappingAvailable));
+            OnPropertyChanged(nameof(ShowRequestControlAction));
+            OnPropertyChanged(nameof(CanRequestControl));
+            OnPropertyChanged(nameof(ShowStopControlAction));
+            OnPropertyChanged(nameof(StopControlButtonText));
+            OnPropertyChanged(nameof(CanStopControl));
+            OnPropertyChanged(nameof(ShowRemoteControlActiveStatus));
+            OnPropertyChanged(nameof(IsRemoteControlInputCaptureEnabled));
+            OnPropertyChanged(nameof(ShowControlModeToggle));
+            OnPropertyChanged(nameof(CanControlModeToggle));
+            OnPropertyChanged(nameof(ControlModeButtonText));
+            OnPropertyChanged(nameof(IsRemoteControlKeyboardCaptureEnabled));
+            OnPropertyChanged(nameof(CanEndSession));
+            NotifyRemoteControlDiagnosticsChanged();
+            RequestControlCommand.NotifyCanExecuteChanged();
+            StopControlCommand.NotifyCanExecuteChanged();
+            ToggleControlModeCommand.NotifyCanExecuteChanged();
+            EndSessionCommand.NotifyCanExecuteChanged();
+            EnsureControlModeConsistency();
+            if (sessionRuntime.ControlState != ControlState.Active)
+            {
+                ResetRemoteControlDebugMetrics();
+            }
+        });
+    }
+
     private void OnSessionRuntimeStateChanged(object? sender, SessionRuntimeStateChangedEventArgs e)
     {
         if (disposed)
@@ -1023,9 +1803,23 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         });
     }
 
+    private void OnSessionSecurityStateChanged(object? sender, EventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(SyncFromRuntime);
+    }
+
     private void OnScreenShareFrameCompleted(object? sender, ScreenShareFrameCompletedEventArgs e)
     {
-        ScreenShareViewer.OnJpegFrame(e.EncodedFrameBytes);
+        ScreenShareViewer.OnJpegFrame(
+            e.EncodedFrameBytes,
+            e.CapturedTsUtcMs,
+            e.ChunksDroppedOlderFrame,
+            e.AssembliesExpired);
     }
 
     private void OnScreenShareStopped(object? sender, EventArgs e)
@@ -1059,7 +1853,23 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (previousShowRemoteScreenShareFrame != nextShowRemoteScreenShareFrame)
             {
                 OnPropertyChanged(nameof(ShowRemoteScreenShareFrame));
+                OnPropertyChanged(nameof(ShowRequestControlAction));
+                OnPropertyChanged(nameof(CanRequestControl));
+                OnPropertyChanged(nameof(ShowStopControlAction));
+                OnPropertyChanged(nameof(CanStopControl));
+                OnPropertyChanged(nameof(IsRemoteControlInputCaptureEnabled));
+                OnPropertyChanged(nameof(ShowControlModeToggle));
+                OnPropertyChanged(nameof(CanControlModeToggle));
+                OnPropertyChanged(nameof(IsRemoteControlKeyboardCaptureEnabled));
+                NotifyRemoteControlDiagnosticsChanged();
+                RequestControlCommand.NotifyCanExecuteChanged();
+                StopControlCommand.NotifyCanExecuteChanged();
                 lastKnownShowRemoteScreenShareFrame = nextShowRemoteScreenShareFrame;
+                EnsureControlModeConsistency();
+                if (!nextShowRemoteScreenShareFrame)
+                {
+                    ResetRemoteControlDebugMetrics();
+                }
             }
 
             var nextShowHelperMainContent = ShowHelperMainContent;
@@ -1085,6 +1895,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(HeaderStatusText));
                 lastKnownHeaderStatusText = nextHeaderStatusText;
                 OnPropertyChanged(nameof(ShowChatConnectionPill));
+                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
@@ -1097,7 +1908,13 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        _ = UiThreadDispatch.RunAsync(SyncTransientStatusFromRuntime);
+        _ = UiThreadDispatch.RunAsync(() =>
+        {
+            SyncTransientStatusFromRuntime();
+            OnPropertyChanged(nameof(HeaderStatusText));
+            OnPropertyChanged(nameof(ShowChatConnectionPill));
+            OnPropertyChanged(nameof(ShowChatTopBar));
+        });
     }
 
     private void OnUiStateStorePropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -1242,7 +2059,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return (null, null);
         }
 
-        return (lastError, "Connection did not complete. Try again or use a new code.");
+        return (lastError, "Connection did not complete. Try again with invite or address.");
     }
 
     private void SyncFromRuntime()
@@ -1269,6 +2086,30 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                     StatusText = transportConfig.ApprovedStatusText;
                     ConnectionState = "Connected";
                     ShowChatNotice = false;
+                    break;
+                case SessionRuntimeState.Idle:
+                    IsConnecting = false;
+                    if (endInvoked)
+                    {
+                        break;
+                    }
+
+                    if (wasConnected && endReason is null)
+                    {
+                        var inferredReason = sessionRuntime.LastDisconnectWasRemoteEnd || sessionRuntime.LastTransportFailure is null
+                            ? SessionEndReason.PeerEnded
+                            : SessionEndReason.Failed;
+                        endReason = inferredReason;
+                        ApplyEndReasonPresentation(inferredReason);
+                    }
+                    else if (!wasConnected)
+                    {
+                        ClearFailurePresentation();
+                        StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
+                            ? string.Empty
+                            : sessionRuntime.StatusText;
+                        ConnectionState = "Idle";
+                    }
                     break;
                 case SessionRuntimeState.Rejected:
                     IsConnecting = false;
@@ -1425,7 +2266,32 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowInlineStatusText));
         OnPropertyChanged(nameof(ShowFailurePanel));
         OnPropertyChanged(nameof(ShowMainControls));
+        OnPropertyChanged(nameof(ShowRecentTargets));
         OnPropertyChanged(nameof(ShowCopyFeedbackInline));
+        OnPropertyChanged(nameof(HeaderStatusText));
+        OnPropertyChanged(nameof(ShowChatConnectionPill));
+        OnPropertyChanged(nameof(ShowChatTopBar));
+        OnPropertyChanged(nameof(SessionSupportsRemoteControl));
+        OnPropertyChanged(nameof(RemoteControlMappingAvailable));
+        OnPropertyChanged(nameof(ShowRequestControlAction));
+        OnPropertyChanged(nameof(CanRequestControl));
+        OnPropertyChanged(nameof(ShowStopControlAction));
+        OnPropertyChanged(nameof(StopControlButtonText));
+        OnPropertyChanged(nameof(CanStopControl));
+        OnPropertyChanged(nameof(ShowRemoteControlActiveStatus));
+        OnPropertyChanged(nameof(IsRemoteControlInputCaptureEnabled));
+        OnPropertyChanged(nameof(ShowControlModeToggle));
+        OnPropertyChanged(nameof(CanControlModeToggle));
+        OnPropertyChanged(nameof(ControlModeButtonText));
+        OnPropertyChanged(nameof(IsRemoteControlKeyboardCaptureEnabled));
+        NotifyRemoteControlDiagnosticsChanged();
+        RequestControlCommand.NotifyCanExecuteChanged();
+        StopControlCommand.NotifyCanExecuteChanged();
+        ToggleControlModeCommand.NotifyCanExecuteChanged();
+        ScanQrFromFileCommand.NotifyCanExecuteChanged();
+        ScanQrFromCameraCommand.NotifyCanExecuteChanged();
+        ClearRecentTargetsCommand.NotifyCanExecuteChanged();
+        EnsureControlModeConsistency();
         SendChatCommand.NotifyCanExecuteChanged();
         RetryCommand.NotifyCanExecuteChanged();
         OpenDiagnosticsCommand.NotifyCanExecuteChanged();
@@ -1620,6 +2486,82 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
+    private void NotifyRemoteControlDiagnosticsChanged()
+    {
+        OnPropertyChanged(nameof(ShowRemoteControlDebugToggle));
+        OnPropertyChanged(nameof(ShowRemoteControlDebugPanel));
+        OnPropertyChanged(nameof(RemoteControlDebugToggleText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsRoleText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsControlStateText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsControlModeText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsDisplayText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsCaptureFrameText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsMoveStatsText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsSuppressionsText));
+        OnPropertyChanged(nameof(RemoteControlDiagnosticsLastMappedText));
+        OnPropertyChanged(nameof(RemoteControlDebugControlStateText));
+        OnPropertyChanged(nameof(RemoteControlDebugDisplayRevisionText));
+        OnPropertyChanged(nameof(RemoteControlDebugRequestIdText));
+        OnPropertyChanged(nameof(RemoteControlDebugControllerPeerText));
+        OnPropertyChanged(nameof(RemoteControlDebugMappingDisplayText));
+        OnPropertyChanged(nameof(RemoteControlDebugControlModeText));
+        OnPropertyChanged(nameof(RemoteControlDebugMouseMoveRateText));
+        OnPropertyChanged(nameof(RemoteControlDebugGuardrailCountersText));
+        ToggleRemoteControlDebugPanelCommand.NotifyCanExecuteChanged();
+    }
+
+    private RemoteControlDebugSnapshot GetRemoteControlDiagnosticsSnapshot()
+    {
+#if DEBUG
+        return RemoteControlDebugDiagnostics.Snapshot(RemoteControlDiagnosticsRole.Helper);
+#else
+        return RemoteControlDebugSnapshot.Empty(RemoteControlDiagnosticsRole.Helper);
+#endif
+    }
+
+    private static string FormatCaptureFrameText(RemoteControlDebugSnapshot snapshot)
+    {
+        var capture = snapshot.CaptureRegionPx.HasValue
+            ? string.Create(
+                CultureInfo.InvariantCulture,
+                $"{snapshot.CaptureRegionPx.Value.X},{snapshot.CaptureRegionPx.Value.Y},{snapshot.CaptureRegionPx.Value.Width}x{snapshot.CaptureRegionPx.Value.Height}")
+            : "n/a";
+        var frame = snapshot.FrameSizePx.HasValue
+            ? string.Create(CultureInfo.InvariantCulture, $"{snapshot.FrameSizePx.Value.Width}x{snapshot.FrameSizePx.Value.Height}")
+            : "n/a";
+        return $"capture={capture}; frame={frame}";
+    }
+
+    private string FormatMoveStatsText(RemoteControlDebugSnapshot snapshot)
+    {
+        var sentPerSecond = snapshot.MouseMoveSentPerSec ?? remoteControlDebugMouseMovesPerSecond;
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"sent={sentPerSecond}/s; dropped={snapshot.MouseMoveDropped}; clamps={snapshot.OutOfRangeClamps}");
+    }
+
+    private static string FormatSuppressionText(RemoteControlDebugSnapshot snapshot)
+    {
+        var ackAgeMs = snapshot.HelperLastAckAgeMs?.ToString(CultureInfo.InvariantCulture) ?? "n/a";
+        var snapshotRate = snapshot.HelperSnapshotSentPerSec?.ToString(CultureInfo.InvariantCulture) ?? "n/a";
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"suppressed={snapshot.SuppressedInjections}; flushes={snapshot.QueueFlushes}; ack_seq={snapshot.HelperLastAckSeq}; ack_age_ms={ackAgeMs}; ack_stalls={snapshot.HelperStallDetectedCount}; stall_recovery_sent={snapshot.HelperStallRecoverySentCount}; snap_tx_seq={snapshot.HelperLastSnapshotSentSeq}; snap_tx_masks={snapshot.HelperLastSnapshotSentModifiersMask}/{snapshot.HelperLastSnapshotSentMouseButtonsMask}; snap_tx_rate={snapshotRate}/s");
+    }
+
+    private static string FormatLastMappedText(RemoteControlDebugSnapshot snapshot)
+    {
+        if (!snapshot.LastMapped.HasValue)
+        {
+            return "n/a";
+        }
+
+        var mapped = snapshot.LastMapped.Value;
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"nx={mapped.Nx:0.###}, ny={mapped.Ny:0.###} -> px={mapped.Px}, py={mapped.Py}");
+    }
+
     private void NotifyStatusBannerDetailChanged()
     {
         OnPropertyChanged(nameof(StatusBannerFailureCategory));
@@ -1686,10 +2628,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                     or SessionUiPhase.Recovering
                     or SessionUiPhase.Failed
                     or SessionUiPhase.Ended;
-            nextCanSendFiles = phase is SessionUiPhase.Idle
-                or SessionUiPhase.Waiting
-                or SessionUiPhase.Connected
-                or SessionUiPhase.Failed;
+            nextCanSendFiles = phase == SessionUiPhase.Connected &&
+                               sessionRuntime.CanPerform(SessionCapability.FileTransfer);
             nextChatEnabled = phase == SessionUiPhase.Connected;
         }
         else
@@ -1698,7 +2638,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 case SessionUiPhase.Connected:
                     nextChatEnabled = true;
-                    nextCanSendFiles = true;
+                    nextCanSendFiles = sessionRuntime.CanPerform(SessionCapability.FileTransfer);
                     nextCanOpenDiagnostics = openDiagnosticsAction is not null;
                     break;
 
@@ -1730,6 +2670,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
         SendChatCommand.NotifyCanExecuteChanged();
+        SendFileCommand.NotifyCanExecuteChanged();
         OpenDiagnosticsCommand.NotifyCanExecuteChanged();
         EndSessionCommand.NotifyCanExecuteChanged();
         AssertUiConsistency();
@@ -1846,6 +2787,25 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         return string.IsNullOrWhiteSpace(withoutAttempt) ? text : withoutAttempt;
     }
 
+    private bool TryGetRemoteControlHeaderHint(out string hintText)
+    {
+        hintText = string.Empty;
+        if (!IsConnectedView || !sessionRuntime.IsTransientStatusVisible)
+        {
+            return false;
+        }
+
+        var transientText = sessionRuntime.TransientStatusText;
+        if (string.IsNullOrWhiteSpace(transientText) ||
+            !transientText.StartsWith("Screen changed", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        hintText = SanitizeTransientText(transientText);
+        return !string.IsNullOrWhiteSpace(hintText);
+    }
+
     private static UserFacingStatus NormalizeStatusForDisplay(UserFacingStatus status)
     {
         return status with
@@ -1915,7 +2875,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             throw new InvalidOperationException("Helper UI invariant failed: Ended/Failed phase requires disabled chat input.");
         }
 
-        if (HeaderStatusText.StartsWith("Connected", StringComparison.Ordinal) && !IsChatInputEnabled)
+        if (!endInvoked &&
+            HeaderStatusText.StartsWith("Connected", StringComparison.Ordinal) &&
+            sessionRuntime.State == SessionRuntimeState.Connected &&
+            (IsConnectedView || uiStateStore?.Phase == SessionUiPhase.Connected) &&
+            !IsChatInputEnabled)
         {
             throw new InvalidOperationException("UI invariant failed: Connected header requires chat enabled.");
         }

@@ -2,7 +2,7 @@ using NLink.App.Services.ScreenCapture;
 
 namespace NLink.SmokeTests.Fakes;
 
-internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IAsyncDisposable
+internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IScreenCaptureMetadataSource, IAsyncDisposable
 {
     private EventHandler<ScreenCaptureFrameEventArgs>? frameArrived;
 
@@ -20,6 +20,7 @@ internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IAsyncDisp
 
     public Exception? StartException { get; set; }
     public TaskCompletionSource<bool>? StopBlocker { get; set; }
+    public ScreenCaptureMetadata? CaptureMetadata { get; set; }
 
     public event EventHandler<ScreenCaptureFrameEventArgs>? FrameArrived
     {
@@ -75,5 +76,17 @@ internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IAsyncDisp
         frameArrived = null;
         FrameSubscriberCount = 0;
         return ValueTask.CompletedTask;
+    }
+
+    public bool TryGetCaptureMetadata(out ScreenCaptureMetadata metadata)
+    {
+        if (CaptureMetadata.HasValue)
+        {
+            metadata = CaptureMetadata.Value;
+            return true;
+        }
+
+        metadata = default;
+        return false;
     }
 }

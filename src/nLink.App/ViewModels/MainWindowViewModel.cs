@@ -11,6 +11,9 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
     private readonly TransportRuntimeConfig transportConfig;
     private readonly ShareMessageConfig shareMessageConfig;
     private readonly IClipboardService clipboardService;
+    private readonly IInviteShareService inviteShareService;
+    private readonly IRecentConnectTargetsStore recentConnectTargetsStore;
+    private readonly IQrCodeService qrCodeService;
     private readonly SessionRuntime sessionRuntime;
     private readonly StatusPresenter statusPresenter;
     private readonly SessionUiStateStore sessionUiStateStore;
@@ -32,6 +35,9 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
         transportConfig = TransportRuntimeConfig.Select();
         shareMessageConfig = this.services.GetRequired<ShareMessageConfig>();
         clipboardService = this.services.GetRequired<IClipboardService>();
+        inviteShareService = this.services.GetRequired<IInviteShareService>();
+        recentConnectTargetsStore = this.services.GetRequired<IRecentConnectTargetsStore>();
+        qrCodeService = this.services.GetRequired<IQrCodeService>();
         metricsRegistry = this.services.GetRequired<MetricsRegistry>();
         resourceRuntimeTracker = this.services.GetRequired<ResourceRuntimeTracker>();
         sessionRuntime = new SessionRuntime(
@@ -79,7 +85,9 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
             statusPresenter,
             incomingRequestTimeout: null,
             uiStateStore: sessionUiStateStore,
-            backAction: ShowHomePage));
+            backAction: ShowHomePage,
+            inviteShareService: inviteShareService,
+            qrCodeService: qrCodeService));
     }
 
     private void ShowHelperPage()
@@ -97,7 +105,8 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
             connectFailureCooldown: null,
             nowProvider: null,
             uiStateStore: sessionUiStateStore,
-            backAction: ShowHomePage));
+            backAction: ShowHomePage,
+            recentConnectTargetsStore: recentConnectTargetsStore));
     }
 
     private void EndSessionOnly()

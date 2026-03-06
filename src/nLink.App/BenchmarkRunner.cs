@@ -12,6 +12,7 @@ using NLink.App.Services;
 using NLink.Core;
 using NLink.Core.Metrics;
 using NLink.Core.Resources;
+using NLink.Core.SessionConnect;
 using NLink.Infra.DevLocal;
 using NLink.Infra.Nkn;
 
@@ -486,7 +487,6 @@ internal static class BenchmarkRunner
 
         private async Task<bool> RunCycleAsync(int cycleIndex, BenchmarkSessionPair? sharedPair, CancellationToken ct)
         {
-            var code = new SessionCode((cycleIndex % 1_000_000).ToString("D6", CultureInfo.InvariantCulture));
             var pair = sharedPair ?? CreateSessionPair(cycleIndex);
             using var ownedPair = sharedPair is null ? pair : null;
             var helpee = pair.Helpee;
@@ -526,8 +526,9 @@ internal static class BenchmarkRunner
 
             try
             {
-                await helpee.StartHelpeeAsync(code, cycleCts.Token);
-                await helper.StartHelperAsync(code, cycleCts.Token);
+                await helpee.StartHelpeeAsync(cycleCts.Token);
+                var (inviteToken, invite) = CreateInviteForTarget(GetHostedAddressOrThrow(helpee));
+                await helper.StartHelperAsync(inviteToken, invite, cycleCts.Token);
 
                 await incomingJoin.Task.WaitAsync(TimeSpan.FromSeconds(10), cycleCts.Token);
                 await helpee.ApproveAsync(cycleCts.Token);
@@ -565,6 +566,43 @@ internal static class BenchmarkRunner
                 helpee.StateChanged -= helpeeStateChangedHandler;
                 helper.StateChanged -= helperStateChangedHandler;
             }
+        }
+
+        private static PeerAddress GetHostedAddressOrThrow(SessionRuntime runtime)
+        {
+            if (runtime.CurrentLocalPeerAddress is PeerAddress address)
+            {
+                return address;
+            }
+
+            throw new InvalidOperationException("Active helpee transport did not expose a local peer address.");
+        }
+
+        private static (string Token, ValidatedInviteV1 Invite) CreateInviteForTarget(PeerAddress targetAddress)
+        {
+            var nowUtc = DateTimeOffset.UtcNow;
+            var factory = InviteTokenServiceFactory.CreateInviteTokenFactory();
+            var create = factory.Create(
+                new InviteTokenCreateRequest(
+                    IssuerAddress: targetAddress,
+                    TargetAddress: targetAddress,
+                    SessionId: new SessionId($"sess_bench_{Guid.NewGuid():N}"),
+                    Capabilities: InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl | InviteCapabilities.FileTransfer,
+                    Lifetime: TimeSpan.FromMinutes(5)),
+                nowUtc);
+            if (!create.IsSuccess || string.IsNullOrWhiteSpace(create.Token))
+            {
+                throw new InvalidOperationException(create.Message ?? "Failed to create benchmark invite.");
+            }
+
+            var validator = InviteTokenServiceFactory.CreateInviteTokenValidator();
+            var validation = validator.Validate(create.Token, nowUtc.AddSeconds(1));
+            if (!validation.IsSuccess || validation.Invite is null)
+            {
+                throw new InvalidOperationException(validation.Message ?? "Failed to validate benchmark invite.");
+            }
+
+            return (create.Token, validation.Invite);
         }
 
         private BenchmarkSessionPair CreateSessionPair(int cycleSeed)

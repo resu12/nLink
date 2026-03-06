@@ -62,6 +62,51 @@ public sealed class ScreenShareFrameAssemblerTests
         Assert.Equal(new byte[] { 4, 5, 6, 7 }, completed!.EncodedFrameBytes);
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void ScreenShareFrameAssembler_BacklogPressure_CompletesLatestFrameOnly()
+    {
+        var assembler = new ScreenShareFrameAssembler();
+        var completedFrames = new List<ScreenShareFrameCompletedEventArgs>();
+        assembler.FrameCompleted += (_, frame) => completedFrames.Add(frame);
+
+        const int totalFrames = 200;
+        for (var frameId = 1; frameId <= totalFrames; frameId++)
+        {
+            assembler.OnChunk(BuildChunk(
+                frameId: frameId,
+                chunkIndex: 0,
+                chunkCount: 2,
+                bytes: new byte[] { (byte)(frameId & 0xFF) }));
+
+            if (frameId > 1)
+            {
+                // Simulate stale tail chunks arriving after a newer frame has already started.
+                assembler.OnChunk(BuildChunk(
+                    frameId: frameId - 1,
+                    chunkIndex: 1,
+                    chunkCount: 2,
+                    bytes: new byte[] { 0x7F }));
+            }
+        }
+
+        assembler.OnChunk(BuildChunk(
+            frameId: totalFrames,
+            chunkIndex: 1,
+            chunkCount: 2,
+            bytes: new byte[] { 0x55 }));
+
+        var completed = Assert.Single(completedFrames);
+        Assert.Equal(totalFrames, completed.FrameId);
+        Assert.Equal(new byte[] { (byte)(totalFrames & 0xFF), 0x55 }, completed.EncodedFrameBytes);
+
+        var metrics = assembler.GetMetricsSnapshot();
+        Assert.Equal(1, metrics.FramesCompleted);
+        Assert.True(metrics.AssembliesResetNewerFrame >= totalFrames - 2);
+        Assert.True(metrics.ChunksDroppedOlderFrame >= totalFrames - 2);
+        Assert.Equal(0, metrics.FramesTooLargeDropped);
+    }
+
     private static ScreenShareFrameChunkV1 BuildChunk(long frameId, int chunkIndex, int chunkCount, byte[] bytes, string? dataBase64 = null)
     {
         return new ScreenShareFrameChunkV1

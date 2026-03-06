@@ -607,10 +607,12 @@ public partial class SessionShellView : UserControl
         // ShowConnectedPanel can arrive after the header flips to Connected. Refresh presenters
         // on every recompute so the chat pane is attached even when the main-pane mode is unchanged.
         UpdateContentPresenters();
+        UpdatePlaceholderVisibility();
         Dispatcher.UIThread.Post(() =>
         {
             UpdateLayoutVisibility();
             UpdateContentPresenters();
+            UpdatePlaceholderVisibility();
         }, DispatcherPriority.Loaded);
     }
 

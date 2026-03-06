@@ -1,0 +1,10 @@
+Idle
+BridgeStarting
+BridgeReady
+TransportInitializing
+Connecting
+Handshake
+Connected
+Reconnecting
+Failed
+Disposed

@@ -10,13 +10,13 @@
 ## How to use
 
 1. Open `nLink` on both computers.
-2. One person clicks **I need help** and shares the 6-digit code.
-3. The helper clicks **I want to help someone**, enters the code, and clicks **Connect**.
+2. One person clicks **I need help** and shares the invite token (or direct NKN address).
+3. The helper clicks **I want to help someone**, pastes invite/address, and clicks **Connect**.
 
 ## Known issues
 
 - Connection can still be slow on some networks.
-- If connection fails, try again or use a new code.
+- If connection fails, retry with a refreshed invite or verify the direct address.
 - This is a pre-release and may still have rough edges.
 
 ## If something goes wrong

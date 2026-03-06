@@ -23,9 +23,25 @@
             <Setter Property="VerticalAlignment" Value="Center"/>
             <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
         </Style>
+
+        <Style Selector="Border.remoteControlBadge">
+            <Setter Property="Background" Value="{StaticResource AppPanelBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource AppCardBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="999"/>
+            <Setter Property="Padding" Value="10,4"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+
+        <Style Selector="TextBlock.remoteControlBadgeText">
+            <Setter Property="Foreground" Value="{StaticResource AppTextBrush}"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
     </UserControl.Styles>
 
-    <Grid ColumnDefinitions="Auto,*,Auto,Auto"
+    <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto"
           ColumnSpacing="10"
           MinHeight="38">
         <TextBlock Grid.Column="0"
@@ -33,18 +49,47 @@
                    Text="{Binding #Root.RoleText}"
                    IsVisible="{Binding #Root.HasRoleText}"/>
 
-            <TextBlock Grid.Column="1"
-                       Classes="headerStatus"
-                       AutomationProperties.AutomationId="SessionHeader.StatusText"
-                       Text="{Binding #Root.StatusText}"
-                       HorizontalAlignment="Stretch"
-                       MaxLines="1"
-                       TextTrimming="CharacterEllipsis"
-                       FontWeight="SemiBold"
-                       FontSize="17"
-                       VerticalAlignment="Center"/>
+        <TextBlock Grid.Column="1"
+                   Classes="headerStatus"
+                   AutomationProperties.AutomationId="SessionHeader.StatusText"
+                   Text="{Binding #Root.StatusText}"
+                   HorizontalAlignment="Stretch"
+                   MaxLines="1"
+                   TextTrimming="CharacterEllipsis"/>
 
-        <Button Grid.Column="2"
+        <Border Grid.Column="2"
+                Classes="remoteControlBadge"
+                IsVisible="{Binding #Root.ShowRemoteControlActiveStatus}">
+            <TextBlock Classes="remoteControlBadgeText"
+                       AutomationProperties.AutomationId="SessionHeader.RemoteControlActive"
+                       Text="Remote control active"/>
+        </Border>
+
+        <Button Grid.Column="3"
+                Classes="appButton secondaryButton"
+                AutomationProperties.AutomationId="SessionHeader.ControlMode"
+                Content="{Binding #Root.ControlModeButtonText}"
+                Command="{Binding #Root.ControlModeToggleCommand}"
+                IsEnabled="{Binding #Root.CanControlModeToggle}"
+                IsVisible="{Binding #Root.ShowControlModeToggle}"
+                HorizontalAlignment="Stretch"
+                Height="34"
+                MinWidth="144"
+                Padding="10,0"/>
+
+        <Button Grid.Column="4"
+                Classes="appButton secondaryButton"
+                AutomationProperties.AutomationId="SessionHeader.RequestControl"
+                Content="Request control"
+                Command="{Binding #Root.RequestControlCommand}"
+                IsEnabled="{Binding #Root.CanRequestControl}"
+                IsVisible="{Binding #Root.ShowRequestControl}"
+                HorizontalAlignment="Stretch"
+                Height="34"
+                MinWidth="132"
+                Padding="10,0"/>
+
+        <Button Grid.Column="5"
                 x:Name="ShareScreenButton"
                 Classes="appButton secondaryButton"
                 AutomationProperties.AutomationId="SessionHeader.ShareScreen"
@@ -57,7 +102,19 @@
                 MinWidth="132"
                 Padding="10,0"/>
 
-        <Button Grid.Column="3"
+        <Button Grid.Column="6"
+                Classes="appButton primaryButton"
+                AutomationProperties.AutomationId="SessionHeader.StopControl"
+                Content="{Binding #Root.StopControlButtonText}"
+                Command="{Binding #Root.StopControlCommand}"
+                IsEnabled="{Binding #Root.CanStopControl}"
+                IsVisible="{Binding #Root.ShowStopControl}"
+                HorizontalAlignment="Stretch"
+                Height="34"
+                MinWidth="120"
+                Padding="10,0"/>
+
+        <Button Grid.Column="7"
                 Classes="appButton secondaryButton"
                 Content="End session"
                 Command="{Binding #Root.EndSessionCommand}"

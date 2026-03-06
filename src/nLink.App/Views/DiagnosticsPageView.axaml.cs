@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using Avalonia.Controls;
+using Avalonia.Interactivity;
 using NLink.App.Services;
 using NLink.App.ViewModels;
 
@@ -8,6 +9,7 @@ namespace NLink.App.Views;
 
 public partial class DiagnosticsPageView : UserControl
 {
+    private static readonly Uri NknWebsiteUri = new("https://nkn.org/");
     private DiagnosticsPageViewModel? subscribedViewModel;
 
     public DiagnosticsPageView()
@@ -132,6 +134,22 @@ public partial class DiagnosticsPageView : UserControl
             FileName = fullPath,
             UseShellExecute = true,
         });
+    }
+
+    private void PoweredByNknLink_Click(object? sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = NknWebsiteUri.ToString(),
+                UseShellExecute = true,
+            });
+        }
+        catch
+        {
+            // Best-effort helper action only.
+        }
     }
 
     private void BindClipboardTopLevel()

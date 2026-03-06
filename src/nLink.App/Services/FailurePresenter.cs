@@ -32,9 +32,9 @@ public static class FailurePresenter
                 "Try again. Ask them to keep nLink open. If it keeps happening, use Copy Diagnostics."),
 
             TransportFailureCategory.PeerUnreachable => new(
-                "No one found with that code",
-                "We couldn't find anyone using that code.",
-                "Check the 6-digit code and try again. If it keeps happening, use Copy Diagnostics."),
+                "No response from target",
+                "We couldn't reach the target address.",
+                "Verify the invite or address and try again. If it keeps happening, use Copy Diagnostics."),
 
             TransportFailureCategory.NknSendFailure => new(
                 "Connection problem",

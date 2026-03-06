@@ -64,7 +64,8 @@
           RowSpacing="10"
           MinHeight="320">
         <Border Grid.Row="0"
-                Classes="chatTopBar">
+                Classes="chatTopBar"
+                IsVisible="{Binding ShowChatTopBar}">
             <Grid ColumnDefinitions="Auto,*,Auto"
                   ColumnSpacing="10"
                   VerticalAlignment="Center">

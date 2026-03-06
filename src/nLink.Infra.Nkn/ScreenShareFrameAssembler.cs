@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using NLink.Core.ScreenShare;
 
 namespace NLink.Infra.Nkn;
@@ -6,24 +7,79 @@ internal sealed class ScreenShareFrameAssembler
 {
     private const int MaxChunkCount = 256;
     private const int MaxAssembledFrameBytes = ScreenSharePayloadCodec.MaxChunkRawBytes * MaxChunkCount;
+    private const int MaxAssemblyAgeMs = 500;
 
     private AssemblyState? currentAssembly;
     private long lastCompletedFrameId = -1;
+    private long latestSeenFrameId = -1;
+    private long chunksDroppedOlderFrame;
+    private long assembliesExpired;
+    private long assembliesResetNewerFrame;
+    private long framesCompleted;
+    private long chunksDuplicateIgnored;
+    private long chunksInvalidDropped;
+    private long framesTooLargeDropped;
 
     public event EventHandler<ScreenShareFrameChunkV1>? ChunkReceived;
 
     public event EventHandler<ScreenShareFrameCompletedEventArgs>? FrameCompleted;
 
+    public ScreenShareFrameAssemblerMetrics GetMetricsSnapshot()
+    {
+        return new ScreenShareFrameAssemblerMetrics(
+            ChunksDroppedOlderFrame: Interlocked.Read(ref chunksDroppedOlderFrame),
+            AssembliesExpired: Interlocked.Read(ref assembliesExpired),
+            AssembliesResetNewerFrame: Interlocked.Read(ref assembliesResetNewerFrame),
+            FramesCompleted: Interlocked.Read(ref framesCompleted),
+            ChunksDuplicateIgnored: Interlocked.Read(ref chunksDuplicateIgnored),
+            ChunksInvalidDropped: Interlocked.Read(ref chunksInvalidDropped),
+            FramesTooLargeDropped: Interlocked.Read(ref framesTooLargeDropped));
+    }
+
     public void OnChunk(ScreenShareFrameChunkV1 chunk)
     {
         ArgumentNullException.ThrowIfNull(chunk);
 
+        if (chunk.ChunkCount <= 0 ||
+            chunk.ChunkCount > MaxChunkCount ||
+            chunk.ChunkIndex < 0 ||
+            chunk.ChunkIndex >= chunk.ChunkCount)
+        {
+            Interlocked.Increment(ref chunksInvalidDropped);
+            return;
+        }
+
         if (!TryDecodeChunk(chunk, out var chunkBytes))
         {
+            Interlocked.Increment(ref chunksInvalidDropped);
+            return;
+        }
+
+        if (chunkBytes.Length == 0)
+        {
+            Interlocked.Increment(ref chunksInvalidDropped);
             return;
         }
 
         ChunkReceived?.Invoke(this, chunk);
+
+        var latestSeen = Interlocked.Read(ref latestSeenFrameId);
+        if (chunk.FrameId > latestSeen)
+        {
+            Interlocked.Exchange(ref latestSeenFrameId, chunk.FrameId);
+            latestSeen = chunk.FrameId;
+        }
+        else if (chunk.FrameId < latestSeen)
+        {
+            Interlocked.Increment(ref chunksDroppedOlderFrame);
+            return;
+        }
+
+        if (currentAssembly is not null && currentAssembly.FrameId < latestSeen)
+        {
+            currentAssembly = null;
+            Interlocked.Increment(ref assembliesResetNewerFrame);
+        }
 
         if (chunk.FrameId <= lastCompletedFrameId)
         {
@@ -32,20 +88,35 @@ internal sealed class ScreenShareFrameAssembler
 
         if (currentAssembly is null || chunk.FrameId > currentAssembly.FrameId)
         {
+            if (currentAssembly is not null && chunk.FrameId > currentAssembly.FrameId)
+            {
+                Interlocked.Increment(ref assembliesResetNewerFrame);
+            }
+
             currentAssembly = CreateAssembly(chunk);
         }
         else if (chunk.FrameId < currentAssembly.FrameId)
         {
+            Interlocked.Increment(ref chunksDroppedOlderFrame);
+            return;
+        }
+
+        if (currentAssembly.IsExpired(Stopwatch.GetTimestamp(), MaxAssemblyAgeMs))
+        {
+            currentAssembly = null;
+            Interlocked.Increment(ref assembliesExpired);
             return;
         }
 
         if (!currentAssembly.Matches(chunk))
         {
+            Interlocked.Increment(ref chunksInvalidDropped);
             return;
         }
 
         if (currentAssembly.ChunkBytes[chunk.ChunkIndex] is not null)
         {
+            Interlocked.Increment(ref chunksDuplicateIgnored);
             return;
         }
 
@@ -56,6 +127,7 @@ internal sealed class ScreenShareFrameAssembler
         if (currentAssembly.TotalBytes > MaxAssembledFrameBytes)
         {
             currentAssembly = null;
+            Interlocked.Increment(ref framesTooLargeDropped);
             return;
         }
 
@@ -71,6 +143,8 @@ internal sealed class ScreenShareFrameAssembler
             var bytes = currentAssembly.ChunkBytes[i];
             if (bytes is null)
             {
+                Interlocked.Increment(ref chunksInvalidDropped);
+                currentAssembly = null;
                 return;
             }
 
@@ -83,10 +157,15 @@ internal sealed class ScreenShareFrameAssembler
             currentAssembly.Width,
             currentAssembly.Height,
             currentAssembly.Encoding,
-            frameBytes);
+            frameBytes,
+            currentAssembly.CapturedTsUtcMs,
+            ChunksDroppedOlderFrame: Interlocked.Read(ref chunksDroppedOlderFrame),
+            AssembliesExpired: Interlocked.Read(ref assembliesExpired),
+            SessionId: currentAssembly.SessionId);
 
         lastCompletedFrameId = currentAssembly.FrameId;
         currentAssembly = null;
+        Interlocked.Increment(ref framesCompleted);
         FrameCompleted?.Invoke(this, completed);
     }
 
@@ -99,10 +178,7 @@ internal sealed class ScreenShareFrameAssembler
             chunk.Height <= 0 ||
             string.IsNullOrWhiteSpace(chunk.SessionId) ||
             string.IsNullOrWhiteSpace(chunk.Encoding) ||
-            chunk.ChunkCount <= 0 ||
-            chunk.ChunkCount > MaxChunkCount ||
-            chunk.ChunkIndex < 0 ||
-            chunk.ChunkIndex >= chunk.ChunkCount)
+            string.IsNullOrWhiteSpace(chunk.DataBase64))
         {
             return false;
         }
@@ -112,6 +188,10 @@ internal sealed class ScreenShareFrameAssembler
             chunkBytes = Convert.FromBase64String(chunk.DataBase64);
         }
         catch (FormatException)
+        {
+            return false;
+        }
+        catch (ArgumentNullException)
         {
             return false;
         }
@@ -127,12 +207,20 @@ internal sealed class ScreenShareFrameAssembler
             chunk.Width,
             chunk.Height,
             chunk.Encoding,
-            chunk.ChunkCount);
+            chunk.ChunkCount,
+            chunk.TimestampUnixMilliseconds);
     }
 
     private sealed class AssemblyState
     {
-        public AssemblyState(string sessionId, long frameId, int width, int height, string encoding, int chunkCount)
+        public AssemblyState(
+            string sessionId,
+            long frameId,
+            int width,
+            int height,
+            string encoding,
+            int chunkCount,
+            long capturedTsUtcMs)
         {
             SessionId = sessionId;
             FrameId = frameId;
@@ -141,6 +229,8 @@ internal sealed class ScreenShareFrameAssembler
             Encoding = encoding;
             ChunkCount = chunkCount;
             ChunkBytes = new byte[chunkCount][];
+            StartedTick = Stopwatch.GetTimestamp();
+            CapturedTsUtcMs = capturedTsUtcMs > 0 ? capturedTsUtcMs : 0;
         }
 
         public string SessionId { get; }
@@ -157,9 +247,18 @@ internal sealed class ScreenShareFrameAssembler
 
         public byte[][] ChunkBytes { get; }
 
+        public long StartedTick { get; }
+
+        public long CapturedTsUtcMs { get; }
+
         public int ReceivedChunkCount { get; set; }
 
         public int TotalBytes { get; set; }
+
+        public bool IsExpired(long nowTick, int maxAgeMs)
+        {
+            return Stopwatch.GetElapsedTime(StartedTick, nowTick) > TimeSpan.FromMilliseconds(maxAgeMs);
+        }
 
         public bool Matches(ScreenShareFrameChunkV1 chunk)
         {
@@ -167,15 +266,29 @@ internal sealed class ScreenShareFrameAssembler
                    chunk.ChunkCount == ChunkCount &&
                    chunk.Width == Width &&
                    chunk.Height == Height &&
+                   chunk.TimestampUnixMilliseconds == CapturedTsUtcMs &&
                    string.Equals(chunk.Encoding, Encoding, StringComparison.Ordinal) &&
                    string.Equals(chunk.SessionId, SessionId, StringComparison.Ordinal);
         }
     }
 }
 
+internal sealed record ScreenShareFrameAssemblerMetrics(
+    long ChunksDroppedOlderFrame,
+    long AssembliesExpired,
+    long AssembliesResetNewerFrame,
+    long FramesCompleted,
+    long ChunksDuplicateIgnored,
+    long ChunksInvalidDropped,
+    long FramesTooLargeDropped);
+
 internal sealed record ScreenShareFrameCompletedEventArgs(
     long FrameId,
     int Width,
     int Height,
     string Encoding,
-    byte[] EncodedFrameBytes);
+    byte[] EncodedFrameBytes,
+    long CapturedTsUtcMs = 0,
+    long ChunksDroppedOlderFrame = 0,
+    long AssembliesExpired = 0,
+    string? SessionId = null);

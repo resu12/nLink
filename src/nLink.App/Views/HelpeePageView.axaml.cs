@@ -13,32 +13,6 @@ public partial class HelpeePageView : UserControl
         AttachedToVisualTree += (_, _) => BindClipboardTopLevel();
     }
 
-    private async void ShareCodeBorder_PointerPressed(object? sender, PointerPressedEventArgs e)
-    {
-        if (DataContext is not HelpeePageViewModel vm)
-        {
-            return;
-        }
-
-        try
-        {
-            var clipboardService = TryGetClipboardService();
-            if (clipboardService is null)
-            {
-                vm.NotifyCodeCopyFailed();
-                return;
-            }
-
-            await clipboardService.SetTextAsync(vm.ShareCode);
-            vm.NotifyCodeCopied();
-            e.Handled = true;
-        }
-        catch
-        {
-            vm.NotifyCodeCopyFailed();
-        }
-    }
-
     private void ChatDraftTextBox_KeyDown(object? sender, KeyEventArgs e)
     {
         if (e.Key != Key.Enter)

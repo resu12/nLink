@@ -1,13 +1,16 @@
-﻿using System;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using NLink.App.Services;
 using NLink.App.ViewModels;
-using NLink.Core;
 
 namespace NLink.App.Views;
 
@@ -15,7 +18,6 @@ public partial class HelperPageView : UserControl
 {
     private const string HelperCodeInputElementName = "HelperCodeInputBox";
     private HelperPageViewModel? currentViewModel;
-    private bool normalizingHelperCodeInput;
 
     public HelperPageView()
     {
@@ -42,6 +44,9 @@ public partial class HelperPageView : UserControl
         if (currentViewModel is not null)
         {
             currentViewModel.SendFileRequested -= OnSendFileRequested;
+            currentViewModel.RemoteControlViewerFocusRequested -= OnRemoteControlViewerFocusRequested;
+            currentViewModel.ScanQrFromFileRequested -= OnScanQrFromFileRequested;
+            currentViewModel.ScanQrFromCameraRequested -= OnScanQrFromCameraRequested;
         }
 
         currentViewModel = DataContext as HelperPageViewModel;
@@ -49,6 +54,9 @@ public partial class HelperPageView : UserControl
         if (currentViewModel is not null)
         {
             currentViewModel.SendFileRequested += OnSendFileRequested;
+            currentViewModel.RemoteControlViewerFocusRequested += OnRemoteControlViewerFocusRequested;
+            currentViewModel.ScanQrFromFileRequested += OnScanQrFromFileRequested;
+            currentViewModel.ScanQrFromCameraRequested += OnScanQrFromCameraRequested;
         }
 
         ScheduleFocusHelperCodeInput();
@@ -136,63 +144,60 @@ public partial class HelperPageView : UserControl
         e.Handled = true;
     }
 
-    private void HelperCodeInput_TextChanged(object? sender, TextChangedEventArgs e)
+    private void ScreenShareSurfaceView_RemoteControlInputProduced(object? sender, RemoteControlInputProducedEventArgs e)
     {
-        if (normalizingHelperCodeInput || sender is not TextBox textBox)
+        if (DataContext is not HelperPageViewModel vm)
         {
             return;
         }
 
-        var incoming = textBox.Text ?? string.Empty;
-        var caret = textBox.CaretIndex;
-        var digitsBeforeCaret = CountDigitsBeforeIndex(incoming, caret);
-
-        var digits = SessionCode.NormalizeDigits(incoming);
-        if (digits.Length > 6)
-        {
-            digits = digits[..6];
-        }
-
-        var formatted = SessionCode.FormatPartial(digits);
-        if (string.Equals(incoming, formatted, StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        normalizingHelperCodeInput = true;
-        try
-        {
-            textBox.Text = formatted;
-            textBox.CaretIndex = MapCaretIndexFromDigitCount(formatted, digitsBeforeCaret);
-        }
-        finally
-        {
-            normalizingHelperCodeInput = false;
-        }
+        vm.PostRemoteControlInput(e.Message);
     }
 
-    private void HelperCodeInput_TextInput(object? sender, TextInputEventArgs e)
+    private void ScreenShareSurfaceView_RemoteControlHeldStateChanged(object? sender, RemoteControlHeldStateChangedEventArgs e)
     {
-        if (sender is not TextBox textBox || string.IsNullOrEmpty(e.Text))
+        if (DataContext is not HelperPageViewModel vm)
         {
             return;
         }
 
-        foreach (var ch in e.Text)
-        {
-            if (!char.IsDigit(ch))
-            {
-                e.Handled = true;
-                return;
-            }
-        }
+        vm.UpdateRemoteControlHeldState(e.ModifiersMask, e.MouseButtonsMask, e.ImmediateReleaseAll);
+    }
 
-        if (!WouldExceedDigitLimit(textBox, e.Text))
+    private void ScreenShareSurfaceView_ControlModeExitRequested(object? sender, EventArgs e)
+    {
+        if (DataContext is not HelperPageViewModel vm)
         {
             return;
         }
 
-        e.Handled = true;
+        vm.ExitControlMode();
+    }
+
+    private void OnRemoteControlViewerFocusRequested(object? sender, EventArgs e)
+    {
+        Dispatcher.UIThread.Post(FocusRemoteControlViewer, DispatcherPriority.Input);
+    }
+
+    private async void OnScanQrFromFileRequested(object? sender, EventArgs e)
+    {
+        await ScanQrFromFileAsync();
+    }
+
+    private async void OnScanQrFromCameraRequested(object? sender, EventArgs e)
+    {
+        await ScanQrFromCameraAsync();
+    }
+
+    private void FocusRemoteControlViewer()
+    {
+        var surface = this.FindControl<ScreenShareSurfaceView>("RemoteScreenShareSurface");
+        if (surface is null || !surface.IsVisible || !surface.IsEnabled)
+        {
+            return;
+        }
+
+        surface.Focus();
     }
 
     private void ShowSendFileWindow()
@@ -243,77 +248,164 @@ public partial class HelperPageView : UserControl
         codeInput.CaretIndex = 0;
     }
 
-    private static int CountDigitsBeforeIndex(string text, int caretIndex)
+    private async void PasteFromClipboard_Click(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
-        var limit = Math.Clamp(caretIndex, 0, text.Length);
-        var count = 0;
-        for (var i = 0; i < limit; i++)
+        if (DataContext is not HelperPageViewModel vm)
         {
-            if (char.IsDigit(text[i]))
-            {
-                count++;
-            }
+            return;
         }
 
-        return count;
+        try
+        {
+            var topLevel = TopLevel.GetTopLevel(this);
+            if (topLevel?.Clipboard is null)
+            {
+                vm.NotifyExternalInputError("Clipboard isn't available right now.");
+                return;
+            }
+
+            var text = await topLevel.Clipboard.GetTextAsync();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                vm.NotifyExternalInputError("There's no text in the clipboard.");
+                return;
+            }
+
+            vm.ApplyExternalConnectInput(text, "clipboard");
+        }
+        catch
+        {
+            vm.NotifyExternalInputError("Couldn't paste from clipboard.");
+        }
     }
 
-    private static int MapCaretIndexFromDigitCount(string formattedText, int digitCount)
+    private async Task ScanQrFromFileAsync()
     {
-        if (digitCount <= 0)
+        if (DataContext is not HelperPageViewModel vm)
         {
-            return 0;
+            return;
         }
 
-        var seenDigits = 0;
-        for (var i = 0; i < formattedText.Length; i++)
+        var topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel?.StorageProvider is null)
         {
-            if (!char.IsDigit(formattedText[i]))
-            {
-                continue;
-            }
-
-            seenDigits++;
-            if (seenDigits >= digitCount)
-            {
-                return i + 1;
-            }
+            vm.NotifyExternalInputError("Can't open files right now.");
+            return;
         }
 
-        return formattedText.Length;
+        if (TryGetQrCodeService() is not IQrCodeService qrCodeService)
+        {
+            vm.NotifyExternalInputError("QR scanning isn't available right now.");
+            return;
+        }
+
+        try
+        {
+            var files = await topLevel.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            {
+                Title = "Select image with QR code",
+                AllowMultiple = false,
+                FileTypeFilter = new List<FilePickerFileType>
+                {
+                    new("Image files")
+                    {
+                        Patterns = new[] { "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.webp" },
+                        MimeTypes = new[] { "image/png", "image/jpeg", "image/bmp", "image/webp" },
+                    },
+                },
+            });
+
+            if (files.Count == 0)
+            {
+                return;
+            }
+
+            await using var stream = await files[0].OpenReadAsync();
+            if (!qrCodeService.TryDecode(stream, out var decoded, out var error) || string.IsNullOrWhiteSpace(decoded))
+            {
+                vm.NotifyExternalInputError(error ?? "No QR code found in the selected image.");
+                return;
+            }
+
+            vm.ApplyExternalConnectInput(decoded, "qr");
+        }
+        catch
+        {
+            vm.NotifyExternalInputError("Couldn't scan that QR code.");
+        }
     }
 
-    private static bool WouldExceedDigitLimit(TextBox textBox, string newText)
+    private async Task ScanQrFromCameraAsync()
     {
-        var currentText = textBox.Text ?? string.Empty;
-        var selectionStart = Math.Clamp(textBox.SelectionStart, 0, currentText.Length);
-        var selectionEnd = Math.Clamp(textBox.SelectionEnd, 0, currentText.Length);
-        if (selectionEnd < selectionStart)
+        if (DataContext is not HelperPageViewModel vm)
         {
-            (selectionStart, selectionEnd) = (selectionEnd, selectionStart);
+            return;
         }
 
-        var selectedDigitCount = 0;
-        for (var i = selectionStart; i < selectionEnd; i++)
+        if (TryGetQrCodeService() is not IQrCodeService qrCodeService ||
+            TryGetCameraCaptureService() is not ICameraQrCaptureService cameraCaptureService)
         {
-            if (char.IsDigit(currentText[i]))
+            vm.NotifyExternalInputError("Camera scanning isn't available right now.");
+            return;
+        }
+
+        if (!cameraCaptureService.IsSupported)
+        {
+            vm.NotifyExternalInputError("Camera scanning isn't available on this device.");
+            return;
+        }
+
+        try
+        {
+            var captured = await cameraCaptureService.CapturePhotoAsync(default);
+            if (!captured.IsSuccess)
             {
-                selectedDigitCount++;
-            }
-        }
+                if (!captured.IsCancelled)
+                {
+                    vm.NotifyExternalInputError(captured.Message ?? "Couldn't capture an image from the camera.");
+                }
 
-        var currentDigitCount = SessionCode.NormalizeDigits(currentText).Length;
-        var incomingDigitCount = 0;
-        foreach (var ch in newText)
-        {
-            if (char.IsDigit(ch))
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(captured.FilePath) || !File.Exists(captured.FilePath))
             {
-                incomingDigitCount++;
+                vm.NotifyExternalInputError("Couldn't use the captured image.");
+                return;
             }
+
+            await using var stream = File.OpenRead(captured.FilePath);
+            if (!qrCodeService.TryDecode(stream, out var decoded, out var error) || string.IsNullOrWhiteSpace(decoded))
+            {
+                vm.NotifyExternalInputError(error ?? "No QR code found in the captured image.");
+                return;
+            }
+
+            vm.ApplyExternalConnectInput(decoded, "qr");
+        }
+        catch
+        {
+            vm.NotifyExternalInputError("Couldn't scan that QR code.");
+        }
+    }
+
+    private IQrCodeService? TryGetQrCodeService()
+    {
+        if (Avalonia.Application.Current is not App app)
+        {
+            return null;
         }
 
-        var resultingDigitCount = currentDigitCount - selectedDigitCount + incomingDigitCount;
-        return resultingDigitCount > 6;
+        return app.Services.TryGet<IQrCodeService>(out var service) ? service : null;
+    }
+
+    private ICameraQrCaptureService? TryGetCameraCaptureService()
+    {
+        if (Avalonia.Application.Current is not App app)
+        {
+            return null;
+        }
+
+        return app.Services.TryGet<ICameraQrCaptureService>(out var service) ? service : null;
     }
 }
-

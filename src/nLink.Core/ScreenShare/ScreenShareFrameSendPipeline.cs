@@ -37,6 +37,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
     private long framesQueued;
     private long framesDropped;
     private long chunksSent;
+    private long lastCaptureToSendAgeMs = -1;
     private long signalWriteAttempts;
     private long signalReadCount;
     private bool disposed;
@@ -118,6 +119,8 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
     internal long SignalWriteAttempts => Interlocked.Read(ref signalWriteAttempts);
 
     internal long SignalReadCount => Interlocked.Read(ref signalReadCount);
+
+    internal long LastCaptureToSendAgeMs => Interlocked.Read(ref lastCaptureToSendAgeMs);
 
     internal long WakeSignalsWritten => Interlocked.Read(ref signalWriteAttempts);
 
@@ -325,6 +328,11 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
                         disposeCts.Token.ThrowIfCancellationRequested();
                         await sendChunkAsync(chunk, disposeCts.Token).ConfigureAwait(false);
                         Interlocked.Increment(ref chunksSent);
+                    }
+                    if (frame.TimestampUnixMilliseconds > 0)
+                    {
+                        var captureToSendAgeMs = Math.Max(0, clock.UtcNow.ToUnixTimeMilliseconds() - frame.TimestampUnixMilliseconds);
+                        Interlocked.Exchange(ref lastCaptureToSendAgeMs, captureToSendAgeMs);
                     }
 #if DEBUG
                     var sendEndTimestamp = Stopwatch.GetTimestamp();

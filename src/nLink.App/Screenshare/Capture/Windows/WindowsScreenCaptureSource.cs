@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Threading;
 using System.Threading.Tasks;
+using NLink.App.Configuration;
 
 namespace NLink.App.Services.ScreenCapture;
 
@@ -15,25 +16,40 @@ namespace NLink.App.Services.ScreenCapture;
 /// Windows screen capture source for the primary display.
 /// </summary>
 [SupportedOSPlatform("windows")]
-internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncDisposable
+internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IScreenCaptureMetadataSource, IScreenCaptureAdaptiveTuning, IAsyncDisposable
 {
     private const int MaxFrameWidth = 1280;
-    private const int MaxFramesPerSecond = 8;
-    private const long JpegQuality = 70L;
+    private const int DefaultMaxFramesPerSecond = 15;
+    private const int MaxConfiguredFramesPerSecond = 30;
+    private const long DefaultJpegQuality = 60L;
+    private const long MinJpegQuality = 30L;
+    private const long MaxJpegQuality = 80L;
+    private const double DefaultConfiguredScale = 0.75d;
+    private const double MinConfiguredScale = 0.25d;
+    private const double MaxConfiguredScale = 1d;
     private const double ScaleFull = 1d;
     private const double ScaleReduced = 0.75d;
     private const double ScaleMinimum = 0.5d;
     private const int SmCxScreen = 0;
     private const int SmCyScreen = 1;
+    private const int CursorShowing = 0x00000001;
+    private const int CursorMarkerRadius = 5;
+    private const int CursorMarkerCrossHalfSize = 7;
 
-    private static readonly TimeSpan FrameInterval = TimeSpan.FromMilliseconds(1000d / MaxFramesPerSecond);
     private static readonly long EncodeScaleDownThresholdTimestampTicks = TimeSpanToStopwatchTicks(TimeSpan.FromMilliseconds(20));
     private static readonly long EncodeScaleUpThresholdTimestampTicks = TimeSpanToStopwatchTicks(TimeSpan.FromMilliseconds(12));
     private static readonly ImageCodecInfo? JpegCodec = FindJpegCodec();
+    private static readonly Brush CursorMarkerFillBrush = Brushes.Gold;
+    private static readonly Pen CursorMarkerOutlinePen = Pens.Black;
+    private static readonly Pen CursorMarkerCrossPen = Pens.DarkSlateGray;
 
     private readonly object sync = new();
     private readonly Func<long> getTimestamp;
     private readonly Func<Bitmap, long, byte[]> encodeBitmap;
+    private readonly double configuredScale;
+    private readonly double? configuredDpiScale;
+    private readonly long jpegQuality;
+    private readonly int configuredMaxFramesPerSecond;
 
     private CancellationTokenSource? captureCts;
     private Task? captureLoopTask;
@@ -44,18 +60,33 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
     private long totalEncodeDurationTicks;
     private long totalEncodedBytes;
     private int encodedFrameCount;
+    private long lastCaptureTimestampTick;
+    private long effectiveMinFrameIntervalTimestampTicks;
 
     public WindowsScreenCaptureSource()
-        : this(getTimestamp: null, encodeBitmap: null)
+        : this(
+            getTimestamp: null,
+            encodeBitmap: null,
+            maxFramesPerSecond: Math.Min(FeatureFlags.ScreenShareMaxFps, FeatureFlags.ScreenShareTransportMaxFps),
+            configuredScale: FeatureFlags.ScreenShareScale,
+            jpegQuality: FeatureFlags.ScreenShareJpegQuality)
     {
     }
 
     internal WindowsScreenCaptureSource(
         Func<long>? getTimestamp = null,
-        Func<Bitmap, long, byte[]>? encodeBitmap = null)
+        Func<Bitmap, long, byte[]>? encodeBitmap = null,
+        int maxFramesPerSecond = DefaultMaxFramesPerSecond,
+        double configuredScale = ScaleFull,
+        long jpegQuality = DefaultJpegQuality)
     {
         this.getTimestamp = getTimestamp ?? Stopwatch.GetTimestamp;
         this.encodeBitmap = encodeBitmap ?? EncodeBitmapToJpegBytes;
+        configuredMaxFramesPerSecond = Math.Clamp(maxFramesPerSecond, 1, MaxConfiguredFramesPerSecond);
+        this.configuredScale = ClampConfiguredScale(configuredScale);
+        configuredDpiScale = TryGetSystemDpiScale();
+        this.jpegQuality = Math.Clamp(jpegQuality, MinJpegQuality, MaxJpegQuality);
+        effectiveMinFrameIntervalTimestampTicks = TimeSpanToStopwatchTicks(TimeSpan.FromMilliseconds(1000d / configuredMaxFramesPerSecond));
     }
 
     /// <inheritdoc />
@@ -63,6 +94,34 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
 
     /// <inheritdoc />
     public event EventHandler<ScreenCaptureFrameEventArgs>? FrameArrived;
+
+    public bool TryGetCaptureMetadata(out ScreenCaptureMetadata metadata)
+    {
+        metadata = default;
+        var width = GetSystemMetrics(SmCxScreen);
+        var height = GetSystemMetrics(SmCyScreen);
+        if (width <= 0 || height <= 0)
+        {
+            return false;
+        }
+
+        metadata = new ScreenCaptureMetadata(
+            // TODO(v0.5.0-P7): plumb selected monitor/region identity once monitor-selection
+            // UI exists; this must match the active capture target used for streaming.
+            DisplayId: ScreenCaptureDisplayIds.Primary,
+            CaptureRegionPx: new ScreenCapturePixelRect(0, 0, width, height),
+            // TODO(v0.5.0-P7): resolve per-monitor DPI for the selected target in mixed-DPI setups.
+            DpiScale: configuredDpiScale);
+        return true;
+    }
+
+    public void SetCaptureFrameRateHint(int maxFramesPerSecond)
+    {
+        var clamped = Math.Clamp(maxFramesPerSecond, 1, configuredMaxFramesPerSecond);
+        Volatile.Write(
+            ref effectiveMinFrameIntervalTimestampTicks,
+            TimeSpanToStopwatchTicks(TimeSpan.FromMilliseconds(1000d / clamped)));
+    }
 
     /// <inheritdoc />
     public Task StartAsync(CancellationToken cancellationToken)
@@ -79,6 +138,7 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
             }
 
             captureCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            lastCaptureTimestampTick = getTimestamp();
             captureLoopTask = Task.Run(() => CaptureLoopAsync(captureCts.Token), CancellationToken.None);
             isStarted = true;
             LogDebug("Capture loop started.");
@@ -152,14 +212,18 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
     {
         while (!cancellationToken.IsCancellationRequested)
         {
-            var frameStartedAt = DateTime.UtcNow;
-            CaptureAndRaiseFrame(swallowFailures: true);
-
-            var remaining = FrameInterval - (DateTime.UtcNow - frameStartedAt);
-            if (remaining > TimeSpan.Zero)
+            var nowTimestampTick = getTimestamp();
+            var previousCaptureTimestampTick = Volatile.Read(ref lastCaptureTimestampTick);
+            var minIntervalTicks = Volatile.Read(ref effectiveMinFrameIntervalTimestampTicks);
+            var remainingTicks = minIntervalTicks - (nowTimestampTick - previousCaptureTimestampTick);
+            if (previousCaptureTimestampTick > 0 && remainingTicks > 0)
             {
-                await Task.Delay(remaining, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(StopwatchTicksToTimeSpan(remainingTicks), cancellationToken).ConfigureAwait(false);
+                continue;
             }
+
+            Volatile.Write(ref lastCaptureTimestampTick, nowTimestampTick);
+            CaptureAndRaiseFrame(swallowFailures: true);
         }
 
         LogDebug("Capture loop exited.");
@@ -205,9 +269,37 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
         using (var graphics = Graphics.FromImage(sourceBitmap))
         {
             graphics.CopyFromScreen(0, 0, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
+            TryDrawCursorOverlay(graphics);
         }
 
         return EncodeFrame(sourceBitmap, width, height);
+    }
+
+    private static void TryDrawCursorOverlay(Graphics graphics)
+    {
+        if (graphics is null)
+        {
+            return;
+        }
+
+        var cursorInfo = new CursorInfo
+        {
+            CbSize = Marshal.SizeOf<CursorInfo>(),
+        };
+
+        if (!GetCursorInfo(ref cursorInfo) ||
+            (cursorInfo.Flags & CursorShowing) == 0)
+        {
+            return;
+        }
+
+        // Lightweight marker avoids expensive icon duplication/composition on every frame.
+        var x = cursorInfo.ScreenPosition.X;
+        var y = cursorInfo.ScreenPosition.Y;
+        graphics.FillEllipse(CursorMarkerFillBrush, x - CursorMarkerRadius, y - CursorMarkerRadius, CursorMarkerRadius * 2, CursorMarkerRadius * 2);
+        graphics.DrawEllipse(CursorMarkerOutlinePen, x - CursorMarkerRadius, y - CursorMarkerRadius, CursorMarkerRadius * 2, CursorMarkerRadius * 2);
+        graphics.DrawLine(CursorMarkerCrossPen, x - CursorMarkerCrossHalfSize, y, x + CursorMarkerCrossHalfSize, y);
+        graphics.DrawLine(CursorMarkerCrossPen, x, y - CursorMarkerCrossHalfSize, x, y + CursorMarkerCrossHalfSize);
     }
 
     internal ScreenCaptureFrameEventArgs EncodeFrameForTesting(Bitmap sourceBitmap)
@@ -237,7 +329,7 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
                 averageEncodeDuration,
                 ewmaEncodeDuration,
                 GetAdaptiveScaleFactor(adaptiveScaleIndex),
-                JpegQuality);
+                jpegQuality);
         }
     }
 
@@ -247,11 +339,14 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
         return EncodeBitmapToJpegBytes(bitmap, quality);
     }
 
-    internal static long DefaultJpegQualityForTesting => JpegQuality;
+    internal static long DefaultJpegQualityForTesting => DefaultJpegQuality;
 
     private ScreenCaptureFrameEventArgs EncodeFrame(Bitmap sourceBitmap, int width, int height)
     {
-        var scale = GetBaseScale(width) * GetAdaptiveScaleFactorSnapshot();
+        var scale = Math.Clamp(
+            GetBaseScale(width) * configuredScale * GetAdaptiveScaleFactorSnapshot(),
+            MinConfiguredScale,
+            MaxConfiguredScale);
         var scaledWidth = Math.Max(1, (int)Math.Round(width * scale));
         var scaledHeight = Math.Max(1, (int)Math.Round(height * scale));
 
@@ -259,12 +354,17 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
             ? ResizeBitmap(sourceBitmap, scaledWidth, scaledHeight)
             : new Bitmap(sourceBitmap);
         var encodeStartedAt = getTimestamp();
-        var encodedBytes = encodeBitmap(encodedBitmap, JpegQuality);
+        var encodedBytes = encodeBitmap(encodedBitmap, jpegQuality);
         var encodeCompletedAt = getTimestamp();
         RecordEncodeMetrics(
             elapsedTimestampTicks: encodeCompletedAt - encodeStartedAt,
             encodedBytesLength: encodedBytes.Length);
-        return new ScreenCaptureFrameEventArgs(scaledWidth, scaledHeight, encodedBytes, "jpeg");
+        return new ScreenCaptureFrameEventArgs(
+            scaledWidth,
+            scaledHeight,
+            encodedBytes,
+            "jpeg",
+            capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
     }
 
     private static Bitmap ResizeBitmap(Bitmap source, int width, int height)
@@ -298,6 +398,25 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
         using var stream = new MemoryStream();
         SaveJpeg(bitmap, stream, quality);
         return stream.ToArray();
+    }
+
+    private static double? TryGetSystemDpiScale()
+    {
+        try
+        {
+            using var graphics = Graphics.FromHwnd(IntPtr.Zero);
+            var scale = graphics.DpiX / 96d;
+            if (scale > 0d && !double.IsNaN(scale) && !double.IsInfinity(scale))
+            {
+                return scale;
+            }
+        }
+        catch
+        {
+            // Best-effort only.
+        }
+
+        return null;
     }
 
     private static double GetBaseScale(int width)
@@ -347,6 +466,21 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
     private static long TimeSpanToStopwatchTicks(TimeSpan value)
         => (long)Math.Ceiling(value.TotalSeconds * Stopwatch.Frequency);
 
+    private static TimeSpan StopwatchTicksToTimeSpan(long value)
+        => value <= 0
+            ? TimeSpan.Zero
+            : TimeSpan.FromSeconds(value / (double)Stopwatch.Frequency);
+
+    private static double ClampConfiguredScale(double value)
+    {
+        if (double.IsNaN(value) || double.IsInfinity(value))
+        {
+            return DefaultConfiguredScale;
+        }
+
+        return Math.Clamp(value, MinConfiguredScale, MaxConfiguredScale);
+    }
+
     private static ImageCodecInfo? FindJpegCodec()
     {
         foreach (var codec in ImageCodecInfo.GetImageEncoders())
@@ -363,6 +497,10 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorInfo(ref CursorInfo pci);
+
     private void ThrowIfDisposed()
     {
         if (disposed)
@@ -376,6 +514,23 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IAsyncD
     {
         Trace.WriteLine($"[ScreenCapture] {message}");
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CursorInfo
+    {
+        public int CbSize;
+        public int Flags;
+        public IntPtr HCursor;
+        public PointStruct ScreenPosition;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PointStruct
+    {
+        public int X;
+        public int Y;
+    }
+
 }
 
 internal readonly record struct WindowsScreenCaptureEncodeMetricsSnapshot(

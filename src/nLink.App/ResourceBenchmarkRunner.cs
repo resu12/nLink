@@ -10,6 +10,7 @@ using NLink.App.Services;
 using NLink.Core;
 using NLink.Core.Metrics;
 using NLink.Core.Resources;
+using NLink.Core.SessionConnect;
 using NLink.Infra.DevLocal;
 using NLink.Infra.Nkn;
 
@@ -120,17 +121,16 @@ internal static class ResourceBenchmarkRunner
         var notes = new List<string>();
         try
         {
-            var code = new SessionCode("123456");
             var benchmarkStartedUtc = DateTimeOffset.UtcNow;
             DateTimeOffset? idleHostingWindowEndUtc = null;
             DateTimeOffset? finalIdleWindowEndUtc = null;
             await output.WriteLineAsync("[resources] starting helpee host");
-            await pair.Helpee.StartHelpeeAsync(code, ct);
+            await pair.Helpee.StartHelpeeAsync(ct);
             await DelayAndSamplePhaseAsync("idle_hosting", TimeSpan.FromSeconds(options.IdleSeconds), output, ct);
             idleHostingWindowEndUtc = await CaptureGcStabilizedCheckpointAsync("idle_hosting_end", resourceSampler, samples, output, ct);
 
             await output.WriteLineAsync("[resources] connecting helper");
-            await RunConnectApproveAsync(pair.Helpee, pair.Helper, code, ct);
+            await RunConnectApproveAsync(pair.Helpee, pair.Helper, ct);
             await DelayAndSamplePhaseAsync("idle_connected", TimeSpan.FromSeconds(options.ConnectedIdleSeconds), output, ct);
 
             await output.WriteLineAsync("[resources] disconnecting");
@@ -206,8 +206,7 @@ internal static class ResourceBenchmarkRunner
         for (var i = 1; i <= options.Cycles; i++)
         {
             ct.ThrowIfCancellationRequested();
-            var code = new SessionCode((i % 1_000_000).ToString("D6", CultureInfo.InvariantCulture));
-            var ok = await TryRunCycleAsync(pair.Helpee, pair.Helper, code, ct);
+            var ok = await TryRunCycleAsync(pair.Helpee, pair.Helper, ct);
             if (!ok)
             {
                 // continue collecting checkpoints; metrics/failures reflect instability
@@ -300,7 +299,7 @@ internal static class ResourceBenchmarkRunner
         }
     }
 
-    private static async Task<bool> TryRunCycleAsync(SessionRuntime helpee, SessionRuntime helper, SessionCode code, CancellationToken ct)
+    private static async Task<bool> TryRunCycleAsync(SessionRuntime helpee, SessionRuntime helper, CancellationToken ct)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(CycleTimeout);
@@ -317,8 +316,9 @@ internal static class ResourceBenchmarkRunner
         helpee.StateChanged += helpeeStateChanged;
         try
         {
-            await helpee.StartHelpeeAsync(code, cts.Token);
-            await helper.StartHelperAsync(code, cts.Token);
+            await helpee.StartHelpeeAsync(cts.Token);
+            var (inviteToken, invite) = CreateInviteForTarget(GetHostedAddressOrThrow(helpee));
+            await helper.StartHelperAsync(inviteToken, invite, cts.Token);
             await incomingJoin.Task.WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
             await helpee.ApproveAsync(cts.Token);
             await Task.WhenAll(
@@ -343,7 +343,7 @@ internal static class ResourceBenchmarkRunner
         }
     }
 
-    private static async Task RunConnectApproveAsync(SessionRuntime helpee, SessionRuntime helper, SessionCode code, CancellationToken ct)
+    private static async Task RunConnectApproveAsync(SessionRuntime helpee, SessionRuntime helper, CancellationToken ct)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(CycleTimeout);
@@ -359,7 +359,8 @@ internal static class ResourceBenchmarkRunner
         helpee.StateChanged += helpeeStateChanged;
         try
         {
-            await helper.StartHelperAsync(code, cts.Token);
+            var (inviteToken, invite) = CreateInviteForTarget(GetHostedAddressOrThrow(helpee));
+            await helper.StartHelperAsync(inviteToken, invite, cts.Token);
             await incomingJoin.Task.WaitAsync(TimeSpan.FromSeconds(10), cts.Token);
             await helpee.ApproveAsync(cts.Token);
             await Task.WhenAll(
@@ -404,6 +405,43 @@ internal static class ResourceBenchmarkRunner
         {
             samples.Add(sampler.Capture());
         }
+    }
+
+    private static PeerAddress GetHostedAddressOrThrow(SessionRuntime runtime)
+    {
+        if (runtime.CurrentLocalPeerAddress is PeerAddress address)
+        {
+            return address;
+        }
+
+        throw new InvalidOperationException("Active helpee transport did not expose a local peer address.");
+    }
+
+    private static (string Token, ValidatedInviteV1 Invite) CreateInviteForTarget(PeerAddress targetAddress)
+    {
+        var nowUtc = DateTimeOffset.UtcNow;
+        var factory = InviteTokenServiceFactory.CreateInviteTokenFactory();
+        var create = factory.Create(
+            new InviteTokenCreateRequest(
+                IssuerAddress: targetAddress,
+                TargetAddress: targetAddress,
+                SessionId: new SessionId($"sess_resource_{Guid.NewGuid():N}"),
+                Capabilities: InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl | InviteCapabilities.FileTransfer,
+                Lifetime: TimeSpan.FromMinutes(5)),
+            nowUtc);
+        if (!create.IsSuccess || string.IsNullOrWhiteSpace(create.Token))
+        {
+            throw new InvalidOperationException(create.Message ?? "Failed to create resource benchmark invite.");
+        }
+
+        var validator = InviteTokenServiceFactory.CreateInviteTokenValidator();
+        var validation = validator.Validate(create.Token, nowUtc.AddSeconds(1));
+        if (!validation.IsSuccess || validation.Invite is null)
+        {
+            throw new InvalidOperationException(validation.Message ?? "Failed to validate resource benchmark invite.");
+        }
+
+        return (create.Token, validation.Invite);
     }
 
     private static BenchmarkSessionPair CreateSessionPair(ResourceRunnerOptions options, ITransportTelemetrySink sink, int cycleSeed)

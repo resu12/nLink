@@ -1,0 +1,10 @@
+{
+  "CurrentState": "Idle",
+  "SessionUiState": "Idle",
+  "AttemptNumber": 0,
+  "LastFailureCategory": "(none)",
+  "LastFailureMessage": "(none)",
+  "LastConnectDurationMs": null,
+  "LastHandshakeDurationMs": null,
+  "LastBridgeStartDurationMs": null
+}

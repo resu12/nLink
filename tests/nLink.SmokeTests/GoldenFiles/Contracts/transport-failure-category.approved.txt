@@ -1,0 +1,10 @@
+BridgeStartFailure
+BridgeUnresponsive
+BridgeCrashed
+HandshakeTimeout
+PeerUnreachable
+NknSendFailure
+JsonProtocolError
+UnexpectedProcessExit
+UserCancelled
+Unknown

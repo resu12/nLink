@@ -9,6 +9,7 @@ using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Layout;
 using Avalonia.LogicalTree;
+using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Threading;
@@ -18,6 +19,8 @@ using NLink.App.Services;
 using NLink.App.ViewModels;
 using NLink.App.Views;
 using NLink.Core.Metrics;
+using NLink.Core.SessionConnect;
+using NLink.Core.SessionSecurity;
 
 namespace NLink.SmokeTests;
 
@@ -141,7 +144,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task HelpeePage_DefaultShell_RendersWaitingContent_InVisibleBranch()
+    public async Task HelpeePage_DefaultShell_PrioritizesQr_AndOmitsRawInviteFallback()
     {
         await fixture.Session.Dispatch(async () =>
         {
@@ -163,9 +166,108 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 window.Show();
                 await FlushUiAsync();
 
-                Assert.NotNull(FindFirstControlByAutomationId(window, "Helpee.CopyCode"));
-                Assert.NotNull(FindFirstControlByAutomationId(window, "Helpee.NewCode"));
-                Assert.NotNull(FindFirstControlByAutomationId(window, "Helpee.Code"));
+                var inviteQr = await WaitForLayoutConditionAsync(
+                    window,
+                    () => FindFirstControlByAutomationId(window, "Helpee.InviteQr") as Image is { IsVisible: true } control &&
+                          control.Bounds.Width > 0 &&
+                          control.Bounds.Height > 0
+                        ? control
+                        : null,
+                    TimeSpan.FromSeconds(2),
+                    "helpee invite qr");
+
+                Assert.NotNull(inviteQr);
+                Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helpee.ShareInvite"));
+                Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helpee.CopyInvite"));
+                Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helpee.RefreshInvite"));
+                Assert.Null(FindFirstControlByAutomationId(window, "Helpee.InviteDetails"));
+                Assert.Null(FindFirstControlByAutomationId(window, "Helpee.InviteText"));
+            }
+            finally
+            {
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task HelpeePage_WaitingView_MakesQrProminent_AndKeepsRefreshSecondary()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+            using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
+            using var helpee = new HelpeePageViewModel(
+                cancelAction: static () => { },
+                transportConfig,
+                runtime,
+                openDiagnosticsAction: static () => { },
+                clipboardService: new TestClipboardService(),
+                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null));
+
+            var view = new HelpeePageView { DataContext = helpee };
+            var window = new Window { Width = 860, Height = 980, Content = view };
+            try
+            {
+                window.Show();
+                await FlushUiAsync();
+
+                var inviteQr = await WaitForLayoutConditionAsync(
+                    window,
+                    () => FindFirstControlByAutomationId(window, "Helpee.InviteQr") as Image is { IsVisible: true } control &&
+                          control.Bounds.Width > 0 &&
+                          control.Bounds.Height > 0
+                        ? control
+                        : null,
+                    TimeSpan.FromSeconds(2),
+                    "helpee invite qr");
+
+                var copyInvite = await WaitForLayoutConditionAsync(
+                    window,
+                    () => FindFirstControlByAutomationId(window, "Helpee.CopyInvite") as Button is { IsVisible: true } control &&
+                          control.Bounds.Width > 0 &&
+                          control.Bounds.Height > 0
+                        ? control
+                        : null,
+                    TimeSpan.FromSeconds(2),
+                    "helpee copy invite button");
+
+                var shareInvite = await WaitForLayoutConditionAsync(
+                    window,
+                    () => FindFirstControlByAutomationId(window, "Helpee.ShareInvite") as Button is { IsVisible: true } control &&
+                          control.Bounds.Width > 0 &&
+                          control.Bounds.Height > 0
+                        ? control
+                        : null,
+                    TimeSpan.FromSeconds(2),
+                    "helpee share invite button");
+
+                var refreshInvite = await WaitForLayoutConditionAsync(
+                    window,
+                    () => FindFirstControlByAutomationId(window, "Helpee.RefreshInvite") as Button is { IsVisible: true } control &&
+                          control.Bounds.Width > 0 &&
+                          control.Bounds.Height > 0
+                        ? control
+                        : null,
+                    TimeSpan.FromSeconds(2),
+                    "helpee refresh invite button");
+
+                Assert.True(inviteQr.Bounds.Width >= 200, $"Expected invite QR width >= 200, got {inviteQr.Bounds.Width:N1}.");
+                Assert.True(inviteQr.Bounds.Height >= 200, $"Expected invite QR height >= 200, got {inviteQr.Bounds.Height:N1}.");
+                Assert.True(copyInvite.Bounds.Width >= 160, $"Expected copy invite button width >= 160, got {copyInvite.Bounds.Width:N1}.");
+                Assert.True(shareInvite.Bounds.Width >= 160, $"Expected share invite button width >= 160, got {shareInvite.Bounds.Width:N1}.");
+                Assert.True(refreshInvite.Bounds.Height < shareInvite.Bounds.Height, $"Expected refresh invite button height < share invite height, got {refreshInvite.Bounds.Height:N1} vs {shareInvite.Bounds.Height:N1}.");
+
+                Assert.True(
+                    Math.Abs(copyInvite.Bounds.Y - shareInvite.Bounds.Y) < 2,
+                    $"Expected copy/share invite buttons on the same row, got Y={copyInvite.Bounds.Y:N1} and {shareInvite.Bounds.Y:N1}.");
+                Assert.True(
+                    refreshInvite.Bounds.Y - copyInvite.Bounds.Y > 20,
+                    $"Expected invite actions to wrap into a second row, got Y={copyInvite.Bounds.Y:N1} and {refreshInvite.Bounds.Y:N1}.");
             }
             finally
             {
@@ -272,6 +374,105 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task HelperPage_WaitingView_ShowsVisibleFallbackLinks_AndQuietRecentTargets()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            const string recentTarget = "nlink-0dfa1ae.f2e91df1fb70f4897f7390c176055ff17bb26d99e0ee66194";
+            var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+            using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
+            using var helper = new HelperPageViewModel(
+                cancelAction: static () => { },
+                transportConfig,
+                runtime,
+                openDiagnosticsAction: static () => { },
+                clipboardService: new TestClipboardService(),
+                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null),
+                recentConnectTargetsStore: new FixedRecentConnectTargetsStore(recentTarget));
+
+            var view = new HelperPageView { DataContext = helper };
+            var window = new Window { Width = 820, Height = 900, Content = view };
+            try
+            {
+                window.Show();
+                await FlushUiAsync();
+
+                var scanQrButton = await WaitForLayoutConditionAsync(
+                    window,
+                    () => FindFirstControlByAutomationId(window, "Helper.ScanQr") as Button is { IsVisible: true } control &&
+                          control.Bounds.Width > 0 &&
+                          control.Bounds.Height > 0
+                        ? control
+                        : null,
+                    TimeSpan.FromSeconds(2),
+                    "helper scan qr action");
+
+                var recentButton = await WaitForLayoutConditionAsync(
+                    window,
+                    () => FindFirstControlByAutomationId(window, "Helper.RecentTarget") as Button is { IsVisible: true } control &&
+                          control.Bounds.Width > 0 &&
+                          control.Bounds.Height > 0
+                        ? control
+                        : null,
+                    TimeSpan.FromSeconds(2),
+                    "helper recent target");
+
+                var installLink = await WaitForLayoutConditionAsync(
+                    window,
+                    () => FindFirstControlByAutomationId(window, "Helper.CopyInstallLink") as Button is { IsVisible: true } control &&
+                          control.Bounds.Width > 0 &&
+                          control.Bounds.Height > 0
+                        ? control
+                        : null,
+                    TimeSpan.FromSeconds(2),
+                    "helper install link");
+
+                var nftpLink = await WaitForLayoutConditionAsync(
+                    window,
+                    () => FindFirstControlByAutomationId(window, "Helper.UseNftp") as Button is { IsVisible: true } control &&
+                          control.Bounds.Width > 0 &&
+                          control.Bounds.Height > 0
+                        ? control
+                        : null,
+                    TimeSpan.FromSeconds(2),
+                    "helper nftp link");
+
+                Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helper.CodeInput"));
+                Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helper.Connect"));
+                Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helper.PasteFromClipboard"));
+                Assert.Null(FindFirstControlByAutomationId(window, "Helper.ConnectHint"));
+                Assert.Equal("Scan QR", scanQrButton.Content?.ToString());
+                Assert.Null(FindFirstControlByAutomationId(window, "Helper.SecondaryOptions"));
+
+                var recentText = recentButton.GetVisualDescendants()
+                    .OfType<TextBlock>()
+                    .FirstOrDefault(text =>
+                        string.Equals(text.Text, recentTarget, StringComparison.Ordinal));
+
+                Assert.Equal("Copy install link", installLink.Content?.ToString());
+                Assert.Equal("Use file transfer instead", nftpLink.Content?.ToString());
+                Assert.True(
+                    recentButton.Bounds.Width >= 300,
+                    $"Expected recent target width >= 300, got {recentButton.Bounds.Width:N1}.");
+                Assert.True(
+                    recentButton.Bounds.Width <= 580,
+                    $"Expected recent target width <= 580, got {recentButton.Bounds.Width:N1}.");
+                Assert.NotNull(recentText);
+                Assert.Equal(TextWrapping.NoWrap, recentText!.TextWrapping);
+                Assert.Equal(TextTrimming.CharacterEllipsis, recentText.TextTrimming);
+            }
+            finally
+            {
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task HelpeePage_WhenConnected_ShowsVisibleChatImmediately()
     {
         await fixture.Session.Dispatch(async () =>
@@ -364,7 +565,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 window.Show();
                 await FlushUiAsync();
 
-                Assert.NotNull(FindFirstControlByAutomationId(window, "Helpee.CopyCode"));
+                Assert.NotNull(FindFirstControlByAutomationId(window, "Helpee.CopyInvite"));
                 Assert.Null(FindFirstVisibleControlByAutomationId(window, "Chat.Messages"));
             }
             finally
@@ -1138,6 +1339,21 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
             services.AddSingleton<IClipboardService>(clipboard);
         }
 
+        if (!services.TryGet<IInviteShareService>(out _))
+        {
+            services.AddSingleton<IInviteShareService>(new DefaultInviteShareService());
+        }
+
+        if (!services.TryGet<IQrCodeService>(out _))
+        {
+            services.AddSingleton<IQrCodeService>(new QrCodeService());
+        }
+
+        if (!services.TryGet<IRecentConnectTargetsStore>(out _))
+        {
+            services.AddSingleton<IRecentConnectTargetsStore>(new LocalRecentConnectTargetsStore());
+        }
+
         if (!services.TryGet<NLink.App.Configuration.ShareMessageConfig>(out _))
         {
             services.AddSingleton(new NLink.App.Configuration.ShareMessageConfig(null));
@@ -1160,6 +1376,9 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
     {
         var services = new AppServiceRegistry();
         services.AddSingleton<IClipboardService>(new TestClipboardService());
+        services.AddSingleton<IInviteShareService>(new DefaultInviteShareService());
+        services.AddSingleton<IQrCodeService>(new QrCodeService());
+        services.AddSingleton<IRecentConnectTargetsStore>(new LocalRecentConnectTargetsStore());
         services.AddSingleton(new NLink.App.Configuration.ShareMessageConfig(null));
         services.AddSingleton(new MetricsRegistry());
         services.AddSingleton(new ResourceRuntimeTracker());
@@ -1341,8 +1560,8 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
             clipboardService: new TestClipboardService(),
             shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null));
 
-        helper.CodeInput = helpee.ShareCode;
-        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+        await WaitUntilAsync(() => !string.IsNullOrWhiteSpace(helpee.ShareInvite), TimeSpan.FromSeconds(3));
+        var connectTask = helperRuntime.StartHelperAsync(new NLink.Core.SessionConnect.PeerAddress(helpeeRuntime.CurrentLocalPeerAddress!.Value.Value), CancellationToken.None);
 
         await WaitUntilAsync(
             () => helpee.HasIncomingRequest && helpee.ConnectionState == "IncomingRequest",
@@ -1361,6 +1580,22 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
     private sealed class TestClipboardService : IClipboardService
     {
         public Task SetTextAsync(string text) => Task.CompletedTask;
+    }
+
+    private sealed class FixedRecentConnectTargetsStore : IRecentConnectTargetsStore
+    {
+        private readonly IReadOnlyList<string> targets;
+
+        public FixedRecentConnectTargetsStore(params string[] targets)
+        {
+            this.targets = targets;
+        }
+
+        public IReadOnlyList<string> LoadTargets() => targets;
+
+        public void SaveTargets(IReadOnlyList<string> targets)
+        {
+        }
     }
 
     private sealed class ConnectedShellContext
@@ -1586,18 +1821,18 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
     private sealed class FakeSessionTransportNetwork
     {
         private readonly object gate = new();
-        private readonly Dictionary<string, FakeSessionTransport> hostsByCode = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, FakeSessionTransport> hostsByAddress = new(StringComparer.Ordinal);
 
         public FakeSessionTransport CreateTransport(string address)
         {
             return new FakeSessionTransport(this, address);
         }
 
-        public void RegisterHost(string code, FakeSessionTransport host)
+        public void RegisterHost(string address, FakeSessionTransport host)
         {
             lock (gate)
             {
-                hostsByCode[code] = host;
+                hostsByAddress[address] = host;
             }
         }
 
@@ -1605,29 +1840,31 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
         {
             lock (gate)
             {
-                foreach (var pair in hostsByCode.ToArray())
+                foreach (var pair in hostsByAddress.ToArray())
                 {
                     if (ReferenceEquals(pair.Value, transport))
                     {
-                        hostsByCode.Remove(pair.Key);
+                        hostsByAddress.Remove(pair.Key);
                     }
                 }
             }
         }
 
-        public FakeSessionTransport? TryFindHost(string code)
+        public FakeSessionTransport? TryFindHost(string address)
         {
             lock (gate)
             {
-                return hostsByCode.TryGetValue(code, out var host) ? host : null;
+                return hostsByAddress.TryGetValue(address, out var host) ? host : null;
             }
         }
     }
 
-    private sealed class FakeSessionTransport : NLink.Core.ISignalingTransport
+    private sealed class FakeSessionTransport : NLink.Core.ISignalingTransport, NLink.Core.IAddressTargetSignalingTransport, NLink.Core.IInviteTargetSignalingTransport, NLink.Core.IAddressHostSignalingTransport, NLink.Core.IHostReadySignalingTransport, NLink.Core.ILocalPeerAddressSignalingTransport, NLink.Core.ISessionSecuritySignalingTransport
     {
         private readonly FakeSessionTransportNetwork network;
         private readonly byte[] sharedKey = SHA256LikeDeterministicBytes("beta3-ui-smoke-key", 32);
+        private readonly TaskCompletionSource<bool> hostReadyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
         private FakeSessionTransport? peer;
         private bool disposed;
 
@@ -1638,6 +1875,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
         }
 
         public string Address { get; }
+        public string LocalPeerAddress => Address;
 
         public event EventHandler<NLink.Core.IncomingJoinRequestEventArgs>? IncomingJoinRequest;
         public event EventHandler<NLink.Core.TransportSessionKeyReadyEventArgs>? SessionKeyReady;
@@ -1645,24 +1883,85 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
         public event EventHandler? Approved;
         public event EventHandler? Rejected;
         public event EventHandler? Disconnected;
+        public event EventHandler<NLink.Core.TransportSessionSecurityStateChangedEventArgs>? SessionSecurityStateChanged;
+        public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
 
-        public Task HostAsync(NLink.Core.SessionCode code, CancellationToken ct)
+        public Task WaitUntilHostReadyAsync(CancellationToken ct) => hostReadyTcs.Task.WaitAsync(ct);
+
+        public Task HostByAddressAsync(CancellationToken ct)
         {
             ThrowIfDisposed();
-            network.RegisterHost(code.Digits, this);
+            network.RegisterHost(Address, this);
+            UpdateSessionSecurityState(SessionSecurityState.CreateHelpeeWaiting(new PeerAddress(Address)));
+            hostReadyTcs.TrySetResult(true);
             return Task.Delay(Timeout.Infinite, ct);
         }
 
-        public Task JoinAsync(NLink.Core.SessionCode code, CancellationToken ct)
+        public Task JoinByAddressAsync(string peerAddress, CancellationToken ct)
         {
             ThrowIfDisposed();
-            var host = network.TryFindHost(code.Digits) ?? throw new TimeoutException("Host not found.");
+            var host = network.TryFindHost(peerAddress) ?? throw new TimeoutException("Host not found.");
+            return JoinCoreAsync(
+                host,
+                new SessionId($"fake_session_{Guid.NewGuid():N}"),
+                SessionSecurityDefaults.AllCapabilityGrants,
+                inviteValidated: true);
+        }
+
+        public Task JoinByInviteAsync(string inviteToken, ValidatedInviteV1 invite, CancellationToken ct)
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(inviteToken))
+            {
+                throw new ArgumentException("Invite token is required.", nameof(inviteToken));
+            }
+
+            ArgumentNullException.ThrowIfNull(invite);
+            var host = network.TryFindHost(invite.TargetAddress.Value) ?? throw new TimeoutException("Host not found.");
+            var helperAddress = new PeerAddress(Address);
+            if (invite.BoundHelperAddress is not null && invite.BoundHelperAddress != helperAddress)
+            {
+                throw new InvalidOperationException("Invite token is bound to a different helper identity.");
+            }
+
+            return JoinCoreAsync(
+                host,
+                invite.SessionId,
+                invite.Payload.Capabilities.ToCapabilityGrant(),
+                inviteValidated: true);
+        }
+
+        private Task JoinCoreAsync(
+            FakeSessionTransport host,
+            SessionId sessionId,
+            CapabilityGrant requestedCapabilities,
+            bool inviteValidated)
+        {
             peer = host;
             host.peer = this;
+            var helpeeAddress = new PeerAddress(host.Address);
+            var helperAddress = new PeerAddress(Address);
+            var approvalRequest = new ApprovalRequest(
+                helperAddress,
+                requestedCapabilities,
+                sessionId);
+
+            var verifiedState = CreateVerifiedSecurityState(sessionId, helpeeAddress, helperAddress, inviteValidated);
+            UpdateSessionSecurityState(verifiedState);
+            host.UpdateSessionSecurityState(verifiedState);
 
             var joinRequest = new NLink.Core.IncomingJoinRequestEventArgs(
-                approveAsync: _ =>
+                approveAsync: (decision, _) =>
                 {
+                    if (decision is null)
+                    {
+                        throw new InvalidOperationException("Explicit approval decision is required.");
+                    }
+
+                    ValidateApprovalDecision(approvalRequest, decision);
+                    var grant = decision.ToGrant();
+                    host.UpdateSessionSecurityState(host.CurrentSessionSecurityState.WithApproval(grant));
+                    UpdateSessionSecurityState(CurrentSessionSecurityState.WithApproval(grant));
                     host.SessionKeyReady?.Invoke(host, new NLink.Core.TransportSessionKeyReadyEventArgs(host.sharedKey));
                     SessionKeyReady?.Invoke(this, new NLink.Core.TransportSessionKeyReadyEventArgs(sharedKey));
                     host.Approved?.Invoke(host, EventArgs.Empty);
@@ -1671,9 +1970,12 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 },
                 rejectAsync: _ =>
                 {
+                    host.UpdateSessionSecurityState(host.CurrentSessionSecurityState.Invalidate("local_reject"));
+                    UpdateSessionSecurityState(CurrentSessionSecurityState.Invalidate("local_reject"));
                     Rejected?.Invoke(this, EventArgs.Empty);
                     return Task.CompletedTask;
-                });
+                },
+                approvalRequest: approvalRequest);
 
             host.IncomingJoinRequest?.Invoke(host, joinRequest);
             return Task.CompletedTask;
@@ -1701,6 +2003,8 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
             {
                 peer = null;
                 target.peer = null;
+                UpdateSessionSecurityState(CurrentSessionSecurityState.Invalidate("transport_disposed"));
+                target.UpdateSessionSecurityState(target.CurrentSessionSecurityState.Invalidate("transport_disposed"));
                 target.Disconnected?.Invoke(target, EventArgs.Empty);
             }
         }
@@ -1710,6 +2014,43 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
             if (disposed)
             {
                 throw new ObjectDisposedException(nameof(FakeSessionTransport));
+            }
+        }
+
+        private void UpdateSessionSecurityState(SessionSecurityState nextState)
+        {
+            if (Equals(currentSessionSecurityState, nextState))
+            {
+                return;
+            }
+
+            currentSessionSecurityState = nextState;
+            SessionSecurityStateChanged?.Invoke(this, new NLink.Core.TransportSessionSecurityStateChangedEventArgs(nextState));
+        }
+
+        private static SessionSecurityState CreateVerifiedSecurityState(
+            SessionId sessionId,
+            PeerAddress helpeeAddress,
+            PeerAddress helperAddress,
+            bool inviteValidated)
+        {
+            return (SessionSecurityState.Empty with
+            {
+                SessionId = sessionId,
+                HelpeeAddress = helpeeAddress,
+                HelperAddress = helperAddress,
+                InviteValidated = inviteValidated,
+            }).WithHandshakeVerified(helperAddress);
+        }
+
+        private static void ValidateApprovalDecision(ApprovalRequest approvalRequest, ApprovalDecision decision)
+        {
+            if (decision.SessionId != approvalRequest.SessionId ||
+                decision.HelperIdentity != approvalRequest.HelperIdentity ||
+                decision.ExpiresAtUtc <= DateTimeOffset.UtcNow ||
+                (decision.ApprovedCapabilities & ~approvalRequest.RequestedCapabilities) != 0)
+            {
+                throw new InvalidOperationException("Approval decision does not match the pending approval request.");
             }
         }
     }

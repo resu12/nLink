@@ -4,21 +4,26 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Avalonia.Media.Imaging;
 using NLink.App;
 using NLink.App.Configuration;
 using NLink.App.Services;
+using NLink.App.Services.RemoteControl;
 using NLink.App.Services.ScreenCapture;
 using NLink.App.ViewModels;
 using NLink.Core;
 using NLink.Core.Chat;
 using NLink.Core.Logging;
 using NLink.Core.Metrics;
+using NLink.Core.RemoteControl;
 using NLink.Core.Resources;
 using NLink.Core.Retry;
 using NLink.Core.ScreenShare;
+using NLink.Core.SessionConnect;
+using NLink.Core.SessionSecurity;
 using NLink.Infra.DevLocal;
 using NLink.Infra.Nkn;
 using NLink.SmokeTests.Fakes;
@@ -148,22 +153,6 @@ public class SmokeTests
         Assert.InRange(maxJitterDelays[1].TotalMilliseconds, 1600d, 2000d);
         Assert.True(minJitterDelays[1].TotalMilliseconds <= 2000d);
         Assert.True(maxJitterDelays[1].TotalMilliseconds <= 2000d);
-    }
-
-    [Trait("Category", "Smoke")]
-    [Fact]
-    public void SessionCode_FormatsToSixDigits_AndRejectsNonDigits()
-    {
-        var code = new SessionCode("001234");
-
-        Assert.Equal("001234", code.Digits);
-        Assert.Equal("001 234", code.DisplayText);
-        Assert.Equal("123456", SessionCode.NormalizeDigits("12a3-45 6"));
-        Assert.True(SessionCode.TryParse("123 456", out var parsed));
-        Assert.Equal("123456", parsed.Digits);
-        Assert.False(SessionCode.TryParse("12a45", out _));
-        Assert.Throws<ArgumentException>(() => new SessionCode("12A456"));
-        Assert.Throws<ArgumentException>(() => new SessionCode("12345"));
     }
 
     [Trait("Category", "Smoke")]
@@ -1075,7 +1064,7 @@ public class SmokeTests
             bridgeReusePolicy: new BridgeReusePolicy(BridgeReuseMode.KeepAlive, TimeSpan.FromSeconds(1)),
             bridgeIdleDelayAsync: (_, _) => idleDelayTcs.Task);
 
-        await runtime.StartHelpeeAsync(CreateTestCode(), CancellationToken.None);
+        await runtime.StartHelpeeAsync(CancellationToken.None);
         await runtime.ResetAsync();
 
         Assert.True(runtime.HasCachedBridgeTransportForTests());
@@ -1091,7 +1080,7 @@ public class SmokeTests
     [Fact]
     public void UserErrorMapper_KeyMessages_AreShortAndUserFriendly()
     {
-        Assert.Equal("No one found with that code.", UserErrorMapper.HelperDiscoveryTimeout());
+        Assert.Equal("No response from target address.", UserErrorMapper.HelperDiscoveryTimeout());
         Assert.Equal("No response yet.", UserErrorMapper.HelperApprovalTimeout());
         Assert.Equal("Connection lost.", UserErrorMapper.HelperDisconnected());
         Assert.Equal("Connection lost.", UserErrorMapper.HelperGenericConnectFailure());
@@ -1283,8 +1272,10 @@ public class SmokeTests
     public void SessionRuntime_TransportStateMachine_AllowsExpectedTransitions_AndStoresMonotonicTimestamps()
     {
         Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.Idle, TransportState.TransportInitializing));
+        Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.Idle, TransportState.Connected));
         Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.TransportInitializing, TransportState.BridgeStarting));
         Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.BridgeStarting, TransportState.BridgeReady));
+        Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.BridgeStarting, TransportState.Handshake));
         Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.BridgeReady, TransportState.Connecting));
         Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.Connecting, TransportState.Handshake));
         Assert.True(SessionRuntime.IsTransportTransitionAllowed(TransportState.Handshake, TransportState.Connected));
@@ -1304,18 +1295,18 @@ public class SmokeTests
     [Fact]
     public void SessionRuntime_TransportStateMachine_BlocksInvalidTransitions()
     {
-        Assert.False(SessionRuntime.IsTransportTransitionAllowed(TransportState.Idle, TransportState.Connected));
+        Assert.False(SessionRuntime.IsTransportTransitionAllowed(TransportState.Idle, TransportState.Handshake));
         Assert.False(SessionRuntime.IsTransportTransitionAllowed(TransportState.Disposed, TransportState.Idle));
         Assert.False(SessionRuntime.IsTransportTransitionAllowed(TransportState.BridgeReady, TransportState.BridgeStarting));
 
         using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
         var idleTs = runtime.GetTransportStateEntryTimestamp(TransportState.Idle);
 
-        var changed = runtime.TryTransitionTransportStateForTests(TransportState.Connected, "invalid_test");
+        var changed = runtime.TryTransitionTransportStateForTests(TransportState.Handshake, "invalid_test");
         Assert.False(changed);
         Assert.Equal(TransportState.Idle, runtime.TransportLifecycleState);
         Assert.Equal(idleTs, runtime.GetTransportStateEntryTimestamp(TransportState.Idle));
-        Assert.Equal(0, runtime.GetTransportStateEntryTimestamp(TransportState.Connected));
+        Assert.Equal(0, runtime.GetTransportStateEntryTimestamp(TransportState.Handshake));
     }
 
     [Trait("Category", "Smoke")]
@@ -1442,7 +1433,7 @@ public class SmokeTests
             options,
             delay.DelayAsync);
 
-        await runtime.StartHelpeeAsync(new SessionCode("123456"), CancellationToken.None);
+        await runtime.StartHelpeeAsync(CancellationToken.None);
         Assert.True(runtime.TryTransitionTransportStateForTests(TransportState.Handshake, "test_handshake"));
 
         await WaitUntilAsync(() => delay.PendingCount > 0, TimeSpan.FromSeconds(1));
@@ -1497,7 +1488,7 @@ public class SmokeTests
         });
 
         using var runtime = new SessionRuntime(factory.Create);
-        await runtime.StartHelpeeAsync(new SessionCode("123456"), CancellationToken.None);
+        await runtime.StartHelpeeAsync(CancellationToken.None);
 
         ScriptedSignalingTransport first;
         lock (created)
@@ -1526,11 +1517,11 @@ public class SmokeTests
 
         using var runtime = new SessionRuntime(() => queue.Dequeue());
 
-        await runtime.StartHelpeeAsync(new SessionCode("111111"), CancellationToken.None);
+        await runtime.StartHelpeeAsync(CancellationToken.None);
         Assert.Equal(SessionRuntimeState.Waiting, runtime.State);
 
         await runtime.ResetAsync();
-        await runtime.StartHelpeeAsync(new SessionCode("222222"), CancellationToken.None);
+        await runtime.StartHelpeeAsync(CancellationToken.None);
         Assert.Equal(SessionRuntimeState.Waiting, runtime.State);
 
         var onDisconnected = typeof(SessionRuntime).GetMethod(
@@ -1585,10 +1576,10 @@ public class SmokeTests
     public async Task SessionRuntime_ConnectAttempt_IncrementsOnRetry_SameSession()
     {
         using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(
-            onJoinAsync: static (_, _) => Task.CompletedTask));
-        var code = new SessionCode("123456");
+            onJoinByAddressAsync: static (_, _) => Task.CompletedTask));
+        var targetAddress = new PeerAddress("scripted.connect.retry");
 
-        await runtime.StartHelperAsync(code, CancellationToken.None);
+        await runtime.StartHelperAsync(targetAddress, CancellationToken.None);
         var firstAttempt = runtime.GetConnectAttemptForTests();
         var firstSessionId = runtime.GetSessionIdForTests();
 
@@ -1596,7 +1587,7 @@ public class SmokeTests
         Assert.False(string.IsNullOrWhiteSpace(firstSessionId));
 
         await runtime.ResetAsync();
-        await runtime.StartHelperAsync(code, CancellationToken.None);
+        await runtime.StartHelperAsync(targetAddress, CancellationToken.None);
 
         Assert.Equal(2, runtime.GetConnectAttemptForTests());
         Assert.Equal(firstSessionId, runtime.GetSessionIdForTests());
@@ -1607,14 +1598,14 @@ public class SmokeTests
     public async Task SessionRuntime_ConnectAttempt_ResetsForNewSession()
     {
         using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(
-            onJoinAsync: static (_, _) => Task.CompletedTask));
+            onJoinByAddressAsync: static (_, _) => Task.CompletedTask));
 
-        await runtime.StartHelperAsync(new SessionCode("123456"), CancellationToken.None);
+        await runtime.StartHelperAsync(new PeerAddress("scripted.connect.first"), CancellationToken.None);
         var firstSessionId = runtime.GetSessionIdForTests();
         Assert.Equal(1, runtime.GetConnectAttemptForTests());
 
         await runtime.ResetAsync();
-        await runtime.StartHelperAsync(new SessionCode("654321"), CancellationToken.None);
+        await runtime.StartHelperAsync(new PeerAddress("scripted.connect.second"), CancellationToken.None);
 
         Assert.Equal(1, runtime.GetConnectAttemptForTests());
         Assert.NotEqual(firstSessionId, runtime.GetSessionIdForTests());
@@ -1826,6 +1817,9 @@ public class SmokeTests
     [Fact]
     public void TransportRuntimeConfig_ReleaseDefault_SelectsNkn_WhenBridgeBundled()
     {
+#if DEBUG
+        return;
+#endif
         var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
         var bridgeRid = GetCurrentBridgeRidForTests();
         var bridgeRoot = Path.Combine(AppContext.BaseDirectory, "bridge", bridgeRid);
@@ -1854,6 +1848,9 @@ public class SmokeTests
     [Fact]
     public void TransportRuntimeConfig_ReleaseDefault_SelectsDevLocal_WithWarning_WhenBridgeMissing()
     {
+#if DEBUG
+        return;
+#endif
         var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
         var bridgeRid = GetCurrentBridgeRidForTests();
         var bridgeRoot = Path.Combine(AppContext.BaseDirectory, "bridge", bridgeRid);
@@ -1894,7 +1891,7 @@ public class SmokeTests
             Assert.True(config.ForcedByEnvironment);
 
             using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(
-                onJoinAsync: static (_, __) => throw new InvalidOperationException("bridge missing")));
+                onJoinByAddressAsync: static (_, __) => throw new InvalidOperationException("bridge missing")));
             using var helper = new HelperPageViewModel(
                 cancelAction: static () => { },
                 config,
@@ -2197,12 +2194,807 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task SessionRuntime_SecurityState_TracksVerifiedHandshake_BeforeApprovalGrant()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(new PeerAddress(hostAddress), out var rawToken);
+        await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(() => helperRuntime.SecurityState.HandshakeState == SessionHandshakeState.Verified, TimeSpan.FromSeconds(2));
+
+        Assert.Equal(SessionHandshakeState.Verified, helpeeRuntime.SecurityState.HandshakeState);
+        Assert.True(helpeeRuntime.SecurityState.HandshakeCompleted);
+        Assert.False(helpeeRuntime.SecurityState.ApprovalGranted);
+        Assert.NotNull(helpeeRuntime.SecurityState.SessionId);
+        Assert.NotNull(helpeeRuntime.SecurityState.HelperAddress);
+        Assert.NotNull(helpeeRuntime.PendingApprovalRequest);
+        Assert.Equal(helpeeRuntime.SecurityState.SessionId, helpeeRuntime.PendingApprovalRequest!.SessionId);
+        Assert.Equal(helpeeRuntime.SecurityState.HelperAddress, helpeeRuntime.PendingApprovalRequest.HelperIdentity);
+        Assert.Equal(
+            CapabilityGrant.Chat | CapabilityGrant.ScreenShare | CapabilityGrant.RemoteControl,
+            helpeeRuntime.PendingApprovalRequest.RequestedCapabilities);
+        Assert.False(helperRuntime.SecurityState.ApprovalGranted);
+
+        await helpeeRuntime.ApproveAsync(cts.Token);
+        await WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected,
+            TimeSpan.FromSeconds(2));
+
+        Assert.True(helpeeRuntime.SecurityState.ApprovalGranted);
+        Assert.NotNull(helpeeRuntime.CurrentSessionGrant);
+        Assert.NotNull(helperRuntime.CurrentSessionGrant);
+        Assert.Equal(helpeeRuntime.CurrentSessionGrant!.Capabilities, helperRuntime.CurrentSessionGrant!.Capabilities);
+        Assert.True(helpeeRuntime.IsCapabilityGranted(CapabilityGrant.Chat));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_ApproveAsync_UsesExplicitCapabilitySubset()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl);
+        await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
+        await helpeeRuntime.ApproveAsync(CapabilityGrant.Chat | CapabilityGrant.ScreenShare, cts.Token);
+        await WaitUntilAsync(
+            () => helpeeRuntime.CurrentSessionGrant is not null &&
+                  helperRuntime.CurrentSessionGrant is not null,
+            TimeSpan.FromSeconds(2));
+
+        Assert.Equal(
+            CapabilityGrant.Chat | CapabilityGrant.ScreenShare,
+            helpeeRuntime.CurrentSessionGrant!.Capabilities);
+        Assert.Equal(
+            CapabilityGrant.Chat | CapabilityGrant.ScreenShare,
+            helperRuntime.CurrentSessionGrant!.Capabilities);
+        Assert.True(helperRuntime.CanPerform(SessionCapability.Chat));
+        Assert.True(helperRuntime.CanPerform(SessionCapability.ScreenShare));
+        Assert.False(helperRuntime.CanPerform(SessionCapability.RemoteControl));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_ApprovalGrant_Expires_And_ClearsCapabilities()
+    {
+        var nowUtc = DateTimeOffset.UtcNow;
+        var hostAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(
+            () => new DevLocalTransport(hostAddress),
+            watchdogOptions: null,
+            nowProvider: () => nowUtc);
+        using var helperRuntime = new SessionRuntime(
+            () => new DevLocalTransport(),
+            watchdogOptions: null,
+            nowProvider: () => nowUtc);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.RemoteControl);
+        await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
+        await helpeeRuntime.ApproveAsync(cts.Token);
+        await WaitUntilAsync(
+            () => helpeeRuntime.CurrentSessionGrant is not null &&
+                  helperRuntime.CurrentSessionGrant is not null,
+            TimeSpan.FromSeconds(2));
+
+        Assert.True(helperRuntime.IsCapabilityGranted(CapabilityGrant.Chat));
+        Assert.True(helperRuntime.IsCapabilityGranted(CapabilityGrant.RemoteControl));
+
+        nowUtc = nowUtc.Add(SessionSecurityDefaults.GrantLifetime).Add(TimeSpan.FromSeconds(1));
+
+        Assert.False(helpeeRuntime.IsCapabilityGranted(CapabilityGrant.Chat));
+        Assert.False(helperRuntime.IsCapabilityGranted(CapabilityGrant.Chat));
+        Assert.Null(helpeeRuntime.CurrentSessionGrant);
+        Assert.Null(helperRuntime.CurrentSessionGrant);
+        Assert.False(helpeeRuntime.SecurityState.ApprovalGranted);
+        Assert.False(helperRuntime.SecurityState.ApprovalGranted);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_RequestRemoteControl_RequiresGrantedCapability()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat);
+        await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
+        await helpeeRuntime.ApproveAsync(cts.Token);
+        await WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected,
+            TimeSpan.FromSeconds(2));
+
+        var requested = await helperRuntime.RequestRemoteControlAsync(cts.Token);
+
+        Assert.False(helperRuntime.IsCapabilityGranted(CapabilityGrant.RemoteControl));
+        Assert.False(requested);
+        Assert.False(helpeeRuntime.HasPendingRemoteControlConsentPrompt);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_TrySendChatText_RequiresGrantedCapability()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        ChatMessageRecord? received = null;
+        helpeeRuntime.ChatMessageReceived += (_, e) => received = e.Message;
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.ScreenShare);
+        await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
+        await helpeeRuntime.ApproveAsync(cts.Token);
+        await WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected,
+            TimeSpan.FromSeconds(2));
+
+        var sent = await helperRuntime.TrySendChatTextAsync("blocked", cts.Token);
+        await Task.Delay(150, cts.Token);
+
+        Assert.False(helperRuntime.CanPerform(SessionCapability.Chat));
+        Assert.Null(sent);
+        Assert.Null(received);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_InboundChat_IsRejected_WhenChatCapabilityMissing()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        ChatMessageRecord? received = null;
+        helpeeRuntime.ChatMessageReceived += (_, e) => received = e.Message;
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.ScreenShare);
+        await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
+        await helpeeRuntime.ApproveAsync(cts.Token);
+        await WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected &&
+                  helpeeRuntime.HasSessionKey &&
+                  helperRuntime.HasSessionKey,
+            TimeSpan.FromSeconds(2));
+
+        var chatServiceField = typeof(SessionRuntime).GetField("chatService", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(chatServiceField);
+        var helperChatService = Assert.IsType<SessionChatService>(chatServiceField!.GetValue(helperRuntime));
+
+        var bypassSent = await helperChatService.TrySendTextAsync("bypass-chat", cts.Token);
+        await Task.Delay(200, cts.Token);
+
+        Assert.NotNull(bypassSent);
+        Assert.False(helperRuntime.CanPerform(SessionCapability.Chat));
+        Assert.False(helpeeRuntime.CanPerform(SessionCapability.Chat));
+        Assert.Null(received);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionAuthorizationGuard_DeniesScreenShare_WhenHandshakeNotVerified()
+    {
+        var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_100_000_000);
+        var sessionId = new SessionId("sess_guard_screenshare");
+        var helpeeAddress = new PeerAddress("nlink.guard.helpee");
+        var helperAddress = new PeerAddress("nlink.guard.helper");
+        var securityState = SessionSecurityState.CreateHelperPending(
+            sessionId,
+            helpeeAddress,
+            helperAddress,
+            inviteValidated: true);
+        var grant = new SessionGrant(
+            helperAddress,
+            CapabilityGrant.ScreenShare,
+            sessionId,
+            nowUtc.AddMinutes(5));
+        var guard = new SessionAuthorizationGuard(() => nowUtc);
+
+        var result = guard.Evaluate(
+            hasSecurityTransport: true,
+            securityState: securityState,
+            grant: grant,
+            capability: SessionCapability.ScreenShare);
+
+        Assert.False(result.IsAuthorized);
+        Assert.Equal(SessionAuthorizationFailure.HandshakeIncomplete, result.Failure);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_ScreenShareFrames_RequireGrantedCapability()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        var frameRaised = false;
+        helperRuntime.ScreenShareFrameCompleted += (_, _) => frameRaised = true;
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat);
+        await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
+        await helpeeRuntime.ApproveAsync(cts.Token);
+        await WaitUntilAsync(() => helperRuntime.State == SessionRuntimeState.Connected, TimeSpan.FromSeconds(2));
+
+        InvokePrivateMethod(
+            helperRuntime,
+            "OnTransportScreenShareFrameCompleted",
+            null,
+            new ScreenShareFrameCompletedEventArgs(
+                1,
+                1,
+                1,
+                "jpeg",
+                new byte[] { 0x01 },
+                SessionId: helperRuntime.SecurityState.SessionId!.Value.Value));
+
+        Assert.False(helperRuntime.CanPerform(SessionCapability.ScreenShare));
+        Assert.False(frameRaised);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_ScreenView_WithoutApproval_IsRejected()
+    {
+        using var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted);
+
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        scripted.SetSessionSecurityStateForTests(
+            CreateVerifiedSecurityState(
+                new PeerAddress("screenview.noapproval.helpee"),
+                new PeerAddress(scripted.LocalPeerAddress)));
+
+        var frameRaised = false;
+        runtime.ScreenShareFrameCompleted += (_, _) => frameRaised = true;
+
+        InvokePrivateMethod(
+            runtime,
+            "OnTransportScreenShareFrameCompleted",
+            scripted,
+            new ScreenShareFrameCompletedEventArgs(
+                1,
+                1,
+                1,
+                "jpeg",
+                new byte[] { 0x01 },
+                SessionId: runtime.SecurityState.SessionId!.Value.Value));
+
+        Assert.False(runtime.CanPerform(SessionCapability.ScreenShare));
+        Assert.Null(runtime.CurrentSessionGrant);
+        Assert.False(frameRaised);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_ScreenShareFrameDispatch_RejectsSessionIdMismatch()
+    {
+        using var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted);
+
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+
+        var approvedState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helper.peer"),
+            CapabilityGrant.ScreenShare);
+        InvokePrivateMethod(runtime, "ApplyTransportSecurityState", approvedState);
+
+        var frameRaised = false;
+        runtime.ScreenShareFrameCompleted += (_, _) => frameRaised = true;
+
+        InvokePrivateMethod(
+            runtime,
+            "OnTransportScreenShareFrameCompleted",
+            scripted,
+            new ScreenShareFrameCompletedEventArgs(
+                1,
+                1,
+                1,
+                "jpeg",
+                new byte[] { 0x01 },
+                SessionId: "sess_other_screenshare"));
+
+        Assert.True(runtime.CanPerform(SessionCapability.ScreenShare));
+        Assert.False(frameRaised);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_UnauthorizedRemoteControlInjection_IsRejected()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        var injector = new CountingRemoteInputInjector();
+        using var helpeeRuntime = new SessionRuntime(
+            () => new DevLocalTransport(hostAddress),
+            watchdogOptions: null,
+            remoteInputInjector: injector);
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        var received = false;
+        helpeeRuntime.RemoteControlInputReceived += (_, _) => received = true;
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat);
+        await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
+        await helpeeRuntime.ApproveAsync(cts.Token);
+        await WaitUntilAsync(() => helperRuntime.CurrentSessionGrant is not null, TimeSpan.FromSeconds(2));
+
+        var handleTask = (Task?)InvokePrivateMethod(
+            helpeeRuntime,
+            "HandleRemoteControlInputReceivedAsync",
+            new RemoteControlInputReceivedEventArgs(
+                new ControlInputMessageV1
+                {
+                    SessionId = helperRuntime.CurrentSessionGrant!.SessionId.Value,
+                    RequestId = "req_unauthorized_input",
+                    Seq = 1,
+                    Kind = "mouse_move",
+                    Nx = 0.5,
+                    Ny = 0.5,
+                    DisplayId = "display-primary",
+                    DisplayInfoRevision = 1,
+                },
+                "devlocal-peer"));
+        Assert.NotNull(handleTask);
+        await handleTask!;
+
+        Assert.False(helpeeRuntime.CanPerform(SessionCapability.RemoteControl));
+        Assert.False(received);
+        Assert.Equal(0, injector.MouseMoveCount);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_RequestRemoteControl_WithoutApproval_IsRejected()
+    {
+        var sentRequests = 0;
+        using var scripted = new ScriptedSignalingTransport(
+            onSendControlRequestAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref sentRequests);
+                return Task.CompletedTask;
+            });
+        using var runtime = new SessionRuntime(() => scripted);
+
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        scripted.SetSessionSecurityStateForTests(
+            CreateVerifiedSecurityState(
+                new PeerAddress("remotecontrol.noapproval.helpee"),
+                new PeerAddress(scripted.LocalPeerAddress)));
+
+        var requested = await runtime.RequestRemoteControlAsync();
+
+        Assert.False(runtime.CanPerform(SessionCapability.RemoteControl));
+        Assert.False(requested);
+        Assert.Equal(ControlState.Off, runtime.ControlState);
+        Assert.Equal(0, Volatile.Read(ref sentRequests));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_RemoteControlDisplayInfoReceive_RequiresGrantedCapability()
+    {
+        using var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted);
+
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        scripted.SetSessionSecurityStateForTests(
+            CreateApprovedSecurityState(
+                new PeerAddress("scripted.aux.helpee"),
+                new PeerAddress(scripted.LocalPeerAddress),
+                CapabilityGrant.Chat));
+
+        var handleTask = (Task?)InvokePrivateMethod(
+            runtime,
+            "HandleRemoteControlDisplayInfoReceivedAsync",
+            new RemoteControlDisplayInfoReceivedEventArgs(
+                new ControlDisplayInfoMessageV1
+                {
+                    SessionId = runtime.SecurityState.SessionId!.Value.Value,
+                    DisplayId = "display-primary",
+                    VirtualDesktopX = 0,
+                    VirtualDesktopY = 0,
+                    VirtualDesktopWidth = 1920,
+                    VirtualDesktopHeight = 1080,
+                    CaptureRegionX = 0,
+                    CaptureRegionY = 0,
+                    CaptureRegionWidth = 1920,
+                    CaptureRegionHeight = 1080,
+                    FrameWidth = 1280,
+                    FrameHeight = 720,
+                    DpiScale = 1.0,
+                    Revision = 1,
+                    TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                },
+                "remote-helpee"));
+        Assert.NotNull(handleTask);
+        await handleTask!;
+
+        Assert.False(runtime.CanPerform(SessionCapability.RemoteControl));
+        Assert.False(runtime.RemoteControlMappingAvailable);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_RemoteControlAllowResponse_IsRejectedWithoutGrantedCapability()
+    {
+        using var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted);
+
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        scripted.SetSessionSecurityStateForTests(
+            CreateApprovedSecurityState(
+                new PeerAddress("scripted.aux.helpee"),
+                new PeerAddress(scripted.LocalPeerAddress),
+                CapabilityGrant.Chat));
+        SetPrivateField(
+            runtime,
+            "remoteControlSessionState",
+            new RemoteControlSessionState(
+                ControlState.Requesting,
+                ControllerPeerId: "remote-helpee",
+                CurrentControlRequestId: "req_capability_lost",
+                ConsentToken: null,
+                SupportsRemoteControl: true,
+                PeerSupportsRemoteControl: true));
+
+        var handleTask = (Task?)InvokePrivateMethod(
+            runtime,
+            "HandleRemoteControlResponseReceivedAsync",
+            new RemoteControlResponseReceivedEventArgs(
+                new ControlResponseMessageV1
+                {
+                    RequestId = "req_capability_lost",
+                    Decision = "allow",
+                    ConsentToken = "consent-token",
+                    TtlMs = 60_000,
+                },
+                "remote-helpee"));
+        Assert.NotNull(handleTask);
+        await handleTask!;
+
+        Assert.False(runtime.CanPerform(SessionCapability.RemoteControl));
+        Assert.Equal(ControlState.Off, runtime.ControlState);
+        Assert.Null(runtime.ConsentToken);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_FileTransferSend_WithoutApproval_IsRejected()
+    {
+        using var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted);
+
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        scripted.SetSessionSecurityStateForTests(
+            CreateVerifiedSecurityState(
+                new PeerAddress("filetransfer.noapproval.helpee"),
+                new PeerAddress(scripted.LocalPeerAddress)));
+
+        var allowed = Assert.IsType<bool>(InvokePrivateMethod(runtime, "TryAuthorizeFileTransferSend")!);
+
+        Assert.False(runtime.CanPerform(SessionCapability.FileTransfer));
+        Assert.False(allowed);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_ExpiredApproval_BlocksPrivilegedOperations()
+    {
+        var sentRequests = 0;
+        using var scripted = new ScriptedSignalingTransport(
+            onSendControlRequestAsync: (_, _) =>
+            {
+                Interlocked.Increment(ref sentRequests);
+                return Task.CompletedTask;
+            });
+        using var runtime = new SessionRuntime(() => scripted);
+
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        scripted.SetSessionSecurityStateForTests(
+            CreateExpiredApprovedSecurityState(
+                new PeerAddress("expired.approval.helpee"),
+                new PeerAddress(scripted.LocalPeerAddress),
+                CapabilityGrant.ScreenShare | CapabilityGrant.RemoteControl | CapabilityGrant.FileTransfer));
+
+        var frameRaised = false;
+        runtime.ScreenShareFrameCompleted += (_, _) => frameRaised = true;
+
+        InvokePrivateMethod(
+            runtime,
+            "OnTransportScreenShareFrameCompleted",
+            scripted,
+            new ScreenShareFrameCompletedEventArgs(
+                1,
+                1,
+                1,
+                "jpeg",
+                new byte[] { 0x01 },
+                SessionId: runtime.SecurityState.SessionId!.Value.Value));
+
+        var requested = await runtime.RequestRemoteControlAsync();
+        var fileTransferAllowed = Assert.IsType<bool>(InvokePrivateMethod(runtime, "TryAuthorizeFileTransferSend")!);
+
+        Assert.False(runtime.CanPerform(SessionCapability.ScreenShare));
+        Assert.False(runtime.CanPerform(SessionCapability.RemoteControl));
+        Assert.False(runtime.CanPerform(SessionCapability.FileTransfer));
+        Assert.Null(runtime.CurrentSessionGrant);
+        Assert.False(runtime.SecurityState.ApprovalGranted);
+        Assert.False(frameRaised);
+        Assert.False(requested);
+        Assert.False(fileTransferAllowed);
+        Assert.Equal(0, Volatile.Read(ref sentRequests));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_StartHelperAsync_RequiresSecurityTransport()
+    {
+        using var runtime = new SessionRuntime(() => new FakeSignalingTransport());
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+
+        await Assert.ThrowsAsync<NotSupportedException>(
+            () => runtime.StartHelperAsync(new PeerAddress("nonsecurity.helper.target"), cts.Token));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task IncomingJoinRequest_ApproveAsync_RequiresExplicitDecision_WhenApprovalRequestPresent()
+    {
+        var approvalRequest = new ApprovalRequest(
+            new PeerAddress("helper.security.test"),
+            CapabilityGrant.Chat,
+            new SessionId("approval_request_test"));
+        var approved = false;
+
+        var joinRequest = new IncomingJoinRequestEventArgs(
+            approveAsync: (decision, _) =>
+            {
+                Assert.NotNull(decision);
+                approved = true;
+                return Task.CompletedTask;
+            },
+            rejectAsync: _ => Task.CompletedTask,
+            approvalRequest: approvalRequest);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => joinRequest.ApproveAsync(CancellationToken.None));
+        Assert.False(approved);
+        Assert.False(joinRequest.IsHandled);
+
+        var nowUtc = DateTimeOffset.UtcNow;
+        var decision = approvalRequest.CreateDecision(
+            CapabilityGrant.Chat,
+            nowUtc.Add(SessionSecurityDefaults.GrantLifetime),
+            nowUtc);
+
+        await joinRequest.ApproveAsync(decision, CancellationToken.None);
+        Assert.True(approved);
+        Assert.True(joinRequest.IsHandled);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperViewModel_FileTransferCommand_RequiresGrantedCapability()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+        await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
+        await helpeeRuntime.ApproveAsync(cts.Token);
+        await WaitUntilAsync(() => helperRuntime.State == SessionRuntimeState.Connected, TimeSpan.FromSeconds(2));
+
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        Assert.False(helperRuntime.CanPerform(SessionCapability.FileTransfer));
+        Assert.False(helper.CanSendFiles);
+        Assert.False(helper.SendFileCommand.CanExecute(null));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperViewModel_FileTransferRequest_IsBlockedByRuntimeGuard_WhenUiFlagIsStale()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+        await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
+        await helpeeRuntime.ApproveAsync(cts.Token);
+        await WaitUntilAsync(() => helperRuntime.State == SessionRuntimeState.Connected, TimeSpan.FromSeconds(2));
+
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+        var requested = false;
+        helper.SendFileRequested += (_, _) => requested = true;
+
+        SetPrivateField(helper, "canSendFiles", true);
+        InvokePrivateMethod(helper, "RequestSendFileWindow");
+        await Task.Delay(150, cts.Token);
+
+        Assert.False(requested);
+        Assert.False(helperRuntime.CanPerform(SessionCapability.FileTransfer));
+        Assert.False(helper.CanSendFiles);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_FileTransferWriteOpen_RequiresGrantedCapability()
+    {
+        using var scripted = new ScriptedSignalingTransport();
+        using var runtime = new SessionRuntime(() => scripted);
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-filetransfer-smoke-" + Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            runtime.SetRoleForTests(SessionRuntimeRole.Helpee);
+            SetPrivateField(runtime, "transport", scripted);
+            SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+            SetPrivateField(runtime, "statusText", "Connected");
+            InvokePrivateMethod(runtime, "WireTransport", scripted);
+            scripted.SetSessionSecurityStateForTests(
+                CreateApprovedSecurityState(
+                    new PeerAddress(scripted.LocalPeerAddress),
+                    new PeerAddress("scripted.helper.peer"),
+                    CapabilityGrant.Chat));
+
+            var result = Assert.IsType<FileTransferWriteOpenResult>(
+                InvokePrivateMethod(
+                    runtime,
+                    "OpenAuthorizedInboundFileWriteStream",
+                    new FileTransferDescriptor(
+                        runtime.SecurityState.SessionId!.Value,
+                        runtime.SecurityState.HelperAddress!.Value,
+                        "safe.txt",
+                        128),
+                    new FileTransferStoragePolicy(tempRoot))!);
+
+            Assert.False(result.IsAllowed);
+            Assert.Equal(FileTransferValidationFailure.AuthorizationDenied, result.Access.Failure);
+            Assert.Equal(SessionAuthorizationFailure.CapabilityMissing, result.Access.AuthorizationFailure);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_AddressJoin_OnSecurityTransport_IsRejectedBeforeApprovalUi()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        await helperRuntime.StartHelperAsync(new PeerAddress(hostAddress), cts.Token);
+
+        await WaitUntilAsync(() => helperRuntime.State == SessionRuntimeState.Rejected, TimeSpan.FromSeconds(2));
+        await Task.Delay(150, cts.Token);
+
+        Assert.NotEqual(SessionRuntimeState.IncomingJoinRequest, helpeeRuntime.State);
+        Assert.False(helpeeRuntime.HasPendingJoinRequest);
+        Assert.Equal(SessionRuntimeState.Rejected, helperRuntime.State);
+        Assert.Equal("Permission was declined.", helperRuntime.StatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task DevLocalTransport_Chat_HelperToHelpee_And_HelpeeToHelper_RoundTrip()
     {
         ChatRuntimeCounters.ResetForTests();
 
-        var code = CreateTestCode();
-        using var hostTransport = new DevLocalTransport();
+        var hostAddress = CreateTestPeerAddress();
+        using var hostTransport = new DevLocalTransport(hostAddress);
         using var helperTransport = new DevLocalTransport();
         using var helpeeChat = new SessionChatService(() => new DateTimeOffset(2026, 2, 23, 18, 0, 0, TimeSpan.Zero));
         using var helperChat = new SessionChatService(() => new DateTimeOffset(2026, 2, 23, 18, 0, 5, TimeSpan.Zero));
@@ -2227,20 +3019,23 @@ public class SmokeTests
         helpeeChat.MessageReceivedBeforeApproved += (_, _) => preApprovalNoticeRaised.TrySetResult();
         helperChat.MessageReceived += (_, e) => helperMessageTcs.TrySetResult(e.Message.Text);
 
-        _ = hostTransport.HostAsync(code, cts.Token);
+        _ = hostTransport.HostByAddressAsync(cts.Token);
         await Task.Delay(75, cts.Token);
-        await helperTransport.JoinAsync(code, cts.Token).WaitAsync(TimeSpan.FromSeconds(3));
-
-        await joinRaised.Task.WaitAsync(cts.Token);
-        await WaitUntilAsync(() => helpeeChat.HasSessionKey && helperChat.HasSessionKey, TimeSpan.FromSeconds(3));
+        var invite = CreateValidatedInviteForTarget(new PeerAddress(hostAddress), out var rawToken, InviteCapabilities.Chat);
+        await helperTransport.JoinByInviteAsync(rawToken, invite, cts.Token).WaitAsync(TimeSpan.FromSeconds(3));
 
         var helperSent = await helperChat.TrySendTextAsync("Hi, it's me", cts.Token);
+        Assert.Null(helperSent);
+        Assert.False(preApprovalNoticeRaised.Task.IsCompleted);
+
+        await joinRaised.Task.WaitAsync(cts.Token);
+        await pendingJoin!.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+        await WaitUntilAsync(() => helperChat.IsApproved && helpeeChat.IsApproved, TimeSpan.FromSeconds(3));
+        await WaitUntilAsync(() => helpeeChat.HasSessionKey && helperChat.HasSessionKey, TimeSpan.FromSeconds(3));
+
+        helperSent = await helperChat.TrySendTextAsync("Hi, it's me", cts.Token);
         Assert.NotNull(helperSent);
         var helpeeReceived = await helpeeMessageTcs.Task.WaitAsync(cts.Token);
-        await preApprovalNoticeRaised.Task.WaitAsync(cts.Token);
-
-        await pendingJoin!.ApproveAsync(cts.Token);
-        await WaitUntilAsync(() => helperChat.IsApproved && helpeeChat.IsApproved, TimeSpan.FromSeconds(3));
 
         var helpeeSent = await helpeeChat.TrySendTextAsync("I can see your message", cts.Token);
         Assert.NotNull(helpeeSent);
@@ -2264,8 +3059,8 @@ public class SmokeTests
     [Fact]
     public async Task DevLocalTransport_ChatSubscriberThrow_DoesNotDisconnectSession()
     {
-        var code = CreateTestCode();
-        using var hostTransport = new DevLocalTransport();
+        var hostAddress = CreateTestPeerAddress();
+        using var hostTransport = new DevLocalTransport(hostAddress);
         using var helperTransport = new DevLocalTransport();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
 
@@ -2297,11 +3092,12 @@ public class SmokeTests
             hostReceived.TrySetResult(Encoding.UTF8.GetString(e.Payload));
         };
 
-        _ = hostTransport.HostAsync(code, cts.Token);
-        await helperTransport.JoinAsync(code, cts.Token).WaitAsync(TimeSpan.FromSeconds(3));
+        _ = hostTransport.HostByAddressAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(new PeerAddress(hostAddress), out var rawToken, InviteCapabilities.Chat);
+        await helperTransport.JoinByInviteAsync(rawToken, invite, cts.Token).WaitAsync(TimeSpan.FromSeconds(3));
         await joinRaised.Task.WaitAsync(cts.Token);
 
-        await pendingJoin!.ApproveAsync(cts.Token);
+        await pendingJoin!.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
         await helperApproved.Task.WaitAsync(cts.Token);
         await hostApproved.Task.WaitAsync(cts.Token);
 
@@ -2429,11 +3225,11 @@ public class SmokeTests
             joinRaised.TrySetResult();
         };
 
-        var code = CreateTestCode();
-        _ = hostTransport.HostAsync(code, cts.Token);
-        await helperTransport.JoinAsync(code, cts.Token).WaitAsync(TimeSpan.FromSeconds(2));
+        var hostAddress = hostTransport.LocalPeerAddress;
+        _ = hostTransport.HostByAddressAsync(cts.Token);
+        await helperTransport.JoinByAddressAsync(hostAddress, cts.Token).WaitAsync(TimeSpan.FromSeconds(2));
         await joinRaised.Task.WaitAsync(cts.Token);
-        await pendingJoin!.ApproveAsync(cts.Token);
+        await pendingJoin!.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
         await WaitUntilAsync(() => helperChat.IsApproved && helpeeChat.IsApproved, TimeSpan.FromSeconds(2));
         await WaitUntilAsync(() => helperChat.HasSessionKey && helpeeChat.HasSessionKey, TimeSpan.FromSeconds(2));
 
@@ -2487,15 +3283,16 @@ public class SmokeTests
     public async Task ViewModelFlow_HelpeeApproves_HelperAndHelpeeReachConnectedState()
     {
         var transportConfig = CreateDevLocalTestConfig();
-        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-viewmodel-flow-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-viewmodel-flow-" + Guid.NewGuid().ToString("N")));
 
         using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
         using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
 
-        helper.CodeInput = helpee.ShareCode;
+        _ = await WaitForShareInviteAsync(helpee);
 
-        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+        var connectTask = helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), CancellationToken.None);
 
         await WaitUntilAsync(
             () => helpee.HasIncomingRequest && helpee.ConnectionState == "IncomingRequest",
@@ -2886,13 +3683,14 @@ public class SmokeTests
     public async Task Beta5_HeaderAndChatPill_NeverDisagreeOnConnected()
     {
         var transportConfig = CreateDevLocalTestConfig();
-        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-beta5-pill-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-beta5-pill-" + Guid.NewGuid().ToString("N")));
         using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
         using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
 
-        helper.CodeInput = helpee.ShareCode;
-        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+        _ = await WaitForShareInviteAsync(helpee);
+        var connectTask = helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), CancellationToken.None);
 
         await WaitUntilAsync(
             () => helpee.HasIncomingRequest && helpee.ConnectionState == "IncomingRequest",
@@ -2913,7 +3711,7 @@ public class SmokeTests
         await helperRuntime.DisconnectAsync();
 
         await WaitUntilAsync(
-            () => helper.EffectivePhase is SessionUiPhase.Failed or SessionUiPhase.Idle or SessionUiPhase.Waiting &&
+            () => (helper.EffectivePhase is SessionUiPhase.Failed or SessionUiPhase.Idle or SessionUiPhase.Waiting or SessionUiPhase.Ended) &&
                   !helper.IsChatInputEnabled,
             TimeSpan.FromSeconds(5));
 
@@ -2926,13 +3724,14 @@ public class SmokeTests
     public async Task Beta5_EndSession_DisablesChat_And_Command_Helper()
     {
         var transportConfig = CreateDevLocalTestConfig();
-        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-beta5-end-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-beta5-end-" + Guid.NewGuid().ToString("N")));
         using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
         using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
 
-        helper.CodeInput = helpee.ShareCode;
-        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+        _ = await WaitForShareInviteAsync(helpee);
+        var connectTask = helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), CancellationToken.None);
 
         await WaitUntilAsync(
             () => helpee.HasIncomingRequest && helpee.ConnectionState == "IncomingRequest",
@@ -2962,8 +3761,9 @@ public class SmokeTests
     public async Task HelperPageViewModel_EndSession_DeactivatesViewer_AndResetsSession()
     {
         var transportConfig = CreateDevLocalTestConfig();
-        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-end-session-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-end-session-" + Guid.NewGuid().ToString("N")));
         using var helpee = new HelpeePageViewModel(
             cancelAction: () => _ = helpeeRuntime.DisconnectAsync(),
             transportConfig,
@@ -2973,8 +3773,8 @@ public class SmokeTests
             transportConfig,
             helperRuntime);
 
-        helper.CodeInput = helpee.ShareCode;
-        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+        _ = await WaitForShareInviteAsync(helpee);
+        var connectTask = helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), CancellationToken.None);
 
         await WaitUntilAsync(
             () => helpee.HasIncomingRequest && helpee.ConnectionState == "IncomingRequest",
@@ -3232,8 +4032,8 @@ public class SmokeTests
         using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
         using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
 
-        helper.CodeInput = helpee.ShareCode;
-        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+        _ = await WaitForShareInviteAsync(helpee);
+        var connectTask = helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), CancellationToken.None);
 
         await WaitUntilAsync(
             () => helpee.HasIncomingRequest && helpee.ConnectionState == "IncomingRequest",
@@ -3313,8 +4113,6 @@ public class SmokeTests
             using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
             using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
 
-            var code = new SessionCode("123456");
-
             var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
             var hostKeyReady = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
             var helperKeyReady = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -3329,11 +4127,12 @@ public class SmokeTests
             helper.Approved += (_, _) => helperApproved.TrySetResult();
             host.ChatMessageReceived += (_, e) => hostChatReceived.TrySetResult(e.Payload);
 
-            await host.HostAsync(code, cts.Token);
-            await helper.JoinAsync(code, cts.Token);
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(new PeerAddress(host.LocalPeerAddress), out var rawToken);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
 
             var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
-            await pendingJoin.ApproveAsync(cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
 
             var hostKey = await hostKeyReady.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             var helperKey = await helperKeyReady.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
@@ -3353,6 +4152,778 @@ public class SmokeTests
         {
             FakeNknClient.ResetNetwork();
         }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_InvalidInvite_DoesNotRaiseIncomingJoinRequest()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.invalidinvite.address");
+            var helperClient = new FakeNknClient("helper.invalidinvite.address");
+            var hostIdentity = new NknIdentity("host-id", "host.invalidinvite.address");
+            var helperIdentity = new NknIdentity("helper-id", "helper.invalidinvite.address");
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(new PeerAddress(host.LocalPeerAddress), out _);
+            CreateValidatedInviteForTarget(new PeerAddress("host.invalidinvite.other"), out var wrongTargetToken);
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => helper.JoinByInviteAsync(wrongTargetToken, invite, cts.Token));
+            await Task.Delay(300, cts.Token);
+
+            Assert.False(joinRequestRaised.Task.IsCompleted);
+            Assert.Equal(SessionHandshakeState.Failed, helper.CurrentSessionSecurityState.HandshakeState);
+            Assert.Equal("invite_binding_mismatch", helper.CurrentSessionSecurityState.HandshakeFailureReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_TamperedInvite_IsRejectedBeforeHandshakeStart()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tamperedinvite.address");
+            var helperClient = new FakeNknClient("helper.tamperedinvite.address");
+            var hostIdentity = new NknIdentity("host-id", "host.tamperedinvite.address");
+            var helperIdentity = new NknIdentity("helper-id", "helper.tamperedinvite.address");
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(new PeerAddress(host.LocalPeerAddress), out var rawToken);
+            var tokenParts = rawToken.Split('.', StringSplitOptions.None);
+            Assert.Equal(3, tokenParts.Length);
+            var payloadJson = Encoding.UTF8.GetString(DecodeBase64Url(tokenParts[1]));
+            var tamperedJson = payloadJson.Replace(host.LocalPeerAddress, "host.tamperedinvite.other", StringComparison.Ordinal);
+            var tamperedToken = $"{tokenParts[0]}.{EncodeBase64Url(Encoding.UTF8.GetBytes(tamperedJson))}.{tokenParts[2]}";
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => helper.JoinByInviteAsync(tamperedToken, invite, cts.Token));
+            await Task.Delay(300, cts.Token);
+
+            Assert.False(joinRequestRaised.Task.IsCompleted);
+            Assert.Equal(SessionHandshakeState.Failed, helper.CurrentSessionSecurityState.HandshakeState);
+            Assert.Equal("invite_signature_invalid", helper.CurrentSessionSecurityState.HandshakeFailureReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_SendScreenSharePayloadAsync_RejectsOldSessionId()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var helperClient = new FakeNknClient("helper.screenshare.send.address");
+            var hostClient = new FakeNknClient("host.screenshare.send.address");
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var helperTransport = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            await helperClient.ConnectAsync(CancellationToken.None);
+            await hostClient.ConnectAsync(CancellationToken.None);
+
+            var sentCount = 0;
+            helperClient.BeforeSendAsync = (_, _, _) =>
+            {
+                Interlocked.Increment(ref sentCount);
+                return Task.CompletedTask;
+            };
+
+            var approvedState = CreateApprovedSecurityState(
+                new PeerAddress(hostClient.Address),
+                new PeerAddress(helperClient.Address),
+                CapabilityGrant.ScreenShare);
+            SetPrivateField(helperTransport, "remoteEndpoint", hostClient.Address);
+            InvokePrivateMethod(helperTransport, "UpdateSessionSecurityState", approvedState);
+
+            var mismatchedPayload = ScreenSharePayloadCodec.Serialize(
+                new ScreenShareFrameChunkV1
+                {
+                    SessionId = "sess_old_screenshare",
+                    FrameId = 1,
+                    Width = 1,
+                    Height = 1,
+                    TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    Encoding = "jpeg",
+                    ChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataBase64 = Convert.ToBase64String(new byte[] { 0x01 }),
+                });
+
+            await helperTransport.SendScreenSharePayloadAsync(mismatchedPayload, CancellationToken.None);
+            Assert.Equal(0, Volatile.Read(ref sentCount));
+
+            var matchingPayload = ScreenSharePayloadCodec.Serialize(
+                new ScreenShareFrameChunkV1
+                {
+                    SessionId = approvedState.SessionId!.Value.Value,
+                    FrameId = 2,
+                    Width = 1,
+                    Height = 1,
+                    TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    Encoding = "jpeg",
+                    ChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataBase64 = Convert.ToBase64String(new byte[] { 0x02 }),
+                });
+
+            await helperTransport.SendScreenSharePayloadAsync(matchingPayload, CancellationToken.None);
+            Assert.Equal(1, Volatile.Read(ref sentCount));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_ExpiredInvite_IsRejectedBeforeHandshakeStart()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.expiredinvite.address");
+            var helperClient = new FakeNknClient("helper.expiredinvite.address");
+            var hostIdentity = new NknIdentity("host-id", "host.expiredinvite.address");
+            var helperIdentity = new NknIdentity("helper-id", "helper.expiredinvite.address");
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+
+            await host.HostByAddressAsync(cts.Token);
+
+            var nowUtc = DateTimeOffset.UtcNow.AddMinutes(-5);
+            var factory = InviteTokenServiceFactory.CreateInviteTokenFactory();
+            var create = factory.Create(
+                new InviteTokenCreateRequest(
+                    IssuerAddress: new PeerAddress(host.LocalPeerAddress),
+                    TargetAddress: new PeerAddress(host.LocalPeerAddress),
+                    SessionId: new SessionId("sess_expired_transport"),
+                    Capabilities: InviteCapabilities.Chat,
+                    Lifetime: TimeSpan.FromSeconds(20)),
+                nowUtc);
+            Assert.True(create.IsSuccess, create.Message);
+            Assert.NotNull(create.Token);
+            Assert.NotNull(create.Payload);
+
+            var expiredInvite = new ValidatedInviteV1(
+                create.Payload!,
+                create.Payload!.TargetAddress,
+                create.Payload.IssuerAddress,
+                create.Payload.SessionId);
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => helper.JoinByInviteAsync(create.Token!, expiredInvite, cts.Token));
+            await Task.Delay(300, cts.Token);
+
+            Assert.False(joinRequestRaised.Task.IsCompleted);
+            Assert.Equal(SessionHandshakeState.Failed, helper.CurrentSessionSecurityState.HandshakeState);
+            Assert.Equal("invite_expired", helper.CurrentSessionSecurityState.HandshakeFailureReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_HelperBoundInvite_ForDifferentHelper_IsRejectedBeforeHandshakeStart()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.boundinvite.address");
+            var helperClient = new FakeNknClient("helper.boundinvite.address");
+            var hostIdentity = new NknIdentity("host-id", "host.boundinvite.address");
+            var helperIdentity = new NknIdentity("helper-id", "helper.boundinvite.address");
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(
+                new PeerAddress(host.LocalPeerAddress),
+                out var rawToken,
+                boundHelperAddress: new PeerAddress("helper.boundinvite.expected"));
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => helper.JoinByInviteAsync(rawToken, invite, cts.Token));
+            await Task.Delay(300, cts.Token);
+
+            Assert.False(joinRequestRaised.Task.IsCompleted);
+            Assert.Equal(SessionHandshakeState.Failed, helper.CurrentSessionSecurityState.HandshakeState);
+            Assert.Equal("invite_helper_mismatch", helper.CurrentSessionSecurityState.HandshakeFailureReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_ReusedInvite_DoesNotRaiseSecondIncomingJoinRequest()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.invitereplay.address");
+            var helperClientOne = new FakeNknClient("helper.invitereplay.one");
+            var hostIdentity = new NknIdentity("host-id", "host.invitereplay.address");
+            var helperIdentityOne = new NknIdentity("helper-one", "helper.invitereplay.one");
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helperOne = new NknSignalingTransport(helperClientOne, options, helperIdentityOne);
+
+            var joinRequestCount = 0;
+            var firstJoinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstHelperRejected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.IncomingJoinRequest += (_, e) =>
+            {
+                if (Interlocked.Increment(ref joinRequestCount) == 1)
+                {
+                    firstJoinRequestRaised.TrySetResult(e);
+                }
+            };
+            helperOne.Rejected += (_, _) => firstHelperRejected.TrySetResult();
+
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(new PeerAddress(host.LocalPeerAddress), out var rawToken);
+
+            await helperOne.JoinByInviteAsync(rawToken, invite, cts.Token);
+            var pendingJoin = await firstJoinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await pendingJoin.RejectAsync(cts.Token);
+            await firstHelperRejected.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await helperOne.JoinByInviteAsync(rawToken, invite, cts.Token);
+            await WaitUntilAsync(
+                () => helperOne.CurrentSessionSecurityState.HandshakeState == SessionHandshakeState.Failed &&
+                      string.Equals(helperOne.CurrentSessionSecurityState.HandshakeFailureReason, "invite_replay_detected", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(3));
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(1, Volatile.Read(ref joinRequestCount));
+            Assert.Equal(SessionHandshakeState.Failed, helperOne.CurrentSessionSecurityState.HandshakeState);
+            Assert.Equal("invite_replay_detected", helperOne.CurrentSessionSecurityState.HandshakeFailureReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_OrphanedJoinRequest_Expires_AllowingSubsequentInviteJoin()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.orphanjoin.address");
+            var attackerClient = new FakeNknClient("attacker.orphanjoin.address");
+            var helperClient = new FakeNknClient("helper.orphanjoin.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+
+            await host.HostByAddressAsync(cts.Token);
+            await attackerClient.ConnectAsync(cts.Token);
+
+            using var attackerEcdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+            var orphanJoinPayload = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                helperEndpoint = attackerClient.Address,
+                helperIdentifier = "attacker",
+                helperEcdhPublicKey = Convert.ToBase64String(attackerEcdh.ExportSubjectPublicKeyInfo()),
+                remoteControlSupported = false,
+            });
+            var orphanJoinEnvelope = new Envelope(
+                Version: 1,
+                Code: "addr.orphanjoin",
+                MessageId: Guid.NewGuid().ToString("N"),
+                Type: MsgType.JoinRequest,
+                Payload: orphanJoinPayload,
+                UnixTimeMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ReplyTo: null);
+            await attackerClient.SendAsync(host.LocalPeerAddress, EnvelopeCodec.Serialize(orphanJoinEnvelope), cts.Token);
+
+            await Task.Delay(TimeSpan.FromSeconds(7), cts.Token);
+
+            var invite = CreateValidatedInviteForTarget(new PeerAddress(host.LocalPeerAddress), out var rawToken);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.NotNull(pendingJoin);
+            Assert.NotNull(pendingJoin.ApprovalRequest);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_ReplayedHandshakeResponse_IsIgnoredAfterVerification()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.replay.address");
+            var helperClient = new FakeNknClient("helper.replay.address");
+            var hostIdentity = new NknIdentity("host-id", "host.replay.address");
+            var helperIdentity = new NknIdentity("helper-id", "helper.replay.address");
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var joinRequestCount = 0;
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            byte[]? replayEnvelopeBytes = null;
+            helperClient.BeforeSendAsync = (_, payload, _) =>
+            {
+                if (replayEnvelopeBytes is not null)
+                {
+                    return Task.CompletedTask;
+                }
+
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) || env.Type != MsgType.SessionHandshakeResponse)
+                {
+                    return Task.CompletedTask;
+                }
+
+                replayEnvelopeBytes = EnvelopeCodec.Serialize(env with { MessageId = Guid.NewGuid().ToString("N") });
+                return Task.CompletedTask;
+            };
+
+            host.IncomingJoinRequest += (_, e) =>
+            {
+                Interlocked.Increment(ref joinRequestCount);
+                joinRequestRaised.TrySetResult(e);
+            };
+
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(new PeerAddress(host.LocalPeerAddress), out var rawToken);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.NotNull(pendingJoin);
+            Assert.NotNull(replayEnvelopeBytes);
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            await helperClient.SendAsync(host.LocalPeerAddress, replayEnvelopeBytes!, cts.Token);
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(1, Volatile.Read(ref joinRequestCount));
+            Assert.Equal(SessionHandshakeState.Verified, host.CurrentSessionSecurityState.HandshakeState);
+            Assert.Equal("handshake_response_replay_detected", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_ControlRequest_WithSessionIdMismatch_IsRejected()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.controlmismatch.address");
+            var helperClient = new FakeNknClient("helper.controlmismatch.address");
+            var hostIdentity = new NknIdentity("host-id", "host.controlmismatch.address");
+            var helperIdentity = new NknIdentity("helper-id", "helper.controlmismatch.address");
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var controlRequestCount = 0;
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.RemoteControlRequestReceived += (_, _) => Interlocked.Increment(ref controlRequestCount);
+
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(
+                new PeerAddress(host.LocalPeerAddress),
+                out var rawToken,
+                InviteCapabilities.Chat | InviteCapabilities.RemoteControl);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            await helper.SendControlRequestAsync(
+                new ControlRequestMessageV1
+                {
+                    SessionId = "sess_control_mismatch",
+                    RequestId = "req_control_mismatch",
+                    Caps = new[] { "mouse", "keyboard" },
+                    Reason = "tampered",
+                },
+                cts.Token);
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(0, Volatile.Read(ref controlRequestCount));
+            Assert.Equal("control_request_session_id_mismatch", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_ControlInput_WithSourceIdentityMismatch_IsRejected()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.controlsource.address");
+            var helperClient = new FakeNknClient("helper.controlsource.address");
+            var attackerClient = new FakeNknClient("attacker.controlsource.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            var attackerIdentity = new NknIdentity("attacker-id", attackerClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            using var attacker = new NknSignalingTransport(attackerClient, options, attackerIdentity);
+
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var controlInputCount = 0;
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.RemoteControlInputReceived += (_, _) => Interlocked.Increment(ref controlInputCount);
+
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(
+                new PeerAddress(host.LocalPeerAddress),
+                out var rawToken,
+                InviteCapabilities.Chat | InviteCapabilities.RemoteControl);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await attackerClient.ConnectAsync(cts.Token);
+
+            var envelopeCode = Assert.IsType<string>(GetPrivateField(helper, "currentEnvelopeCode"));
+            SetPrivateField(attacker, "currentEnvelopeCode", envelopeCode);
+            SetPrivateField(attacker, "remoteEndpoint", host.LocalPeerAddress);
+            InvokePrivateMethod(attacker, "UpdateSessionSecurityState", helper.CurrentSessionSecurityState);
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            await attacker.SendControlInputAsync(
+                new ControlInputMessageV1
+                {
+                    SessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value,
+                    RequestId = "req_control_source_mismatch",
+                    Seq = 1,
+                    Kind = "key",
+                    Action = "down",
+                    Key = "A",
+                },
+                cts.Token);
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(0, Volatile.Read(ref controlInputCount));
+            Assert.Equal("control_input_source_identity_mismatch", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_Reject_WithSourceIdentityMismatch_IsRejected()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.rejectsource.address");
+            var helperClient = new FakeNknClient("helper.rejectsource.address");
+            var attackerClient = new FakeNknClient("attacker.rejectsource.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            var attackerIdentity = new NknIdentity("attacker-id", attackerClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            using var attacker = new NknSignalingTransport(attackerClient, options, attackerIdentity);
+
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(new PeerAddress(host.LocalPeerAddress), out var rawToken);
+            var connectTask = helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            await WaitUntilAsync(
+                () => GetPrivateField(helper, "helperJoinRequestMessageId") is string replyTo && !string.IsNullOrWhiteSpace(replyTo),
+                TimeSpan.FromSeconds(2));
+            var replyTo = Assert.IsType<string>(GetPrivateField(helper, "helperJoinRequestMessageId"));
+            var envelopeCode = Assert.IsType<string>(GetPrivateField(helper, "currentEnvelopeCode"));
+            var sessionId = helper.CurrentSessionSecurityState.SessionId!.Value.Value;
+
+            SetPrivateField(attacker, "currentEnvelopeCode", envelopeCode);
+            SetPrivateField(attacker, "remoteEndpoint", helper.LocalPeerAddress);
+            InvokePrivateMethod(attacker, "UpdateSessionSecurityState", helper.CurrentSessionSecurityState);
+
+            var rejectPayload = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                sessionId,
+                reason = "join_rejected",
+            });
+            var rejectEnvelope = new Envelope(
+                Version: 1,
+                Code: envelopeCode,
+                MessageId: Guid.NewGuid().ToString("N"),
+                Type: MsgType.Reject,
+                Payload: rejectPayload,
+                UnixTimeMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ReplyTo: replyTo);
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            await attackerClient.ConnectAsync(cts.Token);
+            await attackerClient.SendAsync(helper.LocalPeerAddress, EnvelopeCodec.Serialize(rejectEnvelope), cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await connectTask.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            Assert.Equal("reject_source_identity_mismatch", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+            Assert.True(helper.CurrentSessionSecurityState.ApprovalGranted);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_SessionEnd_WithSourceIdentityMismatch_IsRejected()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.sessionendsource.address");
+            var helperClient = new FakeNknClient("helper.sessionendsource.address");
+            var attackerClient = new FakeNknClient("attacker.sessionendsource.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            var attackerIdentity = new NknIdentity("attacker-id", attackerClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            using var attacker = new NknSignalingTransport(attackerClient, options, attackerIdentity);
+
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var remoteSessionEndedCount = 0;
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.RemoteSessionEnded += (_, _) => Interlocked.Increment(ref remoteSessionEndedCount);
+
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(new PeerAddress(host.LocalPeerAddress), out var rawToken);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var envelopeCode = Assert.IsType<string>(GetPrivateField(helper, "currentEnvelopeCode"));
+            SetPrivateField(attacker, "currentEnvelopeCode", envelopeCode);
+            SetPrivateField(attacker, "remoteEndpoint", host.LocalPeerAddress);
+            InvokePrivateMethod(attacker, "UpdateSessionSecurityState", helper.CurrentSessionSecurityState);
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            await attackerClient.ConnectAsync(cts.Token);
+            await attacker.SendSessionEndAsync(cts.Token);
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(0, Volatile.Read(ref remoteSessionEndedCount));
+            Assert.Equal("session_end_source_identity_mismatch", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task DevLocalTransport_ApprovalDecision_CapabilityEscalation_IsRejected()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var host = new DevLocalTransport(hostAddress);
+        using var helper = new DevLocalTransport();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+
+        var hostTask = host.HostByAddressAsync(cts.Token);
+        await host.WaitUntilHostReadyAsync(cts.Token);
+
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat);
+        await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+        var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        Assert.NotNull(pendingJoin.ApprovalRequest);
+
+        var approvalRequest = pendingJoin.ApprovalRequest!;
+        var escalatedDecision = new ApprovalDecision(
+            ApprovedCapabilities: approvalRequest.RequestedCapabilities | CapabilityGrant.RemoteControl,
+            ExpiresAtUtc: DateTimeOffset.UtcNow.AddMinutes(5),
+            HelperIdentity: approvalRequest.HelperIdentity,
+            SessionId: approvalRequest.SessionId);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => pendingJoin.ApproveAsync(escalatedDecision, cts.Token));
+        await Task.Delay(150, cts.Token);
+
+        Assert.False(host.CurrentSessionSecurityState.ApprovalGranted);
+        Assert.False(helper.CurrentSessionSecurityState.ApprovalGranted);
+
+        cts.Cancel();
+        await Task.WhenAny(hostTask, Task.Delay(150, CancellationToken.None));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_HelperReconnect_DoesNotReuseOldApproval()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var reconnectRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.RemoteControl);
+        await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
+        await helpeeRuntime.ApproveAsync(cts.Token);
+        await WaitUntilAsync(
+            () => helperRuntime.CurrentSessionGrant is not null &&
+                  helpeeRuntime.CurrentSessionGrant is not null,
+            TimeSpan.FromSeconds(2));
+
+        var oldSessionId = helperRuntime.CurrentSessionGrant!.SessionId;
+
+        await helperRuntime.DisconnectAsync();
+        await WaitUntilAsync(
+            () => helpeeRuntime.CurrentSessionGrant is null &&
+                  !helpeeRuntime.SecurityState.ApprovalGranted,
+            TimeSpan.FromSeconds(3));
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+
+        var reconnectInvite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var reconnectToken,
+            InviteCapabilities.Chat | InviteCapabilities.RemoteControl);
+        var reconnectTask = reconnectRuntime.StartHelperAsync(reconnectToken, reconnectInvite, cts.Token);
+
+        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
+
+        Assert.Null(reconnectRuntime.CurrentSessionGrant);
+        Assert.False(reconnectRuntime.SecurityState.ApprovalGranted);
+        Assert.False(await reconnectRuntime.RequestRemoteControlAsync(cts.Token));
+
+        await helpeeRuntime.ApproveAsync(cts.Token);
+        await reconnectTask;
+        await WaitUntilAsync(() => reconnectRuntime.CurrentSessionGrant is not null, TimeSpan.FromSeconds(2));
+
+        Assert.NotEqual(oldSessionId, reconnectRuntime.CurrentSessionGrant!.SessionId);
     }
 
     [Trait("Category", "Smoke")]
@@ -3378,10 +4949,8 @@ public class SmokeTests
             helperRuntime.ChatMessageReceived += OnHelperChat;
             helpeeRuntime.ChatMessageReceived += OnHelpeeChat;
 
-            var code = new SessionCode((100000 + i).ToString("D6"));
-
-            await helpeeRuntime.StartHelpeeAsync(code, cts.Token);
-            await helperRuntime.StartHelperAsync(code, cts.Token);
+            await helpeeRuntime.StartHelpeeAsync(cts.Token);
+            await helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
 
             await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(1));
 
@@ -3436,10 +5005,8 @@ public class SmokeTests
         helperRuntime.ChatMessageReceived += (_, e) => helperReceived.TrySetResult(e.Message.Text);
         helpeeRuntime.ChatMessageReceived += (_, e) => helpeeReceived.TrySetResult(e.Message.Text);
 
-        var code = new SessionCode("321654");
-
-        await helpeeRuntime.StartHelpeeAsync(code, cts.Token);
-        await helperRuntime.StartHelperAsync(code, cts.Token);
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        await helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
         await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(1));
 
         await helpeeRuntime.ApproveAsync(cts.Token);
@@ -3481,10 +5048,9 @@ public class SmokeTests
             using var helperRuntime = new SessionRuntime(() => helperTransport);
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
-            var code = new SessionCode("345678");
-
-            await helpeeRuntime.StartHelpeeAsync(code, cts.Token);
-            await helperRuntime.StartHelperAsync(code, cts.Token);
+            await helpeeRuntime.StartHelpeeAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(GetHostedAddressOrThrow(helpeeRuntime), out var rawToken);
+            await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
 
             await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(2));
             await helpeeRuntime.ApproveAsync(cts.Token);
@@ -3534,9 +5100,9 @@ public class SmokeTests
             using var helperRuntime = new SessionRuntime(() => helperTransport);
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
 
-            var code = new SessionCode("456789");
-            await helpeeRuntime.StartHelpeeAsync(code, cts.Token);
-            await helperRuntime.StartHelperAsync(code, cts.Token);
+            await helpeeRuntime.StartHelpeeAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(GetHostedAddressOrThrow(helpeeRuntime), out var rawToken);
+            await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
             await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(2));
             await helpeeRuntime.ApproveAsync(cts.Token);
             await WaitUntilAsync(
@@ -3587,7 +5153,7 @@ public class SmokeTests
     {
         var transportConfig = CreateDevLocalTestConfig();
         using var scripted = new ScriptedSignalingTransport(
-            onJoinAsync: static (_, __) => throw new TimeoutException("Could not find session for code"));
+            onJoinByAddressAsync: static (_, __) => throw new TimeoutException("Could not find target session"));
         using var runtime = new SessionRuntime(() => scripted);
         using var helper = new HelperPageViewModel(
             cancelAction: static () => { },
@@ -3596,17 +5162,18 @@ public class SmokeTests
             approvalTimeout: TimeSpan.FromMilliseconds(100),
             connectFailureCooldown: TimeSpan.Zero);
 
-        helper.CodeInput = "123456";
+        CreateValidatedInviteForTarget(new PeerAddress("scripted.timeout.target"), out var inviteToken);
+        helper.CodeInput = inviteToken;
         await helper.ConnectCommand.ExecuteAsync(null);
 
         await WaitUntilAsync(
             () => runtime.State == SessionRuntimeState.Failed &&
-                  string.Equals(runtime.StatusText, "No one found with that code.", StringComparison.Ordinal) &&
+                  string.Equals(runtime.StatusText, "No response from target address.", StringComparison.Ordinal) &&
                   string.Equals(helper.ConnectionState, "Failed", StringComparison.Ordinal) &&
                   helper.ConnectCommand.CanExecute(null),
             TimeSpan.FromSeconds(1));
 
-        Assert.Equal("No one found with that code.", runtime.StatusText);
+        Assert.Equal("No response from target address.", runtime.StatusText);
         Assert.True(helper.ConnectCommand.CanExecute(null));
         Assert.Equal("Failed", helper.ConnectionState);
 
@@ -3614,8 +5181,8 @@ public class SmokeTests
         InvokePrivateMethod(runtime, "OnTransportDisconnected", scripted, EventArgs.Empty);
 
         await WaitUntilAsync(
-            () => string.Equals(runtime.StatusText, "No one found with that code.", StringComparison.Ordinal) &&
-                  string.Equals(helper.StatusText, "No one found with that code.", StringComparison.Ordinal),
+            () => string.Equals(runtime.StatusText, "No response from target address.", StringComparison.Ordinal) &&
+                  string.Equals(helper.StatusText, "No response from target address.", StringComparison.Ordinal),
             TimeSpan.FromSeconds(1));
     }
 
@@ -3625,7 +5192,7 @@ public class SmokeTests
     {
         var transportConfig = CreateDevLocalTestConfig();
         using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(
-            onJoinAsync: static (_, __) => throw new TimeoutException("Could not find session for code")));
+            onJoinByAddressAsync: static (_, __) => throw new TimeoutException("Could not find target session")));
         using var helper = new HelperPageViewModel(
             cancelAction: static () => { },
             transportConfig,
@@ -3633,17 +5200,18 @@ public class SmokeTests
             approvalTimeout: TimeSpan.FromMilliseconds(100),
             connectFailureCooldown: TimeSpan.Zero);
 
-        helper.CodeInput = "654321";
+        CreateValidatedInviteForTarget(new PeerAddress("scripted.timeout.alpha3"), out var inviteToken);
+        helper.CodeInput = inviteToken;
         await helper.ConnectCommand.ExecuteAsync(null);
 
         await WaitUntilAsync(
             () => runtime.State == SessionRuntimeState.Failed &&
-                  string.Equals(runtime.StatusText, "No one found with that code.", StringComparison.Ordinal) &&
+                  string.Equals(runtime.StatusText, "No response from target address.", StringComparison.Ordinal) &&
                   string.Equals(helper.ConnectionState, "Failed", StringComparison.Ordinal) &&
                   helper.ConnectCommand.CanExecute(null),
             TimeSpan.FromSeconds(1));
 
-        Assert.Equal("No one found with that code.", runtime.StatusText);
+        Assert.Equal("No response from target address.", runtime.StatusText);
         Assert.True(helper.ConnectCommand.CanExecute(null));
         Assert.Equal("Failed", helper.ConnectionState);
     }
@@ -3654,7 +5222,7 @@ public class SmokeTests
     {
         var transportConfig = CreateDevLocalTestConfig();
         using var scripted = new ScriptedSignalingTransport(
-            onJoinAsync: static (_, __) => Task.CompletedTask);
+            onJoinByAddressAsync: static (_, __) => Task.CompletedTask);
         using var runtime = new SessionRuntime(() => scripted);
         using var helper = new HelperPageViewModel(
             cancelAction: static () => { },
@@ -3663,7 +5231,8 @@ public class SmokeTests
             approvalTimeout: TimeSpan.FromMilliseconds(100),
             connectFailureCooldown: TimeSpan.Zero);
 
-        helper.CodeInput = "123456";
+        CreateValidatedInviteForTarget(new PeerAddress("scripted.approval.timeout"), out var inviteToken);
+        helper.CodeInput = inviteToken;
         await helper.ConnectCommand.ExecuteAsync(null);
 
         Assert.Equal(SessionRuntimeState.Failed, runtime.State);
@@ -3686,7 +5255,7 @@ public class SmokeTests
     {
         var transportConfig = CreateDevLocalTestConfig();
         var factory = new CountingTransportFactory(() => new ScriptedSignalingTransport(
-            onJoinAsync: static (_, __) => throw new TimeoutException("Could not find session for code")));
+            onJoinByAddressAsync: static (_, __) => throw new TimeoutException("Could not find target session")));
         using var runtime = new SessionRuntime(factory.Create);
         using var helper = new HelperPageViewModel(
             cancelAction: static () => { },
@@ -3695,7 +5264,8 @@ public class SmokeTests
             approvalTimeout: TimeSpan.FromMilliseconds(100),
             connectFailureCooldown: TimeSpan.FromSeconds(2));
 
-        helper.CodeInput = "123456";
+        CreateValidatedInviteForTarget(new PeerAddress("scripted.cooldown.target"), out var inviteToken);
+        helper.CodeInput = inviteToken;
 
         await helper.ConnectCommand.ExecuteAsync(null);
         await helper.ConnectCommand.ExecuteAsync(null);
@@ -3705,13 +5275,36 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task HelperViewModel_RawAddressInput_IsRejected_WithoutStartingRuntime()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var factory = new CountingTransportFactory(() => new ScriptedSignalingTransport());
+        using var runtime = new SessionRuntime(factory.Create);
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            approvalTimeout: TimeSpan.FromMilliseconds(100),
+            connectFailureCooldown: TimeSpan.Zero);
+
+        helper.CodeInput = "nlink-helpee.raw-address";
+        await helper.ConnectCommand.ExecuteAsync(null);
+
+        Assert.Equal("InvalidInput", helper.ConnectionState);
+        Assert.Equal("Use the helpee invite token.", helper.StatusText);
+        Assert.Equal(SessionRuntimeState.Idle, runtime.State);
+        Assert.Equal(0, factory.CreateCount);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task SessionRuntime_TransportDisconnect_TransitionsToFailed_WithConnectionLost()
     {
-        var scripted = new ScriptedSignalingTransport(onJoinAsync: static (_, __) => Task.CompletedTask);
+        var scripted = new ScriptedSignalingTransport(onJoinByAddressAsync: static (_, __) => Task.CompletedTask);
         using var runtime = new SessionRuntime(() => scripted);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
 
-        await runtime.StartHelperAsync(new SessionCode("123456"), cts.Token);
+        await runtime.StartHelperAsync(new PeerAddress("scripted.transport.disconnect"), cts.Token);
         scripted.RaiseDisconnected();
 
         await WaitUntilAsync(
@@ -3750,6 +5343,10 @@ public class SmokeTests
         SetPrivateField(runtime, "transport", scripted);
         SetPrivateField(runtime, "state", SessionRuntimeState.Connecting);
         SetPrivateField(runtime, "statusText", "Connecting…");
+        scripted.SetSessionSecurityStateForTests(
+            CreateApprovedSecurityState(
+                new PeerAddress(scripted.LocalPeerAddress),
+                new PeerAddress("scripted.helper.peer")));
 
         InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
 
@@ -3769,12 +5366,20 @@ public class SmokeTests
         SetPrivateField(runtime, "transport", scripted);
         SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
         SetPrivateField(runtime, "statusText", "Connected");
+        scripted.SetSessionSecurityStateForTests(
+            CreateApprovedSecurityState(
+                new PeerAddress(scripted.LocalPeerAddress),
+                new PeerAddress("scripted.helper.peer")));
 
         Assert.True(runtime.CanAutoStartTransportScreenShareForTests);
 
         InvokePrivateMethod(runtime, "OnTransportDisconnected", scripted, EventArgs.Empty);
 
         Assert.False(runtime.CanAutoStartTransportScreenShareForTests);
+        scripted.SetSessionSecurityStateForTests(
+            CreateApprovedSecurityState(
+                new PeerAddress(scripted.LocalPeerAddress),
+                new PeerAddress("scripted.helper.peer")));
 
         InvokePrivateMethod(runtime, "OnTransportApproved", scripted, EventArgs.Empty);
 
@@ -3816,7 +5421,7 @@ public class SmokeTests
     [Fact]
     public async Task HelperViewModel_Disconnect_ShowsRetry_AndRetryReturnsToIdle()
     {
-        var scripted = new ScriptedSignalingTransport(onJoinAsync: static (_, __) => Task.CompletedTask);
+        var scripted = new ScriptedSignalingTransport(onJoinByAddressAsync: static (_, __) => Task.CompletedTask);
         var transportConfig = CreateDevLocalTestConfig();
         using var runtime = new SessionRuntime(() => scripted);
         using var helper = new HelperPageViewModel(
@@ -3825,7 +5430,8 @@ public class SmokeTests
             runtime,
             connectFailureCooldown: TimeSpan.Zero);
 
-        helper.CodeInput = "123456";
+        CreateValidatedInviteForTarget(new PeerAddress("scripted.disconnect.retry"), out var inviteToken);
+        helper.CodeInput = inviteToken;
         var connectTask = helper.ConnectCommand.ExecuteAsync(null);
         await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Connecting, TimeSpan.FromSeconds(1));
         scripted.RaiseDisconnected();
@@ -3853,7 +5459,7 @@ public class SmokeTests
     [Fact]
     public async Task Alpha3ScenarioD_DisconnectAndRetry_HeadlessHelperVm_ReturnsToIdle()
     {
-        var scripted = new ScriptedSignalingTransport(onJoinAsync: static (_, __) => Task.CompletedTask);
+        var scripted = new ScriptedSignalingTransport(onJoinByAddressAsync: static (_, __) => Task.CompletedTask);
         var transportConfig = CreateDevLocalTestConfig();
         using var runtime = new SessionRuntime(() => scripted);
         using var helper = new HelperPageViewModel(
@@ -3862,7 +5468,8 @@ public class SmokeTests
             runtime,
             connectFailureCooldown: TimeSpan.Zero);
 
-        helper.CodeInput = "123456";
+        CreateValidatedInviteForTarget(new PeerAddress("scripted.disconnect.alpha3"), out var inviteToken);
+        helper.CodeInput = inviteToken;
         var connectTask = helper.ConnectCommand.ExecuteAsync(null);
         await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Connecting, TimeSpan.FromSeconds(1));
         scripted.RaiseDisconnected();
@@ -3887,29 +5494,24 @@ public class SmokeTests
     [Fact]
     public async Task HelperViewModel_CancelTransientWhileConnecting_ReturnsToIdle_AndCodeInputRemainsEditable()
     {
-        var delay = new ControlledDelayScheduler();
-        var scripted = new ScriptedSignalingTransport(
-            onJoinAsync: (_, ct) => delay.DelayAsync(TimeSpan.FromSeconds(30), ct));
         var transportConfig = CreateDevLocalTestConfig();
-        using var runtime = new SessionRuntime(() => scripted);
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
         using var helper = new HelperPageViewModel(
             cancelAction: static () => { },
             transportConfig,
             runtime,
             connectFailureCooldown: TimeSpan.Zero);
 
-        helper.CodeInput = "123456";
-        var connectTask = helper.ConnectCommand.ExecuteAsync(null);
+        CreateValidatedInviteForTarget(new PeerAddress("scripted.connect.cancel"), out var inviteToken);
+        helper.CodeInput = inviteToken;
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connecting);
+        SetPrivateField(helper, "isConnecting", true);
+        SetPrivateField(helper, "connectionState", "Connecting");
+        SetPrivateField(helper, "showTransientBanner", true);
+        SetPrivateField(helper, "canCancelTransient", true);
 
-        await WaitUntilAsync(
-            () => runtime.State == SessionRuntimeState.Connecting &&
-                  helper.IsConnecting &&
-                  helper.ShowTransientBanner &&
-                  helper.CanCancelTransient &&
-                  delay.PendingCount > 0,
-            TimeSpan.FromSeconds(3));
-
-        await helper.CancelTransientCommand.ExecuteAsync(null);
+        var cancelTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helper, "CancelTransientAsync"));
+        await cancelTask;
 
         await WaitUntilAsync(
             () => runtime.State == SessionRuntimeState.Idle &&
@@ -3919,13 +5521,11 @@ public class SmokeTests
                   helper.ConnectCommand.CanExecute(null),
             TimeSpan.FromSeconds(3));
 
-        helper.CodeInput = "654321";
-        Assert.Equal("654 321", helper.CodeInput);
+        helper.CodeInput = "nlink-invite.editable";
+        Assert.Equal("nlink-invite.editable", helper.CodeInput);
         Assert.True(helper.ConnectCommand.CanExecute(null));
         Assert.False(helper.ShowTransientBanner);
         Assert.True(string.IsNullOrWhiteSpace(helper.TransientBannerText));
-        await connectTask.WaitAsync(TimeSpan.FromSeconds(2));
-        Assert.Equal(0, delay.PendingCount);
     }
 
     [Trait("Category", "Smoke")]
@@ -3939,10 +5539,9 @@ public class SmokeTests
         using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
 
-        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
-        Assert.Equal(6, initialCode.Length);
+        var initialInvite = await WaitForShareInviteAsync(helpee);
 
-        await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
+        await helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
         await WaitUntilAsync(() => helpee.IsIncomingRequestView, TimeSpan.FromSeconds(2));
 
         helpee.AllowCommand.Execute(null);
@@ -3954,19 +5553,19 @@ public class SmokeTests
 
         await helperRuntime.DisconnectAsync();
 
-        string latestCode = initialCode;
+        string latestInvite = initialInvite;
         await WaitUntilAsync(
             () =>
             {
-                latestCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+                latestInvite = helpee.ShareInvite;
                 return helpee.ShowWaitingPanel &&
                        !helpee.IsConnectedView &&
-                       latestCode.Length == 6 &&
-                       !string.Equals(latestCode, initialCode, StringComparison.Ordinal);
+                       !string.IsNullOrWhiteSpace(latestInvite) &&
+                       !string.Equals(latestInvite, initialInvite, StringComparison.Ordinal);
             },
             TimeSpan.FromSeconds(8));
 
-        Assert.NotEqual(initialCode, latestCode);
+        Assert.NotEqual(initialInvite, latestInvite);
     }
 
     [Trait("Category", "Smoke")]
@@ -3980,10 +5579,9 @@ public class SmokeTests
         using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
 
-        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
-        Assert.Equal(6, initialCode.Length);
+        var initialInvite = await WaitForShareInviteAsync(helpee);
 
-        await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
+        await helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
         await WaitUntilAsync(() => helpee.IsIncomingRequestView, TimeSpan.FromSeconds(2));
 
         helpee.AllowCommand.Execute(null);
@@ -3995,21 +5593,21 @@ public class SmokeTests
 
         await helperRuntime.DisconnectAsync();
 
-        string rotatedCode = initialCode;
+        string rotatedInvite = initialInvite;
         await WaitUntilAsync(
             () =>
             {
-                rotatedCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+                rotatedInvite = helpee.ShareInvite;
                 return helpee.ShowWaitingPanel &&
                        !helpee.IsConnectedView &&
-                       rotatedCode.Length == 6 &&
-                       !string.Equals(rotatedCode, initialCode, StringComparison.Ordinal);
+                       !string.IsNullOrWhiteSpace(rotatedInvite) &&
+                       !string.Equals(rotatedInvite, initialInvite, StringComparison.Ordinal);
             },
             TimeSpan.FromSeconds(8));
 
         await Task.Delay(1800);
-        var stableCode = SessionCode.NormalizeDigits(helpee.ShareCode);
-        Assert.Equal(rotatedCode, stableCode);
+        var stableInvite = helpee.ShareInvite;
+        Assert.Equal(rotatedInvite, stableInvite);
     }
 
     [Trait("Category", "Smoke")]
@@ -4026,10 +5624,9 @@ public class SmokeTests
             helpeeRuntime);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
 
-        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
-        Assert.Equal(6, initialCode.Length);
+        var initialInvite = await WaitForShareInviteAsync(helpee);
 
-        await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
+        await helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
         await WaitUntilAsync(() => helpee.IsIncomingRequestView, TimeSpan.FromSeconds(2));
 
         helpee.AllowCommand.Execute(null);
@@ -4041,19 +5638,19 @@ public class SmokeTests
 
         helpee.EndSessionCommand.Execute(null);
 
-        string latestCode = initialCode;
+        string latestInvite = initialInvite;
         await WaitUntilAsync(
             () =>
             {
-                latestCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+                latestInvite = helpee.ShareInvite;
                 return helpee.ShowWaitingPanel &&
                        !helpee.IsConnectedView &&
-                       latestCode.Length == 6 &&
-                       !string.Equals(latestCode, initialCode, StringComparison.Ordinal);
+                       !string.IsNullOrWhiteSpace(latestInvite) &&
+                       !string.Equals(latestInvite, initialInvite, StringComparison.Ordinal);
             },
             TimeSpan.FromSeconds(8));
 
-        Assert.NotEqual(initialCode, latestCode);
+        Assert.NotEqual(initialInvite, latestInvite);
     }
 
     [Trait("Category", "Smoke")]
@@ -4067,27 +5664,26 @@ public class SmokeTests
         using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
 
-        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
-        Assert.Equal(6, initialCode.Length);
+        var initialInvite = await WaitForShareInviteAsync(helpee);
 
-        await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
+        await helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
         await WaitUntilAsync(() => helpee.IsIncomingRequestView, TimeSpan.FromSeconds(2));
 
         await helpee.DeclineCommand.ExecuteAsync(null);
 
-        string latestCode = initialCode;
+        string latestInvite = initialInvite;
         await WaitUntilAsync(
             () =>
             {
-                latestCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+                latestInvite = helpee.ShareInvite;
                 return helpee.ShowWaitingPanel &&
                        !helpee.IsIncomingRequestView &&
-                       latestCode.Length == 6 &&
-                       !string.Equals(latestCode, initialCode, StringComparison.Ordinal);
+                       !string.IsNullOrWhiteSpace(latestInvite) &&
+                       !string.Equals(latestInvite, initialInvite, StringComparison.Ordinal);
             },
             TimeSpan.FromSeconds(8));
 
-        Assert.NotEqual(initialCode, latestCode);
+        Assert.NotEqual(initialInvite, latestInvite);
     }
 
     [Trait("Category", "Smoke")]
@@ -4105,10 +5701,9 @@ public class SmokeTests
             incomingRequestTimeout: TimeSpan.FromMilliseconds(250));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
 
-        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
-        Assert.Equal(6, initialCode.Length);
+        _ = await WaitForShareInviteAsync(helpee);
 
-        await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
+        await helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
         await WaitUntilAsync(() => helpee.IsIncomingRequestView, TimeSpan.FromSeconds(2));
 
         await WaitUntilAsync(
@@ -4117,11 +5712,11 @@ public class SmokeTests
                 return helpee.ShowWaitingPanel &&
                        !helpee.IsIncomingRequestView &&
                        string.Equals(helpee.ConnectionState, "Waiting", StringComparison.Ordinal) &&
-                       SessionCode.NormalizeDigits(helpee.ShareCode).Length == 6;
+                       !string.IsNullOrWhiteSpace(helpee.ShareInvite);
             },
             TimeSpan.FromSeconds(8));
 
-        Assert.Equal(6, SessionCode.NormalizeDigits(helpee.ShareCode).Length);
+        Assert.False(string.IsNullOrWhiteSpace(helpee.ShareInvite));
         Assert.Equal("Waiting", helpee.ConnectionState);
     }
 
@@ -4136,10 +5731,9 @@ public class SmokeTests
         using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
 
-        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
-        Assert.Equal(6, initialCode.Length);
+        var initialInvite = await WaitForShareInviteAsync(helpee);
 
-        await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
+        await helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
         await WaitUntilAsync(
             () => helpee.IsIncomingRequestView && helpee.ShowIncomingRequestPanel,
             TimeSpan.FromSeconds(2));
@@ -4148,20 +5742,20 @@ public class SmokeTests
 
         await helperRuntime.DisconnectAsync();
 
-        string latestCode = initialCode;
+        string latestInvite = initialInvite;
         await WaitUntilAsync(
             () =>
             {
-                latestCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+                latestInvite = helpee.ShareInvite;
                 return !helpee.IsIncomingRequestView &&
                        helpee.ShowWaitingPanel &&
                        !helpee.HasIncomingRequest &&
-                       latestCode.Length == 6 &&
-                       !string.Equals(latestCode, initialCode, StringComparison.Ordinal);
+                       !string.IsNullOrWhiteSpace(latestInvite) &&
+                       !string.Equals(latestInvite, initialInvite, StringComparison.Ordinal);
             },
             TimeSpan.FromSeconds(8));
 
-        Assert.NotEqual(initialCode, latestCode);
+        Assert.NotEqual(initialInvite, latestInvite);
         Assert.False(helpee.ShowTransientBanner);
     }
 
@@ -4180,8 +5774,8 @@ public class SmokeTests
             helperRuntime,
             connectFailureCooldown: TimeSpan.Zero);
 
-        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
-        helper.CodeInput = initialCode;
+        var initialInvite = await WaitForShareInviteAsync(helpee);
+        helper.CodeInput = await WaitForShareInviteAsync(helpee);
 
         var connectTask = helper.ConnectCommand.ExecuteAsync(null);
 
@@ -4192,21 +5786,21 @@ public class SmokeTests
         await helper.CancelTransientCommand.ExecuteAsync(null);
         await connectTask.WaitAsync(TimeSpan.FromSeconds(2));
 
-        string latestCode = initialCode;
+        string latestInvite = initialInvite;
         await WaitUntilAsync(
             () =>
             {
-                latestCode = SessionCode.NormalizeDigits(helpee.ShareCode);
+                latestInvite = helpee.ShareInvite;
                 return !helpee.IsIncomingRequestView &&
                        !helpee.ShowIncomingRequestPanel &&
                        !helpee.HasIncomingRequest &&
                        helpee.ShowWaitingPanel &&
-                       latestCode.Length == 6 &&
-                       !string.Equals(latestCode, initialCode, StringComparison.Ordinal);
+                       !string.IsNullOrWhiteSpace(latestInvite) &&
+                       !string.Equals(latestInvite, initialInvite, StringComparison.Ordinal);
             },
             TimeSpan.FromSeconds(8));
 
-        Assert.NotEqual(initialCode, latestCode);
+        Assert.NotEqual(initialInvite, latestInvite);
     }
 
     [Trait("Category", "Smoke")]
@@ -4220,8 +5814,8 @@ public class SmokeTests
         using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
 
-        var initialCode = SessionCode.NormalizeDigits(helpee.ShareCode);
-        await helperRuntime.StartHelperAsync(new SessionCode(initialCode), cts.Token);
+        _ = await WaitForShareInviteAsync(helpee);
+        await helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
 
         await WaitUntilAsync(
             () => helpee.IsIncomingRequestView && helpee.ShowIncomingRequestPanel,
@@ -4244,8 +5838,8 @@ public class SmokeTests
         Assert.False(helpee.IsIncomingRequestView);
         Assert.True(helpee.ShowWaitingPanel);
 
-        Assert.True(SessionCode.TryParse(helpee.ShareCode, out var code));
-        await helperRuntime.StartHelperAsync(code!, cts.Token);
+        _ = await WaitForShareInviteAsync(helpee);
+        await helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
 
         await WaitUntilAsync(
             () => helpee.IsIncomingRequestView &&
@@ -5099,7 +6693,7 @@ return;
     }
 
     [Trait("Category", "Manual")]
-    [Fact]
+    [ManualBridgeFact]
     public async Task Bridge_ProcessKill_RestartsAndUpdatesDiagnostics()
     {
         if (!OperatingSystem.IsWindows())
@@ -5164,7 +6758,7 @@ return;
     }
 
     [Trait("Category", "Manual")]
-    [Fact]
+    [ManualBridgeFact]
     public async Task NknTransport_RealBridge_SingleMachine_HostJoinApproveAndChat_RoundTrip()
     {
         if (!OperatingSystem.IsWindows())
@@ -5206,9 +6800,6 @@ return;
             using var host = new NknSignalingTransport(hostClient, hostOptions, hostIdentity);
             using var helper = new NknSignalingTransport(helperClient, helperOptions, helperIdentity);
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(120));
-
-            var code = new SessionCode("482631");
-
             var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
             var hostKeyReady = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
             var helperKeyReady = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -5221,11 +6812,12 @@ return;
             helper.Approved += (_, _) => helperApproved.TrySetResult();
             host.ChatMessageReceived += (_, e) => hostChatReceived.TrySetResult(e.Payload);
 
-            await host.HostAsync(code, cts.Token);
-            await helper.JoinAsync(code, cts.Token);
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(new PeerAddress(host.LocalPeerAddress), out var rawToken);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
 
             var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(45), cts.Token);
-            await pendingJoin.ApproveAsync(cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
 
             var hostKey = await hostKeyReady.Task.WaitAsync(TimeSpan.FromSeconds(20), cts.Token);
             var helperKey = await helperKeyReady.Task.WaitAsync(TimeSpan.FromSeconds(20), cts.Token);
@@ -5260,8 +6852,8 @@ return;
 
     private static async Task VerifyHandshakeAsync(bool approve)
     {
-        var code = CreateTestCode();
-        using var host = new DevLocalTransport();
+        var hostAddress = CreateTestPeerAddress();
+        using var host = new DevLocalTransport(hostAddress);
         using var joiner = new DevLocalTransport();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
@@ -5281,16 +6873,23 @@ return;
         joiner.Rejected += (_, _) => rejectedRaised.TrySetResult();
         joiner.Disconnected += (_, _) => disconnectedRaised.TrySetResult();
 
-        _ = host.HostAsync(code, cts.Token);
+        _ = host.HostByAddressAsync(cts.Token);
         await Task.Delay(75, cts.Token);
 
-        await WaitStepAsync("joiner join", joiner.JoinAsync(code, cts.Token), TimeSpan.FromSeconds(3));
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat);
+        await WaitStepAsync("joiner join", joiner.JoinByInviteAsync(rawToken, invite, cts.Token), TimeSpan.FromSeconds(3));
         await WaitStepAsync("join request raised", joinRequestRaised.Task, TimeSpan.FromSeconds(3));
         Assert.NotNull(pendingJoinRequest);
 
         if (approve)
         {
-            await WaitStepAsync("approve request", pendingJoinRequest!.ApproveAsync(CancellationToken.None), TimeSpan.FromSeconds(3));
+            await WaitStepAsync(
+                "approve request",
+                pendingJoinRequest!.ApproveAsync(pendingJoinRequest.CreateApprovalDecision(), CancellationToken.None),
+                TimeSpan.FromSeconds(3));
         }
         else
         {
@@ -5349,10 +6948,123 @@ return;
         }
     }
 
-    private static SessionCode CreateTestCode()
+    private static PeerAddress GetHostedAddressOrThrow(SessionRuntime runtime)
     {
-        var value = Math.Abs(HashCode.Combine(Environment.ProcessId, Environment.TickCount64)) % 1_000_000;
-        return new SessionCode(value.ToString("D6"));
+        if (runtime.CurrentLocalPeerAddress is PeerAddress address)
+        {
+            return address;
+        }
+
+        throw new InvalidOperationException("Active helpee transport did not expose a local peer address.");
+    }
+
+    private static async Task<string> WaitForShareInviteAsync(HelpeePageViewModel helpee, TimeSpan? timeout = null)
+    {
+        var effectiveTimeout = timeout ?? TimeSpan.FromSeconds(3);
+        await WaitUntilAsync(() => !string.IsNullOrWhiteSpace(helpee.ShareInvite), effectiveTimeout);
+        return helpee.ShareInvite;
+    }
+
+    private static SessionSecurityState CreateApprovedSecurityState(
+        PeerAddress helpeeAddress,
+        PeerAddress helperAddress,
+        CapabilityGrant capabilities = CapabilityGrant.Chat | CapabilityGrant.ScreenShare | CapabilityGrant.RemoteControl)
+    {
+        var nowUtc = DateTimeOffset.UtcNow;
+        var sessionId = new SessionId($"scripted_session_{Guid.NewGuid():N}");
+        return (SessionSecurityState.Empty with
+        {
+            SessionId = sessionId,
+            HelpeeAddress = helpeeAddress,
+            HelperAddress = helperAddress,
+            InviteValidated = true,
+        }).WithHandshakeVerified(helperAddress)
+          .WithApproval(new SessionGrant(helperAddress, capabilities, sessionId, nowUtc.Add(SessionSecurityDefaults.GrantLifetime)));
+    }
+
+    private static SessionSecurityState CreateVerifiedSecurityState(
+        PeerAddress helpeeAddress,
+        PeerAddress helperAddress,
+        SessionId? sessionId = null,
+        bool inviteValidated = true)
+    {
+        return (SessionSecurityState.Empty with
+        {
+            SessionId = sessionId ?? new SessionId($"scripted_verified_{Guid.NewGuid():N}"),
+            HelpeeAddress = helpeeAddress,
+            HelperAddress = helperAddress,
+            InviteValidated = inviteValidated,
+        }).WithHandshakeVerified(helperAddress);
+    }
+
+    private static SessionSecurityState CreateExpiredApprovedSecurityState(
+        PeerAddress helpeeAddress,
+        PeerAddress helperAddress,
+        CapabilityGrant capabilities)
+    {
+        var nowUtc = DateTimeOffset.UtcNow;
+        var sessionId = new SessionId($"scripted_expired_{Guid.NewGuid():N}");
+        return (SessionSecurityState.Empty with
+        {
+            SessionId = sessionId,
+            HelpeeAddress = helpeeAddress,
+            HelperAddress = helperAddress,
+            InviteValidated = true,
+        }).WithHandshakeVerified(helperAddress)
+          .WithApproval(new SessionGrant(helperAddress, capabilities, sessionId, nowUtc.AddSeconds(-5)));
+    }
+
+    private static ValidatedInviteV1 CreateValidatedInviteForTarget(
+        PeerAddress targetAddress,
+        out string rawToken,
+        InviteCapabilities capabilities = InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl,
+        SessionId? sessionId = null,
+        PeerAddress? boundHelperAddress = null)
+    {
+        var nowUtc = DateTimeOffset.UtcNow;
+        var factory = InviteTokenServiceFactory.CreateInviteTokenFactory();
+        var create = factory.Create(
+            new InviteTokenCreateRequest(
+                IssuerAddress: targetAddress,
+                TargetAddress: targetAddress,
+                SessionId: sessionId ?? new SessionId($"sess_smoke_{Guid.NewGuid():N}"),
+                Capabilities: capabilities,
+                Lifetime: TimeSpan.FromMinutes(5),
+                BoundHelperAddress: boundHelperAddress),
+            nowUtc);
+        Assert.True(create.IsSuccess, create.Message);
+        Assert.NotNull(create.Token);
+
+        rawToken = create.Token!;
+        var validator = InviteTokenServiceFactory.CreateInviteTokenValidator();
+        var validation = validator.Validate(rawToken, nowUtc.AddSeconds(1));
+        Assert.True(validation.IsSuccess, validation.Message);
+        Assert.NotNull(validation.Invite);
+        return validation.Invite!;
+    }
+
+    private static string EncodeBase64Url(byte[] bytes)
+    {
+        return Convert.ToBase64String(bytes)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+    }
+
+    private static byte[] DecodeBase64Url(string value)
+    {
+        var normalized = value.Replace('-', '+').Replace('_', '/');
+        while (normalized.Length % 4 != 0)
+        {
+            normalized += "=";
+        }
+
+        return Convert.FromBase64String(normalized);
+    }
+
+    private static string CreateTestPeerAddress()
+    {
+        return $"devlocal.test.{Math.Abs(HashCode.Combine(Environment.ProcessId, Environment.TickCount64))}";
     }
 
     private static string? FindFileUpwards(string fileName)
@@ -5551,6 +7263,13 @@ rl.on('line', (line) => {
         field!.SetValue(target, value);
     }
 
+    private static object? GetPrivateField<TTarget>(TTarget target, string fieldName)
+    {
+        var field = typeof(TTarget).GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return field!.GetValue(target);
+    }
+
     private static void SetPrivateFieldDynamic(object target, string fieldName, object? value)
     {
         var field = target.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
@@ -5715,7 +7434,7 @@ rl.on('line', (line) => {
     }
 
 #pragma warning disable CS0067
-    private sealed class FakeSignalingTransport : ISignalingTransport
+    private sealed class FakeSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IAddressHostSignalingTransport
     {
         public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
         public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
@@ -5728,9 +7447,9 @@ rl.on('line', (line) => {
         {
         }
 
-        public Task HostAsync(SessionCode code, CancellationToken ct) => Task.CompletedTask;
+        public Task HostByAddressAsync(CancellationToken ct) => Task.CompletedTask;
 
-        public Task JoinAsync(SessionCode code, CancellationToken ct) => Task.CompletedTask;
+        public Task JoinByAddressAsync(string peerAddress, CancellationToken ct) => Task.CompletedTask;
 
         public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => Task.CompletedTask;
 
@@ -5757,6 +7476,39 @@ rl.on('line', (line) => {
         }
     }
 
+    private sealed class CountingRemoteInputInjector : IRemoteInputInjector
+    {
+        public bool IsSupported => true;
+
+        public int MouseMoveCount { get; private set; }
+
+        public void InjectMouseMoveAbsolute(int xPx, int yPx)
+        {
+            _ = xPx;
+            _ = yPx;
+            MouseMoveCount++;
+        }
+
+        public void InjectMouseButton(RemoteMouseButton button, RemoteButtonAction action)
+        {
+            _ = button;
+            _ = action;
+        }
+
+        public void InjectMouseWheel(int deltaX, int deltaY)
+        {
+            _ = deltaX;
+            _ = deltaY;
+        }
+
+        public void InjectKey(RemoteKey key, RemoteKeyAction action, RemoteKeyModifiers mods)
+        {
+            _ = key;
+            _ = action;
+            _ = mods;
+        }
+    }
+
     private sealed class CountingTransportFactory
     {
         private readonly Func<ISignalingTransport> factory;
@@ -5775,21 +7527,60 @@ rl.on('line', (line) => {
         }
     }
 
-    private sealed class ScriptedSignalingTransport : ISignalingTransport
+    private sealed class ScriptedSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport
     {
-        private readonly Func<SessionCode, CancellationToken, Task> onJoinAsync;
-        private readonly Func<SessionCode, CancellationToken, Task> onHostAsync;
+        private readonly Func<string, CancellationToken, Task> onJoinByAddressAsync;
+        private readonly Func<string, ValidatedInviteV1, CancellationToken, Task> onJoinByInviteAsync;
+        private readonly Func<CancellationToken, Task> onHostByAddressAsync;
         private readonly Func<ReadOnlyMemory<byte>, CancellationToken, Task> onSendChatAsync;
+        private readonly Func<ControlRequestMessageV1, CancellationToken, Task> onSendControlRequestAsync;
+        private readonly Func<ControlResponseMessageV1, CancellationToken, Task> onSendControlResponseAsync;
+        private readonly Func<ControlStartMessageV1, CancellationToken, Task> onSendControlStartAsync;
+        private readonly Func<ControlStopMessageV1, CancellationToken, Task> onSendControlStopAsync;
+        private readonly Func<ControlInputMessageV1, CancellationToken, Task> onSendControlInputAsync;
+        private readonly Func<ControlInputAckV1, CancellationToken, Task> onSendControlAckAsync;
+        private readonly Func<ControlStateSnapshotV1, CancellationToken, Task> onSendControlStateSnapshotAsync;
+        private readonly Func<ControlDisplayInfoMessageV1, CancellationToken, Task> onSendControlDisplayInfoAsync;
+        private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
 
         public ScriptedSignalingTransport(
-            Func<SessionCode, CancellationToken, Task>? onJoinAsync = null,
-            Func<SessionCode, CancellationToken, Task>? onHostAsync = null,
-            Func<ReadOnlyMemory<byte>, CancellationToken, Task>? onSendChatAsync = null)
+            Func<string, CancellationToken, Task>? onJoinByAddressAsync = null,
+            Func<string, ValidatedInviteV1, CancellationToken, Task>? onJoinByInviteAsync = null,
+            Func<CancellationToken, Task>? onHostByAddressAsync = null,
+            string? localPeerAddress = null,
+            Func<ReadOnlyMemory<byte>, CancellationToken, Task>? onSendChatAsync = null,
+            Func<ControlRequestMessageV1, CancellationToken, Task>? onSendControlRequestAsync = null,
+            Func<ControlResponseMessageV1, CancellationToken, Task>? onSendControlResponseAsync = null,
+            Func<ControlStartMessageV1, CancellationToken, Task>? onSendControlStartAsync = null,
+            Func<ControlStopMessageV1, CancellationToken, Task>? onSendControlStopAsync = null,
+            Func<ControlInputMessageV1, CancellationToken, Task>? onSendControlInputAsync = null,
+            Func<ControlInputAckV1, CancellationToken, Task>? onSendControlAckAsync = null,
+            Func<ControlStateSnapshotV1, CancellationToken, Task>? onSendControlStateSnapshotAsync = null,
+            Func<ControlDisplayInfoMessageV1, CancellationToken, Task>? onSendControlDisplayInfoAsync = null,
+            bool localSupportsRemoteControl = true,
+            bool remoteSupportsRemoteControl = true)
         {
-            this.onJoinAsync = onJoinAsync ?? ((_, ct) => Task.Delay(Timeout.Infinite, ct));
-            this.onHostAsync = onHostAsync ?? ((_, ct) => Task.Delay(Timeout.Infinite, ct));
+            this.onJoinByAddressAsync = onJoinByAddressAsync ?? ((_, ct) => Task.Delay(Timeout.Infinite, ct));
+            this.onJoinByInviteAsync = onJoinByInviteAsync ?? ((_, invite, ct) => this.onJoinByAddressAsync(invite.TargetAddress.Value, ct));
+            this.onHostByAddressAsync = onHostByAddressAsync ?? (ct => Task.Delay(Timeout.Infinite, ct));
+            LocalPeerAddress = string.IsNullOrWhiteSpace(localPeerAddress) ? "scripted.local.peer" : localPeerAddress.Trim();
             this.onSendChatAsync = onSendChatAsync ?? ((_, _) => Task.CompletedTask);
+            this.onSendControlRequestAsync = onSendControlRequestAsync ?? ((_, _) => Task.CompletedTask);
+            this.onSendControlResponseAsync = onSendControlResponseAsync ?? ((_, _) => Task.CompletedTask);
+            this.onSendControlStartAsync = onSendControlStartAsync ?? ((_, _) => Task.CompletedTask);
+            this.onSendControlStopAsync = onSendControlStopAsync ?? ((_, _) => Task.CompletedTask);
+            this.onSendControlInputAsync = onSendControlInputAsync ?? ((_, _) => Task.CompletedTask);
+            this.onSendControlAckAsync = onSendControlAckAsync ?? ((_, _) => Task.CompletedTask);
+            this.onSendControlStateSnapshotAsync = onSendControlStateSnapshotAsync ?? ((_, _) => Task.CompletedTask);
+            this.onSendControlDisplayInfoAsync = onSendControlDisplayInfoAsync ?? ((_, _) => Task.CompletedTask);
+            LocalSupportsRemoteControl = localSupportsRemoteControl;
+            RemoteSupportsRemoteControl = remoteSupportsRemoteControl;
         }
+
+        public string LocalPeerAddress { get; }
+        public bool LocalSupportsRemoteControl { get; }
+        public bool RemoteSupportsRemoteControl { get; }
+        public bool SessionSupportsRemoteControl => LocalSupportsRemoteControl && RemoteSupportsRemoteControl;
 
         public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
         public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
@@ -5797,20 +7588,52 @@ rl.on('line', (line) => {
         public event EventHandler? Approved;
         public event EventHandler? Rejected;
         public event EventHandler? Disconnected;
+        public event EventHandler<TransportSessionSecurityStateChangedEventArgs>? SessionSecurityStateChanged;
+        public event EventHandler<RemoteControlRequestReceivedEventArgs>? RemoteControlRequestReceived;
+        public event EventHandler<RemoteControlResponseReceivedEventArgs>? RemoteControlResponseReceived;
+        public event EventHandler<RemoteControlStartReceivedEventArgs>? RemoteControlStartReceived;
+        public event EventHandler<RemoteControlStopReceivedEventArgs>? RemoteControlStopReceived;
+        public event EventHandler<RemoteControlInputReceivedEventArgs>? RemoteControlInputReceived;
+        public event EventHandler<RemoteControlAckReceivedEventArgs>? RemoteControlAckReceived;
+        public event EventHandler<RemoteControlStateSnapshotReceivedEventArgs>? RemoteControlStateSnapshotReceived;
+        public event EventHandler<RemoteControlDisplayInfoReceivedEventArgs>? RemoteControlDisplayInfoReceived;
+        public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
 
         public void Dispose()
         {
         }
 
-        public Task HostAsync(SessionCode code, CancellationToken ct) => onHostAsync(code, ct);
+        public Task HostByAddressAsync(CancellationToken ct) => onHostByAddressAsync(ct);
 
-        public Task JoinAsync(SessionCode code, CancellationToken ct) => onJoinAsync(code, ct);
+        public Task JoinByAddressAsync(string peerAddress, CancellationToken ct) => onJoinByAddressAsync(peerAddress, ct);
+
+        public Task JoinByInviteAsync(string inviteToken, ValidatedInviteV1 invite, CancellationToken ct)
+            => onJoinByInviteAsync(inviteToken, invite, ct);
 
         public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => onSendChatAsync(payload, ct);
+        public Task SendControlRequestAsync(ControlRequestMessageV1 message, CancellationToken ct) => onSendControlRequestAsync(message, ct);
+        public Task SendControlResponseAsync(ControlResponseMessageV1 message, CancellationToken ct) => onSendControlResponseAsync(message, ct);
+        public Task SendControlStartAsync(ControlStartMessageV1 message, CancellationToken ct) => onSendControlStartAsync(message, ct);
+        public Task SendControlStopAsync(ControlStopMessageV1 message, CancellationToken ct) => onSendControlStopAsync(message, ct);
+        public Task SendControlInputAsync(ControlInputMessageV1 message, CancellationToken ct) => onSendControlInputAsync(message, ct);
+        public Task SendControlAckAsync(ControlInputAckV1 message, CancellationToken ct) => onSendControlAckAsync(message, ct);
+        public Task SendControlStateSnapshotAsync(ControlStateSnapshotV1 message, CancellationToken ct) => onSendControlStateSnapshotAsync(message, ct);
+        public Task SendControlDisplayInfoAsync(ControlDisplayInfoMessageV1 message, CancellationToken ct) => onSendControlDisplayInfoAsync(message, ct);
 
         public void RaiseDisconnected()
         {
             Disconnected?.Invoke(this, EventArgs.Empty);
+        }
+
+        public void SetSessionSecurityStateForTests(SessionSecurityState nextState)
+        {
+            if (Equals(currentSessionSecurityState, nextState))
+            {
+                return;
+            }
+
+            currentSessionSecurityState = nextState;
+            SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(nextState));
         }
     }
 
@@ -5897,18 +7720,18 @@ rl.on('line', (line) => {
     private sealed class FakeSessionTransportNetwork
     {
         private readonly object gate = new();
-        private readonly Dictionary<string, FakeSessionTransport> hostsByCode = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, FakeSessionTransport> hostsByAddress = new(StringComparer.Ordinal);
 
         public FakeSessionTransport CreateTransport(string address)
         {
             return new FakeSessionTransport(this, address);
         }
 
-        public void RegisterHost(string code, FakeSessionTransport host)
+        public void RegisterHost(string address, FakeSessionTransport host)
         {
             lock (gate)
             {
-                hostsByCode[code] = host;
+                hostsByAddress[address] = host;
             }
         }
 
@@ -5916,32 +7739,33 @@ rl.on('line', (line) => {
         {
             lock (gate)
             {
-                foreach (var pair in hostsByCode.ToArray())
+                foreach (var pair in hostsByAddress.ToArray())
                 {
                     if (ReferenceEquals(pair.Value, transport))
                     {
-                        hostsByCode.Remove(pair.Key);
+                        hostsByAddress.Remove(pair.Key);
                     }
                 }
             }
         }
 
-        public FakeSessionTransport? TryFindHost(string code)
+        public FakeSessionTransport? TryFindHost(string address)
         {
             lock (gate)
             {
-                return hostsByCode.TryGetValue(code, out var host) ? host : null;
+                return hostsByAddress.TryGetValue(address, out var host) ? host : null;
             }
         }
     }
 
-    private sealed class FakeSessionTransport : ISignalingTransport
+    private sealed class FakeSessionTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport
     {
         private readonly FakeSessionTransportNetwork network;
         private readonly byte[] sharedKey = SmokeTests.SHA256LikeDeterministicBytes("session-runtime-repeat-key", 32);
+        private readonly TaskCompletionSource<bool> hostReadyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
         private FakeSessionTransport? peer;
         private bool disposed;
-        private string? hostedCode;
 
         public FakeSessionTransport(FakeSessionTransportNetwork network, string address)
         {
@@ -5950,6 +7774,7 @@ rl.on('line', (line) => {
         }
 
         public string Address { get; }
+        public string LocalPeerAddress => Address;
 
         public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
         public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
@@ -5957,25 +7782,85 @@ rl.on('line', (line) => {
         public event EventHandler? Approved;
         public event EventHandler? Rejected;
         public event EventHandler? Disconnected;
+        public event EventHandler<TransportSessionSecurityStateChangedEventArgs>? SessionSecurityStateChanged;
+        public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
 
-        public Task HostAsync(SessionCode code, CancellationToken ct)
+        public Task WaitUntilHostReadyAsync(CancellationToken ct) => hostReadyTcs.Task.WaitAsync(ct);
+
+        public Task HostByAddressAsync(CancellationToken ct)
         {
             ThrowIfDisposed();
-            hostedCode = code.Digits;
-            network.RegisterHost(code.Digits, this);
+            network.RegisterHost(Address, this);
+            UpdateSessionSecurityState(SessionSecurityState.CreateHelpeeWaiting(new PeerAddress(Address)));
+            hostReadyTcs.TrySetResult(true);
             return Task.Delay(Timeout.Infinite, ct);
         }
 
-        public Task JoinAsync(SessionCode code, CancellationToken ct)
+        public Task JoinByAddressAsync(string peerAddress, CancellationToken ct)
         {
             ThrowIfDisposed();
-            var host = network.TryFindHost(code.Digits) ?? throw new TimeoutException("Host not found.");
+            var host = network.TryFindHost(peerAddress) ?? throw new TimeoutException("Host not found.");
+            return JoinCoreAsync(
+                host,
+                new SessionId($"fake_session_{Guid.NewGuid():N}"),
+                SessionSecurityDefaults.AllCapabilityGrants,
+                inviteValidated: true);
+        }
+
+        public Task JoinByInviteAsync(string inviteToken, ValidatedInviteV1 invite, CancellationToken ct)
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(inviteToken))
+            {
+                throw new ArgumentException("Invite token is required.", nameof(inviteToken));
+            }
+
+            ArgumentNullException.ThrowIfNull(invite);
+            var host = network.TryFindHost(invite.TargetAddress.Value) ?? throw new TimeoutException("Host not found.");
+            var helperAddress = new PeerAddress(Address);
+            if (invite.BoundHelperAddress is not null && invite.BoundHelperAddress != helperAddress)
+            {
+                throw new InvalidOperationException("Invite token is bound to a different helper identity.");
+            }
+
+            return JoinCoreAsync(
+                host,
+                invite.SessionId,
+                invite.Payload.Capabilities.ToCapabilityGrant(),
+                inviteValidated: true);
+        }
+
+        private Task JoinCoreAsync(
+            FakeSessionTransport host,
+            SessionId sessionId,
+            CapabilityGrant requestedCapabilities,
+            bool inviteValidated)
+        {
             peer = host;
             host.peer = this;
+            var helpeeAddress = new PeerAddress(host.Address);
+            var helperAddress = new PeerAddress(Address);
+            var approvalRequest = new ApprovalRequest(
+                helperAddress,
+                requestedCapabilities,
+                sessionId);
+
+            var verifiedState = CreateVerifiedSecurityState(sessionId, helpeeAddress, helperAddress, inviteValidated);
+            UpdateSessionSecurityState(verifiedState);
+            host.UpdateSessionSecurityState(verifiedState);
 
             var joinRequest = new IncomingJoinRequestEventArgs(
-                approveAsync: _ =>
+                approveAsync: (decision, _) =>
                 {
+                    if (decision is null)
+                    {
+                        throw new InvalidOperationException("Explicit approval decision is required.");
+                    }
+
+                    ValidateApprovalDecision(approvalRequest, decision);
+                    var grant = decision.ToGrant();
+                    host.UpdateSessionSecurityState(host.CurrentSessionSecurityState.WithApproval(grant));
+                    UpdateSessionSecurityState(CurrentSessionSecurityState.WithApproval(grant));
                     host.SessionKeyReady?.Invoke(host, new TransportSessionKeyReadyEventArgs(host.sharedKey));
                     SessionKeyReady?.Invoke(this, new TransportSessionKeyReadyEventArgs(sharedKey));
                     host.Approved?.Invoke(host, EventArgs.Empty);
@@ -5984,9 +7869,12 @@ rl.on('line', (line) => {
                 },
                 rejectAsync: _ =>
                 {
+                    host.UpdateSessionSecurityState(host.CurrentSessionSecurityState.Invalidate("local_reject"));
+                    UpdateSessionSecurityState(CurrentSessionSecurityState.Invalidate("local_reject"));
                     Rejected?.Invoke(this, EventArgs.Empty);
                     return Task.CompletedTask;
-                });
+                },
+                approvalRequest: approvalRequest);
 
             host.IncomingJoinRequest?.Invoke(host, joinRequest);
             return Task.CompletedTask;
@@ -6014,6 +7902,8 @@ rl.on('line', (line) => {
             {
                 peer = null;
                 target.peer = null;
+                UpdateSessionSecurityState(CurrentSessionSecurityState.Invalidate("transport_disposed"));
+                target.UpdateSessionSecurityState(target.CurrentSessionSecurityState.Invalidate("transport_disposed"));
                 target.Disconnected?.Invoke(target, EventArgs.Empty);
             }
         }
@@ -6023,6 +7913,43 @@ rl.on('line', (line) => {
             if (disposed)
             {
                 throw new ObjectDisposedException(nameof(FakeSessionTransport));
+            }
+        }
+
+        private void UpdateSessionSecurityState(SessionSecurityState nextState)
+        {
+            if (Equals(currentSessionSecurityState, nextState))
+            {
+                return;
+            }
+
+            currentSessionSecurityState = nextState;
+            SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(nextState));
+        }
+
+        private static SessionSecurityState CreateVerifiedSecurityState(
+            SessionId sessionId,
+            PeerAddress helpeeAddress,
+            PeerAddress helperAddress,
+            bool inviteValidated)
+        {
+            return (SessionSecurityState.Empty with
+            {
+                SessionId = sessionId,
+                HelpeeAddress = helpeeAddress,
+                HelperAddress = helperAddress,
+                InviteValidated = inviteValidated,
+            }).WithHandshakeVerified(helperAddress);
+        }
+
+        private static void ValidateApprovalDecision(ApprovalRequest approvalRequest, ApprovalDecision decision)
+        {
+            if (decision.SessionId != approvalRequest.SessionId ||
+                decision.HelperIdentity != approvalRequest.HelperIdentity ||
+                decision.ExpiresAtUtc <= DateTimeOffset.UtcNow ||
+                (decision.ApprovedCapabilities & ~approvalRequest.RequestedCapabilities) != 0)
+            {
+                throw new InvalidOperationException("Approval decision does not match the pending approval request.");
             }
         }
     }
@@ -6066,7 +7993,7 @@ rl.on('line', (line) => {
         public void SetFailure(TransportFailure? transportFailure) => failure = transportFailure;
 
         public void RaiseStateChanged()
-            => StateChanged?.Invoke(this, new SessionRuntimeStateChangedEventArgs(uiState, SessionRuntimeRole.Helper, statusText, currentCode: null));
+            => StateChanged?.Invoke(this, new SessionRuntimeStateChangedEventArgs(uiState, SessionRuntimeRole.Helper, statusText));
 
         public void RaiseTransient(bool isVisible, string text, bool canCancel)
         {

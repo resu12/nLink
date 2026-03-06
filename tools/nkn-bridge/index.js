@@ -45,7 +45,16 @@ const state = {
   subscriptions: new Set(),
   clientIdentifier: '',
   connectId: '',
-  preflightProgressEnabled: false
+  preflightProgressEnabled: false,
+  inboundScreenSharePolicy: {
+    enabled: false,
+    sessionId: null,
+    sourceAddress: null,
+    expiresAtUnixMs: 0
+  },
+  lastScreenShareDropLogTs: 0,
+  lastScreenShareDropReason: '',
+  lastScreenShareDropSessionId: ''
 };
 
 let rpcCandidateCursor = 0;
@@ -155,6 +164,30 @@ function toBase64Payload(value) {
   return Buffer.from(String(value), 'utf8').toString('base64');
 }
 
+function toBufferPayload(value) {
+  if (value == null) {
+    return Buffer.alloc(0);
+  }
+
+  if (Buffer.isBuffer(value)) {
+    return value;
+  }
+
+  if (value instanceof Uint8Array) {
+    return Buffer.from(value);
+  }
+
+  if (typeof value === 'string') {
+    return Buffer.from(value, 'utf8');
+  }
+
+  if (typeof value === 'object' && value.payload != null) {
+    return toBufferPayload(value.payload);
+  }
+
+  return Buffer.from(String(value), 'utf8');
+}
+
 function getClientAddress(client) {
   try {
     if (!client) {
@@ -212,7 +245,7 @@ function normalizeMessageEvent(args) {
     const isTopic = Boolean(msg.isTopic || msg.isTopicMessage || topic);
     return {
       source: String(source || ''),
-      payloadBase64: toBase64Payload(msg.payload != null ? msg.payload : msg.data),
+      payload: toBufferPayload(msg.payload != null ? msg.payload : msg.data),
       isTopic,
       topic
     };
@@ -223,9 +256,141 @@ function normalizeMessageEvent(args) {
   const payload = args[1];
   return {
     source: src == null ? '' : String(src),
-    payloadBase64: toBase64Payload(payload),
+    payload: toBufferPayload(payload),
     isTopic: false
   };
+}
+
+function normalizePolicyAddress(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  return value.trim();
+}
+
+function getAddressTail(address) {
+  const normalized = normalizePolicyAddress(address);
+  if (!normalized) {
+    return '';
+  }
+
+  const lastDot = normalized.lastIndexOf('.');
+  if (lastDot < 0 || lastDot === normalized.length - 1) {
+    return normalized;
+  }
+
+  return normalized.slice(lastDot + 1);
+}
+
+function looksLikeNknPubKeyTail(value) {
+  return typeof value === 'string' &&
+    value.length >= 32 &&
+    /^[0-9a-fA-F]+$/.test(value);
+}
+
+function addressesLikelySamePeer(left, right) {
+  const normalizedLeft = normalizePolicyAddress(left);
+  const normalizedRight = normalizePolicyAddress(right);
+  if (!normalizedLeft || !normalizedRight) {
+    return false;
+  }
+
+  if (normalizedLeft === normalizedRight) {
+    return true;
+  }
+
+  const leftTail = getAddressTail(normalizedLeft);
+  const rightTail = getAddressTail(normalizedRight);
+  return looksLikeNknPubKeyTail(leftTail) &&
+    looksLikeNknPubKeyTail(rightTail) &&
+    leftTail === rightTail;
+}
+
+function tryParseInboundScreenShare(payload) {
+  if (!Buffer.isBuffer(payload) || payload.length < 32 || payload[0] !== 0x7b) {
+    return null;
+  }
+
+  const text = payload.toString('utf8');
+  if (!text.includes('screenshare')) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object') {
+      return null;
+    }
+
+    if (typeof parsed.kind === 'string' && parsed.kind.trim() && parsed.kind.trim() !== 'screenshare') {
+      return null;
+    }
+
+    const type = typeof parsed.type === 'string' ? parsed.type.trim() : '';
+    if (type !== 'screenshare.frame.v1' && type !== 'screenshare.stop.v1') {
+      return null;
+    }
+
+    const sessionId = typeof parsed.sessionId === 'string' ? parsed.sessionId.trim() : '';
+    if (!sessionId) {
+      return null;
+    }
+
+    return {
+      type,
+      sessionId
+    };
+  } catch {
+    return null;
+  }
+}
+
+function maybeLogScreenShareDrop(reason, sessionId) {
+  const now = Date.now();
+  const normalizedSessionId = typeof sessionId === 'string' && sessionId.trim().length > 0
+    ? sessionId.trim()
+    : '(none)';
+  if (now - state.lastScreenShareDropLogTs < 2000 &&
+      state.lastScreenShareDropReason === reason &&
+      state.lastScreenShareDropSessionId === normalizedSessionId) {
+    return;
+  }
+
+  state.lastScreenShareDropLogTs = now;
+  state.lastScreenShareDropReason = reason;
+  state.lastScreenShareDropSessionId = normalizedSessionId;
+  logStderr(`Dropped inbound screenshare before stdout (reason=${reason}, sessionId=${normalizedSessionId})`);
+}
+
+function shouldDropInboundScreenShare(msg) {
+  const screenShare = tryParseInboundScreenShare(msg.payload);
+  if (!screenShare) {
+    return false;
+  }
+
+  const policy = state.inboundScreenSharePolicy;
+  if (!policy.enabled) {
+    maybeLogScreenShareDrop('policy_disabled', screenShare.sessionId);
+    return true;
+  }
+
+  if (!policy.expiresAtUnixMs || Date.now() >= policy.expiresAtUnixMs) {
+    maybeLogScreenShareDrop('approval_expired', screenShare.sessionId);
+    return true;
+  }
+
+  if (policy.sessionId !== screenShare.sessionId) {
+    maybeLogScreenShareDrop('session_id_mismatch', screenShare.sessionId);
+    return true;
+  }
+
+  if (!addressesLikelySamePeer(msg.source, policy.sourceAddress)) {
+    maybeLogScreenShareDrop('source_mismatch', screenShare.sessionId);
+    return true;
+  }
+
+  return false;
 }
 
 function attachClientHandlers(client) {
@@ -251,10 +416,14 @@ function attachClientHandlers(client) {
   const onMessage = (...args) => {
     try {
       const msg = normalizeMessageEvent(args);
+      if (shouldDropInboundScreenShare(msg)) {
+        return;
+      }
+
       const evt = {
         event: 'message',
         source: msg.source,
-        payloadBase64: msg.payloadBase64,
+        payloadBase64: msg.payload.toString('base64'),
         isTopic: Boolean(msg.isTopic),
         ts: Date.now()
       };
@@ -333,6 +502,12 @@ async function closeClient() {
   state.readyEmitted = false;
   state.subscriptions.clear();
   state.clientIdentifier = '';
+  state.inboundScreenSharePolicy = {
+    enabled: false,
+    sessionId: null,
+    sourceAddress: null,
+    expiresAtUnixMs: 0
+  };
 
   if (!client) {
     return;
@@ -609,6 +784,28 @@ async function handleSend(command) {
   await callClientMethod('send', [destination, payload, { noReply: true }]);
 }
 
+async function handleSetScreenSharePolicy(command) {
+  const sessionId = typeof command.sessionId === 'string' && command.sessionId.trim().length > 0
+    ? command.sessionId.trim()
+    : null;
+  const sourceAddress = typeof command.sourceAddress === 'string' && command.sourceAddress.trim().length > 0
+    ? command.sourceAddress.trim()
+    : null;
+  const expiresAtUnixMs = Number(command.expiresAtUnixMs);
+  const enabled = Boolean(command.enabled) &&
+    Boolean(sessionId) &&
+    Boolean(sourceAddress) &&
+    Number.isFinite(expiresAtUnixMs) &&
+    expiresAtUnixMs > 0;
+
+  state.inboundScreenSharePolicy = {
+    enabled,
+    sessionId: enabled ? sessionId : null,
+    sourceAddress: enabled ? sourceAddress : null,
+    expiresAtUnixMs: enabled ? expiresAtUnixMs : 0
+  };
+}
+
 async function handleShutdown() {
   state.shuttingDown = true;
   await closeClient();
@@ -659,6 +856,9 @@ async function dispatchCommand(message) {
       return true;
     case 'send':
       await handleSend(message);
+      return true;
+    case 'setScreenSharePolicy':
+      await handleSetScreenSharePolicy(message);
       return true;
     case 'hello':
       await handleHello(message);

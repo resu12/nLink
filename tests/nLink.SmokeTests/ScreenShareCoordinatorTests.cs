@@ -633,6 +633,88 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_FrameSizeOnlyChange_DoesNotResendDisplayInfo()
+    {
+        var fakeSource = new FakeScreenCaptureSource
+        {
+            CaptureMetadata = new ScreenCaptureMetadata(
+                DisplayId: "primary",
+                CaptureRegionPx: new ScreenCapturePixelRect(0, 0, 1920, 1080),
+                DpiScale: 1.25),
+        };
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 5, 16, 0, 0, TimeSpan.Zero));
+        var sentRevisions = new ConcurrentQueue<long>();
+
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: (_, _) => Task.CompletedTask,
+            clock: clock,
+            sendDisplayInfoAsync: (message, _) =>
+            {
+                sentRevisions.Enqueue(message.Revision);
+                return Task.CompletedTask;
+            });
+
+        await coordinator.StartAsync("session-live", CancellationToken.None);
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 1 }, "jpeg");
+        await WaitUntilAsync(() => sentRevisions.Count == 1, TimeSpan.FromSeconds(2));
+
+        clock.Advance(TimeSpan.FromMilliseconds(300));
+        fakeSource.RaiseFrame(960, 540, new byte[] { 2 }, "jpeg");
+        clock.Advance(TimeSpan.FromMilliseconds(300));
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 3 }, "jpeg");
+        await Task.Delay(100);
+
+        Assert.Equal(1, sentRevisions.Count);
+        Assert.Equal(new long[] { 1 }, sentRevisions.ToArray());
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_MappingChange_IsDebounced_AndIncrementsRevisionOnce()
+    {
+        var fakeSource = new FakeScreenCaptureSource
+        {
+            CaptureMetadata = new ScreenCaptureMetadata(
+                DisplayId: "primary",
+                CaptureRegionPx: new ScreenCapturePixelRect(0, 0, 1920, 1080),
+                DpiScale: 1.25),
+        };
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 5, 16, 10, 0, TimeSpan.Zero));
+        var sentRevisions = new ConcurrentQueue<long>();
+
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: (_, _) => Task.CompletedTask,
+            clock: clock,
+            sendDisplayInfoAsync: (message, _) =>
+            {
+                sentRevisions.Enqueue(message.Revision);
+                return Task.CompletedTask;
+            });
+
+        await coordinator.StartAsync("session-live", CancellationToken.None);
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 1 }, "jpeg");
+        await WaitUntilAsync(() => sentRevisions.Count == 1, TimeSpan.FromSeconds(2));
+
+        fakeSource.CaptureMetadata = new ScreenCaptureMetadata(
+            DisplayId: "primary",
+            CaptureRegionPx: new ScreenCapturePixelRect(100, 50, 1720, 980),
+            DpiScale: 1.25);
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 2 }, "jpeg");
+        clock.Advance(TimeSpan.FromMilliseconds(100));
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 3 }, "jpeg");
+        await Task.Delay(100);
+        Assert.Equal(1, sentRevisions.Count);
+
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 4 }, "jpeg");
+        await WaitUntilAsync(() => sentRevisions.Count == 2, TimeSpan.FromSeconds(2));
+        Assert.Equal(new long[] { 1, 2 }, sentRevisions.ToArray());
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task Transport_Stop_PreventsFurtherSends()
     {
         var fakeSource = new FakeScreenCaptureSource();
@@ -909,7 +991,9 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
             for (var i = 0; i < 5; i++)
             {
                 fakeSource.RaiseFrame(1, 1, new byte[] { (byte)(i + 1) }, "jpeg");
-                clock.Advance(TimeSpan.FromMilliseconds(125));
+                // Keep frame cadence well above the transport min interval (8 FPS -> 125 ms)
+                // so this scenario remains deterministic even if the default transport cap changes.
+                clock.Advance(TimeSpan.FromMilliseconds(40));
             }
 
             await AwaitCompletesAsync(
@@ -1418,11 +1502,30 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
                 return;
             }
 
-            await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
-            await Task.Yield();
+            await TryPumpUiThreadOnceAsync().ConfigureAwait(false);
+            await Task.Delay(10).ConfigureAwait(false);
         }
 
         Assert.True(predicate(), $"Condition not met within {timeout.TotalSeconds:N1}s.");
+    }
+
+    private static async Task TryPumpUiThreadOnceAsync()
+    {
+        try
+        {
+            var pumpTask = Dispatcher.UIThread
+                .InvokeAsync(static () => { }, DispatcherPriority.Background)
+                .GetTask();
+            var completed = await Task.WhenAny(pumpTask, Task.Delay(25)).ConfigureAwait(false);
+            if (ReferenceEquals(completed, pumpTask))
+            {
+                await pumpTask.ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            // Best-effort UI pump for tests. If dispatcher is unavailable/stalled, continue polling.
+        }
     }
 
     private static void WaitForSignal(Task signal, TimeSpan timeout)

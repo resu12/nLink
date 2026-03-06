@@ -160,7 +160,7 @@ public static class TransportFailureMapper
         {
             return TransportFailure.Create(
                 TransportFailureCategory.PeerUnreachable,
-                "No one found with that code",
+                "No response from target address",
                 exceptionType,
                 raw,
                 isTransient: true);

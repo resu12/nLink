@@ -11,6 +11,8 @@ public interface IChatPanelBindings
 
     bool ShowChatConnectionPill { get; }
 
+    bool ShowChatTopBar { get; }
+
     bool ShowChatNotice { get; }
 
     string ChatNoticeText { get; }

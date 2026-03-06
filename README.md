@@ -1,47 +1,49 @@
 # nLink
 
-nLink is a private, secure, serverless, simple screen sharing application for helping family and friends.
+nLink is a private, secure, serverless, simple screen sharing application for helping family and friends. No accounts needed.
+
+Powered by NKN. Official website: https://nkn.org/
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
-## Current Release (0.3.4)
+## Current Release (0.4.0)
 
-`0.3.4` is the current stabilized release. It keeps the existing bridge-based transport architecture and focuses on UI clarity, layout consistency, and release hygiene after `0.3.3`.
+`0.4.0` is the current stabilized release. It introduces invite-based connection as the primary flow.
 
-- Architecture remains stable, including the existing bridge JSONL contract.
-- `0.3.4` focuses on bug fixes, deterministic screenshare behavior, helper and helpee layout polish, and release packaging polish.
-- No transport redesign is included in `0.3.4`.
+- Helpee shares an invite with QR, share, and copy actions.
+- Helper connects by pasting an invite, pasting from the clipboard, or scanning a QR code.
+- Direct NKN address entry remains available when needed.
 
 ## Quick Start (Windows)
 
 1. Go to the GitHub Releases page and download the Installer (recommended) or Portable ZIP.
-2. Helpee opens nLink, clicks `I need help`, and shares the 6-digit code.
-3. Helper opens nLink, clicks `I want to help`, enters the code, and clicks `Connect`.
+2. Helpee opens nLink, clicks `I need help`, and shares the invite.
+3. Helper opens nLink, clicks `I want to help`, pastes the invite or scans the QR code, and clicks `Connect`.
 4. Helpee clicks `Allow`.
 5. Chat opens on both sides.
 
 Home:
 
-![Home screen](docs/images/home-0.3.3.png)
+![Home screen](docs/images/home-0.4.0.png)
+
+Helper:
+
+![Helper screen](docs/images/helper-0.4.0.png)
 
 Helpee:
 
-![Helpee screen](docs/images/helpee-0.3.3.png)
-
-Screen sharing preview:
-
-![Screen sharing preview](docs/images/screenshare-preview-0.3.3.png)
+![Helpee screen](docs/images/helpee-0.4.0.png)
 
 If connection fails:
 Open Diagnostics -> Copy diagnostics and include it when reporting issues.
 
 Notes:
 - Windows x64 only
-- Current release (`0.3.4`)
+- Current release (`0.4.0`)
 - Installer path: `%LOCALAPPDATA%\Programs\nLink Helper`
 
 Versioning:
-- Release version uses SemVer (for example: `0.3.4`)
+- Release version uses SemVer (for example: `0.4.0`)
 - The current release version is stored in the repo-root `VERSION` file
 
 License:
@@ -78,7 +80,7 @@ License:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
 - Final release notes:
-  [`docs/releases/0.3.4.md`](docs/releases/0.3.4.md)
+  [`docs/releases/0.4.0.md`](docs/releases/0.4.0.md)
 - Screenshare RC/final validation checklist:
   [`docs/release/0.3.0-rc-validation-checklist.md`](docs/release/0.3.0-rc-validation-checklist.md)
 - Promotion criteria:
@@ -93,7 +95,7 @@ License:
 - Output:
   `artifacts/deadcode/report.md`
 
-### Resource Footprint Tools (Phase 5)
+### Resource Footprint Tools
 
 - Resource benchmark (idle/connect/idle/disconnect/idle, writes JSON + summary):
   `dotnet run --project src/nLink.App -c Release -- --resource-bench --transport devlocal`
@@ -109,15 +111,6 @@ License:
   `--leak-growth-fail-percent 20`
 - Pre-release helpers:
   `powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunResources -RunLeakCheck`
-
-### ScreenShare Soak (Manual, Non-CI)
-
-- Long-run manual screenshare soak:
-  `dotnet run --project src/nLink.App -c Release -- --screenshare-soak --seconds 300`
-- Optional sample interval override:
-  `--sample-interval-seconds 10`
-- Maintainer notes:
-  [`docs/screenshare-soak.md`](docs/screenshare-soak.md)
 
 ### Building Portable EXE (ZIP Release)
 
@@ -145,7 +138,7 @@ Notes:
 - If the bridge bundle is missing, build it first:
   `powershell -ExecutionPolicy Bypass -File .\installer\Build-BridgeBundle.ps1`
 
-### Building Installer for Helper
+### Building Installer
 
 Minimal installer option (Inno Setup 6), split into two steps:
 
@@ -213,11 +206,11 @@ Run the test (same PC, two app instances):
 1. Start the first app instance:
    `dotnet run --project src/nLink.App -c Release`
 2. Click `I need help`
-3. Note the 6-digit code shown on screen
+3. Copy the invite (or direct NKN address) shown on screen
 4. Start the second app instance:
    `dotnet run --project src/nLink.App -c Release`
 5. Click `I want to help someone`
-6. Enter the 6-digit code
+6. Paste the invite or direct NKN address
 7. Click `Connect`
 8. On the first instance, click `Allow`
 9. Send chat messages both ways and confirm they appear on both sides
@@ -237,7 +230,3 @@ How it works at a high level:
 - The app creates a temporary chat key for each session during the connection approval step.
 - Chat messages travel through the selected connection transport (`DevLocal` for same-PC testing, `NKN` for internet connection).
 - Message text is not written to logs.
-
-Notes:
-- NKN support is available in this alpha and may still be slower/flakier on some networks.
-- Smoke tests cover chat key agreement, encryption/decryption, message format stability, and deterministic local transport behavior.

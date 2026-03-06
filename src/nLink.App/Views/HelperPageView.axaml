@@ -19,21 +19,51 @@
             <Setter Property="BorderBrush" Value="{StaticResource AppInputBorderBrush}"/>
         </Style>
 
+        <Style Selector="TextBox.helperConnectInput">
+            <Setter Property="FontSize" Value="18"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="LetterSpacing" Value="0"/>
+            <Setter Property="TextAlignment" Value="Left"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Height" Value="58"/>
+            <Setter Property="Padding" Value="16,0"/>
+        </Style>
+
         <Style Selector="Button.action">
-            <Setter Property="Height" Value="64"/>
+            <Setter Property="Height" Value="56"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="HorizontalAlignment" Value="Stretch"/>
             <Setter Property="HorizontalContentAlignment" Value="Center"/>
             <Setter Property="VerticalContentAlignment" Value="Center"/>
-            <Setter Property="Padding" Value="16,0"/>
+            <Setter Property="Padding" Value="18,0"/>
         </Style>
 
         <Style Selector="Button.primaryAction">
-            <Setter Property="FontSize" Value="22"/>
+            <Setter Property="FontSize" Value="20"/>
         </Style>
 
         <Style Selector="Button.secondaryAction">
-            <Setter Property="FontSize" Value="20"/>
+            <Setter Property="FontSize" Value="18"/>
+        </Style>
+
+        <Style Selector="Button.compactSecondaryAction">
+            <Setter Property="Height" Value="42"/>
+            <Setter Property="FontSize" Value="15"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="HorizontalAlignment" Value="Stretch"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Padding" Value="14,0"/>
+        </Style>
+
+        <Style Selector="Button.recentTargetButton">
+            <Setter Property="Padding" Value="12,0"/>
+            <Setter Property="MinHeight" Value="34"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="HorizontalAlignment" Value="Stretch"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
         </Style>
 
         <Style Selector="Button.linkAction">
@@ -72,8 +102,85 @@
                                         ShowChatPaneRequested="{Binding ShowConnectedPanel}">
                     <views:SessionShellView.MainContent>
                         <Grid>
-                            <views:ScreenShareSurfaceView Frame="{Binding RemoteScreenShareFrame}"
+                            <views:ScreenShareSurfaceView x:Name="RemoteScreenShareSurface"
+                                                          Frame="{Binding RemoteScreenShareFrame}"
+                                                          CaptureEnabled="{Binding IsRemoteControlInputCaptureEnabled}"
+                                                          KeyboardCaptureEnabled="{Binding IsRemoteControlKeyboardCaptureEnabled}"
+                                                          MouseMoveRateHz="{Binding RemoteControlMouseMoveRateHz}"
+                                                          RemoteControlInputProduced="ScreenShareSurfaceView_RemoteControlInputProduced"
+                                                          RemoteControlHeldStateChanged="ScreenShareSurfaceView_RemoteControlHeldStateChanged"
+                                                          ControlModeExitRequested="ScreenShareSurfaceView_ControlModeExitRequested"
                                                           IsVisible="{Binding ShowRemoteScreenShareFrame}"/>
+
+                            <Border IsVisible="{Binding IsRemoteControlKeyboardCaptureEnabled}"
+                                    IsHitTestVisible="False"
+                                    Margin="2"
+                                    BorderBrush="{StaticResource AppTextBrush}"
+                                    BorderThickness="2"
+                                    CornerRadius="10"
+                                    Opacity="0.5"/>
+
+                            <Border HorizontalAlignment="Left"
+                                    VerticalAlignment="Top"
+                                    Margin="12"
+                                    Padding="10,6"
+                                    Classes="appPanel"
+                                    IsVisible="{Binding IsRemoteControlKeyboardCaptureEnabled}">
+                                <TextBlock Text="Keyboard to remote (Esc to exit)"
+                                           FontSize="13"
+                                           FontWeight="SemiBold"/>
+                            </Border>
+
+                            <StackPanel IsVisible="{Binding ShowRemoteControlDebugToggle}"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Top"
+                                        Margin="12"
+                                        Spacing="6"
+                                        MaxWidth="320">
+                                <Button Classes="appButton secondaryButton"
+                                        Content="{Binding RemoteControlDebugToggleText}"
+                                        Command="{Binding ToggleRemoteControlDebugPanelCommand}"
+                                        MinWidth="148"
+                                        Height="28"
+                                        HorizontalAlignment="Right"/>
+                                <Border IsVisible="{Binding ShowRemoteControlDebugPanel}"
+                                        Padding="10"
+                                        Background="#CC111A24"
+                                        BorderBrush="{StaticResource AppCardBorderBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="10">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="Remote control diagnostics"
+                                                   Foreground="{StaticResource AppTextBrush}"
+                                                   FontWeight="SemiBold"
+                                                   FontSize="12"/>
+                                        <TextBlock Text="{Binding RemoteControlDiagnosticsRoleText, StringFormat='role: {0}'}"
+                                                   Foreground="{StaticResource AppTextBrush}"
+                                                   FontSize="12"/>
+                                        <TextBlock Text="{Binding RemoteControlDiagnosticsControlStateText, StringFormat='state: {0}'}"
+                                                   Foreground="{StaticResource AppTextBrush}"
+                                                   FontSize="12"/>
+                                        <TextBlock Text="{Binding RemoteControlDiagnosticsControlModeText, StringFormat='control mode: {0}'}"
+                                                   Foreground="{StaticResource AppTextBrush}"
+                                                   FontSize="12"/>
+                                        <TextBlock Text="{Binding RemoteControlDiagnosticsDisplayText, StringFormat='display: {0}'}"
+                                                   Foreground="{StaticResource AppTextBrush}"
+                                                   FontSize="12"/>
+                                        <TextBlock Text="{Binding RemoteControlDiagnosticsCaptureFrameText}"
+                                                   Classes="appMuted"
+                                                   FontSize="11"/>
+                                        <TextBlock Text="{Binding RemoteControlDiagnosticsMoveStatsText}"
+                                                   Classes="appMuted"
+                                                   FontSize="11"/>
+                                        <TextBlock Text="{Binding RemoteControlDiagnosticsSuppressionsText}"
+                                                   Classes="appMuted"
+                                                   FontSize="11"/>
+                                        <TextBlock Text="{Binding RemoteControlDiagnosticsLastMappedText}"
+                                                   Classes="appMuted"
+                                                   FontSize="11"/>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
 
                             <Border Padding="0"
                                     Background="Transparent"
@@ -117,35 +224,29 @@
                                     </Border>
 
                                     <Border Background="{StaticResource AppMutedPanelBrush}"
-                                            CornerRadius="16"
-                                            Padding="20"
+                                            CornerRadius="18"
+                                            Padding="24"
                                             IsVisible="{Binding ShowMainControls}">
-                                        <StackPanel Spacing="18">
-                                            <TextBlock Classes="appMuted"
-                                                       Text="{Binding HelperPageHelpText}"
-                                                       FontSize="16"
-                                                       TextAlignment="Center"
-                                                       HorizontalAlignment="Center"
-                                                       MaxWidth="560"
-                                                       IsVisible="{Binding ShowMainControls}"/>
-
+                                        <StackPanel Spacing="20">
                                             <Border Background="{StaticResource AppSurfaceBrush}"
-                                                    CornerRadius="14"
-                                                    Padding="18"
+                                                    CornerRadius="18"
+                                                    Padding="20"
                                                     HorizontalAlignment="Stretch"
                                                     IsVisible="{Binding ShowMainControls}">
-                                                <StackPanel Spacing="14">
-                                                    <TextBox Classes="appInput highContrastInput codeDigitsInput"
+                                                <StackPanel Spacing="16">
+                                                    <TextBlock Text="Paste invite or address"
+                                                               Foreground="{StaticResource AppTextBrush}"
+                                                               FontSize="17"
+                                                               FontWeight="SemiBold"
+                                                               HorizontalAlignment="Left"/>
+
+                                                    <TextBox Classes="appInput highContrastInput helperConnectInput"
                                                              x:Name="HelperCodeInputBox"
                                                              AutomationProperties.AutomationId="Helper.CodeInput"
                                                              Text="{Binding CodeInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                                             TextChanged="HelperCodeInput_TextChanged"
-                                                             TextInput="HelperCodeInput_TextInput"
                                                              KeyDown="HelperCodeInput_KeyDown"
-                                                             Watermark="123 456"
-                                                             MaxLength="7"
+                                                             Watermark="Paste invite or address"
                                                              TabIndex="0"
-                                                             Height="68"
                                                              HorizontalAlignment="Stretch"
                                                              IsEnabled="{Binding CanStartOrConnect}"/>
 
@@ -161,22 +262,30 @@
                                                             Content="Retry"
                                                             Command="{Binding RetryCommand}"
                                                             IsVisible="{Binding ShowRetryAction}"/>
+
+                                                    <Grid ColumnDefinitions="*,*"
+                                                          ColumnSpacing="10">
+                                                        <Button Grid.Column="0"
+                                                                Classes="appButton secondaryButton compactSecondaryAction"
+                                                                AutomationProperties.AutomationId="Helper.PasteFromClipboard"
+                                                                Content="Paste from clipboard"
+                                                                Click="PasteFromClipboard_Click"/>
+                                                        <Button Grid.Column="1"
+                                                                Classes="appButton secondaryButton compactSecondaryAction"
+                                                                AutomationProperties.AutomationId="Helper.ScanQr"
+                                                                Content="Scan QR">
+                                                            <Button.Flyout>
+                                                                <MenuFlyout Placement="Bottom">
+                                                                    <MenuItem Header="Scan from file"
+                                                                              Command="{Binding #Root.DataContext.ScanQrFromFileCommand}"/>
+                                                                    <MenuItem Header="Scan with camera"
+                                                                              Command="{Binding #Root.DataContext.ScanQrFromCameraCommand}"/>
+                                                                </MenuFlyout>
+                                                            </Button.Flyout>
+                                                        </Button>
+                                                    </Grid>
                                                 </StackPanel>
                                             </Border>
-
-                                            <StackPanel Orientation="Horizontal"
-                                                        Spacing="12"
-                                                        HorizontalAlignment="Center"
-                                                        IsVisible="{Binding ShowMainControls}">
-                                                <Button Classes="linkButton linkAction"
-                                                        Content="They don't have nLink?"
-                                                        TabIndex="2"
-                                                        Command="{Binding CopyInstallMessageCommand}"/>
-                                                <Button Classes="linkButton linkAction"
-                                                        Content="Use nFTP instead"
-                                                        TabIndex="3"
-                                                        Command="{Binding SendFileCommand}"/>
-                                            </StackPanel>
 
                                             <TextBlock Classes="appMuted"
                                                        Text="{Binding CopyFeedback.Text}"
@@ -184,6 +293,69 @@
                                                        TextAlignment="Center"
                                                        HorizontalAlignment="Center"
                                                        IsVisible="{Binding ShowCopyFeedbackInline}"/>
+
+                                            <WrapPanel Orientation="Horizontal"
+                                                       HorizontalAlignment="Center"
+                                                       IsVisible="{Binding ShowMainControls}">
+                                                <Button Classes="linkButton linkAction"
+                                                        AutomationProperties.AutomationId="Helper.CopyInstallLink"
+                                                        Content="Copy install link"
+                                                        TabIndex="2"
+                                                        Margin="0,0,18,8"
+                                                        Command="{Binding CopyInstallMessageCommand}"/>
+                                                <Button Classes="linkButton linkAction"
+                                                        AutomationProperties.AutomationId="Helper.UseNftp"
+                                                        Content="Use file transfer instead"
+                                                        TabIndex="3"
+                                                        Margin="0,0,0,8"
+                                                        Command="{Binding SendFileCommand}"/>
+                                            </WrapPanel>
+
+                                            <Border Classes="appPanel"
+                                                    Padding="14"
+                                                    Margin="0,6,0,0"
+                                                    IsVisible="{Binding ShowRecentTargets}">
+                                                <StackPanel Spacing="10">
+                                                    <Grid ColumnDefinitions="*,Auto"
+                                                          ColumnSpacing="8">
+                                                        <TextBlock Text="Recent"
+                                                                   Classes="appMuted"
+                                                                   FontSize="13"
+                                                                   FontWeight="SemiBold"
+                                                                   VerticalAlignment="Center"/>
+                                                        <Button Grid.Column="1"
+                                                                Classes="linkButton linkAction"
+                                                                AutomationProperties.AutomationId="Helper.ClearRecentTargets"
+                                                                Content="Clear"
+                                                                Command="{Binding ClearRecentTargetsCommand}"
+                                                                Height="30"
+                                                                MinWidth="76"/>
+                                                    </Grid>
+                                                    <ItemsControl ItemsSource="{Binding RecentTargets}">
+                                                        <ItemsControl.ItemsPanel>
+                                                            <ItemsPanelTemplate>
+                                                                <StackPanel Orientation="Vertical"/>
+                                                            </ItemsPanelTemplate>
+                                                        </ItemsControl.ItemsPanel>
+                                                        <ItemsControl.ItemTemplate>
+                                                            <DataTemplate>
+                                                                <Button Classes="appButton secondaryButton recentTargetButton"
+                                                                        AutomationProperties.AutomationId="Helper.RecentTarget"
+                                                                        Margin="0,0,0,6"
+                                                                        MinWidth="0"
+                                                                        MaxWidth="560"
+                                                                        Command="{Binding #Root.DataContext.UseRecentTargetCommand}"
+                                                                        CommandParameter="{Binding .}"
+                                                                        ToolTip.Tip="{Binding .}">
+                                                                    <TextBlock Text="{Binding .}"
+                                                                               TextTrimming="CharacterEllipsis"
+                                                                               TextWrapping="NoWrap"/>
+                                                                </Button>
+                                                            </DataTemplate>
+                                                        </ItemsControl.ItemTemplate>
+                                                    </ItemsControl>
+                                                </StackPanel>
+                                            </Border>
                                         </StackPanel>
                                     </Border>
                                 </StackPanel>

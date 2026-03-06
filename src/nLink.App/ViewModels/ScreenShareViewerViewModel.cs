@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
+using NLink.Core.Logging;
 using NLink.Core.ScreenShare;
 using System.Diagnostics;
 #if DEBUG
@@ -15,7 +16,7 @@ namespace NLink.App.ViewModels;
 
 public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
 {
-    private const int MaxDecodeIterationsPerPass = 2;
+    private static readonly TimeSpan RenderStatsLogInterval = TimeSpan.FromSeconds(2);
 #if DEBUG
     private static readonly TimeSpan SnapshotInterval = TimeSpan.FromSeconds(10);
 #endif
@@ -27,12 +28,18 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
     private Bitmap? currentFrame;
     private bool isActive;
     private string statusText = string.Empty;
+    private long lastRenderedFrameAgeMs = -1;
     private byte[]? pendingJpegBytes;
+    private long pendingCapturedTsUtcMs;
     private int decodeInFlight;
     private int generation;
+    private long framesReceived;
     private long framesDecoded;
     private long decodeErrors;
     private long framesCoalesced;
+    private long chunksDroppedOlderFrame;
+    private long assembliesExpired;
+    private long lastRenderStatsLogTick;
     private bool disposed;
 #if DEBUG
     private long pendingJpegBytesReceivedUtcTicks;
@@ -68,6 +75,12 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
         private set => SetProperty(ref statusText, value);
     }
 
+    public long LastRenderedFrameAgeMs
+    {
+        get => lastRenderedFrameAgeMs;
+        private set => SetProperty(ref lastRenderedFrameAgeMs, value);
+    }
+
     internal bool IsIdleForDiagnostics
     {
         get
@@ -87,7 +100,11 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
             FramesCoalesced: Interlocked.Read(ref framesCoalesced));
     }
 
-    public void OnJpegFrame(byte[] jpegBytes)
+    public void OnJpegFrame(
+        byte[] jpegBytes,
+        long capturedTsUtcMs = 0,
+        long chunksDroppedOlderFrame = 0,
+        long assembliesExpired = 0)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         ArgumentNullException.ThrowIfNull(jpegBytes);
@@ -98,7 +115,10 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
 
         var copy = new byte[jpegBytes.Length];
         Buffer.BlockCopy(jpegBytes, 0, copy, 0, jpegBytes.Length);
-        ReplacePendingFrame(copy);
+        ReplacePendingFrame(copy, capturedTsUtcMs);
+        Interlocked.Increment(ref framesReceived);
+        Interlocked.Exchange(ref this.chunksDroppedOlderFrame, Math.Max(0, chunksDroppedOlderFrame));
+        Interlocked.Exchange(ref this.assembliesExpired, Math.Max(0, assembliesExpired));
 
         IsActive = true;
         StatusText = "Live";
@@ -108,7 +128,7 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
 
         if (Interlocked.Exchange(ref decodeInFlight, 1) == 0)
         {
-            _ = Task.Run(ProcessDecodeLoopAsync);
+            _ = Task.Run(ProcessDecodeOnceAsync);
         }
     }
 
@@ -118,10 +138,12 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
         lock (gate)
         {
             pendingJpegBytes = null;
+            pendingCapturedTsUtcMs = 0;
         }
 
         IsActive = false;
         StatusText = string.Empty;
+        LastRenderedFrameAgeMs = -1;
 #if DEBUG
         StopSnapshotTimer();
 #endif
@@ -140,84 +162,85 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
         GC.SuppressFinalize(this);
     }
 
-    private async Task ProcessDecodeLoopAsync()
+    private async Task ProcessDecodeOnceAsync()
     {
         try
         {
-            var iteration = 0;
-            while (iteration < MaxDecodeIterationsPerPass)
-            {
-                var generationSnapshot = Volatile.Read(ref generation);
-                var jpegBytes = TakePendingFrame(out var receivedUtcTicks);
+            var generationSnapshot = Volatile.Read(ref generation);
+            var jpegBytes = TakePendingFrame(out var receivedUtcTicks, out var capturedTsUtcMs);
 
-                if (jpegBytes is null || disposed)
+            if (jpegBytes is null || disposed)
+            {
+                return;
+            }
+
+            Bitmap? bitmap = null;
+            var decodeStartTimestamp = Stopwatch.GetTimestamp();
+            try
+            {
+                bitmap = decodeFrame(jpegBytes);
+#if DEBUG
+                decodeDurationLatency.RecordTimeSpanTicks(
+                    DebugLatencyWindow.StopwatchElapsedTimeSpanTicks(decodeStartTimestamp, Stopwatch.GetTimestamp()));
+#endif
+                if (disposed || generationSnapshot != Volatile.Read(ref generation))
                 {
+                    bitmap.Dispose();
+                    bitmap = null;
                     return;
                 }
 
-                Bitmap? bitmap = null;
-                var decodeStartTimestamp = Stopwatch.GetTimestamp();
-                try
+                var nextBitmap = bitmap;
+                await postToUiAsync(() =>
                 {
-                    bitmap = await Task.Run(() => decodeFrame(jpegBytes)).ConfigureAwait(false);
-#if DEBUG
-                    decodeDurationLatency.RecordTimeSpanTicks(
-                        DebugLatencyWindow.StopwatchElapsedTimeSpanTicks(decodeStartTimestamp, Stopwatch.GetTimestamp()));
-#endif
                     if (disposed || generationSnapshot != Volatile.Read(ref generation))
                     {
-                        bitmap.Dispose();
-                        bitmap = null;
+                        nextBitmap.Dispose();
                         return;
                     }
 
-                    var nextBitmap = bitmap;
-                    await postToUiAsync(() =>
-                    {
-                        if (disposed || generationSnapshot != Volatile.Read(ref generation))
-                        {
-                            nextBitmap.Dispose();
-                            return;
-                        }
-
-                        ReplaceCurrentFrame(nextBitmap);
-                        Interlocked.Increment(ref framesDecoded);
+                    ReplaceCurrentFrame(nextBitmap);
+                    Interlocked.Increment(ref framesDecoded);
+                    var nowUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    var ageMs = capturedTsUtcMs > 0
+                        ? Math.Max(0, nowUtcMs - capturedTsUtcMs)
+                        : -1;
+                    LastRenderedFrameAgeMs = ageMs;
+                    MaybeLogRenderStats(ageMs);
 #if DEBUG
-                        endToEndLatency.RecordTimeSpanTicks(DateTime.UtcNow.Ticks - receivedUtcTicks);
+                    endToEndLatency.RecordTimeSpanTicks(DateTime.UtcNow.Ticks - receivedUtcTicks);
 #endif
-                    }).ConfigureAwait(false);
-                    bitmap = null;
-                }
-                catch (Exception ex)
+                }).ConfigureAwait(false);
+                bitmap = null;
+            }
+            catch (Exception ex)
+            {
+#if DEBUG
+                decodeDurationLatency.RecordTimeSpanTicks(
+                    DebugLatencyWindow.StopwatchElapsedTimeSpanTicks(decodeStartTimestamp, Stopwatch.GetTimestamp()));
+#endif
+                bitmap?.Dispose();
+                Interlocked.Increment(ref decodeErrors);
+                LogDebug($"Viewer frame decode/apply failed: {ex.GetType().Name}: {ex.Message}");
+                await postToUiAsync(() =>
                 {
-#if DEBUG
-                    decodeDurationLatency.RecordTimeSpanTicks(
-                        DebugLatencyWindow.StopwatchElapsedTimeSpanTicks(decodeStartTimestamp, Stopwatch.GetTimestamp()));
-#endif
-                    bitmap?.Dispose();
-                    Interlocked.Increment(ref decodeErrors);
-                    LogDebug($"Viewer frame decode/apply failed: {ex.GetType().Name}: {ex.Message}");
-                    await postToUiAsync(() =>
+                    if (!disposed && generationSnapshot == Volatile.Read(ref generation))
                     {
-                        if (!disposed && generationSnapshot == Volatile.Read(ref generation))
-                        {
-                            StatusText = "Invalid frame received";
-                        }
-                    }).ConfigureAwait(false);
-                }
-
-                iteration++;
+                        StatusText = "Invalid frame received";
+                    }
+                }).ConfigureAwait(false);
             }
         }
         finally
         {
             Interlocked.Exchange(ref decodeInFlight, 0);
-
             lock (gate)
             {
-                if (!disposed && pendingJpegBytes is not null && Interlocked.Exchange(ref decodeInFlight, 1) == 0)
+                if (!disposed &&
+                    pendingJpegBytes is not null &&
+                    Interlocked.Exchange(ref decodeInFlight, 1) == 0)
                 {
-                    _ = Task.Run(ProcessDecodeLoopAsync);
+                    _ = Task.Run(ProcessDecodeOnceAsync);
                 }
             }
         }
@@ -240,7 +263,7 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
         }
     }
 
-    private void ReplacePendingFrame(byte[] jpegBytes)
+    private void ReplacePendingFrame(byte[] jpegBytes, long capturedTsUtcMs)
     {
         lock (gate)
         {
@@ -250,18 +273,21 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
             }
 
             pendingJpegBytes = jpegBytes;
+            pendingCapturedTsUtcMs = capturedTsUtcMs > 0 ? capturedTsUtcMs : 0;
 #if DEBUG
             pendingJpegBytesReceivedUtcTicks = DateTime.UtcNow.Ticks;
 #endif
         }
     }
 
-    private byte[]? TakePendingFrame(out long receivedUtcTicks)
+    private byte[]? TakePendingFrame(out long receivedUtcTicks, out long capturedTsUtcMs)
     {
         lock (gate)
         {
             var jpegBytes = pendingJpegBytes;
             pendingJpegBytes = null;
+            capturedTsUtcMs = pendingCapturedTsUtcMs;
+            pendingCapturedTsUtcMs = 0;
 #if DEBUG
             receivedUtcTicks = pendingJpegBytesReceivedUtcTicks;
             pendingJpegBytesReceivedUtcTicks = 0;
@@ -270,6 +296,30 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
 #endif
             return jpegBytes;
         }
+    }
+
+    private void MaybeLogRenderStats(long ageMs)
+    {
+        var nowTick = Stopwatch.GetTimestamp();
+        while (true)
+        {
+            var lastTick = Interlocked.Read(ref lastRenderStatsLogTick);
+            if (lastTick > 0 && Stopwatch.GetElapsedTime(lastTick, nowTick) < RenderStatsLogInterval)
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref lastRenderStatsLogTick, nowTick, lastTick) == lastTick)
+            {
+                break;
+            }
+        }
+
+        var metrics = GetMetricsSnapshot();
+        var ageText = ageMs >= 0 ? ageMs.ToString() : "(none)";
+        LocalOperationalLog.Info(
+            "ScreenShare",
+            $"event=frameshare_render; age_ms={ageText}; frames_completed={Interlocked.Read(ref framesReceived)}; frames_decoded={metrics.FramesDecoded}; frames_coalesced={metrics.FramesCoalesced}; chunks_dropped_older_frame={Interlocked.Read(ref chunksDroppedOlderFrame)}; assemblies_expired={Interlocked.Read(ref assembliesExpired)}");
     }
 
     private static Task PostToUiAsync(Action action)
@@ -345,7 +395,7 @@ public sealed class ScreenShareViewerViewModel : ViewModelBase, IDisposable
             using var process = Process.GetCurrentProcess();
             LogDebug(
                 $"Snapshot heap={heapBytes} ws={process.WorkingSet64} decoded={metrics.FramesDecoded} errors={metrics.DecodeErrors} inFlight={Volatile.Read(ref decodeInFlight)} " +
-                $"decode={FormatLatency(decodeSummary)} e2e={FormatLatency(endToEndSummary)}.");
+                $"decode={FormatLatency(decodeSummary)} e2e={FormatLatency(endToEndSummary)} age_ms={LastRenderedFrameAgeMs}.");
         }
         catch (Exception ex)
         {
