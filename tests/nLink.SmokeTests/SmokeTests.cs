@@ -3584,6 +3584,7 @@ public class SmokeTests
 
         SetPrivateField(helper, "effectivePhase", SessionUiPhase.Connected);
         SetPrivateField(helper.ScreenShareViewer, "isActive", true);
+        SetPrivateField(helper.ScreenShareViewer, "currentFrame", CreateTestBitmap(1, 1));
         Assert.Equal("Connected • Viewing screen", helper.HeaderStatusText);
 
         SetPrivateField(helper, "effectivePhase", SessionUiPhase.Recovering);
