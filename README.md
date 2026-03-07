@@ -51,10 +51,6 @@ Notes:
 - Current release (`0.4.1`)
 - Installer path: `%LOCALAPPDATA%\Programs\nLink Helper`
 
-Versioning:
-- Release version uses SemVer (for example: `0.4.1`)
-- The current release version is stored in the repo-root `VERSION` file
-
 License:
 - MIT (see `LICENSE`)
 
