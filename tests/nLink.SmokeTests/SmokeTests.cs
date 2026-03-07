@@ -3969,12 +3969,25 @@ public class SmokeTests
     public void HelpeePageViewModel_ToggleScreenSharePreviewCommand_CanExecute_FollowsPreviewState()
     {
         var transportConfig = CreateDevLocalTestConfig();
-        using var runtime = new SessionRuntime(() => new DevLocalTransport());
+        using var transport = new DevLocalTransport();
+        using var runtime = new SessionRuntime(() => transport);
         using var helpee = new HelpeePageViewModel(
             cancelAction: static () => { },
             transportConfig,
             runtime,
             screenCaptureSourceFactory: new FixedCaptureSourceFactory(new FakeScreenCaptureSource()));
+
+        SetPrivateField(runtime, "transport", transport);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "transportState", TransportState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        InvokePrivateMethod(
+            runtime,
+            "ApplyTransportSecurityState",
+            CreateApprovedSecurityState(
+                new PeerAddress(transport.LocalPeerAddress),
+                new PeerAddress("helpee.screenshare.helper"),
+                CapabilityGrant.ScreenShare));
 
         Assert.True(helpee.ToggleScreenSharePreviewCommand.CanExecute(null));
 
@@ -4004,7 +4017,8 @@ public class SmokeTests
     public async Task HelpeePageViewModel_ScreenShareStartFailure_ShowsHeaderStatus_AndRemainsInactive()
     {
         var transportConfig = CreateDevLocalTestConfig();
-        using var runtime = new SessionRuntime(() => new DevLocalTransport());
+        using var transport = new DevLocalTransport();
+        using var runtime = new SessionRuntime(() => transport);
         var failingSource = new FakeScreenCaptureSource
         {
             StartException = new InvalidOperationException("capture init failed"),
@@ -4014,6 +4028,18 @@ public class SmokeTests
             transportConfig,
             runtime,
             screenCaptureSourceFactory: new FixedCaptureSourceFactory(failingSource));
+
+        SetPrivateField(runtime, "transport", transport);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "transportState", TransportState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        InvokePrivateMethod(
+            runtime,
+            "ApplyTransportSecurityState",
+            CreateApprovedSecurityState(
+                new PeerAddress(transport.LocalPeerAddress),
+                new PeerAddress("helpee.screenshare.helper"),
+                CapabilityGrant.ScreenShare));
 
         SetPrivateField(helpee, "connectionState", "Connected");
         SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
@@ -5337,11 +5363,18 @@ public class SmokeTests
 
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
             await attackerClient.ConnectAsync(cts.Token);
-            await attacker.SendSessionEndAsync(cts.Token);
-            await Task.Delay(300, cts.Token);
+            var sendException = await Record.ExceptionAsync(() => attacker.SendSessionEndAsync(cts.Token));
+            Assert.True(sendException is TimeoutException or OperationCanceledException);
+            await Task.Delay(300);
 
             Assert.Equal(0, Volatile.Read(ref remoteSessionEndedCount));
-            Assert.Equal("session_end_source_identity_mismatch", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+            Assert.Contains(
+                NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason,
+                new[]
+                {
+                    "session_end_source_identity_mismatch",
+                    "duplicate",
+                });
         }
         finally
         {

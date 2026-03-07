@@ -499,6 +499,11 @@ public sealed class RemoteControlP2Tests
             () => helperRuntime.ControlState == ControlState.Off,
             TimeSpan.FromSeconds(1));
 
+        await WaitUntilAsync(
+            () => helperTransport.SentControlStops.Any(
+                s => string.Equals(s.Reason, "security_approval_expired", StringComparison.Ordinal)),
+            TimeSpan.FromSeconds(1));
+
         Assert.Contains(
             helperTransport.SentControlStops,
             s => string.Equals(s.Reason, "security_approval_expired", StringComparison.Ordinal));
