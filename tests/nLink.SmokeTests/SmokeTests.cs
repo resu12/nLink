@@ -6314,6 +6314,7 @@ public class SmokeTests
             helpeeRuntime,
             incomingRequestTimeout: TimeSpan.FromMilliseconds(250));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+        var usableInvite = string.Empty;
 
         _ = await WaitForShareInviteAsync(helpee);
 
@@ -6323,14 +6324,15 @@ public class SmokeTests
         await WaitUntilAsync(
             () =>
             {
+                usableInvite = helpee.ShareInvite;
                 return helpee.ShowWaitingPanel &&
                        !helpee.IsIncomingRequestView &&
                        string.Equals(helpee.ConnectionState, "Waiting", StringComparison.Ordinal) &&
-                       !string.IsNullOrWhiteSpace(helpee.ShareInvite);
+                       !string.IsNullOrWhiteSpace(usableInvite);
             },
             TimeSpan.FromSeconds(8));
 
-        Assert.False(string.IsNullOrWhiteSpace(helpee.ShareInvite));
+        Assert.False(string.IsNullOrWhiteSpace(usableInvite));
         Assert.Equal("Waiting", helpee.ConnectionState);
     }
 
