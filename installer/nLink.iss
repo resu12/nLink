@@ -58,7 +58,7 @@ begin
   StringChangeEx(Result, '''', '''''', True);
 end;
 
-procedure StopProcessesUnderInstallDir(const TargetDir: string);
+procedure StopProcessesUnderInstallDir(const TargetDir: string; const ExcludeUninstallers: Boolean);
 var
   PowerShellExe: string;
   Script: string;
@@ -86,7 +86,18 @@ begin
   Script :=
     '$ErrorActionPreference=''SilentlyContinue'';' +
     '$dir=[System.IO.Path]::GetFullPath(''' + EscapePowerShellLiteral(TargetDir) + ''').TrimEnd(''\'')+''\'';' +
-    '$procs=@(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and ([System.IO.Path]::GetFullPath($_.ExecutablePath)).StartsWith($dir,[System.StringComparison]::OrdinalIgnoreCase) } | Sort-Object ProcessId -Descending);' +
+    '$procs=@(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and ([System.IO.Path]::GetFullPath($_.ExecutablePath)).StartsWith($dir,[System.StringComparison]::OrdinalIgnoreCase)';
+
+  if ExcludeUninstallers then
+  begin
+    Script :=
+      Script +
+      ' -and -not (([System.IO.Path]::GetFileName($_.ExecutablePath)) -like ''unins*.exe'')';
+  end;
+
+  Script :=
+    Script +
+    ' } | Sort-Object ProcessId -Descending);' +
     'foreach($p in $procs){ try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch {} };' +
     'Start-Sleep -Milliseconds 500;';
 
@@ -108,7 +119,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
   begin
-    StopProcessesUnderInstallDir(ExpandConstant('{app}'));
+    StopProcessesUnderInstallDir(ExpandConstant('{app}'), False);
   end;
 end;
 
@@ -116,6 +127,6 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
   begin
-    StopProcessesUnderInstallDir(ExpandConstant('{app}'));
+    StopProcessesUnderInstallDir(ExpandConstant('{app}'), True);
   end;
 end;
