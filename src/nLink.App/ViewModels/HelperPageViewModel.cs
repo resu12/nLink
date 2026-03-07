@@ -3019,7 +3019,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private string AppendScreenShareSuffix(string text)
     {
-        if (!ScreenShareViewer.IsActive)
+        if (!ScreenShareViewer.IsActive ||
+            (RemoteScreenShareFrame is null && string.IsNullOrWhiteSpace(ScreenShareViewerMessage)))
         {
             return text;
         }

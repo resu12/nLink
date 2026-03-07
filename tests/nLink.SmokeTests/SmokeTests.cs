@@ -4195,6 +4195,29 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void HelperPageViewModel_BlankScreenSharePlaceholder_DoesNotAppendViewingSuffix()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        SetPrivateField(helper, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateField(helper.ScreenShareViewer, "isActive", true);
+        SetPrivateField(helper.ScreenShareViewer, "currentFrame", null);
+        SetPrivateField(helper.ScreenShareViewer, "statusText", string.Empty);
+        InvokePrivateMethod(
+            helper,
+            "OnScreenShareViewerPropertyChanged",
+            helper.ScreenShareViewer,
+            new PropertyChangedEventArgs(nameof(ScreenShareViewerViewModel.StatusText)));
+
+        Assert.False(helper.ShowRemoteScreenShareFrame);
+        Assert.False(helper.ShowScreenShareViewerError);
+        Assert.Equal("Connected", helper.HeaderStatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void HelperPageViewModel_CanEndSession_IsTrueOnlyForConnectedConnectingOrRecoveringPhases()
     {
         Assert.True(InvokeCanEndForPhase(typeof(HelperPageViewModel), SessionUiPhase.Connected));
