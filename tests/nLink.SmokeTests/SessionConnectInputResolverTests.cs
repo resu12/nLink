@@ -52,6 +52,44 @@ public sealed class SessionConnectInputResolverTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void Resolve_QrFormattedInvite_ReturnsInviteKindAndTargetAddress()
+    {
+        var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_000_100_000);
+        var resolver = CreateResolver();
+        var token = CreateInviteToken(nowUtc, lifetime: TimeSpan.FromMinutes(2));
+
+        var result = resolver.Resolve(InviteQrPayload.Format(token), nowUtc.AddSeconds(5));
+
+        Assert.True(result.IsValid, result.Message);
+        Assert.Equal(ConnectInputKind.InviteToken, result.Kind);
+        Assert.NotNull(result.Invite);
+        Assert.Equal("nlink-helpee.target", result.TargetAddress?.Value);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void Format_QrInvite_ReturnsRawInviteToken()
+    {
+        var token = "nlinki1.testpayload.testsignature";
+
+        var payload = InviteQrPayload.Format(token);
+
+        Assert.Equal(token, payload);
+        Assert.Equal(token, InviteQrPayload.ExtractTokenOrOriginal(payload));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void ExtractTokenOrOriginal_LegacyWrappedQrPayload_ReturnsRawInviteToken()
+    {
+        var token = "nlinki1.testpayload.testsignature";
+        var legacyPayload = $"{InviteQrPayload.Header}\n{InviteQrPayload.EncodedPrefix} {EncodeBase64Url(Encoding.UTF8.GetBytes(token))}";
+
+        Assert.Equal(token, InviteQrPayload.ExtractTokenOrOriginal(legacyPayload));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void Resolve_ExpiredInvite_ReturnsExpiredError()
     {
         var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_000_200_000);

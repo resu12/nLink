@@ -186,6 +186,62 @@ public sealed class RemoteControlP2Tests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task RemoteControl_ControlStart_ResendsDisplayInfo_ToRestoreHelperMouseMapping()
+    {
+        var helperTransport = new LinkedRemoteControlTransport("helper-peer");
+        var helpeeTransport = new LinkedRemoteControlTransport("helpee-peer");
+        helperTransport.Peer = helpeeTransport;
+        helpeeTransport.Peer = helperTransport;
+
+        using var helperRuntime = new SessionRuntime(() => helperTransport);
+        using var helpeeRuntime = new SessionRuntime(() => helpeeTransport);
+
+        AttachConnectedRuntime(helperRuntime, helperTransport, SessionRuntimeRole.Helper);
+        AttachConnectedRuntime(helpeeRuntime, helpeeTransport, SessionRuntimeRole.Helpee);
+
+        var initialDisplayInfo = new ControlDisplayInfoMessageV1
+        {
+            SessionId = helpeeRuntime.SecurityState.SessionId!.Value.Value,
+            DisplayId = "primary",
+            Revision = 1,
+            VirtualDesktopX = 0,
+            VirtualDesktopY = 0,
+            VirtualDesktopWidth = 1920,
+            VirtualDesktopHeight = 1080,
+            CaptureRegionX = 0,
+            CaptureRegionY = 0,
+            CaptureRegionWidth = 1920,
+            CaptureRegionHeight = 1080,
+            FrameWidth = 960,
+            FrameHeight = 540,
+            DpiScale = 1.25,
+            TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        };
+
+        await SendDisplayInfoAsync(helpeeRuntime, initialDisplayInfo);
+        await WaitUntilAsync(() => helperRuntime.RemoteControlMappingAvailable, TimeSpan.FromSeconds(1));
+        Assert.Single(helpeeTransport.SentControlDisplayInfos);
+
+        Assert.True(await helperRuntime.RequestRemoteControlAsync());
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Requesting &&
+                  helpeeRuntime.ControlState == ControlState.Requesting,
+            TimeSpan.FromSeconds(2));
+        Assert.False(helperRuntime.RemoteControlMappingAvailable);
+
+        Assert.True(await helpeeRuntime.RespondToRemoteControlRequestAsync(allow: true));
+
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Active &&
+                  helpeeRuntime.ControlState == ControlState.Active &&
+                  helperRuntime.RemoteControlMappingAvailable,
+            TimeSpan.FromSeconds(2));
+
+        Assert.True(helpeeTransport.SentControlDisplayInfos.Count >= 2);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task RemoteControl_StartWithValidToken_TransitionsToActive()
     {
         const string requestId = "req-valid";
@@ -325,6 +381,131 @@ public sealed class RemoteControlP2Tests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task RemoteControl_ApprovalExpiredWhileActive_SendsSecurityStop_AndTurnsBothSidesOff()
+    {
+        var helperTransport = new LinkedRemoteControlTransport("helper-peer");
+        var helpeeTransport = new LinkedRemoteControlTransport("helpee-peer");
+        helperTransport.Peer = helpeeTransport;
+        helpeeTransport.Peer = helperTransport;
+
+        using var helperRuntime = new SessionRuntime(() => helperTransport);
+        using var helpeeRuntime = new SessionRuntime(() => helpeeTransport);
+
+        AttachConnectedRuntime(helperRuntime, helperTransport, SessionRuntimeRole.Helper);
+        AttachConnectedRuntime(helpeeRuntime, helpeeTransport, SessionRuntimeRole.Helpee);
+
+        Assert.True(await helperRuntime.RequestRemoteControlAsync());
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Requesting &&
+                  helpeeRuntime.ControlState == ControlState.Requesting &&
+                  helpeeRuntime.HasPendingRemoteControlConsentPrompt,
+            TimeSpan.FromSeconds(2));
+        Assert.True(await helpeeRuntime.RespondToRemoteControlRequestAsync(allow: true));
+
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Active &&
+                  helpeeRuntime.ControlState == ControlState.Active,
+            TimeSpan.FromSeconds(2));
+
+        var requestId = helperTransport.SentControlRequests.Single().RequestId;
+        ForceCurrentGrantExpiry(helperRuntime, DateTimeOffset.UtcNow.AddMilliseconds(-1));
+        _ = InvokePrivateMethod(helperRuntime, "EnsureApprovalGrantActive");
+
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Off &&
+                  helpeeRuntime.ControlState == ControlState.Off,
+            TimeSpan.FromSeconds(2));
+
+        Assert.Contains(
+            helperTransport.SentControlStops,
+            s => s.RequestId == requestId);
+        Assert.Contains(
+            helperTransport.SentControlStops,
+            s => string.Equals(s.Reason, "security_approval_expired", StringComparison.Ordinal));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task RemoteControl_CapabilityLossWhileActive_SendsSecurityStop_AndTurnsBothSidesOff()
+    {
+        var helperTransport = new LinkedRemoteControlTransport("helper-peer");
+        var helpeeTransport = new LinkedRemoteControlTransport("helpee-peer");
+        helperTransport.Peer = helpeeTransport;
+        helpeeTransport.Peer = helperTransport;
+
+        using var helperRuntime = new SessionRuntime(() => helperTransport);
+        using var helpeeRuntime = new SessionRuntime(() => helpeeTransport);
+
+        AttachConnectedRuntime(helperRuntime, helperTransport, SessionRuntimeRole.Helper);
+        AttachConnectedRuntime(helpeeRuntime, helpeeTransport, SessionRuntimeRole.Helpee);
+
+        Assert.True(await helperRuntime.RequestRemoteControlAsync());
+        await WaitUntilAsync(
+            () => helpeeRuntime.HasPendingRemoteControlConsentPrompt,
+            TimeSpan.FromSeconds(2));
+        Assert.True(await helpeeRuntime.RespondToRemoteControlRequestAsync(allow: true));
+
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Active &&
+                  helpeeRuntime.ControlState == ControlState.Active,
+            TimeSpan.FromSeconds(2));
+
+        helperTransport.LocalSupportsRemoteControl = false;
+        _ = InvokePrivateMethod(helperRuntime, "RefreshRemoteControlCapabilitiesFromTransport");
+
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Off &&
+                  helpeeRuntime.ControlState == ControlState.Off,
+            TimeSpan.FromSeconds(2));
+
+        Assert.Contains(
+            helperTransport.SentControlStops,
+            s => string.Equals(s.Reason, "security_capability_lost", StringComparison.Ordinal));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task RemoteControl_ApprovalExpired_WhenStopSendFails_TurnsLocalSideOffImmediately()
+    {
+        var helperTransport = new LinkedRemoteControlTransport("helper-peer")
+        {
+            ThrowOnSendControlStop = true,
+        };
+        var helpeeTransport = new LinkedRemoteControlTransport("helpee-peer");
+        helperTransport.Peer = helpeeTransport;
+        helpeeTransport.Peer = helperTransport;
+
+        using var helperRuntime = new SessionRuntime(() => helperTransport);
+        using var helpeeRuntime = new SessionRuntime(() => helpeeTransport);
+
+        AttachConnectedRuntime(helperRuntime, helperTransport, SessionRuntimeRole.Helper);
+        AttachConnectedRuntime(helpeeRuntime, helpeeTransport, SessionRuntimeRole.Helpee);
+
+        Assert.True(await helperRuntime.RequestRemoteControlAsync());
+        await WaitUntilAsync(
+            () => helpeeRuntime.HasPendingRemoteControlConsentPrompt,
+            TimeSpan.FromSeconds(2));
+        Assert.True(await helpeeRuntime.RespondToRemoteControlRequestAsync(allow: true));
+
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Active &&
+                  helpeeRuntime.ControlState == ControlState.Active,
+            TimeSpan.FromSeconds(2));
+
+        ForceCurrentGrantExpiry(helperRuntime, DateTimeOffset.UtcNow.AddMilliseconds(-1));
+        _ = InvokePrivateMethod(helperRuntime, "EnsureApprovalGrantActive");
+
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Off,
+            TimeSpan.FromSeconds(1));
+
+        Assert.Contains(
+            helperTransport.SentControlStops,
+            s => string.Equals(s.Reason, "security_approval_expired", StringComparison.Ordinal));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task RemoteControl_HelpeeConsentTimeout_AutoDenies_AndSendsDenyResponse()
     {
         const string requestId = "req-consent-timeout";
@@ -460,6 +641,12 @@ public sealed class RemoteControlP2Tests
         SetPrivateField(runtime, "pendingRemoteControlConsentToken", replacement);
     }
 
+    private static void ForceCurrentGrantExpiry(SessionRuntime runtime, DateTimeOffset expiresAtUtc)
+    {
+        var currentGrant = Assert.IsType<SessionGrant>(GetPrivateField(runtime, "currentSessionGrant"));
+        SetPrivateField(runtime, "currentSessionGrant", currentGrant with { ExpiresAtUtc = expiresAtUtc });
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
     {
         var sw = Stopwatch.StartNew();
@@ -474,6 +661,18 @@ public sealed class RemoteControlP2Tests
         }
 
         Assert.True(condition(), $"Condition was not met within {timeout}.");
+    }
+
+    private static Task SendDisplayInfoAsync(SessionRuntime runtime, ControlDisplayInfoMessageV1 message)
+    {
+        var task = (Task?)InvokePrivateMethod(
+            runtime,
+            "SendRemoteControlDisplayInfoAsync",
+            runtime.SecurityState.SessionId!.Value.Value,
+            message,
+            CancellationToken.None);
+        Assert.NotNull(task);
+        return task!;
     }
 
     private static void SetPrivateField(object target, string fieldName, object? value)
@@ -527,6 +726,8 @@ public sealed class RemoteControlP2Tests
         public bool ForwardControlStartToPeer { get; set; } = true;
 
         public TimeSpan ControlStartSendDelay { get; set; } = TimeSpan.Zero;
+
+        public bool ThrowOnSendControlStop { get; set; }
 
         public List<ControlRequestMessageV1> SentControlRequests { get; } = new();
 
@@ -606,6 +807,11 @@ public sealed class RemoteControlP2Tests
         public Task SendControlStopAsync(ControlStopMessageV1 message, CancellationToken ct)
         {
             SentControlStops.Add(message);
+            if (ThrowOnSendControlStop)
+            {
+                throw new InvalidOperationException("stop_send_failed");
+            }
+
             Peer?.InjectIncomingControlStop(message, LocalPeerId);
             return Task.CompletedTask;
         }

@@ -157,7 +157,7 @@ public partial class ScreenShareSurfaceView : UserControl
 
     private void OnLostFocus(object? sender, RoutedEventArgs e)
     {
-        if (!CaptureEnabled)
+        if (!CaptureEnabled && !KeyboardCaptureEnabled)
         {
             return;
         }

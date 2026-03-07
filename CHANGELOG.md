@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.4.1] - 2026-03-07
+
+### Added
+
+- Final `0.4.1` release notes under `docs/releases/`.
+
+### Changed
+
+- README, screenshots, and release-facing documentation now reflect `0.4.1` as the current release.
+- `0.4.1` is documented as a stabilization release for the remote-control, session-state, and installer hardening work built on `0.4.0`.
+
+### Fixed
+
+- Remote-control request/mapping recovery, disconnect cleanup, helper/helpee stale-state presentation, and bridge shutdown/packaging regressions.
+
+### Packaging
+
+- Windows installer and portable release assets for `0.4.1` are verified together with `SHA256SUMS.txt`.
+
 ## [0.3.1] - 2026-03-03
 
 ### Added

@@ -128,6 +128,50 @@ public sealed class RemoteControlAckSeqTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void RemoteControlSnapshotSeqGate_ApplyStage_DropsQueuedSnapshotOlderThanLastApplied()
+    {
+        FeatureFlagEnvGate.Wait();
+        try
+        {
+            using var snapshotFlag = new EnvironmentOverride("NLINK_FEATURE_REMOTE_CONTROL_STATE_SNAPSHOT", "1");
+
+            var transport = new LinkedAckTransport("helpee-peer");
+            var injector = new CountingRemoteInputInjector();
+            using var runtime = new SessionRuntime(
+                () => transport,
+                SessionRuntimeWatchdogOptions.Default,
+                remoteInputInjector: injector,
+                remoteCoordinateMapper: new FixedRemoteCoordinateMapper());
+
+            AttachConnectedRuntime(runtime, transport, SessionRuntimeRole.Helpee);
+            SetPrivateField(
+                runtime,
+                "remoteControlSessionState",
+                new RemoteControlSessionState(
+                    ControlState.Active,
+                    ControllerPeerId: "helper-peer",
+                    CurrentControlRequestId: "req-snapshot",
+                    ConsentToken: null,
+                    SupportsRemoteControl: true,
+                    PeerSupportsRemoteControl: true));
+            SetPrivateField(runtime, "remoteControlSnapshotLastAppliedSeq", 10L);
+
+            InvokeProcessRemoteControlSnapshot(
+                runtime,
+                BuildSnapshot("req-snapshot", 9),
+                "helper-peer");
+
+            Assert.Equal(0L, (long)(GetPrivateField(runtime, "remoteControlSnapshotAppliedCount") ?? 0L));
+            Assert.Equal(10L, (long)(GetPrivateField(runtime, "remoteControlSnapshotLastAppliedSeq") ?? 0L));
+        }
+        finally
+        {
+            FeatureFlagEnvGate.Release();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task RemoteControlAck_HelperTracksAck_WhenHelpeeAcksPostInjection()
     {
         await FeatureFlagEnvGate.WaitAsync();
@@ -238,6 +282,18 @@ public sealed class RemoteControlAckSeqTests
         };
     }
 
+    private static ControlStateSnapshotV1 BuildSnapshot(string requestId, long seq)
+    {
+        return new ControlStateSnapshotV1
+        {
+            RequestId = requestId,
+            Seq = seq,
+            TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            ModifiersMask = 0,
+            MouseButtonsMask = 0,
+        };
+    }
+
     private static void AttachConnectedRuntime(
         SessionRuntime runtime,
         LinkedAckTransport transport,
@@ -307,6 +363,23 @@ public sealed class RemoteControlAckSeqTests
             .Single();
         var stopEpoch = (long)(GetPrivateField(runtime, "remoteControlStopPriorityEpoch") ?? 0L);
         var workItem = ctor.Invoke(new object?[] { message, null, peerId, stopEpoch });
+
+        _ = InvokePrivateMethod(runtime, "ProcessRemoteControlInjectionWorkItem", workItem);
+    }
+
+    private static void InvokeProcessRemoteControlSnapshot(
+        SessionRuntime runtime,
+        ControlStateSnapshotV1 snapshot,
+        string peerId)
+    {
+        var workItemType = typeof(SessionRuntime).GetNestedType(
+            "RemoteControlInjectionWorkItem",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(workItemType);
+        var ctor = workItemType!.GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+            .Single();
+        var stopEpoch = (long)(GetPrivateField(runtime, "remoteControlStopPriorityEpoch") ?? 0L);
+        var workItem = ctor.Invoke(new object?[] { null, snapshot, peerId, stopEpoch });
 
         _ = InvokePrivateMethod(runtime, "ProcessRemoteControlInjectionWorkItem", workItem);
     }

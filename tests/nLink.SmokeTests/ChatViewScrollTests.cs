@@ -140,11 +140,7 @@ public sealed class ChatViewScrollTests : IClassFixture<ChatViewScrollFixture>
     {
         public string ChatPanelTitle => "Message";
 
-        public string ChatConnectionPillText => "Connected";
-
-        public bool ShowChatConnectionPill => true;
-
-        public bool ShowChatTopBar => ShowChatConnectionPill;
+        public bool ShowChatTopBar => false;
 
         public bool ShowChatNotice => false;
 

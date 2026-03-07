@@ -174,7 +174,7 @@ public partial class StatusBanner : UserControl, INotifyPropertyChanged
         return kind switch
         {
             UserStatusKind.Connecting => "Connecting",
-            UserStatusKind.Handshake => "Connecting",
+            UserStatusKind.Handshake => "Finalizing connection",
             UserStatusKind.Connected => "Connected",
             UserStatusKind.Reconnecting => "Reconnecting",
             UserStatusKind.Failed => "Connection problem",

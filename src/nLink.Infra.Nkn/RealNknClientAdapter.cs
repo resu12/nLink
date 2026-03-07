@@ -58,6 +58,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
     private string? inboundScreenShareSessionId;
     private string? inboundScreenShareSourceAddress;
     private long inboundScreenShareExpiresAtUnixMs;
+    private int disposeStarted;
 
     public RealNknClientAdapter(NknIdentity identity, NknTransportOptions options)
     {
@@ -467,12 +468,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
 
     public void Dispose()
     {
-        if (disposed)
+        if (disposed || Interlocked.Exchange(ref disposeStarted, 1) != 0)
         {
             return;
         }
 
-        disposed = true;
         try
         {
             lock (gate)
@@ -480,12 +480,45 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
                 shuttingDown = true;
             }
 
-            CancelPingLoop();
-            bridgeSupervisor.CleanupState();
+            try
+            {
+                StopPingLoopAsync().GetAwaiter().GetResult();
+            }
+            catch
+            {
+                CancelPingLoop();
+            }
+
+            try
+            {
+                if (bridgeSupervisor.IsProcessRunning)
+                {
+                    bridgeSupervisor.RequestShutdownAndCleanupAsync(
+                        sendShutdownAsync: shutdownCt => SendCommandAndWaitAckAsync(
+                            "shutdown",
+                            payload: null,
+                            shutdownCt,
+                            timeoutOverride: CommandAckTimeout),
+                        CancellationToken.None).GetAwaiter().GetResult();
+                }
+                else
+                {
+                    bridgeSupervisor.CleanupState();
+                }
+            }
+            catch
+            {
+                // Fall back to forceful local cleanup if graceful shutdown is no longer possible.
+                bridgeSupervisor.CleanupState();
+            }
         }
         catch
         {
             // Best-effort shutdown in dispose.
+        }
+        finally
+        {
+            disposed = true;
         }
     }
 

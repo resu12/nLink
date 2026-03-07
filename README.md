@@ -6,12 +6,14 @@ Powered by NKN. Official website: https://nkn.org/
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
-## Current Release (0.4.0)
+## Current Release (0.4.1)
 
-`0.4.0` is the current stabilized release. It introduces invite-based connection as the primary flow.
+`0.4.1` is the current stabilization release. It keeps the existing invite-based connect flow and focuses on hardening remote control, session cleanup, installer reliability, and release polish.
 
 - Helpee shares an invite with QR, share, and copy actions.
-- Helper connects by pasting an invite, pasting from the clipboard, or scanning a QR code.
+- Helper connects by pasting an invite or scanning a QR code.
+- Remote control now behaves more predictably across control start/stop, disconnect, reconnect, and session end.
+- Installer and bundled bridge packaging are hardened for upgrade, shutdown, and release consistency.
 
 ## Quick Start (Windows)
 
@@ -23,26 +25,34 @@ Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke
 
 Home:
 
-![Home screen](docs/images/home-0.4.0.png)
+![Home screen](docs/images/home-0.4.1.png)
 
 Helper:
 
-![Helper screen](docs/images/helper-0.4.0.png)
+![Helper screen](docs/images/helper-0.4.1.png)
 
 Helpee:
 
-![Helpee screen](docs/images/helpee-0.4.0.png)
+![Helpee screen](docs/images/helpee-0.4.1.png)
+
+Screen sharing:
+
+![Screen sharing session](docs/images/screenshare-0.4.1.png)
+
+Remote control:
+
+![Remote control session](docs/images/remote-control-0.4.1.png)
 
 If connection fails:
 Open Diagnostics -> Copy diagnostics and include it when reporting issues.
 
 Notes:
 - Windows x64 only
-- Current release (`0.4.0`)
+- Current release (`0.4.1`)
 - Installer path: `%LOCALAPPDATA%\Programs\nLink Helper`
 
 Versioning:
-- Release version uses SemVer (for example: `0.4.0`)
+- Release version uses SemVer (for example: `0.4.1`)
 - The current release version is stored in the repo-root `VERSION` file
 
 License:
@@ -79,7 +89,7 @@ License:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
 - Final release notes:
-  [`docs/releases/0.4.0.md`](docs/releases/0.4.0.md)
+  [`docs/releases/0.4.1.md`](docs/releases/0.4.1.md)
 - Screenshare RC/final validation checklist:
   [`docs/release/0.3.0-rc-validation-checklist.md`](docs/release/0.3.0-rc-validation-checklist.md)
 - Promotion criteria:

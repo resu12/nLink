@@ -245,9 +245,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 OnPropertyChanged(nameof(ShowStatusText));
                 OnPropertyChanged(nameof(HeaderStatusText));
-                OnPropertyChanged(nameof(ChatConnectionPillText));
-                OnPropertyChanged(nameof(ShowChatConnectionPill));
-                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
                 OnPropertyChanged(nameof(ShowRequestControlAction));
             }
@@ -274,9 +271,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowCopyFeedbackInline));
                 OnPropertyChanged(nameof(ShowBackButton));
                 OnPropertyChanged(nameof(HeaderStatusText));
-                OnPropertyChanged(nameof(ChatConnectionPillText));
-                OnPropertyChanged(nameof(ShowChatConnectionPill));
-                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
                 OnPropertyChanged(nameof(ShowRequestControlAction));
                 OnPropertyChanged(nameof(CanRequestControl));
@@ -318,6 +312,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public ObservableCollection<ChatLineViewModel> ChatMessages { get; }
 
     public bool IsConnectedView => ConnectionState == "Connected";
+
+    private bool IsRemoteControlUiConnected =>
+        EffectivePhase == SessionUiPhase.Connected &&
+        sessionRuntime.State == SessionRuntimeState.Connected;
 
     public bool ShowConnectedPanel => IsConnectedView;
 
@@ -389,8 +387,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref failureTitle, value))
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
-                OnPropertyChanged(nameof(ShowChatConnectionPill));
-                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
@@ -404,8 +400,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref failureMessage, value))
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
-                OnPropertyChanged(nameof(ShowChatConnectionPill));
-                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
@@ -429,17 +423,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public string ChatConnectionHintText => "Waiting for connection...";
 
-    public string ChatConnectionPillText =>
-        EffectivePhase switch
-        {
-            SessionUiPhase.Connected => "Connected",
-            SessionUiPhase.Connecting => "Connecting…",
-            SessionUiPhase.Recovering => "Reconnecting…",
-            _ => "Not connected",
-        };
-
-    public bool ShowChatConnectionPill => !HeaderStatusText.StartsWith(ChatConnectionPillText, StringComparison.Ordinal);
-    public bool ShowChatTopBar => ShowChatConnectionPill || !FeatureFlags.EnableSessionHeader;
+    public bool ShowChatTopBar => !FeatureFlags.EnableSessionHeader;
 
     public string ChatDraft
     {
@@ -490,10 +474,18 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref effectivePhase, value))
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
-                OnPropertyChanged(nameof(ChatConnectionPillText));
-                OnPropertyChanged(nameof(ShowChatConnectionPill));
-                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
+                OnPropertyChanged(nameof(ShowRequestControlAction));
+                OnPropertyChanged(nameof(CanRequestControl));
+                OnPropertyChanged(nameof(ShowStopControlAction));
+                OnPropertyChanged(nameof(CanStopControl));
+                OnPropertyChanged(nameof(ShowRemoteControlActiveStatus));
+                OnPropertyChanged(nameof(IsRemoteControlInputCaptureEnabled));
+                OnPropertyChanged(nameof(ShowControlModeToggle));
+                OnPropertyChanged(nameof(CanControlModeToggle));
+                OnPropertyChanged(nameof(IsRemoteControlKeyboardCaptureEnabled));
+                OnPropertyChanged(nameof(ShowRemoteControlDebugToggle));
+                OnPropertyChanged(nameof(ShowRemoteControlDebugPanel));
             }
         }
     }
@@ -546,33 +538,35 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool SessionSupportsRemoteControl => sessionRuntime.SessionSupportsRemoteControl;
     public bool RemoteControlMappingAvailable => sessionRuntime.RemoteControlMappingAvailable;
     public bool ShowRequestControlAction =>
-        IsConnectedView &&
+        IsRemoteControlUiConnected &&
         sessionRuntime.RemoteControlAvailable &&
         ShowRemoteScreenShareFrame &&
         sessionRuntime.ControlState == ControlState.Off;
     public bool CanRequestControl =>
         sessionRuntime.RemoteControlAvailable &&
-        IsConnectedView &&
+        IsRemoteControlUiConnected &&
         ShowRemoteScreenShareFrame &&
         sessionRuntime.ControlState == ControlState.Off;
     public bool ShowStopControlAction =>
-        IsConnectedView &&
+        IsRemoteControlUiConnected &&
         ShowRemoteScreenShareFrame &&
         sessionRuntime.ControlState is ControlState.Requesting or ControlState.Active;
     public string StopControlButtonText => sessionRuntime.ControlState == ControlState.Requesting ? "Cancel request" : "Stop control";
     public bool CanStopControl =>
         SessionSupportsRemoteControl &&
-        IsConnectedView &&
+        IsRemoteControlUiConnected &&
         ShowRemoteScreenShareFrame &&
         sessionRuntime.ControlState is ControlState.Requesting or ControlState.Active;
-    public bool ShowRemoteControlActiveStatus => sessionRuntime.ControlState == ControlState.Active;
-    public bool ShowControlModeToggle => IsRemoteControlInputCaptureEnabled;
+    public bool ShowRemoteControlActiveStatus =>
+        IsRemoteControlUiConnected &&
+        sessionRuntime.ControlState == ControlState.Active;
+    public bool ShowControlModeToggle => IsRemoteControlKeyboardControlAvailable;
     public bool CanControlModeToggle => ShowControlModeToggle;
     public string ControlModeButtonText => controlModeEnabled ? "Keyboard to remote: On" : "Keyboard to remote: Off";
     public int RemoteControlMouseMoveRateHz => 90;
     public bool ShowRemoteControlDebugToggle =>
         RemoteControlDebugPanelEnabled &&
-        IsConnectedView &&
+        IsRemoteControlUiConnected &&
         ShowRemoteScreenShareFrame;
     public bool ShowRemoteControlDebugPanel =>
         ShowRemoteControlDebugToggle &&
@@ -606,11 +600,16 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool IsRemoteControlInputCaptureEnabled =>
         sessionRuntime.RemoteControlAvailable &&
         RemoteControlMappingAvailable &&
-        IsConnectedView &&
+        IsRemoteControlUiConnected &&
+        ShowRemoteScreenShareFrame &&
+        sessionRuntime.ControlState == ControlState.Active;
+    private bool IsRemoteControlKeyboardControlAvailable =>
+        sessionRuntime.RemoteControlAvailable &&
+        IsRemoteControlUiConnected &&
         ShowRemoteScreenShareFrame &&
         sessionRuntime.ControlState == ControlState.Active;
     public bool IsRemoteControlKeyboardCaptureEnabled =>
-        IsRemoteControlInputCaptureEnabled &&
+        IsRemoteControlKeyboardControlAvailable &&
         controlModeEnabled;
 
     public bool IsChatInputEnabled
@@ -1027,7 +1026,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         try
         {
             var inviteExpiry = connectInput.Invite.Payload.ExpiresAtUtcMs.ToString(CultureInfo.InvariantCulture);
-            AddRecentTarget(targetAddress.Value);
             AppLog.Info($"Helper join requested using {transportConfig.Key} with validated_invite target {targetAddress.Value}; invite_exp_utc_ms={inviteExpiry}");
             await sessionRuntime.StartHelperAsync(CodeInput.Trim(), connectInput.Invite, connectCts.Token);
 
@@ -1273,13 +1271,15 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public void PostRemoteControlInput(ControlInputMessageV1 message)
     {
-        if (!IsRemoteControlInputCaptureEnabled)
+        var kind = string.IsNullOrWhiteSpace(message.Kind) ? string.Empty : message.Kind.Trim();
+        if (string.Equals(kind, "key", StringComparison.Ordinal))
         {
-            return;
+            if (!IsRemoteControlKeyboardCaptureEnabled)
+            {
+                return;
+            }
         }
-
-        if (string.Equals(message.Kind, "key", StringComparison.Ordinal) &&
-            !IsRemoteControlKeyboardCaptureEnabled)
+        else if (!IsRemoteControlInputCaptureEnabled)
         {
             return;
         }
@@ -1383,7 +1383,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void EnsureControlModeConsistency()
     {
-        if (IsRemoteControlInputCaptureEnabled)
+        if (IsRemoteControlKeyboardControlAvailable)
         {
             SyncRemoteControlStateSnapshotPump();
             return;
@@ -1402,7 +1402,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private void SyncRemoteControlStateSnapshotPump()
     {
         var shouldRun = FeatureFlags.RemoteControlStateSnapshotEnabled &&
-                        IsRemoteControlInputCaptureEnabled &&
+                        (IsRemoteControlInputCaptureEnabled || IsRemoteControlKeyboardCaptureEnabled) &&
                         sessionRuntime.ControlState == ControlState.Active;
         if (!shouldRun)
         {
@@ -1676,15 +1676,15 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             ClearRemoteScreenShareFrame();
             IsConnecting = false;
+            var nknSnapshot = NknRuntimeDiagnostics.Snapshot();
+            var remoteSessionEndSeenInDiagnostics =
+                string.Equals(nknSnapshot.LastEnvelopeType, "SessionEnd", StringComparison.OrdinalIgnoreCase);
             var runtimeStatus = sessionRuntime.StatusText;
             if (string.IsNullOrWhiteSpace(runtimeStatus))
             {
                 // Remote session-end can race with runtime reset back to Idle, clearing StatusText
                 // before the helper VM handles the disconnect callback. If we were connected and
                 // there is no classified failure, prefer the friendly session-ended message.
-                var nknSnapshot = NknRuntimeDiagnostics.Snapshot();
-                var remoteSessionEndSeenInDiagnostics =
-                    string.Equals(nknSnapshot.LastEnvelopeType, "SessionEnd", StringComparison.OrdinalIgnoreCase);
                 var disconnectedAfterConnectedNoFailure =
                     string.Equals(ConnectionState, "Connected", StringComparison.Ordinal) &&
                     sessionRuntime.LastTransportFailure is null;
@@ -1700,11 +1700,28 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 StatusText = runtimeStatus;
             }
+
+            var peerEnded =
+                sessionRuntime.LastTransportFailure is null &&
+                (sessionRuntime.LastDisconnectWasRemoteEnd || remoteSessionEndSeenInDiagnostics);
+            if (peerEnded)
+            {
+                ApplyPeerEndedDisconnectUiState();
+            }
+
             var (errorCode, errorHint) = GetReliabilityError();
             LogReliability(SessionReliabilityStage.Disconnected, errorCode, errorHint);
-            if (string.Equals(sessionRuntime.StatusText, "Connection lost.", StringComparison.Ordinal))
+            if (peerEnded)
+            {
+                // Remote-end cleanup above already moved the helper UI out of the active session shell state.
+            }
+            else if (string.Equals(sessionRuntime.StatusText, "Connection lost.", StringComparison.Ordinal))
             {
                 ConnectionState = "Failed";
+            }
+            else if (sessionRuntime.State != SessionRuntimeState.Connected)
+            {
+                ConnectionState = "Disconnected";
             }
             else if (ConnectionState != "Connected")
             {
@@ -1761,8 +1778,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         _ = UiThreadDispatch.RunAsync(() =>
         {
             OnPropertyChanged(nameof(HeaderStatusText));
-            OnPropertyChanged(nameof(ShowChatConnectionPill));
-            OnPropertyChanged(nameof(ShowChatTopBar));
             OnPropertyChanged(nameof(SessionSupportsRemoteControl));
             OnPropertyChanged(nameof(RemoteControlMappingAvailable));
             OnPropertyChanged(nameof(ShowRequestControlAction));
@@ -1894,8 +1909,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
                 lastKnownHeaderStatusText = nextHeaderStatusText;
-                OnPropertyChanged(nameof(ShowChatConnectionPill));
-                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
@@ -1912,8 +1925,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             SyncTransientStatusFromRuntime();
             OnPropertyChanged(nameof(HeaderStatusText));
-            OnPropertyChanged(nameof(ShowChatConnectionPill));
-            OnPropertyChanged(nameof(ShowChatTopBar));
         });
     }
 
@@ -2269,8 +2280,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowRecentTargets));
         OnPropertyChanged(nameof(ShowCopyFeedbackInline));
         OnPropertyChanged(nameof(HeaderStatusText));
-        OnPropertyChanged(nameof(ShowChatConnectionPill));
-        OnPropertyChanged(nameof(ShowChatTopBar));
         OnPropertyChanged(nameof(SessionSupportsRemoteControl));
         OnPropertyChanged(nameof(RemoteControlMappingAvailable));
         OnPropertyChanged(nameof(ShowRequestControlAction));
@@ -2978,6 +2987,16 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 ConnectionState = "Failed";
                 break;
         }
+    }
+
+    private void ApplyPeerEndedDisconnectUiState()
+    {
+        endReason = SessionEndReason.PeerEnded;
+        ApplyEndReasonPresentation(SessionEndReason.PeerEnded);
+        uiStateStore?.SetPhase(SessionUiPhase.Ended, "OnDisconnected:PeerEnded");
+        fallbackUiPhase = SessionUiPhase.Ended;
+        ApplySessionBannerPolicy();
+        UpdateUiFromSnapshot();
     }
 
     private void ClearRemoteScreenShareFrame()

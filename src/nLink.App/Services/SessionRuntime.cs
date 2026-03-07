@@ -192,6 +192,7 @@ public sealed class SessionRuntime : IDisposable
     private readonly Dictionary<string, long> remoteControlLogRateLimitTicks = new(StringComparer.Ordinal);
     private readonly LinkedList<RemoteControlInjectionWorkItem> remoteControlInjectionQueue = new();
     private LinkedListNode<RemoteControlInjectionWorkItem>? queuedRemoteControlInjectionMouseMoveNode;
+    private LinkedListNode<RemoteControlInjectionWorkItem>? queuedRemoteControlInjectionSnapshotNode;
     private bool remoteControlInjectionExecutorActive;
     private readonly object remoteControlMouseMoveQueueGate = new();
 
@@ -225,6 +226,7 @@ public sealed class SessionRuntime : IDisposable
     private bool transientStatusVisible;
     private string transientStatusText = string.Empty;
     private bool transientStatusCanCancel;
+    private string remoteControlStatusHintText = string.Empty;
     private int quietHelpeeRehostInProgress;
     private bool activeSessionCounted;
     private bool activeConnectAttemptCounted;
@@ -394,27 +396,23 @@ public sealed class SessionRuntime : IDisposable
         activeConnectAttemptCounted = false;
     }
 
-    private void RunCountedBackgroundTask(Func<Task> body, bool countAsTransportTask = true)
+    private void RunCountedBackgroundTask(
+        Func<Task> body,
+        bool countAsTransportTask = true,
+        [CallerMemberName] string operationName = "")
     {
         if (countAsTransportTask)
         {
             ActiveRuntimeCounters.IncTransportTasks();
         }
 
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await body().ConfigureAwait(false);
-            }
-            finally
-            {
-                if (countAsTransportTask)
-                {
-                    ActiveRuntimeCounters.DecTransportTasks();
-                }
-            }
-        });
+        _ = BackgroundTaskRunner.Run(
+            body,
+            source: "SessionRuntime",
+            operationName: operationName,
+            onFinally: countAsTransportTask ? ActiveRuntimeCounters.DecTransportTasks : null,
+            contextProvider: () =>
+                $"role={role}; session_state={state}; transport_state={transportState}; disposed={disposed}; resetting={resetInProgress}");
     }
 
     public event EventHandler<SessionRuntimeStateChangedEventArgs>? StateChanged;
@@ -457,6 +455,15 @@ public sealed class SessionRuntime : IDisposable
               PeerAddress.TryParse(localAddressTransport.LocalPeerAddress, out var peerAddress)
                 ? peerAddress
                 : null;
+    public PeerAddress? CurrentInvitePeerAddress =>
+        role != SessionRuntimeRole.Helpee
+            ? null
+            : transport is NknSignalingTransport
+                ? sessionSecurityState.HelpeeAddress
+                : transport is ILocalPeerAddressSignalingTransport localInviteAddressTransport &&
+                  PeerAddress.TryParse(localInviteAddressTransport.LocalPeerAddress, out var invitePeerAddress)
+                    ? invitePeerAddress
+                    : null;
 
     public bool HasPendingJoinRequest => pendingJoinRequest is not null;
     public ApprovalRequest? PendingApprovalRequest => pendingApprovalRequest;
@@ -480,6 +487,7 @@ public sealed class SessionRuntime : IDisposable
     public bool SessionSupportsRemoteControl => remoteControlSessionState.SessionSupportsRemoteControl;
     public bool RemoteControlAvailable => remoteControlSessionState.RemoteControlAvailable && CanPerform(SessionCapability.RemoteControl);
     public bool HasPendingRemoteControlConsentPrompt => hasPendingRemoteControlConsentPrompt;
+    public string RemoteControlStatusHintText => remoteControlStatusHintText;
     public bool RemoteControlMappingAvailable => IsUsableRemoteControlDisplayInfo(latestRemoteControlDisplayInfo);
     public string? RemoteControlMappingDisplayId =>
         IsUsableRemoteControlDisplayInfo(latestRemoteControlDisplayInfo) ? latestRemoteControlDisplayInfo!.DisplayId : null;
@@ -1351,6 +1359,8 @@ public sealed class SessionRuntime : IDisposable
             ResetRemoteControlRequestScopedTracking("request_id_changed");
         }
 
+        UpdateRemoteControlStatusHint(reducerEvent.Reason, transition.NextState.ControlState);
+
         RemoteControlReducerWiring.ExecuteSideEffects(
             transition,
             effect => ExecuteRemoteControlReducerSideEffect(effect, reducerReason));
@@ -2112,8 +2122,8 @@ public sealed class SessionRuntime : IDisposable
         ControlInputMessageV1 outboundMessage;
         string? requestIdForLog = null;
         string? controllerPeerIdForLog = null;
-        string displayId;
-        long displayRevision;
+        var kind = string.IsNullOrWhiteSpace(message.Kind) ? "mouse_move" : message.Kind.Trim();
+        var requiresDisplayMapping = !string.Equals(kind, "key", StringComparison.Ordinal);
 
         await lifecycleGate.WaitAsync(uiCt).ConfigureAwait(false);
         try
@@ -2145,7 +2155,8 @@ public sealed class SessionRuntime : IDisposable
             requestIdForLog = requestId;
             controllerPeerIdForLog = remoteControlSessionState.ControllerPeerId;
 
-            if (!IsUsableRemoteControlDisplayInfo(latestRemoteControlDisplayInfo))
+            ControlDisplayInfoMessageV1? peerDisplayInfo = null;
+            if (requiresDisplayMapping && !IsUsableRemoteControlDisplayInfo(latestRemoteControlDisplayInfo))
             {
                 if (ShouldEmitRemoteControlRateLimitedLog("input_send_ignored:mapping_unavailable"))
                 {
@@ -2153,9 +2164,11 @@ public sealed class SessionRuntime : IDisposable
                 }
                 return false;
             }
-            var peerDisplayInfo = latestRemoteControlDisplayInfo!;
+            if (requiresDisplayMapping)
+            {
+                peerDisplayInfo = latestRemoteControlDisplayInfo!;
+            }
 
-            var kind = string.IsNullOrWhiteSpace(message.Kind) ? "mouse_move" : message.Kind.Trim();
             var outboundSeq = message.Seq > 0
                 ? message.Seq
                 : Interlocked.Increment(ref remoteControlInputSequence);
@@ -2164,15 +2177,13 @@ public sealed class SessionRuntime : IDisposable
             {
                 outboundTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             }
-            displayId = peerDisplayInfo.DisplayId;
-            displayRevision = peerDisplayInfo.Revision;
 
             outboundMessage = message with
             {
                 RequestId = requestId,
                 Kind = kind,
-                DisplayId = displayId,
-                DisplayInfoRevision = displayRevision,
+                DisplayId = requiresDisplayMapping ? peerDisplayInfo!.DisplayId : null,
+                DisplayInfoRevision = requiresDisplayMapping ? peerDisplayInfo!.Revision : null,
                 Seq = outboundSeq,
                 TsUtcMs = outboundTimestamp,
             };
@@ -2491,8 +2502,9 @@ public sealed class SessionRuntime : IDisposable
         }
     }
 
-    private async Task SendRemoteControlDisplayInfoAsync(ControlDisplayInfoMessageV1 message, CancellationToken ct)
+    private async Task SendRemoteControlDisplayInfoAsync(string sessionIdSnapshot, ControlDisplayInfoMessageV1 message, CancellationToken ct)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionIdSnapshot);
         ArgumentNullException.ThrowIfNull(message);
         if (ct.IsCancellationRequested || disposed)
         {
@@ -2515,6 +2527,17 @@ public sealed class SessionRuntime : IDisposable
                 !FeatureFlags.EnableScreenShareCapture)
             {
                 LogRemoteControlInfo("display_info_send_ignored", "invalid_runtime_state");
+                return;
+            }
+
+            var currentSessionId = currentSessionGrant?.SessionId.Value ?? sessionSecurityState.SessionId?.Value ?? sessionId;
+            if (string.IsNullOrWhiteSpace(currentSessionId) ||
+                !string.Equals(currentSessionId, sessionIdSnapshot, StringComparison.Ordinal))
+            {
+                LogRemoteControlInfo(
+                    "display_info_send_ignored",
+                    $"session_mismatch; expected={currentSessionId ?? "(none)"}; captured={sessionIdSnapshot}",
+                    controllerPeerId: remoteControlSessionState.ControllerPeerId);
                 return;
             }
 
@@ -3179,6 +3202,7 @@ public sealed class SessionRuntime : IDisposable
     private void HandleGrantInvalidated(string reason)
     {
         LogApprovalInvalidated(reason);
+        EnsureRemoteControlStoppedForAuthorizationLoss(reason);
         allowTransportScreenShareAutoStart = false;
         RefreshRemoteControlCapabilitiesFromTransport();
         RunCountedBackgroundTask(
@@ -3880,6 +3904,36 @@ public sealed class SessionRuntime : IDisposable
                 return;
             }
 
+            if (e.Snapshot.Seq <= 0)
+            {
+                IncrementRemoteControlSuppressedInjectionCounter();
+                LogRemoteControlViolation("snapshot_ignored", "missing_seq", e.Snapshot.RequestId, normalizedPeerId);
+                return;
+            }
+
+            var previousReceivedSeq = Interlocked.Read(ref remoteControlSnapshotLastReceivedSeq);
+            if (previousReceivedSeq > 0 &&
+                e.Snapshot.Seq <= previousReceivedSeq)
+            {
+                IncrementRemoteControlSuppressedInjectionCounter();
+                var duplicateSnapshot = e.Snapshot.Seq == previousReceivedSeq;
+                var rateLimitKey = duplicateSnapshot
+                    ? "snapshot_deduped:duplicate_seq"
+                    : "snapshot_deduped:out_of_order_seq";
+                if (ShouldEmitRemoteControlRateLimitedLog(rateLimitKey))
+                {
+                    LogRemoteControlRateLimitedInfo(
+                        "snapshot_stale_dropped",
+                        duplicateSnapshot
+                            ? $"duplicate_or_replay_seq={e.Snapshot.Seq.ToString(CultureInfo.InvariantCulture)}; last_received={previousReceivedSeq.ToString(CultureInfo.InvariantCulture)}"
+                            : $"out_of_order_seq={e.Snapshot.Seq.ToString(CultureInfo.InvariantCulture)}; last_received={previousReceivedSeq.ToString(CultureInfo.InvariantCulture)}",
+                        e.Snapshot.RequestId,
+                        normalizedPeerId);
+                }
+
+                return;
+            }
+
             stopEpochSnapshot = SnapshotRemoteControlStopPriorityEpoch();
             acceptedSnapshot = e.Snapshot;
             peerId = normalizedPeerId;
@@ -4299,6 +4353,8 @@ public sealed class SessionRuntime : IDisposable
     private async Task HandleRemoteControlStartReceivedAsync(RemoteControlStartReceivedEventArgs e)
     {
         var stopEpochSnapshot = SnapshotRemoteControlStopPriorityEpoch();
+        ControlDisplayInfoMessageV1? displayInfoToResend = null;
+        string? displayInfoSessionId = null;
 
         await lifecycleGate.WaitAsync().ConfigureAwait(false);
         try
@@ -4368,12 +4424,26 @@ public sealed class SessionRuntime : IDisposable
                     "active",
                     e.Message.RequestId,
                     remoteControlSessionState.ControllerPeerId ?? e.PeerId);
+                if (IsUsableRemoteControlDisplayInfo(latestRemoteControlDisplayInfo))
+                {
+                    displayInfoToResend = latestRemoteControlDisplayInfo;
+                    displayInfoSessionId = currentSessionGrant?.SessionId.Value ?? sessionSecurityState.SessionId?.Value;
+                }
                 ClearPendingRemoteControlConsentToken();
             }
         }
         finally
         {
             lifecycleGate.Release();
+        }
+
+        if (!string.IsNullOrWhiteSpace(displayInfoSessionId) &&
+            displayInfoToResend is not null)
+        {
+            await SendRemoteControlDisplayInfoAsync(
+                displayInfoSessionId!,
+                displayInfoToResend,
+                CancellationToken.None).ConfigureAwait(false);
         }
     }
 
@@ -4595,8 +4665,11 @@ public sealed class SessionRuntime : IDisposable
     private void EnqueueRemoteControlInjection(RemoteControlInjectionWorkItem workItem)
     {
         var isMouseMove = workItem.Message is not null && IsLowPriorityMouseMoveInput(workItem.Message);
+        var isSnapshot = workItem.Snapshot is not null;
         var coalescedMouseMoveDrop = false;
+        var coalescedSnapshotDrop = false;
         var queueOverflowDroppedMouseMove = false;
+        var queueOverflowDroppedSnapshot = false;
         var queueOverflowDroppedCriticalInput = false;
         string droppedCriticalKind = "(none)";
         var shouldStartExecutor = false;
@@ -4620,6 +4693,36 @@ public sealed class SessionRuntime : IDisposable
                     queuedRemoteControlInjectionMouseMoveNode = remoteControlInjectionQueue.AddLast(workItem);
                 }
             }
+            else if (isSnapshot)
+            {
+                if (queuedRemoteControlInjectionSnapshotNode is not null)
+                {
+                    // Keep only the newest snapshot state while older queued snapshots are still pending.
+                    coalescedSnapshotDrop = true;
+                    queuedRemoteControlInjectionSnapshotNode.Value = workItem;
+                }
+                else
+                {
+                    if (remoteControlInjectionQueue.Count >= RemoteControlInjectionQueueCapacity)
+                    {
+                        if (queuedRemoteControlInjectionMouseMoveNode is not null)
+                        {
+                            remoteControlInjectionQueue.Remove(queuedRemoteControlInjectionMouseMoveNode);
+                            queuedRemoteControlInjectionMouseMoveNode = null;
+                            queueOverflowDroppedMouseMove = true;
+                        }
+                        else
+                        {
+                            queueOverflowDroppedSnapshot = true;
+                        }
+                    }
+
+                    if (!queueOverflowDroppedSnapshot)
+                    {
+                        queuedRemoteControlInjectionSnapshotNode = remoteControlInjectionQueue.AddLast(workItem);
+                    }
+                }
+            }
             else
             {
                 if (remoteControlInjectionQueue.Count >= RemoteControlInjectionQueueCapacity)
@@ -4630,6 +4733,13 @@ public sealed class SessionRuntime : IDisposable
                         remoteControlInjectionQueue.Remove(queuedRemoteControlInjectionMouseMoveNode);
                         queuedRemoteControlInjectionMouseMoveNode = null;
                         queueOverflowDroppedMouseMove = true;
+                    }
+                    else if (queuedRemoteControlInjectionSnapshotNode is not null)
+                    {
+                        // Prefer evicting stale snapshot state before older key/button work.
+                        remoteControlInjectionQueue.Remove(queuedRemoteControlInjectionSnapshotNode);
+                        queuedRemoteControlInjectionSnapshotNode = null;
+                        queueOverflowDroppedSnapshot = true;
                     }
                     else if (remoteControlInjectionQueue.First is not null)
                     {
@@ -4655,6 +4765,12 @@ public sealed class SessionRuntime : IDisposable
             PublishRemoteControlDebugDiagnostics();
         }
 
+        if (coalescedSnapshotDrop)
+        {
+            IncrementRemoteControlDebugQueueDropCount();
+            PublishRemoteControlDebugDiagnostics();
+        }
+
         if (queueOverflowDroppedMouseMove)
         {
             IncrementRemoteControlDebugQueueDropCount();
@@ -4664,6 +4780,17 @@ public sealed class SessionRuntime : IDisposable
                     "mouse_move_overflow",
                     GetRemoteControlInjectionWorkItemRequestId(workItem),
                     workItem.PeerId);
+        }
+
+        if (queueOverflowDroppedSnapshot)
+        {
+            IncrementRemoteControlDebugQueueDropCount();
+            PublishRemoteControlDebugDiagnostics();
+            LogRemoteControlInfo(
+                "input_inject_queue_drop",
+                "state_snapshot_overflow",
+                GetRemoteControlInjectionWorkItemRequestId(workItem),
+                workItem.PeerId);
         }
 
         if (queueOverflowDroppedCriticalInput)
@@ -4705,6 +4832,10 @@ public sealed class SessionRuntime : IDisposable
                 if (ReferenceEquals(node, queuedRemoteControlInjectionMouseMoveNode))
                 {
                     queuedRemoteControlInjectionMouseMoveNode = null;
+                }
+                else if (ReferenceEquals(node, queuedRemoteControlInjectionSnapshotNode))
+                {
+                    queuedRemoteControlInjectionSnapshotNode = null;
                 }
 
                 next = node.Value;
@@ -4781,8 +4912,8 @@ public sealed class SessionRuntime : IDisposable
                     MaybeSendControlAck(message.RequestId, message.Kind, previousSeq);
                     if (ShouldEmitRemoteControlRateLimitedLog("input_deduped:duplicate_seq"))
                     {
-                        LogRemoteControlInfo(
-                            "input_deduped",
+                        LogRemoteControlRateLimitedInfo(
+                            "input_stale_dropped",
                             $"duplicate_or_replay_seq={seq.ToString(CultureInfo.InvariantCulture)}; last={previousSeq.ToString(CultureInfo.InvariantCulture)}",
                             message.RequestId,
                             peerId);
@@ -4812,17 +4943,17 @@ public sealed class SessionRuntime : IDisposable
                     }
                     else
                     {
-                    MaybeSendControlAck(message.RequestId, message.Kind, previousSeq);
-                    if (ShouldEmitRemoteControlRateLimitedLog("input_deduped:out_of_order_seq"))
-                    {
-                        LogRemoteControlInfo(
-                            "input_deduped",
-                            $"out_of_order_seq={seq.ToString(CultureInfo.InvariantCulture)}; expected={(previousSeq + 1).ToString(CultureInfo.InvariantCulture)}; last={previousSeq.ToString(CultureInfo.InvariantCulture)}",
-                            message.RequestId,
-                            peerId);
-                    }
+                        MaybeSendControlAck(message.RequestId, message.Kind, previousSeq);
+                        if (ShouldEmitRemoteControlRateLimitedLog("input_deduped:out_of_order_seq"))
+                        {
+                            LogRemoteControlRateLimitedInfo(
+                                "input_stale_dropped",
+                                $"out_of_order_seq={seq.ToString(CultureInfo.InvariantCulture)}; expected={(previousSeq + 1).ToString(CultureInfo.InvariantCulture)}; last={previousSeq.ToString(CultureInfo.InvariantCulture)}",
+                                message.RequestId,
+                                peerId);
+                        }
 
-                    return;
+                        return;
                     }
                 }
             }
@@ -4912,6 +5043,22 @@ public sealed class SessionRuntime : IDisposable
             return false;
         }
 
+        if (snapshot.Seq <= 0)
+        {
+            reason = "missing_seq";
+            return false;
+        }
+
+        var previousAppliedSeq = Interlocked.Read(ref remoteControlSnapshotLastAppliedSeq);
+        if (previousAppliedSeq > 0 &&
+            snapshot.Seq <= previousAppliedSeq)
+        {
+            reason = snapshot.Seq == previousAppliedSeq
+                ? "duplicate_seq"
+                : "out_of_order_seq";
+            return false;
+        }
+
         var desiredButtons = ((RemoteControlMouseButtonsMask)snapshot.MouseButtonsMask) & RemoteControlKnownMouseButtonsMask;
         var stuckButtons = remoteControlAppliedMouseButtonsMask & ~desiredButtons;
         var nowTicks = Stopwatch.GetTimestamp();
@@ -4924,14 +5071,19 @@ public sealed class SessionRuntime : IDisposable
             forceDownInjected = TryForceDownButtonsFromSnapshot(desiredButtons, nowTicks);
         }
 
-        // TODO(v0.4.1): add conservative modifier unstick injection for stuck Shift/Ctrl/Alt/Meta keys.
         var desiredModifiers = ((RemoteControlModifiersMask)snapshot.ModifiersMask) & RemoteControlKnownModifiersMask;
-        _ = desiredModifiers;
+        var stuckModifiers = remoteControlAppliedModifiersMask & ~desiredModifiers;
+        var unstuckModifiers = ReleaseStuckRemoteControlModifiers(stuckModifiers);
+        remoteControlAppliedModifiersMask &= desiredModifiers;
 
         Interlocked.Increment(ref remoteControlSnapshotAppliedCount);
         if (unstuckButtons > 0)
         {
             Interlocked.Add(ref remoteControlSnapshotUnstuckButtonsCount, unstuckButtons);
+        }
+        if (unstuckModifiers > 0)
+        {
+            Interlocked.Add(ref remoteControlSnapshotUnstuckModifiersCount, unstuckModifiers);
         }
         Interlocked.Exchange(ref remoteControlSnapshotLastAppliedSeq, snapshot.Seq);
         Interlocked.Exchange(ref remoteControlSnapshotLastAppliedModifiersMask, (int)remoteControlAppliedModifiersMask);
@@ -4947,8 +5099,8 @@ public sealed class SessionRuntime : IDisposable
         }
 
         PublishRemoteControlDebugDiagnostics();
-        reason = unstuckButtons > 0
-            ? "unstuck_buttons"
+        reason = unstuckButtons > 0 || unstuckModifiers > 0
+            ? "unstuck_input_state"
             : forceDownInjected > 0
                 ? "force_down_applied"
                 : "snapshot_noop";
@@ -4979,6 +5131,37 @@ public sealed class SessionRuntime : IDisposable
 
             remoteInputInjector.InjectMouseButton(button, RemoteButtonAction.Up);
             RecordSnapshotForcedButtonUp(mask, nowTicks);
+            releasedCount++;
+        }
+    }
+
+    private long ReleaseStuckRemoteControlModifiers(RemoteControlModifiersMask modifiersToRelease)
+    {
+        if (modifiersToRelease == RemoteControlModifiersMask.None)
+        {
+            return 0;
+        }
+
+        long releasedCount = 0;
+        ReleaseModifierIfNeeded(RemoteControlModifiersMask.Shift, "Shift");
+        ReleaseModifierIfNeeded(RemoteControlModifiersMask.Ctrl, "Ctrl");
+        ReleaseModifierIfNeeded(RemoteControlModifiersMask.Alt, "Alt");
+        if ((modifiersToRelease & (RemoteControlModifiersMask.Meta | RemoteControlModifiersMask.Win)) != 0)
+        {
+            remoteInputInjector.InjectKey(new RemoteKey("Meta"), RemoteKeyAction.Up, RemoteKeyModifiers.None);
+            releasedCount++;
+        }
+
+        return releasedCount;
+
+        void ReleaseModifierIfNeeded(RemoteControlModifiersMask mask, string key)
+        {
+            if ((modifiersToRelease & mask) == 0)
+            {
+                return;
+            }
+
+            remoteInputInjector.InjectKey(new RemoteKey(key), RemoteKeyAction.Up, RemoteKeyModifiers.None);
             releasedCount++;
         }
     }
@@ -5148,7 +5331,16 @@ public sealed class SessionRuntime : IDisposable
             return;
         }
 
-        if (normalizedReason is "guard_runtime_state" or "guard_role" or "guard_control_state" or "stop_priority" or "feature_disabled")
+        if (normalizedReason is "duplicate_seq" or "out_of_order_seq")
+        {
+            LogRemoteControlRateLimitedInfo(
+                "snapshot_stale_dropped",
+                normalizedReason,
+                requestId,
+                controllerPeerId);
+        }
+
+        if (normalizedReason is "guard_runtime_state" or "guard_role" or "guard_control_state" or "stop_priority" or "feature_disabled" or "duplicate_seq" or "out_of_order_seq")
         {
             LogRemoteControlInfo("snapshot_ignored", normalizedReason, requestId, controllerPeerId);
             return;
@@ -5352,8 +5544,8 @@ public sealed class SessionRuntime : IDisposable
                 var deltaY = NormalizeWheelDelta(message.DeltaY, horizontal: false);
                 if (deltaX == 0 && deltaY == 0)
                 {
-                    reason = "wheel_zero_delta";
-                    return false;
+                    reason = "wheel_carry_only";
+                    return true;
                 }
 
                 remoteInputInjector.InjectMouseWheel(deltaX, deltaY);
@@ -5417,6 +5609,12 @@ public sealed class SessionRuntime : IDisposable
     private bool TryRejectStaleDisplayInfoInput(ControlInputMessageV1 message, out string reason)
     {
         reason = string.Empty;
+        var kind = string.IsNullOrWhiteSpace(message.Kind) ? string.Empty : message.Kind.Trim();
+        if (string.Equals(kind, "key", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         var displayInfo = latestRemoteControlDisplayInfo;
         if (!IsUsableRemoteControlDisplayInfo(displayInfo))
         {
@@ -5440,6 +5638,25 @@ public sealed class SessionRuntime : IDisposable
                 lastRemoteControlRevisionMismatchExpectedRevision = currentDisplayInfo.Revision;
             }
             reason = "display_id_mismatch";
+            return true;
+        }
+
+        var incomingRevisionForCurrentDisplay = message.DisplayInfoRevision ?? 0;
+        if (incomingRevisionForCurrentDisplay <= 0)
+        {
+            reason = "display_revision_missing";
+            return true;
+        }
+
+        if (incomingRevisionForCurrentDisplay < currentDisplayInfo.Revision)
+        {
+            reason = "display_revision_stale";
+            return true;
+        }
+
+        if (incomingRevisionForCurrentDisplay != currentDisplayInfo.Revision)
+        {
+            reason = "display_revision_mismatch";
             return true;
         }
 
@@ -6831,7 +7048,7 @@ public sealed class SessionRuntime : IDisposable
         if (!remoteControlSessionState.SessionSupportsRemoteControl &&
             remoteControlSessionState.ControlState != ControlState.Off)
         {
-            ResetRemoteControlState("capability_lost");
+            EnsureRemoteControlStoppedForAuthorizationLoss("capability_lost");
         }
     }
 
@@ -6892,8 +7109,7 @@ public sealed class SessionRuntime : IDisposable
         ResetRemoteControlWheelDeltaCarry();
         ResetRemoteControlDebugLastMapped();
         Interlocked.Exchange(ref remoteControlForceNextMoveInjectionLog, 0);
-        remoteControlAppliedMouseButtonsMask = RemoteControlMouseButtonsMask.None;
-        remoteControlAppliedModifiersMask = RemoteControlModifiersMask.None;
+        ClearRemoteControlAppliedInputState("reset:" + reason);
         hasPendingRemoteControlConsentPrompt = false;
         ClearPendingRemoteControlConsentToken();
         ClearRemoteControlRevisionMismatchCache();
@@ -6904,6 +7120,7 @@ public sealed class SessionRuntime : IDisposable
                 RemoteControlCoordinatorEventKind.Reset,
                 reason));
         remoteControlSessionState = transition.NextState;
+        UpdateRemoteControlStatusHint(reason, remoteControlSessionState.ControlState);
 
         LogRemoteControlTransition(transition.PreviousState, remoteControlSessionState, reason);
         NotifyRemoteControlStateChanged();
@@ -6942,6 +7159,10 @@ public sealed class SessionRuntime : IDisposable
         Interlocked.Exchange(ref remoteControlSnapshotForcedUpX1Tick, 0);
         Interlocked.Exchange(ref remoteControlSnapshotForcedUpX2Tick, 0);
         ClearRemoteControlAppliedInputState("request_scope_reset:" + reason);
+        if (role == SessionRuntimeRole.Helper)
+        {
+            ClearRemoteControlDisplayInfo("request_scope_reset:" + reason, notifyStateChanged: false);
+        }
         ResetRemoteControlWheelDeltaCarry();
         ResetRemoteControlDebugLastMapped();
         PublishRemoteControlDebugDiagnostics();
@@ -6949,6 +7170,15 @@ public sealed class SessionRuntime : IDisposable
 
     private void ClearRemoteControlAppliedInputState(string reason)
     {
+        var releasedButtons = 0L;
+        var releasedModifiers = 0L;
+        if (role == SessionRuntimeRole.Helpee &&
+            remoteInputInjector.IsSupported)
+        {
+            releasedButtons = ReleaseTrackedRemoteControlMouseButtons(remoteControlAppliedMouseButtonsMask);
+            releasedModifiers = ReleaseStuckRemoteControlModifiers(remoteControlAppliedModifiersMask);
+        }
+
         remoteControlAppliedMouseButtonsMask = RemoteControlMouseButtonsMask.None;
         remoteControlAppliedModifiersMask = RemoteControlModifiersMask.None;
         Interlocked.Exchange(ref remoteControlSnapshotLastAppliedSeq, 0);
@@ -6956,7 +7186,36 @@ public sealed class SessionRuntime : IDisposable
         Interlocked.Exchange(ref remoteControlSnapshotLastAppliedMouseButtonsMask, 0);
         if (ShouldEmitRemoteControlRateLimitedLog("applied_input_state_cleared", TimeSpan.FromSeconds(2)))
         {
-            LogRemoteControlInfo("applied_input_state_cleared", reason);
+            LogRemoteControlInfo(
+                "applied_input_state_cleared",
+                $"{reason}; released_buttons={releasedButtons.ToString(CultureInfo.InvariantCulture)}; released_modifiers={releasedModifiers.ToString(CultureInfo.InvariantCulture)}");
+        }
+    }
+
+    private long ReleaseTrackedRemoteControlMouseButtons(RemoteControlMouseButtonsMask buttonsToRelease)
+    {
+        if (buttonsToRelease == RemoteControlMouseButtonsMask.None)
+        {
+            return 0;
+        }
+
+        long releasedCount = 0;
+        ReleaseMouseButtonIfNeeded(RemoteControlMouseButtonsMask.Left, RemoteMouseButton.Left);
+        ReleaseMouseButtonIfNeeded(RemoteControlMouseButtonsMask.Right, RemoteMouseButton.Right);
+        ReleaseMouseButtonIfNeeded(RemoteControlMouseButtonsMask.Middle, RemoteMouseButton.Middle);
+        ReleaseMouseButtonIfNeeded(RemoteControlMouseButtonsMask.X1, RemoteMouseButton.X1);
+        ReleaseMouseButtonIfNeeded(RemoteControlMouseButtonsMask.X2, RemoteMouseButton.X2);
+        return releasedCount;
+
+        void ReleaseMouseButtonIfNeeded(RemoteControlMouseButtonsMask mask, RemoteMouseButton button)
+        {
+            if ((buttonsToRelease & mask) == 0)
+            {
+                return;
+            }
+
+            remoteInputInjector.InjectMouseButton(button, RemoteButtonAction.Up);
+            releasedCount++;
         }
     }
 
@@ -7688,6 +7947,7 @@ public sealed class SessionRuntime : IDisposable
             "guard_request_mismatch" => "input_inject_ignored:guard_request_mismatch",
             "guard_controller_mismatch" => "input_inject_ignored:guard_controller_mismatch",
             "display_id_mismatch" => "input_inject_ignored:display_id_mismatch",
+            "display_revision_stale" => "input_inject_ignored:display_revision_stale",
             "display_revision_mismatch" => "input_inject_ignored:display_revision_mismatch",
             "missing_seq" => "input_inject_ignored:missing_seq",
             "stop_priority" => "input_inject_ignored:stop_priority",
@@ -7716,6 +7976,15 @@ public sealed class SessionRuntime : IDisposable
             {
                 return;
             }
+        }
+
+        if (normalizedReason is "display_revision_stale" or "display_revision_mismatch")
+        {
+            LogRemoteControlRateLimitedInfo(
+                "input_stale_dropped",
+                normalizedReason,
+                requestId,
+                controllerPeerId);
         }
 
         if (string.Equals(normalizedReason, "mapping_metadata_missing", StringComparison.Ordinal))
@@ -7775,6 +8044,88 @@ public sealed class SessionRuntime : IDisposable
         LocalOperationalLog.Info(
             "RemoteControl",
             $"event=state_transition; from={previous.ControlState}; to={next.ControlState}; request_id={next.CurrentControlRequestId ?? "(none)"}; controller_peer_id={next.ControllerPeerId ?? "(none)"}; role={role}; reason={reason}; token_expiry_utc={pendingRemoteControlConsentToken?.ExpiresAtUtc.ToString("O") ?? "(none)"}");
+    }
+
+    private void UpdateRemoteControlStatusHint(string? reason, ControlState nextState)
+    {
+        if (nextState is ControlState.Active or ControlState.Requesting)
+        {
+            remoteControlStatusHintText = string.Empty;
+            return;
+        }
+
+        remoteControlStatusHintText = ResolveRemoteControlStatusHintText(reason);
+    }
+
+    private static string ResolveRemoteControlStatusHintText(string? reason)
+    {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? string.Empty : reason.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedReason))
+        {
+            return string.Empty;
+        }
+
+        if (normalizedReason is "approval_expired" or "approval_grant_missing" or "capability_lost" or "security_context_changed")
+        {
+            return "Authorization expired or revoked";
+        }
+
+        if (normalizedReason.StartsWith("security_", StringComparison.Ordinal) ||
+            normalizedReason.StartsWith("authorization_", StringComparison.Ordinal) ||
+            normalizedReason.StartsWith("authorization_loss:", StringComparison.Ordinal))
+        {
+            return "Authorization expired or revoked";
+        }
+
+        return string.Empty;
+    }
+
+    private void LogRemoteControlRateLimitedInfo(
+        string eventName,
+        string reason,
+        string? requestId = null,
+        string? controllerPeerId = null,
+        string? tokenDecision = null,
+        TimeSpan? window = null)
+    {
+        var rateLimitKey = BuildRemoteControlDiagnosticRateLimitKey(eventName, reason, requestId, controllerPeerId, tokenDecision);
+        if (!ShouldEmitRemoteControlRateLimitedLog(rateLimitKey, window))
+        {
+            return;
+        }
+
+        LogRemoteControlInfo(eventName, reason, requestId, controllerPeerId, tokenDecision);
+    }
+
+    private void LogRemoteControlRateLimitedViolation(
+        string eventName,
+        string reason,
+        string? requestId = null,
+        string? controllerPeerId = null,
+        string? tokenDecision = null,
+        TimeSpan? window = null)
+    {
+        var rateLimitKey = BuildRemoteControlDiagnosticRateLimitKey(eventName, reason, requestId, controllerPeerId, tokenDecision);
+        if (!ShouldEmitRemoteControlRateLimitedLog(rateLimitKey, window))
+        {
+            return;
+        }
+
+        LogRemoteControlViolation(eventName, reason, requestId, controllerPeerId, tokenDecision);
+    }
+
+    private static string BuildRemoteControlDiagnosticRateLimitKey(
+        string eventName,
+        string reason,
+        string? requestId,
+        string? controllerPeerId,
+        string? tokenDecision)
+    {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "(none)" : reason.Trim();
+        var normalizedRequestId = string.IsNullOrWhiteSpace(requestId) ? "(none)" : requestId.Trim();
+        var normalizedControllerPeerId = string.IsNullOrWhiteSpace(controllerPeerId) ? "(none)" : controllerPeerId.Trim();
+        var normalizedTokenDecision = string.IsNullOrWhiteSpace(tokenDecision) ? "(none)" : tokenDecision.Trim();
+        return $"diag:{eventName}:{normalizedReason}:{normalizedRequestId}:{normalizedControllerPeerId}:{normalizedTokenDecision}";
     }
 
     private void LogRemoteControlInfo(
@@ -7943,9 +8294,12 @@ public sealed class SessionRuntime : IDisposable
         lock (remoteControlInjectionQueueGate)
         {
             clearedCount = remoteControlInjectionQueue.Count;
-            flushed = remoteControlInjectionQueue.Count > 0 || queuedRemoteControlInjectionMouseMoveNode is not null;
+            flushed = remoteControlInjectionQueue.Count > 0 ||
+                      queuedRemoteControlInjectionMouseMoveNode is not null ||
+                      queuedRemoteControlInjectionSnapshotNode is not null;
             remoteControlInjectionQueue.Clear();
             queuedRemoteControlInjectionMouseMoveNode = null;
+            queuedRemoteControlInjectionSnapshotNode = null;
         }
 
         if (flushed)
@@ -8062,6 +8416,47 @@ public sealed class SessionRuntime : IDisposable
                 LogRemoteControlViolation("stop_send_auto_failed", ex.GetType().Name, requestId, controllerPeerId);
             }
         }, countAsTransportTask: false);
+    }
+
+    private void EnsureRemoteControlStoppedForAuthorizationLoss(string reason)
+    {
+        if (remoteControlSessionState.ControlState == ControlState.Off)
+        {
+            return;
+        }
+
+        var requestId = remoteControlSessionState.CurrentControlRequestId;
+        var controllerPeerId = remoteControlSessionState.ControllerPeerId;
+        var stopReason = GetAuthorizationLossRemoteControlStopReason(reason);
+        MarkRemoteControlStopPriority($"authorization_loss:{stopReason}", requestId, controllerPeerId);
+        LogRemoteControlRateLimitedViolation(
+            "security_stop_initiated",
+            stopReason,
+            requestId,
+            controllerPeerId,
+            window: TimeSpan.FromSeconds(5));
+        if (!disposed &&
+            !resetInProgress &&
+            state == SessionRuntimeState.Connected)
+        {
+            TrySendRemoteControlStopFireAndForget(requestId, controllerPeerId, stopReason);
+        }
+
+        ResetRemoteControlState(stopReason);
+    }
+
+    private static string GetAuthorizationLossRemoteControlStopReason(string reason)
+    {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "authorization_lost" : reason.Trim();
+        return normalizedReason switch
+        {
+            "approval_expired" => "security_approval_expired",
+            "security_context_changed" => "security_context_invalidated",
+            "capability_lost" => "security_capability_lost",
+            "approval_grant_missing" => "security_approval_missing",
+            "security_transport_required" => "security_transport_required",
+            _ => "security_authorization_lost:" + normalizedReason,
+        };
     }
 
     private string GetRunIdForLog() => TransportTelemetryContext.RunId;

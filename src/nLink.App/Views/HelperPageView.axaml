@@ -263,17 +263,18 @@
                                                             Command="{Binding RetryCommand}"
                                                             IsVisible="{Binding ShowRetryAction}"/>
 
-                                                    <Grid ColumnDefinitions="*,*"
-                                                          ColumnSpacing="10">
-                                                        <Button Grid.Column="0"
-                                                                Classes="appButton secondaryButton compactSecondaryAction"
+                                                    <StackPanel Orientation="Horizontal"
+                                                                HorizontalAlignment="Center"
+                                                                Spacing="10">
+                                                        <Button Classes="appButton secondaryButton compactSecondaryAction"
                                                                 AutomationProperties.AutomationId="Helper.PasteFromClipboard"
-                                                                Content="Paste from clipboard"
+                                                                Content="Paste invite"
+                                                                Width="160"
                                                                 Click="PasteFromClipboard_Click"/>
-                                                        <Button Grid.Column="1"
-                                                                Classes="appButton secondaryButton compactSecondaryAction"
+                                                        <Button Classes="appButton secondaryButton compactSecondaryAction"
                                                                 AutomationProperties.AutomationId="Helper.ScanQr"
-                                                                Content="Scan QR">
+                                                                Content="Scan QR"
+                                                                Width="160">
                                                             <Button.Flyout>
                                                                 <MenuFlyout Placement="Bottom">
                                                                     <MenuItem Header="Scan from file"
@@ -283,7 +284,7 @@
                                                                 </MenuFlyout>
                                                             </Button.Flyout>
                                                         </Button>
-                                                    </Grid>
+                                                    </StackPanel>
                                                 </StackPanel>
                                             </Border>
 
@@ -294,68 +295,16 @@
                                                        HorizontalAlignment="Center"
                                                        IsVisible="{Binding ShowCopyFeedbackInline}"/>
 
-                                            <WrapPanel Orientation="Horizontal"
-                                                       HorizontalAlignment="Center"
-                                                       IsVisible="{Binding ShowMainControls}">
+                                            <StackPanel HorizontalAlignment="Center"
+                                                        IsVisible="{Binding ShowMainControls}">
                                                 <Button Classes="linkButton linkAction"
                                                         AutomationProperties.AutomationId="Helper.CopyInstallLink"
                                                         Content="Copy install link"
                                                         TabIndex="2"
-                                                        Margin="0,0,18,8"
-                                                        Command="{Binding CopyInstallMessageCommand}"/>
-                                                <Button Classes="linkButton linkAction"
-                                                        AutomationProperties.AutomationId="Helper.UseNftp"
-                                                        Content="Use file transfer instead"
-                                                        TabIndex="3"
                                                         Margin="0,0,0,8"
-                                                        Command="{Binding SendFileCommand}"/>
-                                            </WrapPanel>
+                                                        Command="{Binding CopyInstallMessageCommand}"/>
+                                            </StackPanel>
 
-                                            <Border Classes="appPanel"
-                                                    Padding="14"
-                                                    Margin="0,6,0,0"
-                                                    IsVisible="{Binding ShowRecentTargets}">
-                                                <StackPanel Spacing="10">
-                                                    <Grid ColumnDefinitions="*,Auto"
-                                                          ColumnSpacing="8">
-                                                        <TextBlock Text="Recent"
-                                                                   Classes="appMuted"
-                                                                   FontSize="13"
-                                                                   FontWeight="SemiBold"
-                                                                   VerticalAlignment="Center"/>
-                                                        <Button Grid.Column="1"
-                                                                Classes="linkButton linkAction"
-                                                                AutomationProperties.AutomationId="Helper.ClearRecentTargets"
-                                                                Content="Clear"
-                                                                Command="{Binding ClearRecentTargetsCommand}"
-                                                                Height="30"
-                                                                MinWidth="76"/>
-                                                    </Grid>
-                                                    <ItemsControl ItemsSource="{Binding RecentTargets}">
-                                                        <ItemsControl.ItemsPanel>
-                                                            <ItemsPanelTemplate>
-                                                                <StackPanel Orientation="Vertical"/>
-                                                            </ItemsPanelTemplate>
-                                                        </ItemsControl.ItemsPanel>
-                                                        <ItemsControl.ItemTemplate>
-                                                            <DataTemplate>
-                                                                <Button Classes="appButton secondaryButton recentTargetButton"
-                                                                        AutomationProperties.AutomationId="Helper.RecentTarget"
-                                                                        Margin="0,0,0,6"
-                                                                        MinWidth="0"
-                                                                        MaxWidth="560"
-                                                                        Command="{Binding #Root.DataContext.UseRecentTargetCommand}"
-                                                                        CommandParameter="{Binding .}"
-                                                                        ToolTip.Tip="{Binding .}">
-                                                                    <TextBlock Text="{Binding .}"
-                                                                               TextTrimming="CharacterEllipsis"
-                                                                               TextWrapping="NoWrap"/>
-                                                                </Button>
-                                                            </DataTemplate>
-                                                        </ItemsControl.ItemTemplate>
-                                                    </ItemsControl>
-                                                </StackPanel>
-                                            </Border>
                                         </StackPanel>
                                     </Border>
                                 </StackPanel>

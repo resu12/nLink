@@ -233,6 +233,48 @@ public sealed class RemoteControlP4Tests
     }
 
     [Fact]
+    public async Task RemoteControlSnapshot_WhenModifierWasAppliedButSnapshotHasNone_InjectsModifierUpOnce()
+    {
+        await FeatureFlagEnvGate.WaitAsync();
+        try
+        {
+            using var snapshotFlag = new EnvironmentOverride("NLINK_FEATURE_REMOTE_CONTROL_STATE_SNAPSHOT", "1");
+
+            var transport = new TestRemoteControlTransport();
+            var injector = new CountingRemoteInputInjector();
+            var mapper = new FixedRemoteCoordinateMapper();
+            using var runtime = CreateRuntime(transport, injector, mapper);
+            AttachConnectedRuntime(runtime, transport, SessionRuntimeRole.Helpee);
+            SetRemoteControlState(runtime, ControlState.Active, "controller-peer", "req-1");
+            SetPrivateField(runtime, "remoteControlAppliedModifiersMask", RemoteControlModifiersMask.Shift);
+
+            transport.InjectIncomingControlStateSnapshot(
+                new ControlStateSnapshotV1
+                {
+                    RequestId = "req-1",
+                    Seq = 1,
+                    TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    ModifiersMask = 0,
+                    MouseButtonsMask = 0,
+                },
+                peerId: "controller-peer");
+
+            await WaitUntilAsync(
+                () => injector.KeyCalls == 1 &&
+                      injector.LastKeyAction == RemoteKeyAction.Up &&
+                      string.Equals(injector.LastKeyLogical, "Shift", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(1));
+            Assert.Equal(1, injector.KeyCalls);
+            Assert.Equal(RemoteKeyAction.Up, injector.LastKeyAction);
+            Assert.Equal("Shift", injector.LastKeyLogical);
+        }
+        finally
+        {
+            FeatureFlagEnvGate.Release();
+        }
+    }
+
+    [Fact]
     public async Task RemoteControlSnapshot_ForceDownEnabled_ReappliesDownAfterStableSnapshotStream()
     {
         await FeatureFlagEnvGate.WaitAsync();
@@ -309,6 +351,129 @@ public sealed class RemoteControlP4Tests
     }
 
     [Fact]
+    public async Task RemoteControlSnapshot_WhenSeqReplayedOrOutOfOrder_IsIgnored()
+    {
+        await FeatureFlagEnvGate.WaitAsync();
+        try
+        {
+            using var snapshotFlag = new EnvironmentOverride("NLINK_FEATURE_REMOTE_CONTROL_STATE_SNAPSHOT", "1");
+
+            var transport = new TestRemoteControlTransport();
+            var injector = new CountingRemoteInputInjector();
+            var mapper = new FixedRemoteCoordinateMapper();
+            using var runtime = CreateRuntime(transport, injector, mapper);
+            AttachConnectedRuntime(runtime, transport, SessionRuntimeRole.Helpee);
+            SetRemoteControlState(runtime, ControlState.Active, "controller-peer", "req-1");
+            SetPrivateField(runtime, "remoteControlAppliedMouseButtonsMask", RemoteControlMouseButtonsMask.Left);
+
+            transport.InjectIncomingControlStateSnapshot(
+                new ControlStateSnapshotV1
+                {
+                    RequestId = "req-1",
+                    Seq = 5,
+                    TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    ModifiersMask = 0,
+                    MouseButtonsMask = 0,
+                },
+                peerId: "controller-peer");
+
+            await WaitUntilAsync(
+                () => injector.MouseButtonCalls == 1 &&
+                      (long)(GetPrivateField(runtime, "remoteControlSnapshotAppliedCount") ?? 0L) == 1L,
+                TimeSpan.FromSeconds(1));
+
+            transport.InjectIncomingControlStateSnapshot(
+                new ControlStateSnapshotV1
+                {
+                    RequestId = "req-1",
+                    Seq = 5,
+                    TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    ModifiersMask = 0,
+                    MouseButtonsMask = 0,
+                },
+                peerId: "controller-peer");
+            transport.InjectIncomingControlStateSnapshot(
+                new ControlStateSnapshotV1
+                {
+                    RequestId = "req-1",
+                    Seq = 4,
+                    TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    ModifiersMask = 0,
+                    MouseButtonsMask = 0,
+                },
+                peerId: "controller-peer");
+
+            await Task.Delay(150);
+
+            Assert.Equal(1, injector.MouseButtonCalls);
+            Assert.Equal(1L, (long)(GetPrivateField(runtime, "remoteControlSnapshotAppliedCount") ?? 0L));
+            Assert.Equal(1L, (long)(GetPrivateField(runtime, "remoteControlSnapshotReceivedCount") ?? 0L));
+            Assert.Equal(5L, (long)(GetPrivateField(runtime, "remoteControlSnapshotLastReceivedSeq") ?? 0L));
+            Assert.Equal(5L, (long)(GetPrivateField(runtime, "remoteControlSnapshotLastAppliedSeq") ?? 0L));
+        }
+        finally
+        {
+            FeatureFlagEnvGate.Release();
+        }
+    }
+
+    [Fact]
+    public async Task RemoteControlSnapshot_WhenSeqSkipsForward_IsAccepted()
+    {
+        await FeatureFlagEnvGate.WaitAsync();
+        try
+        {
+            using var snapshotFlag = new EnvironmentOverride("NLINK_FEATURE_REMOTE_CONTROL_STATE_SNAPSHOT", "1");
+
+            var transport = new TestRemoteControlTransport();
+            var injector = new CountingRemoteInputInjector();
+            var mapper = new FixedRemoteCoordinateMapper();
+            using var runtime = CreateRuntime(transport, injector, mapper);
+            AttachConnectedRuntime(runtime, transport, SessionRuntimeRole.Helpee);
+            SetRemoteControlState(runtime, ControlState.Active, "controller-peer", "req-1");
+
+            transport.InjectIncomingControlStateSnapshot(
+                new ControlStateSnapshotV1
+                {
+                    RequestId = "req-1",
+                    Seq = 1,
+                    TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    ModifiersMask = 0,
+                    MouseButtonsMask = 0,
+                },
+                peerId: "controller-peer");
+
+            await WaitUntilAsync(
+                () => (long)(GetPrivateField(runtime, "remoteControlSnapshotAppliedCount") ?? 0L) == 1L,
+                TimeSpan.FromSeconds(1));
+
+            transport.InjectIncomingControlStateSnapshot(
+                new ControlStateSnapshotV1
+                {
+                    RequestId = "req-1",
+                    Seq = 3,
+                    TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    ModifiersMask = 0,
+                    MouseButtonsMask = 0,
+                },
+                peerId: "controller-peer");
+
+            await WaitUntilAsync(
+                () => (long)(GetPrivateField(runtime, "remoteControlSnapshotAppliedCount") ?? 0L) == 2L,
+                TimeSpan.FromSeconds(1));
+
+            Assert.Equal(2L, (long)(GetPrivateField(runtime, "remoteControlSnapshotReceivedCount") ?? 0L));
+            Assert.Equal(3L, (long)(GetPrivateField(runtime, "remoteControlSnapshotLastReceivedSeq") ?? 0L));
+            Assert.Equal(3L, (long)(GetPrivateField(runtime, "remoteControlSnapshotLastAppliedSeq") ?? 0L));
+            Assert.Equal(0, injector.MouseButtonCalls);
+        }
+        finally
+        {
+            FeatureFlagEnvGate.Release();
+        }
+    }
+
+    [Fact]
     public async Task RemoteControlInput_MouseMove_WithoutDisplayInfo_DoesNotInject()
     {
         var transport = new TestRemoteControlTransport();
@@ -364,11 +529,11 @@ public sealed class RemoteControlP4Tests
             frameWidth: 1280,
             frameHeight: 720);
 
-        await InvokePrivateAsync(runtime, "SendRemoteControlDisplayInfoAsync", first, CancellationToken.None);
+        await SendDisplayInfoAsync(runtime, first);
         await WaitUntilAsync(() => transport.SentControlDisplayInfoCount == 1, TimeSpan.FromSeconds(1));
         Assert.Equal(ControlState.Active, runtime.ControlState);
 
-        await InvokePrivateAsync(runtime, "SendRemoteControlDisplayInfoAsync", changed, CancellationToken.None);
+        await SendDisplayInfoAsync(runtime, changed);
         await WaitUntilAsync(() => transport.SentControlStopCount >= 1, TimeSpan.FromSeconds(1));
         Assert.Equal(ControlState.Off, runtime.ControlState);
         Assert.Equal("screen_changed", transport.GetLastSentControlStop()?.Reason);
@@ -403,11 +568,11 @@ public sealed class RemoteControlP4Tests
             frameWidth: 960,
             frameHeight: 540);
 
-        await InvokePrivateAsync(runtime, "SendRemoteControlDisplayInfoAsync", first, CancellationToken.None);
+        await SendDisplayInfoAsync(runtime, first);
         await WaitUntilAsync(() => transport.SentControlDisplayInfoCount == 1, TimeSpan.FromSeconds(1));
         Assert.Equal(ControlState.Active, runtime.ControlState);
 
-        await InvokePrivateAsync(runtime, "SendRemoteControlDisplayInfoAsync", frameOnlyChanged, CancellationToken.None);
+        await SendDisplayInfoAsync(runtime, frameOnlyChanged);
         await Task.Delay(150);
         Assert.Equal(ControlState.Active, runtime.ControlState);
         Assert.Equal(0, transport.SentControlStopCount);
@@ -432,7 +597,7 @@ public sealed class RemoteControlP4Tests
             captureHeight: 500,
             frameWidth: 1000,
             frameHeight: 500);
-        await InvokePrivateAsync(runtime, "SendRemoteControlDisplayInfoAsync", displayInfo, CancellationToken.None);
+        await SendDisplayInfoAsync(runtime, displayInfo);
 
         transport.InjectIncomingControlInput(
             new ControlInputMessageV1
@@ -471,9 +636,18 @@ public sealed class RemoteControlP4Tests
             DeltaY = 0.4d,
         };
 
-        transport.InjectIncomingControlInput(wheelMessage, peerId: "controller-peer");
-        transport.InjectIncomingControlInput(wheelMessage, peerId: "controller-peer");
-        transport.InjectIncomingControlInput(wheelMessage, peerId: "controller-peer");
+        InvokeProcessRemoteControlInjection(
+            runtime,
+            wheelMessage with { Seq = 1, TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() },
+            "controller-peer");
+        InvokeProcessRemoteControlInjection(
+            runtime,
+            wheelMessage with { Seq = 2, TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() },
+            "controller-peer");
+        InvokeProcessRemoteControlInjection(
+            runtime,
+            wheelMessage with { Seq = 3, TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() },
+            "controller-peer");
 
         await WaitUntilAsync(() => injector.WheelCalls >= 1, TimeSpan.FromSeconds(1));
         Assert.Equal(1, injector.WheelCalls);
@@ -510,7 +684,7 @@ public sealed class RemoteControlP4Tests
             captureHeight: captureHeight,
             frameWidth: Math.Max(captureWidth, 1),
             frameHeight: Math.Max(captureHeight, 1));
-        await InvokePrivateAsync(runtime, "SendRemoteControlDisplayInfoAsync", displayInfo, CancellationToken.None);
+        await SendDisplayInfoAsync(runtime, displayInfo);
 
         transport.InjectIncomingControlInput(
             new ControlInputMessageV1
@@ -548,7 +722,7 @@ public sealed class RemoteControlP4Tests
             captureHeight: 1080,
             frameWidth: 1920,
             frameHeight: 1080);
-        await InvokePrivateAsync(runtime, "SendRemoteControlDisplayInfoAsync", displayInfo, CancellationToken.None);
+        await SendDisplayInfoAsync(runtime, displayInfo);
 
         transport.InjectIncomingControlInput(
             new ControlInputMessageV1
@@ -569,7 +743,7 @@ public sealed class RemoteControlP4Tests
     }
 
     [Fact]
-    public async Task RemoteControlInput_WhenRevisionMismatchButDisplayMatches_IsAccepted()
+    public async Task RemoteControlInput_WhenRevisionMismatchButDisplayMatches_IsRejected()
     {
         var transport = new TestRemoteControlTransport();
         var injector = new CountingRemoteInputInjector();
@@ -587,7 +761,7 @@ public sealed class RemoteControlP4Tests
             captureHeight: 100,
             frameWidth: 200,
             frameHeight: 100);
-        await InvokePrivateAsync(runtime, "SendRemoteControlDisplayInfoAsync", displayInfo, CancellationToken.None);
+        await SendDisplayInfoAsync(runtime, displayInfo);
 
         transport.InjectIncomingControlInput(
             new ControlInputMessageV1
@@ -597,15 +771,144 @@ public sealed class RemoteControlP4Tests
                 Nx = 0.5d,
                 Ny = 0.5d,
                 DisplayId = "primary",
-                DisplayInfoRevision = 1, // stale, should still be accepted when displayId matches
+                DisplayInfoRevision = 1, // stale and now rejected until mapping is refreshed
             },
             peerId: "controller-peer");
 
-        await WaitUntilAsync(() => injector.MouseMoveCalls == 1, TimeSpan.FromSeconds(1));
+        await Task.Delay(150);
+        Assert.Equal(0, injector.MouseMoveCalls);
         Assert.Equal(ControlState.Active, runtime.ControlState);
         Assert.Equal(0, transport.SentControlStopCount);
-        Assert.Equal(150, injector.LastMouseMoveX);
-        Assert.Equal(110, injector.LastMouseMoveY);
+    }
+
+    [Fact]
+    public async Task HelperRequestScopeReset_ClearsMapping_AndBlocksInputUntilFreshDisplayInfoArrives()
+    {
+        var transport = new TestRemoteControlTransport();
+        var injector = new CountingRemoteInputInjector();
+        var mapper = new FixedRemoteCoordinateMapper();
+        using var runtime = CreateRuntime(transport, injector, mapper);
+        AttachConnectedRuntime(runtime, transport, SessionRuntimeRole.Helper);
+        SetRemoteControlState(runtime, ControlState.Active, "helpee-peer", "req-old");
+
+        transport.InjectIncomingControlDisplayInfo(
+            CreateDisplayInfoMessage(
+                displayId: "primary",
+                revision: 1,
+                captureX: 0,
+                captureY: 0,
+                captureWidth: 1920,
+                captureHeight: 1080,
+                frameWidth: 1920,
+                frameHeight: 1080),
+            peerId: "helpee-peer");
+        await WaitUntilAsync(() => runtime.RemoteControlMappingAvailable, TimeSpan.FromSeconds(1));
+
+        SetRemoteControlState(runtime, ControlState.Active, "helpee-peer", "req-new");
+        InvokePrivateMethod(runtime, "ResetRemoteControlRequestScopedTracking", "request_id_changed");
+
+        Assert.False(runtime.RemoteControlMappingAvailable);
+        var blocked = await runtime.SendRemoteControlInputAsync(
+            new ControlInputMessageV1
+            {
+                Kind = "mouse_button",
+                Action = "down",
+                Button = "left",
+                Nx = 0.5,
+                Ny = 0.5,
+            },
+            CancellationToken.None);
+        Assert.False(blocked);
+        Assert.Equal(0, transport.SentControlInputCount);
+
+        transport.InjectIncomingControlDisplayInfo(
+            CreateDisplayInfoMessage(
+                displayId: "primary",
+                revision: 2,
+                captureX: 10,
+                captureY: 20,
+                captureWidth: 1280,
+                captureHeight: 720,
+                frameWidth: 1280,
+                frameHeight: 720),
+            peerId: "helpee-peer");
+        await WaitUntilAsync(() => runtime.RemoteControlMappingAvailable, TimeSpan.FromSeconds(1));
+
+        var sent = await runtime.SendRemoteControlInputAsync(
+            new ControlInputMessageV1
+            {
+                Kind = "mouse_button",
+                Action = "down",
+                Button = "left",
+                Nx = 0.25,
+                Ny = 0.75,
+            },
+            CancellationToken.None);
+        Assert.True(sent);
+        Assert.Equal(1, transport.SentControlInputCount);
+        Assert.Equal("req-new", transport.GetLastSentControlInput()?.RequestId);
+        Assert.Equal(2, transport.GetLastSentControlInput()?.DisplayInfoRevision);
+    }
+
+    [Fact]
+    public async Task HelpeeDisplayInfoSend_WhenCapturedSessionDoesNotMatchCurrentSession_IsIgnored()
+    {
+        var transport = new TestRemoteControlTransport();
+        var injector = new CountingRemoteInputInjector();
+        var mapper = new FixedRemoteCoordinateMapper();
+        using var runtime = CreateRuntime(transport, injector, mapper);
+        AttachConnectedRuntime(runtime, transport, SessionRuntimeRole.Helpee);
+        SetRemoteControlState(runtime, ControlState.Active, "controller-peer", "req-1");
+
+        var staleSessionId = "stale-session";
+        var currentSessionId = runtime.SecurityState.SessionId?.ToString();
+        Assert.NotEqual(staleSessionId, currentSessionId);
+
+        await InvokePrivateAsync(
+            runtime,
+            "SendRemoteControlDisplayInfoAsync",
+            staleSessionId,
+            CreateDisplayInfoMessage(
+                displayId: "primary",
+                revision: 1,
+                captureX: 0,
+                captureY: 0,
+                captureWidth: 1920,
+                captureHeight: 1080,
+                frameWidth: 1920,
+                frameHeight: 1080),
+            CancellationToken.None);
+
+        Assert.Equal(0, transport.SentControlDisplayInfoCount);
+    }
+
+    [Fact]
+    public void RemoteControlStateReset_ReleasesAppliedButtonsAndModifiers_Once()
+    {
+        var transport = new TestRemoteControlTransport();
+        var injector = new CountingRemoteInputInjector();
+        var mapper = new FixedRemoteCoordinateMapper();
+        using var runtime = CreateRuntime(transport, injector, mapper);
+        AttachConnectedRuntime(runtime, transport, SessionRuntimeRole.Helpee);
+        SetRemoteControlState(runtime, ControlState.Active, "controller-peer", "req-1");
+        SetPrivateField(runtime, "remoteControlAppliedMouseButtonsMask", RemoteControlMouseButtonsMask.Left);
+        SetPrivateField(runtime, "remoteControlAppliedModifiersMask", RemoteControlModifiersMask.Shift);
+
+        InvokePrivateMethod(runtime, "ResetRemoteControlState", "test_reset");
+
+        Assert.Equal(1, injector.MouseButtonCalls);
+        Assert.Equal(RemoteMouseButton.Left, injector.LastMouseButton);
+        Assert.Equal(RemoteButtonAction.Up, injector.LastMouseButtonAction);
+        Assert.Equal(1, injector.KeyCalls);
+        Assert.Equal("Shift", injector.LastKeyLogical);
+        Assert.Equal(RemoteKeyAction.Up, injector.LastKeyAction);
+        Assert.Equal(RemoteControlMouseButtonsMask.None, (RemoteControlMouseButtonsMask)(GetPrivateField(runtime, "remoteControlAppliedMouseButtonsMask") ?? RemoteControlMouseButtonsMask.Left));
+        Assert.Equal(RemoteControlModifiersMask.None, (RemoteControlModifiersMask)(GetPrivateField(runtime, "remoteControlAppliedModifiersMask") ?? RemoteControlModifiersMask.Shift));
+
+        InvokePrivateMethod(runtime, "ResetRemoteControlState", "test_reset_again");
+
+        Assert.Equal(1, injector.MouseButtonCalls);
+        Assert.Equal(1, injector.KeyCalls);
     }
 
     [Fact]
@@ -627,7 +930,7 @@ public sealed class RemoteControlP4Tests
             captureHeight: 720,
             frameWidth: 1280,
             frameHeight: 720);
-        await InvokePrivateAsync(runtime, "SendRemoteControlDisplayInfoAsync", displayInfo, CancellationToken.None);
+        await SendDisplayInfoAsync(runtime, displayInfo);
 
         transport.InjectIncomingControlInput(
             new ControlInputMessageV1
@@ -937,6 +1240,18 @@ public sealed class RemoteControlP4Tests
         }
     }
 
+    private static Task SendDisplayInfoAsync(SessionRuntime runtime, ControlDisplayInfoMessageV1 message)
+    {
+        var sessionId = runtime.SecurityState.SessionId?.ToString();
+        Assert.False(string.IsNullOrWhiteSpace(sessionId));
+        return InvokePrivateAsync(
+            runtime,
+            "SendRemoteControlDisplayInfoAsync",
+            sessionId!,
+            message,
+            CancellationToken.None);
+    }
+
     private static ControlDisplayInfoMessageV1 CreateDisplayInfoMessage(
         string displayId,
         long revision,
@@ -973,11 +1288,35 @@ public sealed class RemoteControlP4Tests
         field!.SetValue(target, value);
     }
 
+    private static object? GetPrivateField(object target, string fieldName)
+    {
+        var field = target.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return field!.GetValue(target);
+    }
+
     private static object? InvokePrivateMethod(object target, string methodName, params object[] args)
     {
         var method = target.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(method);
         return method!.Invoke(target, args);
+    }
+
+    private static void InvokeProcessRemoteControlInjection(
+        SessionRuntime runtime,
+        ControlInputMessageV1 message,
+        string peerId)
+    {
+        var workItemType = typeof(SessionRuntime).GetNestedType(
+            "RemoteControlInjectionWorkItem",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(workItemType);
+        var ctor = workItemType!.GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+            .Single();
+        var stopEpoch = (long)(GetPrivateField(runtime, "remoteControlStopPriorityEpoch") ?? 0L);
+        var workItem = ctor.Invoke(new object?[] { message, null, peerId, stopEpoch });
+
+        _ = InvokePrivateMethod(runtime, "ProcessRemoteControlInjectionWorkItem", workItem);
     }
 
     private sealed class EnvironmentOverride : IDisposable
@@ -1011,12 +1350,15 @@ public sealed class RemoteControlP4Tests
         private int mouseMoveCalls;
         private int mouseButtonCalls;
         private int wheelCalls;
+        private int keyCalls;
         private int lastMouseMoveX;
         private int lastMouseMoveY;
         private int lastWheelDeltaX;
         private int lastWheelDeltaY;
         private int lastMouseButton;
         private int lastMouseButtonAction;
+        private string? lastKeyLogical;
+        private int lastKeyAction;
 
         public bool IsSupported => true;
 
@@ -1024,12 +1366,15 @@ public sealed class RemoteControlP4Tests
         public int MouseMoveCalls => Volatile.Read(ref mouseMoveCalls);
         public int MouseButtonCalls => Volatile.Read(ref mouseButtonCalls);
         public int WheelCalls => Volatile.Read(ref wheelCalls);
+        public int KeyCalls => Volatile.Read(ref keyCalls);
         public int LastMouseMoveX => Volatile.Read(ref lastMouseMoveX);
         public int LastMouseMoveY => Volatile.Read(ref lastMouseMoveY);
         public int LastWheelDeltaX => Volatile.Read(ref lastWheelDeltaX);
         public int LastWheelDeltaY => Volatile.Read(ref lastWheelDeltaY);
         public RemoteMouseButton LastMouseButton => (RemoteMouseButton)Volatile.Read(ref lastMouseButton);
         public RemoteButtonAction LastMouseButtonAction => (RemoteButtonAction)Volatile.Read(ref lastMouseButtonAction);
+        public string? LastKeyLogical => Volatile.Read(ref lastKeyLogical);
+        public RemoteKeyAction LastKeyAction => (RemoteKeyAction)Volatile.Read(ref lastKeyAction);
 
         public void InjectMouseMoveAbsolute(int xPx, int yPx)
         {
@@ -1057,6 +1402,9 @@ public sealed class RemoteControlP4Tests
 
         public void InjectKey(RemoteKey key, RemoteKeyAction action, RemoteKeyModifiers mods)
         {
+            Volatile.Write(ref lastKeyLogical, key.LogicalKey);
+            Volatile.Write(ref lastKeyAction, (int)action);
+            Interlocked.Increment(ref keyCalls);
             Interlocked.Increment(ref totalCalls);
         }
     }
@@ -1082,8 +1430,10 @@ public sealed class RemoteControlP4Tests
     {
         private readonly object gate = new();
         private readonly List<ControlStopMessageV1> sentControlStops = new();
+        private readonly List<ControlInputMessageV1> sentControlInputs = new();
         private readonly List<ControlDisplayInfoMessageV1> sentControlDisplayInfos = new();
         private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
+        private long nextIncomingControlInputSeq;
 
         public bool LocalSupportsRemoteControl => true;
 
@@ -1114,11 +1464,30 @@ public sealed class RemoteControlP4Tests
             }
         }
 
+        public int SentControlInputCount
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return sentControlInputs.Count;
+                }
+            }
+        }
+
         public ControlStopMessageV1? GetLastSentControlStop()
         {
             lock (gate)
             {
                 return sentControlStops.Count == 0 ? null : sentControlStops[^1];
+            }
+        }
+
+        public ControlInputMessageV1? GetLastSentControlInput()
+        {
+            lock (gate)
+            {
+                return sentControlInputs.Count == 0 ? null : sentControlInputs[^1];
             }
         }
 
@@ -1174,7 +1543,15 @@ public sealed class RemoteControlP4Tests
             return Task.CompletedTask;
         }
 
-        public Task SendControlInputAsync(ControlInputMessageV1 message, CancellationToken ct) => Task.CompletedTask;
+        public Task SendControlInputAsync(ControlInputMessageV1 message, CancellationToken ct)
+        {
+            lock (gate)
+            {
+                sentControlInputs.Add(message);
+            }
+
+            return Task.CompletedTask;
+        }
 
         public Task SendControlAckAsync(ControlInputAckV1 message, CancellationToken ct) => Task.CompletedTask;
 
@@ -1203,6 +1580,17 @@ public sealed class RemoteControlP4Tests
 
         public void InjectIncomingControlInput(ControlInputMessageV1 message, string? peerId)
         {
+            if (message.Seq <= 0 || message.TsUtcMs.GetValueOrDefault() <= 0)
+            {
+                message = message with
+                {
+                    Seq = message.Seq > 0 ? message.Seq : Interlocked.Increment(ref nextIncomingControlInputSeq),
+                    TsUtcMs = message.TsUtcMs.GetValueOrDefault() > 0
+                        ? message.TsUtcMs
+                        : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                };
+            }
+
             RemoteControlInputReceived?.Invoke(this, new RemoteControlInputReceivedEventArgs(message, peerId));
         }
 

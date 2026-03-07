@@ -33,6 +33,15 @@ namespace NLink.App.ViewModels;
 
 public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanelBindings
 {
+    private enum HelpeeConnectionViewState
+    {
+        Waiting,
+        IncomingRequest,
+        Connected,
+        Disconnected,
+        Failed,
+    }
+
     private static readonly TimeSpan DefaultIncomingRequestTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultInviteLifetime = TimeSpan.FromMinutes(15);
@@ -63,6 +72,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool showChatNotice;
     private string connectionStatus = "Waiting for helper…";
     private string connectionState = "Waiting";
+    private HelpeeConnectionViewState connectionViewState = HelpeeConnectionViewState.Waiting;
     private string chatDraft = string.Empty;
     private string failureTitle = string.Empty;
     private string failureMessage = string.Empty;
@@ -387,9 +397,6 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref connectionStatus, value))
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
-                OnPropertyChanged(nameof(ChatConnectionPillText));
-                OnPropertyChanged(nameof(ShowChatConnectionPill));
-                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
@@ -400,8 +407,12 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         get => connectionState;
         private set
         {
-            if (SetProperty(ref connectionState, value))
+            value ??= string.Empty;
+            var nextViewState = MapConnectionViewState(value);
+            var viewStateChanged = connectionViewState != nextViewState;
+            if (SetProperty(ref connectionState, value) || viewStateChanged)
             {
+                connectionViewState = nextViewState;
                 OnPropertyChanged(nameof(IsWaitingView));
                 OnPropertyChanged(nameof(IsIncomingRequestView));
                 OnPropertyChanged(nameof(IsConnectedView));
@@ -417,9 +428,6 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowChatSection));
                 OnPropertyChanged(nameof(ShowFailurePanel));
                 OnPropertyChanged(nameof(HeaderStatusText));
-                OnPropertyChanged(nameof(ChatConnectionPillText));
-                OnPropertyChanged(nameof(ShowChatConnectionPill));
-                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
                 OnPropertyChanged(nameof(ShowStopControlAction));
                 OnPropertyChanged(nameof(CanStopControl));
@@ -435,18 +443,18 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
-    public bool IsWaitingView => ConnectionState is "Waiting" or "Disconnected" or "Failed";
+    public bool IsWaitingView => connectionViewState is HelpeeConnectionViewState.Waiting or HelpeeConnectionViewState.Disconnected or HelpeeConnectionViewState.Failed;
 
-    public bool IsIncomingRequestView => ConnectionState == "IncomingRequest";
+    public bool IsIncomingRequestView => connectionViewState == HelpeeConnectionViewState.IncomingRequest;
 
-    public bool IsConnectedView => ConnectionState == "Connected";
+    public bool IsConnectedView => connectionViewState == HelpeeConnectionViewState.Connected;
 
     public bool ShowChatSection => IsConnectedView;
     public bool ShowWaitingPanel => IsWaitingView && !IsStartupBlocked;
     public bool ShowIncomingRequestPanel => IsIncomingRequestView && !IsStartupBlocked;
     public bool ShowConnectedPanel => ShowChatSection && !IsStartupBlocked;
     public bool ShowFailurePanel => (!string.IsNullOrWhiteSpace(FailureTitle) || !string.IsNullOrWhiteSpace(FailureMessage)) &&
-                                    (IsStartupBlocked || ConnectionState == "Failed");
+                                    (IsStartupBlocked || connectionViewState == HelpeeConnectionViewState.Failed);
     public bool ShowStartupBlockedPanel => IsStartupBlocked && !ShowFailurePanel;
     public bool ShowWaitingStatusLine => !ShowFailurePanel;
 
@@ -493,8 +501,6 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref failureTitle, value))
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
-                OnPropertyChanged(nameof(ShowChatConnectionPill));
-                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
@@ -508,8 +514,6 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref failureMessage, value))
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
-                OnPropertyChanged(nameof(ShowChatConnectionPill));
-                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
@@ -545,7 +549,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     }
 
     public bool ShowHostingUi => !IsStartupBlocked;
-    public bool ShowWaitingInviteActions => ShowHostingUi && ConnectionState == "Waiting";
+    public bool ShowWaitingInviteActions => ShowHostingUi && connectionViewState == HelpeeConnectionViewState.Waiting;
 
     public ObservableCollection<ChatLineViewModel> ChatMessages { get; }
 
@@ -565,17 +569,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
-    public string ChatConnectionPillText =>
-        EffectivePhase switch
-        {
-            SessionUiPhase.Connected => "Connected",
-            SessionUiPhase.Connecting => "Connecting…",
-            SessionUiPhase.Recovering => "Reconnecting…",
-            _ => "Not connected",
-        };
-
-    public bool ShowChatConnectionPill => !HeaderStatusText.StartsWith(ChatConnectionPillText, StringComparison.Ordinal);
-    public bool ShowChatTopBar => ShowChatConnectionPill || !FeatureFlags.EnableSessionHeader;
+    public bool ShowChatTopBar => !FeatureFlags.EnableSessionHeader;
 
     public SessionUiPhase EffectivePhase
     {
@@ -585,15 +579,25 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref effectivePhase, value))
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
-                OnPropertyChanged(nameof(ChatConnectionPillText));
-                OnPropertyChanged(nameof(ShowChatConnectionPill));
-                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
+                OnPropertyChanged(nameof(ShowStopControlAction));
+                OnPropertyChanged(nameof(CanStopControl));
+                OnPropertyChanged(nameof(ShowRemoteControlActiveStatus));
+                OnPropertyChanged(nameof(ShowRemoteControlAdminWarning));
+                OnPropertyChanged(nameof(CanRestartAsAdministrator));
+                OnPropertyChanged(nameof(ShowRemoteControlPreviewActiveCue));
+                OnPropertyChanged(nameof(ShowRemoteControlDebugToggle));
+                OnPropertyChanged(nameof(ShowRemoteControlDebugOverlay));
+                OnPropertyChanged(nameof(ShowRemoteControlConsentDialog));
             }
         }
     }
 
     public bool IsChatReady => sessionRuntime.CanSendChat;
+
+    private bool IsRemoteControlUiConnected =>
+        EffectivePhase == SessionUiPhase.Connected &&
+        sessionRuntime.State == SessionRuntimeState.Connected;
 
     public bool CanStartOrConnect
     {
@@ -631,23 +635,23 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool SessionSupportsRemoteControl => sessionRuntime.SessionSupportsRemoteControl;
     public bool ShowRequestControlAction => false;
     public bool CanRequestControl => false;
-    public bool ShowStopControlAction => IsConnectedView && sessionRuntime.ControlState == ControlState.Active;
+    public bool ShowStopControlAction => IsRemoteControlUiConnected && sessionRuntime.ControlState == ControlState.Active;
     public string StopControlButtonText => "Stop control";
-    public bool CanStopControl => IsConnectedView && sessionRuntime.ControlState == ControlState.Active;
-    public bool ShowRemoteControlActiveStatus => sessionRuntime.ControlState == ControlState.Active;
-    public bool ShowRemoteControlAdminWarning => IsConnectedView && sessionRuntime.RemoteControlAdminRestartRequired;
+    public bool CanStopControl => IsRemoteControlUiConnected && sessionRuntime.ControlState == ControlState.Active;
+    public bool ShowRemoteControlActiveStatus => IsRemoteControlUiConnected && sessionRuntime.ControlState == ControlState.Active;
+    public bool ShowRemoteControlAdminWarning => IsRemoteControlUiConnected && sessionRuntime.RemoteControlAdminRestartRequired;
     public string RemoteControlAdminWarningText => sessionRuntime.RemoteControlAdminWarningText;
     public bool CanRestartAsAdministrator =>
         ShowRemoteControlAdminWarning &&
         OperatingSystem.IsWindows() &&
         !sessionRuntime.RemoteControlProcessElevated;
-    public bool ShowRemoteControlPreviewActiveCue => ShowScreenSharePreviewFrame && sessionRuntime.ControlState == ControlState.Active;
+    public bool ShowRemoteControlPreviewActiveCue => IsRemoteControlUiConnected && ShowScreenSharePreviewFrame && sessionRuntime.ControlState == ControlState.Active;
     public bool ShowControlModeToggle => false;
     public bool CanControlModeToggle => false;
     public string ControlModeButtonText => "Control mode: Off";
     public bool ShowRemoteControlDebugToggle =>
         RemoteControlDebugOverlayEnabled &&
-        IsConnectedView &&
+        IsRemoteControlUiConnected &&
         ShowScreenSharePreviewFrame;
     public bool ShowRemoteControlDebugOverlay =>
         ShowRemoteControlDebugToggle &&
@@ -700,7 +704,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 #else
         "n/a";
 #endif
-    public bool ShowRemoteControlConsentDialog => IsConnectedView && sessionRuntime.HasPendingRemoteControlConsentPrompt;
+    public bool ShowRemoteControlConsentDialog => IsRemoteControlUiConnected && sessionRuntime.HasPendingRemoteControlConsentPrompt;
     public string RemoteControlConsentTitle => "Allow remote control?";
     public string RemoteControlConsentMessage => "The helper is requesting control of your mouse and keyboard.";
 
@@ -712,8 +716,6 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref isScreenSharingPreviewActive, value))
             {
                 OnPropertyChanged(nameof(HeaderStatusText));
-                OnPropertyChanged(nameof(ShowChatConnectionPill));
-                OnPropertyChanged(nameof(ShowChatTopBar));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
                 ToggleScreenSharePreviewCommand.NotifyCanExecuteChanged();
 #if DEBUG
@@ -791,8 +793,6 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 if (!string.Equals(previousHeaderStatusText, HeaderStatusText, StringComparison.Ordinal))
                 {
                     OnPropertyChanged(nameof(HeaderStatusText));
-                    OnPropertyChanged(nameof(ShowChatConnectionPill));
-                    OnPropertyChanged(nameof(ShowChatTopBar));
                     OnPropertyChanged(nameof(ShowTransientStatusPanel));
                 }
 
@@ -859,7 +859,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     public IRelayCommand StatusBannerCopyDiagnosticsCommand => OpenDiagnosticsCommand;
     public IAsyncRelayCommand StatusBannerCancelCommand => CancelTransientCommand;
 
-    public bool ShowRetryAction => !IsStartupBlocked && ConnectionState == "Failed";
+    public bool ShowRetryAction => !IsStartupBlocked && connectionViewState == HelpeeConnectionViewState.Failed;
     public bool ShowTransientBanner
     {
         get => showTransientBanner;
@@ -997,7 +997,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return false;
         }
 
-        return IsScreenSharingPreviewActive || CanShowScreenShareAction;
+        return IsScreenSharingPreviewActive ||
+               (CanShowScreenShareAction && sessionRuntime.CanPerform(SessionCapability.ScreenShare));
     }
 
     private async Task RetryAsync()
@@ -1531,7 +1532,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void EnsureInviteSnapshot(bool forceNewToken)
     {
-        var candidateAddress = sessionRuntime.CurrentLocalPeerAddress?.Value;
+        var candidateAddress = ResolveInviteAddress();
         if (!PeerAddress.TryParse(candidateAddress, out var peerAddress))
         {
             UpdateShareAddressText(string.Empty);
@@ -1598,6 +1599,13 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         RefreshShareQrBitmaps();
     }
 
+    private string? ResolveInviteAddress()
+    {
+        return sessionRuntime.CurrentInvitePeerAddress?.Value ??
+               sessionRuntime.CurrentLocalPeerAddress?.Value ??
+               sessionRuntime.SecurityState.HelpeeAddress?.Value;
+    }
+
     private void UpdateShareInviteText(string value)
     {
         value ??= string.Empty;
@@ -1646,33 +1654,33 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         previousRefresh?.Cancel();
         previousRefresh?.Dispose();
 
-        ReplaceShareQrBitmap(
-            ref shareInviteQrBitmap,
-            next: null,
-            nameof(ShareInviteQrImage),
-            nameof(ShowShareInviteQr),
-            nameof(ShowShareInviteQrPlaceholder));
-
         if (string.IsNullOrWhiteSpace(text))
         {
+            ReplaceShareQrBitmap(
+                ref shareInviteQrBitmap,
+                next: null,
+                nameof(ShareInviteQrImage),
+                nameof(ShowShareInviteQr),
+                nameof(ShowShareInviteQrPlaceholder));
             return;
         }
 
         var inviteSnapshot = text.Trim();
+        var qrPayload = InviteQrPayload.Format(inviteSnapshot);
         var refreshCts = new CancellationTokenSource();
         var refreshVersion = unchecked(++shareInviteQrRefreshVersion);
         shareInviteQrRefreshCts = refreshCts;
-        _ = RefreshShareInviteQrBitmapAsync(inviteSnapshot, refreshVersion, refreshCts);
+        _ = RefreshShareInviteQrBitmapAsync(inviteSnapshot, qrPayload, refreshVersion, refreshCts);
     }
 
-    private async Task RefreshShareInviteQrBitmapAsync(string inviteText, int refreshVersion, CancellationTokenSource refreshCts)
+    private async Task RefreshShareInviteQrBitmapAsync(string inviteText, string qrPayload, int refreshVersion, CancellationTokenSource refreshCts)
     {
         try
         {
             var pngBytes = await Task.Run(() =>
             {
                 if (refreshCts.IsCancellationRequested ||
-                    !qrCodeService.TryCreatePng(inviteText, out var generatedBytes, out _))
+                    !qrCodeService.TryCreatePng(qrPayload, out var generatedBytes, out _))
                 {
                     return Array.Empty<byte>();
                 }
@@ -1871,7 +1879,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         _ = UiThreadDispatch.RunAsync(() =>
         {
-            if (ConnectionState != "Connected")
+            if (!IsConnectedView)
             {
                 ShowChatNotice = true;
             }
@@ -1904,6 +1912,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             OnPropertyChanged(nameof(RemoteControlAdminWarningText));
             OnPropertyChanged(nameof(CanRestartAsAdministrator));
             OnPropertyChanged(nameof(ShowRemoteControlPreviewActiveCue));
+            OnPropertyChanged(nameof(HeaderStatusText));
+            OnPropertyChanged(nameof(ShowTransientStatusPanel));
             NotifyRemoteControlDiagnosticsChanged();
             OnPropertyChanged(nameof(ShowRemoteControlConsentDialog));
             StopControlCommand.NotifyCanExecuteChanged();
@@ -2081,8 +2091,6 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             SyncTransientStatusFromRuntime();
             OnPropertyChanged(nameof(HeaderStatusText));
-            OnPropertyChanged(nameof(ShowChatConnectionPill));
-            OnPropertyChanged(nameof(ShowChatTopBar));
         });
     }
 
@@ -2434,6 +2442,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         AllowCommand.NotifyCanExecuteChanged();
         DeclineCommand.NotifyCanExecuteChanged();
         EndSessionCommand.NotifyCanExecuteChanged();
+        ToggleScreenSharePreviewCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(SessionSupportsRemoteControl));
         OnPropertyChanged(nameof(ShowStopControlAction));
         OnPropertyChanged(nameof(CanStopControl));
@@ -3052,7 +3061,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         if (uiStateStore is not null && uiStateStore.Phase == SessionUiPhase.Connected &&
-            !string.Equals(ConnectionState, "Connected", StringComparison.Ordinal))
+            !IsConnectedView)
         {
             throw new InvalidOperationException("Helpee UI invariant failed: Connected phase requires ConnectionState=Connected.");
         }
@@ -3398,9 +3407,18 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private string BuildHeaderStatusText()
     {
-        var baseText = TryGetRemoteControlHeaderHint(out var remoteControlHint)
-            ? remoteControlHint
-            : EffectivePhase switch
+        string baseText;
+        if (TryGetRemoteControlHeaderHint(out var remoteControlHint))
+        {
+            baseText = remoteControlHint;
+        }
+        else if (TryGetConnectedHeaderStatusText(out var connectedStatusText))
+        {
+            baseText = connectedStatusText;
+        }
+        else
+        {
+            baseText = EffectivePhase switch
             {
                 SessionUiPhase.Connecting => "Connecting…",
                 SessionUiPhase.Recovering => "Reconnecting…",
@@ -3413,6 +3431,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                         : "Session ended",
                 _ => !string.IsNullOrWhiteSpace(ConnectionStatus) ? ConnectionStatus : "Ready",
             };
+        }
 
         if (ScreenSharePreviewStatus.State == ScreenShareState.Failed &&
             !string.IsNullOrWhiteSpace(ScreenShareViewerMessage) &&
@@ -3422,6 +3441,48 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         return AppendScreenShareSuffix(baseText);
+    }
+
+    private static HelpeeConnectionViewState MapConnectionViewState(string? state)
+    {
+        return state switch
+        {
+            "IncomingRequest" => HelpeeConnectionViewState.IncomingRequest,
+            "Connected" => HelpeeConnectionViewState.Connected,
+            "Disconnected" => HelpeeConnectionViewState.Disconnected,
+            "Failed" => HelpeeConnectionViewState.Failed,
+            _ => HelpeeConnectionViewState.Waiting,
+        };
+    }
+
+    private bool TryGetConnectedHeaderStatusText(out string statusText)
+    {
+        statusText = string.Empty;
+        if (!IsConnectedView)
+        {
+            return false;
+        }
+
+        if (sessionRuntime.HasPendingRemoteControlConsentPrompt)
+        {
+            statusText = "Waiting for your approval…";
+            return true;
+        }
+
+        if (sessionRuntime.ControlState == ControlState.Active &&
+            !sessionRuntime.RemoteControlMappingAvailable)
+        {
+            statusText = "Waiting for fresh mapping";
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(sessionRuntime.RemoteControlStatusHintText))
+        {
+            statusText = sessionRuntime.RemoteControlStatusHintText;
+            return true;
+        }
+
+        return false;
     }
 
     private static void RunSynchronousCleanup(Func<Task> cleanup)

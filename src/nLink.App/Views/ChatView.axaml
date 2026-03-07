@@ -17,14 +17,6 @@
             <Setter Property="Padding" Value="10"/>
         </Style>
 
-        <Style Selector="Border.chatStatusPill">
-            <Setter Property="Background" Value="{StaticResource AppPanelBrush}"/>
-            <Setter Property="CornerRadius" Value="999"/>
-            <Setter Property="BorderBrush" Value="{StaticResource AppCardBorderBrush}"/>
-            <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="10,4"/>
-        </Style>
-
         <Style Selector="Border.chatShell">
             <Setter Property="Background" Value="{StaticResource AppMutedPanelBrush}"/>
             <Setter Property="CornerRadius" Value="14"/>
@@ -66,23 +58,12 @@
         <Border Grid.Row="0"
                 Classes="chatTopBar"
                 IsVisible="{Binding ShowChatTopBar}">
-            <Grid ColumnDefinitions="Auto,*,Auto"
-                  ColumnSpacing="10"
+            <Grid ColumnDefinitions="*,Auto"
+                  ColumnSpacing="12"
                   VerticalAlignment="Center">
-                <Border Grid.Column="0"
-                        Classes="chatStatusPill"
-                        IsVisible="{Binding ShowChatConnectionPill}"
-                        VerticalAlignment="Center">
-                    <TextBlock Classes="appMuted"
-                               AutomationProperties.AutomationId="Chat.ConnectionPillText"
-                               Text="{Binding ChatConnectionPillText}"
-                               FontSize="13"
-                               FontWeight="SemiBold"/>
-                </Border>
+                <Grid Grid.Column="0"/>
 
-                <Grid Grid.Column="1"/>
-
-                <Button Grid.Column="2"
+                <Button Grid.Column="1"
                         AutomationProperties.AutomationId="Chat.Disconnect"
                         Classes="appButton secondaryButton"
                         Content="Disconnect"

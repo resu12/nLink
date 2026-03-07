@@ -69,7 +69,7 @@
                       VerticalContentAlignment="Stretch"
                       Margin="24">
             <Grid RowDefinitions="Auto,Auto"
-                  RowSpacing="16">
+                  RowSpacing="8">
 
                 <views:SessionShellView RoleText="Helpee"
                                         HorizontalAlignment="Stretch"
@@ -204,7 +204,7 @@
 
                                     <Border Background="{StaticResource AppMutedPanelBrush}"
                                             CornerRadius="18"
-                                            Padding="24"
+                                            Padding="24,14,24,24"
                                             IsVisible="{Binding ShowWaitingPanel}">
                                         <StackPanel Spacing="20">
                                             <TextBlock Text="Share invite with your helper"
@@ -215,13 +215,13 @@
                                                        HorizontalAlignment="Center"
                                                        MaxWidth="420"/>
 
-                                            <TextBlock Text="Let your helper scan the QR code, or send them the invite."
-                                                       Classes="appMuted"
-                                                       FontSize="14"
-                                                       TextAlignment="Center"
-                                                       HorizontalAlignment="Center"
-                                                       MaxWidth="380"
-                                                       TextWrapping="Wrap"/>
+                                            <Button AutomationProperties.AutomationId="Helpee.RefreshInvite"
+                                                    Classes="linkButton linkAction"
+                                                    Content="Refresh invite"
+                                                    Command="{Binding RefreshInviteCommand}"
+                                                    IsEnabled="{Binding CanStartOrConnect}"
+                                                    HorizontalAlignment="Center"
+                                                    IsVisible="{Binding ShowWaitingInviteActions}"/>
 
                                             <Border Background="{StaticResource AppSurfaceBrush}"
                                                     CornerRadius="20"
@@ -295,14 +295,6 @@
                                                        HorizontalAlignment="Center"
                                                        MaxWidth="380"
                                                        IsVisible="{Binding CopyFeedback.IsVisible}"/>
-
-                                            <Button AutomationProperties.AutomationId="Helpee.RefreshInvite"
-                                                    Classes="linkButton linkAction"
-                                                    Content="Refresh invite"
-                                                    Command="{Binding RefreshInviteCommand}"
-                                                    IsEnabled="{Binding CanStartOrConnect}"
-                                                    HorizontalAlignment="Center"
-                                                    IsVisible="{Binding ShowWaitingInviteActions}"/>
 
                                             <Button Classes="appButton secondaryButton action"
                                                     Content="Retry"

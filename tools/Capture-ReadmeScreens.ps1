@@ -1,7 +1,7 @@
 param(
     [string]$ExePath = ".\src\nLink.App\bin\Release\net8.0\nLink.exe",
     [string]$OutDir = ".\docs\images",
-    [string]$Version = "0.4.0"
+    [string]$Version = "0.4.1"
 )
 
 Set-StrictMode -Version Latest
@@ -73,9 +73,29 @@ function Find-ByNameAndType($Root, [string]$Name, $Type) {
     $Root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
 }
 
+function Find-ByAutomationId($Root, [string]$AutomationId) {
+    $ap = [System.Windows.Automation.AutomationElement]::AutomationIdProperty
+    $cond = New-Object System.Windows.Automation.PropertyCondition($ap, $AutomationId)
+    $Root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+}
+
 function Click($Element) {
     $pattern = $Element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
     ([System.Windows.Automation.InvokePattern]$pattern).Invoke()
+}
+
+function Try-SetValue($Element, [string]$Value) {
+    try {
+        if (-not $Element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+            return $false
+        }
+
+        ([System.Windows.Automation.ValuePattern]$pattern).SetValue($Value)
+        return $true
+    }
+    catch {
+        return $false
+    }
 }
 
 function Save-Capture([int]$ProcessId, [string]$Path) {
@@ -137,6 +157,11 @@ try {
     $connectButton = Wait-Until -TimeoutMs 12000 -PollMs 200 -OnTimeoutMessage "Connect button timeout" -Condition {
         $x = Find-ByNameAndType $window "Connect" ([System.Windows.Automation.ControlType]::Button)
         if ($x -and -not $x.Current.IsOffscreen) { $x }
+    }
+
+    $codeInput = Find-ByAutomationId $window "Helper.CodeInput"
+    if ($codeInput) {
+        [void](Try-SetValue $codeInput "")
     }
 
     Start-Sleep -Milliseconds 500

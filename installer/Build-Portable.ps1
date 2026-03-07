@@ -76,7 +76,9 @@ function Copy-DirectoryClean {
     }
 
     New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null
-    Copy-Item -Recurse -Force (Join-Path $SourceDir "*") $DestinationDir
+    Invoke-WithRetry -OperationName "copy alias folder" -DelayMilliseconds 700 -Action {
+        Copy-Item -Recurse -Force (Join-Path $SourceDir "*") $DestinationDir
+    }
 }
 
 function Remove-StagedDebugFiles {
@@ -269,24 +271,8 @@ function Copy-BridgeBundleToPortable {
     $destination = Join-Path $bridgeRoot $Runtime
 
     if (Test-Path $bridgeRoot) {
-        try {
-            Invoke-WithRetry -OperationName "remove bundled bridge folder" -Action {
-                Remove-Item -Recurse -Force $bridgeRoot
-            }
-        }
-        catch {
-            if (Test-Path $destination) {
-                try {
-                    Assert-BridgeBundleRuntime -BridgeDir $destination
-                    Write-Warning "[nLink] Reusing existing bundled bridge folder due file lock during cleanup: $destination"
-                    return
-                }
-                catch {
-                    throw
-                }
-            }
-
-            throw
+        Invoke-WithRetry -OperationName "remove bundled bridge folder" -Action {
+            Remove-Item -Recurse -Force $bridgeRoot
         }
     }
 

@@ -321,6 +321,162 @@ public sealed class RemoteControlTransportPriorityLaneTests
         }
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknControlStop_HighLane_StillWinsAfterDisconnectReconnect_WithRenewedLowLaneBacklog()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.rc.lane.reconnect");
+            var helperClient = new FakeNknClient("helper.rc.lane.reconnect");
+            var hostIdentity = new NknIdentity("host-rc-lane-reconnect", "host.rc.lane.reconnect");
+            var helperIdentity = new NknIdentity("helper-rc-lane-reconnect", "helper.rc.lane.reconnect");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            await ConnectAsync(host, helper, cts.Token);
+
+            var firstSendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirstSend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var gateFirstControlInput = 1;
+            var controlInputSendCount = 0;
+            helperClient.BeforeSendAsync = async (_, payload, sendCt) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.ControlInput)
+                {
+                    return;
+                }
+
+                if (Volatile.Read(ref gateFirstControlInput) == 1 &&
+                    Interlocked.Increment(ref controlInputSendCount) == 1)
+                {
+                    firstSendStarted.TrySetResult();
+                    await releaseFirstSend.Task.WaitAsync(sendCt);
+                }
+            };
+
+            var receivedInputs = new ConcurrentQueue<ControlInputMessageV1>();
+            var receivedStops = new ConcurrentQueue<ControlStopMessageV1>();
+            var receivedTypes = new ConcurrentQueue<MsgType>();
+            hostClient.MessageReceived += (_, message) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(message.Payload, out var env))
+                {
+                    return;
+                }
+
+                if (env.Type is MsgType.ControlInput or MsgType.ControlStop)
+                {
+                    receivedTypes.Enqueue(env.Type);
+                }
+
+                if (env.Type == MsgType.ControlInput &&
+                    RemoteControlPayloadCodec.TryDeserializeControlInput(env.Payload, out var input))
+                {
+                    receivedInputs.Enqueue(input);
+                }
+
+                if (env.Type == MsgType.ControlStop &&
+                    RemoteControlPayloadCodec.TryDeserializeControlStop(env.Payload, out var stop))
+                {
+                    receivedStops.Enqueue(stop);
+                }
+            };
+
+            const string oldRequestId = "req-p61-reconnect-old";
+            for (var i = 0; i < 1000; i++)
+            {
+                _ = helper.SendControlInputAsync(
+                    new ControlInputMessageV1
+                    {
+                        RequestId = oldRequestId,
+                        Seq = i,
+                        Kind = "mouse_move",
+                        Nx = (i % 100) / 100d,
+                        Ny = (i % 100) / 100d,
+                    },
+                    cts.Token);
+            }
+
+            await firstSendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            await helperClient.DisconnectAsync();
+            releaseFirstSend.TrySetResult();
+            await Task.Delay(100, cts.Token);
+
+            while (receivedInputs.TryDequeue(out _))
+            {
+            }
+
+            while (receivedStops.TryDequeue(out _))
+            {
+            }
+
+            while (receivedTypes.TryDequeue(out _))
+            {
+            }
+
+            controlInputSendCount = 0;
+            firstSendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            releaseFirstSend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Volatile.Write(ref gateFirstControlInput, 1);
+
+            await ConnectAsync(host, helper, cts.Token);
+
+            const string newRequestId = "req-p61-reconnect-new";
+            for (var i = 0; i < 1000; i++)
+            {
+                _ = helper.SendControlInputAsync(
+                    new ControlInputMessageV1
+                    {
+                        RequestId = newRequestId,
+                        Seq = i,
+                        Kind = "mouse_move",
+                        Nx = (i % 100) / 100d,
+                        Ny = (i % 100) / 100d,
+                    },
+                    cts.Token);
+            }
+
+            await firstSendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            var stopTask = helper.SendControlStopAsync(
+                new ControlStopMessageV1
+                {
+                    RequestId = newRequestId,
+                    Reason = "p61_reconnect_stop",
+                },
+                cts.Token);
+
+            releaseFirstSend.TrySetResult();
+            await stopTask.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            await WaitUntilAsync(() => receivedStops.Count >= 1, TimeSpan.FromSeconds(2));
+            await Task.Delay(100, cts.Token);
+
+            var types = receivedTypes.ToArray();
+            var stopIndex = Array.IndexOf(types, MsgType.ControlStop);
+            Assert.True(stopIndex >= 1, "Expected control stop to arrive after one in-flight move following reconnect.");
+            Assert.DoesNotContain(types.Skip(stopIndex + 1), static t => t == MsgType.ControlInput);
+
+            var inputs = receivedInputs.ToArray();
+            Assert.Single(inputs);
+            Assert.All(inputs, input => Assert.Equal(newRequestId, input.RequestId));
+
+            var stops = receivedStops.ToArray();
+            Assert.Single(stops);
+            Assert.Equal("p61_reconnect_stop", stops[0].Reason);
+            Assert.True(helper.LowLaneDroppedMoves > 0);
+            Assert.InRange(helper.LowLaneMaxDepthSeen, 1, 256);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
     private static async Task ConnectAsync(
         NknSignalingTransport host,
         NknSignalingTransport helper,
@@ -330,20 +486,37 @@ public sealed class RemoteControlTransportPriorityLaneTests
         var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
-        host.Approved += (_, _) => hostApproved.TrySetResult();
-        helper.Approved += (_, _) => helperApproved.TrySetResult();
+        EventHandler<IncomingJoinRequestEventArgs>? onJoin = null;
+        EventHandler? onHostApproved = null;
+        EventHandler? onHelperApproved = null;
 
-        await host.HostByAddressAsync(ct);
-        var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
-            new PeerAddress(host.LocalPeerAddress),
-            InviteCapabilities.RemoteControl | InviteCapabilities.ScreenShare);
-        await helper.JoinByInviteAsync(rawToken, invite, ct);
+        onJoin = (_, e) => joinRequestRaised.TrySetResult(e);
+        onHostApproved = (_, _) => hostApproved.TrySetResult();
+        onHelperApproved = (_, _) => helperApproved.TrySetResult();
 
-        var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
-        await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), ct);
-        await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(2), ct);
-        await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(2), ct);
+        host.IncomingJoinRequest += onJoin;
+        host.Approved += onHostApproved;
+        helper.Approved += onHelperApproved;
+
+        try
+        {
+            await host.HostByAddressAsync(ct);
+            var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.RemoteControl | InviteCapabilities.ScreenShare);
+            await helper.JoinByInviteAsync(rawToken, invite, ct);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), ct);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(2), ct);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(2), ct);
+        }
+        finally
+        {
+            host.IncomingJoinRequest -= onJoin;
+            host.Approved -= onHostApproved;
+            helper.Approved -= onHelperApproved;
+        }
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)

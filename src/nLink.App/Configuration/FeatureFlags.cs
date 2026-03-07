@@ -47,7 +47,7 @@ public static class FeatureFlags
         ReadBoolEnvironmentOverride("NLINK_FEATURE_REMOTE_CONTROL_ACK", defaultValue: false);
 
     public static bool RemoteControlSeqGateEnabled =>
-        ReadBoolEnvironmentOverride("NLINK_FEATURE_REMOTE_CONTROL_SEQ_GATE", defaultValue: false);
+        ReadBoolEnvironmentOverride("NLINK_FEATURE_REMOTE_CONTROL_SEQ_GATE", defaultValue: true);
 
     public static bool RemoteControlStateSnapshotEnabled =>
         ReadBoolEnvironmentOverride("NLINK_FEATURE_REMOTE_CONTROL_STATE_SNAPSHOT", defaultValue: false);

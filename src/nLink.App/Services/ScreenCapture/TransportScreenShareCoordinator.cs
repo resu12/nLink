@@ -2,7 +2,9 @@ using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using NLink.App.Services;
 using NLink.App.Configuration;
+using NLink.Core.Logging;
 using NLink.Core.RemoteControl;
 using NLink.Core.ScreenShare;
 #if DEBUG
@@ -25,10 +27,11 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
 
     private readonly Func<IScreenCaptureSource> captureSourceFactory;
     private readonly Func<ReadOnlyMemory<byte>, CancellationToken, Task> sendPayloadAsync;
-    private readonly Func<ControlDisplayInfoMessageV1, CancellationToken, Task>? sendDisplayInfoAsync;
+    private readonly Func<string, ControlDisplayInfoMessageV1, CancellationToken, Task>? sendDisplayInfoAsync;
     private readonly ScreenShareDisplayInfoProvider displayInfoProvider;
     private readonly IScreenShareClock clock;
     private readonly object gate = new();
+    private readonly object diagnosticRateLimitGate = new();
     private static readonly TimeSpan InFlightEnqueueDrainTimeout = TimeSpan.FromSeconds(2);
 
     private IScreenCaptureSource? captureSource;
@@ -41,6 +44,8 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
     private DisplayInfoMappingKey? pendingDisplayInfoMapping;
     private DateTimeOffset pendingDisplayInfoNotBeforeUtc;
     private string lastDisplayInfoIssue = string.Empty;
+    private long lifecycleGeneration;
+    private long lastDisplayInfoSuppressedLogTick;
     private int inFlightEnqueues;
     private TaskCompletionSource<bool>? inFlightDrainedTcs;
     private Timer? autoTuneTimer;
@@ -57,7 +62,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         Func<IScreenCaptureSource> captureSourceFactory,
         Func<ReadOnlyMemory<byte>, CancellationToken, Task> sendPayloadAsync,
         IScreenShareClock? clock = null,
-        Func<ControlDisplayInfoMessageV1, CancellationToken, Task>? sendDisplayInfoAsync = null,
+        Func<string, ControlDisplayInfoMessageV1, CancellationToken, Task>? sendDisplayInfoAsync = null,
         ScreenShareDisplayInfoProvider? displayInfoProvider = null)
     {
         this.captureSourceFactory = captureSourceFactory ?? throw new ArgumentNullException(nameof(captureSourceFactory));
@@ -120,6 +125,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
 
         lock (gate)
         {
+            lifecycleGeneration = checked(lifecycleGeneration + 1);
             captureSource = nextCaptureSource;
             sendPipeline = nextPipeline;
             sessionId = normalizedSessionId;
@@ -202,6 +208,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             oldCaptureSource = captureSource;
             oldPipeline = sendPipeline;
             oldSessionId = sessionId;
+            lifecycleGeneration = checked(lifecycleGeneration + 1);
             captureSource = null;
             sendPipeline = null;
             sessionId = string.Empty;
@@ -533,6 +540,8 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         }
 
         ControlDisplayInfoMessageV1 message;
+        string publishSessionId;
+        long publishLifecycleGeneration;
         long revision;
         ScreenShareDisplayInfoSnapshot sentSnapshot;
         DisplayInfoMappingKey sentMapping;
@@ -580,6 +589,13 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                 ClearPendingDisplayInfoUnsafe();
             }
 
+            if (string.IsNullOrWhiteSpace(sessionId) ||
+                captureSource is null ||
+                sendPipeline is null)
+            {
+                return;
+            }
+
             revision = checked(lastSentDisplayInfoRevision + 1);
             lastSentDisplayInfoRevision = revision;
             lastSentDisplayInfo = snapshot;
@@ -604,34 +620,45 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                 Revision = revision,
                 TsUtcMs = clock.UtcNow.ToUnixTimeMilliseconds(),
             };
+            publishSessionId = sessionId;
+            publishLifecycleGeneration = lifecycleGeneration;
         }
 
-        _ = Task.Run(async () =>
-        {
-            try
+        _ = BackgroundTaskRunner.Run(
+            async () =>
             {
-                await sendDisplayInfoAsync(message, CancellationToken.None).ConfigureAwait(false);
-                LogDebug($"Display info sent (display_id={message.DisplayId}, revision={message.Revision}, frame={message.FrameWidth}x{message.FrameHeight}).");
-            }
-            catch (Exception ex)
-            {
-                lock (gate)
+                if (!ShouldSendDisplayInfo(
+                        publishSessionId,
+                        publishLifecycleGeneration,
+                        sentSnapshot,
+                        sentMapping,
+                        revision))
                 {
-                    if (lastSentDisplayInfo.HasValue &&
-                        lastSentDisplayInfo.Value.Equals(sentSnapshot) &&
-                        lastSentDisplayInfoMapping.HasValue &&
-                        lastSentDisplayInfoMapping.Value.Equals(sentMapping) &&
-                        lastSentDisplayInfoRevision == revision)
-                    {
-                        // Retry on subsequent frames if this send failed.
-                        lastSentDisplayInfo = null;
-                        lastSentDisplayInfoMapping = null;
-                    }
+                    LogDisplayInfoSendSuppressed(message);
+                    LogDebug($"Display info suppressed because ownership changed before send (display_id={message.DisplayId}, revision={message.Revision}).");
+                    return;
                 }
 
-                LogDebug($"Display info send failed: {ex.GetType().Name}: {ex.Message}");
-            }
-        });
+                try
+                {
+                    await sendDisplayInfoAsync(publishSessionId, message, CancellationToken.None).ConfigureAwait(false);
+                    LogDebug($"Display info sent (display_id={message.DisplayId}, revision={message.Revision}, frame={message.FrameWidth}x{message.FrameHeight}).");
+                }
+                catch
+                {
+                    ResetDisplayInfoRetryStateIfCurrent(
+                        publishSessionId,
+                        publishLifecycleGeneration,
+                        sentSnapshot,
+                        sentMapping,
+                        revision);
+
+                    throw;
+                }
+            },
+            source: "ScreenShareTransport",
+            operationName: "send_display_info",
+            contextProvider: () => $"revision={revision}; frame={message.FrameWidth}x{message.FrameHeight}");
     }
 
     private void ClearPendingDisplayInfoUnsafe()
@@ -639,6 +666,70 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         pendingDisplayInfo = null;
         pendingDisplayInfoMapping = null;
         pendingDisplayInfoNotBeforeUtc = default;
+    }
+
+    private bool ShouldSendDisplayInfo(
+        string expectedSessionId,
+        long expectedLifecycleGeneration,
+        ScreenShareDisplayInfoSnapshot expectedSnapshot,
+        DisplayInfoMappingKey expectedMapping,
+        long expectedRevision)
+    {
+        lock (gate)
+        {
+            return captureSource is not null &&
+                sendPipeline is not null &&
+                string.Equals(sessionId, expectedSessionId, StringComparison.Ordinal) &&
+                lifecycleGeneration == expectedLifecycleGeneration &&
+                lastSentDisplayInfo.HasValue &&
+                lastSentDisplayInfo.Value.Equals(expectedSnapshot) &&
+                lastSentDisplayInfoMapping.HasValue &&
+                lastSentDisplayInfoMapping.Value.Equals(expectedMapping) &&
+                lastSentDisplayInfoRevision == expectedRevision;
+        }
+    }
+
+    private void LogDisplayInfoSendSuppressed(ControlDisplayInfoMessageV1 message)
+    {
+        var nowTicks = Environment.TickCount64;
+        var windowTicks = (long)Math.Max(1d, TimeSpan.FromSeconds(2).TotalMilliseconds);
+        lock (diagnosticRateLimitGate)
+        {
+            if (nowTicks - lastDisplayInfoSuppressedLogTick < windowTicks)
+            {
+                return;
+            }
+
+            lastDisplayInfoSuppressedLogTick = nowTicks;
+        }
+
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=display_info_send_suppressed; reason=ownership_changed; display_id={message.DisplayId}; revision={message.Revision}; frame={message.FrameWidth}x{message.FrameHeight}");
+    }
+
+    private void ResetDisplayInfoRetryStateIfCurrent(
+        string expectedSessionId,
+        long expectedLifecycleGeneration,
+        ScreenShareDisplayInfoSnapshot expectedSnapshot,
+        DisplayInfoMappingKey expectedMapping,
+        long expectedRevision)
+    {
+        lock (gate)
+        {
+            if (string.Equals(sessionId, expectedSessionId, StringComparison.Ordinal) &&
+                lifecycleGeneration == expectedLifecycleGeneration &&
+                lastSentDisplayInfo.HasValue &&
+                lastSentDisplayInfo.Value.Equals(expectedSnapshot) &&
+                lastSentDisplayInfoMapping.HasValue &&
+                lastSentDisplayInfoMapping.Value.Equals(expectedMapping) &&
+                lastSentDisplayInfoRevision == expectedRevision)
+            {
+                // Retry on subsequent frames if this send failed while still current.
+                lastSentDisplayInfo = null;
+                lastSentDisplayInfoMapping = null;
+            }
+        }
     }
 
     private static DisplayInfoMappingKey CreateMappingKey(ScreenShareDisplayInfoSnapshot snapshot)

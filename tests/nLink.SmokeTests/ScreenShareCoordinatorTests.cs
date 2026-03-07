@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Reflection;
 using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
@@ -7,6 +8,7 @@ using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
+using NLink.App.Configuration;
 using NLink.App.Services.ScreenCapture;
 using NLink.App.Views;
 using NLink.Core.ScreenShare;
@@ -649,7 +651,7 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
             captureSourceFactory: () => fakeSource,
             sendPayloadAsync: (_, _) => Task.CompletedTask,
             clock: clock,
-            sendDisplayInfoAsync: (message, _) =>
+            sendDisplayInfoAsync: (_, message, _) =>
             {
                 sentRevisions.Enqueue(message.Revision);
                 return Task.CompletedTask;
@@ -687,7 +689,7 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
             captureSourceFactory: () => fakeSource,
             sendPayloadAsync: (_, _) => Task.CompletedTask,
             clock: clock,
-            sendDisplayInfoAsync: (message, _) =>
+            sendDisplayInfoAsync: (_, message, _) =>
             {
                 sentRevisions.Enqueue(message.Revision);
                 return Task.CompletedTask;
@@ -711,6 +713,220 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
         fakeSource.RaiseFrame(1280, 720, new byte[] { 4 }, "jpeg");
         await WaitUntilAsync(() => sentRevisions.Count == 2, TimeSpan.FromSeconds(2));
         Assert.Equal(new long[] { 1, 2 }, sentRevisions.ToArray());
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_DisplayInfoSendFailure_DoesNotRaiseUnobservedException_AndLaterFrameRetries()
+    {
+        using var unobserved = new UnobservedTaskExceptionRecorder();
+        var fakeSource = new FakeScreenCaptureSource
+        {
+            CaptureMetadata = new ScreenCaptureMetadata(
+                DisplayId: "primary",
+                CaptureRegionPx: new ScreenCapturePixelRect(0, 0, 1920, 1080),
+                DpiScale: 1.0),
+        };
+        var sentRevisions = new ConcurrentQueue<long>();
+        var attempts = 0;
+
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: (_, _) => Task.CompletedTask,
+            sendDisplayInfoAsync: (_, message, _) =>
+            {
+                var nextAttempt = Interlocked.Increment(ref attempts);
+                if (nextAttempt == 1)
+                {
+                    throw new InvalidOperationException("display-info-send-failed");
+                }
+
+                sentRevisions.Enqueue(message.Revision);
+                return Task.CompletedTask;
+            });
+
+        await coordinator.StartAsync("session-live", CancellationToken.None);
+
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 1 }, "jpeg");
+        await WaitUntilAsync(() => Volatile.Read(ref attempts) >= 1, TimeSpan.FromSeconds(2));
+        await Task.Yield();
+        ForceFullCollection();
+        Assert.Empty(unobserved.Exceptions);
+
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 2 }, "jpeg");
+        await WaitUntilAsync(() => sentRevisions.Count == 1, TimeSpan.FromSeconds(2));
+
+        Assert.Equal(2, Volatile.Read(ref attempts));
+        Assert.Equal(new long[] { 2 }, sentRevisions.ToArray());
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_StaleDisplayInfoFailureAfterRestart_DoesNotForceRedundantResend()
+    {
+        using var unobserved = new UnobservedTaskExceptionRecorder();
+        var fakeSource = new FakeScreenCaptureSource
+        {
+            CaptureMetadata = new ScreenCaptureMetadata(
+                DisplayId: "primary",
+                CaptureRegionPx: new ScreenCapturePixelRect(0, 0, 1920, 1080),
+                DpiScale: 1.0),
+        };
+        var staleSendStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStaleSend = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var staleFailureObserved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sentRevisions = new ConcurrentQueue<long>();
+        var attempts = 0;
+
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: (_, _) => Task.CompletedTask,
+            sendDisplayInfoAsync: async (_, message, _) =>
+            {
+                var attempt = Interlocked.Increment(ref attempts);
+                if (attempt == 1)
+                {
+                    staleSendStarted.TrySetResult(true);
+                    await releaseStaleSend.Task.ConfigureAwait(false);
+                    staleFailureObserved.TrySetResult(true);
+                    throw new InvalidOperationException("stale-display-info-send");
+                }
+
+                sentRevisions.Enqueue(message.Revision);
+            });
+
+        await coordinator.StartAsync("session-live", CancellationToken.None);
+
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 1 }, "jpeg");
+        await AwaitCompletesAsync(
+            staleSendStarted.Task,
+            TimeSpan.FromSeconds(2),
+            "stale display-info send start");
+
+        await coordinator.StopAsync(sendStopMessage: false, reason: null, CancellationToken.None);
+        await coordinator.StartAsync("session-live", CancellationToken.None);
+
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 2 }, "jpeg");
+        await WaitUntilAsync(() => sentRevisions.Count == 1, TimeSpan.FromSeconds(2));
+
+        releaseStaleSend.TrySetResult(true);
+        await AwaitCompletesAsync(
+            staleFailureObserved.Task,
+            TimeSpan.FromSeconds(2),
+            "stale display-info send failure");
+        await Task.Yield();
+        ForceFullCollection();
+        Assert.Empty(unobserved.Exceptions);
+
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 3 }, "jpeg");
+        await Task.Delay(150);
+
+        Assert.Equal(2, Volatile.Read(ref attempts));
+        Assert.Equal(new long[] { 1 }, sentRevisions.ToArray());
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_FrameSizeOnlyChange_RemainsSuppressed_AcrossRapidRestart()
+    {
+        var fakeSource = new FakeScreenCaptureSource
+        {
+            CaptureMetadata = new ScreenCaptureMetadata(
+                DisplayId: "primary",
+                CaptureRegionPx: new ScreenCapturePixelRect(0, 0, 1920, 1080),
+                DpiScale: 1.25),
+        };
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 5, 16, 20, 0, TimeSpan.Zero));
+        var sentRevisions = new ConcurrentQueue<long>();
+
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: (_, _) => Task.CompletedTask,
+            clock: clock,
+            sendDisplayInfoAsync: (_, message, _) =>
+            {
+                sentRevisions.Enqueue(message.Revision);
+                return Task.CompletedTask;
+            });
+
+        await coordinator.StartAsync("session-live", CancellationToken.None);
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 1 }, "jpeg");
+        await WaitUntilAsync(() => sentRevisions.Count == 1, TimeSpan.FromSeconds(2));
+
+        await coordinator.StopAsync(sendStopMessage: false, reason: null, CancellationToken.None);
+        await coordinator.StartAsync("session-live", CancellationToken.None);
+
+        fakeSource.RaiseFrame(960, 540, new byte[] { 2 }, "jpeg");
+        await WaitUntilAsync(() => sentRevisions.Count == 2, TimeSpan.FromSeconds(2));
+
+        clock.Advance(TimeSpan.FromMilliseconds(300));
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 3 }, "jpeg");
+        clock.Advance(TimeSpan.FromMilliseconds(300));
+        fakeSource.RaiseFrame(800, 450, new byte[] { 4 }, "jpeg");
+        await Task.Delay(100);
+
+        Assert.Equal(new long[] { 1, 1 }, sentRevisions.ToArray());
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_MappingChangeDebounce_RemainsScoped_AcrossRapidRestart()
+    {
+        var fakeSource = new FakeScreenCaptureSource
+        {
+            CaptureMetadata = new ScreenCaptureMetadata(
+                DisplayId: "primary",
+                CaptureRegionPx: new ScreenCapturePixelRect(0, 0, 1920, 1080),
+                DpiScale: 1.25),
+        };
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 5, 16, 30, 0, TimeSpan.Zero));
+        var sentRevisions = new ConcurrentQueue<long>();
+
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: (_, _) => Task.CompletedTask,
+            clock: clock,
+            sendDisplayInfoAsync: (_, message, _) =>
+            {
+                sentRevisions.Enqueue(message.Revision);
+                return Task.CompletedTask;
+            });
+
+        await coordinator.StartAsync("session-live", CancellationToken.None);
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 1 }, "jpeg");
+        await WaitUntilAsync(() => sentRevisions.Count == 1, TimeSpan.FromSeconds(2));
+
+        fakeSource.CaptureMetadata = new ScreenCaptureMetadata(
+            DisplayId: "primary",
+            CaptureRegionPx: new ScreenCapturePixelRect(100, 50, 1720, 980),
+            DpiScale: 1.25);
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 2 }, "jpeg");
+        clock.Advance(TimeSpan.FromMilliseconds(100));
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 3 }, "jpeg");
+        await Task.Delay(100);
+        Assert.Equal(1, sentRevisions.Count);
+
+        await coordinator.StopAsync(sendStopMessage: false, reason: null, CancellationToken.None);
+        await coordinator.StartAsync("session-live", CancellationToken.None);
+
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 4 }, "jpeg");
+        await WaitUntilAsync(() => sentRevisions.Count == 2, TimeSpan.FromSeconds(2));
+
+        fakeSource.CaptureMetadata = new ScreenCaptureMetadata(
+            DisplayId: "primary",
+            CaptureRegionPx: new ScreenCapturePixelRect(150, 80, 1600, 900),
+            DpiScale: 1.25);
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 5 }, "jpeg");
+        clock.Advance(TimeSpan.FromMilliseconds(100));
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 6 }, "jpeg");
+        await Task.Delay(100);
+        Assert.Equal(2, sentRevisions.Count);
+
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        fakeSource.RaiseFrame(1280, 720, new byte[] { 7 }, "jpeg");
+        await WaitUntilAsync(() => sentRevisions.Count == 3, TimeSpan.FromSeconds(2));
+
+        Assert.Equal(new long[] { 1, 1, 2 }, sentRevisions.ToArray());
     }
 
     [Fact]
@@ -937,6 +1153,86 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
                 coordinator.DisposeAsync().AsTask(),
                 TimeSpan.FromSeconds(3),
                 "transport lifecycle final dispose");
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_AutoTuneHint_ResetsAcrossStopRestart()
+    {
+        using var autoTuneFlag = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE", "1");
+        var fakeSource = new AdaptiveFakeScreenCaptureSource
+        {
+            CaptureMetadata = new ScreenCaptureMetadata(
+                DisplayId: "primary",
+                CaptureRegionPx: new ScreenCapturePixelRect(0, 0, 1920, 1080),
+                DpiScale: 1.0),
+        };
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 6, 10, 0, 0, TimeSpan.Zero));
+        var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: (_, _) => Task.CompletedTask,
+            clock: clock);
+
+        var autoTuneTick = typeof(TransportScreenShareCoordinator).GetMethod(
+            "OnAutoTuneTimerTick",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(autoTuneTick);
+
+        try
+        {
+            await AwaitCompletesAsync(
+                coordinator.StartAsync("session-auto-1", CancellationToken.None),
+                TimeSpan.FromSeconds(2),
+                "auto-tune cycle 1 start");
+
+            Assert.Equal(FeatureFlags.ScreenShareTransportMaxFps, fakeSource.LastCaptureFrameRateHint);
+
+            fakeSource.RaiseFrame(
+                new ScreenCaptureFrameEventArgs(
+                    1280,
+                    720,
+                    new byte[] { 1, 2, 3 },
+                    "jpeg",
+                    capturedTsUtcMs: clock.UtcNow.AddMilliseconds(-1000).ToUnixTimeMilliseconds()));
+
+            await Task.Delay(50);
+            autoTuneTick!.Invoke(coordinator, Array.Empty<object>());
+
+            Assert.Equal(FeatureFlags.ScreenShareTransportMaxFps - 1, fakeSource.LastCaptureFrameRateHint);
+            Assert.Contains(FeatureFlags.ScreenShareTransportMaxFps, fakeSource.CaptureFrameRateHints);
+
+            await AwaitCompletesAsync(
+                coordinator.StopAsync(sendStopMessage: false, reason: "restart", CancellationToken.None),
+                TimeSpan.FromSeconds(2),
+                "auto-tune cycle 1 stop");
+
+            await AwaitCompletesAsync(
+                coordinator.StartAsync("session-auto-2", CancellationToken.None),
+                TimeSpan.FromSeconds(2),
+                "auto-tune cycle 2 start");
+
+            Assert.Equal(FeatureFlags.ScreenShareTransportMaxFps, fakeSource.LastCaptureFrameRateHint);
+
+            fakeSource.RaiseFrame(
+                new ScreenCaptureFrameEventArgs(
+                    1280,
+                    720,
+                    new byte[] { 4, 5, 6 },
+                    "jpeg",
+                    capturedTsUtcMs: clock.UtcNow.ToUnixTimeMilliseconds()));
+
+            await Task.Delay(50);
+            autoTuneTick.Invoke(coordinator, Array.Empty<object>());
+
+            Assert.Equal(FeatureFlags.ScreenShareTransportMaxFps, fakeSource.LastCaptureFrameRateHint);
+        }
+        finally
+        {
+            await AwaitCompletesAsync(
+                coordinator.DisposeAsync().AsTask(),
+                TimeSpan.FromSeconds(2),
+                "auto-tune final dispose");
         }
     }
 
@@ -1602,6 +1898,75 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
             }
 
             return sources.Dequeue();
+        }
+    }
+
+    private sealed class AdaptiveFakeScreenCaptureSource :
+        IScreenCaptureSource,
+        IScreenCaptureMetadataSource,
+        IScreenCaptureAdaptiveTuning,
+        IAsyncDisposable
+    {
+        private EventHandler<ScreenCaptureFrameEventArgs>? frameArrived;
+        private readonly List<int> captureFrameRateHints = new();
+
+        public bool IsSupported => true;
+
+        public bool IsStarted { get; private set; }
+
+        public int LastCaptureFrameRateHint { get; private set; }
+
+        public IReadOnlyList<int> CaptureFrameRateHints => captureFrameRateHints;
+
+        public ScreenCaptureMetadata? CaptureMetadata { get; set; }
+
+        public event EventHandler<ScreenCaptureFrameEventArgs>? FrameArrived
+        {
+            add => frameArrived += value;
+            remove => frameArrived -= value;
+        }
+
+        public Task StartAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            IsStarted = true;
+            return Task.CompletedTask;
+        }
+
+        public Task StopAsync()
+        {
+            IsStarted = false;
+            return Task.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            IsStarted = false;
+            frameArrived = null;
+            return ValueTask.CompletedTask;
+        }
+
+        public bool TryGetCaptureMetadata(out ScreenCaptureMetadata metadata)
+        {
+            if (CaptureMetadata.HasValue)
+            {
+                metadata = CaptureMetadata.Value;
+                return true;
+            }
+
+            metadata = default;
+            return false;
+        }
+
+        public void SetCaptureFrameRateHint(int maxFramesPerSecond)
+        {
+            LastCaptureFrameRateHint = maxFramesPerSecond;
+            captureFrameRateHints.Add(maxFramesPerSecond);
+        }
+
+        public void RaiseFrame(ScreenCaptureFrameEventArgs frame)
+        {
+            frameArrived?.Invoke(this, frame);
         }
     }
 

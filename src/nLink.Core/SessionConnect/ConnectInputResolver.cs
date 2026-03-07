@@ -74,7 +74,7 @@ public sealed class ConnectInputResolver : IConnectInputResolver
                 "Enter an NKN address or invite token.");
         }
 
-        var normalized = input.Trim();
+        var normalized = InviteQrPayload.ExtractTokenOrOriginal(input);
 
         if (LooksLikeInviteToken(normalized))
         {

@@ -527,8 +527,8 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
         var envelope = CreateEnvelope(envelopeCode, MsgType.SessionEnd, payload, replyTo: null);
         SessionTimeline.Record("SessionEndSent");
-        await SendEnvelopeAsync(remoteEndpoint, envelope, ct);
-        Log($"SendSessionEndAsync sent SessionEnd (msg_id={envelope.MessageId})");
+        await SendEnvelopeWithAckRetryAsync(remoteEndpoint, envelope, ct);
+        Log($"SendSessionEndAsync sent SessionEnd with Ack (msg_id={envelope.MessageId})");
     }
 
     public async Task SendControlRequestAsync(ControlRequestMessageV1 message, CancellationToken ct)

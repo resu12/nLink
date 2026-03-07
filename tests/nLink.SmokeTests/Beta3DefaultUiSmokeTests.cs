@@ -194,6 +194,37 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task HelpeePage_WhenScreenShareNotApproved_ShowsDisabledShareScreenButton()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            using var context = await CreateConnectedSessionContextAsync(
+                helpee => helpee.AllowIncomingScreenShareCapability = false);
+            var view = new HelpeePageView { DataContext = context.Helpee };
+            var window = new Window { Width = 1080, Height = 760, Content = view };
+            window.Show();
+
+            try
+            {
+                await FlushUiAsync();
+
+                var shareButton = Assert.IsType<Button>(FindFirstControlByAutomationId(window, "SessionHeader.ShareScreen"));
+                Assert.True(shareButton.IsVisible);
+                Assert.False(shareButton.IsEnabled);
+                Assert.Equal("Share screen", Assert.IsType<string>(shareButton.Content));
+            }
+            finally
+            {
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task HelpeePage_WaitingView_MakesQrProminent_AndKeepsRefreshSecondary()
     {
         await fixture.Session.Dispatch(async () =>
@@ -271,6 +302,127 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
             }
             finally
             {
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task HelpeePage_RefreshInvite_KeepsExistingQrVisible_WhileReplacementRenders()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+            var blockingQrService = new BlockingQrCodeService();
+            using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
+            using var helpee = new HelpeePageViewModel(
+                cancelAction: static () => { },
+                transportConfig,
+                runtime,
+                openDiagnosticsAction: static () => { },
+                clipboardService: new TestClipboardService(),
+                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null),
+                qrCodeService: blockingQrService);
+
+            var view = new HelpeePageView { DataContext = helpee };
+            var window = new Window { Width = 1080, Height = 760, Content = view };
+            try
+            {
+                window.Show();
+                await FlushUiAsync();
+
+                _ = await WaitForLayoutConditionAsync(
+                    window,
+                    () => FindFirstControlByAutomationId(window, "Helpee.InviteQr") as Image is { IsVisible: true } control &&
+                          control.Bounds.Width > 0 &&
+                          control.Bounds.Height > 0
+                        ? control
+                        : null,
+                    TimeSpan.FromSeconds(2),
+                    "initial helpee invite qr");
+
+                await WaitUntilAsync(
+                    () => helpee.ShowShareInviteQr && !helpee.ShowShareInviteQrPlaceholder,
+                    TimeSpan.FromSeconds(2));
+
+                var initialInvite = helpee.ShareInvite;
+                Assert.False(string.IsNullOrWhiteSpace(initialInvite));
+
+                blockingQrService.BlockNextCreate();
+                helpee.RefreshInviteCommand.Execute(null);
+
+                await WaitUntilAsync(
+                    () => !string.Equals(initialInvite, helpee.ShareInvite, StringComparison.Ordinal),
+                    TimeSpan.FromSeconds(2));
+                await FlushUiAsync();
+
+                Assert.True(helpee.ShowShareInviteQr);
+                Assert.False(helpee.ShowShareInviteQrPlaceholder);
+
+                blockingQrService.ReleaseBlockedCreate();
+
+                await WaitUntilAsync(() => blockingQrService.CompletedCreateCount >= 2, TimeSpan.FromSeconds(2));
+                await WaitUntilAsync(
+                    () => helpee.ShowShareInviteQr && !helpee.ShowShareInviteQrPlaceholder,
+                    TimeSpan.FromSeconds(2));
+                await FlushUiAsync();
+            }
+            finally
+            {
+                blockingQrService.ReleaseBlockedCreate();
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task HelpeePage_PreparesInviteBeforeHostReady_WhenSecurityStateProvidesAddress()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            using var delayedTransport = new DelayedHostReadyTransport("beta3-delayed-host-ready");
+            using var runtime = new SessionRuntime(() => delayedTransport);
+            using var helpee = new HelpeePageViewModel(
+                cancelAction: static () => { },
+                NLink.App.Configuration.TransportRuntimeConfig.Select(),
+                runtime,
+                openDiagnosticsAction: static () => { },
+                clipboardService: new TestClipboardService(),
+                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null));
+
+            var view = new HelpeePageView { DataContext = helpee };
+            var window = new Window { Width = 1080, Height = 760, Content = view };
+            try
+            {
+                window.Show();
+                await FlushUiAsync();
+
+                Assert.Null(runtime.CurrentLocalPeerAddress);
+                Assert.Equal(delayedTransport.LocalPeerAddress, runtime.CurrentInvitePeerAddress?.Value);
+
+                await WaitUntilAsync(
+                    () => !string.IsNullOrWhiteSpace(helpee.ShareInvite),
+                    TimeSpan.FromSeconds(2));
+
+                await WaitUntilAsync(
+                    () => helpee.ShowShareInviteQr && !helpee.ShowShareInviteQrPlaceholder,
+                    TimeSpan.FromSeconds(2));
+
+                Assert.Equal("Invite ready", helpee.ShareInviteStatusText);
+                Assert.Null(runtime.CurrentLocalPeerAddress);
+                Assert.Equal(delayedTransport.LocalPeerAddress, runtime.CurrentInvitePeerAddress?.Value);
+            }
+            finally
+            {
+                delayedTransport.ReleaseHostReady();
                 window.Close();
             }
 
@@ -374,12 +526,11 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task HelperPage_WaitingView_ShowsVisibleFallbackLinks_AndQuietRecentTargets()
+    public async Task HelperPage_WaitingView_ShowsCenteredInstallLink_WithoutRecentTargets()
     {
         await fixture.Session.Dispatch(async () =>
         {
             EnsureAppServices();
-            const string recentTarget = "nlink-0dfa1ae.f2e91df1fb70f4897f7390c176055ff17bb26d99e0ee66194";
             var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
             using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
             using var helper = new HelperPageViewModel(
@@ -388,8 +539,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 runtime,
                 openDiagnosticsAction: static () => { },
                 clipboardService: new TestClipboardService(),
-                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null),
-                recentConnectTargetsStore: new FixedRecentConnectTargetsStore(recentTarget));
+                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null));
 
             var view = new HelperPageView { DataContext = helper };
             var window = new Window { Width = 820, Height = 900, Content = view };
@@ -408,15 +558,15 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                     TimeSpan.FromSeconds(2),
                     "helper scan qr action");
 
-                var recentButton = await WaitForLayoutConditionAsync(
+                var pasteButton = await WaitForLayoutConditionAsync(
                     window,
-                    () => FindFirstControlByAutomationId(window, "Helper.RecentTarget") as Button is { IsVisible: true } control &&
+                    () => FindFirstControlByAutomationId(window, "Helper.PasteFromClipboard") as Button is { IsVisible: true } control &&
                           control.Bounds.Width > 0 &&
                           control.Bounds.Height > 0
                         ? control
                         : null,
                     TimeSpan.FromSeconds(2),
-                    "helper recent target");
+                    "helper paste action");
 
                 var installLink = await WaitForLayoutConditionAsync(
                     window,
@@ -428,39 +578,55 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                     TimeSpan.FromSeconds(2),
                     "helper install link");
 
-                var nftpLink = await WaitForLayoutConditionAsync(
+                var codeInput = await WaitForLayoutConditionAsync(
                     window,
-                    () => FindFirstControlByAutomationId(window, "Helper.UseNftp") as Button is { IsVisible: true } control &&
+                    () => FindFirstControlByAutomationId(window, "Helper.CodeInput") as TextBox is { IsVisible: true } control &&
                           control.Bounds.Width > 0 &&
                           control.Bounds.Height > 0
                         ? control
                         : null,
                     TimeSpan.FromSeconds(2),
-                    "helper nftp link");
+                    "helper code input");
 
-                Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helper.CodeInput"));
                 Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helper.Connect"));
-                Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helper.PasteFromClipboard"));
                 Assert.Null(FindFirstControlByAutomationId(window, "Helper.ConnectHint"));
+                Assert.Equal("Paste invite", pasteButton.Content?.ToString());
                 Assert.Equal("Scan QR", scanQrButton.Content?.ToString());
                 Assert.Null(FindFirstControlByAutomationId(window, "Helper.SecondaryOptions"));
+                Assert.Null(FindFirstControlByAutomationId(window, "Helper.UseNftp"));
+                Assert.Null(FindFirstControlByAutomationId(window, "Helper.RecentTarget"));
+                Assert.Null(FindFirstControlByAutomationId(window, "Helper.ClearRecentTargets"));
 
-                var recentText = recentButton.GetVisualDescendants()
-                    .OfType<TextBlock>()
-                    .FirstOrDefault(text =>
-                        string.Equals(text.Text, recentTarget, StringComparison.Ordinal));
+                var inputCenter = codeInput.TranslatePoint(
+                    new Point(codeInput.Bounds.Width / 2, codeInput.Bounds.Height / 2),
+                    window);
+                var pasteCenter = pasteButton.TranslatePoint(
+                    new Point(pasteButton.Bounds.Width / 2, pasteButton.Bounds.Height / 2),
+                    window);
+                var scanCenter = scanQrButton.TranslatePoint(
+                    new Point(scanQrButton.Bounds.Width / 2, scanQrButton.Bounds.Height / 2),
+                    window);
+                var installCenter = installLink.TranslatePoint(
+                    new Point(installLink.Bounds.Width / 2, installLink.Bounds.Height / 2),
+                    window);
 
                 Assert.Equal("Copy install link", installLink.Content?.ToString());
-                Assert.Equal("Use file transfer instead", nftpLink.Content?.ToString());
                 Assert.True(
-                    recentButton.Bounds.Width >= 300,
-                    $"Expected recent target width >= 300, got {recentButton.Bounds.Width:N1}.");
+                    Math.Abs(pasteButton.Bounds.Width - scanQrButton.Bounds.Width) < 1,
+                    $"Expected equal helper secondary action widths, got {pasteButton.Bounds.Width:N1} and {scanQrButton.Bounds.Width:N1}.");
                 Assert.True(
-                    recentButton.Bounds.Width <= 580,
-                    $"Expected recent target width <= 580, got {recentButton.Bounds.Width:N1}.");
-                Assert.NotNull(recentText);
-                Assert.Equal(TextWrapping.NoWrap, recentText!.TextWrapping);
-                Assert.Equal(TextTrimming.CharacterEllipsis, recentText.TextTrimming);
+                    Math.Abs(pasteButton.Bounds.Y - scanQrButton.Bounds.Y) < 2,
+                    $"Expected helper secondary actions on the same row, got Y={pasteButton.Bounds.Y:N1} and {scanQrButton.Bounds.Y:N1}.");
+                Assert.True(inputCenter.HasValue, "Expected helper code input to translate into window coordinates.");
+                Assert.True(pasteCenter.HasValue, "Expected helper paste action to translate into window coordinates.");
+                Assert.True(scanCenter.HasValue, "Expected helper scan action to translate into window coordinates.");
+                Assert.True(installCenter.HasValue, "Expected install link to translate into window coordinates.");
+                Assert.True(
+                    Math.Abs(inputCenter!.Value.X - ((pasteCenter!.Value.X + scanCenter!.Value.X) / 2)) < 12,
+                    $"Expected centered helper action row, got input center X={inputCenter.Value.X:N1}, paste X={pasteCenter.Value.X:N1}, scan X={scanCenter.Value.X:N1}.");
+                Assert.True(
+                    Math.Abs(inputCenter!.Value.X - installCenter!.Value.X) < 12,
+                    $"Expected centered install link, got input center X={inputCenter.Value.X:N1} and install link center X={installCenter.Value.X:N1}.");
             }
             finally
             {
@@ -1477,6 +1643,53 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
         }
     }
 
+    private sealed class BlockingQrCodeService : IQrCodeService
+    {
+        private readonly QrCodeService inner = new();
+        private readonly object sync = new();
+        private TaskCompletionSource<bool>? nextCreateGate;
+        private int completedCreateCount;
+
+        public int CompletedCreateCount => Volatile.Read(ref completedCreateCount);
+
+        public void BlockNextCreate()
+        {
+            lock (sync)
+            {
+                nextCreateGate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+        }
+
+        public void ReleaseBlockedCreate()
+        {
+            TaskCompletionSource<bool>? gate;
+            lock (sync)
+            {
+                gate = nextCreateGate;
+                nextCreateGate = null;
+            }
+
+            gate?.TrySetResult(true);
+        }
+
+        public bool TryCreatePng(string text, out byte[] pngBytes, out string? errorMessage)
+        {
+            TaskCompletionSource<bool>? gate;
+            lock (sync)
+            {
+                gate = nextCreateGate;
+            }
+
+            gate?.Task.GetAwaiter().GetResult();
+            var created = inner.TryCreatePng(text, out pngBytes, out errorMessage);
+            Interlocked.Increment(ref completedCreateCount);
+            return created;
+        }
+
+        public bool TryDecode(Stream imageStream, out string? decodedText, out string? errorMessage)
+            => inner.TryDecode(imageStream, out decodedText, out errorMessage);
+    }
+
     private static Image? FindVisibleScreenShareViewer(Control root)
         => root.GetVisualDescendants()
             .OfType<Image>()
@@ -1539,7 +1752,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
         property!.SetValue(target, value);
     }
 
-    private static async Task<ConnectedSessionContext> CreateConnectedSessionContextAsync()
+    private static async Task<ConnectedSessionContext> CreateConnectedSessionContextAsync(Action<HelpeePageViewModel>? configureIncomingApproval = null)
     {
         var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
         var network = new FakeSessionTransportNetwork();
@@ -1567,6 +1780,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
             () => helpee.HasIncomingRequest && helpee.ConnectionState == "IncomingRequest",
             TimeSpan.FromSeconds(5));
 
+        configureIncomingApproval?.Invoke(helpee);
         helpee.AllowCommand.Execute(null);
         await connectTask;
 
@@ -2051,6 +2265,76 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 (decision.ApprovedCapabilities & ~approvalRequest.RequestedCapabilities) != 0)
             {
                 throw new InvalidOperationException("Approval decision does not match the pending approval request.");
+            }
+        }
+    }
+
+    private sealed class DelayedHostReadyTransport : NLink.Core.ISignalingTransport, NLink.Core.IAddressHostSignalingTransport, NLink.Core.IHostReadySignalingTransport, NLink.Core.ILocalPeerAddressSignalingTransport, NLink.Core.ISessionSecuritySignalingTransport
+    {
+        private readonly TaskCompletionSource<bool> hostReadyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
+        private bool disposed;
+
+        public DelayedHostReadyTransport(string address)
+        {
+            LocalPeerAddress = address;
+        }
+
+        public string LocalPeerAddress { get; }
+        public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
+
+        public event EventHandler<NLink.Core.IncomingJoinRequestEventArgs>? IncomingJoinRequest;
+        public event EventHandler<NLink.Core.TransportSessionKeyReadyEventArgs>? SessionKeyReady;
+        public event EventHandler<NLink.Core.TransportChatMessageEventArgs>? ChatMessageReceived;
+        public event EventHandler? Approved;
+        public event EventHandler? Rejected;
+        public event EventHandler? Disconnected;
+        public event EventHandler<NLink.Core.TransportSessionSecurityStateChangedEventArgs>? SessionSecurityStateChanged;
+
+        public Task HostByAddressAsync(CancellationToken ct)
+        {
+            ThrowIfDisposed();
+            UpdateSessionSecurityState(SessionSecurityState.CreateHelpeeWaiting(new PeerAddress(LocalPeerAddress)));
+            return Task.Delay(Timeout.Infinite, ct);
+        }
+
+        public Task WaitUntilHostReadyAsync(CancellationToken ct) => hostReadyTcs.Task.WaitAsync(ct);
+
+        public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
+            => Task.CompletedTask;
+
+        public void ReleaseHostReady()
+        {
+            hostReadyTcs.TrySetResult(true);
+        }
+
+        public void Dispose()
+        {
+            if (disposed)
+            {
+                return;
+            }
+
+            disposed = true;
+            hostReadyTcs.TrySetCanceled();
+        }
+
+        private void UpdateSessionSecurityState(SessionSecurityState nextState)
+        {
+            if (Equals(currentSessionSecurityState, nextState))
+            {
+                return;
+            }
+
+            currentSessionSecurityState = nextState;
+            SessionSecurityStateChanged?.Invoke(this, new NLink.Core.TransportSessionSecurityStateChangedEventArgs(nextState));
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (disposed)
+            {
+                throw new ObjectDisposedException(nameof(DelayedHostReadyTransport));
             }
         }
     }

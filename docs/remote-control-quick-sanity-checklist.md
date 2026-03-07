@@ -1,4 +1,4 @@
-# Remote Control 0.4.0 Quick Sanity Checklist
+# Remote Control 0.4.1 Quick Sanity Checklist
 
 ## Scope
 - Consent handshake works (request/allow/deny/start/stop).

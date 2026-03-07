@@ -153,7 +153,7 @@ public sealed class StatusPresenter : IDisposable
             var title = kind switch
             {
                 UserStatusKind.Reconnecting => "Reconnecting",
-                UserStatusKind.Handshake => "Connecting",
+                UserStatusKind.Handshake => "Finalizing connection",
                 _ => "Connecting"
             };
 
@@ -244,10 +244,13 @@ public sealed class StatusPresenter : IDisposable
 
         if (source.TransportLifecycleState == TransportState.Handshake || source.State == SessionRuntimeState.IncomingJoinRequest)
         {
+            var isAwaitingApproval = source.State == SessionRuntimeState.IncomingJoinRequest;
             SetStatus(new UserFacingStatus(
                 UserStatusKind.Handshake,
-                "Connecting",
-                string.IsNullOrWhiteSpace(source.StatusText) ? "Connecting…" : source.StatusText,
+                isAwaitingApproval ? "Waiting for approval" : "Finalizing connection",
+                string.IsNullOrWhiteSpace(source.StatusText)
+                    ? isAwaitingApproval ? "Waiting for approval…" : "Finalizing connection…"
+                    : source.StatusText,
                 FailureSeverity.Info,
                 Attempt: diag.AttemptNumber > 0 ? (int)diag.AttemptNumber : null,
                 CanCancel: true));

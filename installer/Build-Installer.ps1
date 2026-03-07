@@ -249,43 +249,6 @@ function Publish-ReleaseAssets {
     }
 }
 
-function Copy-BridgeBundleToStaging {
-    param(
-        [Parameter(Mandatory = $true)][string]$BridgeDir,
-        [Parameter(Mandatory = $true)][string]$PublishOutDir
-    )
-
-    $destination = Join-Path $PublishOutDir (Join-Path "bridge" $Runtime)
-    $bridgeRoot = Join-Path $PublishOutDir "bridge"
-    if (Test-Path $bridgeRoot) {
-        try {
-            Invoke-WithRetry -OperationName "remove helper bridge staging" -Action {
-                Remove-Item -Recurse -Force $bridgeRoot
-            }
-        }
-        catch {
-            if (Test-Path $destination) {
-                try {
-                    Assert-BridgeBundleRuntime -BridgeDir $destination
-                    Write-Warning "[nLink] Reusing existing helper bridge staging due file lock during cleanup: $destination"
-                    return
-                }
-                catch {
-                    throw
-                }
-            }
-
-            throw
-        }
-    }
-
-    New-Item -ItemType Directory -Force -Path $destination | Out-Null
-    Copy-Item -Recurse -Force (Join-Path $BridgeDir "*") $destination
-
-    Assert-BridgeBundleRuntime -BridgeDir $destination
-    Write-Host "[nLink] Copied bridge runtime into helper staging: $destination" -ForegroundColor Green
-}
-
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $resolvedVersion = Get-ReleaseVersion -RepoRoot $repoRoot -OverrideVersion $AppVersion
 $AppVersion = $resolvedVersion
@@ -322,31 +285,29 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Assert-BridgeBundleRuntime -BridgeDir $bridgeBundleAbs
-Copy-BridgeBundleToStaging -BridgeDir $bridgeBundleAbs -PublishOutDir $helperPortableOutAbs
 
-# Safe size reduction in installer staging only (leave bin/obj untouched).
-Remove-StagedDebugFiles -RootDir $helperPortableOutAbs
-Assert-InstallerStagePayload -StageDir $helperPortableOutAbs -Runtime $Runtime
-& $verifyPackageManifestPath -StageDir $helperPortableOutAbs -ManifestPath $packageManifestPath
+$installerStageAbs = $canonicalPortableOutAbs
+Assert-InstallerStagePayload -StageDir $installerStageAbs -Runtime $Runtime
+& $verifyPackageManifestPath -StageDir $installerStageAbs -ManifestPath $packageManifestPath
 
 $isccPath = Resolve-IsccPath
 if (-not $isccPath) {
     Write-Warning "Inno Setup compiler (ISCC.exe) was not found."
     Write-Warning "Portable ZIP is ready at: $portableZipAbs"
-    Write-Warning "Helper staging folder is ready at: $helperPortableOutAbs"
+    Write-Warning "Installer staging folder is ready at: $installerStageAbs"
     Write-Warning "Install Inno Setup 6 and re-run this script to build the installer."
     exit 1
 }
 
 Write-Host "[nLink] Building installer with Inno Setup..." -ForegroundColor Cyan
-& $isccPath "/DSourceDir=$helperPortableOutAbs" "/DOutDir=$installerOutAbs" "/DAppVersion=$AppVersion" $issPath
+& $isccPath "/DSourceDir=$installerStageAbs" "/DOutDir=$installerOutAbs" "/DAppVersion=$AppVersion" $issPath
 
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
 # Packaging validation step: inspect staging folder used for installer packaging.
-Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $helperPortableOutAbs "bridge") $Runtime)
+Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $installerStageAbs "bridge") $Runtime)
 $installerExeAbs = Join-Path $installerOutAbs ("nLink-Setup-win-x64-{0}.exe" -f $resolvedVersion)
 $releasePublish = Publish-ReleaseAssets `
     -RepoRoot $repoRoot `
@@ -366,11 +327,11 @@ foreach ($asset in @($releasePublish.Assets)) {
     }
 }
 
-$bridgeRootAbs = Join-Path $helperPortableOutAbs "bridge"
+$bridgeRootAbs = Join-Path $installerStageAbs "bridge"
 $bridgeRidAbs = Join-Path $bridgeRootAbs $Runtime
 $nodeModulesAbs = Join-Path $bridgeRidAbs "node_modules"
 
-$totalSizeBytes = Get-DirectorySizeBytes -RootDir $helperPortableOutAbs
+$totalSizeBytes = Get-DirectorySizeBytes -RootDir $installerStageAbs
 $bridgeSizeBytes = Get-DirectorySizeBytes -RootDir $bridgeRootAbs
 $nodeModulesSizeBytes = Get-DirectorySizeBytes -RootDir $nodeModulesAbs
 

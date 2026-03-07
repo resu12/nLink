@@ -97,6 +97,44 @@ function Invoke-SelfTest {
     }
 }
 
+function Start-BridgeNodeLock {
+    param([Parameter(Mandatory = $true)][string]$TargetDir)
+
+    $nodeExe = Join-Path $TargetDir 'bridge\win-x64\node.exe'
+    if (-not (Test-Path $nodeExe)) {
+        throw "Bundled node.exe not found: $nodeExe"
+    }
+
+    $process = Start-Process -FilePath $nodeExe -ArgumentList @(
+            '-e',
+            'setInterval(() => {}, 1000 * 60);'
+        ) -WorkingDirectory (Split-Path -Parent $nodeExe) -WindowStyle Hidden -PassThru
+
+    Start-Sleep -Milliseconds 750
+    if ($process.HasExited) {
+        throw "Failed to keep bundled node.exe running for installer lock validation: $nodeExe"
+    }
+
+    return $process
+}
+
+function Stop-TestProcess {
+    param($Process)
+
+    if ($null -eq $Process) {
+        return
+    }
+
+    try {
+        if (-not $Process.HasExited) {
+            $Process.Kill(entireProcessTree: $true)
+            $Process.WaitForExit()
+        }
+    }
+    catch {
+    }
+}
+
 function Get-UserDataSnapshot {
     param([Parameter(Mandatory = $true)][string]$RootDir)
 
@@ -203,7 +241,14 @@ Read-Host | Out-Null
 $beforeUpgradeUserData = Get-UserDataSnapshot -RootDir $resolvedUserDataRoot
 
 Write-Host "[nLink] Upgrading in place to: $resolvedNewInstaller" -ForegroundColor Cyan
-Invoke-Installer -InstallerPath $resolvedNewInstaller -TargetDir $resolvedInstallDir
+$upgradeLockProcess = $null
+try {
+    $upgradeLockProcess = Start-BridgeNodeLock -TargetDir $resolvedInstallDir
+    Invoke-Installer -InstallerPath $resolvedNewInstaller -TargetDir $resolvedInstallDir
+}
+finally {
+    Stop-TestProcess -Process $upgradeLockProcess
+}
 Assert-InstalledLayout -TargetDir $resolvedInstallDir
 if (-not $SkipSelfTest) {
     Invoke-SelfTest -TargetDir $resolvedInstallDir
@@ -213,7 +258,14 @@ $afterUpgradeUserData = Get-UserDataSnapshot -RootDir $resolvedUserDataRoot
 Assert-UserDataPreserved -Before $beforeUpgradeUserData -After $afterUpgradeUserData
 
 Write-Host "[nLink] Uninstalling upgraded build..." -ForegroundColor Cyan
-Invoke-Uninstaller -TargetDir $resolvedInstallDir
+$uninstallLockProcess = $null
+try {
+    $uninstallLockProcess = Start-BridgeNodeLock -TargetDir $resolvedInstallDir
+    Invoke-Uninstaller -TargetDir $resolvedInstallDir
+}
+finally {
+    Stop-TestProcess -Process $uninstallLockProcess
+}
 Assert-NoProcessesUnderInstallDir -TargetDir $resolvedInstallDir
 
 $afterUninstallUserData = Get-UserDataSnapshot -RootDir $resolvedUserDataRoot
