@@ -7,7 +7,7 @@ using Avalonia;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using NLink.App.Threading;
-using NLink.Infra.Nkn;
+using NLink.Core.ScreenShare;
 
 namespace NLink.App.Services.ScreenCapture;
 

@@ -2603,6 +2603,62 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void SessionRuntime_ScreenShareFrameDispatch_SuppressesLateFrameImmediatelyAfterStop()
+    {
+        using var scripted = new ScriptedSignalingTransport();
+        var nowUtc = new DateTimeOffset(2026, 3, 7, 12, 0, 0, TimeSpan.Zero);
+        using var runtime = new SessionRuntime(
+            () => scripted,
+            watchdogOptions: null,
+            nowProvider: () => nowUtc);
+
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+
+        var approvedState = CreateApprovedSecurityState(
+            new PeerAddress(scripted.LocalPeerAddress),
+            new PeerAddress("scripted.helper.peer"),
+            CapabilityGrant.ScreenShare);
+        InvokePrivateMethod(runtime, "ApplyTransportSecurityState", approvedState);
+
+        var frameRaised = false;
+        runtime.ScreenShareFrameCompleted += (_, _) => frameRaised = true;
+
+        InvokePrivateMethod(runtime, "OnTransportScreenShareStopped", scripted, EventArgs.Empty);
+        InvokePrivateMethod(
+            runtime,
+            "OnTransportScreenShareFrameCompleted",
+            scripted,
+            new ScreenShareFrameCompletedEventArgs(
+                1,
+                1,
+                1,
+                "jpeg",
+                new byte[] { 0x01 },
+                SessionId: runtime.SecurityState.SessionId!.Value.Value));
+
+        Assert.False(frameRaised);
+
+        nowUtc = nowUtc.AddSeconds(1);
+        InvokePrivateMethod(
+            runtime,
+            "OnTransportScreenShareFrameCompleted",
+            scripted,
+            new ScreenShareFrameCompletedEventArgs(
+                2,
+                1,
+                1,
+                "jpeg",
+                new byte[] { 0x02 },
+                SessionId: runtime.SecurityState.SessionId!.Value.Value));
+
+        Assert.True(frameRaised);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task SessionRuntime_UnauthorizedRemoteControlInjection_IsRejected()
     {
         var hostAddress = CreateTestPeerAddress();
@@ -4015,6 +4071,110 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task HelpeePageViewModel_StopScreenShareWhileConsentPending_ClearsApprovalUiImmediately()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var transport = new DevLocalTransport();
+        using var runtime = new SessionRuntime(() => transport);
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            screenCaptureSourceFactory: new FixedCaptureSourceFactory(new FakeScreenCaptureSource()));
+
+        SetPrivateField(runtime, "transport", transport);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "transportState", TransportState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        SetPrivateField(
+            runtime,
+            "remoteControlSessionState",
+            new RemoteControlSessionState(
+                ControlState.Requesting,
+                ControllerPeerId: "helper-peer",
+                CurrentControlRequestId: "req-preview-stop",
+                ConsentToken: null,
+                SupportsRemoteControl: true,
+                PeerSupportsRemoteControl: true));
+        SetPrivateField(runtime, "hasPendingRemoteControlConsentPrompt", true);
+        SetPrivateProperty(helpee, "ConnectionState", "Connected");
+        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateProperty(helpee, "IsScreenSharingPreviewActive", true);
+
+        Assert.True(helpee.ShowRemoteControlConsentDialog);
+        Assert.Equal("Waiting for your approval… • Screen sharing", helpee.HeaderStatusText);
+
+        SetPrivateProperty(helpee, "IsScreenSharingPreviewActive", false);
+
+        Assert.False(helpee.ShowRemoteControlConsentDialog);
+        Assert.Equal("Connected", helpee.HeaderStatusText);
+
+        await WaitUntilAsync(
+            () => runtime.ControlState == ControlState.Off &&
+                  !runtime.HasPendingRemoteControlConsentPrompt,
+            TimeSpan.FromSeconds(1));
+
+        await WaitUntilAsync(
+            () => !helpee.ShowRemoteControlConsentDialog &&
+                  helpee.HeaderStatusText == "Connected",
+            TimeSpan.FromSeconds(1));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_StopScreenShareWhileControlActive_ClearsActiveUiImmediately()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var transport = new DevLocalTransport();
+        using var runtime = new SessionRuntime(() => transport);
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            screenCaptureSourceFactory: new FixedCaptureSourceFactory(new FakeScreenCaptureSource()));
+
+        SetPrivateField(runtime, "transport", transport);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "transportState", TransportState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        SetPrivateField(
+            runtime,
+            "remoteControlSessionState",
+            new RemoteControlSessionState(
+                ControlState.Active,
+                ControllerPeerId: "helper-peer",
+                CurrentControlRequestId: "req-preview-stop-active",
+                ConsentToken: null,
+                SupportsRemoteControl: true,
+                PeerSupportsRemoteControl: true));
+        SetPrivateProperty(helpee, "ConnectionState", "Connected");
+        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateProperty(helpee, "ScreenSharePreviewFrame", CreateTestBitmap(1, 1));
+        SetPrivateProperty(helpee, "IsScreenSharingPreviewActive", true);
+
+        Assert.True(helpee.ShowRemoteControlActiveStatus);
+        Assert.True(helpee.ShowStopControlAction);
+        Assert.Contains("Screen sharing", helpee.HeaderStatusText, StringComparison.Ordinal);
+
+        SetPrivateProperty(helpee, "IsScreenSharingPreviewActive", false);
+
+        Assert.False(helpee.ShowRemoteControlActiveStatus);
+        Assert.False(helpee.ShowStopControlAction);
+        Assert.Equal("Connected", helpee.HeaderStatusText);
+
+        await WaitUntilAsync(
+            () => runtime.ControlState == ControlState.Off,
+            TimeSpan.FromSeconds(1));
+
+        await WaitUntilAsync(
+            () => !helpee.ShowRemoteControlActiveStatus &&
+                  !helpee.ShowStopControlAction &&
+                  helpee.HeaderStatusText == "Connected",
+            TimeSpan.FromSeconds(1));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task HelpeePageViewModel_ScreenShareStartFailure_ShowsHeaderStatus_AndRemainsInactive()
     {
         var transportConfig = CreateDevLocalTestConfig();
@@ -4159,6 +4319,29 @@ public class SmokeTests
 
         Assert.False(helper.ShowRemoteScreenShareFrame);
         Assert.Null(helper.RemoteScreenShareFrame);
+        Assert.Equal("Connected", helper.HeaderStatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperPageViewModel_RequestPendingWithoutVisibleScreen_DoesNotKeepWaitingApprovalHeader()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        SetPrivateField(helper, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateField(
+            helperRuntime,
+            "remoteControlSessionState",
+            new RemoteControlSessionState(
+                ControlState.Requesting,
+                ControllerPeerId: "helpee-peer",
+                CurrentControlRequestId: "req-no-screen",
+                ConsentToken: null,
+                SupportsRemoteControl: true,
+                PeerSupportsRemoteControl: true));
+
         Assert.Equal("Connected", helper.HeaderStatusText);
     }
 
@@ -4312,6 +4495,7 @@ public class SmokeTests
                   helper.CanEndSession,
             TimeSpan.FromSeconds(5));
 
+        helper.CodeInput = "stale-invite-should-clear";
         Assert.True(helper.IsChatInputEnabled);
         Assert.True(helper.CanEndSession);
 
@@ -4319,6 +4503,7 @@ public class SmokeTests
 
         Assert.False(helper.IsChatInputEnabled);
         Assert.False(helper.CanEndSession);
+        Assert.Equal(string.Empty, helper.CodeInput);
         Assert.False(string.IsNullOrWhiteSpace(helper.HeaderStatusText));
     }
 
@@ -4464,6 +4649,34 @@ public class SmokeTests
                   helpee.ScreenSharePreviewStatus.State == ScreenShareState.Off,
             TimeSpan.FromSeconds(2));
         Assert.DoesNotContain("Screen sharing", helpee.HeaderStatusText, StringComparison.Ordinal);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task UnsentChatDraft_DoesNotLeakIntoNextSession_AfterEndAndRestart()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        helper.ChatDraft = "unsent helper draft";
+        helpee.ChatDraft = "unsent helpee draft";
+        helper.ChatMessages.Add(new ChatLineViewModel { Text = "old helper message", IsLocal = true });
+        helpee.ChatMessages.Add(new ChatLineViewModel { Text = "old helpee message", IsLocal = true });
+        SetPrivateField(helper, "endSessionRequested", true);
+        SetPrivateField(helper, "endReason", Enum.Parse(typeof(SessionEndReason), "UserEnded"));
+        SetPrivateField(helpee, "endSessionRequested", true);
+        SetPrivateField(helpee, "endReason", Enum.Parse(typeof(SessionEndReason), "UserEnded"));
+
+        InvokePrivateMethod(helper, "PrepareForNewSession");
+        InvokePrivateMethod(helpee, "PrepareForNewSession");
+
+        Assert.Equal(string.Empty, helper.ChatDraft);
+        Assert.Equal(string.Empty, helpee.ChatDraft);
+        Assert.Empty(helper.ChatMessages);
+        Assert.Empty(helpee.ChatMessages);
     }
 
     [Trait("Category", "Smoke")]
@@ -5473,6 +5686,65 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task NknSignalingTransport_HandshakeStart_RetriesUntilDelivered_WhenFirstPacketIsDropped()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.handshakestartretry.address");
+            var helperClient = new FakeNknClient("helper.handshakestartretry.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var handshakeStartSendAttempts = 0;
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+
+            helperClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (!string.Equals(destination, "host.handshakestartretry.address", StringComparison.Ordinal))
+                {
+                    return Task.FromResult(true);
+                }
+
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) || env.Type != MsgType.SessionHandshakeStart)
+                {
+                    return Task.FromResult(true);
+                }
+
+                var nextAttempt = Interlocked.Increment(ref handshakeStartSendAttempts);
+                return Task.FromResult(nextAttempt != 1);
+            };
+
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(new PeerAddress(host.LocalPeerAddress), out var rawToken);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            Assert.True(Volatile.Read(ref handshakeStartSendAttempts) >= 2);
+            Assert.True(helper.CurrentSessionSecurityState.ApprovalGranted);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task DevLocalTransport_ApprovalDecision_CapabilityEscalation_IsRejected()
     {
         var hostAddress = CreateTestPeerAddress();
@@ -5932,6 +6204,40 @@ public class SmokeTests
         Assert.Equal("Use the helpee invite token.", helper.StatusText);
         Assert.Equal(SessionRuntimeState.Idle, runtime.State);
         Assert.Equal(0, factory.CreateCount);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperViewModel_FirstConnectAfterEndedSession_PreservesInviteAndStartsJoin()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var joinByInviteCalls = 0;
+        string? observedInviteToken = null;
+        using var scripted = new ScriptedSignalingTransport(
+            onJoinByInviteAsync: (inviteToken, _, _) =>
+            {
+                observedInviteToken = inviteToken;
+                Interlocked.Increment(ref joinByInviteCalls);
+                return Task.CompletedTask;
+            });
+        using var runtime = new SessionRuntime(() => scripted);
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            approvalTimeout: TimeSpan.FromMilliseconds(100),
+            connectFailureCooldown: TimeSpan.Zero);
+
+        CreateValidatedInviteForTarget(new PeerAddress("scripted.connect.after-ended"), out var inviteToken);
+        SetPrivateField(helper, "endReason", SessionEndReason.UserEnded);
+        helper.CodeInput = inviteToken;
+
+        await helper.ConnectCommand.ExecuteAsync(null);
+
+        Assert.Equal(inviteToken, observedInviteToken);
+        Assert.Equal(1, Volatile.Read(ref joinByInviteCalls));
+        Assert.Equal(inviteToken, helper.CodeInput);
+        Assert.NotEqual("InvalidInput", helper.ConnectionState);
     }
 
     [Trait("Category", "Smoke")]
@@ -6486,6 +6792,69 @@ public class SmokeTests
                   helpee.ShowIncomingRequestPanel &&
                   !helpee.ShowWaitingPanel,
             TimeSpan.FromSeconds(2));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task ApprovalVerificationCode_IsExposedOnHelpeeAndHelper_FromSharedHelperIdentity()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-verify-code-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-verify-code-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+
+        _ = await WaitForShareInviteAsync(helpee);
+        var connectTask = helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
+
+        await WaitUntilAsync(
+            () => helpee.IsIncomingRequestView &&
+                  helpee.ShowIncomingRequestPanel &&
+                  helpee.HasIncomingHelperVerificationCode &&
+                  helper.HasHelperVerificationCode,
+            TimeSpan.FromSeconds(3));
+
+        Assert.Equal(helpee.IncomingHelperVerificationCode, helper.HelperVerificationCode);
+        Assert.True(helpee.HasIncomingTechnicalDetails);
+        Assert.False(string.IsNullOrWhiteSpace(helpee.IncomingTechnicalHelperIdentityText));
+        Assert.False(string.IsNullOrWhiteSpace(helpee.IncomingTechnicalSessionIdText));
+        Assert.True(helper.HasHelperTechnicalDetails);
+        Assert.False(string.IsNullOrWhiteSpace(helper.HelperTechnicalIdentityText));
+        Assert.False(string.IsNullOrWhiteSpace(helper.HelperTechnicalSessionIdText));
+        Assert.True(helper.ShowHelperVerificationCode);
+
+        await helpee.DeclineCommand.ExecuteAsync(null);
+        await connectTask;
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperVerificationCode_IsHiddenUntilStableSessionSecurityHelperIdentityExists()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        var localTransport = new ScriptedSignalingTransport(localPeerAddress: "helper.local.identity");
+        SetPrivateField(helperRuntime, "transport", localTransport);
+        Assert.False(helper.HasHelperVerificationCode);
+        Assert.False(helper.ShowHelperVerificationCode);
+
+        SetPrivateField(
+            helperRuntime,
+            "sessionSecurityState",
+            SessionSecurityState.CreateHelperPending(
+                new SessionId("session-verify"),
+                new PeerAddress("helpee.target.identity"),
+                new PeerAddress("helper.stable.identity"),
+                inviteValidated: true));
+
+        var expected = HelperVerificationCodeFormatter.Format(new PeerAddress("helper.stable.identity"));
+
+        Assert.Equal(expected, helper.HelperVerificationCode);
+        Assert.Equal("helper.stable.identity", helper.HelperTechnicalIdentityText);
     }
 
     [Trait("Category", "Smoke")]

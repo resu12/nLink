@@ -242,6 +242,82 @@ public sealed class RemoteControlP2Tests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task RemoteControl_ScreenShareStopsWhileConsentPending_ClearsPendingApprovalImmediately()
+    {
+        var helperTransport = new LinkedRemoteControlTransport("helper-peer");
+        var helpeeTransport = new LinkedRemoteControlTransport("helpee-peer");
+        helperTransport.Peer = helpeeTransport;
+        helpeeTransport.Peer = helperTransport;
+
+        using var helperRuntime = new SessionRuntime(() => helperTransport);
+        using var helpeeRuntime = new SessionRuntime(() => helpeeTransport);
+
+        AttachConnectedRuntime(helperRuntime, helperTransport, SessionRuntimeRole.Helper);
+        AttachConnectedRuntime(helpeeRuntime, helpeeTransport, SessionRuntimeRole.Helpee);
+
+        Assert.True(await helperRuntime.RequestRemoteControlAsync());
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Requesting &&
+                  helpeeRuntime.ControlState == ControlState.Requesting &&
+                  helpeeRuntime.HasPendingRemoteControlConsentPrompt,
+            TimeSpan.FromSeconds(2));
+
+        _ = InvokePrivateMethod(helperRuntime, "OnTransportScreenShareStopped", helperTransport, EventArgs.Empty);
+
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Off &&
+                  helpeeRuntime.ControlState == ControlState.Off &&
+                  !helpeeRuntime.HasPendingRemoteControlConsentPrompt,
+            TimeSpan.FromSeconds(2));
+
+        Assert.Contains(
+            helperTransport.SentControlStops,
+            s => string.Equals(s.Reason, "screenshare_stopped_pending_request", StringComparison.Ordinal));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task RemoteControl_HelpeeStopsScreenShareWhileActive_ClearsBothSidesImmediately()
+    {
+        var helperTransport = new LinkedRemoteControlTransport("helper-peer");
+        var helpeeTransport = new LinkedRemoteControlTransport("helpee-peer");
+        helperTransport.Peer = helpeeTransport;
+        helpeeTransport.Peer = helperTransport;
+
+        using var helperRuntime = new SessionRuntime(() => helperTransport);
+        using var helpeeRuntime = new SessionRuntime(() => helpeeTransport);
+
+        AttachConnectedRuntime(helperRuntime, helperTransport, SessionRuntimeRole.Helper);
+        AttachConnectedRuntime(helpeeRuntime, helpeeTransport, SessionRuntimeRole.Helpee);
+
+        Assert.True(await helperRuntime.RequestRemoteControlAsync());
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Requesting &&
+                  helpeeRuntime.ControlState == ControlState.Requesting &&
+                  helpeeRuntime.HasPendingRemoteControlConsentPrompt,
+            TimeSpan.FromSeconds(2));
+        Assert.True(await helpeeRuntime.RespondToRemoteControlRequestAsync(allow: true));
+
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Active &&
+                  helpeeRuntime.ControlState == ControlState.Active,
+            TimeSpan.FromSeconds(2));
+
+        Assert.True(await helpeeRuntime.StopRemoteControlAsync("screenshare_stopped_local"));
+        await helpeeRuntime.StopTransportScreenShareAsync("preview_stopped");
+
+        await WaitUntilAsync(
+            () => helperRuntime.ControlState == ControlState.Off &&
+                  helpeeRuntime.ControlState == ControlState.Off,
+            TimeSpan.FromSeconds(2));
+
+        Assert.Contains(
+            helpeeTransport.SentControlStops,
+            s => string.Equals(s.Reason, "screenshare_stopped_local", StringComparison.Ordinal));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task RemoteControl_StartWithValidToken_TransitionsToActive()
     {
         const string requestId = "req-valid";

@@ -206,7 +206,7 @@
                                             CornerRadius="18"
                                             Padding="24,14,24,24"
                                             IsVisible="{Binding ShowWaitingPanel}">
-                                        <StackPanel Spacing="20">
+                                        <StackPanel Spacing="16">
                                             <TextBlock Text="Share invite with your helper"
                                                        Foreground="{StaticResource AppTextBrush}"
                                                        FontSize="22"
@@ -214,14 +214,6 @@
                                                        TextAlignment="Center"
                                                        HorizontalAlignment="Center"
                                                        MaxWidth="420"/>
-
-                                            <Button AutomationProperties.AutomationId="Helpee.RefreshInvite"
-                                                    Classes="linkButton linkAction"
-                                                    Content="Refresh invite"
-                                                    Command="{Binding RefreshInviteCommand}"
-                                                    IsEnabled="{Binding CanStartOrConnect}"
-                                                    HorizontalAlignment="Center"
-                                                    IsVisible="{Binding ShowWaitingInviteActions}"/>
 
                                             <Border Background="{StaticResource AppSurfaceBrush}"
                                                     CornerRadius="20"
@@ -250,23 +242,31 @@
                                                 </Grid>
                                             </Border>
 
-                                            <StackPanel Spacing="6"
+                                            <StackPanel Spacing="10"
                                                         HorizontalAlignment="Center"
                                                         MaxWidth="380">
-                                                <TextBlock Text="{Binding ShareInviteStatusText}"
-                                                           Classes="appMuted"
-                                                           FontSize="13"
-                                                           TextAlignment="Center"
-                                                           TextWrapping="Wrap"/>
-                                                <TextBlock Text="{Binding ShareInviteExpiryText}"
-                                                           Classes="appMuted"
-                                                           FontSize="12"
-                                                           FontWeight="SemiBold"
-                                                           TextAlignment="Center"
-                                                           IsVisible="{Binding ShowShareInviteExpiry}"/>
+                                                <Grid ColumnDefinitions="Auto,Auto"
+                                                      ColumnSpacing="10"
+                                                      HorizontalAlignment="Center"
+                                                      IsVisible="{Binding ShowShareInviteExpiry}">
+                                                    <TextBlock Text="{Binding ShareInviteExpiryText}"
+                                                               Classes="appMuted"
+                                                               FontSize="12"
+                                                               FontWeight="SemiBold"
+                                                               VerticalAlignment="Center"
+                                                               TextAlignment="Center"/>
+                                                    <Button Grid.Column="1"
+                                                            AutomationProperties.AutomationId="Helpee.RefreshInvite"
+                                                            Classes="linkButton linkAction"
+                                                            Content="Refresh invite"
+                                                            Command="{Binding RefreshInviteCommand}"
+                                                            IsEnabled="{Binding CanStartOrConnect}"
+                                                            VerticalAlignment="Center"
+                                                            IsVisible="{Binding ShowWaitingInviteActions}"/>
+                                                </Grid>
                                             </StackPanel>
 
-                                            <StackPanel Spacing="6"
+                                            <StackPanel Spacing="4"
                                                         HorizontalAlignment="Center"
                                                         MaxWidth="380"
                                                         IsVisible="{Binding ShowWaitingInviteActions}">
@@ -305,103 +305,98 @@
                                         </StackPanel>
                                     </Border>
 
-                                    <StackPanel Spacing="16"
-                                                IsVisible="{Binding ShowIncomingRequestPanel}">
-                                        <StackPanel Spacing="6">
-                                            <TextBlock Text="Verified helper identity"
-                                                       Classes="appMuted"
-                                                       FontSize="12"
-                                                       TextAlignment="Center"
-                                                       HorizontalAlignment="Center"/>
-                                            <TextBlock AutomationProperties.AutomationId="Helpee.IncomingHelperIdentity"
-                                                       Text="{Binding IncomingHelperName}"
+                                        <StackPanel Spacing="14"
+                                                    IsVisible="{Binding ShowIncomingRequestPanel}">
+                                            <StackPanel Spacing="6">
+                                                <TextBlock AutomationProperties.AutomationId="Helpee.IncomingApprovalTitle"
+                                                           Text="Allow this helper to connect?"
+                                                           Foreground="{StaticResource AppTextBrush}"
+                                                           FontSize="21"
+                                                           FontWeight="SemiBold"
+                                                           TextAlignment="Center"
+                                                           HorizontalAlignment="Center"
+                                                           MaxWidth="420"/>
+                                            <TextBlock AutomationProperties.AutomationId="Helpee.IncomingVerificationCode"
+                                                       Text="{Binding IncomingHelperVerificationCode}"
                                                        Foreground="{StaticResource AppTextBrush}"
-                                                       FontSize="18"
-                                                       FontWeight="SemiBold"
-                                                       TextAlignment="Center"
+                                                        FontSize="22"
+                                                        FontWeight="SemiBold"
+                                                        LetterSpacing="0.3"
+                                                        TextAlignment="Center"
                                                        HorizontalAlignment="Center"
-                                                       TextWrapping="Wrap"/>
-                                            <TextBlock AutomationProperties.AutomationId="Helpee.IncomingSessionId"
-                                                       Text="{Binding IncomingSessionIdText}"
+                                                       IsVisible="{Binding HasIncomingHelperVerificationCode}"/>
+                                            <TextBlock AutomationProperties.AutomationId="Helpee.IncomingVerificationHint"
+                                                       Text="If needed, ask the helper to read this code aloud before allowing."
                                                        Classes="appMuted"
                                                        FontSize="12"
+                                                       TextWrapping="Wrap"
                                                        TextAlignment="Center"
                                                        HorizontalAlignment="Center"
-                                                       IsVisible="{Binding ShowIncomingRequestedCapabilities}"/>
+                                                       MaxWidth="420"/>
                                         </StackPanel>
 
-                                        <TextBlock Classes="appBody"
-                                                   AutomationProperties.AutomationId="Helpee.Status"
-                                                   Text="{Binding StatusLineText}"
-                                                   TextAlignment="Center"
-                                                   HorizontalAlignment="Center"/>
-
                                         <Border Background="{StaticResource AppSurfaceBrush}"
-                                                CornerRadius="14"
-                                                Padding="16"
+                                                CornerRadius="12"
+                                                Padding="14"
                                                 IsVisible="{Binding ShowIncomingRequestedCapabilities}">
-                                            <StackPanel Spacing="12">
+                                            <StackPanel Spacing="10">
                                                 <StackPanel Spacing="4">
-                                                    <TextBlock Text="Requested capabilities"
+                                                    <TextBlock AutomationProperties.AutomationId="Helpee.RequestedAccessTitle"
+                                                               Text="Requested access"
                                                                Foreground="{StaticResource AppTextBrush}"
                                                                FontSize="14"
                                                                FontWeight="SemiBold"/>
-                                                    <TextBlock AutomationProperties.AutomationId="Helpee.RequestedCapabilities"
-                                                               Text="{Binding IncomingRequestedCapabilitiesText}"
+                                                    <TextBlock Text="Choose what to allow in this session."
                                                                Classes="appMuted"
+                                                               FontSize="12"
                                                                TextWrapping="Wrap"/>
                                                 </StackPanel>
 
-                                                <StackPanel Spacing="8">
-                                                    <TextBlock Text="Choose what to approve for this session"
-                                                               Foreground="{StaticResource AppTextBrush}"
-                                                               FontSize="13"
-                                                               FontWeight="SemiBold"/>
-
+                                                <StackPanel Spacing="6">
                                                     <CheckBox AutomationProperties.AutomationId="Helpee.AllowCapability.Chat"
-                                                              Content="Chat"
+                                                              Content="Send messages"
                                                               IsChecked="{Binding AllowIncomingChatCapability}"
                                                               IsVisible="{Binding ShowIncomingChatCapability}"/>
 
                                                     <CheckBox AutomationProperties.AutomationId="Helpee.AllowCapability.ScreenShare"
-                                                              Content="Screen view"
+                                                              Content="View your screen"
                                                               IsChecked="{Binding AllowIncomingScreenShareCapability}"
                                                               IsVisible="{Binding ShowIncomingScreenShareCapability}"/>
 
                                                     <CheckBox AutomationProperties.AutomationId="Helpee.AllowCapability.RemoteControl"
-                                                              Content="Remote control"
+                                                              Content="Control your mouse and keyboard"
                                                               IsChecked="{Binding AllowIncomingRemoteControlCapability}"
                                                               IsVisible="{Binding ShowIncomingRemoteControlCapability}"/>
 
                                                     <CheckBox AutomationProperties.AutomationId="Helpee.AllowCapability.FileTransfer"
-                                                              Content="File transfer"
+                                                              Content="Transfer files"
                                                               IsChecked="{Binding AllowIncomingFileTransferCapability}"
                                                               IsVisible="{Binding ShowIncomingFileTransferCapability}"/>
 
                                                     <CheckBox AutomationProperties.AutomationId="Helpee.AllowCapability.Clipboard"
-                                                              Content="Clipboard"
+                                                              Content="Use clipboard"
                                                               IsChecked="{Binding AllowIncomingClipboardCapability}"
                                                               IsVisible="{Binding ShowIncomingClipboardCapability}"/>
                                                 </StackPanel>
-
-                                                <TextBlock AutomationProperties.AutomationId="Helpee.ApprovedCapabilities"
-                                                           Text="{Binding IncomingApprovedCapabilitiesText, StringFormat='Approving: {0}'}"
-                                                           Classes="appMuted"
-                                                           TextWrapping="Wrap"/>
                                             </StackPanel>
                                         </Border>
 
-                                        <Button Classes="appButton positiveButton action"
-                                                AutomationProperties.AutomationId="Helpee.Allow"
-                                                Content="Allow"
-                                                Command="{Binding AllowCommand}"
-                                                IsEnabled="{Binding HasIncomingRequest}"/>
+                                        <Grid ColumnDefinitions="*,*"
+                                              ColumnSpacing="10">
+                                            <Button Grid.Column="0"
+                                                    Classes="appButton positiveButton action"
+                                                    AutomationProperties.AutomationId="Helpee.Allow"
+                                                    Content="Allow"
+                                                    Command="{Binding AllowCommand}"
+                                                    IsEnabled="{Binding HasIncomingRequest}"/>
 
-                                        <Button Classes="appButton secondaryButton action"
-                                                AutomationProperties.AutomationId="Helpee.Decline"
-                                                Content="Decline"
-                                                Command="{Binding DeclineCommand}"
-                                                IsEnabled="{Binding HasIncomingRequest}"/>
+                                            <Button Grid.Column="1"
+                                                    Classes="appButton secondaryButton action"
+                                                    AutomationProperties.AutomationId="Helpee.Decline"
+                                                    Content="Decline"
+                                                    Command="{Binding DeclineCommand}"
+                                                    IsEnabled="{Binding HasIncomingRequest}"/>
+                                        </Grid>
                                     </StackPanel>
                                     </StackPanel>
                             </Border>

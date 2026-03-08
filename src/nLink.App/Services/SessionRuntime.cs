@@ -165,6 +165,7 @@ public sealed class SessionRuntime : IDisposable
     private const long RemoteControlAckMouseMoveMinSeqDelta = 8;
     private const string RemoteControlScreenChangedStatusTextHelper = "Screen changed";
     private const string RemoteControlScreenChangedStatusTextHelpee = "Screen changed; control stopped";
+    private static readonly TimeSpan RemoteScreenShareStopFrameSuppressionWindow = TimeSpan.FromMilliseconds(750);
 
     private readonly Func<ISignalingTransport> createTransport;
     private readonly SessionChatService chatService = new();
@@ -302,6 +303,8 @@ public sealed class SessionRuntime : IDisposable
     private long remoteControlSnapshotForcedUpMiddleTick;
     private long remoteControlSnapshotForcedUpX1Tick;
     private long remoteControlSnapshotForcedUpX2Tick;
+    private DateTimeOffset remoteScreenShareFramesSuppressedUntilUtc;
+    private long lastScreenShareStopSuppressedLogTick;
 
     public SessionRuntime(Func<ISignalingTransport> createTransport)
         : this(createTransport, SessionRuntimeWatchdogOptions.Default, DefaultWatchdogDelayAsync, TransportTelemetry.Noop, BridgeReusePolicy.Default, null, null, null)
@@ -3042,12 +3045,15 @@ public sealed class SessionRuntime : IDisposable
             controlTransport.RemoteControlStateSnapshotReceived += OnRemoteControlStateSnapshotReceived;
             controlTransport.RemoteControlDisplayInfoReceived += OnRemoteControlDisplayInfoReceived;
         }
+        if (nextTransport is IScreenShareSignalingTransport screenShareTransport)
+        {
+            screenShareTransport.ScreenShareFrameCompleted += OnTransportScreenShareFrameCompleted;
+            screenShareTransport.ScreenShareStopped += OnTransportScreenShareStopped;
+        }
         if (nextTransport is NknSignalingTransport nknTransport)
         {
             nknTransport.RemoteSessionEnded += OnRemoteSessionEnded;
             nknTransport.BridgeLifecycle += OnBridgeLifecycle;
-            nknTransport.ScreenShareFrameCompleted += OnTransportScreenShareFrameCompleted;
-            nknTransport.ScreenShareStopped += OnTransportScreenShareStopped;
         }
     }
 
@@ -3072,12 +3078,15 @@ public sealed class SessionRuntime : IDisposable
             controlTransport.RemoteControlStateSnapshotReceived -= OnRemoteControlStateSnapshotReceived;
             controlTransport.RemoteControlDisplayInfoReceived -= OnRemoteControlDisplayInfoReceived;
         }
+        if (nextTransport is IScreenShareSignalingTransport screenShareTransport)
+        {
+            screenShareTransport.ScreenShareFrameCompleted -= OnTransportScreenShareFrameCompleted;
+            screenShareTransport.ScreenShareStopped -= OnTransportScreenShareStopped;
+        }
         if (nextTransport is NknSignalingTransport nknTransport)
         {
             nknTransport.RemoteSessionEnded -= OnRemoteSessionEnded;
             nknTransport.BridgeLifecycle -= OnBridgeLifecycle;
-            nknTransport.ScreenShareFrameCompleted -= OnTransportScreenShareFrameCompleted;
-            nknTransport.ScreenShareStopped -= OnTransportScreenShareStopped;
         }
     }
 
@@ -3622,6 +3631,29 @@ public sealed class SessionRuntime : IDisposable
             return;
         }
 
+        var suppressedUntilUtc = remoteScreenShareFramesSuppressedUntilUtc;
+        if (suppressedUntilUtc > DateTimeOffset.MinValue && nowProvider() < suppressedUntilUtc)
+        {
+            var nowTicks = Environment.TickCount64;
+            if (nowTicks - Interlocked.Read(ref lastScreenShareStopSuppressedLogTick) >= 1000)
+            {
+                Interlocked.Exchange(ref lastScreenShareStopSuppressedLogTick, nowTicks);
+                LocalOperationalLog.Info(
+                    "ScreenShareTransport",
+                    $"event=screenshare_frame_suppressed_after_stop; session_id={e.SessionId}; suppressed_until_utc={suppressedUntilUtc:O}; control_state={remoteControlSessionState.ControlState}; role={role}");
+            }
+            return;
+        }
+
+        if (suppressedUntilUtc > DateTimeOffset.MinValue)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_frame_resumed_after_stop; session_id={e.SessionId}; resumed_at_utc={nowProvider():O}; control_state={remoteControlSessionState.ControlState}; role={role}");
+        }
+
+        remoteScreenShareFramesSuppressedUntilUtc = default;
+        lastScreenShareStopSuppressedLogTick = 0;
         CancelRemoteControlScreenShareStopGrace("screenshare_frame_resumed");
 
         ScreenShareFrameCompleted?.Invoke(this, e);
@@ -3634,6 +3666,10 @@ public sealed class SessionRuntime : IDisposable
             return;
         }
 
+        remoteScreenShareFramesSuppressedUntilUtc = nowProvider().Add(RemoteScreenShareStopFrameSuppressionWindow);
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_stop_received_runtime; suppressed_until_utc={remoteScreenShareFramesSuppressedUntilUtc:O}; control_state={remoteControlSessionState.ControlState}; role={role}; transport={GetTransportNameForLog(sender)}");
         ScheduleRemoteControlScreenShareStopGrace();
         ScreenShareStopped?.Invoke(this, EventArgs.Empty);
     }
@@ -6275,6 +6311,7 @@ public sealed class SessionRuntime : IDisposable
                 string? requestId = null;
                 string? controllerPeerId = null;
                 var shouldSchedule = false;
+                var shouldStopImmediately = false;
 
                 await lifecycleGate.WaitAsync().ConfigureAwait(false);
                 try
@@ -6286,12 +6323,34 @@ public sealed class SessionRuntime : IDisposable
                     {
                         requestId = remoteControlSessionState.CurrentControlRequestId;
                         controllerPeerId = remoteControlSessionState.ControllerPeerId;
-                        shouldSchedule = true;
+                        shouldSchedule = remoteControlSessionState.ControlState == ControlState.Active;
+                        shouldStopImmediately = remoteControlSessionState.ControlState == ControlState.Requesting;
                     }
                 }
                 finally
                 {
                     lifecycleGate.Release();
+                }
+
+                if (shouldStopImmediately)
+                {
+                    LogRemoteControlInfo(
+                        "screenshare_stop_pending_request",
+                        "stopping_remote_control_immediately",
+                        requestId,
+                        controllerPeerId);
+                    await StopRemoteControlAsync("screenshare_stopped_pending_request", CancellationToken.None).ConfigureAwait(false);
+
+                    await lifecycleGate.WaitAsync().ConfigureAwait(false);
+                    try
+                    {
+                        ClearRemoteControlDisplayInfo("screenshare_stopped", notifyStateChanged: true);
+                    }
+                    finally
+                    {
+                        lifecycleGate.Release();
+                    }
+                    return;
                 }
 
                 if (!shouldSchedule)
@@ -7106,6 +7165,7 @@ public sealed class SessionRuntime : IDisposable
         Interlocked.Exchange(ref remoteControlSnapshotForcedUpMiddleTick, 0);
         Interlocked.Exchange(ref remoteControlSnapshotForcedUpX1Tick, 0);
         Interlocked.Exchange(ref remoteControlSnapshotForcedUpX2Tick, 0);
+        remoteScreenShareFramesSuppressedUntilUtc = default;
         ResetRemoteControlWheelDeltaCarry();
         ResetRemoteControlDebugLastMapped();
         Interlocked.Exchange(ref remoteControlForceNextMoveInjectionLog, 0);
@@ -8652,12 +8712,12 @@ public sealed class SessionRuntime : IDisposable
             return;
         }
 
-        if (transport is not NknSignalingTransport nknTransport)
+        if (transport is not IScreenShareSignalingTransport screenShareTransport)
         {
             return;
         }
 
-        await nknTransport.SendScreenSharePayloadAsync(payload, ct).ConfigureAwait(false);
+        await screenShareTransport.SendScreenSharePayloadAsync(payload, ct).ConfigureAwait(false);
     }
 
     private Task StopTransportScreenShareAsync(bool notifyRemoteStop, string reason, CancellationToken ct)

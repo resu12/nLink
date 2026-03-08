@@ -281,14 +281,3 @@ internal sealed record ScreenShareFrameAssemblerMetrics(
     long ChunksDuplicateIgnored,
     long ChunksInvalidDropped,
     long FramesTooLargeDropped);
-
-internal sealed record ScreenShareFrameCompletedEventArgs(
-    long FrameId,
-    int Width,
-    int Height,
-    string Encoding,
-    byte[] EncodedFrameBytes,
-    long CapturedTsUtcMs = 0,
-    long ChunksDroppedOlderFrame = 0,
-    long AssembliesExpired = 0,
-    string? SessionId = null);

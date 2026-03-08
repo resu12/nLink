@@ -11,6 +11,17 @@ internal static class GuiSmokeHarness
 
     public static async Task RunScenariosAsync(ITestOutputHelper output, params string[] scenarios)
     {
+        await RunScenariosCoreAsync(output, transportOverride: null, scenarios);
+    }
+
+    public static async Task RunScenariosWithTransportAsync(ITestOutputHelper output, string transport, params string[] scenarios)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(transport);
+        await RunScenariosCoreAsync(output, transport.Trim(), scenarios);
+    }
+
+    private static async Task RunScenariosCoreAsync(ITestOutputHelper output, string? transportOverride, params string[] scenarios)
+    {
         var selectedScenarios = NormalizeScenarios(scenarios);
         var repoRoot = FindRepoRoot();
         var scriptPath = Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1");
@@ -18,10 +29,15 @@ internal static class GuiSmokeHarness
 
         var exePath = ResolveGuiSmokeExe(repoRoot);
         Assert.True(File.Exists(exePath), $"nLink executable not found for GUI smoke: {exePath}");
-        var wrapperTimeout = TimeSpan.FromSeconds(CalculateWrapperTimeoutSeconds(selectedScenarios));
+        var wrapperTimeout = TimeSpan.FromSeconds(CalculateWrapperTimeoutSeconds(selectedScenarios, transportOverride));
 
         var previousScenarioEnv = Environment.GetEnvironmentVariable("NLINK_GUI_SMOKE_SCENARIOS");
+        var previousTransportEnv = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
         Environment.SetEnvironmentVariable("NLINK_GUI_SMOKE_SCENARIOS", string.Join(",", selectedScenarios));
+        if (transportOverride is not null)
+        {
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", transportOverride);
+        }
 
         try
         {
@@ -91,6 +107,7 @@ internal static class GuiSmokeHarness
         finally
         {
             Environment.SetEnvironmentVariable("NLINK_GUI_SMOKE_SCENARIOS", previousScenarioEnv);
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransportEnv);
         }
     }
 
@@ -106,7 +123,7 @@ internal static class GuiSmokeHarness
     {
         var parsed = (scenarios ?? Array.Empty<string>())
             .Select(x => x?.Trim().ToUpperInvariant())
-            .Where(x => x is "A" or "B" or "C" or "D" or "E" or "F" or "G" or "H" or "I" or "J" or "K" or "L" or "M" or "HEADER_CHAT_COHERENCE" or "END_SESSION_DISABLES_CHAT" or "SCREENSHARE_BUTTON_VISIBILITY" or "SCREENSHARE_VIEWER_TOGGLE" or "SCREENSHARE_CHAT_COEXISTENCE" or "STATUS_TEXT_GUARDRAILS")
+            .Where(x => x is "A" or "B" or "C" or "D" or "E" or "F" or "G" or "H" or "I" or "J" or "K" or "L" or "M" or "HEADER_CHAT_COHERENCE" or "END_SESSION_DISABLES_CHAT" or "SCREENSHARE_BUTTON_VISIBILITY" or "SCREENSHARE_VIEWER_TOGGLE" or "SCREENSHARE_CHAT_COEXISTENCE" or "SCREENSHARE_STOP_PENDING_APPROVAL" or "STATUS_TEXT_GUARDRAILS")
             .Cast<string>()
             .Distinct()
             .ToArray();
@@ -114,7 +131,7 @@ internal static class GuiSmokeHarness
         return parsed.Length == 0 ? new[] { "A", "B", "C", "E", "F", "G", "H", "I", "J", "K", "L", "M" } : parsed;
     }
 
-    private static int CalculateWrapperTimeoutSeconds(IReadOnlyList<string> scenarios)
+    private static int CalculateWrapperTimeoutSeconds(IReadOnlyList<string> scenarios, string? transportOverride)
     {
         var total = 15;
         foreach (var scenario in scenarios)
@@ -135,10 +152,16 @@ internal static class GuiSmokeHarness
                 "SCREENSHARE_BUTTON_VISIBILITY" => 90,
                 "SCREENSHARE_VIEWER_TOGGLE" => 90,
                 "SCREENSHARE_CHAT_COEXISTENCE" => 90,
+                "SCREENSHARE_STOP_PENDING_APPROVAL" => 90,
                 "STATUS_TEXT_GUARDRAILS" => 90,
                 "E" => 120,
                 _ => 90
             };
+        }
+
+        if (string.Equals(transportOverride, "NKN", StringComparison.OrdinalIgnoreCase))
+        {
+            total += 90;
         }
 
         return Math.Max(total, 90);

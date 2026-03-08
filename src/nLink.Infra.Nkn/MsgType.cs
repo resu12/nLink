@@ -21,4 +21,5 @@ internal enum MsgType
     SessionHandshakeChallenge = 16,
     SessionHandshakeResponse = 17,
     SessionHandshakeResult = 18,
+    ScreenShareStop = 19,
 }

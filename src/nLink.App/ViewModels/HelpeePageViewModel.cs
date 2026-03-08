@@ -312,10 +312,27 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             ? "Waiting for verified helper identity."
             : incomingHelperIdentity;
 
+    public string IncomingHelperVerificationCode =>
+        HelperVerificationCodeFormatter.FormatOrNull(incomingHelperIdentity) ?? string.Empty;
+
+    public bool HasIncomingHelperVerificationCode => !string.IsNullOrWhiteSpace(IncomingHelperVerificationCode);
+
+    public string IncomingTechnicalHelperIdentityText => IncomingHelperIdentityText;
+
+    public bool HasIncomingTechnicalHelperIdentity => !string.IsNullOrWhiteSpace(IncomingTechnicalHelperIdentityText);
+
     public string IncomingSessionIdText =>
         string.IsNullOrWhiteSpace(incomingSessionId)
             ? string.Empty
             : $"Session {incomingSessionId}";
+
+    public string IncomingTechnicalSessionIdText => IncomingSessionIdText;
+
+    public bool HasIncomingTechnicalSessionId => !string.IsNullOrWhiteSpace(IncomingTechnicalSessionIdText);
+
+    public bool HasIncomingTechnicalDetails =>
+        !string.IsNullOrWhiteSpace(IncomingTechnicalHelperIdentityText) ||
+        !string.IsNullOrWhiteSpace(IncomingTechnicalSessionIdText);
 
     public string IncomingRequestedCapabilitiesText =>
         BuildCapabilitySummary(incomingRequestedCapabilities);
@@ -704,7 +721,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 #else
         "n/a";
 #endif
-    public bool ShowRemoteControlConsentDialog => IsRemoteControlUiConnected && sessionRuntime.HasPendingRemoteControlConsentPrompt;
+    public bool ShowRemoteControlConsentDialog =>
+        IsRemoteControlUiConnected &&
+        IsScreenSharingPreviewActive &&
+        sessionRuntime.HasPendingRemoteControlConsentPrompt;
     public string RemoteControlConsentTitle => "Allow remote control?";
     public string RemoteControlConsentMessage => "The helper is requesting control of your mouse and keyboard.";
 
@@ -721,7 +741,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 #if DEBUG
                 UpdatePreviewSnapshotTimer();
 #endif
-                SyncTransportScreenShareWithPreview(value);
+                _ = SyncTransportScreenShareWithPreviewAsync(value);
             }
         }
     }
@@ -2804,9 +2824,20 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         if (SetProperty(ref incomingHelperIdentity, helperIdentity ?? string.Empty, nameof(IncomingHelperIdentityText)))
         {
             OnPropertyChanged(nameof(IncomingHelperName));
+            OnPropertyChanged(nameof(IncomingHelperVerificationCode));
+            OnPropertyChanged(nameof(HasIncomingHelperVerificationCode));
+            OnPropertyChanged(nameof(IncomingTechnicalHelperIdentityText));
+            OnPropertyChanged(nameof(HasIncomingTechnicalHelperIdentity));
+            OnPropertyChanged(nameof(HasIncomingTechnicalDetails));
         }
 
-        SetProperty(ref incomingSessionId, sessionId ?? string.Empty, nameof(IncomingSessionIdText));
+        if (SetProperty(ref incomingSessionId, sessionId ?? string.Empty, nameof(IncomingSessionIdText)))
+        {
+            OnPropertyChanged(nameof(IncomingTechnicalSessionIdText));
+            OnPropertyChanged(nameof(HasIncomingTechnicalSessionId));
+            OnPropertyChanged(nameof(HasIncomingTechnicalDetails));
+        }
+
         if (SetProperty(ref incomingRequestedCapabilities, requestedCapabilities, nameof(IncomingRequestedCapabilitiesText)))
         {
             OnPropertyChanged(nameof(ShowIncomingRequestedCapabilities));
@@ -3257,6 +3288,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         endReason = null;
         endSessionRequested = false;
         endSessionCancelInvoked = false;
+        ChatDraft = string.Empty;
+        ChatMessages.Clear();
+        OnPropertyChanged(nameof(HasChatMessages));
+        OnPropertyChanged(nameof(ShowNoMessagesPlaceholder));
         if (uiStateStore?.Phase == SessionUiPhase.Ended)
         {
             uiStateStore.SetPhase(SessionUiPhase.Waiting, "StartNewSession:Helpee");
@@ -3358,7 +3393,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         });
     }
 
-    private void SyncTransportScreenShareWithPreview(bool isPreviewActive)
+    private async Task SyncTransportScreenShareWithPreviewAsync(bool isPreviewActive)
     {
         if (disposed ||
             !FeatureFlags.EnableScreenShareTransport ||
@@ -3367,24 +3402,37 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        _ = Task.Run(async () =>
+        try
         {
-            try
+            if (isPreviewActive)
             {
-                if (isPreviewActive)
-                {
-                    await sessionRuntime.StartTransportScreenShareAsync().ConfigureAwait(false);
-                }
-                else
-                {
-                    await sessionRuntime.StopTransportScreenShareAsync("preview_stopped").ConfigureAwait(false);
-                }
+                await sessionRuntime.StartTransportScreenShareAsync().ConfigureAwait(false);
             }
-            catch
+            else
             {
-                // Best-effort: the local preview remains the user-visible source of truth.
+                if (sessionRuntime.ControlState == ControlState.Active)
+                {
+                    await sessionRuntime.StopRemoteControlAsync(
+                            "screenshare_stopped_local",
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+                else if (sessionRuntime.ControlState == ControlState.Requesting ||
+                         sessionRuntime.HasPendingRemoteControlConsentPrompt)
+                {
+                    await sessionRuntime.StopRemoteControlAsync(
+                            "screenshare_stopped_pending_request",
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+
+                await sessionRuntime.StopTransportScreenShareAsync("preview_stopped").ConfigureAwait(false);
             }
-        });
+        }
+        catch
+        {
+            // Best-effort: the local preview remains the user-visible source of truth.
+        }
     }
 
     private static bool DetermineIsCaptureSupported(IScreenCaptureSourceFactory captureSourceFactory)
@@ -3463,7 +3511,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return false;
         }
 
-        if (sessionRuntime.HasPendingRemoteControlConsentPrompt)
+        if (IsScreenSharingPreviewActive && sessionRuntime.HasPendingRemoteControlConsentPrompt)
         {
             statusText = "Waiting for your approval…";
             return true;

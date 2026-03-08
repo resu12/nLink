@@ -13,7 +13,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport
+public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport
 {
     private const int EnvelopeVersion = 1;
     private static readonly TimeSpan AckWaitTimeout = TimeSpan.FromSeconds(2);
@@ -26,6 +26,11 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         TimeSpan.FromMilliseconds(300),
         TimeSpan.FromMilliseconds(900),
         TimeSpan.FromMilliseconds(2700),
+    };
+    private static readonly TimeSpan[] ScreenShareStopRetryDelays =
+    {
+        TimeSpan.FromMilliseconds(80),
+        TimeSpan.FromMilliseconds(220),
     };
 
     private readonly NknTransportOptions options;
@@ -124,8 +129,8 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
     public event EventHandler<RemoteControlStateSnapshotReceivedEventArgs>? RemoteControlStateSnapshotReceived;
 
     internal event EventHandler<BridgeLifecycleEvent>? BridgeLifecycle;
-    internal event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
-    internal event EventHandler? ScreenShareStopped;
+    public event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
+    public event EventHandler? ScreenShareStopped;
 
     public string LocalPeerAddress => string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address;
     public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
@@ -357,11 +362,6 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         seenMessageIds.Clear();
         ReplaceHelperJoinKeyPair(CreateSessionEcdhKeyPair());
         pendingOutboundHandshake = outboundHandshake;
-        UpdateSessionSecurityState(SessionSecurityState.CreateHelperPending(
-            outboundHandshake.SessionId,
-            outboundHandshake.HelpeeAddress,
-            outboundHandshake.HelperAddress,
-            outboundHandshake.InviteValidated));
 
         var destination = peerAddress.Trim();
 
@@ -454,7 +454,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         Log($"SendChatMessageAsync sent Chat with Ack (payload_len={payload.Length}, msg_id={envelope.MessageId})");
     }
 
-    internal async Task SendScreenSharePayloadAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
+    public async Task SendScreenSharePayloadAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
     {
         ThrowIfDisposed();
 
@@ -484,22 +484,147 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             throw new InvalidOperationException("Remote endpoint is not known yet.");
         }
 
-        if (!await outboundSendGate.WaitAsync(0, ct).ConfigureAwait(false))
+        var isStopPayload = string.Equals(messageType, "stop", StringComparison.Ordinal);
+        if (isStopPayload)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_stop_send_requested; session_id={messageSessionId}; payload_len={payload.Length}");
+            if (TryGetCurrentEnvelopeCode(out var envelopeCode))
+            {
+                var envelope = CreateEnvelope(envelopeCode, MsgType.ScreenShareStop, payload.ToArray(), replyTo: null);
+                await SendScreenShareStopEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
+                SendScreenShareStopEnvelopeRetriesFireAndForget(destination, envelope, messageSessionId);
+            }
+            else
+            {
+                LocalOperationalLog.Warn(
+                    "ScreenShareTransport",
+                    $"event=screenshare_stop_envelope_skipped; reason=no_session_context; session_id={messageSessionId}");
+            }
+
+            await SendRawScreenSharePayloadAsync(destination, payload, waitForOutboundGate: true, ct).ConfigureAwait(false);
+            SendScreenShareStopRetriesFireAndForget(destination, payload.ToArray());
+        }
+        else if (!await SendRawScreenSharePayloadAsync(destination, payload, waitForOutboundGate: false, ct).ConfigureAwait(false))
         {
             Log($"SendScreenSharePayloadAsync dropped (payload_len={payload.Length}, reason=outbound_busy)");
             return;
         }
 
+        Log($"SendScreenSharePayloadAsync sent screenshare payload (payload_len={payload.Length})");
+    }
+
+    private async Task<bool> SendRawScreenSharePayloadAsync(
+        string destination,
+        ReadOnlyMemory<byte> payload,
+        bool waitForOutboundGate,
+        CancellationToken ct)
+    {
+        if (waitForOutboundGate)
+        {
+            await outboundSendGate.WaitAsync(ct).ConfigureAwait(false);
+        }
+        else if (!await outboundSendGate.WaitAsync(0, ct).ConfigureAwait(false))
+        {
+            return false;
+        }
+
         try
         {
             await client.SendAsync(destination, payload.ToArray(), ct).ConfigureAwait(false);
+            return true;
         }
         finally
         {
             outboundSendGate.Release();
         }
+    }
 
-        Log($"SendScreenSharePayloadAsync sent screenshare payload (payload_len={payload.Length})");
+    private void SendScreenShareStopRetriesFireAndForget(string destination, byte[] payload)
+    {
+        if (string.IsNullOrWhiteSpace(destination) || payload.Length == 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                foreach (var delay in ScreenShareStopRetryDelays)
+                {
+                    await Task.Delay(delay, CancellationToken.None).ConfigureAwait(false);
+                    await SendRawScreenSharePayloadAsync(destination, payload, waitForOutboundGate: true, CancellationToken.None).ConfigureAwait(false);
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_stop_resend_dispatched; payload_len={payload.Length}; delay_ms={delay.TotalMilliseconds:F0}");
+                    Log($"SendScreenSharePayloadAsync resent screenshare stop (payload_len={payload.Length})");
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (InvalidOperationException)
+            {
+            }
+            catch (Exception ex)
+            {
+                NknRuntimeDiagnostics.SetLastError(ex);
+                Log($"SendScreenSharePayloadAsync stop resend failed (payload_len={payload.Length}, ex={ex.GetType().Name})");
+            }
+        });
+    }
+
+    private Task SendScreenShareStopEnvelopeAsync(string destination, Envelope envelope, CancellationToken ct)
+    {
+        FlushLowPriorityControlOutboundQueue("screenshare_stop");
+        return QueueControlEnvelopeAsync(destination, envelope, ControlOutboundLane.High, ct);
+    }
+
+    private void SendScreenShareStopEnvelopeRetriesFireAndForget(string destination, Envelope envelope, string? sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(destination))
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                foreach (var delay in ScreenShareStopRetryDelays)
+                {
+                    await Task.Delay(delay, CancellationToken.None).ConfigureAwait(false);
+
+                    if (disposed ||
+                        !string.Equals(currentSessionSecurityState.SessionId?.Value, sessionId, StringComparison.Ordinal) ||
+                        !string.Equals(remoteEndpoint, destination, StringComparison.Ordinal))
+                    {
+                        return;
+                    }
+
+                    await SendScreenShareStopEnvelopeAsync(destination, envelope, CancellationToken.None).ConfigureAwait(false);
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_stop_envelope_resend_dispatched; session_id={sessionId ?? "(none)"}; msg_id={envelope.MessageId}; delay_ms={delay.TotalMilliseconds:F0}");
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (InvalidOperationException)
+            {
+            }
+            catch (Exception ex)
+            {
+                NknRuntimeDiagnostics.SetLastError(ex);
+                LocalOperationalLog.Warn(
+                    "ScreenShareTransport",
+                    $"event=screenshare_stop_envelope_resend_failed; session_id={sessionId ?? "(none)"}; msg_id={envelope.MessageId}; ex={ex.GetType().Name}");
+                Log($"SendScreenSharePayloadAsync stop envelope resend failed (msg_id={envelope.MessageId}, ex={ex.GetType().Name})");
+            }
+        });
     }
 
     public async Task SendSessionEndAsync(CancellationToken ct)
@@ -1089,6 +1214,9 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             return;
         }
 
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_stop_received_transport; session_id={sessionId}");
         ScreenShareStopped?.Invoke(this, EventArgs.Empty);
     }
 
@@ -1149,7 +1277,10 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         var dedupTimestamp = env.UnixTimeMs > 0 ? env.UnixTimeMs : nowUnixMs;
         if (!seenMessageIds.TryAdd(env.MessageId, dedupTimestamp))
         {
-            if ((env.Type == MsgType.JoinRequest || env.Type == MsgType.Chat) && !string.IsNullOrWhiteSpace(e.Source))
+            if ((env.Type == MsgType.JoinRequest ||
+                 env.Type == MsgType.Chat ||
+                 env.Type == MsgType.SessionHandshakeStart) &&
+                !string.IsNullOrWhiteSpace(e.Source))
             {
                 SendAckFireAndForget(e.Source, env.Code, env.MessageId);
             }
@@ -1219,6 +1350,9 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                     break;
                 case MsgType.SessionHandshakeResult:
                     HandleSessionHandshakeResult(e.Source, env);
+                    break;
+                case MsgType.ScreenShareStop:
+                    HandleScreenShareStop(e.Source, env);
                     break;
                 default:
                     NknRuntimeDiagnostics.SetLastError("unexpected_message_type");
@@ -1345,6 +1479,11 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         {
             FailInboundHandshake(pending, "handshake_start_helper_mismatch", source);
             return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(source))
+        {
+            SendAckFireAndForget(source, env.Code, env.MessageId);
         }
 
         var localAddress = new PeerAddress(LocalPeerAddress);
@@ -1917,6 +2056,32 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
         Log($"SessionEnd dispatched (msg_id={env.MessageId})");
         RemoteSessionEnded?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void HandleScreenShareStop(string source, Envelope env)
+    {
+        if (!ScreenSharePayloadCodec.TryDeserializeStop(env.Payload, out var stop))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_stop_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("screenshare_stop_payload_invalid");
+            Log($"ScreenShareStop payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlMessageSession(
+                "screenshare_stop",
+                stop.SessionId,
+                env.MessageId,
+                requestId: null,
+                source))
+        {
+            return;
+        }
+
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_stop_received_transport; session_id={stop.SessionId}; source={source ?? "(none)"}; msg_id={env.MessageId}; path=envelope");
+        ScreenShareStopped?.Invoke(this, EventArgs.Empty);
     }
 
     private void HandleControlRequest(string source, Envelope env)
@@ -3109,7 +3274,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             outboundHandshake.InviteToken);
         var payload = SessionHandshakeProtocol.Serialize(start);
         var envelope = CreateEnvelope(envelopeCode, MsgType.SessionHandshakeStart, payload, helperJoinRequestMessageId);
-        await SendEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
+        await SendEnvelopeWithAckRetryAsync(destination, envelope, ct).ConfigureAwait(false);
     }
 
     private void FailInboundHandshake(

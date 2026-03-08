@@ -28,6 +28,10 @@
             <Setter Property="VerticalContentAlignment" Value="Center"/>
             <Setter Property="Height" Value="58"/>
             <Setter Property="Padding" Value="16,0"/>
+            <Setter Property="TextWrapping" Value="NoWrap"/>
+            <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+            <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Disabled"/>
+            <Setter Property="ClipToBounds" Value="True"/>
         </Style>
 
         <Style Selector="Button.action">
@@ -227,73 +231,99 @@
                                             CornerRadius="18"
                                             Padding="24"
                                             IsVisible="{Binding ShowMainControls}">
-                                        <StackPanel Spacing="20">
-                                            <Border Background="{StaticResource AppSurfaceBrush}"
-                                                    CornerRadius="18"
-                                                    Padding="20"
-                                                    HorizontalAlignment="Stretch"
-                                                    IsVisible="{Binding ShowMainControls}">
-                                                <StackPanel Spacing="16">
-                                                    <TextBlock Text="Paste invite"
+                                            <StackPanel Spacing="20">
+                                                <Border Background="{StaticResource AppSurfaceBrush}"
+                                                        CornerRadius="18"
+                                                        Padding="20"
+                                                        HorizontalAlignment="Stretch"
+                                                        IsVisible="{Binding ShowMainControls}">
+                                                    <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto"
+                                                          RowSpacing="16">
+                                                        <TextBlock Text="Paste invite"
+                                                                   Foreground="{StaticResource AppTextBrush}"
+                                                                   FontSize="17"
+                                                                   FontWeight="SemiBold"
+                                                                   HorizontalAlignment="Left"/>
+
+                                                        <TextBox Grid.Row="1"
+                                                                 Classes="appInput highContrastInput helperConnectInput"
+                                                                 x:Name="HelperCodeInputBox"
+                                                                 AutomationProperties.AutomationId="Helper.CodeInput"
+                                                                 Text="{Binding CodeInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                 KeyDown="HelperCodeInput_KeyDown"
+                                                                 Watermark="Paste invite"
+                                                                 TabIndex="0"
+                                                                 Width="532"
+                                                                 HorizontalAlignment="Center"
+                                                                 IsEnabled="{Binding CanStartOrConnect}"/>
+
+                                                        <Button Grid.Row="2"
+                                                                Classes="appButton primaryButton action primaryAction"
+                                                                AutomationProperties.AutomationId="Helper.Connect"
+                                                                Content="Connect"
+                                                                TabIndex="1"
+                                                                Command="{Binding ConnectCommand}"
+                                                                IsEnabled="{Binding CanStartOrConnect}"
+                                                                IsVisible="{Binding ShowConnectAction}"/>
+
+                                                        <Button Grid.Row="2"
+                                                                Classes="appButton secondaryButton action secondaryAction"
+                                                                Content="Retry"
+                                                                Command="{Binding RetryCommand}"
+                                                                IsVisible="{Binding ShowRetryAction}"/>
+
+                                                        <StackPanel Grid.Row="3"
+                                                                    Orientation="Horizontal"
+                                                                    HorizontalAlignment="Center"
+                                                                    Spacing="10">
+                                                            <Button Classes="appButton secondaryButton compactSecondaryAction"
+                                                                    AutomationProperties.AutomationId="Helper.PasteFromClipboard"
+                                                                    Content="Paste invite"
+                                                                    Width="160"
+                                                                    Click="PasteFromClipboard_Click"/>
+                                                            <Button Classes="appButton secondaryButton compactSecondaryAction"
+                                                                    AutomationProperties.AutomationId="Helper.ScanQr"
+                                                                    Content="Scan QR"
+                                                                    Width="160">
+                                                                <Button.Flyout>
+                                                                    <MenuFlyout Placement="Bottom">
+                                                                        <MenuItem Header="Scan from file"
+                                                                                  Command="{Binding #Root.DataContext.ScanQrFromFileCommand}"/>
+                                                                        <MenuItem Header="Scan with camera"
+                                                                                  Command="{Binding #Root.DataContext.ScanQrFromCameraCommand}"/>
+                                                                    </MenuFlyout>
+                                                                </Button.Flyout>
+                                                            </Button>
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </Border>
+
+                                            <Border Classes="appPanel"
+                                                    Padding="16"
+                                                    IsVisible="{Binding ShowHelperVerificationCode}">
+                                                <StackPanel Spacing="8">
+                                                    <TextBlock Text="Verification code"
+                                                               Classes="appMuted"
+                                                               FontSize="12"
+                                                               TextAlignment="Center"
+                                                               HorizontalAlignment="Center"/>
+                                                    <TextBlock AutomationProperties.AutomationId="Helper.VerificationCode"
+                                                               Text="{Binding HelperVerificationCode}"
                                                                Foreground="{StaticResource AppTextBrush}"
-                                                               FontSize="17"
+                                                               FontSize="24"
                                                                FontWeight="SemiBold"
-                                                               HorizontalAlignment="Left"/>
-
-                                                    <TextBox Classes="appInput highContrastInput helperConnectInput"
-                                                             x:Name="HelperCodeInputBox"
-                                                             AutomationProperties.AutomationId="Helper.CodeInput"
-                                                             Text="{Binding CodeInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                                             KeyDown="HelperCodeInput_KeyDown"
-                                                             Watermark="Paste invite"
-                                                             TabIndex="0"
-                                                             HorizontalAlignment="Stretch"
-                                                             IsEnabled="{Binding CanStartOrConnect}"/>
-
-                                                    <Button Classes="appButton primaryButton action primaryAction"
-                                                            AutomationProperties.AutomationId="Helper.Connect"
-                                                            Content="Connect"
-                                                            TabIndex="1"
-                                                            Command="{Binding ConnectCommand}"
-                                                            IsEnabled="{Binding CanStartOrConnect}"
-                                                            IsVisible="{Binding ShowConnectAction}"/>
-
-                                                    <Button Classes="appButton secondaryButton action secondaryAction"
-                                                            Content="Retry"
-                                                            Command="{Binding RetryCommand}"
-                                                            IsVisible="{Binding ShowRetryAction}"/>
-
-                                                    <StackPanel Orientation="Horizontal"
-                                                                HorizontalAlignment="Center"
-                                                                Spacing="10">
-                                                        <Button Classes="appButton secondaryButton compactSecondaryAction"
-                                                                AutomationProperties.AutomationId="Helper.PasteFromClipboard"
-                                                                Content="Paste invite"
-                                                                Width="160"
-                                                                Click="PasteFromClipboard_Click"/>
-                                                        <Button Classes="appButton secondaryButton compactSecondaryAction"
-                                                                AutomationProperties.AutomationId="Helper.ScanQr"
-                                                                Content="Scan QR"
-                                                                Width="160">
-                                                            <Button.Flyout>
-                                                                <MenuFlyout Placement="Bottom">
-                                                                    <MenuItem Header="Scan from file"
-                                                                              Command="{Binding #Root.DataContext.ScanQrFromFileCommand}"/>
-                                                                    <MenuItem Header="Scan with camera"
-                                                                              Command="{Binding #Root.DataContext.ScanQrFromCameraCommand}"/>
-                                                                </MenuFlyout>
-                                                            </Button.Flyout>
-                                                        </Button>
-                                                    </StackPanel>
+                                                               LetterSpacing="0.3"
+                                                               TextAlignment="Center"
+                                                               HorizontalAlignment="Center"/>
+                                                    <TextBlock Text="Read this code to the helpee while waiting for approval."
+                                                               Classes="appMuted"
+                                                               FontSize="12"
+                                                               TextWrapping="Wrap"
+                                                               TextAlignment="Center"
+                                                               HorizontalAlignment="Center"
+                                                               MaxWidth="420"/>
                                                 </StackPanel>
                                             </Border>
-
-                                            <TextBlock Classes="appMuted"
-                                                       Text="{Binding CopyFeedback.Text}"
-                                                       FontSize="14"
-                                                       TextAlignment="Center"
-                                                       HorizontalAlignment="Center"
-                                                       IsVisible="{Binding ShowCopyFeedbackInline}"/>
 
                                             <StackPanel HorizontalAlignment="Center"
                                                         IsVisible="{Binding ShowMainControls}">
@@ -301,8 +331,17 @@
                                                         AutomationProperties.AutomationId="Helper.CopyInstallLink"
                                                         Content="Copy install link"
                                                         TabIndex="2"
-                                                        Margin="0,0,0,8"
                                                         Command="{Binding CopyInstallMessageCommand}"/>
+                                                <TextBlock AutomationProperties.AutomationId="Helper.CopyInstallFeedback"
+                                                           Classes="appMuted"
+                                                           Text="{Binding CopyFeedback.Text}"
+                                                           FontSize="14"
+                                                           TextAlignment="Center"
+                                                           HorizontalAlignment="Center"
+                                                           VerticalAlignment="Top"
+                                                           MinHeight="20"
+                                                           Margin="0,6,0,0"
+                                                           MaxWidth="380"/>
                                             </StackPanel>
 
                                         </StackPanel>

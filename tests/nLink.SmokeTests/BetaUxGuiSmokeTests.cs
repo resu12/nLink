@@ -64,6 +64,11 @@ public sealed class BetaUxGuiSmokeTests
 
     [GuiSmokeFact]
     [Trait("Category", "GuiSmoke")]
+    public Task Windows_GuiSmoke_BetaUx_ScreenShareStopWhileControlApprovalPending_ClearsViewer()
+        => GuiSmokeHarness.RunScenariosAsync(output, "screenshare_stop_pending_approval");
+
+    [GuiSmokeFact]
+    [Trait("Category", "GuiSmoke")]
     public Task Windows_GuiSmoke_BetaUx_StatusTextGuardrails()
         => GuiSmokeHarness.RunScenariosAsync(output, "status_text_guardrails");
 }

@@ -16,7 +16,9 @@ using NLink.App.Services.SessionConnect;
 using NLink.App.Threading;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.Logging;
 using NLink.Core.RemoteControl;
+using NLink.Core.ScreenShare;
 using NLink.Core.SessionConnect;
 using NLink.Core.SessionSecurity;
 using NLink.Infra.Nkn;
@@ -309,6 +311,28 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public string ConnectionMethodHint => transportConfig.HelperHintText;
 
+    private PeerAddress? HelperVerificationIdentity => sessionRuntime.SecurityState.HelperAddress;
+
+    public string HelperVerificationCode =>
+        HelperVerificationCodeFormatter.FormatOrNull(HelperVerificationIdentity) ?? string.Empty;
+
+    public bool HasHelperVerificationCode => !string.IsNullOrWhiteSpace(HelperVerificationCode);
+
+    public bool ShowHelperVerificationCode =>
+        HasHelperVerificationCode &&
+        EffectivePhase is SessionUiPhase.Connecting or SessionUiPhase.Recovering;
+
+    public string HelperTechnicalIdentityText => HelperVerificationIdentity?.Value ?? string.Empty;
+
+    public string HelperTechnicalSessionIdText =>
+        sessionRuntime.SecurityState.SessionId is SessionId sessionId
+            ? $"Session {sessionId.Value}"
+            : string.Empty;
+
+    public bool HasHelperTechnicalDetails =>
+        !string.IsNullOrWhiteSpace(HelperTechnicalIdentityText) ||
+        !string.IsNullOrWhiteSpace(HelperTechnicalSessionIdText);
+
     public ObservableCollection<ChatLineViewModel> ChatMessages { get; }
 
     public bool IsConnectedView => ConnectionState == "Connected";
@@ -454,7 +478,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 SessionUiPhase.Recovering => "Reconnecting…",
                 SessionUiPhase.Connected when sessionRuntime.ControlState == ControlState.Active && !sessionRuntime.RemoteControlMappingAvailable
                     => "Remote control mapping unavailable",
-                SessionUiPhase.Connected => sessionRuntime.ControlState == ControlState.Requesting
+                SessionUiPhase.Connected => sessionRuntime.ControlState == ControlState.Requesting && ShowRemoteScreenShareFrame
                     ? "Waiting for approval…"
                     : "Connected",
                 SessionUiPhase.Failed => string.IsNullOrWhiteSpace(FailureTitle) ? "Connection failed" : FailureTitle,
@@ -744,12 +768,17 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private bool CanConnect()
     {
-        return CanStartOrConnect && !IsStartupBlocked && !IsConnecting && ResolveConnectInput().IsValid;
+        return CanStartOrConnect && !IsStartupBlocked && !IsConnecting && ResolveConnectInput(CodeInput).IsValid;
     }
 
     private ConnectInputResolution ResolveConnectInput()
     {
-        return connectInputResolver.Resolve(CodeInput, nowProvider());
+        return ResolveConnectInput(CodeInput);
+    }
+
+    private ConnectInputResolution ResolveConnectInput(string rawInput)
+    {
+        return connectInputResolver.Resolve(rawInput, nowProvider());
     }
 
     private static string NormalizeConnectInputForDisplay(string incoming)
@@ -965,7 +994,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private async Task ConnectAsync()
     {
-        PrepareForNewSession();
+        var connectInputText = CodeInput;
+        PrepareForNewSession(clearConnectInput: false);
         uiRecoveryTransientDismissed = false;
 
         if (IsStartupBlocked)
@@ -978,7 +1008,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        var connectInput = ResolveConnectInput();
+        var connectInput = ResolveConnectInput(connectInputText);
         if (!connectInput.IsValid)
         {
             LogInvalidConnectInput(connectInput);
@@ -990,7 +1020,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         if (connectInput.Kind == ConnectInputKind.PeerAddress)
         {
-            var rawTarget = connectInput.TargetAddress?.Value ?? CodeInput.Trim();
+            var rawTarget = connectInput.TargetAddress?.Value ?? connectInputText.Trim();
             AppLog.Info($"Helper join rejected using {transportConfig.Key}; reason=invite_required; target={rawTarget}");
             StatusText = UserErrorMapper.HelperInviteRequired();
             ConnectionState = "InvalidInput";
@@ -1027,7 +1057,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             var inviteExpiry = connectInput.Invite.Payload.ExpiresAtUtcMs.ToString(CultureInfo.InvariantCulture);
             AppLog.Info($"Helper join requested using {transportConfig.Key} with validated_invite target {targetAddress.Value}; invite_exp_utc_ms={inviteExpiry}");
-            await sessionRuntime.StartHelperAsync(CodeInput.Trim(), connectInput.Invite, connectCts.Token);
+            await sessionRuntime.StartHelperAsync(connectInputText.Trim(), connectInput.Invite, connectCts.Token);
 
             // NKN transport logs these stages after JoinRequest Ack to avoid optimistic duplicates.
             if (!string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase))
@@ -1193,6 +1223,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         IsChatInputEnabled = false;
         CanSendFiles = false;
         CanEndSession = false;
+        CodeInput = string.Empty;
         SendChatCommand.NotifyCanExecuteChanged();
         EndSessionCommand.NotifyCanExecuteChanged();
         AssertUiConsistency();
@@ -1844,9 +1875,15 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
+        LocalOperationalLog.Info(
+            "HelperUi",
+            $"event=helper_screenshare_viewer_clear_requested; control_state={sessionRuntime.ControlState}; header_status={HeaderStatusText}; has_visible_frame={ShowRemoteScreenShareFrame}");
         _ = UiThreadDispatch.RunAsync(() =>
         {
             ClearRemoteScreenShareFrame();
+            LocalOperationalLog.Info(
+                "HelperUi",
+                $"event=helper_screenshare_viewer_cleared; control_state={sessionRuntime.ControlState}; header_status={HeaderStatusText}; has_visible_frame={ShowRemoteScreenShareFrame}");
         });
     }
 
@@ -2280,6 +2317,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowRecentTargets));
         OnPropertyChanged(nameof(ShowCopyFeedbackInline));
         OnPropertyChanged(nameof(HeaderStatusText));
+        OnPropertyChanged(nameof(HelperVerificationCode));
+        OnPropertyChanged(nameof(HasHelperVerificationCode));
+        OnPropertyChanged(nameof(ShowHelperVerificationCode));
+        OnPropertyChanged(nameof(HelperTechnicalIdentityText));
+        OnPropertyChanged(nameof(HelperTechnicalSessionIdText));
+        OnPropertyChanged(nameof(HasHelperTechnicalDetails));
         OnPropertyChanged(nameof(SessionSupportsRemoteControl));
         OnPropertyChanged(nameof(RemoteControlMappingAvailable));
         OnPropertyChanged(nameof(ShowRequestControlAction));
@@ -2899,7 +2942,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
-    private void PrepareForNewSession()
+    private void PrepareForNewSession(bool clearConnectInput = true)
     {
         if (!endSessionRequested && !endSessionCancelInvoked && endReason is null)
         {
@@ -2911,6 +2954,14 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         endReason = null;
         endSessionRequested = false;
         endSessionCancelInvoked = false;
+        if (clearConnectInput)
+        {
+            CodeInput = string.Empty;
+        }
+        ChatDraft = string.Empty;
+        ChatMessages.Clear();
+        OnPropertyChanged(nameof(HasChatMessages));
+        OnPropertyChanged(nameof(ShowNoMessagesPlaceholder));
         ClearRemoteScreenShareFrame();
         if (uiStateStore?.Phase == SessionUiPhase.Ended)
         {
@@ -2951,6 +3002,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 uiRecoveryTransientDismissed = true;
                 ClearFailurePresentation();
                 ShowChatNotice = false;
+                CodeInput = string.Empty;
                 StatusText = "You ended the session.";
                 ConnectionState = "Idle";
                 break;

@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.2] - 2026-03-08
+
+### Added
+
+- Final `0.4.2` release notes under `docs/releases/`.
+
+### Changed
+
+- README, screenshots, and release-facing documentation now reflect `0.4.2` as the current release.
+- The helpee approval flow and invite surfaces are simplified, while helper verification remains available only where it is useful.
+
+### Fixed
+
+- Helper connect no longer loses a pasted invite on the first attempt after an ended session.
+- Session-boundary cleanup now clears unsent chat drafts, in-memory chat messages, and the helper invite textbox before a new session starts.
+- Remote-control and screen-share transitions now clear stale approval/viewer state more promptly when screen sharing stops or sessions end.
+
+### Packaging
+
+- Windows installer and portable release assets for `0.4.2` are prepared together with `SHA256SUMS.txt`.
+
 ## [0.4.1] - 2026-03-07
 
 ### Added

@@ -6,9 +6,9 @@ Powered by NKN. Official website: https://nkn.org/
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
-## Current Release (0.4.1)
+## Current Release (0.4.2)
 
-`0.4.1` is the current stabilization release. It keeps the existing invite-based connect flow and focuses on hardening remote control, session cleanup, installer reliability, and release polish.
+`0.4.2` is the current polish release. It keeps the existing invite-based connect flow and focuses on approval-window simplification, invite/connect cleanup, session cleanup, and more predictable remote-control/screen-share transitions.
 
 - Helpee shares an invite with QR, share, and copy actions.
 - Helper connects by pasting an invite or scanning a QR code.
@@ -25,30 +25,30 @@ Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke
 
 Home:
 
-![Home screen](docs/images/home-0.4.1.png)
+![Home screen](docs/images/home-0.4.2.png)
 
 Helper:
 
-![Helper screen](docs/images/helper-0.4.1.png)
+![Helper screen](docs/images/helper-0.4.2.png)
 
 Helpee:
 
-![Helpee screen](docs/images/helpee-0.4.1.png)
+![Helpee screen](docs/images/helpee-0.4.2.png)
 
 Screen sharing:
 
-![Screen sharing session](docs/images/screenshare-0.4.1.png)
+![Screen sharing session](docs/images/screenshare-0.4.2.png)
 
 Remote control:
 
-![Remote control session](docs/images/remote-control-0.4.1.png)
+![Remote control session](docs/images/remote-control-0.4.2.png)
 
 If connection fails:
 Open Diagnostics -> Copy diagnostics and include it when reporting issues.
 
 Notes:
 - Windows x64 only
-- Current release (`0.4.1`)
+- Current release (`0.4.2`)
 - Installer path: `%LOCALAPPDATA%\Programs\nLink Helper`
 
 License:
@@ -85,7 +85,7 @@ License:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
 - Final release notes:
-  [`docs/releases/0.4.1.md`](docs/releases/0.4.1.md)
+  [`docs/releases/0.4.2.md`](docs/releases/0.4.2.md)
 - Screenshare RC/final validation checklist:
   [`docs/release/0.3.0-rc-validation-checklist.md`](docs/release/0.3.0-rc-validation-checklist.md)
 - Promotion criteria:

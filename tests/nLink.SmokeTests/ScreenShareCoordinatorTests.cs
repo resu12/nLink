@@ -635,6 +635,43 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_StopSendsRemoteStop_BeforeSlowCaptureShutdownCompletes()
+    {
+        var fakeSource = new FakeScreenCaptureSource
+        {
+            StopBlocker = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        var probe = new ScreenShareSendProbe(recentPayloadCapacity: 2);
+
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: probe.SendReadOnlyPayloadAsync);
+
+        await coordinator.StartAsync("session-live", CancellationToken.None);
+
+        var stopTask = coordinator.StopAsync(sendStopMessage: true, reason: "preview_stopped", CancellationToken.None);
+
+        await AwaitCompletesAsync(
+            probe.WaitForPayloadCountAsync(1, TimeSpan.FromSeconds(2)),
+            TimeSpan.FromSeconds(2),
+            "screen-share stop payload before capture shutdown");
+
+        Assert.False(stopTask.IsCompleted, "Expected stop to still be waiting on capture shutdown.");
+
+        var sentPayload = Assert.Single(probe.GetRecentPayloadsSnapshot());
+        Assert.True(ScreenSharePayloadCodec.TryDeserializeStop(sentPayload, out var stop));
+        Assert.Equal("session-live", stop.SessionId);
+        Assert.Equal("preview_stopped", stop.Reason);
+
+        fakeSource.StopBlocker.TrySetResult(true);
+        await AwaitCompletesAsync(
+            stopTask,
+            TimeSpan.FromSeconds(2),
+            "screen-share stop final completion");
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportScreenShareCoordinator_FrameSizeOnlyChange_DoesNotResendDisplayInfo()
     {
         var fakeSource = new FakeScreenCaptureSource

@@ -200,6 +200,8 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         IScreenCaptureSource? oldCaptureSource;
         ScreenShareFrameSendPipeline? oldPipeline;
         string oldSessionId;
+        long oldLifecycleGeneration;
+        Task? pipelineDisposeTask = null;
         Task? drainTask = null;
         TaskCompletionSource<bool>? drainCompletion = null;
 
@@ -208,6 +210,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             oldCaptureSource = captureSource;
             oldPipeline = sendPipeline;
             oldSessionId = sessionId;
+            oldLifecycleGeneration = lifecycleGeneration;
             lifecycleGeneration = checked(lifecycleGeneration + 1);
             captureSource = null;
             sendPipeline = null;
@@ -245,6 +248,35 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         {
             LogDebug("StopAsync ignored because screenshare is already inactive.");
             return;
+        }
+
+        if (oldPipeline is not null)
+        {
+            // Cancel queued/in-flight frame work immediately, but do not wait for the
+            // send loop to finish before notifying the remote side that screensharing stopped.
+            pipelineDisposeTask = oldPipeline.DisposeAsync().AsTask();
+        }
+
+        if (sendStopMessage && !string.IsNullOrWhiteSpace(oldSessionId))
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_stop_local_requested; session_id={oldSessionId}; reason={(string.IsNullOrWhiteSpace(reason) ? "(none)" : reason)}; lifecycle_generation={oldLifecycleGeneration}");
+            var stop = new ScreenShareStopMessageV1
+            {
+                SessionId = oldSessionId,
+                Reason = reason,
+            };
+
+            await sendPayloadAsync(ScreenSharePayloadCodec.SerializeStop(stop), ct).ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_stop_local_dispatched; session_id={oldSessionId}; reason={(string.IsNullOrWhiteSpace(reason) ? "(none)" : reason)}; lifecycle_generation={oldLifecycleGeneration}");
+        }
+
+        if (pipelineDisposeTask is not null)
+        {
+            await pipelineDisposeTask.ConfigureAwait(false);
         }
 
         if (drainTask is not null)
@@ -293,21 +325,6 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             }
         }
 
-        if (oldPipeline is not null)
-        {
-            await oldPipeline.DisposeAsync().ConfigureAwait(false);
-        }
-
-        if (sendStopMessage && !string.IsNullOrWhiteSpace(oldSessionId))
-        {
-            var stop = new ScreenShareStopMessageV1
-            {
-                SessionId = oldSessionId,
-                Reason = reason,
-            };
-
-            await sendPayloadAsync(ScreenSharePayloadCodec.SerializeStop(stop), ct).ConfigureAwait(false);
-        }
     }
 
     public async ValueTask DisposeAsync()
