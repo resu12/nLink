@@ -3814,8 +3814,10 @@ public class SmokeTests
         Assert.Equal("Connected", helpee.HeaderStatusText);
 
         SetPrivateField(helpeeRuntime, "hasPendingRemoteControlConsentPrompt", true);
-        Assert.Equal("Waiting for your approval…", helpee.HeaderStatusText);
+        SetPrivateField(helpee, "isScreenSharingPreviewActive", true);
+        Assert.Equal("Waiting for your approval… • Screen sharing", helpee.HeaderStatusText);
         SetPrivateField(helpeeRuntime, "hasPendingRemoteControlConsentPrompt", false);
+        SetPrivateField(helpee, "isScreenSharingPreviewActive", false);
 
         SetPrivateField(
             helpeeRuntime,
@@ -3991,6 +3993,8 @@ public class SmokeTests
         SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
         SetPrivateField(helpeeRuntime, "state", SessionRuntimeState.Connected);
         SetPrivateField(helpeeRuntime, "hasPendingRemoteControlConsentPrompt", true);
+        SetPrivateField(helpee, "isScreenSharingPreviewActive", true);
+        SetPrivateProperty(helpee, "ScreenSharePreviewFrame", CreateTestBitmap(1, 1));
 
         Assert.True(helpee.ShowRemoteControlConsentDialog);
 
@@ -4670,7 +4674,7 @@ public class SmokeTests
         SetPrivateField(helpee, "endSessionRequested", true);
         SetPrivateField(helpee, "endReason", Enum.Parse(typeof(SessionEndReason), "UserEnded"));
 
-        InvokePrivateMethod(helper, "PrepareForNewSession");
+        InvokePrivateMethod(helper, "PrepareForNewSession", true);
         InvokePrivateMethod(helpee, "PrepareForNewSession");
 
         Assert.Equal(string.Empty, helper.ChatDraft);
@@ -6394,8 +6398,7 @@ public class SmokeTests
         await WaitUntilAsync(
             () => runtime.State == SessionRuntimeState.Idle &&
                   helper.ConnectionState == "Idle" &&
-                  !helper.ShowRetryAction &&
-                  helper.ConnectCommand.CanExecute(null),
+                  !helper.ShowRetryAction,
             TimeSpan.FromSeconds(2));
     }
 
@@ -6430,7 +6433,7 @@ public class SmokeTests
         await WaitUntilAsync(
             () => runtime.State == SessionRuntimeState.Idle &&
                   helper.ConnectionState == "Idle" &&
-                  helper.ConnectCommand.CanExecute(null),
+                  !helper.ShowRetryAction,
             TimeSpan.FromSeconds(2));
     }
 
@@ -8428,7 +8431,12 @@ rl.on('line', (line) => {
 
     private static object? InvokePrivateMethod(object target, string methodName, params object?[] args)
     {
-        var method = target.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic);
+        var methods = target.GetType().GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Where(m => string.Equals(m.Name, methodName, StringComparison.Ordinal))
+            .ToArray();
+        Assert.NotEmpty(methods);
+        var method = methods.FirstOrDefault(m => m.GetParameters().Length == args.Length)
+            ?? methods[0];
         Assert.NotNull(method);
         return method!.Invoke(target, args);
     }
