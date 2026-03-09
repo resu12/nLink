@@ -2085,7 +2085,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             this,
             new IncomingJoinRequestEventArgs(
                 approveAsync: (decision, ct) => ApproveJoinRequestAsync(pending.JoinRequestMessageId, decision, ct),
-                rejectAsync: ct => RejectJoinRequestAsync(pending.JoinRequestMessageId, ct),
+                rejectAsync: (reason, ct) => RejectJoinRequestAsync(pending.JoinRequestMessageId, reason, ct),
                 approvalRequest: approvalRequest));
         NknRuntimeDiagnostics.IncrementIncomingJoinRequestRaised();
     }
@@ -3864,7 +3864,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         }
     }
 
-    private async Task RejectJoinRequestAsync(string joinRequestMessageId, CancellationToken ct)
+    private async Task RejectJoinRequestAsync(string joinRequestMessageId, string? reason, CancellationToken ct)
     {
         PendingJoinRequestState? pending;
         if (!TryBeginPendingJoinDecision(joinRequestMessageId, out pending))
@@ -3875,6 +3875,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
         try
         {
+            var rejectionReason = string.IsNullOrWhiteSpace(reason) ? "join_rejected" : reason.Trim();
             if (string.IsNullOrWhiteSpace(pending!.EnvelopeCode))
             {
                 NknRuntimeDiagnostics.SetLastError("reject_missing_session_context");
@@ -3915,7 +3916,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                     RequestId: joinRequestMessageId),
                 JsonSerializer.SerializeToUtf8Bytes(new RejectSecurePayload
                 {
-                    reason = "join_rejected",
+                    reason = rejectionReason,
                 }));
 
             var rejectPayload = new RejectPayload
@@ -3934,7 +3935,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             {
                 LocalOperationalLog.Info(
                     "SessionSecurity",
-                    $"event=approval_denied; reason=local_reject; session_id={approvalRequest.SessionId.Value}; helper_identity={approvalRequest.HelperIdentity.Value}; requested_capabilities={approvalRequest.RequestedCapabilities}");
+                    $"event=approval_denied; reason={rejectionReason}; session_id={approvalRequest.SessionId.Value}; helper_identity={approvalRequest.HelperIdentity.Value}; requested_capabilities={approvalRequest.RequestedCapabilities}");
             }
             Rejected?.Invoke(this, EventArgs.Empty);
             Log($"Reject sent (msg_id={envelope.MessageId}, reply_to={envelope.ReplyTo})");

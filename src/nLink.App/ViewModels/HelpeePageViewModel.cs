@@ -3556,7 +3556,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
             try
             {
-                await sessionRuntime.RejectAsync(CancellationToken.None).ConfigureAwait(false);
+                await sessionRuntime.RejectAsync("approval_timeout", CancellationToken.None).ConfigureAwait(false);
             }
             catch
             {

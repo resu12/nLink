@@ -8510,6 +8510,8 @@ public class SmokeTests
 
         Assert.Equal(SessionRuntimeState.Failed, runtime.State);
         Assert.Equal("No response yet.", helper.StatusText);
+        Assert.Equal("No response yet", helper.FailureTitle);
+        Assert.Equal("The other person did not respond in time.", helper.FailureMessage);
         Assert.True(helper.ConnectCommand.CanExecute(null));
         Assert.Equal("Failed", helper.ConnectionState);
 
@@ -9101,6 +9103,42 @@ public class SmokeTests
 
         Assert.False(string.IsNullOrWhiteSpace(usableInvite));
         Assert.Equal("Waiting", helpee.ConnectionState);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeeViewModel_IncomingRequestTimeout_ShowsHelperTimeoutPresentation()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-timeout-helper-copy-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-timeout-helper-copy-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            helpeeRuntime,
+            incomingRequestTimeout: TimeSpan.FromMilliseconds(250));
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            helperRuntime,
+            approvalTimeout: TimeSpan.FromSeconds(2),
+            connectFailureCooldown: TimeSpan.Zero);
+
+        helper.CodeInput = await WaitForShareInviteAsync(helpee);
+        await helper.ConnectCommand.ExecuteAsync(null);
+
+        await WaitUntilAsync(
+            () => helperRuntime.State == SessionRuntimeState.Failed &&
+                  string.Equals(helper.StatusText, "No response yet.", StringComparison.Ordinal) &&
+                  string.Equals(helper.FailureTitle, "No response yet", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(3));
+
+        Assert.Equal(TransportFailureCategory.HandshakeTimeout, helperRuntime.GetLastFailureCategoryForTests());
+        Assert.Equal("No response yet.", helper.StatusText);
+        Assert.Equal("No response yet", helper.FailureTitle);
+        Assert.Equal("The other person did not respond in time.", helper.FailureMessage);
+        Assert.Equal("No response yet", helper.HeaderStatusText);
     }
 
     [Trait("Category", "Smoke")]
@@ -12084,10 +12122,11 @@ rl.on('line', (line) => {
                     Approved?.Invoke(this, EventArgs.Empty);
                     return Task.CompletedTask;
                 },
-                rejectAsync: _ =>
+                rejectAsync: (reason, _) =>
                 {
-                    host.UpdateSessionSecurityState(host.CurrentSessionSecurityState.Invalidate("local_reject"));
-                    UpdateSessionSecurityState(CurrentSessionSecurityState.Invalidate("local_reject"));
+                    var rejectionReason = string.IsNullOrWhiteSpace(reason) ? "local_reject" : reason.Trim();
+                    host.UpdateSessionSecurityState(host.CurrentSessionSecurityState.Invalidate(rejectionReason));
+                    UpdateSessionSecurityState(CurrentSessionSecurityState.Invalidate(rejectionReason));
                     Rejected?.Invoke(this, EventArgs.Empty);
                     return Task.CompletedTask;
                 },

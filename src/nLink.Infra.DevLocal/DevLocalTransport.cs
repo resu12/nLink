@@ -484,7 +484,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
                 var joinRequestArgs = new IncomingJoinRequestEventArgs(
                     approveAsync: (decision, token) => ApproveHostJoinAsync(connection, sharedKey, approvalRequest, decision, token),
-                    rejectAsync: token => RejectHostJoinAsync(connection, sharedKey, approvalRequest, token),
+                    rejectAsync: (reason, token) => RejectHostJoinAsync(connection, sharedKey, approvalRequest, reason, token),
                     approvalRequest: approvalRequest);
 
                 var handler = IncomingJoinRequest;
@@ -663,16 +663,19 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 {
                     if (!TryGetPayloadBytes(frame, out var rejectPayloadBytes) ||
                         pendingSessionKey is null ||
-                        !TryDecryptLifecyclePayload(rejectPayloadBytes, pendingSessionKey, RejectFrameType, pendingOutboundHandshake?.HelpeeAddress, out _))
+                        !TryDecryptLifecyclePayload(rejectPayloadBytes, pendingSessionKey, RejectFrameType, pendingOutboundHandshake?.HelpeeAddress, out var rejectPayload))
                     {
                         AbortOutboundHandshake("reject_payload_invalid");
                         connection.Dispose();
                         break;
                     }
 
+                    var rejectionReason = TryParseRejectReason(rejectPayload.Plaintext, out var parsedRejectReason)
+                        ? parsedRejectReason
+                        : "join_rejected";
                     rejected = true;
                     pendingOutboundHandshake = null;
-                    UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(SessionHandshakeState.Invalidated, "join_rejected"));
+                    UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(SessionHandshakeState.Invalidated, rejectionReason));
                     SafeRaiseRejected();
                     connection.Dispose();
                     break;
@@ -1242,24 +1245,54 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         SafeRaiseApproved();
     }
 
-    private async Task RejectHostJoinAsync(SessionConnection connection, byte[] sharedKey, ApprovalRequest? approvalRequest, CancellationToken ct)
+    private async Task RejectHostJoinAsync(SessionConnection connection, byte[] sharedKey, ApprovalRequest? approvalRequest, string? reason, CancellationToken ct)
     {
+        var rejectionReason = string.IsNullOrWhiteSpace(reason) ? "join_rejected" : reason.Trim();
         if (currentSessionSecurityState.SessionId is SessionId sessionId &&
             currentSessionSecurityState.HelperAddress is PeerAddress helperAddress)
         {
             LocalOperationalLog.Info(
                 "SessionSecurity",
-                $"event=approval_denied; reason=local_reject; session_id={sessionId.Value}; helper_identity={helperAddress.Value}; requested_capabilities={approvalRequest?.RequestedCapabilities ?? CapabilityGrant.None}");
+                $"event=approval_denied; reason={rejectionReason}; session_id={sessionId.Value}; helper_identity={helperAddress.Value}; requested_capabilities={approvalRequest?.RequestedCapabilities ?? CapabilityGrant.None}");
         }
 
         SetControlSessionSharedKey(sharedKey);
         await connection.WriteFrameAsync(
             CreateSecureTransportFrame(
                 RejectFrameType,
-                CreateSecureLifecyclePayload(RejectFrameType, JsonSerializer.SerializeToUtf8Bytes(new { reason = "join_rejected" }))),
+                CreateSecureLifecyclePayload(RejectFrameType, JsonSerializer.SerializeToUtf8Bytes(new { reason = rejectionReason }))),
             ct);
         SafeRaiseRejected();
         connection.Dispose();
+    }
+
+    private static bool TryParseRejectReason(byte[] payload, out string reason)
+    {
+        reason = "join_rejected";
+
+        try
+        {
+            using var document = JsonDocument.Parse(payload);
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("reason", out var reasonElement) ||
+                reasonElement.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            var parsedReason = reasonElement.GetString();
+            if (string.IsNullOrWhiteSpace(parsedReason))
+            {
+                return false;
+            }
+
+            reason = parsedReason.Trim();
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private void OnDisconnected()

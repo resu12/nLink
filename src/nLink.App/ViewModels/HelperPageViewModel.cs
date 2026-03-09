@@ -2043,13 +2043,23 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void OnRejected(object? sender, EventArgs e)
     {
-        connectOutcome?.TrySetResult(HelperConnectOutcome.Rejected);
+        var approvalTimedOut = IsApprovalTimeoutFailure();
+        connectOutcome?.TrySetResult(approvalTimedOut ? HelperConnectOutcome.Disconnected : HelperConnectOutcome.Rejected);
         _ = UiThreadDispatch.RunAsync(() =>
         {
             IsConnecting = false;
-            StatusText = UserErrorMapper.HelperRejected();
-            ConnectionState = "Rejected";
-            LogReliability(SessionReliabilityStage.Rejected, "rejected", "They did not allow the connection.");
+            StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
+                ? approvalTimedOut ? UserErrorMapper.HelperApprovalTimeout() : UserErrorMapper.HelperRejected()
+                : sessionRuntime.StatusText;
+            ConnectionState = approvalTimedOut ? "Failed" : "Rejected";
+            if (approvalTimedOut)
+            {
+                LogReliability(SessionReliabilityStage.Disconnected, "approval_timeout", "No response yet.");
+            }
+            else
+            {
+                LogReliability(SessionReliabilityStage.Rejected, "rejected", "They did not allow the connection.");
+            }
             OnPropertyChanged(nameof(ShowChatConnectionHint));
         });
     }
@@ -2559,10 +2569,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                     }
                     else
                     {
-                        EnsureFailurePresentation(
-                            "Connection failed",
-                            "The session ended due to a connection problem.",
-                            "Retry");
+                        EnsureFailurePresentationForTerminalFailure();
                         StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
                             ? UserErrorMapper.HelperDisconnected()
                             : sessionRuntime.StatusText;
@@ -2584,10 +2591,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                     }
                     else
                     {
-                        EnsureFailurePresentation(
-                            "Connection failed",
-                            "The session ended due to a connection problem.",
-                            "Retry");
+                        EnsureFailurePresentationForTerminalFailure();
                         StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
                             ? UserErrorMapper.HelperDisconnected()
                             : sessionRuntime.StatusText;
@@ -2909,6 +2913,29 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 isTransient: false);
             _ = sessionRuntime.FailAsync(failure, UserErrorMapper.NknStartFailedReinstall());
         }
+    }
+
+    private void EnsureFailurePresentationForTerminalFailure()
+    {
+        if (IsApprovalTimeoutFailure())
+        {
+            EnsureFailurePresentation(
+                "No response yet",
+                "The other person did not respond in time.",
+                "Retry");
+            return;
+        }
+
+        EnsureFailurePresentation(
+            "Connection failed",
+            "The session ended due to a connection problem.",
+            "Retry");
+    }
+
+    private bool IsApprovalTimeoutFailure()
+    {
+        return string.Equals(sessionRuntime.StatusText, UserErrorMapper.HelperApprovalTimeout(), StringComparison.Ordinal) ||
+               sessionRuntime.LastTransportFailure?.Category == TransportFailureCategory.HandshakeTimeout;
     }
 
     private void NotifyRemoteControlDiagnosticsChanged()

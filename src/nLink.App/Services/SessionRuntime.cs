@@ -641,6 +641,11 @@ public sealed class SessionRuntime : IDisposable
             $"event=approval_denied; reason={reason}; session_id={approvalRequest?.SessionId.Value ?? "(none)"}; helper_identity={approvalRequest?.HelperIdentity.Value ?? "(none)"}; requested_capabilities={approvalRequest?.RequestedCapabilities.ToString() ?? "(none)"}");
     }
 
+    private static string NormalizeIncomingRejectReason(string? reason)
+    {
+        return string.IsNullOrWhiteSpace(reason) ? "local_reject" : reason.Trim();
+    }
+
     private void LogApprovalInvalidated(string reason)
     {
         LocalOperationalLog.Info(
@@ -1312,12 +1317,19 @@ public sealed class SessionRuntime : IDisposable
         }
     }
 
-    public async Task RejectAsync(CancellationToken uiCt)
+    public Task RejectAsync(CancellationToken uiCt)
+    {
+        return RejectAsync(reason: null, uiCt);
+    }
+
+    public async Task RejectAsync(string? reason, CancellationToken uiCt)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
 
         IncomingJoinRequestEventArgs? request;
         ApprovalRequest? approvalRequest;
+        var normalizedReason = NormalizeIncomingRejectReason(reason);
+        var isApprovalTimeout = string.Equals(normalizedReason, "approval_timeout", StringComparison.Ordinal);
         await lifecycleGate.WaitAsync(uiCt).ConfigureAwait(false);
         try
         {
@@ -1330,9 +1342,13 @@ public sealed class SessionRuntime : IDisposable
                 return;
             }
 
-            LogApprovalDenied("local_reject", approvalRequest);
-            TransitionTo(TransportState.Failed, "local_reject");
-            SetState(SessionRuntimeState.Rejected, "Permission was declined.");
+            LogApprovalDenied(normalizedReason, approvalRequest);
+            TransitionTo(TransportState.Failed, normalizedReason);
+            SetState(
+                SessionRuntimeState.Rejected,
+                isApprovalTimeout
+                    ? UserErrorMapper.HelperApprovalTimeout()
+                    : "Permission was declined.");
         }
         finally
         {
@@ -1341,7 +1357,7 @@ public sealed class SessionRuntime : IDisposable
 
         try
         {
-            await request.RejectAsync(uiCt).ConfigureAwait(false);
+            await request.RejectWithReasonAsync(normalizedReason, uiCt).ConfigureAwait(false);
         }
         catch
         {
@@ -3490,6 +3506,7 @@ public sealed class SessionRuntime : IDisposable
             return;
         }
 
+        var rejectionReason = sessionSecurityState.HandshakeFailureReason;
         RefreshRemoteControlCapabilitiesFromTransport();
         if (remoteControlSessionState.ControlState != ControlState.Off)
         {
@@ -3519,6 +3536,19 @@ public sealed class SessionRuntime : IDisposable
             SetState(SessionRuntimeState.Failed, "The helper ended the session.");
             RemoteSessionEnded?.Invoke(this, EventArgs.Empty);
             Disconnected?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        if (role == SessionRuntimeRole.Helper &&
+            string.Equals(rejectionReason, "approval_timeout", StringComparison.Ordinal))
+        {
+            const string approvalTimeoutReason = "approval_timeout";
+            var failure = TransportFailureMapper.CreateTimeout(approvalTimeoutReason);
+            SessionTimeline.Record("Rejected", approvalTimeoutReason);
+            TransitionTo(TransportState.Failed, approvalTimeoutReason);
+            SetState(SessionRuntimeState.Failed, UserErrorMapper.HelperApprovalTimeout());
+            LogTransportFailure(failure, "transport_rejected");
+            Rejected?.Invoke(this, EventArgs.Empty);
             return;
         }
 
@@ -3600,7 +3630,10 @@ public sealed class SessionRuntime : IDisposable
                 fallbackMessage: "Connection lost.");
             if (alreadyFailedWithMappedStatus)
             {
-                LogTransportFailure(failure, "transport_disconnected");
+                if (lastTransportFailure is null)
+                {
+                    LogTransportFailure(failure, "transport_disconnected");
+                }
                 Disconnected?.Invoke(this, EventArgs.Empty);
                 return;
             }

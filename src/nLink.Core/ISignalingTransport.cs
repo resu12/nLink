@@ -55,20 +55,28 @@ public interface ISessionSecuritySignalingTransport
 public sealed class IncomingJoinRequestEventArgs : EventArgs
 {
     private readonly Func<ApprovalDecision?, CancellationToken, Task> approveAsync;
-    private readonly Func<CancellationToken, Task> rejectAsync;
+    private readonly Func<string?, CancellationToken, Task> rejectAsync;
     private int handled;
 
     public IncomingJoinRequestEventArgs(
         Func<CancellationToken, Task> approveAsync,
         Func<CancellationToken, Task> rejectAsync,
         ApprovalRequest? approvalRequest = null)
-        : this((_, ct) => approveAsync(ct), rejectAsync, approvalRequest)
+        : this((_, ct) => approveAsync(ct), (_, ct) => rejectAsync(ct), approvalRequest)
     {
     }
 
     public IncomingJoinRequestEventArgs(
         Func<ApprovalDecision?, CancellationToken, Task> approveAsync,
         Func<CancellationToken, Task> rejectAsync,
+        ApprovalRequest? approvalRequest = null)
+        : this(approveAsync, (_, ct) => rejectAsync(ct), approvalRequest)
+    {
+    }
+
+    public IncomingJoinRequestEventArgs(
+        Func<ApprovalDecision?, CancellationToken, Task> approveAsync,
+        Func<string?, CancellationToken, Task> rejectAsync,
         ApprovalRequest? approvalRequest = null)
     {
         this.approveAsync = approveAsync;
@@ -107,12 +115,17 @@ public sealed class IncomingJoinRequestEventArgs : EventArgs
 
     public Task RejectAsync(CancellationToken ct = default)
     {
+        return RejectWithReasonAsync(reason: null, ct);
+    }
+
+    public Task RejectWithReasonAsync(string? reason, CancellationToken ct = default)
+    {
         if (Interlocked.Exchange(ref handled, 1) != 0)
         {
             return Task.CompletedTask;
         }
 
-        return rejectAsync(ct);
+        return rejectAsync(reason, ct);
     }
 }
 
