@@ -1345,6 +1345,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         EndSessionCommand.NotifyCanExecuteChanged();
         endSessionRequested = true;
         endReason = SessionEndReason.UserEnded;
+        connectCts?.Cancel();
+        connectOutcome?.TrySetCanceled();
+        IsConnecting = false;
         uiRecoveryTransientDismissed = true;
         ClearUiRecoveryTransient();
         ShowTransientBanner = false;

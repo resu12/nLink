@@ -157,6 +157,21 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
     public string LocalPeerAddress => string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address;
     public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
     public bool CanSendSessionEnd => !disposed && !string.IsNullOrWhiteSpace(currentEnvelopeCode) && !string.IsNullOrWhiteSpace(remoteEndpoint);
+    public bool CanSendPendingJoinCancel
+    {
+        get
+        {
+            lock (gate)
+            {
+                return !disposed &&
+                       pendingOutboundHandshake?.HelpeeEcdhPublicKey is not null &&
+                       helperJoinEcdhKeyPair is not null &&
+                       !string.IsNullOrWhiteSpace(helperJoinRequestMessageId) &&
+                       !string.IsNullOrWhiteSpace(currentEnvelopeCode) &&
+                       !string.IsNullOrWhiteSpace(remoteEndpoint);
+            }
+        }
+    }
     public bool LocalSupportsRemoteControl => LocalRemoteControlSupported;
     public bool RemoteSupportsRemoteControl => remoteSupportsRemoteControl;
     public bool SessionSupportsRemoteControl => LocalSupportsRemoteControl && RemoteSupportsRemoteControl;
@@ -683,6 +698,80 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         SessionTimeline.Record("SessionEndSent");
         await SendEnvelopeWithAckRetryAsync(remoteEndpoint, envelope, ct);
         Log($"SendSessionEndAsync sent SessionEnd with Ack (msg_id={envelope.MessageId})");
+    }
+
+    public async Task SendPendingJoinCancelAsync(CancellationToken ct)
+    {
+        ThrowIfDisposed();
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        PendingOutboundHandshakeState? pending;
+        SessionEcdhKeyPair? helperKeyPair;
+        string? joinRequestMessageId;
+        string? destination;
+        string? envelopeCode;
+        lock (gate)
+        {
+            pending = pendingOutboundHandshake;
+            helperKeyPair = helperJoinEcdhKeyPair;
+            joinRequestMessageId = helperJoinRequestMessageId;
+            destination = remoteEndpoint;
+            envelopeCode = currentEnvelopeCode;
+        }
+
+        if (pending?.HelpeeEcdhPublicKey is null ||
+            helperKeyPair is null ||
+            string.IsNullOrWhiteSpace(joinRequestMessageId) ||
+            string.IsNullOrWhiteSpace(destination) ||
+            string.IsNullOrWhiteSpace(envelopeCode))
+        {
+            return;
+        }
+
+        byte[] sharedKey;
+        try
+        {
+            sharedKey = DeriveSessionKey(helperKeyPair, pending.HelpeeEcdhPublicKey, envelopeCode);
+        }
+        catch (Exception ex) when (ex is CryptographicException or ArgumentException)
+        {
+            NknRuntimeDiagnostics.SetLastError("reject_key_derivation_failed");
+            Log($"SendPendingJoinCancelAsync key derivation failed (join_msg_id={joinRequestMessageId}, ex={ex.GetType().Name})");
+            return;
+        }
+
+        var securePayload = SessionSecureEnvelopeCodec.Encrypt(
+            sharedKey,
+            new SessionSecureEnvelopeMetadata(
+                Family: SessionSecureMessageFamily.Lifecycle,
+                MessageType: "reject",
+                SessionId: pending.SessionId,
+                SenderIdentity: ResolveLocalPeerAddressForSecureEnvelope(),
+                Sequence: Interlocked.Increment(ref nextOutboundLifecycleSecureSequence),
+                RequestId: joinRequestMessageId),
+            JsonSerializer.SerializeToUtf8Bytes(new RejectSecurePayload
+            {
+                reason = "helper_cancelled",
+            }));
+
+        var rejectPayload = new RejectPayload
+        {
+            sessionId = pending.SessionId.Value,
+            helpeeEcdhPublicKey = Convert.ToBase64String(pending.HelpeeEcdhPublicKey),
+            secureEnvelopeBase64 = Convert.ToBase64String(securePayload),
+        };
+        var envelope = CreateEnvelope(
+            envelopeCode,
+            MsgType.Reject,
+            JsonSerializer.SerializeToUtf8Bytes(rejectPayload),
+            joinRequestMessageId);
+        await SendEnvelopeWithAckRetryAsync(destination, envelope, ct);
+        Log($"SendPendingJoinCancelAsync sent Reject with Ack (msg_id={envelope.MessageId}, reply_to={envelope.ReplyTo})");
     }
 
     public async Task SendControlRequestAsync(ControlRequestMessageV1 message, CancellationToken ct)
@@ -1852,7 +1941,10 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             pendingOutboundHandshake.HelperAddress,
             challenge.ChallengeNonce,
             Convert.ToBase64String(mac));
-        pendingOutboundHandshake = pendingOutboundHandshake.WithChallenge(challenge.ChallengeNonce, DateTimeOffset.FromUnixTimeMilliseconds(challenge.ExpiresAtUtcMs));
+        pendingOutboundHandshake = pendingOutboundHandshake.WithChallenge(
+            challenge.ChallengeNonce,
+            DateTimeOffset.FromUnixTimeMilliseconds(challenge.ExpiresAtUtcMs),
+            helpeePubKey);
         UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeChallenge(
             challenge.SessionId,
             challenge.HelpeeAddress,
@@ -2237,21 +2329,24 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         }
 
         PendingOutboundHandshakeState? outboundHandshake;
+        PendingJoinRequestState? inboundJoinRequest;
         string? expectedJoinRequestId;
         lock (gate)
         {
             outboundHandshake = pendingOutboundHandshake;
+            inboundJoinRequest = pendingJoinRequest;
             expectedJoinRequestId = helperJoinRequestMessageId;
         }
 
-        if (outboundHandshake is null)
+        if (outboundHandshake is null && inboundJoinRequest is null)
         {
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("reject_no_outbound_handshake");
-            Log($"Reject ignored (msg_id={env.MessageId}, reason=no_outbound_handshake)");
+            Log($"Reject ignored (msg_id={env.MessageId}, reason=no_pending_handshake)");
             return;
         }
 
-        if (!TryValidatePendingOutboundLifecycleMessage(
+        if (outboundHandshake is not null &&
+            !TryValidatePendingOutboundLifecycleMessage(
                 "reject",
                 reject.sessionId,
                 env.MessageId,
@@ -2263,17 +2358,39 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             return;
         }
 
+        if (outboundHandshake is null &&
+            !TryValidatePendingInboundLifecycleMessage(
+                "reject",
+                reject.sessionId,
+                env.MessageId,
+                env.ReplyTo,
+                source,
+                inboundJoinRequest!))
+        {
+            return;
+        }
+
         SessionEcdhKeyPair? helperKeyPair;
+        SessionEcdhKeyPair? helpeeKeyPair;
         lock (gate)
         {
             helperKeyPair = helperJoinEcdhKeyPair;
+            helpeeKeyPair = helpeeHostEcdhKeyPair;
         }
 
-        if (helperKeyPair is null)
+        if (outboundHandshake is not null && helperKeyPair is null)
         {
             NknRuntimeDiagnostics.SetLastError("reject_missing_helper_ecdh");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("reject_missing_helper_ecdh");
             Log($"Reject ignored (msg_id={env.MessageId}, reason=no_helper_key)");
+            return;
+        }
+
+        if (outboundHandshake is null && helpeeKeyPair is null)
+        {
+            NknRuntimeDiagnostics.SetLastError("reject_missing_host_ecdh");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("reject_missing_host_ecdh");
+            Log($"Reject ignored (msg_id={env.MessageId}, reason=no_host_key)");
             return;
         }
 
@@ -2289,28 +2406,42 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                 NknRuntimeDiagnostics.SetLastError("reject_bad_pubkey");
                 NknRuntimeDiagnostics.SetLastEnvelopeDropReason("reject_bad_pubkey");
                 Log($"Reject public key invalid (msg_id={env.MessageId})");
-                AbortOutboundHandshake("reject_bad_pubkey");
+                if (outboundHandshake is not null)
+                {
+                    AbortOutboundHandshake("reject_bad_pubkey");
+                }
                 return;
             }
 
-            if (!TryGetCurrentEnvelopeCode(out var sessionContextCode))
+            string? sessionContextCode = null;
+            var pendingSessionContext = outboundHandshake is not null ? null : inboundJoinRequest!.EnvelopeCode;
+            if ((outboundHandshake is not null && !TryGetCurrentEnvelopeCode(out sessionContextCode)) ||
+                (outboundHandshake is null && string.IsNullOrWhiteSpace(pendingSessionContext)))
             {
                 NknRuntimeDiagnostics.SetLastError("reject_missing_session_context");
                 Log($"Reject ignored (msg_id={env.MessageId}, reason=no_session_context)");
-                AbortOutboundHandshake("reject_missing_session_context");
+                if (outboundHandshake is not null)
+                {
+                    AbortOutboundHandshake("reject_missing_session_context");
+                }
                 return;
             }
 
             byte[] sharedKey;
             try
             {
-                sharedKey = DeriveSessionKey(helperKeyPair, helpeePubKey, sessionContextCode);
+                sharedKey = outboundHandshake is not null
+                    ? DeriveSessionKey(helperKeyPair!, helpeePubKey, sessionContextCode!)
+                    : DeriveSessionKey(helpeeKeyPair!, inboundJoinRequest!.HelperEcdhPublicKey, pendingSessionContext!);
             }
             catch (Exception ex) when (ex is CryptographicException or ArgumentException)
             {
                 NknRuntimeDiagnostics.SetLastError("reject_key_derivation_failed");
                 Log($"Reject key derivation failed (msg_id={env.MessageId}, ex={ex.GetType().Name})");
-                AbortOutboundHandshake("reject_key_derivation_failed");
+                if (outboundHandshake is not null)
+                {
+                    AbortOutboundHandshake("reject_key_derivation_failed");
+                }
                 return;
             }
 
@@ -2327,13 +2458,16 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                         new SessionSecureEnvelopeExpectation(
                             Family: SessionSecureMessageFamily.Lifecycle,
                             MessageType: "reject",
-                            SessionId: outboundHandshake.SessionId,
-                            SenderIdentity: outboundHandshake.HelpeeAddress,
-                            RequestId: expectedJoinRequestId),
+                            SessionId: outboundHandshake?.SessionId ?? inboundJoinRequest!.SessionId,
+                            SenderIdentity: outboundHandshake?.HelpeeAddress ?? inboundJoinRequest!.HelperAddress,
+                            RequestId: outboundHandshake is not null ? expectedJoinRequestId : inboundJoinRequest!.JoinRequestMessageId),
                         inboundLifecycleReplayWindow,
                         out securePayload))
                 {
-                    AbortOutboundHandshake("reject_secure_envelope_invalid");
+                    if (outboundHandshake is not null)
+                    {
+                        AbortOutboundHandshake("reject_secure_envelope_invalid");
+                    }
                     return;
                 }
             }
@@ -2342,7 +2476,10 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                 NknRuntimeDiagnostics.SetLastError("reject_secure_envelope_invalid");
                 NknRuntimeDiagnostics.SetLastEnvelopeDropReason("reject_secure_envelope_invalid");
                 Log($"Reject secure envelope invalid base64 (msg_id={env.MessageId})");
-                AbortOutboundHandshake("reject_secure_envelope_invalid");
+                if (outboundHandshake is not null)
+                {
+                    AbortOutboundHandshake("reject_secure_envelope_invalid");
+                }
                 return;
             }
 
@@ -2351,21 +2488,33 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                 NknRuntimeDiagnostics.SetLastError("reject_secure_payload_invalid");
                 NknRuntimeDiagnostics.SetLastEnvelopeDropReason("reject_secure_payload_invalid");
                 Log($"Reject secure payload invalid (msg_id={env.MessageId})");
-                AbortOutboundHandshake("reject_secure_payload_invalid");
+                if (outboundHandshake is not null)
+                {
+                    AbortOutboundHandshake("reject_secure_payload_invalid");
+                }
                 return;
             }
 
-            pendingOutboundHandshake = null;
+            var rejectionReason = string.IsNullOrWhiteSpace(secureReject.reason) ? "join_rejected" : secureReject.reason;
             UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(
                 SessionHandshakeState.Invalidated,
-                string.IsNullOrWhiteSpace(secureReject.reason) ? "join_rejected" : secureReject.reason));
-            ClearHelperJoinKeyPair();
-            Rejected?.Invoke(this, EventArgs.Empty);
+                rejectionReason));
+            if (outboundHandshake is not null)
+            {
+                pendingOutboundHandshake = null;
+                ClearHelperJoinKeyPair();
+                Rejected?.Invoke(this, EventArgs.Empty);
+            }
+            else
+            {
+                ClearPendingJoinRequest(inboundJoinRequest!.JoinRequestMessageId);
+                RemoteSessionEnded?.Invoke(this, EventArgs.Empty);
+            }
             Log($"Reject dispatched (msg_id={env.MessageId})");
         }
         finally
         {
-            helperKeyPair.Dispose();
+            helperKeyPair?.Dispose();
         }
     }
 
@@ -3379,6 +3528,56 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         LocalOperationalLog.Warn(
             "SessionSecurity",
             $"event=lifecycle_message_rejected; message_type={messageType}; reason={failureReason}; session_id={normalizedMessageSessionId ?? "(none)"}; expected_session_id={pending.SessionId.Value}; source={normalizedSource ?? "(none)"}; expected_source={pending.HelpeeAddress.Value}; reply_to={replyTo ?? "(none)"}; expected_reply_to={expectedJoinRequestId ?? "(none)"}");
+        Log($"Lifecycle message rejected (type={messageType}, msg_id={messageId}, reason={failureReason})");
+        return false;
+    }
+
+    private bool TryValidatePendingInboundLifecycleMessage(
+        string messageType,
+        string? messageSessionId,
+        string messageId,
+        string? replyTo,
+        string? source,
+        PendingJoinRequestState pending)
+    {
+        var normalizedMessageSessionId = string.IsNullOrWhiteSpace(messageSessionId) ? null : messageSessionId.Trim();
+        var normalizedSource = string.IsNullOrWhiteSpace(source) ? null : source.Trim();
+        string failureReason;
+
+        if (string.IsNullOrWhiteSpace(normalizedMessageSessionId))
+        {
+            failureReason = "missing_session_id";
+        }
+        else if (!string.Equals(normalizedMessageSessionId, pending.SessionId.Value, StringComparison.Ordinal))
+        {
+            failureReason = "session_id_mismatch";
+        }
+        else if (string.IsNullOrWhiteSpace(normalizedSource))
+        {
+            failureReason = "missing_source_identity";
+        }
+        else if (!AddressMatchesForSessionPolicy(normalizedSource, pending.HelperAddress.Value))
+        {
+            failureReason = "source_identity_mismatch";
+        }
+        else if (string.IsNullOrWhiteSpace(replyTo))
+        {
+            failureReason = "missing_replyto";
+        }
+        else if (!string.Equals(replyTo, pending.JoinRequestMessageId, StringComparison.Ordinal))
+        {
+            failureReason = "replyto_mismatch";
+        }
+        else
+        {
+            return true;
+        }
+
+        NknRuntimeDiagnostics.SetLastError($"{messageType}_{failureReason}");
+        NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageType}_{failureReason}");
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=lifecycle_message_rejected; message_type={messageType}; reason={failureReason}; session_id={normalizedMessageSessionId ?? "(none)"}; expected_session_id={pending.SessionId.Value}; source={normalizedSource ?? "(none)"}; expected_source={pending.HelperAddress.Value}; reply_to={replyTo ?? "(none)"}; expected_reply_to={pending.JoinRequestMessageId}");
         Log($"Lifecycle message rejected (type={messageType}, msg_id={messageId}, reason={failureReason})");
         return false;
     }
@@ -4979,13 +5178,18 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
     {
         public string? ChallengeNonce { get; init; }
         public DateTimeOffset? ChallengeExpiresAtUtc { get; init; }
+        public byte[]? HelpeeEcdhPublicKey { get; init; }
 
-        public PendingOutboundHandshakeState WithChallenge(string challengeNonce, DateTimeOffset challengeExpiresAtUtc)
+        public PendingOutboundHandshakeState WithChallenge(
+            string challengeNonce,
+            DateTimeOffset challengeExpiresAtUtc,
+            byte[] helpeeEcdhPublicKey)
         {
             return this with
             {
                 ChallengeNonce = challengeNonce,
                 ChallengeExpiresAtUtc = challengeExpiresAtUtc,
+                HelpeeEcdhPublicKey = helpeeEcdhPublicKey,
             };
         }
     }

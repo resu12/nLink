@@ -5107,6 +5107,57 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task HelperPageViewModel_EndSession_WhileApprovalPending_AllowsReconnectWithFreshInvite()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-end-pending-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-end-pending-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: () => _ = helpeeRuntime.DisconnectAsync(),
+            transportConfig,
+            helpeeRuntime);
+        using var helper = new HelperPageViewModel(
+            cancelAction: () => _ = helperRuntime.DisconnectAsync(),
+            transportConfig,
+            helperRuntime);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        helper.CodeInput = await WaitForShareInviteAsync(helpee);
+        var connectTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helper, "ConnectAsync"));
+
+        await WaitUntilAsync(
+            () => helpee.HasIncomingRequest &&
+                  helpee.ConnectionState == "IncomingRequest",
+            TimeSpan.FromSeconds(5));
+
+        helper.EndSessionCommand.Execute(null);
+        await Task.WhenAny(connectTask, Task.Delay(TimeSpan.FromSeconds(2), cts.Token));
+
+        await WaitUntilAsync(
+            () => !helper.IsConnecting &&
+                  helperRuntime.State == SessionRuntimeState.Idle &&
+                  string.Equals(helper.StatusText, "You ended the session.", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(5));
+
+        await helpeeRuntime.ResetAsync();
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var freshInvite = await WaitForShareInviteAsync(helpee);
+
+        helper.CodeInput = freshInvite;
+
+        Assert.True(helper.ConnectCommand.CanExecute(null));
+
+        var reconnectTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helper, "ConnectAsync"));
+
+        await WaitUntilAsync(
+            () => helpee.HasIncomingRequest && helpee.ConnectionState == "IncomingRequest",
+            TimeSpan.FromSeconds(5));
+        await Task.WhenAny(reconnectTask, Task.Delay(TimeSpan.FromSeconds(2), cts.Token));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task HelpeePageViewModel_EndSession_StopsPreviewCapture_AndClearsPreviewState()
     {
         var transportConfig = CreateDevLocalTestConfig();
@@ -7849,6 +7900,57 @@ public class SmokeTests
 
             await helpeeRuntime.ResetAsync();
             Assert.Equal(SessionRuntimeState.Idle, helpeeRuntime.State);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_NknHelperEndWhileApprovalPending_PreventsStaleHelpeeApproval()
+    {
+        FakeNknClient.ResetNetwork();
+
+        try
+        {
+            var options = NknTransportOptions.Load();
+            using var helpeeTransport = new NknSignalingTransport(
+                new FakeNknClient("helpee.approvalpending.addr." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helpee-approvalpending-test", "helpee.approvalpending.test.fake"));
+            using var helperTransport = new NknSignalingTransport(
+                new FakeNknClient("helper.approvalpending.addr." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helper-approvalpending-test", "helper.approvalpending.test.fake"));
+            using var helpeeRuntime = new SessionRuntime(() => helpeeTransport);
+            using var helperRuntime = new SessionRuntime(() => helperTransport);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            await helpeeRuntime.StartHelpeeAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(GetHostedAddressOrThrow(helpeeRuntime), out var rawToken);
+            await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+            await WaitUntilAsync(
+                () => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest &&
+                      helpeeRuntime.PendingApprovalRequest is not null,
+                TimeSpan.FromSeconds(2));
+
+            await helperRuntime.DisconnectAsync();
+
+            await WaitUntilAsync(
+                () => helpeeRuntime.State == SessionRuntimeState.Failed &&
+                      string.Equals(helpeeRuntime.StatusText, "The helper ended the session.", StringComparison.Ordinal) &&
+                      helpeeRuntime.PendingApprovalRequest is null,
+                TimeSpan.FromSeconds(3));
+
+            await helpeeRuntime.ApproveAsync(cts.Token);
+
+            Assert.Equal(SessionRuntimeState.Failed, helpeeRuntime.State);
+            Assert.Equal("The helper ended the session.", helpeeRuntime.StatusText);
+            Assert.Null(helpeeRuntime.CurrentSessionGrant);
+            Assert.Equal(SessionRuntimeState.Idle, helperRuntime.State);
         }
         finally
         {

@@ -1294,7 +1294,7 @@ public sealed class SessionRuntime : IDisposable
             pendingApprovalRequest = null;
             LogApprovalGranted(decision);
             TransitionTo(TransportState.Handshake, "local_approve");
-            SetState(SessionRuntimeState.Connected, "Connected");
+            SetState(SessionRuntimeState.Connecting, "Connecting…");
         }
         finally
         {
@@ -3509,6 +3509,18 @@ public sealed class SessionRuntime : IDisposable
             countAsTransportTask: false);
         pendingJoinRequest = null;
         InvalidateSessionSecurity("transport_rejected");
+        if (role == SessionRuntimeRole.Helpee &&
+            state == SessionRuntimeState.IncomingJoinRequest)
+        {
+            SessionTimeline.Record("SessionEndReceived", "remote_end");
+            SessionTimeline.Record("Disconnected", "remote_end");
+            TransitionTo(TransportState.Failed, "transport_rejected_remote_end");
+            SetState(SessionRuntimeState.Failed, "The helper ended the session.");
+            RemoteSessionEnded?.Invoke(this, EventArgs.Empty);
+            Disconnected?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
         SessionTimeline.Record("Rejected");
         TransitionTo(TransportState.Failed, "transport_rejected");
         SetState(SessionRuntimeState.Rejected, "Permission was declined.");
@@ -8726,6 +8738,23 @@ public sealed class SessionRuntime : IDisposable
         SessionRuntimeRole oldRole,
         SessionRuntimeState oldState)
     {
+        if (oldTransport is NknSignalingTransport pendingJoinTransport &&
+            oldState == SessionRuntimeState.Connecting &&
+            pendingJoinTransport.CanSendPendingJoinCancel)
+        {
+            using var pendingJoinCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            try
+            {
+                await pendingJoinTransport.SendPendingJoinCancelAsync(pendingJoinCts.Token).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best-effort only.
+            }
+
+            return;
+        }
+
         if (!ShouldNotifyRemoteSessionEnd(oldTransport, oldRole, oldState))
         {
             return;
