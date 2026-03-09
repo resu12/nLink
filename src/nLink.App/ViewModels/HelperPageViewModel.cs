@@ -29,6 +29,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 {
     private static readonly TimeSpan DefaultConnectFailureCooldown = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultApprovalTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan DisposeOperationTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan EndSessionAfterControlStopGuard = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan RemoteControlSnapshotKeepAliveInterval = TimeSpan.FromMilliseconds(250);
@@ -841,6 +842,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             statusPresenter.Dispose();
         }
         sessionRuntime.SetReliabilityAttempt(null);
+        RunBoundedSynchronousCleanup(() => sessionRuntime.DisconnectAsync(), DisposeOperationTimeout);
 
         connectCts?.Cancel();
         connectCts?.Dispose();
@@ -3452,5 +3454,19 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         return HeaderStatusText.StartsWith(TransientBannerText, StringComparison.Ordinal) ||
                TransientBannerText.StartsWith(HeaderStatusText, StringComparison.Ordinal);
+    }
+
+    private static void RunBoundedSynchronousCleanup(Func<Task> cleanup, TimeSpan timeout)
+    {
+        ArgumentNullException.ThrowIfNull(cleanup);
+
+        try
+        {
+            cleanup().WaitAsync(timeout).GetAwaiter().GetResult();
+        }
+        catch
+        {
+            // Best-effort bounded cleanup.
+        }
     }
 }

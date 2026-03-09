@@ -436,10 +436,13 @@ public sealed class ScreenCaptureAbstractionTests
             };
 
             var rawPayloadReceived = new TaskCompletionSource<NknIncomingMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var frameReceived = new TaskCompletionSource<ScreenShareFrameCompletedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
             var payload = ScreenSharePayloadCodec.Serialize(chunk);
+            host.ScreenShareFrameCompleted += (_, e) => frameReceived.TrySetResult(e);
             hostClient.MessageReceived += (_, e) =>
             {
-                if (e.Payload.SequenceEqual(payload))
+                if (EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.ScreenShareFrame)
                 {
                     rawPayloadReceived.TrySetResult(e);
                 }
@@ -448,20 +451,26 @@ public sealed class ScreenCaptureAbstractionTests
 
             await helper.SendScreenSharePayloadAsync(payload, cts.Token);
             var received = await rawPayloadReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var deliveredFrame = await frameReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             var diagnosticsAfterSend = NknRuntimeDiagnostics.Snapshot();
 
             Assert.Equal(helperIdentity.Address, received.Source);
             Assert.False(received.IsTopic);
             Assert.Null(received.Topic);
-            Assert.Equal(payload, received.Payload);
+            Assert.True(EnvelopeCodec.TryDeserialize(received.Payload, out var env));
+            Assert.Equal(MsgType.ScreenShareFrame, env.Type);
+            Assert.Equal(frameBytes, deliveredFrame.EncodedFrameBytes);
+            Assert.Equal(chunk.FrameId, deliveredFrame.FrameId);
+            Assert.Equal(chunk.Width, deliveredFrame.Width);
+            Assert.Equal(chunk.Height, deliveredFrame.Height);
             Assert.Equal(0, helper.ScreenShareOutboundBusyDrops);
             Assert.Equal(1, helper.ScreenShareMessagesSent);
-            Assert.Equal(payload.Length, helper.ScreenSharePayloadBytesSent);
+            Assert.Equal(received.Payload.Length, helper.ScreenSharePayloadBytesSent);
             Assert.Equal(
                 diagnosticsBeforeSend.ScreenShareMessagesSent + 1,
                 diagnosticsAfterSend.ScreenShareMessagesSent);
             Assert.Equal(
-                diagnosticsBeforeSend.ScreenSharePayloadBytesSent + payload.Length,
+                diagnosticsBeforeSend.ScreenSharePayloadBytesSent + received.Payload.Length,
                 diagnosticsAfterSend.ScreenSharePayloadBytesSent);
             Assert.Equal(
                 diagnosticsBeforeSend.ScreenShareOutboundBusyDrops,
@@ -500,16 +509,22 @@ public sealed class ScreenCaptureAbstractionTests
             var rawScreenPayloadReceived = 0;
             var chatPayload = System.Text.Encoding.UTF8.GetBytes("chat-priority-payload");
             byte[] screenPayload = Array.Empty<byte>();
+            var screenFrameReceived = new TaskCompletionSource<ScreenShareFrameCompletedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var screenEnvelopeReceived = new TaskCompletionSource<NknIncomingMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
             host.Approved += (_, _) => hostApproved.TrySetResult();
             helper.Approved += (_, _) => helperApproved.TrySetResult();
             host.ChatMessageReceived += (_, e) => hostChatReceived.TrySetResult(e.Payload);
+            host.ScreenShareFrameCompleted += (_, e) => screenFrameReceived.TrySetResult(e);
             hostClient.MessageReceived += (_, e) =>
             {
-                if (!e.IsTopic && e.Payload.SequenceEqual(screenPayload))
+                if (!e.IsTopic &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.ScreenShareFrame)
                 {
                     Interlocked.Increment(ref rawScreenPayloadReceived);
+                    screenEnvelopeReceived.TrySetResult(e);
                 }
             };
 
@@ -558,13 +573,16 @@ public sealed class ScreenCaptureAbstractionTests
             await chatTask;
             await screenSendTask.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             var receivedChat = await hostChatReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var receivedFrame = await screenFrameReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var receivedEnvelope = await screenEnvelopeReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             var diagnosticsAfterSend = NknRuntimeDiagnostics.Snapshot();
 
             Assert.Equal(chatPayload, receivedChat);
+            Assert.Equal(new byte[] { 1, 2, 3, 4 }, receivedFrame.EncodedFrameBytes);
             Assert.Equal(1, Volatile.Read(ref rawScreenPayloadReceived));
             Assert.Equal(0, helper.ScreenShareOutboundBusyDrops);
             Assert.Equal(1, helper.ScreenShareMessagesSent);
-            Assert.Equal(screenPayload.Length, helper.ScreenSharePayloadBytesSent);
+            Assert.Equal(receivedEnvelope.Payload.Length, helper.ScreenSharePayloadBytesSent);
             Assert.Equal(
                 diagnosticsBeforeSend.ScreenShareOutboundBusyDrops,
                 diagnosticsAfterSend.ScreenShareOutboundBusyDrops);
@@ -572,7 +590,7 @@ public sealed class ScreenCaptureAbstractionTests
                 diagnosticsBeforeSend.ScreenShareMessagesSent + 1,
                 diagnosticsAfterSend.ScreenShareMessagesSent);
             Assert.Equal(
-                diagnosticsBeforeSend.ScreenSharePayloadBytesSent + screenPayload.Length,
+                diagnosticsBeforeSend.ScreenSharePayloadBytesSent + receivedEnvelope.Payload.Length,
                 diagnosticsAfterSend.ScreenSharePayloadBytesSent);
         }
         finally
@@ -746,9 +764,13 @@ public sealed class ScreenCaptureAbstractionTests
             });
 
             var stopPayloadReceived = new TaskCompletionSource<NknIncomingMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var stopReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.ScreenShareStopped += (_, _) => stopReceived.TrySetResult();
             hostClient.MessageReceived += (_, e) =>
             {
-                if (!e.IsTopic && e.Payload.SequenceEqual(stopPayload))
+                if (!e.IsTopic &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.ScreenShareStop)
                 {
                     stopPayloadReceived.TrySetResult(e);
                 }
@@ -775,9 +797,11 @@ public sealed class ScreenCaptureAbstractionTests
             await frameSendTask;
             await stopSendTask;
             var receivedStop = await stopPayloadReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await stopReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
 
             Assert.Equal(helperIdentity.Address, receivedStop.Source);
-            Assert.Equal(stopPayload, receivedStop.Payload);
+            Assert.True(EnvelopeCodec.TryDeserialize(receivedStop.Payload, out var env));
+            Assert.Equal(MsgType.ScreenShareStop, env.Type);
         }
         finally
         {
@@ -829,10 +853,14 @@ public sealed class ScreenCaptureAbstractionTests
             });
 
             var stopPayloadReceived = new TaskCompletionSource<NknIncomingMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var stopReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var deliveredStopCount = 0;
+            host.ScreenShareStopped += (_, _) => stopReceived.TrySetResult();
             hostClient.MessageReceived += (_, e) =>
             {
-                if (!e.IsTopic && e.Payload.SequenceEqual(stopPayload))
+                if (!e.IsTopic &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.ScreenShareStop)
                 {
                     Interlocked.Increment(ref deliveredStopCount);
                     stopPayloadReceived.TrySetResult(e);
@@ -842,7 +870,9 @@ public sealed class ScreenCaptureAbstractionTests
             var droppedFirstStop = 0;
             helperClient.ShouldDeliverSendAsync = (_, payload, _) =>
             {
-                if (payload.SequenceEqual(stopPayload) && Interlocked.Exchange(ref droppedFirstStop, 1) == 0)
+                if (EnvelopeCodec.TryDeserialize(payload, out var env) &&
+                    env.Type == MsgType.ScreenShareStop &&
+                    Interlocked.Exchange(ref droppedFirstStop, 1) == 0)
                 {
                     return Task.FromResult(false);
                 }
@@ -852,8 +882,12 @@ public sealed class ScreenCaptureAbstractionTests
 
             await helper.SendScreenSharePayloadAsync(stopPayload, cts.Token);
             var receivedStop = await stopPayloadReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await stopReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
 
             Assert.Equal(helperIdentity.Address, receivedStop.Source);
+            Assert.True(Volatile.Read(ref droppedFirstStop) == 1);
+            Assert.True(EnvelopeCodec.TryDeserialize(receivedStop.Payload, out var env));
+            Assert.Equal(MsgType.ScreenShareStop, env.Type);
             Assert.True(Volatile.Read(ref deliveredStopCount) >= 1);
         }
         finally

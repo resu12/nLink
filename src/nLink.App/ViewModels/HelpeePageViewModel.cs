@@ -2217,6 +2217,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
+        ApplyImmediateScreenSharePreviewStopState();
         RequestStopScreenSharePreview();
     }
 
@@ -3713,21 +3714,39 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        _ = Task.Run(async () =>
+        _ = StopScreenSharePreviewAsync();
+    }
+
+    private async Task StopScreenSharePreviewAsync()
+    {
+        try
         {
-            try
-            {
-                await screenShareCoordinator.StopAsync().ConfigureAwait(false);
-            }
-            catch
-            {
-                // Best-effort teardown.
-            }
-            finally
-            {
-                Interlocked.Exchange(ref screenSharePreviewStopInFlight, 0);
-            }
-        });
+            await screenShareCoordinator.StopAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best-effort teardown.
+        }
+        finally
+        {
+            Interlocked.Exchange(ref screenSharePreviewStopInFlight, 0);
+        }
+    }
+
+    private void ApplyImmediateScreenSharePreviewStopState()
+    {
+        var previousFrame = ScreenSharePreviewFrame;
+        ScreenSharePreviewFrame = null;
+        try
+        {
+            previousFrame?.Dispose();
+        }
+        catch
+        {
+            // Best-effort preview teardown.
+        }
+        IsScreenSharingPreviewActive = false;
+        ScreenSharePreviewStatus = new ScreenShareStatus(ScreenShareState.Off, null, DateTimeOffset.UtcNow);
     }
 
     private async Task SyncTransportScreenShareWithPreviewAsync(bool isPreviewActive)
