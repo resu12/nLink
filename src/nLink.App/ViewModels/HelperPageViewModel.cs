@@ -334,10 +334,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public string ConnectionMethodHint => transportConfig.HelperHintText;
 
     private PeerAddress? HelperVerificationIdentity => sessionRuntime.SecurityState.HelperAddress;
-    private PeerAddress? HelperIdentityForInviteBinding =>
-        RequiresHelperIdentityBootstrap
-            ? bootstrapHelperIdentity
-            : sessionRuntime.CurrentLocalPeerAddress;
+    private PeerAddress? HelperIdentityForInviteBinding => bootstrapHelperIdentity ?? sessionRuntime.CurrentLocalPeerAddress;
     private bool RequiresHelperIdentityBootstrap =>
         string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase) &&
         InviteSecurityDiagnostics.RequiresBoundHelperForIssuedSecretInvites();
@@ -373,7 +370,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         EffectivePhase is SessionUiPhase.Connecting or SessionUiPhase.Recovering or SessionUiPhase.Failed;
 
     public string HeaderVerificationCodeText =>
-        EffectivePhase == SessionUiPhase.Failed && HasHelperIdentityBootstrapVerificationCode
+        (EffectivePhase is SessionUiPhase.Connecting or SessionUiPhase.Failed) && HasHelperIdentityBootstrapVerificationCode
             ? HelperIdentityBootstrapVerificationCode
             : ShowHelperIdentityBootstrapPanel && HasHelperIdentityBootstrapVerificationCode
             ? HelperIdentityBootstrapVerificationCode
@@ -1852,6 +1849,78 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         bootstrapHelperIdentityResolutionTask = ResolveBootstrapHelperIdentityAsync(bootstrapHelperIdentityResolutionCts.Token);
     }
 
+    private void NotifyHelperIdentityBootstrapChanged()
+    {
+        OnPropertyChanged(nameof(HelperIdentityBootstrapText));
+        OnPropertyChanged(nameof(HelperIdentityBootstrapHintText));
+        OnPropertyChanged(nameof(HelperIdentityBootstrapVerificationCode));
+        OnPropertyChanged(nameof(HasHelperIdentityBootstrapVerificationCode));
+        OnPropertyChanged(nameof(ShowHelperIdentityBootstrapPanel));
+        OnPropertyChanged(nameof(HeaderVerificationCodeText));
+        OnPropertyChanged(nameof(ShowHeaderVerificationCode));
+        OnPropertyChanged(nameof(FirstPillVerificationCodeText));
+        OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+    }
+
+    private void PromoteBootstrapHelperIdentityFromConnectedSessionIfAvailable()
+    {
+        if (sessionRuntime.State != SessionRuntimeState.Connected ||
+            sessionRuntime.SecurityState.HelperAddress is not { } verifiedIdentity)
+        {
+            return;
+        }
+
+        var changed =
+            bootstrapHelperIdentity is null ||
+            bootstrapHelperIdentity.Value != verifiedIdentity;
+
+        bootstrapHelperIdentity = verifiedIdentity;
+        helperIdentityBootstrapPending = false;
+        CancelBootstrapHelperIdentityResolution();
+        bootstrapHelperIdentityResolutionTask = null;
+
+        if (changed)
+        {
+            NotifyHelperIdentityBootstrapChanged();
+        }
+    }
+
+    private void CacheBootstrapHelperIdentityFromRuntimeIfAvailable()
+    {
+        if (bootstrapHelperIdentity is not null)
+        {
+            return;
+        }
+
+        var resolvedIdentity = sessionRuntime.CurrentLocalPeerAddress;
+        if (resolvedIdentity is null)
+        {
+            return;
+        }
+
+        bootstrapHelperIdentity = resolvedIdentity;
+        helperIdentityBootstrapPending = false;
+        CancelBootstrapHelperIdentityResolution();
+        bootstrapHelperIdentityResolutionTask = null;
+        NotifyHelperIdentityBootstrapChanged();
+    }
+
+    private void EnsureBootstrapHelperIdentityResolutionForReadyState()
+    {
+        if (!RequiresHelperIdentityBootstrap ||
+            disposed ||
+            bootstrapHelperIdentity is not null ||
+            helperIdentityBootstrapPending ||
+            bootstrapHelperIdentityResolutionTask is not null ||
+            !ShowMainControls)
+        {
+            return;
+        }
+
+        BeginBootstrapHelperIdentityResolution();
+        NotifyHelperIdentityBootstrapChanged();
+    }
+
     private async Task ResolveBootstrapHelperIdentityAsync(CancellationToken ct)
     {
         try
@@ -1870,15 +1939,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                     bootstrapHelperIdentity = resolved;
                 }
                 helperIdentityBootstrapPending = false;
-                OnPropertyChanged(nameof(HelperIdentityBootstrapText));
-                OnPropertyChanged(nameof(HelperIdentityBootstrapHintText));
-                OnPropertyChanged(nameof(HelperIdentityBootstrapVerificationCode));
-                OnPropertyChanged(nameof(HasHelperIdentityBootstrapVerificationCode));
-                OnPropertyChanged(nameof(ShowHelperIdentityBootstrapPanel));
-                OnPropertyChanged(nameof(HeaderVerificationCodeText));
-                OnPropertyChanged(nameof(ShowHeaderVerificationCode));
-                OnPropertyChanged(nameof(FirstPillVerificationCodeText));
-                OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+                NotifyHelperIdentityBootstrapChanged();
             });
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -1891,12 +1952,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             await UiThreadDispatch.RunAsync(() =>
             {
                 helperIdentityBootstrapPending = false;
-                OnPropertyChanged(nameof(HelperIdentityBootstrapHintText));
-                OnPropertyChanged(nameof(ShowHelperIdentityBootstrapPanel));
-                OnPropertyChanged(nameof(HeaderVerificationCodeText));
-                OnPropertyChanged(nameof(ShowHeaderVerificationCode));
-                OnPropertyChanged(nameof(FirstPillVerificationCodeText));
-                OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+                NotifyHelperIdentityBootstrapChanged();
             });
         }
         catch (Exception ex)
@@ -1910,8 +1966,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             await UiThreadDispatch.RunAsync(() =>
             {
                 helperIdentityBootstrapPending = false;
-                OnPropertyChanged(nameof(HelperIdentityBootstrapHintText));
-                OnPropertyChanged(nameof(ShowHelperIdentityBootstrapPanel));
+                NotifyHelperIdentityBootstrapChanged();
             });
         }
     }
@@ -2410,6 +2465,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void SyncFromRuntime()
     {
+        PromoteBootstrapHelperIdentityFromConnectedSessionIfAvailable();
+        CacheBootstrapHelperIdentityFromRuntimeIfAvailable();
+
         var runtimeTerminalFailure = false;
         if (endSessionRequested)
         {
@@ -2652,6 +2710,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         EndSessionCommand.NotifyCanExecuteChanged();
         SyncTransientStatusFromRuntime();
         NotifyStatusBannerDetailChanged();
+        EnsureBootstrapHelperIdentityResolutionForReadyState();
     }
 
     private void SyncTransientStatusFromRuntime()

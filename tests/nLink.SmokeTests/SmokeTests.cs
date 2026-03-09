@@ -7836,6 +7836,70 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void HelperViewModel_RemoteEndAfterSuccessfulSession_RetainsHelperAddress_WhenBootstrapWasMissing()
+    {
+        var transportConfig = CreateNknTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        var helpeeIdentity = new PeerAddress("nlink-helpee.retained.target");
+        var helperIdentity = new PeerAddress("nlink-helper.retained.identity");
+        var approvedState = CreateApprovedSecurityState(helpeeIdentity, helperIdentity);
+
+        SetPrivateField(helperRuntime, "sessionSecurityState", approvedState);
+        SetPrivateField(helperRuntime, "state", SessionRuntimeState.Connected);
+        InvokePrivateMethod(helper, "SyncFromRuntime");
+
+        Assert.Equal(helperIdentity.Value, helper.HelperIdentityBootstrapText);
+        Assert.True(helper.HasHelperIdentityBootstrapVerificationCode);
+
+        SetPrivateField(helperRuntime, "sessionSecurityState", SessionSecurityState.Empty);
+        SetPrivateField(helperRuntime, "state", SessionRuntimeState.Failed);
+        SetPrivateField(helperRuntime, "statusText", "The other person ended the session.");
+        SetPrivateField(helperRuntime, "lastDisconnectWasRemoteEnd", true);
+        InvokePrivateMethod(helper, "SyncFromRuntime");
+
+        Assert.Equal(helperIdentity.Value, helper.HelperIdentityBootstrapText);
+        Assert.True(helper.HasHelperIdentityBootstrapVerificationCode);
+        Assert.Equal("The other person ended the session.", helper.StatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperViewModel_RemoteEndAfterSuccessfulSession_ReplacesBootstrapAddress_WithVerifiedHelperIdentity()
+    {
+        var transportConfig = CreateNknTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        var bootstrapHelperIdentity = new PeerAddress("nlink-helper.bootstrap.placeholder");
+        var helpeeIdentity = new PeerAddress("nlink-helpee.retained.target");
+        var verifiedHelperIdentity = new PeerAddress("nlink-helper.connected.verified");
+        var approvedState = CreateApprovedSecurityState(helpeeIdentity, verifiedHelperIdentity);
+
+        SetPrivateField(helper, "bootstrapHelperIdentity", bootstrapHelperIdentity);
+        SetPrivateField(helperRuntime, "sessionSecurityState", approvedState);
+        SetPrivateField(helperRuntime, "state", SessionRuntimeState.Connected);
+        InvokePrivateMethod(helper, "SyncFromRuntime");
+
+        Assert.Equal(verifiedHelperIdentity.Value, helper.HelperIdentityBootstrapText);
+        Assert.NotEqual(bootstrapHelperIdentity.Value, helper.HelperIdentityBootstrapText);
+        Assert.True(helper.HasHelperIdentityBootstrapVerificationCode);
+
+        SetPrivateField(helperRuntime, "sessionSecurityState", SessionSecurityState.Empty);
+        SetPrivateField(helperRuntime, "state", SessionRuntimeState.Failed);
+        SetPrivateField(helperRuntime, "statusText", "The other person ended the session.");
+        SetPrivateField(helperRuntime, "lastDisconnectWasRemoteEnd", true);
+        InvokePrivateMethod(helper, "SyncFromRuntime");
+
+        Assert.Equal(verifiedHelperIdentity.Value, helper.HelperIdentityBootstrapText);
+        Assert.NotEqual(bootstrapHelperIdentity.Value, helper.HelperIdentityBootstrapText);
+        Assert.True(helper.HasHelperIdentityBootstrapVerificationCode);
+        Assert.Equal("The other person ended the session.", helper.StatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task Alpha3ScenarioC_SessionEnd_HeadlessRemoteEnd_ShowsFriendlyMessage()
     {
         FakeNknClient.ResetNetwork();
@@ -8780,6 +8844,7 @@ public class SmokeTests
     [Fact]
     public void HelperHeaderVerificationCode_StaysPinnedToBootstrapIdentity_WhileConnecting()
     {
+        using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
         var transportConfig = CreateNknTestConfig();
         using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
         using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
@@ -8863,6 +8928,7 @@ public class SmokeTests
     [Fact]
     public void HelperFirstPillVerificationCode_StaysPinnedToBootstrapIdentity_WhileConnecting()
     {
+        using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
         var transportConfig = CreateNknTestConfig();
         using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
         using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
@@ -8884,6 +8950,7 @@ public class SmokeTests
     [Fact]
     public async Task HelperFirstPillVerificationCode_DoesNotFlip_WhenLateBootstrapResolutionReturnsDifferentIdentity()
     {
+        using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
         var transportConfig = CreateNknTestConfig();
         using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
         var bootstrapResolution = new TaskCompletionSource<PeerAddress?>(
@@ -8903,8 +8970,9 @@ public class SmokeTests
         var expected = HelperVerificationCodeFormatter.Format(bootstrapHelperIdentity);
         var unexpected = HelperVerificationCodeFormatter.Format(lateResolvedIdentity);
 
+        var pending = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helper, "ResolveBootstrapHelperIdentityAsync", CancellationToken.None));
+        SetPrivateField(helper, "bootstrapHelperIdentityResolutionTask", pending);
         bootstrapResolution.SetResult(lateResolvedIdentity);
-        var pending = Assert.IsAssignableFrom<Task>(GetPrivateField(helper, "bootstrapHelperIdentityResolutionTask"));
         await pending;
 
         Assert.Equal(expected, helper.FirstPillVerificationCodeText);
