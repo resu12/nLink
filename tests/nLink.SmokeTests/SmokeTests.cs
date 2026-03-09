@@ -9071,6 +9071,32 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task HelpeeViewModel_IncomingRequest_ShowsApprovalCountdown()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-timeout-countdown-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-timeout-countdown-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            helpeeRuntime,
+            incomingRequestTimeout: TimeSpan.FromSeconds(5));
+
+        _ = await WaitForShareInviteAsync(helpee);
+
+        await helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), CancellationToken.None);
+        await WaitUntilAsync(
+            () => helpee.IsIncomingRequestView &&
+                  helpee.ShowIncomingRequestTimeout &&
+                  !string.IsNullOrWhiteSpace(helpee.IncomingRequestTimeoutText),
+            TimeSpan.FromSeconds(2));
+
+        Assert.StartsWith("Request expires in 00:0", helpee.IncomingRequestTimeoutText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task HelpeeViewModel_IncomingRequestTimeout_ReturnsToWaitingWithUsableCode()
     {
         var transportConfig = CreateDevLocalTestConfig();

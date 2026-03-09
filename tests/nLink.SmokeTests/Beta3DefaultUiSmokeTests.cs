@@ -570,7 +570,8 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
             await WaitUntilAsync(
                 () => helpee.IsIncomingRequestView &&
                       helpee.ShowIncomingRequestPanel &&
-                      helpee.HasIncomingHelperVerificationCode,
+                      helpee.HasIncomingHelperVerificationCode &&
+                      helpee.ShowIncomingRequestTimeout,
                 TimeSpan.FromSeconds(3));
 
             var view = new HelpeePageView { DataContext = helpee };
@@ -582,6 +583,9 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 await FlushUiAsync();
 
                 Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helpee.IncomingApprovalTitle"));
+                var approvalTimer = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helpee.IncomingApprovalTimer"));
+                Assert.Equal(helpee.IncomingRequestTimeoutText, approvalTimer.Text);
+                Assert.False(string.IsNullOrWhiteSpace(approvalTimer.Text));
                 Assert.Null(FindFirstControlByAutomationId(window, "Helpee.IncomingApprovalExplanation"));
                 var verificationCode = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "SessionHeader.VerificationCode"));
                 Assert.Equal(helpee.IncomingHelperVerificationCode, verificationCode.Text);

@@ -378,15 +378,23 @@
 
                                         <StackPanel Spacing="14"
                                                     IsVisible="{Binding ShowIncomingRequestPanel}">
-                                            <StackPanel Spacing="6">
-                                                <TextBlock AutomationProperties.AutomationId="Helpee.IncomingApprovalTitle"
-                                                           Text="Allow this helper to connect?"
-                                                           Foreground="{StaticResource AppTextBrush}"
-                                                           FontSize="21"
-                                                           FontWeight="SemiBold"
-                                                           TextAlignment="Center"
-                                                           HorizontalAlignment="Center"
-                                                           MaxWidth="420"/>
+                                        <StackPanel Spacing="6">
+                                            <TextBlock AutomationProperties.AutomationId="Helpee.IncomingApprovalTitle"
+                                                       Text="Allow this helper to connect?"
+                                                       Foreground="{StaticResource AppTextBrush}"
+                                                       FontSize="21"
+                                                       FontWeight="SemiBold"
+                                                       TextAlignment="Center"
+                                                       HorizontalAlignment="Center"
+                                                       MaxWidth="420"/>
+                                            <TextBlock AutomationProperties.AutomationId="Helpee.IncomingApprovalTimer"
+                                                       Text="{Binding IncomingRequestTimeoutText}"
+                                                       Classes="appMuted"
+                                                       FontSize="12"
+                                                       FontWeight="SemiBold"
+                                                       TextAlignment="Center"
+                                                       HorizontalAlignment="Center"
+                                                       IsVisible="{Binding ShowIncomingRequestTimeout}"/>
                                         </StackPanel>
 
                                         <Border Background="{StaticResource AppSurfaceBrush}"

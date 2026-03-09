@@ -100,6 +100,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private DateTimeOffset shareInviteExpiresAtUtc = DateTimeOffset.MinValue;
     private string shareInviteExpiryText = string.Empty;
     private bool shareInviteAutoRefreshTriggered;
+    private DateTimeOffset incomingRequestExpiresAtUtc = DateTimeOffset.MinValue;
+    private string incomingRequestTimeoutText = string.Empty;
     private string inviteHelperIdentityInput = string.Empty;
     private string verifiedInviteHelperIdentity = string.Empty;
     private bool suppressAutoApplyInviteHelperIdentityInput;
@@ -310,6 +312,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool ShowShareInviteStatus => !HasShareInvite && !string.IsNullOrWhiteSpace(ShareInviteStatusText);
     public string ShareInviteExpiryText => shareInviteExpiryText;
     public bool ShowShareInviteExpiry => HasShareInvite && !string.IsNullOrWhiteSpace(ShareInviteExpiryText);
+    public string IncomingRequestTimeoutText => incomingRequestTimeoutText;
+    public bool ShowIncomingRequestTimeout =>
+        ShowIncomingRequestPanel &&
+        HasIncomingRequest &&
+        !string.IsNullOrWhiteSpace(IncomingRequestTimeoutText);
     public bool HasShareInvite => !string.IsNullOrWhiteSpace(ShareInvite);
     public bool HasShareInviteRawToken =>
         !string.IsNullOrWhiteSpace(ShareInviteRawToken) &&
@@ -493,6 +500,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref hasIncomingRequest, value))
             {
                 OnPropertyChanged(nameof(CanAllowIncomingRequestAction));
+                OnPropertyChanged(nameof(ShowIncomingRequestTimeout));
                 AllowCommand.NotifyCanExecuteChanged();
                 DeclineCommand.NotifyCanExecuteChanged();
             }
@@ -560,6 +568,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowFailurePanel));
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
+                OnPropertyChanged(nameof(ShowIncomingRequestTimeout));
                 OnPropertyChanged(nameof(ShowStopControlAction));
                 OnPropertyChanged(nameof(CanStopControl));
                 OnPropertyChanged(nameof(ShowRemoteControlActiveStatus));
@@ -677,6 +686,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowRetryAction));
                 OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
                 OnPropertyChanged(nameof(ShowFailurePanel));
+                OnPropertyChanged(nameof(ShowIncomingRequestTimeout));
                 OpenDiagnosticsCommand.NotifyCanExecuteChanged();
             }
         }
@@ -1104,8 +1114,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 #endif
         RunBoundedSynchronousCleanup(screenShareCoordinator.StopAsync, TimeSpan.FromSeconds(2));
         copyFeedback.Dispose();
-        incomingRequestTimeoutCts?.Cancel();
-        incomingRequestTimeoutCts?.Dispose();
+        CancelIncomingRequestTimeout();
         RunSynchronousCleanup(() => sessionRuntime.ResetAsync());
     }
 
@@ -1175,9 +1184,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         PrepareForNewSession();
 
-        incomingRequestTimeoutCts?.Cancel();
-        incomingRequestTimeoutCts?.Dispose();
-        incomingRequestTimeoutCts = null;
+        CancelIncomingRequestTimeout();
 
         await sessionRuntime.ResetAsync();
 
@@ -1978,6 +1985,15 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
+    private void UpdateIncomingRequestTimeoutText(string value)
+    {
+        value ??= string.Empty;
+        if (SetProperty(ref incomingRequestTimeoutText, value, nameof(IncomingRequestTimeoutText)))
+        {
+            OnPropertyChanged(nameof(ShowIncomingRequestTimeout));
+        }
+    }
+
     private void RefreshShareQrBitmaps()
     {
         RefreshShareInviteQrBitmap(ShareInvite);
@@ -2105,13 +2121,15 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
+        var now = DateTimeOffset.UtcNow;
+        RefreshIncomingRequestTimeoutText(now);
+
         if (!HasShareInvite || shareInviteExpiresAtUtc == DateTimeOffset.MinValue)
         {
             UpdateShareInviteExpiryText(string.Empty);
             return;
         }
 
-        var now = DateTimeOffset.UtcNow;
         var remaining = shareInviteExpiresAtUtc - now;
         if (remaining <= TimeSpan.Zero)
         {
@@ -2134,6 +2152,19 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         UpdateShareInviteExpiryText(BuildInviteExpiryText(now));
+    }
+
+    private void RefreshIncomingRequestTimeoutText(DateTimeOffset now)
+    {
+        if (!HasIncomingRequest ||
+            !IsIncomingRequestView ||
+            incomingRequestExpiresAtUtc == DateTimeOffset.MinValue)
+        {
+            UpdateIncomingRequestTimeoutText(string.Empty);
+            return;
+        }
+
+        UpdateIncomingRequestTimeoutText(BuildIncomingRequestTimeoutText(now));
     }
 
     private string BuildInviteExpiryText(DateTimeOffset now)
@@ -2159,6 +2190,20 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         return $"Invite expires in {minutes:D2}:{seconds:D2}";
     }
 
+    private string BuildIncomingRequestTimeoutText(DateTimeOffset now)
+    {
+        if (incomingRequestExpiresAtUtc == DateTimeOffset.MinValue)
+        {
+            return string.Empty;
+        }
+
+        var remaining = incomingRequestExpiresAtUtc - now;
+        var totalSeconds = Math.Max(1, (int)Math.Ceiling(remaining.TotalSeconds));
+        var minutes = totalSeconds / 60;
+        var seconds = totalSeconds % 60;
+        return $"Request expires in {minutes:D2}:{seconds:D2}.";
+    }
+
     private async Task ApproveIncomingRequestAsync()
     {
         wasConnected = true;
@@ -2174,7 +2219,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private void OnIncomingJoinRequestAvailable(object? sender, EventArgs e)
     {
         LogReliability(SessionReliabilityStage.IncomingJoinRequest);
-        StartIncomingRequestTimeout();
+        _ = UiThreadDispatch.RunAsync(StartIncomingRequestTimeout);
     }
 
     private void OnRuntimeDisconnected(object? sender, EventArgs e)
@@ -3535,6 +3580,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         CancelIncomingRequestTimeout();
 
+        incomingRequestExpiresAtUtc = DateTimeOffset.UtcNow + incomingRequestTimeout;
+        UpdateIncomingRequestTimeoutText(BuildIncomingRequestTimeoutText(DateTimeOffset.UtcNow));
         incomingRequestTimeoutCts = new CancellationTokenSource();
         var ct = incomingRequestTimeoutCts.Token;
 
@@ -3587,6 +3634,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         incomingRequestTimeoutCts?.Cancel();
         incomingRequestTimeoutCts?.Dispose();
         incomingRequestTimeoutCts = null;
+        incomingRequestExpiresAtUtc = DateTimeOffset.MinValue;
+        UpdateIncomingRequestTimeoutText(string.Empty);
     }
 
     private bool TryAutoRegenerateAfterConnectedSessionEnd()
