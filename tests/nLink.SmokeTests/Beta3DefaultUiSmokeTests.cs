@@ -627,6 +627,58 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task HelpeeApprovalPanel_NoCapabilitiesSelected_DisablesAllowButton()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+            var network = new FakeSessionTransportNetwork();
+            using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-approval-disable-" + Guid.NewGuid().ToString("N")));
+            using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-approval-disable-" + Guid.NewGuid().ToString("N")));
+            using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+
+            await WaitUntilAsync(() => !string.IsNullOrWhiteSpace(helpee.ShareInvite), TimeSpan.FromSeconds(3));
+            await helperRuntime.StartHelperAsync(
+                new NLink.Core.SessionConnect.PeerAddress(helpeeRuntime.CurrentLocalPeerAddress!.Value.Value),
+                CancellationToken.None);
+            await WaitUntilAsync(
+                () => helpee.IsIncomingRequestView && helpee.ShowIncomingRequestPanel,
+                TimeSpan.FromSeconds(3));
+
+            var view = new HelpeePageView { DataContext = helpee };
+            var window = new Window { Width = 1080, Height = 760, Content = view };
+            window.Show();
+
+            try
+            {
+                await FlushUiAsync();
+
+                var allowButton = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "Helpee.Allow"));
+                Assert.True(allowButton.IsEnabled);
+
+                helpee.AllowIncomingChatCapability = false;
+                helpee.AllowIncomingScreenShareCapability = false;
+                helpee.AllowIncomingRemoteControlCapability = false;
+                helpee.AllowIncomingFileTransferCapability = false;
+                helpee.AllowIncomingClipboardCapability = false;
+
+                await FlushUiAsync();
+
+                Assert.False(helpee.CanAllowIncomingRequestAction);
+                Assert.False(allowButton.IsEnabled);
+            }
+            finally
+            {
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task HelpeePage_WaitingView_MakesQrProminent_AndKeepsRefreshSecondary()
     {
         await fixture.Session.Dispatch(async () =>

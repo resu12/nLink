@@ -446,6 +446,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool ShowIncomingChatCapability => (incomingRequestedCapabilities & CapabilityGrant.Chat) == CapabilityGrant.Chat;
     public bool ShowIncomingScreenShareCapability => (incomingRequestedCapabilities & CapabilityGrant.ScreenShare) == CapabilityGrant.ScreenShare;
     public bool ShowIncomingRemoteControlCapability => (incomingRequestedCapabilities & CapabilityGrant.RemoteControl) == CapabilityGrant.RemoteControl;
+    public bool CanAllowIncomingRemoteControlCapability => ShowIncomingRemoteControlCapability && allowIncomingScreenShareCapability;
     public bool ShowIncomingFileTransferCapability => (incomingRequestedCapabilities & CapabilityGrant.FileTransfer) == CapabilityGrant.FileTransfer;
     public bool ShowIncomingClipboardCapability => (incomingRequestedCapabilities & CapabilityGrant.Clipboard) == CapabilityGrant.Clipboard;
 
@@ -479,6 +480,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         set => SetIncomingCapabilitySelection(ref allowIncomingClipboardCapability, value, nameof(AllowIncomingClipboardCapability));
     }
 
+    public bool CanAllowIncomingRequestAction => CanAllowIncomingRequest();
+
     public InlineTransientText CopyFeedback => copyFeedback;
     public bool ShowCopyFeedbackInline => ShowWaitingPanel && copyFeedback.IsVisible;
 
@@ -489,6 +492,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             if (SetProperty(ref hasIncomingRequest, value))
             {
+                OnPropertyChanged(nameof(CanAllowIncomingRequestAction));
                 AllowCommand.NotifyCanExecuteChanged();
                 DeclineCommand.NotifyCanExecuteChanged();
             }
@@ -502,6 +506,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             if (SetProperty(ref isRequestAllowed, value))
             {
+                OnPropertyChanged(nameof(CanAllowIncomingRequestAction));
                 AllowCommand.NotifyCanExecuteChanged();
                 DeclineCommand.NotifyCanExecuteChanged();
             }
@@ -3182,6 +3187,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             OnPropertyChanged(nameof(ShowIncomingChatCapability));
             OnPropertyChanged(nameof(ShowIncomingScreenShareCapability));
             OnPropertyChanged(nameof(ShowIncomingRemoteControlCapability));
+            OnPropertyChanged(nameof(CanAllowIncomingRemoteControlCapability));
             OnPropertyChanged(nameof(ShowIncomingFileTransferCapability));
             OnPropertyChanged(nameof(ShowIncomingClipboardCapability));
         }
@@ -3194,12 +3200,14 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         SetIncomingCapabilitySelectionCore(ref allowIncomingRemoteControlCapability, (approvedCapabilities & CapabilityGrant.RemoteControl) == CapabilityGrant.RemoteControl, nameof(AllowIncomingRemoteControlCapability));
         SetIncomingCapabilitySelectionCore(ref allowIncomingFileTransferCapability, (approvedCapabilities & CapabilityGrant.FileTransfer) == CapabilityGrant.FileTransfer, nameof(AllowIncomingFileTransferCapability));
         SetIncomingCapabilitySelectionCore(ref allowIncomingClipboardCapability, (approvedCapabilities & CapabilityGrant.Clipboard) == CapabilityGrant.Clipboard, nameof(AllowIncomingClipboardCapability));
+        NormalizeIncomingCapabilityDependencies();
         OnIncomingCapabilitySelectionChanged();
     }
 
     private void SetIncomingCapabilitySelection(ref bool field, bool value, string propertyName)
     {
         SetIncomingCapabilitySelectionCore(ref field, value, propertyName);
+        NormalizeIncomingCapabilityDependencies();
         OnIncomingCapabilitySelectionChanged();
     }
 
@@ -3208,9 +3216,20 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         SetProperty(ref field, value, propertyName);
     }
 
+    private void NormalizeIncomingCapabilityDependencies()
+    {
+        if (!allowIncomingScreenShareCapability && allowIncomingRemoteControlCapability)
+        {
+            SetIncomingCapabilitySelectionCore(ref allowIncomingRemoteControlCapability, false, nameof(AllowIncomingRemoteControlCapability));
+        }
+
+        OnPropertyChanged(nameof(CanAllowIncomingRemoteControlCapability));
+    }
+
     private void OnIncomingCapabilitySelectionChanged()
     {
         OnPropertyChanged(nameof(IncomingApprovedCapabilitiesText));
+        OnPropertyChanged(nameof(CanAllowIncomingRequestAction));
         AllowCommand.NotifyCanExecuteChanged();
     }
 
@@ -3243,7 +3262,14 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             selected |= CapabilityGrant.Clipboard;
         }
 
-        return selected & incomingRequestedCapabilities;
+        selected &= incomingRequestedCapabilities;
+
+        if ((selected & CapabilityGrant.ScreenShare) != CapabilityGrant.ScreenShare)
+        {
+            selected &= ~CapabilityGrant.RemoteControl;
+        }
+
+        return selected;
     }
 
     private static string BuildCapabilitySummary(CapabilityGrant capabilities)

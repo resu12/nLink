@@ -121,6 +121,7 @@ public static class SessionHandshakeProtocol
 
         if ((capabilities & InviteCapabilities.RemoteControl) != 0)
         {
+            grants |= CapabilityGrant.ScreenShare;
             grants |= CapabilityGrant.RemoteControl;
         }
 

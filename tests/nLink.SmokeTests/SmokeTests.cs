@@ -3418,6 +3418,98 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void ApprovalRequest_CreateDecision_RemoteControlRequiresScreenShare()
+    {
+        var approvalRequest = new ApprovalRequest(
+            new PeerAddress("helper.security.remotecontrol"),
+            CapabilityGrant.Chat | CapabilityGrant.ScreenShare | CapabilityGrant.RemoteControl,
+            new SessionId("approval_request_remotecontrol_requires_screenshare"));
+        var nowUtc = DateTimeOffset.UtcNow;
+
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(
+            () => approvalRequest.CreateDecision(
+                CapabilityGrant.Chat | CapabilityGrant.RemoteControl,
+                nowUtc.Add(SessionSecurityDefaults.GrantLifetime),
+                nowUtc));
+
+        Assert.Equal("approvedCapabilities", ex.ParamName);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_DisablingScreenShare_ClearsAndDisablesRemoteControlApproval()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var hostAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl);
+        await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpee.HasIncomingRequest, TimeSpan.FromSeconds(2));
+
+        Assert.True(helpee.AllowIncomingScreenShareCapability);
+        Assert.True(helpee.AllowIncomingRemoteControlCapability);
+        Assert.True(helpee.CanAllowIncomingRemoteControlCapability);
+
+        helpee.AllowIncomingScreenShareCapability = false;
+
+        Assert.False(helpee.AllowIncomingRemoteControlCapability);
+        Assert.False(helpee.CanAllowIncomingRemoteControlCapability);
+
+        helpee.AllowIncomingRemoteControlCapability = true;
+
+        Assert.False(helpee.AllowIncomingRemoteControlCapability);
+
+        helpee.AllowIncomingScreenShareCapability = true;
+
+        Assert.True(helpee.CanAllowIncomingRemoteControlCapability);
+
+        helpee.AllowIncomingRemoteControlCapability = true;
+
+        Assert.True(helpee.AllowIncomingRemoteControlCapability);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_NoApprovedCapabilities_DisablesAllowAction()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var hostAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl);
+        await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpee.HasIncomingRequest, TimeSpan.FromSeconds(2));
+
+        Assert.True(helpee.CanAllowIncomingRequestAction);
+        Assert.True(helpee.AllowCommand.CanExecute(null));
+
+        helpee.AllowIncomingChatCapability = false;
+        helpee.AllowIncomingScreenShareCapability = false;
+        helpee.AllowIncomingRemoteControlCapability = false;
+
+        Assert.False(helpee.CanAllowIncomingRequestAction);
+        Assert.False(helpee.AllowCommand.CanExecute(null));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task HelperViewModel_FileTransferCommand_RequiresGrantedCapability()
     {
         var hostAddress = CreateTestPeerAddress();

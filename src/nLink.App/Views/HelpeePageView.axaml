@@ -420,6 +420,7 @@
                                                     <CheckBox AutomationProperties.AutomationId="Helpee.AllowCapability.RemoteControl"
                                                               Content="Control your mouse and keyboard"
                                                               IsChecked="{Binding AllowIncomingRemoteControlCapability}"
+                                                              IsEnabled="{Binding CanAllowIncomingRemoteControlCapability}"
                                                               IsVisible="{Binding ShowIncomingRemoteControlCapability}"/>
 
                                                     <CheckBox AutomationProperties.AutomationId="Helpee.AllowCapability.FileTransfer"
@@ -442,7 +443,7 @@
                                                     AutomationProperties.AutomationId="Helpee.Allow"
                                                     Content="Allow"
                                                     Command="{Binding AllowCommand}"
-                                                    IsEnabled="{Binding HasIncomingRequest}"/>
+                                                    IsEnabled="{Binding CanAllowIncomingRequestAction}"/>
 
                                             <Button Grid.Column="1"
                                                     Classes="appButton secondaryButton action"

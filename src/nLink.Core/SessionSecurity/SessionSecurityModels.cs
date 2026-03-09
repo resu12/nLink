@@ -38,6 +38,12 @@ public sealed record ApprovalRequest(
             throw new ArgumentOutOfRangeException(nameof(approvedCapabilities), "Approval cannot grant capabilities that were not requested.");
         }
 
+        if ((approvedCapabilities & CapabilityGrant.RemoteControl) == CapabilityGrant.RemoteControl &&
+            (approvedCapabilities & CapabilityGrant.ScreenShare) != CapabilityGrant.ScreenShare)
+        {
+            throw new ArgumentOutOfRangeException(nameof(approvedCapabilities), "Remote control approval requires screen sharing approval.");
+        }
+
         if (expiresAtUtc <= nowUtc)
         {
             throw new ArgumentOutOfRangeException(nameof(expiresAtUtc), "Approval must expire in the future.");
