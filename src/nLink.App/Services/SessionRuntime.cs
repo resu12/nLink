@@ -110,7 +110,11 @@ public readonly record struct DiagnosticsSnapshot(
     string LastFailureMessage,
     double? LastConnectDurationMs,
     double? LastHandshakeDurationMs,
-    double? LastBridgeStartDurationMs);
+    double? LastBridgeStartDurationMs,
+    string AuthorizationSummary = "(unknown)",
+    string SessionSecuritySummary = "(unknown)",
+    string RemoteControlSummary = "(unknown)",
+    string ScreenShareSummary = "(unknown)");
 
 internal sealed record SessionRuntimeWatchdogOptions(
     bool Enabled,
@@ -458,15 +462,7 @@ public sealed class SessionRuntime : IDisposable
               PeerAddress.TryParse(localAddressTransport.LocalPeerAddress, out var peerAddress)
                 ? peerAddress
                 : null;
-    public PeerAddress? CurrentInvitePeerAddress =>
-        role != SessionRuntimeRole.Helpee
-            ? null
-            : transport is NknSignalingTransport
-                ? sessionSecurityState.HelpeeAddress
-                : transport is ILocalPeerAddressSignalingTransport localInviteAddressTransport &&
-                  PeerAddress.TryParse(localInviteAddressTransport.LocalPeerAddress, out var invitePeerAddress)
-                    ? invitePeerAddress
-                    : null;
+    public PeerAddress? CurrentInvitePeerAddress => CurrentLocalPeerAddress;
 
     public bool HasPendingJoinRequest => pendingJoinRequest is not null;
     public ApprovalRequest? PendingApprovalRequest => pendingApprovalRequest;
@@ -875,8 +871,58 @@ public sealed class SessionRuntime : IDisposable
             LastFailureMessage: string.IsNullOrWhiteSpace(lastTransportFailure?.Message) ? "(none)" : lastTransportFailure!.Message,
             LastConnectDurationMs: GetLastDurationMetricMilliseconds("connect_duration_ms"),
             LastHandshakeDurationMs: GetLastDurationMetricMilliseconds("handshake_duration_ms"),
-            LastBridgeStartDurationMs: GetLastDurationMetricMilliseconds("bridge_start_duration_ms"));
+            LastBridgeStartDurationMs: GetLastDurationMetricMilliseconds("bridge_start_duration_ms"),
+            AuthorizationSummary: BuildAuthorizationSummary(),
+            SessionSecuritySummary: BuildSessionSecuritySummary(),
+            RemoteControlSummary: BuildRemoteControlSummary(),
+            ScreenShareSummary: BuildScreenShareSummary());
     }
+
+    private string BuildAuthorizationSummary()
+        => $"chat={DescribeCapabilityAuthorization(SessionCapability.Chat)}; " +
+           $"screenshare={DescribeCapabilityAuthorization(SessionCapability.ScreenShare)}; " +
+           $"remote_control={DescribeCapabilityAuthorization(SessionCapability.RemoteControl)}";
+
+    private string BuildSessionSecuritySummary()
+    {
+        var approvalActive = sessionSecurityState.IsApprovalActive(nowProvider());
+        return $"invite_validated={FormatYesNo(sessionSecurityState.InviteValidated)}; " +
+               $"handshake={sessionSecurityState.HandshakeState}; " +
+               $"approval_granted={FormatYesNo(sessionSecurityState.ApprovalGranted)}; " +
+               $"approval_active={FormatYesNo(approvalActive)}; " +
+               $"capabilities={FormatCapabilities(sessionSecurityState.ApprovedCapabilities)}";
+    }
+
+    private string BuildRemoteControlSummary()
+    {
+        var statusHint = string.IsNullOrWhiteSpace(remoteControlStatusHintText) ? "(none)" : remoteControlStatusHintText;
+        return $"state={remoteControlSessionState.ControlState}; " +
+               $"available={FormatYesNo(RemoteControlAvailable)}; " +
+               $"local_support={FormatYesNo(LocalSupportsRemoteControl)}; " +
+               $"remote_support={FormatYesNo(RemoteSupportsRemoteControl)}; " +
+               $"session_support={FormatYesNo(SessionSupportsRemoteControl)}; " +
+               $"status_hint={statusHint}";
+    }
+
+    private string BuildScreenShareSummary()
+    {
+        var authorized = EvaluateCapabilityAuthorization(SessionCapability.ScreenShare).IsAuthorized;
+        return $"active={FormatYesNo(transportScreenShareCoordinator.IsActive)}; " +
+               $"authorized={FormatYesNo(authorized)}; " +
+               $"auto_start={FormatYesNo(allowTransportScreenShareAutoStart)}; " +
+               $"host_ready={FormatYesNo(hostReady)}";
+    }
+
+    private string DescribeCapabilityAuthorization(SessionCapability capability)
+    {
+        var authorization = EvaluateCapabilityAuthorization(capability);
+        return authorization.IsAuthorized ? "yes" : $"no ({authorization.Failure})";
+    }
+
+    private static string FormatYesNo(bool value) => value ? "yes" : "no";
+
+    private static string FormatCapabilities(CapabilityGrant capabilities)
+        => capabilities == CapabilityGrant.None ? "none" : capabilities.ToString();
 
     internal async Task HandleExternalRecoveryAsync(ExternalRecoveryTrigger triggers, CancellationToken ct)
     {
@@ -3490,6 +3536,7 @@ public sealed class SessionRuntime : IDisposable
         RunCountedBackgroundTask(
             () => transportScreenShareCoordinator.HandleDisconnectedAsync(),
             countAsTransportTask: false);
+        NotifyLocalScreenShareStoppedForTeardown("transport_disconnected", sender);
 
         if (disposed || resetInProgress || remoteSessionEndHandling || sessionCts?.IsCancellationRequested == true)
         {
@@ -3586,6 +3633,7 @@ public sealed class SessionRuntime : IDisposable
         RunCountedBackgroundTask(
             () => transportScreenShareCoordinator.HandleDisconnectedAsync(),
             countAsTransportTask: false);
+        NotifyLocalScreenShareStoppedForTeardown("remote_session_ended", sender);
 
         var message = role switch
         {
@@ -3617,6 +3665,14 @@ public sealed class SessionRuntime : IDisposable
     private void OnTransportScreenShareFrameCompleted(object? sender, ScreenShareFrameCompletedEventArgs e)
     {
         if (!IsFromCurrentTransport(sender))
+        {
+            return;
+        }
+
+        if (remoteSessionEndHandling ||
+            lastDisconnectWasRemoteEnd ||
+            resetInProgress ||
+            state is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected)
         {
             return;
         }
@@ -3672,6 +3728,23 @@ public sealed class SessionRuntime : IDisposable
             $"event=screenshare_stop_received_runtime; suppressed_until_utc={remoteScreenShareFramesSuppressedUntilUtc:O}; control_state={remoteControlSessionState.ControlState}; role={role}; transport={GetTransportNameForLog(sender)}");
         ScheduleRemoteControlScreenShareStopGrace();
         ScreenShareStopped?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void NotifyLocalScreenShareStoppedForTeardown(string reason, object? sender)
+    {
+        remoteScreenShareFramesSuppressedUntilUtc = nowProvider().Add(RemoteScreenShareStopFrameSuppressionWindow);
+        Interlocked.Exchange(ref lastScreenShareStopSuppressedLogTick, 0);
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_stop_local_runtime; reason={reason}; suppressed_until_utc={remoteScreenShareFramesSuppressedUntilUtc:O}; control_state={remoteControlSessionState.ControlState}; role={role}; transport={GetTransportNameForLog(sender)}");
+        ScheduleRemoteControlScreenShareStopGrace();
+        try
+        {
+            ScreenShareStopped?.Invoke(this, EventArgs.Empty);
+        }
+        catch
+        {
+        }
     }
 
     private void OnRemoteControlRequestReceived(object? sender, RemoteControlRequestReceivedEventArgs e)

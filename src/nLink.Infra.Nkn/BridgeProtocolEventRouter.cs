@@ -68,6 +68,7 @@ internal sealed class BridgeProtocolEventRouter
         }
 
         setConnectedAddress(resolvedAddress);
+        NknRuntimeDiagnostics.SetAuthoritativeConnectedAddressResolved(true);
     }
 
     public void HandleRpcProgress(string eventName, JsonElement root)

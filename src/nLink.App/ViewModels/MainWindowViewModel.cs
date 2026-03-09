@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using NLink.App.Configuration;
 using NLink.App.Services;
 using NLink.Core.Metrics;
@@ -7,6 +8,7 @@ namespace NLink.App.ViewModels;
 
 public class MainWindowViewModel : ViewModelBase, IDisposable
 {
+    private static readonly TimeSpan WindowClosePreparationTimeout = TimeSpan.FromSeconds(2);
     private readonly AppServiceRegistry services;
     private readonly TransportRuntimeConfig transportConfig;
     private readonly ShareMessageConfig shareMessageConfig;
@@ -106,7 +108,8 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
             nowProvider: null,
             uiStateStore: sessionUiStateStore,
             backAction: ShowHomePage,
-            recentConnectTargetsStore: recentConnectTargetsStore));
+            recentConnectTargetsStore: recentConnectTargetsStore,
+            inviteShareService: inviteShareService));
     }
 
     private void EndSessionOnly()
@@ -178,5 +181,35 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
         statusPresenter.Dispose();
         sessionRuntime.Dispose();
         resourceRuntimeTracker.Dispose();
+    }
+
+    public Task PrepareForWindowCloseAsync()
+    {
+        var closeAwarePage = CurrentPage as IWindowCloseAware;
+        if (closeAwarePage is null && CurrentPage is DiagnosticsPageViewModel)
+        {
+            closeAwarePage = lastNonDiagnosticsPage as IWindowCloseAware;
+        }
+
+        return PreparePageForWindowCloseAsync(closeAwarePage);
+    }
+
+    internal static async Task PreparePageForWindowCloseAsync(IWindowCloseAware? closeAwarePage)
+    {
+        if (closeAwarePage is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await closeAwarePage.PrepareForWindowCloseAsync()
+                .WaitAsync(WindowClosePreparationTimeout)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best-effort close path. App shutdown still proceeds.
+        }
     }
 }

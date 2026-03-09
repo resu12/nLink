@@ -20,6 +20,9 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
     private static readonly TimeSpan PendingJoinTimeout = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan ControlInputReceiveLogWindow = TimeSpan.FromSeconds(1);
     private const int ControlInputReceiveLogBurst = 5;
+    // Transport-local abuse bounds. Hard payload-size ceilings still also exist
+    // below this layer in the bridge/session envelope/screen-share codecs.
+    private const int HighPriorityControlLaneCapacity = 256;
     private const int LowPriorityControlLaneCapacity = 256;
     private static readonly TimeSpan[] AckRetryDelays =
     {
@@ -32,6 +35,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         TimeSpan.FromMilliseconds(80),
         TimeSpan.FromMilliseconds(220),
     };
+    private static readonly TimeSpan ScreenShareOutboundGateWaitBudget = TimeSpan.FromMilliseconds(25);
 
     private readonly NknTransportOptions options;
     private readonly NknIdentity identity;
@@ -48,6 +52,11 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
     private readonly LinkedList<QueuedControlEnvelope> highPriorityControlOutboundQueue = new();
     private readonly LinkedList<QueuedControlEnvelope> lowPriorityControlOutboundQueue = new();
     private readonly object gate = new();
+    private readonly object controlSecureStateGate = new();
+    private readonly ScreenShareFrameReassembler secureScreenShareFrameReassembler = new();
+    private readonly SessionReplayWindow inboundControlReplayWindow = new();
+    private readonly SessionReplayWindow inboundLifecycleReplayWindow = new();
+    private readonly SessionReplayWindow inboundScreenShareReplayWindow = new();
     private const bool LocalRemoteControlSupported = true;
 
     private string? currentEnvelopeCode;
@@ -72,6 +81,17 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
     private long controlInputReceiveLogWindowStartTicks;
     private int controlInputReceiveLogCount;
     private int controlInputReceiveLogSuppressed;
+    private long screenShareOutboundBusyDrops;
+    private long screenSharePayloadBytesSent;
+    private long screenShareMessagesSent;
+    private long highPriorityControlQueueOverflowCount;
+    private long highPriorityControlRejectedCount;
+    private long highPriorityControlCoalescedCount;
+    private long highPriorityControlDroppedForStopCount;
+    private byte[]? controlSessionSharedKey;
+    private long nextOutboundControlSecureSequence;
+    private long nextOutboundLifecycleSecureSequence;
+    private long nextOutboundScreenShareSecureSequence;
     private TaskCompletionSource<bool> hostReadyTcs = CreateHostReadyTcs();
     private bool disposed;
 
@@ -83,6 +103,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         inviteTokenValidator = InviteTokenServiceFactory.CreateInviteTokenValidator();
         inviteValidationThrottle = InviteTokenServiceFactory.CreateInviteValidationThrottle();
         handshakeReplayCache = new InMemorySessionHandshakeReplayCache();
+        secureScreenShareFrameReassembler.FrameReady += OnSecureScreenShareFrameReady;
         SubscribeClientEvents();
 
         NknRuntimeDiagnostics.SetIdentity(
@@ -91,7 +112,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             keyPath: options.KeyPath,
             seedRpc: options.SeedRpc);
 
-        Log($"Initialized | address={identity.Address} | identifier={identity.Identifier} | key_path={options.KeyPath}");
+        Log($"Initialized | {SensitiveDataRedactor.FormatStructuredFields(" | ", ("address", identity.Address), ("identifier", identity.Identifier))}");
     }
 
     internal NknSignalingTransport(INknClient client, NknTransportOptions options, NknIdentity identity)
@@ -102,6 +123,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         inviteTokenValidator = InviteTokenServiceFactory.CreateInviteTokenValidator();
         inviteValidationThrottle = InviteTokenServiceFactory.CreateInviteValidationThrottle();
         handshakeReplayCache = new InMemorySessionHandshakeReplayCache();
+        secureScreenShareFrameReassembler.FrameReady += OnSecureScreenShareFrameReady;
         SubscribeClientEvents();
     }
 
@@ -141,6 +163,13 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
     internal long LowLaneDroppedMoves => Interlocked.Read(ref lowLaneDroppedMoves);
     internal long LowLaneEnqueuedMoves => Interlocked.Read(ref lowLaneEnqueuedMoves);
     internal int LowLaneMaxDepthSeen => Volatile.Read(ref lowLaneMaxDepthSeen);
+    internal long ScreenShareOutboundBusyDrops => Interlocked.Read(ref screenShareOutboundBusyDrops);
+    internal long ScreenSharePayloadBytesSent => Interlocked.Read(ref screenSharePayloadBytesSent);
+    internal long ScreenShareMessagesSent => Interlocked.Read(ref screenShareMessagesSent);
+    internal long HighPriorityControlQueueOverflowCount => Interlocked.Read(ref highPriorityControlQueueOverflowCount);
+    internal long HighPriorityControlRejectedCount => Interlocked.Read(ref highPriorityControlRejectedCount);
+    internal long HighPriorityControlCoalescedCount => Interlocked.Read(ref highPriorityControlCoalescedCount);
+    internal long HighPriorityControlDroppedForStopCount => Interlocked.Read(ref highPriorityControlDroppedForStopCount);
 
     public Task WaitUntilHostReadyAsync(CancellationToken ct)
     {
@@ -327,9 +356,22 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             throw new InvalidOperationException("Invite token does not match the provided invite context.");
         }
 
-        var helperAddress = new PeerAddress(string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address);
+        var hasConnectedHelperAddress =
+            client is IAuthoritativeConnectedAddressSource authoritativeConnectedAddressSource
+                ? authoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress
+                : !string.IsNullOrWhiteSpace(client.Address);
+        var helperAddress = new PeerAddress(hasConnectedHelperAddress ? client.Address : identity.Address);
+        if (InviteSecurityDiagnostics.RequiresBoundHelperForIssuedSecretInvites() &&
+            validation.Invite.BoundHelperAddress is null)
+        {
+            UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(SessionHandshakeState.Failed, "invite_helper_required"));
+            Log("JoinByInviteAsync rejected before join (reason=invite_helper_required)");
+            throw new InvalidOperationException("Invite token must be bound to the verified helper identity.");
+        }
+
         if (validation.Invite.BoundHelperAddress is not null &&
-            validation.Invite.BoundHelperAddress != helperAddress)
+            hasConnectedHelperAddress &&
+            !AddressesLikelySamePeer(validation.Invite.BoundHelperAddress.Value.Value, helperAddress.Value))
         {
             UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(SessionHandshakeState.Failed, "invite_helper_mismatch"));
             Log("JoinByInviteAsync rejected before join (reason=invite_helper_mismatch)");
@@ -485,37 +527,41 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         }
 
         var isStopPayload = string.Equals(messageType, "stop", StringComparison.Ordinal);
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_session_context_unavailable");
+            Log($"SendScreenSharePayloadAsync failed (payload_len={payload.Length}, reason=no_session_context)");
+            throw new InvalidOperationException("Session context is not known yet.");
+        }
+
         if (isStopPayload)
         {
+            var securePayload = CreateSecureScreenSharePayload(MsgType.ScreenShareStop, payload.ToArray());
+            var envelope = CreateEnvelope(envelopeCode, MsgType.ScreenShareStop, securePayload, replyTo: null);
             LocalOperationalLog.Info(
                 "ScreenShareTransport",
                 $"event=screenshare_stop_send_requested; session_id={messageSessionId}; payload_len={payload.Length}");
-            if (TryGetCurrentEnvelopeCode(out var envelopeCode))
-            {
-                var envelope = CreateEnvelope(envelopeCode, MsgType.ScreenShareStop, payload.ToArray(), replyTo: null);
-                await SendScreenShareStopEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
-                SendScreenShareStopEnvelopeRetriesFireAndForget(destination, envelope, messageSessionId);
-            }
-            else
-            {
-                LocalOperationalLog.Warn(
-                    "ScreenShareTransport",
-                    $"event=screenshare_stop_envelope_skipped; reason=no_session_context; session_id={messageSessionId}");
-            }
-
-            await SendRawScreenSharePayloadAsync(destination, payload, waitForOutboundGate: true, ct).ConfigureAwait(false);
-            SendScreenShareStopRetriesFireAndForget(destination, payload.ToArray());
+            await SendScreenShareStopEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
+            SendScreenShareStopEnvelopeRetriesFireAndForget(destination, envelope, messageSessionId);
         }
-        else if (!await SendRawScreenSharePayloadAsync(destination, payload, waitForOutboundGate: false, ct).ConfigureAwait(false))
+        else
         {
-            Log($"SendScreenSharePayloadAsync dropped (payload_len={payload.Length}, reason=outbound_busy)");
-            return;
+            var securePayload = CreateSecureScreenSharePayload(MsgType.ScreenShareFrame, payload.ToArray());
+            var envelope = CreateEnvelope(envelopeCode, MsgType.ScreenShareFrame, securePayload, replyTo: null);
+            var transportPayload = EnvelopeCodec.Serialize(envelope);
+            if (!await SendScreenShareTransportPayloadAsync(destination, transportPayload, waitForOutboundGate: false, ct).ConfigureAwait(false))
+            {
+                Interlocked.Increment(ref screenShareOutboundBusyDrops);
+                NknRuntimeDiagnostics.IncrementScreenShareOutboundBusyDrops();
+                Log($"SendScreenSharePayloadAsync dropped (payload_len={payload.Length}, reason=outbound_busy)");
+                return;
+            }
         }
 
         Log($"SendScreenSharePayloadAsync sent screenshare payload (payload_len={payload.Length})");
     }
 
-    private async Task<bool> SendRawScreenSharePayloadAsync(
+    private async Task<bool> SendScreenShareTransportPayloadAsync(
         string destination,
         ReadOnlyMemory<byte> payload,
         bool waitForOutboundGate,
@@ -525,7 +571,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         {
             await outboundSendGate.WaitAsync(ct).ConfigureAwait(false);
         }
-        else if (!await outboundSendGate.WaitAsync(0, ct).ConfigureAwait(false))
+        else if (!await TryAcquireScreenShareOutboundGateAsync(ct).ConfigureAwait(false))
         {
             return false;
         }
@@ -533,6 +579,10 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         try
         {
             await client.SendAsync(destination, payload.ToArray(), ct).ConfigureAwait(false);
+            Interlocked.Increment(ref screenShareMessagesSent);
+            Interlocked.Add(ref screenSharePayloadBytesSent, payload.Length);
+            NknRuntimeDiagnostics.IncrementScreenShareMessagesSent();
+            NknRuntimeDiagnostics.AddScreenSharePayloadBytesSent(payload.Length);
             return true;
         }
         finally
@@ -541,45 +591,21 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         }
     }
 
-    private void SendScreenShareStopRetriesFireAndForget(string destination, byte[] payload)
+    private async Task<bool> TryAcquireScreenShareOutboundGateAsync(CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(destination) || payload.Length == 0)
+        if (await outboundSendGate.WaitAsync(0, ct).ConfigureAwait(false))
         {
-            return;
+            return true;
         }
 
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                foreach (var delay in ScreenShareStopRetryDelays)
-                {
-                    await Task.Delay(delay, CancellationToken.None).ConfigureAwait(false);
-                    await SendRawScreenSharePayloadAsync(destination, payload, waitForOutboundGate: true, CancellationToken.None).ConfigureAwait(false);
-                    LocalOperationalLog.Info(
-                        "ScreenShareTransport",
-                        $"event=screenshare_stop_resend_dispatched; payload_len={payload.Length}; delay_ms={delay.TotalMilliseconds:F0}");
-                    Log($"SendScreenSharePayloadAsync resent screenshare stop (payload_len={payload.Length})");
-                }
-            }
-            catch (ObjectDisposedException)
-            {
-            }
-            catch (InvalidOperationException)
-            {
-            }
-            catch (Exception ex)
-            {
-                NknRuntimeDiagnostics.SetLastError(ex);
-                Log($"SendScreenSharePayloadAsync stop resend failed (payload_len={payload.Length}, ex={ex.GetType().Name})");
-            }
-        });
+        return await outboundSendGate.WaitAsync(ScreenShareOutboundGateWaitBudget, ct).ConfigureAwait(false);
     }
 
-    private Task SendScreenShareStopEnvelopeAsync(string destination, Envelope envelope, CancellationToken ct)
+    private async Task SendScreenShareStopEnvelopeAsync(string destination, Envelope envelope, CancellationToken ct)
     {
         FlushLowPriorityControlOutboundQueue("screenshare_stop");
-        return QueueControlEnvelopeAsync(destination, envelope, ControlOutboundLane.High, ct);
+        var payload = EnvelopeCodec.Serialize(envelope);
+        await SendScreenShareTransportPayloadAsync(destination, payload, waitForOutboundGate: true, ct).ConfigureAwait(false);
     }
 
     private void SendScreenShareStopEnvelopeRetriesFireAndForget(string destination, Envelope envelope, string? sessionId)
@@ -644,11 +670,14 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             return;
         }
 
-        var payload = JsonSerializer.SerializeToUtf8Bytes(new SessionEndPayload
-        {
-            sessionId = sessionId.Value,
-            reason = "user_exit",
-        });
+        var payload = CreateSecureLifecyclePayload(
+            MsgType.SessionEnd,
+            requestId: null,
+            JsonSerializer.SerializeToUtf8Bytes(new SessionEndPayload
+            {
+                sessionId = sessionId.Value,
+                reason = "user_exit",
+            }));
 
         var envelope = CreateEnvelope(envelopeCode, MsgType.SessionEnd, payload, replyTo: null);
         SessionTimeline.Record("SessionEndSent");
@@ -682,7 +711,10 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             throw new InvalidOperationException("Remote endpoint is not known yet.");
         }
 
-        var payload = RemoteControlPayloadCodec.Serialize(message);
+        var payload = CreateSecureControlPayload(
+            MsgType.ControlRequest,
+            message.RequestId,
+            RemoteControlPayloadCodec.Serialize(message));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlRequest, payload, replyTo: null);
         await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
         Log($"SendControlRequestAsync sent ControlRequest (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length})");
@@ -714,7 +746,10 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             throw new InvalidOperationException("Remote endpoint is not known yet.");
         }
 
-        var payload = RemoteControlPayloadCodec.Serialize(message);
+        var payload = CreateSecureControlPayload(
+            MsgType.ControlResponse,
+            message.RequestId,
+            RemoteControlPayloadCodec.Serialize(message));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlResponse, payload, replyTo: null);
         await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
         Log($"SendControlResponseAsync sent ControlResponse (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length}, decision={message.Decision})");
@@ -746,7 +781,10 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             throw new InvalidOperationException("Remote endpoint is not known yet.");
         }
 
-        var payload = RemoteControlPayloadCodec.Serialize(message);
+        var payload = CreateSecureControlPayload(
+            MsgType.ControlStart,
+            message.RequestId,
+            RemoteControlPayloadCodec.Serialize(message));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlStart, payload, replyTo: null);
         await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
         Log($"SendControlStartAsync sent ControlStart (msg_id={envelope.MessageId}, request_id_len={message.RequestId.Length})");
@@ -778,7 +816,10 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             throw new InvalidOperationException("Remote endpoint is not known yet.");
         }
 
-        var payload = RemoteControlPayloadCodec.Serialize(message);
+        var payload = CreateSecureControlPayload(
+            MsgType.ControlStop,
+            message.RequestId,
+            RemoteControlPayloadCodec.Serialize(message));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlStop, payload, replyTo: null);
         FlushLowPriorityControlOutboundQueue("control_stop");
         await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
@@ -811,7 +852,10 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             throw new InvalidOperationException("Remote endpoint is not known yet.");
         }
 
-        var payload = RemoteControlPayloadCodec.Serialize(message);
+        var payload = CreateSecureControlPayload(
+            MsgType.ControlInput,
+            message.RequestId,
+            RemoteControlPayloadCodec.Serialize(message));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlInput, payload, replyTo: null);
         var isMouseMove = IsLowPriorityControlInput(message);
         await QueueControlEnvelopeAsync(
@@ -850,7 +894,10 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             throw new InvalidOperationException("Remote endpoint is not known yet.");
         }
 
-        var payload = RemoteControlPayloadCodec.Serialize(ack);
+        var payload = CreateSecureControlPayload(
+            MsgType.ControlAck,
+            ack.RequestId,
+            RemoteControlPayloadCodec.Serialize(ack));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlAck, payload, replyTo: null);
         await QueueControlEnvelopeAsync(
                 remoteEndpoint,
@@ -887,7 +934,10 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             throw new InvalidOperationException("Remote endpoint is not known yet.");
         }
 
-        var payload = RemoteControlPayloadCodec.Serialize(message);
+        var payload = CreateSecureControlPayload(
+            MsgType.ControlDisplayInfo,
+            requestId: null,
+            RemoteControlPayloadCodec.Serialize(message));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlDisplayInfo, payload, replyTo: null);
         await QueueControlEnvelopeAsync(
                 remoteEndpoint,
@@ -924,7 +974,10 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             throw new InvalidOperationException("Remote endpoint is not known yet.");
         }
 
-        var payload = RemoteControlPayloadCodec.Serialize(snapshot);
+        var payload = CreateSecureControlPayload(
+            MsgType.ControlStateSnapshot,
+            snapshot.RequestId,
+            RemoteControlPayloadCodec.Serialize(snapshot));
         var envelope = CreateEnvelope(envelopeCode, MsgType.ControlStateSnapshot, payload, replyTo: null);
         await QueueControlEnvelopeAsync(
                 remoteEndpoint,
@@ -963,6 +1016,10 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         var queued = new QueuedControlEnvelope(destination, envelope, completion, ct, isLowPriorityMouseMove);
         List<TaskCompletionSource<bool>>? droppedCompletions = null;
         var shouldStartDrainer = false;
+        var lowLaneDroppedCount = 0;
+        var highLaneRejected = false;
+        var highLaneCoalescedCount = 0;
+        var highLaneDroppedCount = 0;
 
         lock (controlOutboundQueueGate)
         {
@@ -978,6 +1035,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                     droppedCompletions ??= new List<TaskCompletionSource<bool>>();
                     droppedCompletions.Add(queuedLowPriorityMouseMoveNode.Value.Completion);
                     Interlocked.Increment(ref lowLaneDroppedMoves);
+                    lowLaneDroppedCount++;
                     queuedLowPriorityMouseMoveNode.Value = queued;
                 }
                 else
@@ -1002,6 +1060,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                         {
                             Interlocked.Increment(ref lowLaneDroppedMoves);
                         }
+                        lowLaneDroppedCount++;
                     }
 
                     var inserted = lowPriorityControlOutboundQueue.AddLast(queued);
@@ -1018,10 +1077,53 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             }
             else
             {
-                highPriorityControlOutboundQueue.AddLast(queued);
+                if (TryCoalesceHighPriorityEnvelopeWhenFull(envelope, queued, ref droppedCompletions, out highLaneCoalescedCount))
+                {
+                    // Coalesced into an existing supersedable slot; count does not grow.
+                    Interlocked.Increment(ref highPriorityControlQueueOverflowCount);
+                    NknRuntimeDiagnostics.IncrementHighPriorityControlQueueOverflows();
+                    Interlocked.Add(ref highPriorityControlCoalescedCount, highLaneCoalescedCount);
+                    NknRuntimeDiagnostics.AddHighPriorityControlCoalesced(highLaneCoalescedCount);
+                }
+                else if (highPriorityControlOutboundQueue.Count >= HighPriorityControlLaneCapacity)
+                {
+                    Interlocked.Increment(ref highPriorityControlQueueOverflowCount);
+                    NknRuntimeDiagnostics.IncrementHighPriorityControlQueueOverflows();
+                    if (envelope.Type == MsgType.ControlStop)
+                    {
+                        var droppedNode = FindDroppableHighPriorityNodeForStop();
+                        if (droppedNode is not null)
+                        {
+                            highPriorityControlOutboundQueue.Remove(droppedNode);
+                            droppedCompletions ??= new List<TaskCompletionSource<bool>>();
+                            droppedCompletions.Add(droppedNode.Value.Completion);
+                            highLaneDroppedCount++;
+                            Interlocked.Increment(ref highPriorityControlDroppedForStopCount);
+                            NknRuntimeDiagnostics.AddHighPriorityControlDroppedForStop(1);
+                            highPriorityControlOutboundQueue.AddLast(queued);
+                        }
+                        else
+                        {
+                            highLaneRejected = true;
+                            droppedCompletions ??= new List<TaskCompletionSource<bool>>();
+                            droppedCompletions.Add(queued.Completion);
+                        }
+                    }
+                    else
+                    {
+                        highLaneRejected = true;
+                        droppedCompletions ??= new List<TaskCompletionSource<bool>>();
+                        droppedCompletions.Add(queued.Completion);
+                    }
+                }
+                else
+                {
+                    highPriorityControlOutboundQueue.AddLast(queued);
+                }
             }
 
-            if (!controlOutboundDrainerActive)
+            if (!controlOutboundDrainerActive &&
+                (highPriorityControlOutboundQueue.Count > 0 || lowPriorityControlOutboundQueue.Count > 0))
             {
                 controlOutboundDrainerActive = true;
                 shouldStartDrainer = true;
@@ -1035,7 +1137,25 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                 dropped.TrySetResult(false);
             }
 
-            Log($"Control outbound low lane dropped stale message(s) (count={droppedCompletions.Count})");
+            if (lowLaneDroppedCount > 0)
+            {
+                Log($"Control outbound low lane dropped stale message(s) (count={lowLaneDroppedCount})");
+            }
+        }
+
+        if (highLaneRejected)
+        {
+            Interlocked.Increment(ref highPriorityControlRejectedCount);
+            NknRuntimeDiagnostics.IncrementHighPriorityControlRejected();
+            Log($"Control outbound high lane rejected message at capacity (type={envelope.Type}, cap={HighPriorityControlLaneCapacity})");
+        }
+        else if (highLaneCoalescedCount > 0)
+        {
+            Log($"Control outbound high lane coalesced supersedable message(s) (type={envelope.Type}, count={highLaneCoalescedCount}, cap={HighPriorityControlLaneCapacity})");
+        }
+        else if (highLaneDroppedCount > 0)
+        {
+            Log($"Control outbound high lane dropped queued message(s) to prioritize stop (count={highLaneDroppedCount}, cap={HighPriorityControlLaneCapacity})");
         }
 
         if (shouldStartDrainer)
@@ -1044,6 +1164,53 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         }
 
         return completion.Task;
+    }
+
+    private bool TryCoalesceHighPriorityEnvelopeWhenFull(
+        Envelope envelope,
+        QueuedControlEnvelope queued,
+        ref List<TaskCompletionSource<bool>>? droppedCompletions,
+        out int replacedCount)
+    {
+        replacedCount = 0;
+        if (!IsSupersedableHighPriorityType(envelope.Type) ||
+            highPriorityControlOutboundQueue.Count < HighPriorityControlLaneCapacity)
+        {
+            return false;
+        }
+
+        var existingNode = highPriorityControlOutboundQueue.Last;
+        while (existingNode is not null)
+        {
+            if (existingNode.Value.Envelope.Type == envelope.Type)
+            {
+                droppedCompletions ??= new List<TaskCompletionSource<bool>>();
+                droppedCompletions.Add(existingNode.Value.Completion);
+                existingNode.Value = queued;
+                replacedCount = 1;
+                return true;
+            }
+
+            existingNode = existingNode.Previous;
+        }
+
+        return false;
+    }
+
+    private LinkedListNode<QueuedControlEnvelope>? FindDroppableHighPriorityNodeForStop()
+    {
+        var droppedNode = highPriorityControlOutboundQueue.First;
+        while (droppedNode is not null && droppedNode.Value.Envelope.Type == MsgType.ControlStop)
+        {
+            droppedNode = droppedNode.Next;
+        }
+
+        return droppedNode ?? highPriorityControlOutboundQueue.First;
+    }
+
+    private static bool IsSupersedableHighPriorityType(MsgType type)
+    {
+        return type is MsgType.ControlDisplayInfo or MsgType.ControlStateSnapshot;
     }
 
     private async Task DrainControlOutboundQueueAsync()
@@ -1220,6 +1387,36 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         ScreenShareStopped?.Invoke(this, EventArgs.Empty);
     }
 
+    private void OnSecureScreenShareFrameReady(object? sender, ScreenShareFrameReadyEventArgs e)
+    {
+        if (!TryValidateScreenShareSession("frame", e.SessionId) ||
+            !IsScreenShareAuthorizedForDispatch("frame", e.SessionId))
+        {
+            return;
+        }
+
+        try
+        {
+            var metrics = secureScreenShareFrameReassembler.GetMetricsSnapshot();
+            ScreenShareFrameCompleted?.Invoke(
+                this,
+                new ScreenShareFrameCompletedEventArgs(
+                    e.FrameId,
+                    e.Width,
+                    e.Height,
+                    e.Encoding,
+                    e.EncodedFrameBytes,
+                    e.TimestampUnixMilliseconds,
+                    ChunksDroppedOlderFrame: metrics.FramesDropped,
+                    AssembliesExpired: 0,
+                    SessionId: e.SessionId));
+        }
+        catch (Exception ex)
+        {
+            Log($"ScreenShareFrameCompleted dispatch failed (source=secure_envelope, ex={ex.GetType().Name})");
+        }
+    }
+
     private void OnClientDisconnected(object? sender, EventArgs e)
     {
         if (disposed)
@@ -1350,6 +1547,9 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                     break;
                 case MsgType.SessionHandshakeResult:
                     HandleSessionHandshakeResult(e.Source, env);
+                    break;
+                case MsgType.ScreenShareFrame:
+                    HandleScreenShareFrame(e.Source, env);
                     break;
                 case MsgType.ScreenShareStop:
                     HandleScreenShareStop(e.Source, env);
@@ -1516,6 +1716,13 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                 validation.Invite.TargetAddress != localAddress)
             {
                 FailInboundHandshake(pending, "invite_binding_mismatch", source, start.SessionId);
+                return;
+            }
+
+            if (InviteSecurityDiagnostics.RequiresBoundHelperForIssuedSecretInvites() &&
+                validation.Invite.BoundHelperAddress is null)
+            {
+                FailInboundHandshake(pending, "invite_helper_required", source, start.SessionId);
                 return;
             }
 
@@ -1837,28 +2044,6 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             return;
         }
 
-        ApprovalDecision decision;
-        try
-        {
-            if (string.IsNullOrWhiteSpace(approve.approvalDecisionBase64) ||
-                !SessionHandshakeProtocol.TryDeserializeApprovalDecision(
-                    Convert.FromBase64String(approve.approvalDecisionBase64),
-                    out decision))
-            {
-                NknRuntimeDiagnostics.SetLastError("approve_decision_invalid");
-                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_decision_invalid");
-                Log($"Approve decision invalid (msg_id={env.MessageId})");
-                return;
-            }
-        }
-        catch (FormatException)
-        {
-            NknRuntimeDiagnostics.SetLastError("approve_decision_invalid");
-            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_decision_invalid");
-            Log($"Approve decision invalid base64 (msg_id={env.MessageId})");
-            return;
-        }
-
         SessionEcdhKeyPair? helperKeyPair;
         string? expectedJoinRequestId;
         PendingOutboundHandshakeState? outboundHandshake;
@@ -1879,32 +2064,13 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
         if (!TryValidatePendingOutboundLifecycleMessage(
                 "approve",
-                decision.SessionId.Value,
+                approve.sessionId,
                 env.MessageId,
                 env.ReplyTo,
                 source,
                 outboundHandshake,
                 expectedJoinRequestId))
         {
-            return;
-        }
-
-        remoteSupportsRemoteControl = approve.remoteControlSupported == true;
-        transportRemoteControlState = transportRemoteControlState with
-        {
-            SupportsRemoteControl = LocalSupportsRemoteControl,
-            PeerSupportsRemoteControl = remoteSupportsRemoteControl,
-        };
-
-        if (decision.SessionId != outboundHandshake.SessionId ||
-            decision.HelperIdentity != outboundHandshake.HelperAddress ||
-            decision.ExpiresAtUtc <= DateTimeOffset.UtcNow ||
-            (decision.ApprovedCapabilities & ~outboundHandshake.RequestedCapabilities) != 0)
-        {
-            NknRuntimeDiagnostics.SetLastError("approve_decision_mismatch");
-            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_decision_mismatch");
-            Log($"Approve decision mismatch (msg_id={env.MessageId})");
-            AbortOutboundHandshake("approve_decision_mismatch");
             return;
         }
 
@@ -1946,6 +2112,89 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                 return;
             }
 
+            SessionSecureEnvelopePayload securePayload;
+            try
+            {
+                var secureEnvelopeBytes = Convert.FromBase64String(approve.secureEnvelopeBase64!);
+                if (!TryDecryptLifecyclePayload(
+                        source,
+                        env.MessageId,
+                        "approve",
+                        secureEnvelopeBytes,
+                        sharedKey,
+                        new SessionSecureEnvelopeExpectation(
+                            Family: SessionSecureMessageFamily.Lifecycle,
+                            MessageType: "approve",
+                            SessionId: outboundHandshake.SessionId,
+                            SenderIdentity: outboundHandshake.HelpeeAddress,
+                            RequestId: expectedJoinRequestId),
+                        inboundLifecycleReplayWindow,
+                        out securePayload))
+                {
+                    AbortOutboundHandshake("approve_secure_envelope_invalid");
+                    return;
+                }
+            }
+            catch (FormatException)
+            {
+                NknRuntimeDiagnostics.SetLastError("approve_secure_envelope_invalid");
+                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_secure_envelope_invalid");
+                Log($"Approve secure envelope invalid base64 (msg_id={env.MessageId})");
+                AbortOutboundHandshake("approve_secure_envelope_invalid");
+                return;
+            }
+
+            if (!TryParseApproveSecurePayload(securePayload.Plaintext, out var secureApprove))
+            {
+                NknRuntimeDiagnostics.SetLastError("approve_secure_payload_invalid");
+                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_secure_payload_invalid");
+                Log($"Approve secure payload invalid (msg_id={env.MessageId})");
+                AbortOutboundHandshake("approve_secure_payload_invalid");
+                return;
+            }
+
+            ApprovalDecision decision;
+            try
+            {
+                if (!SessionHandshakeProtocol.TryDeserializeApprovalDecision(
+                        Convert.FromBase64String(secureApprove.approvalDecisionBase64!),
+                        out decision))
+                {
+                    NknRuntimeDiagnostics.SetLastError("approve_decision_invalid");
+                    NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_decision_invalid");
+                    Log($"Approve decision invalid (msg_id={env.MessageId})");
+                    AbortOutboundHandshake("approve_decision_invalid");
+                    return;
+                }
+            }
+            catch (FormatException)
+            {
+                NknRuntimeDiagnostics.SetLastError("approve_decision_invalid");
+                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_decision_invalid");
+                Log($"Approve decision invalid base64 (msg_id={env.MessageId})");
+                AbortOutboundHandshake("approve_decision_invalid");
+                return;
+            }
+
+            remoteSupportsRemoteControl = secureApprove.remoteControlSupported == true;
+            transportRemoteControlState = transportRemoteControlState with
+            {
+                SupportsRemoteControl = LocalSupportsRemoteControl,
+                PeerSupportsRemoteControl = remoteSupportsRemoteControl,
+            };
+
+            if (decision.SessionId != outboundHandshake.SessionId ||
+                decision.HelperIdentity != outboundHandshake.HelperAddress ||
+                decision.ExpiresAtUtc <= DateTimeOffset.UtcNow ||
+                (decision.ApprovedCapabilities & ~outboundHandshake.RequestedCapabilities) != 0)
+            {
+                NknRuntimeDiagnostics.SetLastError("approve_decision_mismatch");
+                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("approve_decision_mismatch");
+                Log($"Approve decision mismatch (msg_id={env.MessageId})");
+                AbortOutboundHandshake("approve_decision_mismatch");
+                return;
+            }
+
             lock (gate)
             {
                 if (ReferenceEquals(helperJoinEcdhKeyPair, helperKeyPair))
@@ -1959,6 +2208,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                 }
             }
 
+            SetControlSessionSharedKey(sharedKey);
             UpdateSessionSecurityState(currentSessionSecurityState.WithApproval(decision.ToGrant()));
             SessionKeyReady?.Invoke(this, new TransportSessionKeyReadyEventArgs(sharedKey));
             pendingOutboundHandshake = null;
@@ -2008,13 +2258,110 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             return;
         }
 
-        pendingOutboundHandshake = null;
-        UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(
-            SessionHandshakeState.Invalidated,
-            string.IsNullOrWhiteSpace(reject.reason) ? "join_rejected" : reject.reason));
-        ClearHelperJoinKeyPair();
-        Rejected?.Invoke(this, EventArgs.Empty);
-        Log($"Reject dispatched (msg_id={env.MessageId})");
+        SessionEcdhKeyPair? helperKeyPair;
+        lock (gate)
+        {
+            helperKeyPair = helperJoinEcdhKeyPair;
+        }
+
+        if (helperKeyPair is null)
+        {
+            NknRuntimeDiagnostics.SetLastError("reject_missing_helper_ecdh");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("reject_missing_helper_ecdh");
+            Log($"Reject ignored (msg_id={env.MessageId}, reason=no_helper_key)");
+            return;
+        }
+
+        try
+        {
+            byte[] helpeePubKey;
+            try
+            {
+                helpeePubKey = Convert.FromBase64String(reject.helpeeEcdhPublicKey ?? string.Empty);
+            }
+            catch (FormatException)
+            {
+                NknRuntimeDiagnostics.SetLastError("reject_bad_pubkey");
+                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("reject_bad_pubkey");
+                Log($"Reject public key invalid (msg_id={env.MessageId})");
+                AbortOutboundHandshake("reject_bad_pubkey");
+                return;
+            }
+
+            if (!TryGetCurrentEnvelopeCode(out var sessionContextCode))
+            {
+                NknRuntimeDiagnostics.SetLastError("reject_missing_session_context");
+                Log($"Reject ignored (msg_id={env.MessageId}, reason=no_session_context)");
+                AbortOutboundHandshake("reject_missing_session_context");
+                return;
+            }
+
+            byte[] sharedKey;
+            try
+            {
+                sharedKey = DeriveSessionKey(helperKeyPair, helpeePubKey, sessionContextCode);
+            }
+            catch (Exception ex) when (ex is CryptographicException or ArgumentException)
+            {
+                NknRuntimeDiagnostics.SetLastError("reject_key_derivation_failed");
+                Log($"Reject key derivation failed (msg_id={env.MessageId}, ex={ex.GetType().Name})");
+                AbortOutboundHandshake("reject_key_derivation_failed");
+                return;
+            }
+
+            SessionSecureEnvelopePayload securePayload;
+            try
+            {
+                var secureEnvelopeBytes = Convert.FromBase64String(reject.secureEnvelopeBase64!);
+                if (!TryDecryptLifecyclePayload(
+                        source,
+                        env.MessageId,
+                        "reject",
+                        secureEnvelopeBytes,
+                        sharedKey,
+                        new SessionSecureEnvelopeExpectation(
+                            Family: SessionSecureMessageFamily.Lifecycle,
+                            MessageType: "reject",
+                            SessionId: outboundHandshake.SessionId,
+                            SenderIdentity: outboundHandshake.HelpeeAddress,
+                            RequestId: expectedJoinRequestId),
+                        inboundLifecycleReplayWindow,
+                        out securePayload))
+                {
+                    AbortOutboundHandshake("reject_secure_envelope_invalid");
+                    return;
+                }
+            }
+            catch (FormatException)
+            {
+                NknRuntimeDiagnostics.SetLastError("reject_secure_envelope_invalid");
+                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("reject_secure_envelope_invalid");
+                Log($"Reject secure envelope invalid base64 (msg_id={env.MessageId})");
+                AbortOutboundHandshake("reject_secure_envelope_invalid");
+                return;
+            }
+
+            if (!TryParseRejectSecurePayload(securePayload.Plaintext, out var secureReject))
+            {
+                NknRuntimeDiagnostics.SetLastError("reject_secure_payload_invalid");
+                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("reject_secure_payload_invalid");
+                Log($"Reject secure payload invalid (msg_id={env.MessageId})");
+                AbortOutboundHandshake("reject_secure_payload_invalid");
+                return;
+            }
+
+            pendingOutboundHandshake = null;
+            UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(
+                SessionHandshakeState.Invalidated,
+                string.IsNullOrWhiteSpace(secureReject.reason) ? "join_rejected" : secureReject.reason));
+            ClearHelperJoinKeyPair();
+            Rejected?.Invoke(this, EventArgs.Empty);
+            Log($"Reject dispatched (msg_id={env.MessageId})");
+        }
+        finally
+        {
+            helperKeyPair.Dispose();
+        }
     }
 
     private void HandleChat(string source, Envelope env)
@@ -2030,7 +2377,24 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
     private void HandleSessionEnd(string source, Envelope env)
     {
-        if (!TryParseSessionEndPayload(env.Payload, out var sessionEnd))
+        if (!TryDecryptLifecyclePayload(
+                source,
+                env.MessageId,
+                "session_end",
+                env.Payload,
+                TryGetControlSessionSharedKey(),
+                new SessionSecureEnvelopeExpectation(
+                    Family: SessionSecureMessageFamily.Lifecycle,
+                    MessageType: "session_end",
+                    SessionId: currentSessionSecurityState.SessionId,
+                    SenderIdentity: TryResolveExpectedRemotePeerAddressForLifecycle()),
+                inboundLifecycleReplayWindow,
+                out var securePayload))
+        {
+            return;
+        }
+
+        if (!TryParseSessionEndPayload(securePayload.Plaintext, out var sessionEnd))
         {
             NknRuntimeDiagnostics.SetLastError("session_end_payload_invalid");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("session_end_payload_invalid");
@@ -2058,9 +2422,45 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         RemoteSessionEnded?.Invoke(this, EventArgs.Empty);
     }
 
+    private void HandleScreenShareFrame(string source, Envelope env)
+    {
+        if (!TryDecryptScreenSharePayload(source, env, MsgType.ScreenShareFrame, out var securePayload))
+        {
+            return;
+        }
+
+        if (!ScreenSharePayloadCodec.TryDeserialize(securePayload.Plaintext, out var chunk))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_frame_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("screenshare_frame_payload_invalid");
+            Log($"ScreenShareFrame payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateScreenShareSecureMetadata("screenshare_frame", securePayload.Metadata, env.MessageId) ||
+            !TryValidateControlMessageSession(
+                "screenshare_frame",
+                chunk.SessionId,
+                env.MessageId,
+                requestId: null,
+                source) ||
+            !TryValidateScreenShareSession("frame", chunk.SessionId) ||
+            !IsScreenShareAuthorizedForDispatch("frame", chunk.SessionId))
+        {
+            return;
+        }
+
+        secureScreenShareFrameReassembler.OnChunk(chunk);
+    }
+
     private void HandleScreenShareStop(string source, Envelope env)
     {
-        if (!ScreenSharePayloadCodec.TryDeserializeStop(env.Payload, out var stop))
+        if (!TryDecryptScreenSharePayload(source, env, MsgType.ScreenShareStop, out var securePayload))
+        {
+            return;
+        }
+
+        if (!ScreenSharePayloadCodec.TryDeserializeStop(securePayload.Plaintext, out var stop))
         {
             NknRuntimeDiagnostics.SetLastError("screenshare_stop_payload_invalid");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("screenshare_stop_payload_invalid");
@@ -2068,16 +2468,19 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             return;
         }
 
-        if (!TryValidateControlMessageSession(
+        if (!TryValidateScreenShareSecureMetadata("screenshare_stop", securePayload.Metadata, env.MessageId) ||
+            !TryValidateControlMessageSession(
                 "screenshare_stop",
                 stop.SessionId,
                 env.MessageId,
                 requestId: null,
-                source))
+                source) ||
+            !TryValidateScreenShareSession("stop", stop.SessionId))
         {
             return;
         }
 
+        secureScreenShareFrameReassembler.ClearSession(stop.SessionId);
         LocalOperationalLog.Info(
             "ScreenShareTransport",
             $"event=screenshare_stop_received_transport; session_id={stop.SessionId}; source={source ?? "(none)"}; msg_id={env.MessageId}; path=envelope");
@@ -2086,11 +2489,21 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
     private void HandleControlRequest(string source, Envelope env)
     {
-        if (!RemoteControlPayloadCodec.TryDeserializeControlRequest(env.Payload, out var request))
+        if (!TryDecryptControlPayload(source, env, MsgType.ControlRequest, out var securePayload))
+        {
+            return;
+        }
+
+        if (!RemoteControlPayloadCodec.TryDeserializeControlRequest(securePayload.Plaintext, out var request))
         {
             NknRuntimeDiagnostics.SetLastError("controlrequest_payload_invalid");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controlrequest_payload_invalid");
             Log($"ControlRequest payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlSecureMetadata("control_request", securePayload.Metadata, request.RequestId, env.MessageId))
+        {
             return;
         }
 
@@ -2117,11 +2530,21 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
     private void HandleControlResponse(string source, Envelope env)
     {
-        if (!RemoteControlPayloadCodec.TryDeserializeControlResponse(env.Payload, out var response))
+        if (!TryDecryptControlPayload(source, env, MsgType.ControlResponse, out var securePayload))
+        {
+            return;
+        }
+
+        if (!RemoteControlPayloadCodec.TryDeserializeControlResponse(securePayload.Plaintext, out var response))
         {
             NknRuntimeDiagnostics.SetLastError("controlresponse_payload_invalid");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controlresponse_payload_invalid");
             Log($"ControlResponse payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlSecureMetadata("control_response", securePayload.Metadata, response.RequestId, env.MessageId))
+        {
             return;
         }
 
@@ -2148,11 +2571,21 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
     private void HandleControlStart(string source, Envelope env)
     {
-        if (!RemoteControlPayloadCodec.TryDeserializeControlStart(env.Payload, out var start))
+        if (!TryDecryptControlPayload(source, env, MsgType.ControlStart, out var securePayload))
+        {
+            return;
+        }
+
+        if (!RemoteControlPayloadCodec.TryDeserializeControlStart(securePayload.Plaintext, out var start))
         {
             NknRuntimeDiagnostics.SetLastError("controlstart_payload_invalid");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controlstart_payload_invalid");
             Log($"ControlStart payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlSecureMetadata("control_start", securePayload.Metadata, start.RequestId, env.MessageId))
+        {
             return;
         }
 
@@ -2179,11 +2612,21 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
     private void HandleControlStop(string source, Envelope env)
     {
-        if (!RemoteControlPayloadCodec.TryDeserializeControlStop(env.Payload, out var stop))
+        if (!TryDecryptControlPayload(source, env, MsgType.ControlStop, out var securePayload))
+        {
+            return;
+        }
+
+        if (!RemoteControlPayloadCodec.TryDeserializeControlStop(securePayload.Plaintext, out var stop))
         {
             NknRuntimeDiagnostics.SetLastError("controlstop_payload_invalid");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controlstop_payload_invalid");
             Log($"ControlStop payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlSecureMetadata("control_stop", securePayload.Metadata, stop.RequestId, env.MessageId))
+        {
             return;
         }
 
@@ -2210,11 +2653,21 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
     private void HandleControlInput(string source, Envelope env)
     {
-        if (!RemoteControlPayloadCodec.TryDeserializeControlInput(env.Payload, out var input))
+        if (!TryDecryptControlPayload(source, env, MsgType.ControlInput, out var securePayload))
+        {
+            return;
+        }
+
+        if (!RemoteControlPayloadCodec.TryDeserializeControlInput(securePayload.Plaintext, out var input))
         {
             NknRuntimeDiagnostics.SetLastError("controlinput_payload_invalid");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controlinput_payload_invalid");
             Log($"ControlInput payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlSecureMetadata("control_input", securePayload.Metadata, input.RequestId, env.MessageId))
+        {
             return;
         }
 
@@ -2234,11 +2687,21 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
     private void HandleControlAck(string source, Envelope env)
     {
-        if (!RemoteControlPayloadCodec.TryDeserializeControlAck(env.Payload, out var ack))
+        if (!TryDecryptControlPayload(source, env, MsgType.ControlAck, out var securePayload))
+        {
+            return;
+        }
+
+        if (!RemoteControlPayloadCodec.TryDeserializeControlAck(securePayload.Plaintext, out var ack))
         {
             NknRuntimeDiagnostics.SetLastError("controlack_payload_invalid");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controlack_payload_invalid");
             Log($"ControlAck payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlSecureMetadata("control_ack", securePayload.Metadata, ack.RequestId, env.MessageId))
+        {
             return;
         }
 
@@ -2258,11 +2721,21 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
     private void HandleControlStateSnapshot(string source, Envelope env)
     {
-        if (!RemoteControlPayloadCodec.TryDeserializeControlStateSnapshot(env.Payload, out var snapshot))
+        if (!TryDecryptControlPayload(source, env, MsgType.ControlStateSnapshot, out var securePayload))
+        {
+            return;
+        }
+
+        if (!RemoteControlPayloadCodec.TryDeserializeControlStateSnapshot(securePayload.Plaintext, out var snapshot))
         {
             NknRuntimeDiagnostics.SetLastError("controlstatesnapshot_payload_invalid");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controlstatesnapshot_payload_invalid");
             Log($"ControlStateSnapshot payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlSecureMetadata("control_state_snapshot", securePayload.Metadata, snapshot.RequestId, env.MessageId))
+        {
             return;
         }
 
@@ -2324,11 +2797,21 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
     private void HandleControlDisplayInfo(string source, Envelope env)
     {
-        if (!RemoteControlPayloadCodec.TryDeserializeControlDisplayInfo(env.Payload, out var displayInfo))
+        if (!TryDecryptControlPayload(source, env, MsgType.ControlDisplayInfo, out var securePayload))
+        {
+            return;
+        }
+
+        if (!RemoteControlPayloadCodec.TryDeserializeControlDisplayInfo(securePayload.Plaintext, out var displayInfo))
         {
             NknRuntimeDiagnostics.SetLastError("controldisplayinfo_payload_invalid");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("controldisplayinfo_payload_invalid");
             Log($"ControlDisplayInfo payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlSecureMetadata("control_display_info", securePayload.Metadata, requestId: null, env.MessageId))
+        {
             return;
         }
 
@@ -2401,6 +2884,447 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         return false;
     }
 
+    private byte[] CreateSecureControlPayload(MsgType messageType, string? requestId, byte[] plaintextPayload)
+    {
+        ArgumentNullException.ThrowIfNull(plaintextPayload);
+
+        var sessionId = currentSessionSecurityState.SessionId
+            ?? throw new InvalidOperationException("Session security state does not have an active session id.");
+        var senderIdentity = ResolveLocalPeerAddressForSecureEnvelope();
+        var key = GetControlSessionSharedKeyOrThrow();
+        var metadata = new SessionSecureEnvelopeMetadata(
+            Family: SessionSecureMessageFamily.RemoteControl,
+            MessageType: MapSecureControlMessageType(messageType),
+            SessionId: sessionId,
+            SenderIdentity: senderIdentity,
+            Sequence: Interlocked.Increment(ref nextOutboundControlSecureSequence),
+            RequestId: string.IsNullOrWhiteSpace(requestId) ? null : requestId.Trim());
+        return SessionSecureEnvelopeCodec.Encrypt(key, metadata, plaintextPayload);
+    }
+
+    private bool TryDecryptControlPayload(
+        string? source,
+        Envelope env,
+        MsgType messageType,
+        out SessionSecureEnvelopePayload securePayload)
+    {
+        securePayload = default;
+
+        if (currentSessionSecurityState.SessionId is not SessionId sessionId)
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureControlMessageType(messageType)}_session_unavailable");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureControlMessageType(messageType)}_session_unavailable");
+            Log($"Control secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason=session_unavailable)");
+            return false;
+        }
+
+        var expectedSender = ResolveExpectedRemotePeerAddressForCurrentSession();
+        if (string.IsNullOrWhiteSpace(expectedSender) || !PeerAddress.TryParse(expectedSender, out var senderIdentity))
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureControlMessageType(messageType)}_expected_sender_unavailable");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureControlMessageType(messageType)}_expected_sender_unavailable");
+            Log($"Control secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason=expected_sender_unavailable)");
+            return false;
+        }
+
+        byte[] key;
+        try
+        {
+            key = GetControlSessionSharedKeyOrThrow();
+        }
+        catch (InvalidOperationException)
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureControlMessageType(messageType)}_session_key_unavailable");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureControlMessageType(messageType)}_session_key_unavailable");
+            Log($"Control secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason=session_key_unavailable)");
+            return false;
+        }
+
+        try
+        {
+            securePayload = SessionSecureEnvelopeCodec.Decrypt(
+                key,
+                env.Payload,
+                new SessionSecureEnvelopeExpectation(
+                    Family: SessionSecureMessageFamily.RemoteControl,
+                    MessageType: MapSecureControlMessageType(messageType),
+                    SessionId: sessionId,
+                    SenderIdentity: senderIdentity));
+        }
+        catch (Exception ex) when (ex is CryptographicException or InvalidOperationException or JsonException or FormatException)
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureControlMessageType(messageType)}_secure_envelope_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureControlMessageType(messageType)}_secure_envelope_invalid");
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=control_message_rejected; message_type={MapSecureControlMessageType(messageType)}; reason=secure_envelope_invalid; session_id={sessionId.Value}; source={source ?? "(none)"}; expected_source={expectedSender}; msg_id={env.MessageId}; ex={ex.GetType().Name}");
+            Log($"Control secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason=secure_envelope_invalid, ex={ex.GetType().Name})");
+            return false;
+        }
+
+        SessionReplaySequenceResult replay;
+        lock (controlSecureStateGate)
+        {
+            replay = inboundControlReplayWindow.EvaluateAndTrack(securePayload.Metadata.Sequence);
+        }
+
+        if (replay != SessionReplaySequenceResult.Accepted)
+        {
+            var replayReason = replay switch
+            {
+                SessionReplaySequenceResult.Duplicate => "replay_duplicate",
+                SessionReplaySequenceResult.Stale => "replay_stale",
+                SessionReplaySequenceResult.TooFarAhead => "replay_too_far_ahead",
+                _ => "replay_invalid",
+            };
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureControlMessageType(messageType)}_{replayReason}");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureControlMessageType(messageType)}_{replayReason}");
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=control_message_rejected; message_type={MapSecureControlMessageType(messageType)}; reason={replayReason}; session_id={sessionId.Value}; source={source ?? "(none)"}; sequence={securePayload.Metadata.Sequence}; msg_id={env.MessageId}");
+            Log($"Control secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason={replayReason}, seq={securePayload.Metadata.Sequence})");
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool TryValidateControlSecureMetadata(
+        string messageType,
+        SessionSecureEnvelopeMetadata metadata,
+        string? requestId,
+        string messageId)
+    {
+        var normalizedRequestId = string.IsNullOrWhiteSpace(requestId) ? null : requestId.Trim();
+        var normalizedMetadataRequestId = string.IsNullOrWhiteSpace(metadata.RequestId) ? null : metadata.RequestId.Trim();
+        if (!string.Equals(normalizedMetadataRequestId, normalizedRequestId, StringComparison.Ordinal))
+        {
+            NknRuntimeDiagnostics.SetLastError($"{messageType}_secure_request_id_mismatch");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageType}_secure_request_id_mismatch");
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=control_message_rejected; message_type={messageType}; reason=secure_request_id_mismatch; request_id={normalizedRequestId ?? "(none)"}; secure_request_id={normalizedMetadataRequestId ?? "(none)"}");
+            Log($"Control secure envelope rejected (type={messageType}, msg_id={messageId}, reason=secure_request_id_mismatch)");
+            return false;
+        }
+
+        return true;
+    }
+
+    private byte[] CreateSecureLifecyclePayload(MsgType messageType, string? requestId, byte[] plaintextPayload)
+    {
+        ArgumentNullException.ThrowIfNull(plaintextPayload);
+
+        var sessionId = currentSessionSecurityState.SessionId
+            ?? throw new InvalidOperationException("Session security state does not have an active session id.");
+        var senderIdentity = ResolveLocalPeerAddressForSecureEnvelope();
+        var key = GetControlSessionSharedKeyOrThrow();
+        var metadata = new SessionSecureEnvelopeMetadata(
+            Family: SessionSecureMessageFamily.Lifecycle,
+            MessageType: MapSecureLifecycleMessageType(messageType),
+            SessionId: sessionId,
+            SenderIdentity: senderIdentity,
+            Sequence: Interlocked.Increment(ref nextOutboundLifecycleSecureSequence),
+            RequestId: string.IsNullOrWhiteSpace(requestId) ? null : requestId.Trim());
+        return SessionSecureEnvelopeCodec.Encrypt(key, metadata, plaintextPayload);
+    }
+
+    private byte[] CreateSecureScreenSharePayload(MsgType messageType, byte[] plaintextPayload)
+    {
+        ArgumentNullException.ThrowIfNull(plaintextPayload);
+
+        var sessionId = currentSessionSecurityState.SessionId
+            ?? throw new InvalidOperationException("Session security state does not have an active session id.");
+        var senderIdentity = ResolveLocalPeerAddressForSecureEnvelope();
+        var key = GetControlSessionSharedKeyOrThrow();
+        var metadata = new SessionSecureEnvelopeMetadata(
+            Family: SessionSecureMessageFamily.ScreenShare,
+            MessageType: MapSecureScreenShareMessageType(messageType),
+            SessionId: sessionId,
+            SenderIdentity: senderIdentity,
+            Sequence: Interlocked.Increment(ref nextOutboundScreenShareSecureSequence),
+            RequestId: null);
+        return SessionSecureEnvelopeCodec.Encrypt(key, metadata, plaintextPayload);
+    }
+
+    private bool TryDecryptLifecyclePayload(
+        string? source,
+        string messageId,
+        string messageType,
+        byte[] encodedPayload,
+        byte[]? key,
+        SessionSecureEnvelopeExpectation expectation,
+        SessionReplayWindow replayWindow,
+        out SessionSecureEnvelopePayload securePayload)
+    {
+        securePayload = default;
+
+        if (key is null || key.Length == 0)
+        {
+            NknRuntimeDiagnostics.SetLastError($"{messageType}_session_key_unavailable");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageType}_session_key_unavailable");
+            Log($"Lifecycle secure envelope rejected (type={messageType}, msg_id={messageId}, reason=session_key_unavailable)");
+            return false;
+        }
+
+        try
+        {
+            securePayload = SessionSecureEnvelopeCodec.Decrypt(key, encodedPayload, expectation);
+        }
+        catch (Exception ex) when (ex is CryptographicException or InvalidOperationException or JsonException or FormatException)
+        {
+            NknRuntimeDiagnostics.SetLastError($"{messageType}_secure_envelope_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageType}_secure_envelope_invalid");
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=lifecycle_message_rejected; message_type={messageType}; reason=secure_envelope_invalid; session_id={expectation.SessionId?.Value ?? "(none)"}; source={source ?? "(none)"}; expected_source={expectation.SenderIdentity?.Value ?? "(none)"}; msg_id={messageId}; ex={ex.GetType().Name}");
+            Log($"Lifecycle secure envelope rejected (type={messageType}, msg_id={messageId}, reason=secure_envelope_invalid, ex={ex.GetType().Name})");
+            return false;
+        }
+
+        SessionReplaySequenceResult replay;
+        lock (controlSecureStateGate)
+        {
+            replay = replayWindow.EvaluateAndTrack(securePayload.Metadata.Sequence);
+        }
+
+        if (replay != SessionReplaySequenceResult.Accepted)
+        {
+            var replayReason = replay switch
+            {
+                SessionReplaySequenceResult.Duplicate => "replay_duplicate",
+                SessionReplaySequenceResult.Stale => "replay_stale",
+                SessionReplaySequenceResult.TooFarAhead => "replay_too_far_ahead",
+                _ => "replay_invalid",
+            };
+            NknRuntimeDiagnostics.SetLastError($"{messageType}_{replayReason}");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageType}_{replayReason}");
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=lifecycle_message_rejected; message_type={messageType}; reason={replayReason}; session_id={securePayload.Metadata.SessionId.Value}; source={source ?? "(none)"}; sequence={securePayload.Metadata.Sequence}; msg_id={messageId}");
+            Log($"Lifecycle secure envelope rejected (type={messageType}, msg_id={messageId}, reason={replayReason}, seq={securePayload.Metadata.Sequence})");
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool TryDecryptScreenSharePayload(
+        string? source,
+        Envelope env,
+        MsgType messageType,
+        out SessionSecureEnvelopePayload securePayload)
+    {
+        securePayload = default;
+
+        if (currentSessionSecurityState.SessionId is not SessionId sessionId)
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureScreenShareMessageType(messageType)}_session_unavailable");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureScreenShareMessageType(messageType)}_session_unavailable");
+            Log($"ScreenShare secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason=session_unavailable)");
+            return false;
+        }
+
+        var expectedSender = ResolveExpectedRemotePeerAddressForCurrentSession();
+        if (string.IsNullOrWhiteSpace(expectedSender) || !PeerAddress.TryParse(expectedSender, out var senderIdentity))
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureScreenShareMessageType(messageType)}_expected_sender_unavailable");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureScreenShareMessageType(messageType)}_expected_sender_unavailable");
+            Log($"ScreenShare secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason=expected_sender_unavailable)");
+            return false;
+        }
+
+        byte[] key;
+        try
+        {
+            key = GetControlSessionSharedKeyOrThrow();
+        }
+        catch (InvalidOperationException)
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureScreenShareMessageType(messageType)}_session_key_unavailable");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureScreenShareMessageType(messageType)}_session_key_unavailable");
+            Log($"ScreenShare secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason=session_key_unavailable)");
+            return false;
+        }
+
+        try
+        {
+            securePayload = SessionSecureEnvelopeCodec.Decrypt(
+                key,
+                env.Payload,
+                new SessionSecureEnvelopeExpectation(
+                    Family: SessionSecureMessageFamily.ScreenShare,
+                    MessageType: MapSecureScreenShareMessageType(messageType),
+                    SessionId: sessionId,
+                    SenderIdentity: senderIdentity));
+        }
+        catch (Exception ex) when (ex is CryptographicException or InvalidOperationException or JsonException or FormatException)
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureScreenShareMessageType(messageType)}_secure_envelope_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureScreenShareMessageType(messageType)}_secure_envelope_invalid");
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=screen_share_message_rejected; message_type={MapSecureScreenShareMessageType(messageType)}; reason=secure_envelope_invalid; session_id={sessionId.Value}; source={source ?? "(none)"}; expected_source={expectedSender}; msg_id={env.MessageId}; ex={ex.GetType().Name}");
+            Log($"ScreenShare secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason=secure_envelope_invalid, ex={ex.GetType().Name})");
+            return false;
+        }
+
+        SessionReplaySequenceResult replay;
+        lock (controlSecureStateGate)
+        {
+            replay = inboundScreenShareReplayWindow.EvaluateAndTrack(securePayload.Metadata.Sequence);
+        }
+
+        if (replay != SessionReplaySequenceResult.Accepted)
+        {
+            var replayReason = replay switch
+            {
+                SessionReplaySequenceResult.Duplicate => "replay_duplicate",
+                SessionReplaySequenceResult.Stale => "replay_stale",
+                SessionReplaySequenceResult.TooFarAhead => "replay_too_far_ahead",
+                _ => "replay_invalid",
+            };
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureScreenShareMessageType(messageType)}_{replayReason}");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureScreenShareMessageType(messageType)}_{replayReason}");
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=screen_share_message_rejected; message_type={MapSecureScreenShareMessageType(messageType)}; reason={replayReason}; session_id={sessionId.Value}; source={source ?? "(none)"}; sequence={securePayload.Metadata.Sequence}; msg_id={env.MessageId}");
+            Log($"ScreenShare secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason={replayReason}, seq={securePayload.Metadata.Sequence})");
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool TryValidateScreenShareSecureMetadata(
+        string messageType,
+        SessionSecureEnvelopeMetadata metadata,
+        string messageId)
+    {
+        if (!string.IsNullOrWhiteSpace(metadata.RequestId))
+        {
+            NknRuntimeDiagnostics.SetLastError($"{messageType}_secure_request_id_present");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageType}_secure_request_id_present");
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=screen_share_message_rejected; message_type={messageType}; reason=secure_request_id_present; secure_request_id={metadata.RequestId}");
+            Log($"ScreenShare secure envelope rejected (type={messageType}, msg_id={messageId}, reason=secure_request_id_present)");
+            return false;
+        }
+
+        return true;
+    }
+
+    private PeerAddress ResolveLocalPeerAddressForSecureEnvelope()
+    {
+        if (PeerAddress.TryParse(LocalPeerAddress, out var localAddress))
+        {
+            return localAddress;
+        }
+
+        throw new InvalidOperationException("Local peer address is not available for secure control payloads.");
+    }
+
+    private byte[] GetControlSessionSharedKeyOrThrow()
+    {
+        lock (controlSecureStateGate)
+        {
+            if (controlSessionSharedKey is null || controlSessionSharedKey.Length == 0)
+            {
+                throw new InvalidOperationException("Session shared key is not available.");
+            }
+
+            return controlSessionSharedKey.AsSpan().ToArray();
+        }
+    }
+
+    private byte[]? TryGetControlSessionSharedKey()
+    {
+        lock (controlSecureStateGate)
+        {
+            return controlSessionSharedKey is null || controlSessionSharedKey.Length == 0
+                ? null
+                : controlSessionSharedKey.AsSpan().ToArray();
+        }
+    }
+
+    private void SetControlSessionSharedKey(byte[] sharedKey)
+    {
+        ArgumentNullException.ThrowIfNull(sharedKey);
+
+        lock (controlSecureStateGate)
+        {
+            if (controlSessionSharedKey is not null)
+            {
+                CryptographicOperations.ZeroMemory(controlSessionSharedKey);
+            }
+
+            controlSessionSharedKey = sharedKey.AsSpan().ToArray();
+            nextOutboundControlSecureSequence = 0;
+            nextOutboundLifecycleSecureSequence = 0;
+            nextOutboundScreenShareSecureSequence = 0;
+            inboundControlReplayWindow.Reset();
+            inboundLifecycleReplayWindow.Reset();
+            inboundScreenShareReplayWindow.Reset();
+        }
+    }
+
+    private void ResetControlSecureState()
+    {
+        lock (controlSecureStateGate)
+        {
+            if (controlSessionSharedKey is not null)
+            {
+                CryptographicOperations.ZeroMemory(controlSessionSharedKey);
+                controlSessionSharedKey = null;
+            }
+
+            nextOutboundControlSecureSequence = 0;
+            nextOutboundLifecycleSecureSequence = 0;
+            nextOutboundScreenShareSecureSequence = 0;
+            inboundControlReplayWindow.Reset();
+            inboundLifecycleReplayWindow.Reset();
+            inboundScreenShareReplayWindow.Reset();
+        }
+    }
+
+    private static string MapSecureControlMessageType(MsgType messageType)
+    {
+        return messageType switch
+        {
+            MsgType.ControlRequest => "control_request",
+            MsgType.ControlResponse => "control_response",
+            MsgType.ControlStart => "control_start",
+            MsgType.ControlStop => "control_stop",
+            MsgType.ControlInput => "control_input",
+            MsgType.ControlAck => "control_ack",
+            MsgType.ControlStateSnapshot => "control_state_snapshot",
+            MsgType.ControlDisplayInfo => "control_display_info",
+            _ => throw new ArgumentOutOfRangeException(nameof(messageType), messageType, "Unsupported secure control message type."),
+        };
+    }
+
+    private static string MapSecureLifecycleMessageType(MsgType messageType)
+    {
+        return messageType switch
+        {
+            MsgType.Approve => "approve",
+            MsgType.Reject => "reject",
+            MsgType.SessionEnd => "session_end",
+            _ => throw new ArgumentOutOfRangeException(nameof(messageType), messageType, "Unsupported secure lifecycle message type."),
+        };
+    }
+
+    private static string MapSecureScreenShareMessageType(MsgType messageType)
+    {
+        return messageType switch
+        {
+            MsgType.ScreenShareFrame => "screenshare_frame",
+            MsgType.ScreenShareStop => "screenshare_stop",
+            _ => throw new ArgumentOutOfRangeException(nameof(messageType), messageType, "Unsupported secure screen-share message type."),
+        };
+    }
+
     private bool TryValidatePendingOutboundLifecycleMessage(
         string messageType,
         string? messageSessionId,
@@ -2471,6 +3395,12 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         }
 
         return string.IsNullOrWhiteSpace(remoteEndpoint) ? null : remoteEndpoint;
+    }
+
+    private PeerAddress? TryResolveExpectedRemotePeerAddressForLifecycle()
+    {
+        var expected = ResolveExpectedRemotePeerAddressForCurrentSession();
+        return PeerAddress.TryParse(expected, out var peerAddress) ? peerAddress : null;
     }
 
     private bool TryValidateScreenShareSession(string messageType, string? messageSessionId)
@@ -2668,17 +3598,6 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                 return;
             }
 
-            var approvePayload = new ApprovePayload
-            {
-                helpeeEcdhPublicKey = Convert.ToBase64String(helpeeKeyPair.PublicKey),
-                remoteControlSupported = LocalSupportsRemoteControl,
-                approvalDecisionBase64 = Convert.ToBase64String(SessionHandshakeProtocol.Serialize(decision)),
-            };
-
-            var payloadBytes = JsonSerializer.SerializeToUtf8Bytes(approvePayload);
-            var envelope = CreateEnvelope(pendingState.EnvelopeCode, MsgType.Approve, payloadBytes, joinRequestMessageId);
-            await SendEnvelopeAsync(pendingState.RemoteEndpoint, envelope, ct);
-
             if (string.IsNullOrWhiteSpace(pendingState.EnvelopeCode))
             {
                 NknRuntimeDiagnostics.SetLastError("approve_missing_session_context");
@@ -2700,6 +3619,33 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                 return;
             }
 
+            var securePayload = SessionSecureEnvelopeCodec.Encrypt(
+                sharedKey,
+                new SessionSecureEnvelopeMetadata(
+                    Family: SessionSecureMessageFamily.Lifecycle,
+                    MessageType: "approve",
+                    SessionId: decision.SessionId,
+                    SenderIdentity: ResolveLocalPeerAddressForSecureEnvelope(),
+                    Sequence: Interlocked.Increment(ref nextOutboundLifecycleSecureSequence),
+                    RequestId: joinRequestMessageId),
+                JsonSerializer.SerializeToUtf8Bytes(new ApproveSecurePayload
+                {
+                    remoteControlSupported = LocalSupportsRemoteControl,
+                    approvalDecisionBase64 = Convert.ToBase64String(SessionHandshakeProtocol.Serialize(decision)),
+                }));
+
+            var approvePayload = new ApprovePayload
+            {
+                sessionId = decision.SessionId.Value,
+                helpeeEcdhPublicKey = Convert.ToBase64String(helpeeKeyPair.PublicKey),
+                secureEnvelopeBase64 = Convert.ToBase64String(securePayload),
+            };
+
+            var payloadBytes = JsonSerializer.SerializeToUtf8Bytes(approvePayload);
+            var envelope = CreateEnvelope(pendingState.EnvelopeCode, MsgType.Approve, payloadBytes, joinRequestMessageId);
+            await SendEnvelopeAsync(pendingState.RemoteEndpoint, envelope, ct);
+
+            SetControlSessionSharedKey(sharedKey);
             UpdateSessionSecurityState(currentSessionSecurityState.WithApproval(decision.ToGrant()));
             LocalOperationalLog.Info(
                 "SessionSecurity",
@@ -2725,17 +3671,61 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
         try
         {
+            if (string.IsNullOrWhiteSpace(pending!.EnvelopeCode))
+            {
+                NknRuntimeDiagnostics.SetLastError("reject_missing_session_context");
+                Log($"Reject failed (join_msg_id={joinRequestMessageId}, reason=no_session_context)");
+                Disconnected?.Invoke(this, EventArgs.Empty);
+                return;
+            }
+
+            if (!TryGetHelpeeHostKeyPair(out var helpeeKeyPair) || helpeeKeyPair is null)
+            {
+                NknRuntimeDiagnostics.SetLastError("host_ecdh_not_ready");
+                Log($"Reject failed (join_msg_id={joinRequestMessageId}, reason=no_host_key)");
+                Disconnected?.Invoke(this, EventArgs.Empty);
+                return;
+            }
+
+            byte[] sharedKey;
+            try
+            {
+                sharedKey = DeriveSessionKey(helpeeKeyPair, pending.HelperEcdhPublicKey, pending.EnvelopeCode);
+            }
+            catch (Exception ex) when (ex is CryptographicException or ArgumentException)
+            {
+                NknRuntimeDiagnostics.SetLastError("reject_key_derivation_failed");
+                Log($"Reject key derivation failed (join_msg_id={joinRequestMessageId}, ex={ex.GetType().Name})");
+                Disconnected?.Invoke(this, EventArgs.Empty);
+                return;
+            }
+
+            var securePayload = SessionSecureEnvelopeCodec.Encrypt(
+                sharedKey,
+                new SessionSecureEnvelopeMetadata(
+                    Family: SessionSecureMessageFamily.Lifecycle,
+                    MessageType: "reject",
+                    SessionId: pending.SessionId,
+                    SenderIdentity: ResolveLocalPeerAddressForSecureEnvelope(),
+                    Sequence: Interlocked.Increment(ref nextOutboundLifecycleSecureSequence),
+                    RequestId: joinRequestMessageId),
+                JsonSerializer.SerializeToUtf8Bytes(new RejectSecurePayload
+                {
+                    reason = "join_rejected",
+                }));
+
             var rejectPayload = new RejectPayload
             {
-                sessionId = pending!.SessionId.Value,
-                reason = "join_rejected",
+                sessionId = pending.SessionId.Value,
+                helpeeEcdhPublicKey = Convert.ToBase64String(helpeeKeyPair.PublicKey),
+                secureEnvelopeBase64 = Convert.ToBase64String(securePayload),
             };
             var envelope = CreateEnvelope(
                 pending.EnvelopeCode,
                 MsgType.Reject,
                 JsonSerializer.SerializeToUtf8Bytes(rejectPayload),
                 joinRequestMessageId);
-            await SendEnvelopeAsync(pending!.RemoteEndpoint, envelope, ct);
+            await SendEnvelopeAsync(pending.RemoteEndpoint, envelope, ct);
             if (pending.ApprovalRequest is ApprovalRequest approvalRequest)
             {
                 LocalOperationalLog.Info(
@@ -2870,6 +3860,8 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
     private void ResetSessionTracking()
     {
         FlushAllControlOutboundQueues("reset_session_tracking");
+        ResetControlSecureState();
+        secureScreenShareFrameReassembler.ClearAll();
         remoteEndpoint = null;
         currentEnvelopeCode = null;
         lastPeerAddress = null;
@@ -2909,6 +3901,8 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
     private void ClearActivePeerSessionTracking(bool preserveHelpeeHostKeyPair)
     {
+        ResetControlSecureState();
+        secureScreenShareFrameReassembler.ClearAll();
         remoteEndpoint = null;
         currentEnvelopeCode = null;
         lastPeerAddress = null;
@@ -3360,7 +4354,10 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         try
         {
             var dto = JsonSerializer.Deserialize<ApprovePayload>(payload);
-            if (dto is null || string.IsNullOrWhiteSpace(dto.helpeeEcdhPublicKey))
+            if (dto is null ||
+                string.IsNullOrWhiteSpace(dto.sessionId) ||
+                string.IsNullOrWhiteSpace(dto.helpeeEcdhPublicKey) ||
+                string.IsNullOrWhiteSpace(dto.secureEnvelopeBase64))
             {
                 return false;
             }
@@ -3675,6 +4672,32 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         }
     }
 
+    private static bool TryParseApproveSecurePayload(byte[] payload, out ApproveSecurePayload parsed)
+    {
+        parsed = default!;
+
+        if (payload is null || payload.Length == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            var dto = JsonSerializer.Deserialize<ApproveSecurePayload>(payload);
+            if (dto is null || string.IsNullOrWhiteSpace(dto.approvalDecisionBase64))
+            {
+                return false;
+            }
+
+            parsed = dto;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static bool TryParseRejectPayload(byte[] payload, out RejectPayload parsed)
     {
         parsed = default!;
@@ -3687,7 +4710,36 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         try
         {
             parsed = JsonSerializer.Deserialize<RejectPayload>(payload);
-            return parsed is not null && !string.IsNullOrWhiteSpace(parsed.sessionId);
+            return parsed is not null &&
+                   !string.IsNullOrWhiteSpace(parsed.sessionId) &&
+                   !string.IsNullOrWhiteSpace(parsed.helpeeEcdhPublicKey) &&
+                   !string.IsNullOrWhiteSpace(parsed.secureEnvelopeBase64);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryParseRejectSecurePayload(byte[] payload, out RejectSecurePayload parsed)
+    {
+        parsed = default!;
+
+        if (payload is null || payload.Length == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            var dto = JsonSerializer.Deserialize<RejectSecurePayload>(payload);
+            if (dto is null)
+            {
+                return false;
+            }
+
+            parsed = dto;
+            return true;
         }
         catch
         {
@@ -3808,7 +4860,13 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
     private sealed class ApprovePayload
     {
+        public string? sessionId { get; set; }
         public string? helpeeEcdhPublicKey { get; set; }
+        public string? secureEnvelopeBase64 { get; set; }
+    }
+
+    private sealed class ApproveSecurePayload
+    {
         public bool? remoteControlSupported { get; set; }
         public string? approvalDecisionBase64 { get; set; }
     }
@@ -3822,6 +4880,12 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
     private sealed class RejectPayload
     {
         public string? sessionId { get; set; }
+        public string? helpeeEcdhPublicKey { get; set; }
+        public string? secureEnvelopeBase64 { get; set; }
+    }
+
+    private sealed class RejectSecurePayload
+    {
         public string? reason { get; set; }
     }
 

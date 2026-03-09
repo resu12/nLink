@@ -10,13 +10,14 @@
 ## How to use
 
 1. Open `nLink` on both computers.
-2. One person clicks **I need help** and shares the invite token (or direct NKN address).
-3. The helper clicks **I want to help someone**, pastes invite/address, and clicks **Connect**.
+2. The helper clicks **I want to help someone** and copies the helper address.
+3. The helpee clicks **I need help**, enters that helper address, confirms the verification code, and shares the helper-bound invite code.
+4. The helper pastes the invite code, or scans the QR code, and clicks **Connect**.
 
 ## Known issues
 
 - Connection can still be slow on some networks.
-- If connection fails, retry with a refreshed invite or verify the direct address.
+- If connection fails, retry with a refreshed invite code and confirm the helper address and verification code were entered correctly.
 - This is a pre-release and may still have rough edges.
 
 ## If something goes wrong
@@ -24,3 +25,9 @@
 Open **Diagnostics** in the app and click **Copy diagnostics**.
 Paste that text into the GitHub issue/report.
 You can also click **Open logs folder** and attach the latest `nlink.log` files if needed.
+
+For a release-safe build, diagnostics should show:
+- `invite_security_mode: issued_one_time_secret_invites`
+- `invite_public_flow: verified_helper_required`
+- `invite_security_release_ready: Yes`
+- `invite_security_warning: none`

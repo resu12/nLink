@@ -6,7 +6,7 @@ namespace NLink.Infra.Nkn;
 internal sealed class ScreenShareFrameAssembler
 {
     private const int MaxChunkCount = 256;
-    private const int MaxAssembledFrameBytes = ScreenSharePayloadCodec.MaxChunkRawBytes * MaxChunkCount;
+    private const int MaxAssembledFrameBytes = 2_048_000;
     private const int MaxAssemblyAgeMs = 500;
 
     private AssemblyState? currentAssembly;

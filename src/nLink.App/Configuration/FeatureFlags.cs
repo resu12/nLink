@@ -5,6 +5,8 @@ namespace NLink.App.Configuration;
 
 public static class FeatureFlags
 {
+    public const string AllowInsecureRemoteControlSeqGateOverrideEnvVar = "NLINK_ALLOW_INSECURE_REMOTE_CONTROL_SEQ_GATE_OVERRIDE";
+
     public static bool UsePhaseDrivenGating { get; } = false;
 
     public static bool EnableResponsiveLayout { get; } =
@@ -32,10 +34,10 @@ public static class FeatureFlags
         ReadIntEnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS", defaultValue: 8, minValue: 1, maxValue: 8);
 
     public static bool ScreenShareTransportAutoTuneEnabled =>
-        ReadBoolEnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE", defaultValue: false);
+        ReadBoolEnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE", defaultValue: true);
 
     public static double ScreenShareScale =>
-        ReadDoubleEnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCALE", defaultValue: 0.75d, minValue: 0.25d, maxValue: 1d);
+        ReadDoubleEnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCALE", defaultValue: 1d, minValue: 0.25d, maxValue: 1d);
 
     public static long ScreenShareJpegQuality =>
         ReadIntEnvironmentOverride("NLINK_FEATURE_SCREENCAP_JPEG_QUALITY", defaultValue: 75, minValue: 30, maxValue: 80);
@@ -47,7 +49,10 @@ public static class FeatureFlags
         ReadBoolEnvironmentOverride("NLINK_FEATURE_REMOTE_CONTROL_ACK", defaultValue: false);
 
     public static bool RemoteControlSeqGateEnabled =>
-        ReadBoolEnvironmentOverride("NLINK_FEATURE_REMOTE_CONTROL_SEQ_GATE", defaultValue: true);
+        ReadSecurityCriticalBoolEnvironmentOverride(
+            "NLINK_FEATURE_REMOTE_CONTROL_SEQ_GATE",
+            defaultValue: true,
+            insecureOverrideOptInVariable: AllowInsecureRemoteControlSeqGateOverrideEnvVar);
 
     public static bool RemoteControlStateSnapshotEnabled =>
         ReadBoolEnvironmentOverride("NLINK_FEATURE_REMOTE_CONTROL_STATE_SNAPSHOT", defaultValue: false);
@@ -84,6 +89,31 @@ public static class FeatureFlags
             "OFF" => false,
             _ => false,
         };
+    }
+
+    private static bool ReadSecurityCriticalBoolEnvironmentOverride(
+        string variableName,
+        bool defaultValue,
+        string insecureOverrideOptInVariable)
+    {
+        var effective = ReadBoolEnvironmentOverride(variableName, defaultValue);
+#if DEBUG
+        return effective;
+#else
+        if (!defaultValue && effective)
+        {
+            return true;
+        }
+
+        if (defaultValue && !effective)
+        {
+            return ReadBoolEnvironmentOverride(insecureOverrideOptInVariable, defaultValue: false)
+                ? effective
+                : defaultValue;
+        }
+
+        return effective;
+#endif
     }
 
     private static int ReadIntEnvironmentOverride(string variableName, int defaultValue, int minValue, int maxValue)

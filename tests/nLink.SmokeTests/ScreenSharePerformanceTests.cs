@@ -1,7 +1,11 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
+using Avalonia.Threading;
+using NLink.App.Services.ScreenCapture;
 using NLink.App.ViewModels;
 using NLink.Core.ScreenShare;
 using NLink.SmokeTests.Fakes;
@@ -56,17 +60,12 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
                 {
                     firstFrameDecoded.TrySetResult(true);
                     return CreateBitmap(2, 1);
-                },
-                postToUiAsync: action =>
-                {
-                    action();
-                    return Task.CompletedTask;
                 });
 
             reassembler.FrameReady += (_, frame) =>
             {
                 firstFrameCompleted.TrySetResult(true);
-                viewer.OnJpegFrame(frame.EncodedFrameBytes);
+                viewer.OnJpegFrame(frame.EncodedFrameBytes, frame.TimestampUnixMilliseconds);
             };
 
             EventHandler<NLink.App.Services.ScreenCapture.ScreenCaptureFrameEventArgs>? onFrameArrived = null;
@@ -106,6 +105,13 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
                     var viewerMetrics = viewer.GetMetricsSnapshot();
                     return $"Expected screenshare progress under pressure. sender={sender}; receiver={receiver}; viewer={viewerMetrics}";
                 });
+            await WaitUntilAsync(
+                () =>
+                {
+                    var viewerMetrics = viewer.GetMetricsSnapshot();
+                    return viewerMetrics.FramesDecoded >= 1 && viewerMetrics.AverageCaptureToRenderMs > 0;
+                },
+                TimeSpan.FromSeconds(2));
 
             fakeCapture.FrameArrived -= onFrameArrived;
             await fakeCapture.StopAsync();
@@ -126,6 +132,9 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
             Assert.True(receiverMetrics.FramesCompleted >= 1);
             Assert.Equal(0, receiverMetrics.FramesRejectedOversize);
             Assert.Equal(0, viewerStats.DecodeErrors);
+            Assert.True(
+                viewerStats.AverageCaptureToRenderMs > 0,
+                $"Expected non-zero capture-to-render latency on the default viewer dispatcher path. viewer={viewerStats}");
 
             GC.Collect();
             GC.WaitForPendingFinalizers();
@@ -192,14 +201,11 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
                     Interlocked.Increment(ref appliedFrames);
                     decodeProgress.TrySetResult(true);
                     return CreateBitmap(2, 1);
-                },
-                postToUiAsync: action =>
-                {
-                    action();
-                    return Task.CompletedTask;
                 });
 
-            reassembler.FrameReady += (_, frame) => viewer.OnJpegFrame(frame.EncodedFrameBytes);
+            reassembler.FrameReady += (_, frame) => viewer.OnJpegFrame(
+                frame.EncodedFrameBytes,
+                frame.TimestampUnixMilliseconds);
 
             EventHandler<NLink.App.Services.ScreenCapture.ScreenCaptureFrameEventArgs>? onFrameArrived = null;
             onFrameArrived = (_, frame) =>
@@ -279,6 +285,9 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
             Assert.True(viewerMetrics.FramesDecoded >= minimumDecodedFrames);
             Assert.Equal(0, viewerMetrics.DecodeErrors);
             Assert.True(
+                viewerMetrics.AverageCaptureToRenderMs > 0,
+                $"Expected non-zero capture-to-render latency on the default viewer dispatcher path. viewer={viewerMetrics}");
+            Assert.True(
                 memoryMax - memoryMin <= maxTotalMemoryDeltaBytes,
                 $"Expected bounded memory spread. Min={memoryMin}, Max={memoryMax}, Spread={memoryMax - memoryMin}.");
             Assert.False(
@@ -292,11 +301,151 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
         }, default);
     }
 
+    [Fact]
+    [Trait("Category", "Performance")]
+    public async Task ScreenSharePipeline_DisplayMappingAlternation_RendersFirstPostChangeFrameWithinBudget()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            const int recoveryBudgetMs = 500;
+
+            var fakeSource = new FakeScreenCaptureSource
+            {
+                CaptureMetadata = CreateMetadata(0, 0, 1920, 1080, 1.25),
+            };
+            var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 8, 18, 0, 0, TimeSpan.Zero));
+            var reassembler = new ScreenShareFrameReassembler();
+            var displayInfoRevisions = new ConcurrentQueue<long>();
+            var renderedSizesByMarker = new ConcurrentDictionary<byte, (int Width, int Height)>();
+            byte nextMarker = 1;
+
+            await using var coordinator = new TransportScreenShareCoordinator(
+                captureSourceFactory: () => fakeSource,
+                sendPayloadAsync: (payload, _) =>
+                {
+                    if (ScreenSharePayloadCodec.TryDeserialize(payload.Span, out var chunk))
+                    {
+                        reassembler.OnChunk(chunk);
+                    }
+
+                    return Task.CompletedTask;
+                },
+                clock: clock,
+                sendDisplayInfoAsync: (_, message, _) =>
+                {
+                    displayInfoRevisions.Enqueue(message.Revision);
+                    return Task.CompletedTask;
+                });
+
+            using var viewer = new ScreenShareViewerViewModel(
+                decodeFrame: bytes =>
+                {
+                    var marker = bytes.Span[0];
+                    var (width, height) = renderedSizesByMarker[marker];
+                    return CreateBitmap(width, height);
+                });
+
+            reassembler.FrameReady += (_, frame) =>
+            {
+                var marker = frame.EncodedFrameBytes[0];
+                renderedSizesByMarker[marker] = (frame.Width, frame.Height);
+                viewer.OnJpegFrame(frame.EncodedFrameBytes, frame.TimestampUnixMilliseconds);
+            };
+
+            await coordinator.StartAsync("session-resize", CancellationToken.None);
+
+            await RaiseFrameAndWaitForRenderAsync(
+                width: 1280,
+                height: 720,
+                expectedRevisionCount: 1);
+
+            await VerifyResizeRecoveryAsync(
+                metadata: CreateMetadata(100, 50, 1720, 980, 1.25),
+                width: 960,
+                height: 540,
+                expectedRevisionCount: 2);
+
+            await VerifyResizeRecoveryAsync(
+                metadata: CreateMetadata(0, 0, 1920, 1080, 1.25),
+                width: 1280,
+                height: 720,
+                expectedRevisionCount: 3);
+
+            await VerifyResizeRecoveryAsync(
+                metadata: CreateMetadata(50, 30, 1600, 900, 1.00),
+                width: 1024,
+                height: 576,
+                expectedRevisionCount: 4);
+
+            Assert.Equal(4, displayInfoRevisions.Count);
+            Assert.Equal(0, viewer.GetMetricsSnapshot().DecodeErrors);
+
+            return true;
+
+            async Task RaiseFrameAndWaitForRenderAsync(int width, int height, int expectedRevisionCount)
+            {
+                var marker = nextMarker++;
+                fakeSource.RaiseFrame(new ScreenCaptureFrameEventArgs(
+                    width,
+                    height,
+                    new byte[] { marker },
+                    "jpeg",
+                    capturedTsUtcMs: clock.UtcNow.ToUnixTimeMilliseconds()));
+
+                await WaitUntilAsync(
+                    () =>
+                    {
+                        var metrics = viewer.GetMetricsSnapshot();
+                        return displayInfoRevisions.Count >= expectedRevisionCount &&
+                            viewer.CurrentFrame is Bitmap bitmap &&
+                            bitmap.PixelSize.Width == width &&
+                            bitmap.PixelSize.Height == height &&
+                            metrics.FramesDecoded >= 1;
+                    },
+                    TimeSpan.FromSeconds(2));
+            }
+
+            async Task VerifyResizeRecoveryAsync(
+                ScreenCaptureMetadata metadata,
+                int width,
+                int height,
+                int expectedRevisionCount)
+            {
+                fakeSource.CaptureMetadata = metadata;
+
+                clock.Advance(TimeSpan.FromMilliseconds(100));
+                fakeSource.RaiseFrame(new ScreenCaptureFrameEventArgs(
+                    width,
+                    height,
+                    new byte[] { nextMarker++ },
+                    "jpeg",
+                    capturedTsUtcMs: clock.UtcNow.ToUnixTimeMilliseconds()));
+
+                clock.Advance(TimeSpan.FromMilliseconds(300));
+                var recoveryStart = Stopwatch.StartNew();
+
+                await RaiseFrameAndWaitForRenderAsync(width, height, expectedRevisionCount);
+
+                recoveryStart.Stop();
+                Assert.True(
+                    recoveryStart.ElapsedMilliseconds <= recoveryBudgetMs,
+                    $"Expected first valid post-change render within {recoveryBudgetMs} ms, but took {recoveryStart.ElapsedMilliseconds} ms for {width}x{height}.");
+            }
+
+            static ScreenCaptureMetadata CreateMetadata(int x, int y, int width, int height, double dpiScale)
+                => new(
+                    DisplayId: "primary",
+                    CaptureRegionPx: new ScreenCapturePixelRect(x, y, width, height),
+                    DpiScale: dpiScale);
+        }, default);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
         {
+            await FlushUiAsync();
             if (predicate())
             {
                 return;
@@ -305,7 +454,16 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
             await Task.Yield();
         }
 
+        await FlushUiAsync();
         Assert.True(predicate(), $"Condition not met within {timeout.TotalSeconds:N1}s.");
+    }
+
+    private static async Task FlushUiAsync()
+    {
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Render);
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
     }
 
     private static bool IsStrictlyMonotonicIncrease(IReadOnlyList<long> samples)

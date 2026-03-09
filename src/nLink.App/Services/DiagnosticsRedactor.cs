@@ -18,6 +18,7 @@ internal static partial class DiagnosticsRedactor
         redacted = PemPrivateKeyBlockRegex().Replace(redacted, Redacted);
         redacted = DiagnosticsSecretKeyValueRegex().Replace(redacted, m => m.Groups["prefix"].Value + Redacted);
         redacted = WalletSeedPhraseRegex().Replace(redacted, m => m.Groups["prefix"].Value + Redacted);
+        redacted = DiagnosticsPrivacyMetadataRegex().Replace(redacted, m => m.Groups["prefix"].Value + Redacted);
 
         // Preserve broad existing protections (chat payloads, generic tokens, etc.).
         redacted = SensitiveDataRedactor.Redact(redacted);
@@ -35,6 +36,9 @@ internal static partial class DiagnosticsRedactor
 
     [GeneratedRegex(@"(?<prefix>\bwallet\s+seed\b\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\r\n,;]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex WalletSeedPhraseRegex();
+
+    [GeneratedRegex(@"(?<prefix>\b(?:last_bridge_message_source|session_id|expected_session_id|helper_identity|helper|target|source|expected_source|peer_id|reply_to|expected_reply_to|msg_id|run_id)\b\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\r\n,;]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex DiagnosticsPrivacyMetadataRegex();
 
     [GeneratedRegex(@"\[(?:redacted|REDACTED)\]", RegexOptions.CultureInvariant)]
     private static partial Regex GenericRedactedTokenRegex();

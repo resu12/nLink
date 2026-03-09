@@ -5,7 +5,8 @@ namespace NLink.Core.ScreenShare;
 public sealed record ScreenShareFrameChunkV1
 {
     [JsonPropertyName("kind")]
-    public string Kind { get; init; } = "screenshare";
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Kind { get; init; }
 
     [JsonPropertyName("type")]
     public string Type { get; init; } = ScreenSharePayloadCodec.ScreenShareFrameTypeV1;

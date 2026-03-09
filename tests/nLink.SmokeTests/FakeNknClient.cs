@@ -2,13 +2,15 @@ using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
 
-internal sealed class FakeNknClient : INknClient
+internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddressSource
 {
     private static readonly object Gate = new();
     private static readonly Dictionary<string, FakeNknClient> ClientsByAddress = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, HashSet<FakeNknClient>> TopicSubscribers = new(StringComparer.Ordinal);
 
     private readonly HashSet<string> subscriptions = new(StringComparer.Ordinal);
+    private readonly string initialAddress;
+    private readonly string connectedAddress;
     private bool connected;
     private bool disposed;
 
@@ -18,12 +20,28 @@ internal sealed class FakeNknClient : INknClient
 
     public Func<string, byte[], CancellationToken, Task>? BeforePublishAsync { get; set; }
 
-    public FakeNknClient(string address)
+    public FakeNknClient(string address, string? connectedAddress = null)
     {
-        Address = address ?? throw new ArgumentNullException(nameof(address));
+        initialAddress = address ?? throw new ArgumentNullException(nameof(address));
+        this.connectedAddress = string.IsNullOrWhiteSpace(connectedAddress) ? initialAddress : connectedAddress.Trim();
     }
 
-    public string Address { get; }
+    public string Address
+    {
+        get
+        {
+            lock (Gate)
+            {
+                return connected ? connectedAddress : initialAddress;
+            }
+        }
+    }
+
+    public string InitialAddress => initialAddress;
+
+    public string ConnectedAddress => connectedAddress;
+
+    bool IAuthoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress => connected;
 
     public event EventHandler<NknIncomingMessage>? MessageReceived;
 
@@ -53,7 +71,7 @@ internal sealed class FakeNknClient : INknClient
 
         lock (Gate)
         {
-            ClientsByAddress[Address] = this;
+            ClientsByAddress[connectedAddress] = this;
             connected = true;
         }
 
@@ -72,7 +90,7 @@ internal sealed class FakeNknClient : INknClient
         {
             wasConnected = connected;
             connected = false;
-            ClientsByAddress.Remove(Address);
+            ClientsByAddress.Remove(connectedAddress);
 
             foreach (var topic in subscriptions.ToArray())
             {

@@ -3,9 +3,13 @@ using System.Globalization;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Avalonia;
+using Avalonia.Logging;
+using Avalonia.Threading;
 using NLink.App.Services.ScreenCapture;
 using NLink.App.ViewModels;
 using NLink.Core.ScreenShare;
+using NLink.Infra.Nkn;
 
 namespace NLink.App;
 
@@ -34,22 +38,31 @@ internal static class ScreenShareSoakRunner
 
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         linkedCts.CancelAfter(options!.Duration + TimeSpan.FromSeconds(30));
+        EnsureViewerDecodePlatformInitialized();
 
-        await using var captureSource = new WindowsScreenCaptureSource();
         var reassembler = new ScreenShareFrameReassembler();
         long framesSent = 0;
         long enqueueFailures = 0;
-        await using var sendPipeline = new ScreenShareFrameSendPipeline(
-            sendChunkAsync: (chunk, token) =>
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: static () => new WindowsScreenCaptureSource(),
+            sendPayloadAsync: (payload, _) =>
             {
-                reassembler.OnChunk(chunk);
-                if (chunk.ChunkIndex == chunk.ChunkCount - 1)
+                if (ScreenSharePayloadCodec.TryDeserialize(payload.Span, out var chunk))
                 {
-                    Interlocked.Increment(ref framesSent);
+                    reassembler.OnChunk(chunk);
+                    if (chunk.ChunkIndex == chunk.ChunkCount - 1)
+                    {
+                        Interlocked.Increment(ref framesSent);
+                    }
                 }
 
                 return Task.CompletedTask;
-            });
+            },
+            sendDisplayInfoAsync: (_, _, _) => Task.CompletedTask,
+            estimateBridgeBytes: payload => NknBridgePayloadAccounting.MeasureSendCommandJsonlBytes(
+                destination: "screenshare-soak",
+                payload.Span,
+                commandId: "1"));
         using var viewer = new ScreenShareViewerViewModel(
             postToUiAsync: action =>
             {
@@ -57,33 +70,9 @@ internal static class ScreenShareSoakRunner
                 return Task.CompletedTask;
             });
 
-        reassembler.FrameReady += (_, frame) => viewer.OnJpegFrame(frame.EncodedFrameBytes);
-
-        EventHandler<ScreenCaptureFrameEventArgs>? onFrameArrived = null;
-        onFrameArrived = (_, frame) =>
-        {
-            _ = sendPipeline.EnqueueFrameAsync(
-                    sessionId: "screenshare-soak",
-                    width: frame.Width,
-                    height: frame.Height,
-                    encoding: frame.Encoding,
-                    encodedFrameBytes: frame.EncodedFrameData,
-                    timestampUnixMilliseconds: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                    cancellationToken: linkedCts.Token)
-                .ContinueWith(
-                    task =>
-                    {
-                        if (task.IsFaulted || task.IsCanceled)
-                        {
-                            Interlocked.Increment(ref enqueueFailures);
-                        }
-                    },
-                    CancellationToken.None,
-                    TaskContinuationOptions.ExecuteSynchronously,
-                    TaskScheduler.Default);
-        };
-
-        captureSource.FrameArrived += onFrameArrived;
+        reassembler.FrameReady += (_, frame) => viewer.OnJpegFrame(
+            frame.EncodedFrameBytes,
+            frame.TimestampUnixMilliseconds);
 
         try
         {
@@ -91,13 +80,14 @@ internal static class ScreenShareSoakRunner
             await output.WriteLineAsync($"  Duration: {options.Duration}");
             await output.WriteLineAsync($"  Sample interval: {options.SampleInterval}");
 
-            await captureSource.StartAsync(linkedCts.Token).ConfigureAwait(false);
+            await coordinator.StartAsync("screenshare-soak", linkedCts.Token).ConfigureAwait(false);
             var startedAt = DateTimeOffset.UtcNow;
             var nextSampleAt = startedAt;
 
             while (DateTimeOffset.UtcNow - startedAt < options.Duration)
             {
                 linkedCts.Token.ThrowIfCancellationRequested();
+                await TryFlushUiAsync(linkedCts.Token).ConfigureAwait(false);
 
                 var now = DateTimeOffset.UtcNow;
                 if (now >= nextSampleAt)
@@ -105,7 +95,7 @@ internal static class ScreenShareSoakRunner
                     await output.WriteLineAsync(BuildMetricsLine(
                         elapsed: now - startedAt,
                         framesSent: Interlocked.Read(ref framesSent),
-                        senderMetrics: sendPipeline.GetMetricsSnapshot(),
+                        senderMetrics: coordinator.GetMetricsSnapshot(),
                         receiverMetrics: reassembler.GetMetricsSnapshot(),
                         viewerMetrics: viewer.GetMetricsSnapshot(),
                         enqueueFailures: Interlocked.Read(ref enqueueFailures)));
@@ -115,19 +105,21 @@ internal static class ScreenShareSoakRunner
                 await Task.Delay(TimeSpan.FromMilliseconds(250), linkedCts.Token).ConfigureAwait(false);
             }
 
-            captureSource.FrameArrived -= onFrameArrived;
-            await captureSource.StopAsync().ConfigureAwait(false);
+            await coordinator.StopAsync(sendStopMessage: false, reason: "soak_complete", linkedCts.Token).ConfigureAwait(false);
+            await TryFlushUiAsync(linkedCts.Token).ConfigureAwait(false);
             await WaitUntilAsync(
                 condition: () => viewer.IsIdleForDiagnostics,
                 timeout: TimeSpan.FromSeconds(5),
                 pollInterval: TimeSpan.FromMilliseconds(50),
-                failureMessage: "Viewer did not become idle after screenshare stop.").ConfigureAwait(false);
+                failureMessage: "Viewer did not become idle after screenshare stop.",
+                ct: linkedCts.Token).ConfigureAwait(false);
 
             var stableSnapshot = await WaitForStableMetricsAsync(
-                getSnapshot: () => CreateStopSnapshot(sendPipeline, reassembler, viewer, framesSent, enqueueFailures),
+                getSnapshot: () => CreateStopSnapshot(coordinator, reassembler, viewer, framesSent, enqueueFailures),
                 timeout: TimeSpan.FromSeconds(5),
                 pollInterval: TimeSpan.FromMilliseconds(50),
-                stablePolls: 5).ConfigureAwait(false);
+                stablePolls: 5,
+                ct: linkedCts.Token).ConfigureAwait(false);
 
             viewer.Clear();
 
@@ -154,13 +146,25 @@ internal static class ScreenShareSoakRunner
         }
         finally
         {
-            captureSource.FrameArrived -= onFrameArrived;
-            await captureSource.StopAsync().ConfigureAwait(false);
+            await coordinator.StopAsync(sendStopMessage: false, reason: "soak_finalize", CancellationToken.None).ConfigureAwait(false);
         }
     }
 
     internal static bool TryParseOptionsForTests(string[] args, out ScreenShareSoakRunnerOptions? options, out string error)
         => TryParseOptions(args, out options, out error);
+
+    private static void EnsureViewerDecodePlatformInitialized()
+    {
+        if (Application.Current is not null)
+        {
+            return;
+        }
+
+        AppBuilder.Configure<ScreenShareSoakApplication>()
+            .UsePlatformDetect()
+            .LogToTrace(LogEventLevel.Warning)
+            .SetupWithoutStarting();
+    }
 
     private static bool TryParseOptions(string[] args, out ScreenShareSoakRunnerOptions? options, out string error)
     {
@@ -244,33 +248,54 @@ internal static class ScreenShareSoakRunner
     {
         return string.Format(
             CultureInfo.InvariantCulture,
-            "[{0:mm\\:ss}] FramesCaptured={1} FramesSent={2} FramesDropped={3} FramesCompleted={4} DecodeErrors={5} EnqueueFailures={6}",
+            "[{0:mm\\:ss}] FramesCaptured={1} FramesSent={2} FramesDropped={3} FramesDroppedByRateGate={4} " +
+            "FramesDroppedByQueueEvict={5} FramesCompleted={6} DecodeErrors={7} EnqueueFailures={8} " +
+            "DisplayInfoSends={9} AvgCaptureToEnqueueMs={10:F1} AvgEnqueueToSendMs={11:F1} AvgCaptureToSendMs={12:F1} LastCaptureToSendAgeMs={13} " +
+            "AvgRawFrameBytes={14:F1} AvgSerializedChunkBytes={15:F1} AvgBridgeBytes={16:F1} " +
+            "AvgRenderIntervalMs={17:F1} AvgCaptureToRenderMs={18:F1} StaleFrameRenders={19}",
             elapsed,
             senderMetrics.FramesCaptured,
             framesSent,
             senderMetrics.FramesDropped,
+            senderMetrics.FramesDroppedByRateGate,
+            senderMetrics.FramesDroppedByQueueEvict,
             receiverMetrics.FramesCompleted,
             viewerMetrics.DecodeErrors,
-            enqueueFailures);
+            enqueueFailures,
+            senderMetrics.DisplayInfoSendCount,
+            senderMetrics.AverageCaptureToEnqueueMs,
+            senderMetrics.AverageEnqueueToSendMs,
+            senderMetrics.AverageCaptureToSendMs,
+            senderMetrics.LastCaptureToSendAgeMs,
+            framesSent > 0 ? senderMetrics.RawFrameBytesSent / (double)framesSent : 0d,
+            framesSent > 0 ? senderMetrics.SerializedChunkBytesSent / (double)framesSent : 0d,
+            framesSent > 0 ? senderMetrics.BridgeBytesSent / (double)framesSent : 0d,
+            viewerMetrics.AverageRenderIntervalMs,
+            viewerMetrics.AverageCaptureToRenderMs,
+            viewerMetrics.StaleFrameRenders);
     }
 
     private static async Task WaitUntilAsync(
         Func<bool> condition,
         TimeSpan timeout,
         TimeSpan pollInterval,
-        string failureMessage)
+        string failureMessage,
+        CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
         {
+            ct.ThrowIfCancellationRequested();
+            await TryFlushUiAsync(ct).ConfigureAwait(false);
             if (condition())
             {
                 return;
             }
 
-            await Task.Delay(pollInterval).ConfigureAwait(false);
+            await Task.Delay(pollInterval, ct).ConfigureAwait(false);
         }
 
+        await TryFlushUiAsync(ct).ConfigureAwait(false);
         if (!condition())
         {
             throw new TimeoutException(failureMessage);
@@ -281,7 +306,8 @@ internal static class ScreenShareSoakRunner
         Func<StopSnapshot> getSnapshot,
         TimeSpan timeout,
         TimeSpan pollInterval,
-        int stablePolls)
+        int stablePolls,
+        CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + timeout;
         var stableCount = 0;
@@ -289,6 +315,8 @@ internal static class ScreenShareSoakRunner
 
         while (DateTime.UtcNow < deadline)
         {
+            ct.ThrowIfCancellationRequested();
+            await TryFlushUiAsync(ct).ConfigureAwait(false);
             var current = getSnapshot();
             if (previous is not null && current.Equals(previous))
             {
@@ -304,21 +332,43 @@ internal static class ScreenShareSoakRunner
             }
 
             previous = current;
-            await Task.Delay(pollInterval).ConfigureAwait(false);
+            await Task.Delay(pollInterval, ct).ConfigureAwait(false);
         }
 
         throw new TimeoutException("Screenshare metrics did not stabilize after stop.");
     }
 
+    private static Task TryFlushUiAsync(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        try
+        {
+            Dispatcher.UIThread.RunJobs(DispatcherPriority.Loaded);
+            Dispatcher.UIThread.RunJobs(DispatcherPriority.Background);
+            Dispatcher.UIThread.RunJobs(DispatcherPriority.Render);
+            Dispatcher.UIThread.RunJobs(DispatcherPriority.Background);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // Best-effort only. The soak runner should keep polling even if the dispatcher is unavailable.
+        }
+
+        return Task.CompletedTask;
+    }
+
     private static StopSnapshot CreateStopSnapshot(
-        ScreenShareFrameSendPipeline sendPipeline,
+        TransportScreenShareCoordinator coordinator,
         ScreenShareFrameReassembler reassembler,
         ScreenShareViewerViewModel viewer,
         long framesSent,
         long enqueueFailures)
     {
         return new StopSnapshot(
-            SenderMetrics: sendPipeline.GetMetricsSnapshot(),
+            SenderMetrics: coordinator.GetMetricsSnapshot(),
             ReceiverMetrics: reassembler.GetMetricsSnapshot(),
             ViewerMetrics: viewer.GetMetricsSnapshot(),
             FramesSent: Interlocked.Read(ref framesSent),
@@ -331,4 +381,11 @@ internal static class ScreenShareSoakRunner
         ScreenShareMetrics ViewerMetrics,
         long FramesSent,
         long EnqueueFailures);
+
+    private sealed class ScreenShareSoakApplication : Application
+    {
+        public override void Initialize()
+        {
+        }
+    }
 }

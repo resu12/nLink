@@ -19,6 +19,12 @@ public interface IInviteValidationThrottle
     bool TryAcquire(string scopeKey, DateTimeOffset nowUtc, out TimeSpan retryAfter);
 }
 
+public interface IInviteIssuedTokenStore
+{
+    bool TryRegisterIssuedToken(InvitePayloadV1 payload, ReadOnlySpan<byte> verificationBytes, DateTimeOffset nowUtc, out string? failureReason);
+    InviteIssuedTokenConsumeResult ConsumeIssuedToken(InvitePayloadV1 payload, ReadOnlySpan<byte> verificationBytes, DateTimeOffset nowUtc);
+}
+
 public sealed record InviteSecurityStoreOptions
 {
     public string? FilePath { get; init; }
@@ -28,7 +34,7 @@ public sealed record InviteSecurityStoreOptions
     public TimeSpan ValidationWindow { get; init; } = TimeSpan.FromSeconds(10);
 }
 
-public sealed class PersistentInviteSecurityStore : IInviteReplayCache, IInviteRevocationStore, IInviteIssueTracker, IInviteValidationThrottle
+public sealed class PersistentInviteSecurityStore : IInviteReplayCache, IInviteRevocationStore, IInviteIssueTracker, IInviteValidationThrottle, IInviteIssuedTokenStore
 {
     private const int CurrentVersion = 1;
     private const string UnknownHelperScopeKey = "(unknown)";
@@ -213,6 +219,136 @@ public sealed class PersistentInviteSecurityStore : IInviteReplayCache, IInviteR
         }
     }
 
+    public bool TryRegisterIssuedToken(InvitePayloadV1 payload, ReadOnlySpan<byte> verificationBytes, DateTimeOffset nowUtc, out string? failureReason)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+
+        if (!InviteIssuedSecretProof.IsWellFormed(verificationBytes))
+        {
+            failureReason = "Invite proof is invalid.";
+            return false;
+        }
+
+        var proofHashKey = InviteIssuedSecretProof.ComputeHashKey(verificationBytes);
+        try
+        {
+            var result = WithDocument(
+                nowUtc,
+                mutate: true,
+                (document, nowUtcMs) =>
+                {
+                    var scopeKey = BuildIssueScopeKey(payload);
+                    if (!TryRecordAttempt(
+                            document.IssueAttempts,
+                            scopeKey,
+                            nowUtcMs,
+                            issueWindow,
+                            maxIssueAttemptsPerScope,
+                            out var retryAfter))
+                    {
+                        var failure = $"Invite issuance is throttled. Retry after {Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds))}s.";
+                        LocalOperationalLog.Warn(
+                            "InviteSecurity",
+                            $"event=issue_throttled; target={payload.TargetAddress.Value}; helper={payload.BoundHelperAddress?.Value ?? "(unbound)"}; retry_after_ms={(long)Math.Ceiling(retryAfter.TotalMilliseconds)}");
+                        return (Accepted: false, FailureReason: failure);
+                    }
+
+                    if (document.ActiveInvitesByScope.TryGetValue(scopeKey, out var activeInvite) &&
+                        activeInvite.ExpiresAtUtcMs > nowUtcMs &&
+                        !string.Equals(activeInvite.InviteKey, proofHashKey, StringComparison.Ordinal))
+                    {
+                        if (document.IssuedInvitesByProofHash.TryGetValue(activeInvite.InviteKey, out var previousIssuedInvite))
+                        {
+                            previousIssuedInvite.RevokedReason = "superseded";
+                            document.IssuedInvitesByProofHash[activeInvite.InviteKey] = previousIssuedInvite;
+                        }
+
+                        LocalOperationalLog.Info(
+                            "InviteSecurity",
+                            $"event=invite_revoked; reason=superseded; target={payload.TargetAddress.Value}; helper={payload.BoundHelperAddress?.Value ?? "(unbound)"}; old_exp_utc_ms={activeInvite.ExpiresAtUtcMs}; new_session_id={payload.SessionId.Value}");
+                    }
+
+                    document.IssuedInvitesByProofHash[proofHashKey] = new IssuedInviteRecord
+                    {
+                        Version = payload.Version,
+                        IssuerAddress = payload.IssuerAddress.Value,
+                        TargetAddress = payload.TargetAddress.Value,
+                        SessionId = payload.SessionId.Value,
+                        Capabilities = payload.Capabilities,
+                        IssuedAtUtcMs = payload.IssuedAtUtcMs,
+                        Nonce = payload.Nonce,
+                        BoundHelperAddress = payload.BoundHelperAddress?.Value,
+                        ExpiresAtUtcMs = payload.ExpiresAtUtcMs,
+                    };
+                    document.ActiveInvitesByScope[scopeKey] = new ActiveInviteScopeRecord
+                    {
+                        InviteKey = proofHashKey,
+                        ExpiresAtUtcMs = payload.ExpiresAtUtcMs,
+                    };
+
+                    return (Accepted: true, FailureReason: (string?)null);
+                });
+
+            failureReason = result.FailureReason;
+            return result.Accepted;
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn("InviteSecurity", $"event=store_failure; op=register_issued_token; ex={ex.GetType().Name}");
+            failureReason = "Invite issuance could not be secured.";
+            return false;
+        }
+    }
+
+    public InviteIssuedTokenConsumeResult ConsumeIssuedToken(InvitePayloadV1 payload, ReadOnlySpan<byte> verificationBytes, DateTimeOffset nowUtc)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+
+        if (!InviteIssuedSecretProof.IsWellFormed(verificationBytes))
+        {
+            return InviteIssuedTokenConsumeResult.InvalidProof();
+        }
+
+        var proofHashKey = InviteIssuedSecretProof.ComputeHashKey(verificationBytes);
+        try
+        {
+            return WithDocument(
+                nowUtc,
+                mutate: true,
+                (document, _) =>
+                {
+                    if (!document.IssuedInvitesByProofHash.TryGetValue(proofHashKey, out var issuedInvite))
+                    {
+                        return InviteIssuedTokenConsumeResult.InvalidProof();
+                    }
+
+                    if (!PayloadMatchesIssuedRecord(payload, issuedInvite))
+                    {
+                        return InviteIssuedTokenConsumeResult.InvalidProof();
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(issuedInvite.RevokedReason))
+                    {
+                        return InviteIssuedTokenConsumeResult.Revoked();
+                    }
+
+                    if (issuedInvite.ConsumedAtUtcMs is not null)
+                    {
+                        return InviteIssuedTokenConsumeResult.ReplayDetected();
+                    }
+
+                    issuedInvite.ConsumedAtUtcMs = nowUtc.ToUnixTimeMilliseconds();
+                    document.IssuedInvitesByProofHash[proofHashKey] = issuedInvite;
+                    return InviteIssuedTokenConsumeResult.Valid();
+                });
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn("InviteSecurity", $"event=store_failure; op=consume_issued_token; ex={ex.GetType().Name}");
+            return InviteIssuedTokenConsumeResult.InvalidProof("Invite issuance record is unavailable.");
+        }
+    }
+
     public bool TryAcquire(string scopeKey, DateTimeOffset nowUtc, out TimeSpan retryAfter)
     {
         if (string.IsNullOrWhiteSpace(scopeKey))
@@ -344,6 +480,7 @@ public sealed class PersistentInviteSecurityStore : IInviteReplayCache, IInviteR
 
             parsed.ReplayReservations ??= new Dictionary<string, long>(StringComparer.Ordinal);
             parsed.RevokedInvites ??= new Dictionary<string, RevokedInviteRecord>(StringComparer.Ordinal);
+            parsed.IssuedInvitesByProofHash ??= new Dictionary<string, IssuedInviteRecord>(StringComparer.Ordinal);
             parsed.ActiveInvitesByScope ??= new Dictionary<string, ActiveInviteScopeRecord>(StringComparer.Ordinal);
             parsed.IssueAttempts ??= new Dictionary<string, List<long>>(StringComparer.Ordinal);
             parsed.ValidationAttempts ??= new Dictionary<string, List<long>>(StringComparer.Ordinal);
@@ -369,6 +506,7 @@ public sealed class PersistentInviteSecurityStore : IInviteReplayCache, IInviteR
     {
         var dirty = RemoveExpired(document.ReplayReservations, nowUtcMs);
         dirty |= RemoveExpired(document.RevokedInvites, nowUtcMs, static record => record.ExpiresAtUtcMs);
+        dirty |= RemoveExpired(document.IssuedInvitesByProofHash, nowUtcMs, static record => record.ExpiresAtUtcMs);
         dirty |= RemoveExpired(document.ActiveInvitesByScope, nowUtcMs, static record => record.ExpiresAtUtcMs);
         dirty |= RemoveExpiredAttempts(document.IssueAttempts, nowUtcMs, issueWindow);
         dirty |= RemoveExpiredAttempts(document.ValidationAttempts, nowUtcMs, validationWindow);
@@ -477,6 +615,19 @@ public sealed class PersistentInviteSecurityStore : IInviteReplayCache, IInviteR
         }
     }
 
+    private static bool PayloadMatchesIssuedRecord(InvitePayloadV1 payload, IssuedInviteRecord record)
+    {
+        return record.Version == payload.Version &&
+               string.Equals(record.IssuerAddress, payload.IssuerAddress.Value, StringComparison.Ordinal) &&
+               string.Equals(record.TargetAddress, payload.TargetAddress.Value, StringComparison.Ordinal) &&
+               string.Equals(record.SessionId, payload.SessionId.Value, StringComparison.Ordinal) &&
+               record.Capabilities == payload.Capabilities &&
+               record.IssuedAtUtcMs == payload.IssuedAtUtcMs &&
+               string.Equals(record.Nonce, payload.Nonce, StringComparison.Ordinal) &&
+               record.ExpiresAtUtcMs == payload.ExpiresAtUtcMs &&
+               string.Equals(record.BoundHelperAddress ?? string.Empty, payload.BoundHelperAddress?.Value ?? string.Empty, StringComparison.Ordinal);
+    }
+
     private static string BuildDefaultPath()
     {
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -488,6 +639,7 @@ public sealed class PersistentInviteSecurityStore : IInviteReplayCache, IInviteR
         public int Version { get; set; } = CurrentVersion;
         public Dictionary<string, long> ReplayReservations { get; set; } = new(StringComparer.Ordinal);
         public Dictionary<string, RevokedInviteRecord> RevokedInvites { get; set; } = new(StringComparer.Ordinal);
+        public Dictionary<string, IssuedInviteRecord> IssuedInvitesByProofHash { get; set; } = new(StringComparer.Ordinal);
         public Dictionary<string, ActiveInviteScopeRecord> ActiveInvitesByScope { get; set; } = new(StringComparer.Ordinal);
         public Dictionary<string, List<long>> IssueAttempts { get; set; } = new(StringComparer.Ordinal);
         public Dictionary<string, List<long>> ValidationAttempts { get; set; } = new(StringComparer.Ordinal);
@@ -503,5 +655,20 @@ public sealed class PersistentInviteSecurityStore : IInviteReplayCache, IInviteR
     {
         public string InviteKey { get; set; } = string.Empty;
         public long ExpiresAtUtcMs { get; set; }
+    }
+
+    private sealed class IssuedInviteRecord
+    {
+        public int Version { get; set; }
+        public string IssuerAddress { get; set; } = string.Empty;
+        public string TargetAddress { get; set; } = string.Empty;
+        public string SessionId { get; set; } = string.Empty;
+        public InviteCapabilities Capabilities { get; set; }
+        public long IssuedAtUtcMs { get; set; }
+        public string Nonce { get; set; } = string.Empty;
+        public string? BoundHelperAddress { get; set; }
+        public long ExpiresAtUtcMs { get; set; }
+        public string? RevokedReason { get; set; }
+        public long? ConsumedAtUtcMs { get; set; }
     }
 }

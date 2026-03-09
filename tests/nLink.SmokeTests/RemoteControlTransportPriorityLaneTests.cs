@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
+using System.Reflection;
 using NLink.Core;
 using NLink.Core.RemoteControl;
 using NLink.Core.SessionConnect;
+using NLink.Core.SessionSecurity;
 using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
@@ -47,19 +49,7 @@ public sealed class RemoteControlTransportPriorityLaneTests
             };
 
             var receivedInputs = new ConcurrentQueue<ControlInputMessageV1>();
-            hostClient.MessageReceived += (_, message) =>
-            {
-                if (!EnvelopeCodec.TryDeserialize(message.Payload, out var env) ||
-                    env.Type != MsgType.ControlInput)
-                {
-                    return;
-                }
-
-                if (RemoteControlPayloadCodec.TryDeserializeControlInput(env.Payload, out var parsed))
-                {
-                    receivedInputs.Enqueue(parsed);
-                }
-            };
+            host.RemoteControlInputReceived += (_, e) => receivedInputs.Enqueue(e.Message);
 
             const string requestId = "req-p61-coalesce";
             const int totalMoves = 1000;
@@ -137,6 +127,8 @@ public sealed class RemoteControlTransportPriorityLaneTests
             var receivedTypes = new ConcurrentQueue<MsgType>();
             var receivedInputs = new ConcurrentQueue<ControlInputMessageV1>();
             var receivedStops = new ConcurrentQueue<ControlStopMessageV1>();
+            host.RemoteControlInputReceived += (_, e) => receivedInputs.Enqueue(e.Message);
+            host.RemoteControlStopReceived += (_, e) => receivedStops.Enqueue(e.Message);
             hostClient.MessageReceived += (_, message) =>
             {
                 if (!EnvelopeCodec.TryDeserialize(message.Payload, out var env))
@@ -147,18 +139,6 @@ public sealed class RemoteControlTransportPriorityLaneTests
                 if (env.Type is MsgType.ControlInput or MsgType.ControlStop)
                 {
                     receivedTypes.Enqueue(env.Type);
-                }
-
-                if (env.Type == MsgType.ControlInput &&
-                    RemoteControlPayloadCodec.TryDeserializeControlInput(env.Payload, out var input))
-                {
-                    receivedInputs.Enqueue(input);
-                }
-
-                if (env.Type == MsgType.ControlStop &&
-                    RemoteControlPayloadCodec.TryDeserializeControlStop(env.Payload, out var stop))
-                {
-                    receivedStops.Enqueue(stop);
                 }
             };
 
@@ -363,6 +343,8 @@ public sealed class RemoteControlTransportPriorityLaneTests
             var receivedInputs = new ConcurrentQueue<ControlInputMessageV1>();
             var receivedStops = new ConcurrentQueue<ControlStopMessageV1>();
             var receivedTypes = new ConcurrentQueue<MsgType>();
+            host.RemoteControlInputReceived += (_, e) => receivedInputs.Enqueue(e.Message);
+            host.RemoteControlStopReceived += (_, e) => receivedStops.Enqueue(e.Message);
             hostClient.MessageReceived += (_, message) =>
             {
                 if (!EnvelopeCodec.TryDeserialize(message.Payload, out var env))
@@ -373,18 +355,6 @@ public sealed class RemoteControlTransportPriorityLaneTests
                 if (env.Type is MsgType.ControlInput or MsgType.ControlStop)
                 {
                     receivedTypes.Enqueue(env.Type);
-                }
-
-                if (env.Type == MsgType.ControlInput &&
-                    RemoteControlPayloadCodec.TryDeserializeControlInput(env.Payload, out var input))
-                {
-                    receivedInputs.Enqueue(input);
-                }
-
-                if (env.Type == MsgType.ControlStop &&
-                    RemoteControlPayloadCodec.TryDeserializeControlStop(env.Payload, out var stop))
-                {
-                    receivedStops.Enqueue(stop);
                 }
             };
 
@@ -477,6 +447,166 @@ public sealed class RemoteControlTransportPriorityLaneTests
         }
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknControlHighLane_Backlog_IsCapped_WhenSendIsBlocked()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.rc.lane.highcap");
+            var helperClient = new FakeNknClient("helper.rc.lane.highcap");
+            var hostIdentity = new NknIdentity("host-rc-lane-highcap", "host.rc.lane.highcap");
+            var helperIdentity = new NknIdentity("helper-rc-lane-highcap", "helper.rc.lane.highcap");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            await ConnectAsync(host, helper, cts.Token);
+
+            var firstSendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirstSend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var controlRequestSendCount = 0;
+            helperClient.BeforeSendAsync = async (_, payload, sendCt) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.ControlRequest)
+                {
+                    return;
+                }
+
+                if (Interlocked.Increment(ref controlRequestSendCount) == 1)
+                {
+                    firstSendStarted.TrySetResult();
+                    await releaseFirstSend.Task.WaitAsync(sendCt);
+                }
+            };
+
+            var receivedRequests = new ConcurrentQueue<ControlRequestMessageV1>();
+            host.RemoteControlRequestReceived += (_, e) => receivedRequests.Enqueue(e.Message);
+
+            const int totalRequests = 400;
+            for (var i = 0; i < totalRequests; i++)
+            {
+                _ = helper.SendControlRequestAsync(
+                    new ControlRequestMessageV1
+                    {
+                        RequestId = $"req-p61-highcap-{i:D4}",
+                        Caps = new[] { "remote_control" },
+                    },
+                    cts.Token);
+            }
+
+            await firstSendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            await WaitUntilAsync(() => GetHighPriorityQueueCount(helper) == 256, TimeSpan.FromSeconds(2));
+            var cappedDepth = GetHighPriorityQueueCount(helper);
+
+            releaseFirstSend.TrySetResult();
+
+            await WaitUntilAsync(() => receivedRequests.Count >= 257, TimeSpan.FromSeconds(2));
+            await WaitUntilAsync(() => GetHighPriorityQueueCount(helper) == 0, TimeSpan.FromSeconds(2));
+            await Task.Delay(100, cts.Token);
+
+            Assert.Equal(256, cappedDepth);
+            Assert.Equal(257, receivedRequests.Count);
+            Assert.True(helper.HighPriorityControlQueueOverflowCount > 0);
+            Assert.True(helper.HighPriorityControlRejectedCount > 0);
+            Assert.Equal(0, helper.HighPriorityControlCoalescedCount);
+            Assert.Equal(0, helper.HighPriorityControlDroppedForStopCount);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknControlDisplayInfo_HighLane_CoalescesLatestRevision_WhenQueueIsFull()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.rc.lane.displaycap");
+            var helperClient = new FakeNknClient("helper.rc.lane.displaycap");
+            var hostIdentity = new NknIdentity("host-rc-lane-displaycap", "host.rc.lane.displaycap");
+            var helperIdentity = new NknIdentity("helper-rc-lane-displaycap", "helper.rc.lane.displaycap");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            await ConnectAsync(host, helper, cts.Token);
+
+            var firstSendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirstSend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var controlDisplayInfoSendCount = 0;
+            helperClient.BeforeSendAsync = async (_, payload, sendCt) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.ControlDisplayInfo)
+                {
+                    return;
+                }
+                var sendIndex = Interlocked.Increment(ref controlDisplayInfoSendCount);
+                if (sendIndex == 1)
+                {
+                    firstSendStarted.TrySetResult();
+                    await releaseFirstSend.Task.WaitAsync(sendCt);
+                }
+            };
+
+            const int totalRevisions = 400;
+            for (var i = 0; i < totalRevisions; i++)
+            {
+                _ = helper.SendControlDisplayInfoAsync(
+                    new ControlDisplayInfoMessageV1
+                    {
+                        DisplayId = "primary",
+                        Revision = i,
+                        VirtualDesktopX = 0,
+                        VirtualDesktopY = 0,
+                        VirtualDesktopWidth = 1920,
+                        VirtualDesktopHeight = 1080,
+                        CaptureRegionX = 0,
+                        CaptureRegionY = 0,
+                        CaptureRegionWidth = 1920,
+                        CaptureRegionHeight = 1080,
+                        FrameWidth = 1280,
+                        FrameHeight = 720,
+                        TsUtcMs = i + 1,
+                    },
+                    cts.Token);
+            }
+
+            await firstSendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            await WaitUntilAsync(() => GetHighPriorityQueueCount(helper) == 256, TimeSpan.FromSeconds(2));
+            var cappedDepth = GetHighPriorityQueueCount(helper);
+            var queuedRevisions = GetQueuedHighPriorityDisplayInfoRevisions(helper);
+
+            releaseFirstSend.TrySetResult();
+            await WaitUntilAsync(() => GetHighPriorityQueueCount(helper) == 0, TimeSpan.FromSeconds(5));
+            await Task.Delay(100, cts.Token);
+
+            Assert.Equal(256, cappedDepth);
+            Assert.Equal(256, queuedRevisions.Length);
+            Assert.Equal(totalRevisions - 1, queuedRevisions[^1]);
+            Assert.Contains(totalRevisions - 1, queuedRevisions);
+            Assert.DoesNotContain(totalRevisions - 2, queuedRevisions);
+            Assert.True(helper.HighPriorityControlQueueOverflowCount > 0);
+            Assert.Equal(0, helper.HighPriorityControlRejectedCount);
+            Assert.True(helper.HighPriorityControlCoalescedCount > 0);
+            Assert.Equal(0, helper.HighPriorityControlDroppedForStopCount);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
     private static async Task ConnectAsync(
         NknSignalingTransport host,
         NknSignalingTransport helper,
@@ -533,5 +663,73 @@ public sealed class RemoteControlTransportPriorityLaneTests
         }
 
         Assert.True(condition(), $"Condition was not met within {timeout}.");
+    }
+
+    private static int GetHighPriorityQueueCount(NknSignalingTransport transport)
+    {
+        var field = typeof(NknSignalingTransport).GetField(
+            "highPriorityControlOutboundQueue",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+
+        var queue = field!.GetValue(transport);
+        Assert.NotNull(queue);
+
+        var countProperty = queue!.GetType().GetProperty("Count", BindingFlags.Instance | BindingFlags.Public);
+        Assert.NotNull(countProperty);
+        return (int)(countProperty!.GetValue(queue) ?? 0);
+    }
+
+    private static T? GetPrivateField<T>(object instance, string fieldName)
+    {
+        var field = instance.GetType().GetField(
+            fieldName,
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return (T?)field!.GetValue(instance);
+    }
+
+    private static int[] GetQueuedHighPriorityDisplayInfoRevisions(NknSignalingTransport transport)
+    {
+        var queue = GetPrivateField<object>(transport, "highPriorityControlOutboundQueue");
+        Assert.NotNull(queue);
+
+        var sharedKey = GetPrivateField<byte[]?>(transport, "controlSessionSharedKey");
+        Assert.NotNull(sharedKey);
+
+        var sessionId = Assert.IsType<SessionId>(transport.CurrentSessionSecurityState.SessionId);
+        var revisions = new List<int>();
+
+        foreach (var queued in (System.Collections.IEnumerable)queue!)
+        {
+            var envelope = GetPrivateProperty<Envelope>(queued, "Envelope");
+            if (envelope.Type != MsgType.ControlDisplayInfo)
+            {
+                continue;
+            }
+
+            var securePayload = SessionSecureEnvelopeCodec.Decrypt(
+                sharedKey!,
+                envelope.Payload,
+                new SessionSecureEnvelopeExpectation(
+                    Family: SessionSecureMessageFamily.RemoteControl,
+                    MessageType: "control_display_info",
+                    SessionId: sessionId));
+            Assert.True(
+                RemoteControlPayloadCodec.TryDeserializeControlDisplayInfo(securePayload.Plaintext, out var displayInfo),
+                "Expected queued high-priority payload to deserialize as ControlDisplayInfo.");
+            revisions.Add(checked((int)displayInfo.Revision));
+        }
+
+        return revisions.ToArray();
+    }
+
+    private static T GetPrivateProperty<T>(object instance, string propertyName)
+    {
+        var property = instance.GetType().GetProperty(
+            propertyName,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        Assert.NotNull(property);
+        return Assert.IsType<T>(property!.GetValue(instance));
     }
 }

@@ -90,6 +90,22 @@
             <Setter Property="VerticalContentAlignment" Value="Center"/>
             <Setter Property="MinWidth" Value="220"/>
         </Style>
+
+        <Style Selector="Border.inlineBadge">
+            <Setter Property="Background" Value="{StaticResource AppPanelBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource AppCardBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="999"/>
+            <Setter Property="Padding" Value="10,4"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+
+        <Style Selector="TextBlock.inlineBadgeText">
+            <Setter Property="Foreground" Value="{StaticResource AppTextBrush}"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
     </UserControl.Styles>
 
     <Grid Background="{StaticResource AppBackgroundBrush}">
@@ -229,9 +245,96 @@
 
                                     <Border Background="{StaticResource AppMutedPanelBrush}"
                                             CornerRadius="18"
-                                            Padding="24"
-                                            IsVisible="{Binding ShowMainControls}">
+                                            Padding="28"
+                                            IsVisible="{Binding ShowFailurePanel}">
+                                        <StackPanel Spacing="14"
+                                                    HorizontalAlignment="Stretch">
+                                            <TextBlock Text="{Binding FailureTitle}"
+                                                       Foreground="{StaticResource AppTextBrush}"
+                                                       FontSize="28"
+                                                       FontWeight="Bold"
+                                                       TextAlignment="Center"
+                                                       HorizontalAlignment="Center"
+                                                       TextWrapping="Wrap"
+                                                       MaxWidth="460"/>
+
+                                            <TextBlock Text="{Binding FailureMessage}"
+                                                       Foreground="{StaticResource AppMutedTextBrush}"
+                                                       FontSize="16"
+                                                       TextAlignment="Center"
+                                                       HorizontalAlignment="Center"
+                                                       TextWrapping="Wrap"
+                                                       MaxWidth="520"/>
+
+                                            <StackPanel Orientation="Horizontal"
+                                                        Spacing="12"
+                                                        HorizontalAlignment="Center">
+                                                <Button Classes="appButton secondaryButton compactSecondaryAction"
+                                                        Content="{Binding FailureActionText}"
+                                                        Command="{Binding RetryCommand}"
+                                                        MinWidth="136"
+                                                        IsVisible="{Binding ShowRetryAction}"/>
+                                                <Button Classes="appButton secondaryButton compactSecondaryAction"
+                                                        Content="Open diagnostics"
+                                                        Command="{Binding OpenDiagnosticsCommand}"
+                                                        MinWidth="160"
+                                                        IsVisible="{Binding ShowOpenDiagnosticsLink}"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+
+                                        <Border Background="{StaticResource AppMutedPanelBrush}"
+                                                CornerRadius="18"
+                                                Padding="24"
+                                                IsVisible="{Binding ShowMainControls}">
                                             <StackPanel Spacing="20">
+                                                <Border Background="{StaticResource AppSurfaceBrush}"
+                                                        CornerRadius="18"
+                                                        Padding="20"
+                                                        HorizontalAlignment="Stretch"
+                                                        IsVisible="{Binding ShowHelperIdentityBootstrapPanel}">
+                                                    <StackPanel Spacing="8">
+                                                        <Grid ColumnDefinitions="*,Auto"
+                                                              ColumnSpacing="10">
+                                                            <TextBlock Text="1. Share your helper address"
+                                                                       Foreground="{StaticResource AppTextBrush}"
+                                                                       FontSize="17"
+                                                                       FontWeight="SemiBold"
+                                                                       HorizontalAlignment="Left"
+                                                                       TextAlignment="Left"
+                                                                       VerticalAlignment="Center"/>
+                                                            <Border Grid.Column="1"
+                                                                    Classes="inlineBadge"
+                                                                    IsVisible="{Binding ShowFirstPillVerificationCode}">
+                                                                <TextBlock Classes="inlineBadgeText"
+                                                                           AutomationProperties.AutomationId="Helper.FirstPillVerificationCode"
+                                                                           Text="{Binding FirstPillVerificationCodeText}"/>
+                                                            </Border>
+                                                        </Grid>
+                                                        <Grid ColumnDefinitions="*,*"
+                                                              ColumnSpacing="10"
+                                                              HorizontalAlignment="Center"
+                                                              MaxWidth="410">
+                                                            <Button Grid.Column="0"
+                                                                    Classes="appButton primaryButton compactSecondaryAction"
+                                                                    AutomationProperties.AutomationId="Helper.ShareHelperIdentity"
+                                                                    Content="Share helper address"
+                                                                    Command="{Binding ShareHelperIdentityCommand}"
+                                                                    IsEnabled="{Binding HasHelperIdentityBootstrapVerificationCode}"
+                                                                    HorizontalAlignment="Stretch"
+                                                                    MinWidth="0"/>
+                                                            <Button Grid.Column="1"
+                                                                    Classes="appButton primaryButton compactSecondaryAction"
+                                                                    AutomationProperties.AutomationId="Helper.CopyHelperIdentity"
+                                                                    Content="Copy helper address"
+                                                                    Command="{Binding CopyHelperIdentityCommand}"
+                                                                    IsEnabled="{Binding HasHelperIdentityBootstrapVerificationCode}"
+                                                                    HorizontalAlignment="Stretch"
+                                                                    MinWidth="0"/>
+                                                        </Grid>
+                                                    </StackPanel>
+                                                </Border>
+
                                                 <Border Background="{StaticResource AppSurfaceBrush}"
                                                         CornerRadius="18"
                                                         Padding="20"
@@ -239,7 +342,7 @@
                                                         IsVisible="{Binding ShowMainControls}">
                                                     <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto"
                                                           RowSpacing="16">
-                                                        <TextBlock Text="Paste invite"
+                                                        <TextBlock Text="2. Paste invite"
                                                                    Foreground="{StaticResource AppTextBrush}"
                                                                    FontSize="17"
                                                                    FontWeight="SemiBold"
@@ -298,54 +401,27 @@
                                                     </Grid>
                                                 </Border>
 
-                                            <Border Classes="appPanel"
-                                                    Padding="16"
-                                                    IsVisible="{Binding ShowHelperVerificationCode}">
-                                                <StackPanel Spacing="8">
-                                                    <TextBlock Text="Verification code"
+                                                <StackPanel HorizontalAlignment="Center"
+                                                            IsVisible="{Binding ShowMainControls}">
+                                                    <Button Classes="linkButton linkAction"
+                                                            AutomationProperties.AutomationId="Helper.CopyInstallLink"
+                                                            Content="Copy install link"
+                                                            TabIndex="2"
+                                                            Command="{Binding CopyInstallMessageCommand}"/>
+                                                    <TextBlock AutomationProperties.AutomationId="Helper.CopyInstallFeedback"
                                                                Classes="appMuted"
-                                                               FontSize="12"
-                                                               TextAlignment="Center"
-                                                               HorizontalAlignment="Center"/>
-                                                    <TextBlock AutomationProperties.AutomationId="Helper.VerificationCode"
-                                                               Text="{Binding HelperVerificationCode}"
-                                                               Foreground="{StaticResource AppTextBrush}"
-                                                               FontSize="24"
-                                                               FontWeight="SemiBold"
-                                                               LetterSpacing="0.3"
-                                                               TextAlignment="Center"
-                                                               HorizontalAlignment="Center"/>
-                                                    <TextBlock Text="Read this code to the helpee while waiting for approval."
-                                                               Classes="appMuted"
-                                                               FontSize="12"
-                                                               TextWrapping="Wrap"
+                                                               Text="{Binding CopyFeedback.Text}"
+                                                               FontSize="14"
                                                                TextAlignment="Center"
                                                                HorizontalAlignment="Center"
-                                                               MaxWidth="420"/>
+                                                               VerticalAlignment="Top"
+                                                               MinHeight="20"
+                                                               Margin="0,6,0,0"
+                                                               MaxWidth="380"/>
                                                 </StackPanel>
-                                            </Border>
 
-                                            <StackPanel HorizontalAlignment="Center"
-                                                        IsVisible="{Binding ShowMainControls}">
-                                                <Button Classes="linkButton linkAction"
-                                                        AutomationProperties.AutomationId="Helper.CopyInstallLink"
-                                                        Content="Copy install link"
-                                                        TabIndex="2"
-                                                        Command="{Binding CopyInstallMessageCommand}"/>
-                                                <TextBlock AutomationProperties.AutomationId="Helper.CopyInstallFeedback"
-                                                           Classes="appMuted"
-                                                           Text="{Binding CopyFeedback.Text}"
-                                                           FontSize="14"
-                                                           TextAlignment="Center"
-                                                           HorizontalAlignment="Center"
-                                                           VerticalAlignment="Top"
-                                                           MinHeight="20"
-                                                           Margin="0,6,0,0"
-                                                           MaxWidth="380"/>
                                             </StackPanel>
-
-                                        </StackPanel>
-                                    </Border>
+                                        </Border>
                                 </StackPanel>
                             </Border>
                         </Grid>

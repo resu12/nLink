@@ -12,11 +12,14 @@ public partial class MainWindow : Window
 {
     private MainWindowViewModel? subscribedViewModel;
     private bool narwhalImageLoaded;
+    private bool closePrepared;
+    private bool closePreparationInProgress;
 
     public MainWindow()
     {
         InitializeComponent();
         DataContextChanged += OnDataContextChanged;
+        Closing += OnMainWindowClosing;
         KeyDown += OnMainWindowKeyDown;
         TryLoadNarwhalPeekImage();
     }
@@ -89,6 +92,33 @@ public partial class MainWindow : Window
         {
             vm.ToggleDebugPanel();
             e.Handled = true;
+        }
+    }
+
+    private async void OnMainWindowClosing(object? sender, WindowClosingEventArgs e)
+    {
+        if (closePrepared || closePreparationInProgress)
+        {
+            return;
+        }
+
+        if (DataContext is not MainWindowViewModel vm)
+        {
+            return;
+        }
+
+        closePreparationInProgress = true;
+        e.Cancel = true;
+
+        try
+        {
+            await vm.PrepareForWindowCloseAsync();
+        }
+        finally
+        {
+            closePreparationInProgress = false;
+            closePrepared = true;
+            Close();
         }
     }
 }

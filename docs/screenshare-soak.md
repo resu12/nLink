@@ -19,9 +19,22 @@ The runner prints periodic snapshots:
 - `FramesCaptured`
 - `FramesSent`
 - `FramesDropped`
+- `FramesDroppedByRateGate`
+- `FramesDroppedByQueueEvict`
 - `FramesCompleted`
 - `DecodeErrors`
 - `EnqueueFailures`
+- `DisplayInfoSends`
+- `AvgCaptureToEnqueueMs`
+- `AvgEnqueueToSendMs`
+- `AvgCaptureToSendMs`
+- `LastCaptureToSendAgeMs`
+- `AvgRawFrameBytes`
+- `AvgSerializedChunkBytes`
+- `AvgBridgeBytes`
+- `AvgRenderIntervalMs`
+- `AvgCaptureToRenderMs`
+- `StaleFrameRenders`
 
 On shutdown it:
 

@@ -68,6 +68,24 @@ public sealed class SessionConnectInputResolverTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void Resolve_InviteShareCode_ReturnsInviteKindAndDecodedRawToken()
+    {
+        var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_000_100_000);
+        var resolver = CreateResolver();
+        var token = CreateInviteToken(nowUtc, lifetime: TimeSpan.FromMinutes(2));
+        var shareCode = InviteShareCodeCodec.Encode(token);
+
+        var result = resolver.Resolve(shareCode, nowUtc.AddSeconds(5));
+
+        Assert.True(result.IsValid, result.Message);
+        Assert.Equal(ConnectInputKind.InviteToken, result.Kind);
+        Assert.NotNull(result.Invite);
+        Assert.Equal(token, result.InviteTokenText);
+        Assert.Equal("nlink-helpee.target", result.TargetAddress?.Value);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void Format_QrInvite_ReturnsRawInviteToken()
     {
         var token = "nlinki1.testpayload.testsignature";
@@ -105,7 +123,7 @@ public sealed class SessionConnectInputResolverTests
 
     [Trait("Category", "Smoke")]
     [Fact]
-    public void Resolve_TamperedInvite_ReturnsSignatureFailure()
+    public void Resolve_TamperedInvite_ReturnsParsedInviteForHelpeeSideValidation()
     {
         var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_000_250_000);
         var resolver = CreateResolver();
@@ -121,9 +139,12 @@ public sealed class SessionConnectInputResolverTests
 
         var result = resolver.Resolve(tamperedToken, nowUtc.AddSeconds(1));
 
-        Assert.False(result.IsValid);
-        Assert.Equal(ConnectInputValidationError.InvalidInviteToken, result.Error);
-        Assert.Equal(InviteTokenValidationError.SignatureInvalid, result.InviteValidationError);
+        Assert.True(result.IsValid, result.Message);
+        Assert.Equal(ConnectInputKind.InviteToken, result.Kind);
+        Assert.NotNull(result.Invite);
+        Assert.Equal(tamperedToken, result.InviteTokenText);
+        Assert.Equal("nlink-helpee.tampered", result.TargetAddress?.Value);
+        Assert.Equal(InviteTokenValidationError.None, result.InviteValidationError);
     }
 
     [Trait("Category", "Smoke")]
@@ -142,10 +163,7 @@ public sealed class SessionConnectInputResolverTests
     private static ConnectInputResolver CreateResolver()
     {
         var codec = new InviteTokenCodec();
-        var signer = new HmacSha256InviteSignatureService(
-            Encoding.UTF8.GetBytes("nlink-invite-signing-key-v1"));
-        var validator = new InviteTokenValidator(codec, signer, new InviteExpiryValidator());
-        return new ConnectInputResolver(codec, validator);
+        return new ConnectInputResolver(codec, new InviteExpiryValidator());
     }
 
     private static string CreateInviteToken(DateTimeOffset nowUtc, TimeSpan lifetime)
@@ -223,6 +241,27 @@ public sealed class SessionRuntimeAddressConnectTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task StartHelperAsync_InviteShareCode_UsesDecodedInviteTargetTransportPath()
+    {
+        var fakeTransport = new FakeAddressTransport();
+        using var runtime = new SessionRuntime(() => fakeTransport);
+        var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_000_500_000);
+        var token = CreateInviteToken(nowUtc, lifetime: TimeSpan.FromMinutes(2));
+        var shareCode = InviteShareCodeCodec.Encode(token);
+        var resolver = CreateResolver();
+        var resolution = resolver.Resolve(shareCode, nowUtc.AddSeconds(1));
+        Assert.True(resolution.IsValid, resolution.Message);
+        Assert.NotNull(resolution.Invite);
+        Assert.Equal(token, resolution.InviteTokenText);
+
+        await runtime.StartHelperAsync(resolution.InviteTokenText!, resolution.Invite!, CancellationToken.None);
+
+        Assert.Equal(token, fakeTransport.LastJoinByInviteToken);
+        Assert.Equal("sess_address_native", fakeTransport.LastJoinInviteSessionId);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task StartHelpeeAsync_AddressNative_UsesAddressHostTransportPath()
     {
         var fakeTransport = new FakeAddressTransport();
@@ -236,10 +275,7 @@ public sealed class SessionRuntimeAddressConnectTests
     private static ConnectInputResolver CreateResolver()
     {
         var codec = new InviteTokenCodec();
-        var signer = new HmacSha256InviteSignatureService(
-            Encoding.UTF8.GetBytes("nlink-invite-signing-key-v1"));
-        var validator = new InviteTokenValidator(codec, signer, new InviteExpiryValidator());
-        return new ConnectInputResolver(codec, validator);
+        return new ConnectInputResolver(codec, new InviteExpiryValidator());
     }
 
     private static string CreateInviteToken(DateTimeOffset nowUtc, TimeSpan lifetime)

@@ -1,5 +1,7 @@
+using System.Security.Cryptography;
 using System.Text;
 using NLink.Core.SessionConnect;
+using NLink.SmokeTests.TestUtilities;
 
 namespace NLink.SmokeTests;
 
@@ -354,6 +356,181 @@ public sealed class SessionConnectInviteTokenTests
         }
     }
 
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void InviteTokenServiceFactory_DefaultLegacySigningMode_IsBlockedInReleaseWithoutExplicitOptIn()
+    {
+        using var inviteMode = new ScopedEnvironmentVariable(InviteTokenServiceFactory.InviteModeEnvVar, InviteTokenServiceFactory.InviteModeLegacySigned);
+        using var legacyModeOptIn = new ScopedEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, null);
+        using var signingKey = new ScopedEnvironmentVariable(InviteTokenServiceFactory.InviteSigningKeyEnvVar, null);
+        using var legacyOptIn = new ScopedEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteSigningEnvVar, null);
+
+#if DEBUG
+        var keyMaterial = InviteTokenServiceFactory.ReadInviteSigningKeyMaterial();
+        Assert.Equal(InviteTokenServiceFactory.DefaultInviteSigningKey, Encoding.UTF8.GetString(keyMaterial));
+#else
+        var modeEx = Assert.Throws<InvalidOperationException>(() => InviteTokenServiceFactory.CreateInviteTokenFactory());
+        Assert.Contains(InviteTokenServiceFactory.InviteModeEnvVar, modeEx.Message, StringComparison.Ordinal);
+        Assert.Contains(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, modeEx.Message, StringComparison.Ordinal);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => InviteTokenServiceFactory.ReadInviteSigningKeyMaterial());
+        Assert.Contains(InviteTokenServiceFactory.InviteSigningKeyEnvVar, ex.Message, StringComparison.Ordinal);
+        Assert.Contains(InviteTokenServiceFactory.AllowInsecureLegacyInviteSigningEnvVar, ex.Message, StringComparison.Ordinal);
+
+        Assert.Throws<InvalidOperationException>(() => InviteTokenServiceFactory.CreateInviteTokenValidator());
+        Assert.Throws<InvalidOperationException>(() => InviteTokenServiceFactory.CreateInviteSignatureService());
+        Assert.NotNull(InviteTokenServiceFactory.CreateDefaultResolver());
+#endif
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void InviteTokenServiceFactory_LegacySigningMode_CanBeExplicitlyEnabledForInternalUse()
+    {
+        using var inviteMode = new ScopedEnvironmentVariable(InviteTokenServiceFactory.InviteModeEnvVar, InviteTokenServiceFactory.InviteModeLegacySigned);
+        using var legacyModeOptIn = new ScopedEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, "1");
+        using var signingKey = new ScopedEnvironmentVariable(InviteTokenServiceFactory.InviteSigningKeyEnvVar, null);
+        using var legacyOptIn = new ScopedEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteSigningEnvVar, "1");
+
+        var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_000_280_000);
+        var request = new InviteTokenCreateRequest(
+            IssuerAddress: new PeerAddress("nlink-helper.legacy.1111"),
+            TargetAddress: new PeerAddress("nlink-helpee.legacy.2222"),
+            SessionId: new SessionId("sess_legacy_optin"),
+            Capabilities: InviteCapabilities.Chat,
+            Lifetime: TimeSpan.FromMinutes(2));
+
+        var factory = InviteTokenServiceFactory.CreateInviteTokenFactory();
+        var created = factory.Create(request, nowUtc);
+        Assert.True(created.IsSuccess, created.Message);
+
+        var validator = InviteTokenServiceFactory.CreateInviteTokenValidator();
+        var validated = validator.Validate(created.Token, nowUtc.AddSeconds(1));
+        Assert.True(validated.IsSuccess, validated.Message);
+        Assert.NotNull(validated.Invite);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void InviteTokenServiceFactory_DefaultMode_UsesIssuedSecretInvites_WithoutSigningKey()
+    {
+        using var inviteMode = new ScopedEnvironmentVariable(InviteTokenServiceFactory.InviteModeEnvVar, null);
+        using var signingKey = new ScopedEnvironmentVariable(InviteTokenServiceFactory.InviteSigningKeyEnvVar, null);
+        using var legacyOptIn = new ScopedEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteSigningEnvVar, null);
+
+        var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_000_290_000);
+        var request = new InviteTokenCreateRequest(
+            IssuerAddress: new PeerAddress("nlink-helper.configured.1111"),
+            TargetAddress: new PeerAddress("nlink-helpee.configured.2222"),
+            SessionId: new SessionId("sess_configured_key"),
+            Capabilities: InviteCapabilities.Chat,
+            Lifetime: TimeSpan.FromMinutes(2));
+
+        var factory = InviteTokenServiceFactory.CreateInviteTokenFactory();
+        var created = factory.Create(request, nowUtc);
+        Assert.True(created.IsSuccess, created.Message);
+        Assert.NotNull(created.Token);
+
+        var validator = InviteTokenServiceFactory.CreateInviteTokenValidator();
+        var validated = validator.Validate(created.Token, nowUtc.AddSeconds(1));
+        Assert.True(validated.IsSuccess, validated.Message);
+        Assert.NotNull(validated.Invite);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void InviteIssuedSecretToken_InspectOnly_DoesNotConsume_AndPersistentStore_DoesNotContainRawProof()
+    {
+        var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_000_295_000);
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-issued-invite-store-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var storePath = Path.Combine(tempDir, "invite-security-store.json");
+
+        try
+        {
+            var request = new InviteTokenCreateRequest(
+                IssuerAddress: new PeerAddress("nlink-helper.issued.1111"),
+                TargetAddress: new PeerAddress("nlink-helpee.issued.2222"),
+                SessionId: new SessionId("sess_issued_store"),
+                Capabilities: InviteCapabilities.Chat,
+                Lifetime: TimeSpan.FromMinutes(2));
+
+            var codec = new InviteTokenCodec();
+            var store = new PersistentInviteSecurityStore(new InviteSecurityStoreOptions { FilePath = storePath });
+            var factory = new IssuedSecretInviteTokenFactory(codec, store);
+            var validator = new IssuedSecretInviteTokenValidator(codec, new InviteExpiryValidator(), store);
+
+            var created = factory.Create(request, nowUtc);
+            Assert.True(created.IsSuccess, created.Message);
+            Assert.NotNull(created.Token);
+
+            var tokenParts = created.Token!.Split('.', StringSplitOptions.None);
+            Assert.Equal(3, tokenParts.Length);
+            var rawProofSegment = tokenParts[2];
+            var proofHashKey = ComputeProofHashKey(DecodeBase64Url(rawProofSegment));
+
+            var persisted = File.ReadAllText(storePath);
+            Assert.Contains("issuedInvitesByProofHash", persisted, StringComparison.Ordinal);
+            Assert.Contains(proofHashKey, persisted, StringComparison.Ordinal);
+            Assert.DoesNotContain(rawProofSegment, persisted, StringComparison.Ordinal);
+
+            var firstInspect = validator.Validate(created.Token, nowUtc.AddSeconds(1), InviteValidationMode.InspectOnly);
+            var secondInspect = validator.Validate(created.Token, nowUtc.AddSeconds(2), InviteValidationMode.InspectOnly);
+            var firstConsume = validator.Validate(created.Token, nowUtc.AddSeconds(3), InviteValidationMode.ConsumeIfValid);
+            var secondConsume = validator.Validate(created.Token, nowUtc.AddSeconds(4), InviteValidationMode.ConsumeIfValid);
+
+            Assert.True(firstInspect.IsSuccess, firstInspect.Message);
+            Assert.True(secondInspect.IsSuccess, secondInspect.Message);
+            Assert.True(firstConsume.IsSuccess, firstConsume.Message);
+            Assert.False(secondConsume.IsSuccess);
+            Assert.Equal(InviteValidationResult.ReplayDetected, secondConsume.Result);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void InviteTokenServiceFactory_DefaultMode_TamperedCapabilities_AreRejectedOnConsume()
+    {
+        using var inviteMode = new ScopedEnvironmentVariable(InviteTokenServiceFactory.InviteModeEnvVar, null);
+        using var signingKey = new ScopedEnvironmentVariable(InviteTokenServiceFactory.InviteSigningKeyEnvVar, null);
+        using var legacyOptIn = new ScopedEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteSigningEnvVar, null);
+
+        var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_000_300_000);
+        var request = new InviteTokenCreateRequest(
+            IssuerAddress: new PeerAddress("nlink-helper.default.1111"),
+            TargetAddress: new PeerAddress("nlink-helpee.default.2222"),
+            SessionId: new SessionId("sess_default_tamper"),
+            Capabilities: InviteCapabilities.Chat,
+            Lifetime: TimeSpan.FromMinutes(2));
+
+        var factory = InviteTokenServiceFactory.CreateInviteTokenFactory();
+        var created = factory.Create(request, nowUtc);
+        Assert.True(created.IsSuccess, created.Message);
+        Assert.NotNull(created.Token);
+
+        var parts = created.Token!.Split('.', StringSplitOptions.None);
+        Assert.Equal(3, parts.Length);
+        var payloadJson = Encoding.UTF8.GetString(DecodeBase64Url(parts[1]));
+        var tamperedJson = payloadJson.Replace("\"cap\":1", "\"cap\":7", StringComparison.Ordinal);
+        var tamperedPayload = EncodeBase64Url(Encoding.UTF8.GetBytes(tamperedJson));
+        var tamperedToken = $"{parts[0]}.{tamperedPayload}.{parts[2]}";
+
+        var validator = InviteTokenServiceFactory.CreateInviteTokenValidator();
+        var inspected = validator.Validate(tamperedToken, nowUtc.AddSeconds(1), InviteValidationMode.InspectOnly);
+        Assert.True(inspected.IsSuccess, inspected.Message);
+
+        var consumed = validator.Validate(tamperedToken, nowUtc.AddSeconds(1), InviteValidationMode.ConsumeIfValid);
+        Assert.False(consumed.IsSuccess);
+        Assert.Equal(InviteValidationResult.InvalidSignature, consumed.Result);
+    }
+
     private static HmacSha256InviteSignatureService CreateSigner()
     {
         return new HmacSha256InviteSignatureService(
@@ -377,5 +554,28 @@ public sealed class SessionConnectInviteTokenTests
         }
 
         return Convert.FromBase64String(normalized);
+    }
+
+    private static string ComputeProofHashKey(byte[] proofBytes)
+    {
+        return EncodeBase64Url(SHA256.HashData(proofBytes));
+    }
+
+    private sealed class ScopedEnvironmentVariable : IDisposable
+    {
+        private readonly string name;
+        private readonly string? previousValue;
+
+        public ScopedEnvironmentVariable(string name, string? value)
+        {
+            this.name = name;
+            previousValue = Environment.GetEnvironmentVariable(name);
+            Environment.SetEnvironmentVariable(name, value);
+        }
+
+        public void Dispose()
+        {
+            Environment.SetEnvironmentVariable(name, previousValue);
+        }
     }
 }

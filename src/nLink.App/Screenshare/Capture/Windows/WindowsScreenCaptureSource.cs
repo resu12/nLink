@@ -24,7 +24,8 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IScreen
     private const long DefaultJpegQuality = 60L;
     private const long MinJpegQuality = 30L;
     private const long MaxJpegQuality = 80L;
-    private const double DefaultConfiguredScale = 0.75d;
+    private const long TransportPressureJpegQualityReduction = 10L;
+    private const double DefaultConfiguredScale = 1d;
     private const double MinConfiguredScale = 0.25d;
     private const double MaxConfiguredScale = 1d;
     private const double ScaleFull = 1d;
@@ -62,6 +63,7 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IScreen
     private int encodedFrameCount;
     private long lastCaptureTimestampTick;
     private long effectiveMinFrameIntervalTimestampTicks;
+    private bool transportPressureActive;
 
     public WindowsScreenCaptureSource()
         : this(
@@ -121,6 +123,14 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IScreen
         Volatile.Write(
             ref effectiveMinFrameIntervalTimestampTicks,
             TimeSpanToStopwatchTicks(TimeSpan.FromMilliseconds(1000d / clamped)));
+    }
+
+    public void SetTransportPressureHint(bool prefersLowerBandwidth)
+    {
+        lock (sync)
+        {
+            transportPressureActive = prefersLowerBandwidth;
+        }
     }
 
     /// <inheritdoc />
@@ -329,7 +339,8 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IScreen
                 averageEncodeDuration,
                 ewmaEncodeDuration,
                 GetAdaptiveScaleFactor(adaptiveScaleIndex),
-                jpegQuality);
+                GetTransportPressureScaleFactor(transportPressureActive),
+                GetEffectiveJpegQuality(transportPressureActive));
         }
     }
 
@@ -343,18 +354,20 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IScreen
 
     private ScreenCaptureFrameEventArgs EncodeFrame(Bitmap sourceBitmap, int width, int height)
     {
+        var transportPressureScaleFactor = GetTransportPressureScaleFactorSnapshot();
         var scale = Math.Clamp(
-            GetBaseScale(width) * configuredScale * GetAdaptiveScaleFactorSnapshot(),
+            GetBaseScale(width) * configuredScale * Math.Min(GetAdaptiveScaleFactorSnapshot(), transportPressureScaleFactor),
             MinConfiguredScale,
             MaxConfiguredScale);
         var scaledWidth = Math.Max(1, (int)Math.Round(width * scale));
         var scaledHeight = Math.Max(1, (int)Math.Round(height * scale));
+        var effectiveJpegQuality = GetEffectiveJpegQualitySnapshot();
 
         using var encodedBitmap = scale < 1d
             ? ResizeBitmap(sourceBitmap, scaledWidth, scaledHeight)
             : new Bitmap(sourceBitmap);
         var encodeStartedAt = getTimestamp();
-        var encodedBytes = encodeBitmap(encodedBitmap, jpegQuality);
+        var encodedBytes = encodeBitmap(encodedBitmap, effectiveJpegQuality);
         var encodeCompletedAt = getTimestamp();
         RecordEncodeMetrics(
             elapsedTimestampTicks: encodeCompletedAt - encodeStartedAt,
@@ -373,7 +386,7 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IScreen
         using var graphics = Graphics.FromImage(target);
         graphics.CompositingMode = CompositingMode.SourceCopy;
         graphics.CompositingQuality = CompositingQuality.HighSpeed;
-        graphics.InterpolationMode = InterpolationMode.HighQualityBilinear;
+        graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
         graphics.PixelOffsetMode = PixelOffsetMode.HighSpeed;
         graphics.SmoothingMode = SmoothingMode.None;
         graphics.DrawImage(source, 0, 0, width, height);
@@ -432,6 +445,22 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IScreen
         }
     }
 
+    private double GetTransportPressureScaleFactorSnapshot()
+    {
+        lock (sync)
+        {
+            return GetTransportPressureScaleFactor(transportPressureActive);
+        }
+    }
+
+    private long GetEffectiveJpegQualitySnapshot()
+    {
+        lock (sync)
+        {
+            return GetEffectiveJpegQuality(transportPressureActive);
+        }
+    }
+
     private static double GetAdaptiveScaleFactor(int scaleIndex)
         => scaleIndex switch
         {
@@ -439,6 +468,14 @@ internal sealed class WindowsScreenCaptureSource : IScreenCaptureSource, IScreen
             1 => ScaleReduced,
             _ => ScaleMinimum,
         };
+
+    private static double GetTransportPressureScaleFactor(bool prefersLowerBandwidth)
+        => prefersLowerBandwidth ? ScaleReduced : ScaleFull;
+
+    private long GetEffectiveJpegQuality(bool prefersLowerBandwidth)
+        => prefersLowerBandwidth
+            ? Math.Max(MinJpegQuality, jpegQuality - TransportPressureJpegQualityReduction)
+            : jpegQuality;
 
     private void RecordEncodeMetrics(long elapsedTimestampTicks, int encodedBytesLength)
     {
@@ -539,4 +576,5 @@ internal readonly record struct WindowsScreenCaptureEncodeMetricsSnapshot(
     TimeSpan AverageEncodeDuration,
     TimeSpan CurrentAverageEncodeDuration,
     double AdaptiveScaleFactor,
+    double TransportPressureScaleFactor,
     long JpegQuality);

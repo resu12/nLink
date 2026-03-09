@@ -34,6 +34,27 @@ public partial class HelpeePageView : UserControl
         e.Handled = true;
     }
 
+    private void InviteHelperIdentityInput_KeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter)
+        {
+            return;
+        }
+
+        if (DataContext is not HelpeePageViewModel vm)
+        {
+            return;
+        }
+
+        if (!vm.ApplyInviteHelperIdentityCommand.CanExecute(null))
+        {
+            return;
+        }
+
+        vm.ApplyInviteHelperIdentityCommand.Execute(null);
+        e.Handled = true;
+    }
+
     private void BindClipboardTopLevel()
     {
         if (TryGetClipboardService() is not AvaloniaClipboardService service)

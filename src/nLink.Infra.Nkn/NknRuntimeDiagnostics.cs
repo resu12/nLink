@@ -1,3 +1,5 @@
+using NLink.Core.Logging;
+
 namespace NLink.Infra.Nkn;
 
 public static class NknRuntimeDiagnostics
@@ -19,6 +21,14 @@ public static class NknRuntimeDiagnostics
     private static long messagesSent;
     private static long messagesReceived;
     private static long bridgeRawMessagesReceived;
+    private static long screenShareOutboundBusyDrops;
+    private static long screenSharePayloadBytesSent;
+    private static long screenShareMessagesSent;
+    private static long screenShareBridgeBytesSent;
+    private static long highPriorityControlQueueOverflows;
+    private static long highPriorityControlRejected;
+    private static long highPriorityControlCoalesced;
+    private static long highPriorityControlDroppedForStop;
     private static string lastBridgeMessageSource = "(none)";
     private static bool? lastBridgeMessageIsTopic;
     private static string lastEnvelopeType = "(none)";
@@ -26,6 +36,7 @@ public static class NknRuntimeDiagnostics
     private static string lastProgressEventType = "(none)";
     private static long lastProgressEventUtcTicks;
     private static string lastSelectedRpc = "(none)";
+    private static bool authoritativeConnectedAddressResolved;
     private static long joinRequestsReceived;
     private static long incomingJoinRequestRaisedCount;
     private static long acksReceived;
@@ -44,6 +55,15 @@ public static class NknRuntimeDiagnostics
             NknRuntimeDiagnostics.identifier = string.IsNullOrWhiteSpace(identifier) ? "(unknown)" : identifier;
             NknRuntimeDiagnostics.keyPath = string.IsNullOrWhiteSpace(keyPath) ? "(unknown)" : keyPath;
             NknRuntimeDiagnostics.seedRpc = string.IsNullOrWhiteSpace(seedRpc) ? "(default)" : seedRpc!;
+            authoritativeConnectedAddressResolved = false;
+        }
+    }
+
+    public static void SetAuthoritativeConnectedAddressResolved(bool resolved)
+    {
+        lock (Gate)
+        {
+            authoritativeConnectedAddressResolved = resolved;
         }
     }
 
@@ -74,6 +94,54 @@ public static class NknRuntimeDiagnostics
     public static void IncrementMessagesReceived() => Interlocked.Increment(ref messagesReceived);
 
     public static void IncrementBridgeRawMessagesReceived() => Interlocked.Increment(ref bridgeRawMessagesReceived);
+
+    public static void IncrementScreenShareOutboundBusyDrops() => Interlocked.Increment(ref screenShareOutboundBusyDrops);
+
+    public static void AddScreenSharePayloadBytesSent(long bytes)
+    {
+        if (bytes <= 0)
+        {
+            return;
+        }
+
+        Interlocked.Add(ref screenSharePayloadBytesSent, bytes);
+    }
+
+    public static void IncrementScreenShareMessagesSent() => Interlocked.Increment(ref screenShareMessagesSent);
+
+    public static void AddScreenShareBridgeBytesSent(long bytes)
+    {
+        if (bytes <= 0)
+        {
+            return;
+        }
+
+        Interlocked.Add(ref screenShareBridgeBytesSent, bytes);
+    }
+
+    public static void IncrementHighPriorityControlQueueOverflows() => Interlocked.Increment(ref highPriorityControlQueueOverflows);
+
+    public static void IncrementHighPriorityControlRejected() => Interlocked.Increment(ref highPriorityControlRejected);
+
+    public static void AddHighPriorityControlCoalesced(long count)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        Interlocked.Add(ref highPriorityControlCoalesced, count);
+    }
+
+    public static void AddHighPriorityControlDroppedForStop(long count)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        Interlocked.Add(ref highPriorityControlDroppedForStop, count);
+    }
 
     public static void SetLastBridgeMessage(string? source, bool isTopic)
     {
@@ -126,7 +194,9 @@ public static class NknRuntimeDiagnostics
     {
         lock (Gate)
         {
-            lastDisconnectReason = string.IsNullOrWhiteSpace(reason) ? "(none)" : reason!;
+            lastDisconnectReason = string.IsNullOrWhiteSpace(reason)
+                ? "(none)"
+                : SanitizeDiagnosticText(reason!);
         }
     }
 
@@ -192,7 +262,7 @@ public static class NknRuntimeDiagnostics
     {
         lock (Gate)
         {
-            lastError = message;
+            lastError = SanitizeDiagnosticText(message);
         }
     }
 
@@ -200,7 +270,7 @@ public static class NknRuntimeDiagnostics
     {
         lock (Gate)
         {
-            lastError = ex.GetType().Name + ": " + ex.Message;
+            lastError = ex.GetType().Name + ": " + SanitizeDiagnosticText(ex.Message);
         }
     }
 
@@ -224,6 +294,14 @@ public static class NknRuntimeDiagnostics
                 BridgeLastExitReason: string.IsNullOrWhiteSpace(bridgeLastExitReason) ? "(none)" : bridgeLastExitReason,
                 BridgeLastUptimeMs: bridgeLastUptimeMs,
                 BridgeRawMessagesReceived: Interlocked.Read(ref bridgeRawMessagesReceived),
+                ScreenShareOutboundBusyDrops: Interlocked.Read(ref screenShareOutboundBusyDrops),
+                ScreenSharePayloadBytesSent: Interlocked.Read(ref screenSharePayloadBytesSent),
+                ScreenShareMessagesSent: Interlocked.Read(ref screenShareMessagesSent),
+                ScreenShareBridgeBytesSent: Interlocked.Read(ref screenShareBridgeBytesSent),
+                HighPriorityControlQueueOverflows: Interlocked.Read(ref highPriorityControlQueueOverflows),
+                HighPriorityControlRejected: Interlocked.Read(ref highPriorityControlRejected),
+                HighPriorityControlCoalesced: Interlocked.Read(ref highPriorityControlCoalesced),
+                HighPriorityControlDroppedForStop: Interlocked.Read(ref highPriorityControlDroppedForStop),
                 LastBridgeMessageSource: string.IsNullOrWhiteSpace(lastBridgeMessageSource) ? "(none)" : lastBridgeMessageSource,
                 LastBridgeMessageIsTopic: lastBridgeMessageIsTopic,
                 LastEnvelopeType: string.IsNullOrWhiteSpace(lastEnvelopeType) ? "(none)" : lastEnvelopeType,
@@ -231,6 +309,7 @@ public static class NknRuntimeDiagnostics
                 LastProgressEventType: string.IsNullOrWhiteSpace(lastProgressEventType) ? "(none)" : lastProgressEventType,
                 LastProgressEventUtcTicks: Interlocked.Read(ref lastProgressEventUtcTicks),
                 LastSelectedRpc: string.IsNullOrWhiteSpace(lastSelectedRpc) ? "(none)" : lastSelectedRpc,
+                AuthoritativeConnectedAddressResolved: authoritativeConnectedAddressResolved,
                 JoinRequestsReceived: Interlocked.Read(ref joinRequestsReceived),
                 IncomingJoinRequestRaisedCount: Interlocked.Read(ref incomingJoinRequestRaisedCount),
                 AcksReceived: Interlocked.Read(ref acksReceived),
@@ -240,6 +319,12 @@ public static class NknRuntimeDiagnostics
                 FirstColdStartMs: firstColdStartMs,
                 FirstColdStartUtcTicks: Interlocked.Read(ref firstColdStartUtcTicks));
         }
+    }
+
+    private static string SanitizeDiagnosticText(string value)
+    {
+        var sanitized = SensitiveDataRedactor.Redact(value);
+        return string.IsNullOrWhiteSpace(sanitized) ? "(none)" : sanitized;
     }
 }
 
@@ -259,6 +344,14 @@ public readonly record struct NknRuntimeDiagnosticsSnapshot(
     string BridgeLastExitReason,
     double BridgeLastUptimeMs,
     long BridgeRawMessagesReceived,
+    long ScreenShareOutboundBusyDrops,
+    long ScreenSharePayloadBytesSent,
+    long ScreenShareMessagesSent,
+    long ScreenShareBridgeBytesSent,
+    long HighPriorityControlQueueOverflows,
+    long HighPriorityControlRejected,
+    long HighPriorityControlCoalesced,
+    long HighPriorityControlDroppedForStop,
     string LastBridgeMessageSource,
     bool? LastBridgeMessageIsTopic,
     string LastEnvelopeType,
@@ -266,6 +359,7 @@ public readonly record struct NknRuntimeDiagnosticsSnapshot(
     string LastProgressEventType,
     long LastProgressEventUtcTicks,
     string LastSelectedRpc,
+    bool AuthoritativeConnectedAddressResolved,
     long JoinRequestsReceived,
     long IncomingJoinRequestRaisedCount,
     long AcksReceived,

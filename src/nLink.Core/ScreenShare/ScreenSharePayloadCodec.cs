@@ -1,4 +1,6 @@
+using System.Text.Encodings.Web;
 using System.Text.Json;
+using NLink.Core.Logging;
 
 namespace NLink.Core.ScreenShare;
 
@@ -6,12 +8,14 @@ public static class ScreenSharePayloadCodec
 {
     public const string ScreenShareFrameTypeV1 = "screenshare.frame.v1";
     public const string ScreenShareStopTypeV1 = "screenshare.stop.v1";
-    // Keep each serialized screenshare message comfortably below the NKN bridge
-    // payload sizes that have been observed to destabilize active sessions.
-    public const int MaxChunkRawBytes = 8_000;
+    // Keep each serialized screenshare message comfortably below the transport
+    // budgets that have been stable in practice, while reducing chunks/frame.
+    public const int MaxChunkRawBytes = 12_000;
+    public const int MaxSerializedFramePayloadBytes = 18_000;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         PropertyNamingPolicy = null,
         WriteIndented = false,
     };
@@ -19,7 +23,16 @@ public static class ScreenSharePayloadCodec
     public static byte[] Serialize(ScreenShareFrameChunkV1 msg)
     {
         ArgumentNullException.ThrowIfNull(msg);
-        return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
+        if (payload.Length > MaxSerializedFramePayloadBytes)
+        {
+            var diagnostics = BuildFrameChunkSerializationDiagnostics(msg, payload.Length);
+            LocalOperationalLog.Warn("ScreenSharePayload", $"event=serialize_frame_payload_budget_exceeded; {diagnostics}");
+            throw new InvalidOperationException(
+                $"Serialized screenshare frame payload exceeded safe budget of {MaxSerializedFramePayloadBytes} bytes ({diagnostics}).");
+        }
+
+        return payload;
     }
 
     public static byte[] SerializeStop(ScreenShareStopMessageV1 msg)
@@ -141,5 +154,43 @@ public static class ScreenSharePayloadCodec
         {
             return false;
         }
+    }
+
+    private static string BuildFrameChunkSerializationDiagnostics(ScreenShareFrameChunkV1 msg, int serializedLength)
+    {
+        var rawChunkBytes = EstimateRawBytesFromBase64(msg.DataBase64);
+        return string.Join(
+            "; ",
+            $"serialized_bytes={serializedLength}",
+            $"budget_bytes={MaxSerializedFramePayloadBytes}",
+            $"raw_chunk_bytes={rawChunkBytes}",
+            $"base64_bytes={msg.DataBase64.Length}",
+            $"session_id_len={msg.SessionId?.Length ?? 0}",
+            $"frame_id={msg.FrameId}",
+            $"frame={msg.Width}x{msg.Height}",
+            $"chunk={msg.ChunkIndex + 1}/{msg.ChunkCount}",
+            $"encoding={msg.Encoding}");
+    }
+
+    private static int EstimateRawBytesFromBase64(string? base64)
+    {
+        if (string.IsNullOrEmpty(base64))
+        {
+            return 0;
+        }
+
+        var length = base64.Length;
+        var padding = 0;
+        if (length > 0 && base64[^1] == '=')
+        {
+            padding++;
+        }
+
+        if (length > 1 && base64[^2] == '=')
+        {
+            padding++;
+        }
+
+        return Math.Max(0, (length / 4 * 3) - padding);
     }
 }

@@ -7,7 +7,7 @@ public sealed class ScreenShareFrameReassembler
 {
     public const int MaxInFlightFramesPerSession = 2;
     public const int MaxChunkCount = 128;
-    public const int MaxAssembledFrameBytes = ScreenSharePayloadCodec.MaxChunkRawBytes * 64;
+    public const int MaxAssembledFrameBytes = 512_000;
 
     private readonly Dictionary<string, SessionAssemblyState> sessions = new(StringComparer.Ordinal);
     private long framesCompleted;

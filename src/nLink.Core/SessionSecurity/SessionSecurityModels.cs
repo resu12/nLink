@@ -72,6 +72,16 @@ public enum SessionHandshakeState
     Invalidated = 6,
 }
 
+public enum SessionSecureMessageFamily
+{
+    Chat = 1,
+    RemoteControl = 2,
+    ScreenShare = 3,
+    Lifecycle = 4,
+    FileTransfer = 5,
+    Clipboard = 6,
+}
+
 public sealed record SessionGrant(
     PeerAddress HelperIdentity,
     CapabilityGrant Capabilities,

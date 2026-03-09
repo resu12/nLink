@@ -11,6 +11,12 @@ public partial class SessionHeaderView : UserControl
     public static readonly StyledProperty<string?> StatusTextProperty =
         AvaloniaProperty.Register<SessionHeaderView, string?>(nameof(StatusText));
 
+    public static readonly StyledProperty<string?> VerificationCodeTextProperty =
+        AvaloniaProperty.Register<SessionHeaderView, string?>(nameof(VerificationCodeText));
+
+    public static readonly StyledProperty<bool> ShowVerificationCodeProperty =
+        AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(ShowVerificationCode), false);
+
     public static readonly StyledProperty<ICommand?> EndSessionCommandProperty =
         AvaloniaProperty.Register<SessionHeaderView, ICommand?>(nameof(EndSessionCommand));
 
@@ -92,6 +98,18 @@ public partial class SessionHeaderView : UserControl
     {
         get => GetValue(StatusTextProperty);
         set => SetValue(StatusTextProperty, value);
+    }
+
+    public string? VerificationCodeText
+    {
+        get => GetValue(VerificationCodeTextProperty);
+        set => SetValue(VerificationCodeTextProperty, value);
+    }
+
+    public bool ShowVerificationCode
+    {
+        get => GetValue(ShowVerificationCodeProperty);
+        set => SetValue(ShowVerificationCodeProperty, value);
     }
 
     public ICommand? EndSessionCommand

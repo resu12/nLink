@@ -13,6 +13,7 @@ using NLink.Core;
 using NLink.Core.Chat;
 using NLink.Core.Logging;
 using NLink.Core.Metrics;
+using NLink.Core.SessionConnect;
 using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
@@ -21,6 +22,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 {
     private const string ScreenShareMaxFpsVariable = "NLINK_FEATURE_SCREENCAP_MAX_FPS";
     private const string ScreenShareTransportMaxFpsVariable = "NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS";
+    private const string ScreenShareTransportAutotuneVariable = "NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE";
     private const string ScreenShareScaleVariable = "NLINK_FEATURE_SCREENCAP_SCALE";
     private const string ScreenShareJpegQualityVariable = "NLINK_FEATURE_SCREENCAP_JPEG_QUALITY";
 
@@ -32,6 +34,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private readonly HangReportService? hangReportService;
     private readonly Func<DateTimeOffset> nowProvider;
     private readonly Func<string> diagnosticsExportRootProvider;
+    private readonly InviteSecurityStatus inviteSecurityStatus;
+    private readonly NknRuntimeDiagnosticsSnapshot nknDiagnosticsSnapshot;
 
     public DiagnosticsPageViewModel(
         Action backAction,
@@ -61,6 +65,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         SelectionReason = transportConfig.SelectionReason;
         AutoSelected = transportConfig.AutoSelected ? "Yes" : "No";
         ForcedByEnvironment = transportConfig.ForcedByEnvironment ? "Yes" : "No";
+        inviteSecurityStatus = InviteSecurityDiagnostics.Snapshot();
         EmbeddedWebViewDefault = AppFeatureFlags.UseEmbeddedWebView ? "Enabled by default" : "Disabled by default";
         ScreenShareScaffold = FormatFeatureFlag(FeatureFlags.EnableScreenShareScaffold);
         SessionHeader = FormatFeatureFlag(FeatureFlags.EnableSessionHeader);
@@ -85,34 +90,42 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         }
 
         var counters = ChatRuntimeCounters.Snapshot();
-        var nknDiagnostics = NknRuntimeDiagnostics.Snapshot();
-        NknAddress = nknDiagnostics.Address;
-        MessagesSent = nknDiagnostics.MessagesSent.ToString();
-        MessagesReceived = nknDiagnostics.MessagesReceived.ToString();
-        LastError = nknDiagnostics.LastError;
-        BridgePid = nknDiagnostics.BridgePid > 0 ? nknDiagnostics.BridgePid.ToString() : "(not running)";
-        NodeSdk = string.IsNullOrWhiteSpace(nknDiagnostics.NodeVersion) ? "(unknown)" : nknDiagnostics.NodeVersion;
-        LastHeartbeat = nknDiagnostics.BridgeLastPongUtcTicks > 0
-            ? new DateTimeOffset(nknDiagnostics.BridgeLastPongUtcTicks, TimeSpan.Zero).ToString("u")
+        nknDiagnosticsSnapshot = NknRuntimeDiagnostics.Snapshot();
+        NknAddress = nknDiagnosticsSnapshot.Address;
+        MessagesSent = nknDiagnosticsSnapshot.MessagesSent.ToString();
+        MessagesReceived = nknDiagnosticsSnapshot.MessagesReceived.ToString();
+        LastError = nknDiagnosticsSnapshot.LastError;
+        BridgePid = nknDiagnosticsSnapshot.BridgePid > 0 ? nknDiagnosticsSnapshot.BridgePid.ToString() : "(not running)";
+        NodeSdk = string.IsNullOrWhiteSpace(nknDiagnosticsSnapshot.NodeVersion) ? "(unknown)" : nknDiagnosticsSnapshot.NodeVersion;
+        LastHeartbeat = nknDiagnosticsSnapshot.BridgeLastPongUtcTicks > 0
+            ? new DateTimeOffset(nknDiagnosticsSnapshot.BridgeLastPongUtcTicks, TimeSpan.Zero).ToString("u")
             : "(none)";
-        BridgeRestarts = nknDiagnostics.BridgeRestartCount.ToString();
-        LastBridgeExit = BuildLastBridgeExitText(nknDiagnostics.BridgeLastExitCode, nknDiagnostics.BridgeLastExitReason);
-        BridgeRawMessagesReceived = nknDiagnostics.BridgeRawMessagesReceived.ToString();
-        LastBridgeMessageSource = nknDiagnostics.LastBridgeMessageSource;
-        LastBridgeMessageKind = BuildBridgeMessageKind(nknDiagnostics.LastBridgeMessageIsTopic);
-        LastEnvelopeType = nknDiagnostics.LastEnvelopeType;
-        LastEnvelopeDropReason = nknDiagnostics.LastEnvelopeDropReason;
-        JoinRequestsReceived = nknDiagnostics.JoinRequestsReceived.ToString();
-        IncomingJoinRequestRaisedCount = nknDiagnostics.IncomingJoinRequestRaisedCount.ToString();
-        AcksReceived = nknDiagnostics.AcksReceived.ToString();
-        AcksIgnoredSourceMismatch = nknDiagnostics.AcksIgnoredSourceMismatch.ToString();
-        LastDisconnectReason = nknDiagnostics.LastDisconnectReason;
-        FirstColdStartObserved = nknDiagnostics.FirstColdStartObserved ? "Yes" : "No";
-        FirstColdStartMs = nknDiagnostics.FirstColdStartObserved && nknDiagnostics.FirstColdStartMs >= 0
-            ? nknDiagnostics.FirstColdStartMs.ToString("F2")
+        BridgeRestarts = nknDiagnosticsSnapshot.BridgeRestartCount.ToString();
+        LastBridgeExit = BuildLastBridgeExitText(nknDiagnosticsSnapshot.BridgeLastExitCode, nknDiagnosticsSnapshot.BridgeLastExitReason);
+        BridgeRawMessagesReceived = nknDiagnosticsSnapshot.BridgeRawMessagesReceived.ToString();
+        ScreenShareOutboundBusyDrops = nknDiagnosticsSnapshot.ScreenShareOutboundBusyDrops.ToString();
+        ScreenSharePayloadBytesSent = nknDiagnosticsSnapshot.ScreenSharePayloadBytesSent.ToString();
+        ScreenShareMessagesSent = nknDiagnosticsSnapshot.ScreenShareMessagesSent.ToString();
+        ScreenShareBridgeBytesSent = nknDiagnosticsSnapshot.ScreenShareBridgeBytesSent.ToString();
+        HighPriorityControlQueueOverflows = nknDiagnosticsSnapshot.HighPriorityControlQueueOverflows.ToString();
+        HighPriorityControlRejected = nknDiagnosticsSnapshot.HighPriorityControlRejected.ToString();
+        HighPriorityControlCoalesced = nknDiagnosticsSnapshot.HighPriorityControlCoalesced.ToString();
+        HighPriorityControlDroppedForStop = nknDiagnosticsSnapshot.HighPriorityControlDroppedForStop.ToString();
+        LastBridgeMessageSource = nknDiagnosticsSnapshot.LastBridgeMessageSource;
+        LastBridgeMessageKind = BuildBridgeMessageKind(nknDiagnosticsSnapshot.LastBridgeMessageIsTopic);
+        LastEnvelopeType = nknDiagnosticsSnapshot.LastEnvelopeType;
+        LastEnvelopeDropReason = nknDiagnosticsSnapshot.LastEnvelopeDropReason;
+        JoinRequestsReceived = nknDiagnosticsSnapshot.JoinRequestsReceived.ToString();
+        IncomingJoinRequestRaisedCount = nknDiagnosticsSnapshot.IncomingJoinRequestRaisedCount.ToString();
+        AcksReceived = nknDiagnosticsSnapshot.AcksReceived.ToString();
+        AcksIgnoredSourceMismatch = nknDiagnosticsSnapshot.AcksIgnoredSourceMismatch.ToString();
+        LastDisconnectReason = nknDiagnosticsSnapshot.LastDisconnectReason;
+        FirstColdStartObserved = nknDiagnosticsSnapshot.FirstColdStartObserved ? "Yes" : "No";
+        FirstColdStartMs = nknDiagnosticsSnapshot.FirstColdStartObserved && nknDiagnosticsSnapshot.FirstColdStartMs >= 0
+            ? nknDiagnosticsSnapshot.FirstColdStartMs.ToString("F2")
             : "(none)";
-        FirstColdStartRecordedUtc = nknDiagnostics.FirstColdStartUtcTicks > 0
-            ? new DateTimeOffset(nknDiagnostics.FirstColdStartUtcTicks, TimeSpan.Zero).ToString("u")
+        FirstColdStartRecordedUtc = nknDiagnosticsSnapshot.FirstColdStartUtcTicks > 0
+            ? new DateTimeOffset(nknDiagnosticsSnapshot.FirstColdStartUtcTicks, TimeSpan.Zero).ToString("u")
             : "(none)";
         ChatSent = counters.ChatSent.ToString();
         ChatReceived = counters.ChatReceived.ToString();
@@ -150,6 +163,16 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     public string EmbeddedWebViewDefault { get; }
 
+    public string InviteSecurityMode => inviteSecurityStatus.Mode;
+
+    public string InviteSigningConfiguration => inviteSecurityStatus.SigningConfiguration;
+
+    public string InvitePublicFlow => inviteSecurityStatus.PublicInviteFlow;
+
+    public string InviteSecurityReleaseReady => inviteSecurityStatus.ReleaseReady ? "Yes" : "No";
+
+    public string InviteSecurityWarning => inviteSecurityStatus.Warning;
+
     public string ScreenShareScaffold { get; }
 
     public string SessionHeader { get; }
@@ -157,7 +180,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public int ScreenShareTransportMaxFps => FeatureFlags.ScreenShareTransportMaxFps;
     public string ScreenShareCaptureScale => FeatureFlags.ScreenShareScale.ToString("0.###", CultureInfo.InvariantCulture);
     public long ScreenShareCaptureJpegQuality => FeatureFlags.ScreenShareJpegQuality;
-    public string ScreenSharePresetBalanced => "fps=15, scale=0.75, jpeg=75";
+    public string ScreenSharePresetBalanced => "fps=15, scale=1.00, jpeg=75";
     public string ScreenSharePresetLowEnd => "fps=10, scale=0.60, jpeg=50";
     public string ScreenSharePresetHigherClarity => "fps=20, scale=0.85, jpeg=75";
     public string ScreenShareCaptureEnvHint => "Apply preset, then restart screen sharing. Settings apply instantly and are persisted in background via env vars: NLINK_FEATURE_SCREENCAP_MAX_FPS, NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS, NLINK_FEATURE_SCREENCAP_SCALE, NLINK_FEATURE_SCREENCAP_JPEG_QUALITY.";
@@ -172,12 +195,19 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     public string BridgeResolutionRid { get; }
     public string CurrentTransportState => runtimeDiagnosticsSnapshot.CurrentState;
+    public string SessionUiState => runtimeDiagnosticsSnapshot.SessionUiState;
     public string LastFailureCategory => runtimeDiagnosticsSnapshot.LastFailureCategory;
     public string LastFailureMessage => runtimeDiagnosticsSnapshot.LastFailureMessage;
     public string AttemptNumber => runtimeDiagnosticsSnapshot.AttemptNumber.ToString();
     public string LastConnectDurationMs => FormatDuration(runtimeDiagnosticsSnapshot.LastConnectDurationMs);
     public string LastHandshakeDurationMs => FormatDuration(runtimeDiagnosticsSnapshot.LastHandshakeDurationMs);
     public string LastBridgeStartDurationMs => FormatDuration(runtimeDiagnosticsSnapshot.LastBridgeStartDurationMs);
+    public string AuthorizationSummary => runtimeDiagnosticsSnapshot.AuthorizationSummary;
+    public string SessionSecuritySummary => runtimeDiagnosticsSnapshot.SessionSecuritySummary;
+    public string RemoteControlSummary => runtimeDiagnosticsSnapshot.RemoteControlSummary;
+    public string ScreenShareSummary => runtimeDiagnosticsSnapshot.ScreenShareSummary;
+    public string AuthoritativeConnectedAddress => nknDiagnosticsSnapshot.AuthoritativeConnectedAddressResolved ? "Yes" : "No";
+    public string LastRejectedMessageSummary => BuildLastRejectedMessageSummary();
 
     public string NknAddress { get; }
 
@@ -204,6 +234,22 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string LastBridgeExit { get; }
 
     public string BridgeRawMessagesReceived { get; }
+
+    public string ScreenShareOutboundBusyDrops { get; }
+
+    public string ScreenSharePayloadBytesSent { get; }
+
+    public string ScreenShareMessagesSent { get; }
+
+    public string ScreenShareBridgeBytesSent { get; }
+
+    public string HighPriorityControlQueueOverflows { get; }
+
+    public string HighPriorityControlRejected { get; }
+
+    public string HighPriorityControlCoalesced { get; }
+
+    public string HighPriorityControlDroppedForStop { get; }
 
     public string LastBridgeMessageSource { get; }
 
@@ -296,7 +342,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         OpenBugReportRequested?.Invoke(this, bugReportUrl);
     }
 
-    private void ApplyBalancedScreenSharePreset() => ApplyScreenSharePreset(15, 0.75d, 75, "Balanced");
+    private void ApplyBalancedScreenSharePreset() => ApplyScreenSharePreset(15, 1d, 75, "Balanced");
 
     private void ApplyLowEndScreenSharePreset() => ApplyScreenSharePreset(10, 0.60d, 50, "Low-end");
 
@@ -422,7 +468,12 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"OS architecture: {OsArchitecture}",
             $"Bridge RID: {BridgeResolutionRid}",
             $"current_state: {CurrentTransportState}",
+            $"session_ui_state: {SessionUiState}",
             $"attempt: {AttemptNumber}",
+            $"authorization_summary: {AuthorizationSummary}",
+            $"session_security_summary: {SessionSecuritySummary}",
+            $"remote_control_summary: {RemoteControlSummary}",
+            $"screenshare_summary: {ScreenShareSummary}",
             string.Empty,
             $"Transport: {TransportSummary}",
             $"Connection method: {ActiveTransport}",
@@ -433,6 +484,12 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"Forced by environment: {ForcedByEnvironment}",
             $"Why this was chosen: {SelectionReason}",
             $"Built-in web page view: {EmbeddedWebViewDefault}",
+            $"invite_security_mode: {InviteSecurityMode}",
+            $"invite_signing_configuration: {InviteSigningConfiguration}",
+            $"invite_public_flow: {InvitePublicFlow}",
+            $"invite_security_release_ready: {InviteSecurityReleaseReady}",
+            $"invite_security_warning: {InviteSecurityWarning}",
+            $"security_relevant_overrides: {BuildSecurityRelevantOverridesSummary()}",
             $"screenshare_capture_max_fps: {FeatureFlags.ScreenShareMaxFps}",
             $"screenshare_transport_max_fps: {FeatureFlags.ScreenShareTransportMaxFps}",
             $"screenshare_transport_autotune: {FormatFeatureFlag(FeatureFlags.ScreenShareTransportAutoTuneEnabled)}",
@@ -447,18 +504,26 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             string.Empty,
             "Bridge / NKN",
             "------------",
-            $"NKN address: {NknAddress}",
             $"Bridge PID: {BridgePid}",
             $"Node/SDK: {NodeSdk}",
+            $"authoritative_connected_address: {AuthoritativeConnectedAddress}",
             $"Last heartbeat: {LastHeartbeat}",
             $"Bridge restarts: {BridgeRestarts}",
             $"Last bridge exit: {LastBridgeExit}",
             $"bridge_process_status: {BuildBridgeProcessStatus()}",
             $"bridge_raw_messages_received: {BridgeRawMessagesReceived}",
+            $"screenshare_outbound_busy_drops: {ScreenShareOutboundBusyDrops}",
+            $"screenshare_messages_sent: {ScreenShareMessagesSent}",
+            $"screenshare_payload_bytes_sent: {ScreenSharePayloadBytesSent}",
+            $"screenshare_bridge_bytes_sent: {ScreenShareBridgeBytesSent}",
+            $"high_priority_control_queue_overflows: {HighPriorityControlQueueOverflows}",
+            $"high_priority_control_rejected: {HighPriorityControlRejected}",
+            $"high_priority_control_coalesced: {HighPriorityControlCoalesced}",
+            $"high_priority_control_dropped_for_stop: {HighPriorityControlDroppedForStop}",
             $"last_bridge_message_kind: {LastBridgeMessageKind}",
-            $"last_bridge_message_source: {LastBridgeMessageSource}",
             $"last_envelope_type: {LastEnvelopeType}",
             $"last_envelope_drop_reason: {LastEnvelopeDropReason}",
+            $"last_rejected_message: {LastRejectedMessageSummary}",
             $"join_requests_received: {JoinRequestsReceived}",
             $"incoming_join_request_raised: {IncomingJoinRequestRaisedCount}",
             $"acks_received: {AcksReceived}",
@@ -575,6 +640,78 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         }
 
         return string.Join(Environment.NewLine, lines);
+    }
+
+    private static string BuildSecurityRelevantOverridesSummary()
+    {
+        var riskyOverrides = new List<string>();
+
+        if (!FeatureFlags.RemoteControlSeqGateEnabled)
+        {
+            riskyOverrides.Add("remote_control_seq_gate=off");
+        }
+
+        var nknOptions = NknTransportOptions.Load();
+        if (nknOptions.PreflightRpcEnabled)
+        {
+            riskyOverrides.Add("nkn_preflight_rpc=on");
+        }
+
+        AddIfNonDefault(
+            riskyOverrides,
+            "screenshare_capture_max_fps",
+            FeatureFlags.ScreenShareMaxFps,
+            15,
+            ScreenShareMaxFpsVariable);
+        AddIfNonDefault(
+            riskyOverrides,
+            "screenshare_transport_max_fps",
+            FeatureFlags.ScreenShareTransportMaxFps,
+            8,
+            ScreenShareTransportMaxFpsVariable);
+        AddIfNonDefault(
+            riskyOverrides,
+            "screenshare_capture_scale",
+            FeatureFlags.ScreenShareScale.ToString("0.###", CultureInfo.InvariantCulture),
+            1d.ToString("0.###", CultureInfo.InvariantCulture),
+            ScreenShareScaleVariable);
+        AddIfNonDefault(
+            riskyOverrides,
+            "screenshare_capture_jpeg_quality",
+            FeatureFlags.ScreenShareJpegQuality,
+            75L,
+            ScreenShareJpegQualityVariable);
+
+        if (!FeatureFlags.ScreenShareTransportAutoTuneEnabled &&
+            !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(ScreenShareTransportAutotuneVariable)))
+        {
+            riskyOverrides.Add("screenshare_transport_autotune=off");
+        }
+
+        return riskyOverrides.Count == 0 ? "none" : string.Join(", ", riskyOverrides);
+    }
+
+    private string BuildLastRejectedMessageSummary()
+    {
+        var envelopeType = string.IsNullOrWhiteSpace(LastEnvelopeType) ? "(none)" : LastEnvelopeType;
+        var dropReason = string.IsNullOrWhiteSpace(LastEnvelopeDropReason) ? "(none)" : LastEnvelopeDropReason;
+        var error = string.IsNullOrWhiteSpace(LastError) ? "(none)" : LastError;
+        return $"envelope={envelopeType}; reason={dropReason}; error={error}";
+    }
+
+    private static void AddIfNonDefault<T>(
+        List<string> riskyOverrides,
+        string key,
+        T currentValue,
+        T defaultValue,
+        string envVarName)
+        where T : notnull
+    {
+        if (!EqualityComparer<T>.Default.Equals(currentValue, defaultValue) &&
+            !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(envVarName)))
+        {
+            riskyOverrides.Add($"{key}={currentValue}");
+        }
     }
 
     private static IEnumerable<string> TrimSummaryLines(string text, int maxLines)

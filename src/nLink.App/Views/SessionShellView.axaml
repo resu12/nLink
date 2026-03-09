@@ -14,6 +14,8 @@
                 MaxWidth="{Binding #Root.MainPaneMaxWidth}"
                 IsVisible="{Binding #Root.UseSessionHeader}">
             <views:SessionHeaderView StatusText="{ReflectionBinding HeaderStatusText}"
+                                     VerificationCodeText="{ReflectionBinding HeaderVerificationCodeText}"
+                                     ShowVerificationCode="{ReflectionBinding ShowHeaderVerificationCode}"
                                      EndSessionCommand="{ReflectionBinding EndSessionCommand}"
                                      CanEndSession="{ReflectionBinding CanEndSession}"
                                      ShowEndSession="True"

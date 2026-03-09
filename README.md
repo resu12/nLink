@@ -1,54 +1,67 @@
 # nLink
 
-nLink is a private, secure, serverless, simple screen sharing application for helping family and friends. No accounts needed.
+nLink is a private, serverless, simple screen sharing application for helping family and friends. No accounts needed.
+
+Created by Codex/GPT
 
 Powered by NKN. Official website: https://nkn.org/
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
-## Current Release (0.4.2)
+## Current Release (0.4.5)
 
-`0.4.2` is the current polish release. It keeps the existing invite-based connect flow and focuses on approval-window simplification, invite/connect cleanup, session cleanup, and more predictable remote-control/screen-share transitions.
+`0.4.5` is the current cumulative release since `0.4.2`. It combines the recent screen-sharing improvements, invite/session security hardening, and the simplified helper/helpee connection flow into one release.
 
-- Helpee shares an invite with QR, share, and copy actions.
-- Helper connects by pasting an invite or scanning a QR code.
-- Remote control now behaves more predictably across control start/stop, disconnect, reconnect, and session end.
+- Helper shares a helper address, the helpee enters that helper address, and the app shows a short verification code so both sides can confirm they are using the same helper before the helpee shares a helper-bound invite.
+- Helper connects by pasting the invite or scanning the QR code.
+- Screen sharing now keeps fresher frames under pressure and reacts better to unstable links.
+- Screen sharing preserves more readable UI text by default on stable links and recovers more cleanly after resize/display changes.
+- Invite, transport, and diagnostics handling are hardened for release, including helper-bound one-time invites, stronger post-handshake protection, and safer local secret storage on Windows.
 - Installer and bundled bridge packaging are hardened for upgrade, shutdown, and release consistency.
 
 ## Quick Start (Windows)
 
 1. Go to the GitHub Releases page and download the Installer (recommended) or Portable ZIP.
-2. Helpee opens nLink, clicks `I need help`, and shares the invite.
-3. Helper opens nLink, clicks `I want to help`, pastes the invite or scans the QR code, and clicks `Connect`.
-4. Helpee clicks `Allow`.
-5. Chat opens on both sides.
+2. Helper opens nLink, clicks `I want to help`, and copies the helper address.
+3. Helpee opens nLink, clicks `I need help`, enters the provided helper address, checks the verification code, and shares the invite with the built-in share/copy actions.
+4. Helper pastes the invite or scans the QR code, and clicks `Connect`.
+5. Helpee clicks `Allow`.
+6. Chat opens on both sides.
 
 Home:
 
-![Home screen](docs/images/home-0.4.2.png)
+![Home screen](docs/images/home-0.4.5.png)
 
 Helper:
 
-![Helper screen](docs/images/helper-0.4.2.png)
+![Helper screen](docs/images/helper-0.4.5.png)
 
 Helpee:
 
-![Helpee screen](docs/images/helpee-0.4.2.png)
+![Helpee screen](docs/images/helpee-0.4.5.png)
 
 Screen sharing:
 
-![Screen sharing session](docs/images/screenshare-0.4.2.png)
+![Screen sharing session](docs/images/screenshare-0.4.5.png)
 
 Remote control:
 
-![Remote control session](docs/images/remote-control-0.4.2.png)
+![Remote control session](docs/images/remote-control-0.4.5.png)
 
 If connection fails:
 Open Diagnostics -> Copy diagnostics and include it when reporting issues.
 
+For release-safe builds, Diagnostics should show:
+- `invite_security_mode: issued_one_time_secret_invites`
+- `invite_public_flow: verified_helper_required`
+- `invite_security_release_ready: Yes`
+- `invite_security_warning: none`
+
+Normal release UX uses a raw helper address plus a short verification code, then a helper-bound invite with QR/share/copy actions on the helpee side.
+
 Notes:
 - Windows x64 only
-- Current release (`0.4.2`)
+- Current release (`0.4.5`)
 - Installer path: `%LOCALAPPDATA%\Programs\nLink Helper`
 
 License:
@@ -85,7 +98,7 @@ License:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
 - Final release notes:
-  [`docs/releases/0.4.2.md`](docs/releases/0.4.2.md)
+  [`docs/releases/0.4.5.md`](docs/releases/0.4.5.md)
 - Screenshare RC/final validation checklist:
   [`docs/release/0.3.0-rc-validation-checklist.md`](docs/release/0.3.0-rc-validation-checklist.md)
 - Promotion criteria:
@@ -211,7 +224,7 @@ Run the test (same PC, two app instances):
 1. Start the first app instance:
    `dotnet run --project src/nLink.App -c Release`
 2. Click `I need help`
-3. Copy the invite shown on screen
+3. Copy the helper address from the helper screen, enter that helper address on the helpee screen, confirm the verification code, and share or copy the invite shown on screen
 4. Start the second app instance:
    `dotnet run --project src/nLink.App -c Release`
 5. Click `I want to help someone`

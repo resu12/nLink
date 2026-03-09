@@ -27,6 +27,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
 
     private readonly Func<IScreenCaptureSource> captureSourceFactory;
     private readonly Func<ReadOnlyMemory<byte>, CancellationToken, Task> sendPayloadAsync;
+    private readonly Func<ReadOnlyMemory<byte>, long>? estimateBridgeBytes;
     private readonly Func<string, ControlDisplayInfoMessageV1, CancellationToken, Task>? sendDisplayInfoAsync;
     private readonly ScreenShareDisplayInfoProvider displayInfoProvider;
     private readonly IScreenShareClock clock;
@@ -52,6 +53,14 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
     private int autoTuneTickInFlight;
     private int captureFpsHint;
     private int lowAgeStableTicks;
+    private int preferFreshestPendingFrameOnly;
+    private bool transportPressureHintActive;
+    private long lastAutoTuneRateGateDrops;
+    private long lastAutoTuneQueueEvictDrops;
+    private long displayInfoSendCount;
+    private long serializedChunkBytesSent;
+    private long bridgeBytesSent;
+    private ScreenShareMetrics lastMetricsSnapshot = new();
     private bool disposed;
 #if DEBUG
     private Timer? snapshotTimer;
@@ -63,13 +72,15 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         Func<ReadOnlyMemory<byte>, CancellationToken, Task> sendPayloadAsync,
         IScreenShareClock? clock = null,
         Func<string, ControlDisplayInfoMessageV1, CancellationToken, Task>? sendDisplayInfoAsync = null,
-        ScreenShareDisplayInfoProvider? displayInfoProvider = null)
+        ScreenShareDisplayInfoProvider? displayInfoProvider = null,
+        Func<ReadOnlyMemory<byte>, long>? estimateBridgeBytes = null)
     {
         this.captureSourceFactory = captureSourceFactory ?? throw new ArgumentNullException(nameof(captureSourceFactory));
         this.sendPayloadAsync = sendPayloadAsync ?? throw new ArgumentNullException(nameof(sendPayloadAsync));
         this.sendDisplayInfoAsync = sendDisplayInfoAsync;
         this.displayInfoProvider = displayInfoProvider ?? new ScreenShareDisplayInfoProvider();
         this.clock = clock ?? SystemScreenShareClock.Instance;
+        this.estimateBridgeBytes = estimateBridgeBytes;
     }
 
     public bool IsActive
@@ -119,6 +130,15 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             {
                 var payload = ScreenSharePayloadCodec.Serialize(chunk);
                 await sendPayloadAsync(payload, sendCt).ConfigureAwait(false);
+                Interlocked.Add(ref serializedChunkBytesSent, payload.Length);
+                if (estimateBridgeBytes is not null)
+                {
+                    var bridgeBytes = Math.Max(0L, estimateBridgeBytes(payload));
+                    if (bridgeBytes > 0)
+                    {
+                        Interlocked.Add(ref bridgeBytesSent, bridgeBytes);
+                    }
+                }
             },
             clock: clock,
             maxFramesPerSecond: FeatureFlags.ScreenShareTransportMaxFps);
@@ -136,16 +156,24 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             pendingDisplayInfoMapping = null;
             pendingDisplayInfoNotBeforeUtc = default;
             lastDisplayInfoIssue = string.Empty;
+            displayInfoSendCount = 0;
+            lastMetricsSnapshot = new();
             var minAutoTuneFps = Math.Min(MinAutoTuneFramesPerSecond, FeatureFlags.ScreenShareTransportMaxFps);
             captureFpsHint = Math.Clamp(
                 Math.Min(FeatureFlags.ScreenShareMaxFps, FeatureFlags.ScreenShareTransportMaxFps),
                 minAutoTuneFps,
                 FeatureFlags.ScreenShareTransportMaxFps);
             lowAgeStableTicks = 0;
+            Volatile.Write(ref preferFreshestPendingFrameOnly, 0);
+            lastAutoTuneRateGateDrops = 0;
+            lastAutoTuneQueueEvictDrops = 0;
+            serializedChunkBytesSent = 0;
+            bridgeBytesSent = 0;
             nextCaptureSource.FrameArrived += OnFrameArrived;
             if (nextCaptureSource is IScreenCaptureAdaptiveTuning tunableCaptureSource)
             {
                 tunableCaptureSource.SetCaptureFrameRateHint(captureFpsHint);
+                tunableCaptureSource.SetTransportPressureHint(false);
             }
         }
 
@@ -201,6 +229,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         ScreenShareFrameSendPipeline? oldPipeline;
         string oldSessionId;
         long oldLifecycleGeneration;
+        ScreenShareMetrics oldMetricsSnapshot = new(DisplayInfoSendCount: Interlocked.Read(ref displayInfoSendCount));
         Task? pipelineDisposeTask = null;
         Task? drainTask = null;
         TaskCompletionSource<bool>? drainCompletion = null;
@@ -211,6 +240,16 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             oldPipeline = sendPipeline;
             oldSessionId = sessionId;
             oldLifecycleGeneration = lifecycleGeneration;
+            if (oldPipeline is not null)
+            {
+                oldMetricsSnapshot = oldPipeline.GetMetricsSnapshot() with
+                {
+                    DisplayInfoSendCount = Interlocked.Read(ref displayInfoSendCount),
+                    SerializedChunkBytesSent = Interlocked.Read(ref serializedChunkBytesSent),
+                    BridgeBytesSent = Interlocked.Read(ref bridgeBytesSent),
+                };
+            }
+
             lifecycleGeneration = checked(lifecycleGeneration + 1);
             captureSource = null;
             sendPipeline = null;
@@ -222,6 +261,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             pendingDisplayInfoMapping = null;
             pendingDisplayInfoNotBeforeUtc = default;
             lastDisplayInfoIssue = string.Empty;
+            lastMetricsSnapshot = oldMetricsSnapshot;
 
             if (oldCaptureSource is not null)
             {
@@ -381,6 +421,15 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
     {
         try
         {
+            if (Volatile.Read(ref preferFreshestPendingFrameOnly) == 1)
+            {
+                var flushedQueuedFrames = currentPipeline.FlushPendingFrames();
+                if (flushedQueuedFrames > 0)
+                {
+                    LogDebug("Dropped queued frame(s) to keep only the freshest frame under unstable transport pressure.");
+                }
+            }
+
             await currentPipeline.EnqueueFrameAsync(
                 currentSessionId,
                 e.Width,
@@ -407,6 +456,33 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         catch (Exception ex)
         {
             LogDebug($"Frame enqueue failed unexpectedly: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    internal ScreenShareMetrics GetMetricsSnapshot()
+    {
+        lock (gate)
+        {
+            if (sendPipeline is not null)
+            {
+                lastMetricsSnapshot = sendPipeline.GetMetricsSnapshot() with
+                {
+                    DisplayInfoSendCount = Interlocked.Read(ref displayInfoSendCount),
+                    SerializedChunkBytesSent = Interlocked.Read(ref serializedChunkBytesSent),
+                    BridgeBytesSent = Interlocked.Read(ref bridgeBytesSent),
+                };
+            }
+            else
+            {
+                lastMetricsSnapshot = lastMetricsSnapshot with
+                {
+                    DisplayInfoSendCount = Interlocked.Read(ref displayInfoSendCount),
+                    SerializedChunkBytesSent = Interlocked.Read(ref serializedChunkBytesSent),
+                    BridgeBytesSent = Interlocked.Read(ref bridgeBytesSent),
+                };
+            }
+
+            return lastMetricsSnapshot;
         }
     }
 
@@ -452,6 +528,10 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         timer?.Dispose();
         lowAgeStableTicks = 0;
         captureFpsHint = 0;
+        Volatile.Write(ref preferFreshestPendingFrameOnly, 0);
+        transportPressureHintActive = false;
+        lastAutoTuneRateGateDrops = 0;
+        lastAutoTuneQueueEvictDrops = 0;
     }
 
     private void OnAutoTuneTimerTick()
@@ -476,11 +556,18 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                 currentCaptureSource = captureSource;
             }
 
-            if (currentPipeline is null ||
-                currentCaptureSource is not IScreenCaptureAdaptiveTuning tunableCaptureSource)
+            if (currentPipeline is null)
             {
                 return;
             }
+
+            var metrics = currentPipeline.GetMetricsSnapshot();
+            var rateGateDropDelta = ConsumeAutoTuneCounterDelta(
+                metrics.FramesDroppedByRateGate,
+                ref lastAutoTuneRateGateDrops);
+            var queueEvictDropDelta = ConsumeAutoTuneCounterDelta(
+                metrics.FramesDroppedByQueueEvict,
+                ref lastAutoTuneQueueEvictDrops);
 
             var maxTransportFps = FeatureFlags.ScreenShareTransportMaxFps;
             var minAutoTuneFps = Math.Min(MinAutoTuneFramesPerSecond, maxTransportFps);
@@ -490,23 +577,47 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                 maxTransportFps);
 
             var currentHint = captureFpsHint <= 0 ? configuredCap : captureFpsHint;
-            var captureToSendAgeMs = currentPipeline.LastCaptureToSendAgeMs;
-            if (captureToSendAgeMs < 0)
+            var captureToSendAgeMs = metrics.LastCaptureToSendAgeMs;
+            var hasHighAgePressure = captureToSendAgeMs >= HighCaptureToSendAgeMs;
+            var hasLowAgeHeadroom = captureToSendAgeMs >= 0 && captureToSendAgeMs <= LowCaptureToSendAgeMs;
+            var hasRateGatePressure = rateGateDropDelta > 0;
+            var hasQueuePressure = queueEvictDropDelta > 0;
+            var shouldPreferLowerBandwidth = hasQueuePressure || hasHighAgePressure || hasRateGatePressure;
+
+            if (hasQueuePressure || hasHighAgePressure)
+            {
+                Volatile.Write(ref preferFreshestPendingFrameOnly, 1);
+            }
+
+            if (captureToSendAgeMs < 0 && !hasRateGatePressure && !hasQueuePressure)
             {
                 return;
             }
 
             var nextHint = currentHint;
-            if (captureToSendAgeMs >= HighCaptureToSendAgeMs)
+            var nextTransportPressureHint = transportPressureHintActive;
+            if (shouldPreferLowerBandwidth)
+            {
+                nextTransportPressureHint = true;
+            }
+
+            if (hasQueuePressure)
+            {
+                nextHint = Math.Max(minAutoTuneFps, currentHint - 2);
+                lowAgeStableTicks = 0;
+            }
+            else if (hasHighAgePressure || hasRateGatePressure)
             {
                 nextHint = Math.Max(minAutoTuneFps, currentHint - 1);
                 lowAgeStableTicks = 0;
             }
-            else if (captureToSendAgeMs <= LowCaptureToSendAgeMs)
+            else if (hasLowAgeHeadroom)
             {
                 lowAgeStableTicks++;
                 if (lowAgeStableTicks >= StableLowAgeTicksForIncrease)
                 {
+                    Volatile.Write(ref preferFreshestPendingFrameOnly, 0);
+                    nextTransportPressureHint = false;
                     nextHint = Math.Min(configuredCap, currentHint + 1);
                     lowAgeStableTicks = 0;
                 }
@@ -516,6 +627,20 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                 lowAgeStableTicks = 0;
             }
 
+            if (currentCaptureSource is not IScreenCaptureAdaptiveTuning tunableCaptureSource)
+            {
+                return;
+            }
+
+            if (nextTransportPressureHint != transportPressureHintActive)
+            {
+                transportPressureHintActive = nextTransportPressureHint;
+                tunableCaptureSource.SetTransportPressureHint(nextTransportPressureHint);
+                LogDebug(
+                    $"Auto-tuned transport pressure hint to {(nextTransportPressureHint ? "lower-bandwidth" : "normal")} " +
+                    $"(capture_to_send_age_ms={captureToSendAgeMs}, rate_gate_delta={rateGateDropDelta}, queue_evict_delta={queueEvictDropDelta}).");
+            }
+
             if (nextHint == currentHint)
             {
                 return;
@@ -523,7 +648,9 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
 
             captureFpsHint = nextHint;
             tunableCaptureSource.SetCaptureFrameRateHint(nextHint);
-            LogDebug($"Auto-tuned capture fps hint to {nextHint} (capture_to_send_age_ms={captureToSendAgeMs}).");
+            LogDebug(
+                $"Auto-tuned capture fps hint to {nextHint} " +
+                $"(capture_to_send_age_ms={captureToSendAgeMs}, rate_gate_delta={rateGateDropDelta}, queue_evict_delta={queueEvictDropDelta}).");
         }
         catch (Exception ex)
         {
@@ -533,6 +660,13 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         {
             Interlocked.Exchange(ref autoTuneTickInFlight, 0);
         }
+    }
+
+    private static long ConsumeAutoTuneCounterDelta(long currentValue, ref long previousValue)
+    {
+        var delta = Math.Max(0, currentValue - previousValue);
+        previousValue = currentValue;
+        return delta;
     }
 
     private void TryPublishDisplayInfo(IScreenCaptureSource currentCaptureSource, int frameWidth, int frameHeight)
@@ -562,6 +696,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         long revision;
         ScreenShareDisplayInfoSnapshot sentSnapshot;
         DisplayInfoMappingKey sentMapping;
+        var flushedQueuedFrames = 0;
         lock (gate)
         {
             if (lastSentDisplayInfo.HasValue &&
@@ -603,6 +738,10 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
 
                 snapshot = pendingDisplayInfo.Value;
                 mapping = pendingDisplayInfoMapping.Value;
+                if (sendPipeline is not null)
+                {
+                    flushedQueuedFrames = sendPipeline.FlushPendingFrames();
+                }
                 ClearPendingDisplayInfoUnsafe();
             }
 
@@ -641,6 +780,13 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             publishLifecycleGeneration = lifecycleGeneration;
         }
 
+        if (flushedQueuedFrames > 0)
+        {
+            LogDebug(
+                $"Dropped {flushedQueuedFrames} queued frame(s) before display info send " +
+                $"(display_id={message.DisplayId}, revision={message.Revision}, frame={message.FrameWidth}x{message.FrameHeight}).");
+        }
+
         _ = BackgroundTaskRunner.Run(
             async () =>
             {
@@ -659,6 +805,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                 try
                 {
                     await sendDisplayInfoAsync(publishSessionId, message, CancellationToken.None).ConfigureAwait(false);
+                    Interlocked.Increment(ref displayInfoSendCount);
                     LogDebug($"Display info sent (display_id={message.DisplayId}, revision={message.Revision}, frame={message.FrameWidth}x{message.FrameHeight}).");
                 }
                 catch
@@ -815,12 +962,16 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                 }
             }
 
-            var metrics = currentPipeline.GetMetricsSnapshot();
+            var metrics = GetMetricsSnapshot();
             var latency = currentPipeline.GetDebugLatencySnapshotAndReset();
             var heapBytes = GC.GetTotalMemory(false);
             using var process = Process.GetCurrentProcess();
             LogDebug(
-                $"Snapshot heap={heapBytes} ws={process.WorkingSet64} queued={metrics.FramesQueued} dropped={metrics.FramesDropped} sent={metrics.ChunksSent} " +
+                $"Snapshot heap={heapBytes} ws={process.WorkingSet64} queued={metrics.FramesQueued} dropped={metrics.FramesDropped} " +
+                $"drop_rate={metrics.FramesDroppedByRateGate} drop_evict={metrics.FramesDroppedByQueueEvict} sent={metrics.ChunksSent} " +
+                $"raw_bytes={metrics.RawFrameBytesSent} serialized_bytes={metrics.SerializedChunkBytesSent} bridge_bytes={metrics.BridgeBytesSent} " +
+                $"display_info={metrics.DisplayInfoSendCount} avg_c2e={metrics.AverageCaptureToEnqueueMs:F1}ms " +
+                $"avg_q2s={metrics.AverageEnqueueToSendMs:F1}ms avg_c2s={metrics.AverageCaptureToSendMs:F1}ms " +
                 $"c2e={FormatLatency(latency.CaptureToEnqueue)} q2s={FormatLatency(latency.EnqueueToSend)} " +
                 $"send={FormatLatency(latency.SendDuration)} e2e={FormatLatency(latency.EndToEnd)}.");
         }

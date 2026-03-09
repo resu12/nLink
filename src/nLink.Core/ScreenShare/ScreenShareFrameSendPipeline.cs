@@ -36,13 +36,21 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
     private long framesCaptured;
     private long framesQueued;
     private long framesDropped;
+    private long framesDroppedByRateGate;
+    private long framesDroppedByQueueEvict;
     private long chunksSent;
+    private long rawFrameBytesSent;
     private long lastCaptureToSendAgeMs = -1;
+    private long captureToEnqueueSampleCount;
+    private long captureToEnqueueTotalTimeSpanTicks;
+    private long enqueueToSendSampleCount;
+    private long enqueueToSendTotalTimeSpanTicks;
+    private long captureToSendSampleCount;
+    private long captureToSendTotalMilliseconds;
     private long signalWriteAttempts;
     private long signalReadCount;
     private bool disposed;
 #if DEBUG
-    private readonly Queue<long> pendingEnqueueUtcTicks = new();
     private readonly DebugLatencyWindow captureToEnqueueLatency = new();
     private readonly DebugLatencyWindow enqueueToSendLatency = new();
     private readonly DebugLatencyWindow sendDurationLatency = new();
@@ -111,7 +119,20 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
             FramesCaptured: Interlocked.Read(ref framesCaptured),
             FramesQueued: Interlocked.Read(ref framesQueued),
             FramesDropped: Interlocked.Read(ref framesDropped),
-            ChunksSent: Interlocked.Read(ref chunksSent));
+            FramesDroppedByRateGate: Interlocked.Read(ref framesDroppedByRateGate),
+            FramesDroppedByQueueEvict: Interlocked.Read(ref framesDroppedByQueueEvict),
+            ChunksSent: Interlocked.Read(ref chunksSent),
+            RawFrameBytesSent: Interlocked.Read(ref rawFrameBytesSent),
+            LastCaptureToSendAgeMs: Interlocked.Read(ref lastCaptureToSendAgeMs),
+            AverageCaptureToEnqueueMs: ComputeAverageMillisecondsFromTimeSpanTicks(
+                Interlocked.Read(ref captureToEnqueueTotalTimeSpanTicks),
+                Interlocked.Read(ref captureToEnqueueSampleCount)),
+            AverageEnqueueToSendMs: ComputeAverageMillisecondsFromTimeSpanTicks(
+                Interlocked.Read(ref enqueueToSendTotalTimeSpanTicks),
+                Interlocked.Read(ref enqueueToSendSampleCount)),
+            AverageCaptureToSendMs: ComputeAverageMillisecondsFromMilliseconds(
+                Interlocked.Read(ref captureToSendTotalMilliseconds),
+                Interlocked.Read(ref captureToSendSampleCount)));
     }
 
     internal int PendingSignalCount => pendingSignals.Reader.CanCount ? pendingSignals.Reader.Count : 0;
@@ -127,6 +148,24 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
     internal long WakeSignalsRead => Interlocked.Read(ref signalReadCount);
 
     internal bool IsSendLoopCompleted => sendLoopTask.IsCompleted;
+
+    internal int FlushPendingFrames()
+    {
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+
+            var droppedCount = pendingFrames.Count;
+            if (droppedCount <= 0)
+            {
+                return 0;
+            }
+
+            pendingFrames.Clear();
+            Interlocked.Add(ref framesDropped, droppedCount);
+            return droppedCount;
+        }
+    }
 
 #if DEBUG
     internal (
@@ -190,6 +229,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
                 now - lastQueuedFrameAtUtc < minimumFrameInterval)
             {
                 Interlocked.Increment(ref framesDropped);
+                Interlocked.Increment(ref framesDroppedByRateGate);
                 return Task.CompletedTask;
             }
 
@@ -205,23 +245,18 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
                 height,
                 encoding.Trim(),
                 timestampUnixMilliseconds,
-                encodedFrameBytes);
+                encodedFrameBytes,
+                now.UtcTicks);
 
             if (pendingFrames.Count >= capacity)
             {
                 pendingFrames.Dequeue();
-#if DEBUG
-                pendingEnqueueUtcTicks.Dequeue();
-#endif
                 Interlocked.Increment(ref framesDropped);
+                Interlocked.Increment(ref framesDroppedByQueueEvict);
             }
 
             pendingFrames.Enqueue(frame);
-#if DEBUG
-            pendingEnqueueUtcTicks.Enqueue(now.UtcTicks);
-            captureToEnqueueLatency.RecordTimeSpanTicks(
-                now.UtcTicks - (timestampUnixMilliseconds * TimeSpan.TicksPerMillisecond));
-#endif
+            RecordCaptureToEnqueue(now.UtcTicks, timestampUnixMilliseconds);
             AssertBufferBounds();
             lastQueuedFrameAtUtc = now;
             Interlocked.Increment(ref framesQueued);
@@ -283,17 +318,11 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
                 while (true)
                 {
                     PendingFrame? frame = null;
-#if DEBUG
-                    var enqueueTimestampUtcTicks = 0L;
-#endif
                     lock (gate)
                     {
                         if (pendingFrames.Count > 0)
                         {
                             frame = pendingFrames.Dequeue();
-#if DEBUG
-                            enqueueTimestampUtcTicks = pendingEnqueueUtcTicks.Dequeue();
-#endif
                             AssertBufferBounds();
                         }
                     }
@@ -316,31 +345,34 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
 
 #if DEBUG
                     var sendStartUtcTicks = clock.UtcNow.UtcTicks;
-                    if (enqueueTimestampUtcTicks != 0)
-                    {
-                        enqueueToSendLatency.RecordTimeSpanTicks(sendStartUtcTicks - enqueueTimestampUtcTicks);
-                    }
-
                     var sendStartTimestamp = Stopwatch.GetTimestamp();
 #endif
+                    RecordEnqueueToSend(frame.EnqueuedAtUtcTicks);
                     foreach (var chunk in chunks)
                     {
                         disposeCts.Token.ThrowIfCancellationRequested();
                         await sendChunkAsync(chunk, disposeCts.Token).ConfigureAwait(false);
                         Interlocked.Increment(ref chunksSent);
                     }
+                    Interlocked.Add(ref rawFrameBytesSent, frame.EncodedFrameBytes.Length);
                     if (frame.TimestampUnixMilliseconds > 0)
                     {
                         var captureToSendAgeMs = Math.Max(0, clock.UtcNow.ToUnixTimeMilliseconds() - frame.TimestampUnixMilliseconds);
                         Interlocked.Exchange(ref lastCaptureToSendAgeMs, captureToSendAgeMs);
+                        Interlocked.Increment(ref captureToSendSampleCount);
+                        Interlocked.Add(ref captureToSendTotalMilliseconds, captureToSendAgeMs);
                     }
 #if DEBUG
                     var sendEndTimestamp = Stopwatch.GetTimestamp();
                     var sendEndUtcTicks = clock.UtcNow.UtcTicks;
+                    if (frame.EnqueuedAtUtcTicks > 0)
+                    {
+                        enqueueToSendLatency.RecordTimeSpanTicks(sendStartUtcTicks - frame.EnqueuedAtUtcTicks);
+                    }
                     sendDurationLatency.RecordTimeSpanTicks(
                         DebugLatencyWindow.StopwatchElapsedTimeSpanTicks(sendStartTimestamp, sendEndTimestamp));
                     endToEndLatency.RecordTimeSpanTicks(
-                        sendEndUtcTicks - (frame.TimestampUnixMilliseconds * TimeSpan.TicksPerMillisecond));
+                        sendEndUtcTicks - ConvertUnixMillisecondsToUtcTicks(frame.TimestampUnixMilliseconds));
 #endif
                 }
             }
@@ -362,7 +394,60 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
         int Height,
         string Encoding,
         long TimestampUnixMilliseconds,
-        byte[] EncodedFrameBytes);
+        byte[] EncodedFrameBytes,
+        long EnqueuedAtUtcTicks);
+
+    private void RecordCaptureToEnqueue(long enqueueUtcTicks, long timestampUnixMilliseconds)
+    {
+        if (enqueueUtcTicks <= 0 || timestampUnixMilliseconds <= 0)
+        {
+            return;
+        }
+
+        var captureUtcTicks = ConvertUnixMillisecondsToUtcTicks(timestampUnixMilliseconds);
+        var elapsedTicks = Math.Max(0, enqueueUtcTicks - captureUtcTicks);
+        Interlocked.Increment(ref captureToEnqueueSampleCount);
+        Interlocked.Add(ref captureToEnqueueTotalTimeSpanTicks, elapsedTicks);
+#if DEBUG
+        captureToEnqueueLatency.RecordTimeSpanTicks(elapsedTicks);
+#endif
+    }
+
+    private void RecordEnqueueToSend(long enqueueUtcTicks)
+    {
+        if (enqueueUtcTicks <= 0)
+        {
+            return;
+        }
+
+        var sendStartUtcTicks = clock.UtcNow.UtcTicks;
+        var elapsedTicks = Math.Max(0, sendStartUtcTicks - enqueueUtcTicks);
+        Interlocked.Increment(ref enqueueToSendSampleCount);
+        Interlocked.Add(ref enqueueToSendTotalTimeSpanTicks, elapsedTicks);
+    }
+
+    private static double ComputeAverageMillisecondsFromTimeSpanTicks(long totalTimeSpanTicks, long sampleCount)
+    {
+        if (sampleCount <= 0 || totalTimeSpanTicks <= 0)
+        {
+            return 0;
+        }
+
+        return TimeSpan.FromTicks(totalTimeSpanTicks / sampleCount).TotalMilliseconds;
+    }
+
+    private static double ComputeAverageMillisecondsFromMilliseconds(long totalMilliseconds, long sampleCount)
+    {
+        if (sampleCount <= 0 || totalMilliseconds <= 0)
+        {
+            return 0;
+        }
+
+        return totalMilliseconds / (double)sampleCount;
+    }
+
+    private static long ConvertUnixMillisecondsToUtcTicks(long timestampUnixMilliseconds)
+        => DateTimeOffset.FromUnixTimeMilliseconds(timestampUnixMilliseconds).UtcTicks;
 
     private async Task WaitForNextSendSlotAsync()
     {
@@ -451,7 +536,10 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
             }
 
             LogDebug(
-                $"Latency queued={metrics.FramesQueued} dropped={metrics.FramesDropped} sent={metrics.ChunksSent} " +
+                $"Latency queued={metrics.FramesQueued} dropped={metrics.FramesDropped} " +
+                $"drop_rate={metrics.FramesDroppedByRateGate} drop_evict={metrics.FramesDroppedByQueueEvict} " +
+                $"sent={metrics.ChunksSent} raw_bytes={metrics.RawFrameBytesSent} avg_c2e={metrics.AverageCaptureToEnqueueMs:F1}ms " +
+                $"avg_q2s={metrics.AverageEnqueueToSendMs:F1}ms avg_c2s={metrics.AverageCaptureToSendMs:F1}ms " +
                 $"c2e={FormatLatency(latency.CaptureToEnqueue)} q2s={FormatLatency(latency.EnqueueToSend)} " +
                 $"send={FormatLatency(latency.SendDuration)} e2e={FormatLatency(latency.EndToEnd)}.");
         }

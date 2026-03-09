@@ -25,7 +25,7 @@ using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
 
-public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanelBindings
+public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanelBindings, IWindowCloseAware
 {
     private static readonly TimeSpan DefaultConnectFailureCooldown = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultApprovalTimeout = TimeSpan.FromSeconds(20);
@@ -48,11 +48,17 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly StatusPresenter statusPresenter;
     private readonly bool ownsStatusPresenter;
     private readonly IClipboardService? clipboardService;
+    private readonly IInviteShareService inviteShareService;
     private readonly ShareMessageConfig shareMessageConfig;
     private readonly IRecentConnectTargetsStore? recentConnectTargetsStore;
     private readonly SessionUiStateStore? uiStateStore;
     private readonly IConnectInputResolver connectInputResolver;
     private readonly DispatcherTimer remoteControlStateSnapshotTimer;
+    private readonly Func<CancellationToken, Task<PeerAddress?>> bootstrapHelperIdentityResolver;
+    private CancellationTokenSource? bootstrapHelperIdentityResolutionCts;
+    private PeerAddress? bootstrapHelperIdentity;
+    private PeerAddress? previewInviteBoundHelperIdentity;
+    private bool helperIdentityBootstrapPending;
 
     private string codeInput = string.Empty;
     private string statusText = string.Empty;
@@ -91,6 +97,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool endSessionCancelInvoked;
     private DateTimeOffset endSessionGuardUntilUtc = DateTimeOffset.MinValue;
     private CancellationTokenSource? connectCts;
+    private Task? bootstrapHelperIdentityResolutionTask;
     private readonly InlineTransientText copyFeedback = new();
     private readonly Func<DateTimeOffset> nowProvider;
     private readonly ObservableCollection<string> recentTargets = new();
@@ -122,6 +129,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private long remoteControlSnapshotSendWindowStartTickMs;
     private bool remoteControlDebugPanelExpanded;
     private bool disposed;
+    private int windowCloseDisconnectStarted;
 
     public HelperPageViewModel(
         Action cancelAction,
@@ -137,7 +145,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         SessionUiStateStore? uiStateStore = null,
         Action? backAction = null,
         IConnectInputResolver? connectInputResolver = null,
-        IRecentConnectTargetsStore? recentConnectTargetsStore = null)
+        IRecentConnectTargetsStore? recentConnectTargetsStore = null,
+        Func<CancellationToken, Task<PeerAddress?>>? bootstrapHelperIdentityResolver = null,
+        IInviteShareService? inviteShareService = null)
     {
         this.cancelAction = cancelAction;
         this.backAction = backAction ?? cancelAction;
@@ -147,10 +157,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         this.statusPresenter = statusPresenter ?? new StatusPresenter(sessionRuntime);
         ownsStatusPresenter = statusPresenter is null;
         this.clipboardService = clipboardService;
+        this.inviteShareService = inviteShareService ?? new DefaultInviteShareService();
         this.shareMessageConfig = shareMessageConfig ?? new ShareMessageConfig(null);
         this.uiStateStore = uiStateStore;
         this.connectInputResolver = connectInputResolver ?? ConnectInputResolverFactory.CreateDefault();
         this.recentConnectTargetsStore = recentConnectTargetsStore;
+        this.bootstrapHelperIdentityResolver = bootstrapHelperIdentityResolver ?? NknLocalPeerAddressResolver.ResolveAsync;
         this.approvalTimeout = approvalTimeout ?? DefaultApprovalTimeout;
         this.connectFailureCooldown = connectFailureCooldown ?? DefaultConnectFailureCooldown;
         this.nowProvider = nowProvider ?? (() => DateTimeOffset.UtcNow);
@@ -190,6 +202,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         ConnectCommand = new AsyncRelayCommand(ConnectAsync, CanConnect);
+        CopyHelperIdentityCommand = new AsyncRelayCommand(CopyHelperIdentityAsync);
+        ShareHelperIdentityCommand = new AsyncRelayCommand(ShareHelperIdentityAsync);
         CopyInstallMessageCommand = new AsyncRelayCommand(CopyInstallMessageAsync);
         SendFileCommand = new RelayCommand(RequestSendFileWindow, CanSendFileAction);
         SendChatCommand = new AsyncRelayCommand(SendChatAsync, CanSendChat);
@@ -218,6 +232,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
         ApplySessionBannerPolicy();
         UpdateUiFromSnapshot();
+        BeginBootstrapHelperIdentityResolution();
     }
 
     public string CodeInput
@@ -228,6 +243,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             var normalized = NormalizeConnectInputForDisplay(value ?? string.Empty);
             if (SetProperty(ref codeInput, normalized))
             {
+                UpdatePreviewInviteBoundHelperIdentity(normalized);
                 ConnectCommand.NotifyCanExecuteChanged();
                 SendChatCommand.NotifyCanExecuteChanged();
                 ScanQrFromFileCommand.NotifyCanExecuteChanged();
@@ -271,6 +287,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowInlineStatusText));
                 OnPropertyChanged(nameof(ShowFailurePanel));
                 OnPropertyChanged(nameof(ShowCopyFeedbackInline));
+                OnPropertyChanged(nameof(ShowHelperIdentityBootstrapPanel));
+                OnPropertyChanged(nameof(HelperIdentityBootstrapHintText));
+                OnPropertyChanged(nameof(HeaderVerificationCodeText));
+                OnPropertyChanged(nameof(ShowHeaderVerificationCode));
+                OnPropertyChanged(nameof(FirstPillVerificationCodeText));
+                OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
                 OnPropertyChanged(nameof(ShowBackButton));
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
@@ -307,11 +329,39 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
-    public string HelperPageHelpText => "Paste invite.";
+    public string HelperPageHelpText => "Paste invite or invite code.";
 
     public string ConnectionMethodHint => transportConfig.HelperHintText;
 
     private PeerAddress? HelperVerificationIdentity => sessionRuntime.SecurityState.HelperAddress;
+    private PeerAddress? HelperIdentityForInviteBinding =>
+        RequiresHelperIdentityBootstrap
+            ? bootstrapHelperIdentity
+            : sessionRuntime.CurrentLocalPeerAddress;
+    private bool RequiresHelperIdentityBootstrap =>
+        string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase) &&
+        InviteSecurityDiagnostics.RequiresBoundHelperForIssuedSecretInvites();
+
+    public string HelperIdentityBootstrapText =>
+        HelperIdentityForInviteBinding is { } helperIdentity
+            ? helperIdentity.Value
+            : string.Empty;
+
+    public string HelperIdentityBootstrapHintText =>
+        string.IsNullOrWhiteSpace(HelperIdentityBootstrapText)
+            ? "Preparing your helper address. Share it with the helpee before they generate the invite."
+            : "Copy this helper address into the helpee's helper field before they generate the invite.";
+
+    public string HelperIdentityBootstrapVerificationCode =>
+        HelperVerificationCodeFormatter.FormatOrNull(HelperIdentityForInviteBinding) ?? string.Empty;
+
+    public bool HasHelperIdentityBootstrapVerificationCode =>
+        !string.IsNullOrWhiteSpace(HelperIdentityBootstrapVerificationCode);
+
+    public bool ShowHelperIdentityBootstrapPanel =>
+        ShowMainControls &&
+        RequiresHelperIdentityBootstrap &&
+        (helperIdentityBootstrapPending || !string.IsNullOrWhiteSpace(HelperIdentityBootstrapText));
 
     public string HelperVerificationCode =>
         HelperVerificationCodeFormatter.FormatOrNull(HelperVerificationIdentity) ?? string.Empty;
@@ -320,7 +370,29 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public bool ShowHelperVerificationCode =>
         HasHelperVerificationCode &&
-        EffectivePhase is SessionUiPhase.Connecting or SessionUiPhase.Recovering;
+        EffectivePhase is SessionUiPhase.Connecting or SessionUiPhase.Recovering or SessionUiPhase.Failed;
+
+    public string HeaderVerificationCodeText =>
+        EffectivePhase == SessionUiPhase.Failed && HasHelperIdentityBootstrapVerificationCode
+            ? HelperIdentityBootstrapVerificationCode
+            : ShowHelperIdentityBootstrapPanel && HasHelperIdentityBootstrapVerificationCode
+            ? HelperIdentityBootstrapVerificationCode
+            : ShowHelperVerificationCode
+                ? HelperVerificationCode
+                : string.Empty;
+
+    public bool ShowHeaderVerificationCode =>
+        !ShowHelperIdentityBootstrapPanel &&
+        !string.IsNullOrWhiteSpace(HeaderVerificationCodeText);
+
+    public string FirstPillVerificationCodeText =>
+        HasHelperIdentityBootstrapVerificationCode
+            ? HelperIdentityBootstrapVerificationCode
+            : string.Empty;
+
+    public bool ShowFirstPillVerificationCode =>
+        ShowHelperIdentityBootstrapPanel &&
+        !string.IsNullOrWhiteSpace(FirstPillVerificationCodeText);
 
     public string HelperTechnicalIdentityText => HelperVerificationIdentity?.Value ?? string.Empty;
 
@@ -387,6 +459,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowInlineStatusText));
                 OnPropertyChanged(nameof(ShowFailurePanel));
                 OnPropertyChanged(nameof(ShowCopyFeedbackInline));
+                OnPropertyChanged(nameof(ShowHelperIdentityBootstrapPanel));
+                OnPropertyChanged(nameof(HelperIdentityBootstrapHintText));
+                OnPropertyChanged(nameof(HeaderVerificationCodeText));
+                OnPropertyChanged(nameof(ShowHeaderVerificationCode));
+                OnPropertyChanged(nameof(FirstPillVerificationCodeText));
+                OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
                 ConnectCommand.NotifyCanExecuteChanged();
                 RetryCommand.NotifyCanExecuteChanged();
                 OpenDiagnosticsCommand.NotifyCanExecuteChanged();
@@ -510,6 +588,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(IsRemoteControlKeyboardCaptureEnabled));
                 OnPropertyChanged(nameof(ShowRemoteControlDebugToggle));
                 OnPropertyChanged(nameof(ShowRemoteControlDebugPanel));
+                OnPropertyChanged(nameof(HeaderVerificationCodeText));
+                OnPropertyChanged(nameof(ShowHeaderVerificationCode));
+                OnPropertyChanged(nameof(FirstPillVerificationCodeText));
+                OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
             }
         }
     }
@@ -644,6 +726,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public IAsyncRelayCommand ConnectCommand { get; }
 
+    public IAsyncRelayCommand CopyHelperIdentityCommand { get; }
+
+    public IAsyncRelayCommand ShareHelperIdentityCommand { get; }
+
     public IAsyncRelayCommand CopyInstallMessageCommand { get; }
 
     public IRelayCommand SendFileCommand { get; }
@@ -729,6 +815,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         disposed = true;
+        CancelBootstrapHelperIdentityResolution();
 
         remoteControlStateSnapshotTimer.Stop();
         remoteControlStateSnapshotTimer.Tick -= OnRemoteControlStateSnapshotTimerTick;
@@ -757,13 +844,34 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             statusPresenter.Dispose();
         }
         sessionRuntime.SetReliabilityAttempt(null);
-        sessionRuntime.ResetAsync().GetAwaiter().GetResult();
 
         connectCts?.Cancel();
         connectCts?.Dispose();
         connectCts = null;
         ScreenShareViewer.Dispose();
         copyFeedback.Dispose();
+    }
+
+    public async Task PrepareForWindowCloseAsync()
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref windowCloseDisconnectStarted, 1, 0) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await sessionRuntime.DisconnectAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best-effort close path. Main disposal still proceeds.
+        }
     }
 
     private bool CanConnect()
@@ -779,6 +887,25 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private ConnectInputResolution ResolveConnectInput(string rawInput)
     {
         return connectInputResolver.Resolve(rawInput, nowProvider());
+    }
+
+    private void UpdatePreviewInviteBoundHelperIdentity(string rawInput)
+    {
+        var resolution = ResolveConnectInput(rawInput);
+        var nextPreviewIdentity =
+            resolution.Kind == ConnectInputKind.InviteToken
+                ? resolution.Invite?.BoundHelperAddress
+                : null;
+        if (previewInviteBoundHelperIdentity == nextPreviewIdentity)
+        {
+            return;
+        }
+
+        previewInviteBoundHelperIdentity = nextPreviewIdentity;
+        OnPropertyChanged(nameof(HeaderVerificationCodeText));
+        OnPropertyChanged(nameof(ShowHeaderVerificationCode));
+        OnPropertyChanged(nameof(FirstPillVerificationCodeText));
+        OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
     }
 
     private static string NormalizeConnectInputForDisplay(string incoming)
@@ -994,6 +1121,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private async Task ConnectAsync()
     {
+        CancelBootstrapHelperIdentityResolution();
+        await AwaitBootstrapHelperIdentityResolutionCompletionAsync();
         var connectInputText = CodeInput;
         PrepareForNewSession(clearConnectInput: false);
         uiRecoveryTransientDismissed = false;
@@ -1056,8 +1185,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         try
         {
             var inviteExpiry = connectInput.Invite.Payload.ExpiresAtUtcMs.ToString(CultureInfo.InvariantCulture);
-            AppLog.Info($"Helper join requested using {transportConfig.Key} with validated_invite target {targetAddress.Value}; invite_exp_utc_ms={inviteExpiry}");
-            await sessionRuntime.StartHelperAsync(connectInputText.Trim(), connectInput.Invite, connectCts.Token);
+            AppLog.Info($"Helper join requested using {transportConfig.Key} with prechecked_invite target {targetAddress.Value}; invite_exp_utc_ms={inviteExpiry}");
+            var inviteTokenInput = connectInput.InviteTokenText ?? connectInputText.Trim();
+            await sessionRuntime.StartHelperAsync(inviteTokenInput, connectInput.Invite, connectCts.Token);
 
             // NKN transport logs these stages after JoinRequest Ack to avoid optimistic duplicates.
             if (!string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase))
@@ -1091,6 +1221,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
         catch (Exception ex)
         {
+            AppLog.Warn($"Helper connect failed before approval ({ex.GetType().Name}): {ex.Message}");
             var (errorCode, errorHint) = GetReliabilityError();
             LogReliability(SessionReliabilityStage.Disconnected, errorCode, errorHint);
             var snapshot = NknRuntimeDiagnostics.Snapshot();
@@ -1271,10 +1402,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         var reason = resolution.Error switch
         {
             ConnectInputValidationError.ExpiredInviteToken => "expired_invite",
-            ConnectInputValidationError.InvalidInviteToken when resolution.InviteValidationError == InviteTokenValidationError.SignatureInvalid => "invite_signature_verification_failed",
             ConnectInputValidationError.InvalidInviteToken when resolution.InviteValidationError == InviteTokenValidationError.UnsupportedVersion => "invite_version_unsupported",
-            ConnectInputValidationError.InvalidInviteToken when resolution.InviteValidationError == InviteTokenValidationError.ReplayDetected => "invite_replay_detected",
-            ConnectInputValidationError.InvalidInviteToken when resolution.InviteValidationError == InviteTokenValidationError.Revoked => "invite_revoked",
             ConnectInputValidationError.InvalidInviteToken when resolution.InviteValidationError == InviteTokenValidationError.ParseFailed => "invite_parse_failed",
             ConnectInputValidationError.InvalidInviteToken => "invite_invalid",
             ConnectInputValidationError.Empty => "empty_input",
@@ -1656,6 +1784,52 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
+    private async Task CopyHelperIdentityAsync()
+    {
+        if (clipboardService is null)
+        {
+            copyFeedback.Show("Could not copy. Please try again.");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(HelperIdentityBootstrapText))
+        {
+            copyFeedback.Show("Helper address is not ready yet.");
+            return;
+        }
+
+        try
+        {
+            await clipboardService.SetTextAsync(HelperIdentityBootstrapText);
+            copyFeedback.Show("Helper address copied.");
+        }
+        catch
+        {
+            copyFeedback.Show("Could not copy. Please try again.");
+        }
+    }
+
+    private async Task ShareHelperIdentityAsync()
+    {
+        if (string.IsNullOrWhiteSpace(HelperIdentityBootstrapText))
+        {
+            copyFeedback.Show("Helper address is not ready yet.");
+            return;
+        }
+
+        try
+        {
+            var shared = await inviteShareService.ShareInviteAsync(HelperIdentityBootstrapText, CancellationToken.None);
+            copyFeedback.Show(shared.IsSuccess
+                ? "Helper address shared."
+                : shared.Message ?? "Could not share. Please try again.");
+        }
+        catch
+        {
+            copyFeedback.Show("Could not share. Please try again.");
+        }
+    }
+
     private string BuildHelperInstallMessage()
     {
         const string releasesUrl = "https://github.com/resu12/nLink/releases";
@@ -1663,6 +1837,130 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             ? releasesUrl
             : shareMessageConfig.DownloadUrl;
         return ShareMessageBuilder.BuildHelperInstallMessage(url);
+    }
+
+    private void BeginBootstrapHelperIdentityResolution()
+    {
+        if (!RequiresHelperIdentityBootstrap)
+        {
+            return;
+        }
+
+        CancelBootstrapHelperIdentityResolution();
+        bootstrapHelperIdentityResolutionCts = new CancellationTokenSource();
+        helperIdentityBootstrapPending = true;
+        bootstrapHelperIdentityResolutionTask = ResolveBootstrapHelperIdentityAsync(bootstrapHelperIdentityResolutionCts.Token);
+    }
+
+    private async Task ResolveBootstrapHelperIdentityAsync(CancellationToken ct)
+    {
+        try
+        {
+            var resolved = await bootstrapHelperIdentityResolver(ct).ConfigureAwait(false);
+            if (disposed || ct.IsCancellationRequested)
+            {
+                return;
+            }
+
+            await UiThreadDispatch.RunAsync(() =>
+            {
+                // Keep the first stable helper identity visible through pre-connected UI states.
+                if (bootstrapHelperIdentity is null && resolved is not null)
+                {
+                    bootstrapHelperIdentity = resolved;
+                }
+                helperIdentityBootstrapPending = false;
+                OnPropertyChanged(nameof(HelperIdentityBootstrapText));
+                OnPropertyChanged(nameof(HelperIdentityBootstrapHintText));
+                OnPropertyChanged(nameof(HelperIdentityBootstrapVerificationCode));
+                OnPropertyChanged(nameof(HasHelperIdentityBootstrapVerificationCode));
+                OnPropertyChanged(nameof(ShowHelperIdentityBootstrapPanel));
+                OnPropertyChanged(nameof(HeaderVerificationCodeText));
+                OnPropertyChanged(nameof(ShowHeaderVerificationCode));
+                OnPropertyChanged(nameof(FirstPillVerificationCodeText));
+                OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+            });
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            if (disposed)
+            {
+                return;
+            }
+
+            await UiThreadDispatch.RunAsync(() =>
+            {
+                helperIdentityBootstrapPending = false;
+                OnPropertyChanged(nameof(HelperIdentityBootstrapHintText));
+                OnPropertyChanged(nameof(ShowHelperIdentityBootstrapPanel));
+                OnPropertyChanged(nameof(HeaderVerificationCodeText));
+                OnPropertyChanged(nameof(ShowHeaderVerificationCode));
+                OnPropertyChanged(nameof(FirstPillVerificationCodeText));
+                OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+            });
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"Helper identity bootstrap resolution failed: {ex.Message}");
+            if (disposed)
+            {
+                return;
+            }
+
+            await UiThreadDispatch.RunAsync(() =>
+            {
+                helperIdentityBootstrapPending = false;
+                OnPropertyChanged(nameof(HelperIdentityBootstrapHintText));
+                OnPropertyChanged(nameof(ShowHelperIdentityBootstrapPanel));
+            });
+        }
+    }
+
+    private void CancelBootstrapHelperIdentityResolution()
+    {
+        var cts = Interlocked.Exchange(ref bootstrapHelperIdentityResolutionCts, null);
+        if (cts is null)
+        {
+            return;
+        }
+
+        try
+        {
+            cts.Cancel();
+        }
+        catch
+        {
+            // Best-effort only.
+        }
+        finally
+        {
+            cts.Dispose();
+        }
+    }
+
+    private async Task AwaitBootstrapHelperIdentityResolutionCompletionAsync()
+    {
+        var pending = bootstrapHelperIdentityResolutionTask;
+        if (pending is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await pending.ConfigureAwait(false);
+        }
+        catch
+        {
+            // Resolution failure should not block a real helper connect.
+        }
+        finally
+        {
+            if (ReferenceEquals(bootstrapHelperIdentityResolutionTask, pending))
+            {
+                bootstrapHelperIdentityResolutionTask = null;
+            }
+        }
     }
 
     private void OnApproved(object? sender, EventArgs e)
@@ -2107,7 +2405,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return (null, null);
         }
 
-        return (lastError, "Connection did not complete. Try again with invite or address.");
+        return (lastError, "Connection did not complete. Try again with invite, invite code, or address.");
     }
 
     private void SyncFromRuntime()
@@ -2320,6 +2618,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(HelperVerificationCode));
         OnPropertyChanged(nameof(HasHelperVerificationCode));
         OnPropertyChanged(nameof(ShowHelperVerificationCode));
+        OnPropertyChanged(nameof(HeaderVerificationCodeText));
+        OnPropertyChanged(nameof(ShowHeaderVerificationCode));
+        OnPropertyChanged(nameof(FirstPillVerificationCodeText));
+        OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
         OnPropertyChanged(nameof(HelperTechnicalIdentityText));
         OnPropertyChanged(nameof(HelperTechnicalSessionIdText));
         OnPropertyChanged(nameof(HasHelperTechnicalDetails));

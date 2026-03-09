@@ -444,14 +444,28 @@ public sealed class ScreenCaptureAbstractionTests
                     rawPayloadReceived.TrySetResult(e);
                 }
             };
+            var diagnosticsBeforeSend = NknRuntimeDiagnostics.Snapshot();
 
             await helper.SendScreenSharePayloadAsync(payload, cts.Token);
             var received = await rawPayloadReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var diagnosticsAfterSend = NknRuntimeDiagnostics.Snapshot();
 
             Assert.Equal(helperIdentity.Address, received.Source);
             Assert.False(received.IsTopic);
             Assert.Null(received.Topic);
             Assert.Equal(payload, received.Payload);
+            Assert.Equal(0, helper.ScreenShareOutboundBusyDrops);
+            Assert.Equal(1, helper.ScreenShareMessagesSent);
+            Assert.Equal(payload.Length, helper.ScreenSharePayloadBytesSent);
+            Assert.Equal(
+                diagnosticsBeforeSend.ScreenShareMessagesSent + 1,
+                diagnosticsAfterSend.ScreenShareMessagesSent);
+            Assert.Equal(
+                diagnosticsBeforeSend.ScreenSharePayloadBytesSent + payload.Length,
+                diagnosticsAfterSend.ScreenSharePayloadBytesSent);
+            Assert.Equal(
+                diagnosticsBeforeSend.ScreenShareOutboundBusyDrops,
+                diagnosticsAfterSend.ScreenShareOutboundBusyDrops);
         }
         finally
         {
@@ -461,7 +475,7 @@ public sealed class ScreenCaptureAbstractionTests
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task NknSignalingTransport_ChatSend_PrioritizesOverConcurrentScreenSharePayload()
+    public async Task NknSignalingTransport_ChatSend_PrioritizesOverConcurrentScreenSharePayload_AndScreenShareCanUseBriefWaitBudget()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -534,17 +548,137 @@ public sealed class ScreenCaptureAbstractionTests
 
             var chatTask = helper.SendChatMessageAsync(chatPayload, cts.Token);
             await firstSendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            var diagnosticsBeforeSend = NknRuntimeDiagnostics.Snapshot();
 
-            await helper.SendScreenSharePayloadAsync(screenPayload, cts.Token).WaitAsync(TimeSpan.FromMilliseconds(300), cts.Token);
+            var screenSendTask = helper.SendScreenSharePayloadAsync(screenPayload, cts.Token);
             Assert.Equal(0, Volatile.Read(ref rawScreenPayloadReceived));
 
             releaseFirstSend.TrySetResult();
 
             await chatTask;
+            await screenSendTask.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             var receivedChat = await hostChatReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var diagnosticsAfterSend = NknRuntimeDiagnostics.Snapshot();
 
             Assert.Equal(chatPayload, receivedChat);
+            Assert.Equal(1, Volatile.Read(ref rawScreenPayloadReceived));
+            Assert.Equal(0, helper.ScreenShareOutboundBusyDrops);
+            Assert.Equal(1, helper.ScreenShareMessagesSent);
+            Assert.Equal(screenPayload.Length, helper.ScreenSharePayloadBytesSent);
+            Assert.Equal(
+                diagnosticsBeforeSend.ScreenShareOutboundBusyDrops,
+                diagnosticsAfterSend.ScreenShareOutboundBusyDrops);
+            Assert.Equal(
+                diagnosticsBeforeSend.ScreenShareMessagesSent + 1,
+                diagnosticsAfterSend.ScreenShareMessagesSent);
+            Assert.Equal(
+                diagnosticsBeforeSend.ScreenSharePayloadBytesSent + screenPayload.Length,
+                diagnosticsAfterSend.ScreenSharePayloadBytesSent);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknSignalingTransport_ScreenSharePayload_DropsAfterBriefWaitBudget_WhenOutboundGateRemainsBusy()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.chat-budget-drop.address");
+            var helperClient = new FakeNknClient("helper.chat-budget-drop.address");
+            var hostIdentity = new NknIdentity("host-chat-budget-drop-id", "host.chat-budget-drop.address");
+            var helperIdentity = new NknIdentity("helper-chat-budget-drop-id", "helper.chat-budget-drop.address");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostChatReceived = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstSendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirstSend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var sendInvocationCount = 0;
+            var rawScreenPayloadReceived = 0;
+            var chatPayload = System.Text.Encoding.UTF8.GetBytes("chat-budget-drop-payload");
+            byte[] screenPayload = Array.Empty<byte>();
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ChatMessageReceived += (_, e) => hostChatReceived.TrySetResult(e.Payload);
+            hostClient.MessageReceived += (_, e) =>
+            {
+                if (!e.IsTopic && e.Payload.SequenceEqual(screenPayload))
+                {
+                    Interlocked.Increment(ref rawScreenPayloadReceived);
+                }
+            };
+
+            await host.HostByAddressAsync(cts.Token);
+            var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
+            screenPayload = ScreenSharePayloadCodec.Serialize(new ScreenShareFrameChunkV1
+            {
+                SessionId = authorizedSessionId,
+                FrameId = 1,
+                Width = 640,
+                Height = 360,
+                TimestampUnixMilliseconds = 1234,
+                Encoding = "jpeg",
+                ChunkIndex = 0,
+                ChunkCount = 1,
+                DataBase64 = Convert.ToBase64String(new byte[] { 1, 2, 3, 4 }),
+            });
+
+            helperClient.BeforeSendAsync = async (_, _, sendCt) =>
+            {
+                if (Interlocked.Increment(ref sendInvocationCount) == 1)
+                {
+                    firstSendStarted.TrySetResult();
+                    await releaseFirstSend.Task.WaitAsync(sendCt);
+                }
+            };
+
+            var chatTask = helper.SendChatMessageAsync(chatPayload, cts.Token);
+            await firstSendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            var diagnosticsBeforeDrop = NknRuntimeDiagnostics.Snapshot();
+
+            await helper.SendScreenSharePayloadAsync(screenPayload, cts.Token).WaitAsync(TimeSpan.FromMilliseconds(300), cts.Token);
+
+            var diagnosticsAfterDrop = NknRuntimeDiagnostics.Snapshot();
             Assert.Equal(0, Volatile.Read(ref rawScreenPayloadReceived));
+            Assert.Equal(1, helper.ScreenShareOutboundBusyDrops);
+            Assert.Equal(0, helper.ScreenShareMessagesSent);
+            Assert.Equal(0, helper.ScreenSharePayloadBytesSent);
+            Assert.Equal(
+                diagnosticsBeforeDrop.ScreenShareOutboundBusyDrops + 1,
+                diagnosticsAfterDrop.ScreenShareOutboundBusyDrops);
+            Assert.Equal(
+                diagnosticsBeforeDrop.ScreenShareMessagesSent,
+                diagnosticsAfterDrop.ScreenShareMessagesSent);
+            Assert.Equal(
+                diagnosticsBeforeDrop.ScreenSharePayloadBytesSent,
+                diagnosticsAfterDrop.ScreenSharePayloadBytesSent);
+
+            releaseFirstSend.TrySetResult();
+            await chatTask;
+            var receivedChat = await hostChatReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.Equal(chatPayload, receivedChat);
         }
         finally
         {

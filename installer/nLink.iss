@@ -7,13 +7,17 @@
 #endif
 
 #ifndef AppVersion
-  #define AppVersion "0.4.2"
+  #define AppVersion "0.4.5"
 #endif
 
 #define MyAppName "nLink"
 #define MyAppExeName "nLink.exe"
 
 [Setup]
+; Public release policy:
+; - installer artifacts must be Authenticode-signed before publication
+; - local/manual packaging may remain unsigned until the release signing step runs
+; - if SignTool is configured in the release environment, keep installer and generated uninstaller signing enabled
 ; Keep AppId stable across releases so silent upgrade/rollback tests exercise true in-place upgrades.
 AppId={{9D5C9C2D-7D66-4E6E-8A5A-20F64C2F31A7}
 AppName={#MyAppName}

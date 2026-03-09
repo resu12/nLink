@@ -194,6 +194,333 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task HelpeePage_PublicInviteFlowBlockedWithoutVerifiedHelperIdentity_HidesInviteActions()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+            var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+            using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
+            using var helpee = new HelpeePageViewModel(
+                cancelAction: static () => { },
+                transportConfig,
+                runtime,
+                openDiagnosticsAction: static () => { },
+                clipboardService: new TestClipboardService(),
+                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null));
+
+            var view = new HelpeePageView { DataContext = helpee };
+            var window = new Window { Width = 1080, Height = 760, Content = view };
+            try
+            {
+                window.Show();
+                await FlushUiAsync();
+
+#if DEBUG
+                Assert.False(string.IsNullOrWhiteSpace(helpee.ShareInvite));
+                Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helpee.ShareInvite"));
+#else
+                Assert.True(string.IsNullOrWhiteSpace(helpee.ShareInvite));
+                Assert.False(helpee.ShowShareInviteQr);
+                Assert.True(helpee.ShowShareInviteQrPlaceholder);
+                Assert.False(helpee.ShowWaitingInviteActions);
+                Assert.Equal("Invite setup requires a verified helper address.", helpee.ShareInviteStatusText);
+
+                var inviteStatus = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helpee.InviteStatus"));
+                Assert.Equal("Invite setup requires a verified helper address.", inviteStatus.Text);
+#endif
+            }
+            finally
+            {
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task HelpeePage_PublicInviteFlow_UnlocksInviteActionsAfterEnteringHelperIdentity()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+            var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+            using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
+            using var helpee = new HelpeePageViewModel(
+                cancelAction: static () => { },
+                transportConfig,
+                runtime,
+                openDiagnosticsAction: static () => { },
+                clipboardService: new TestClipboardService(),
+                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null));
+
+            var view = new HelpeePageView { DataContext = helpee };
+            var window = new Window { Width = 1080, Height = 760, Content = view };
+            try
+            {
+                window.Show();
+                await FlushUiAsync();
+
+#if DEBUG
+                Assert.False(string.IsNullOrWhiteSpace(helpee.ShareInvite));
+#else
+                var helperIdentity = new PeerAddress("nlink-helper.boundpublic.ui.1234");
+                var helperInput = Assert.IsType<TextBox>(FindFirstVisibleControlByAutomationId(window, "Helpee.HelperIdentityInput"));
+                Assert.Null(FindFirstVisibleControlByAutomationId(window, "Helpee.UseHelperIdentity"));
+
+                helperInput.Text = helperIdentity.Value;
+                await FlushUiAsync();
+
+                await WaitUntilAsync(
+                    () => !string.IsNullOrWhiteSpace(helpee.ShareInvite) && helpee.ShowWaitingInviteActions,
+                    TimeSpan.FromSeconds(3));
+                await FlushUiAsync();
+
+                Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helpee.ShareInvite"));
+                Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helpee.CopyInvite"));
+                Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helpee.RefreshInvite"));
+
+                Assert.Equal(helperIdentity.Value, helperInput.Text);
+                Assert.Null(FindFirstVisibleControlByAutomationId(window, "Helpee.HelperIdentityHint"));
+                Assert.Null(FindFirstVisibleControlByAutomationId(window, "Helpee.BoundHelperIdentity"));
+                var boundVerificationCode = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helpee.FirstPillVerificationCode"));
+                Assert.Equal(helpee.VerifiedInviteHelperVerificationCode, boundVerificationCode.Text);
+                Assert.Null(FindFirstVisibleControlByAutomationId(window, "Helpee.BoundHelperTechnicalIdentity"));
+                Assert.Null(FindFirstVisibleControlByAutomationId(window, "Helpee.InviteCodeText"));
+                Assert.Null(FindFirstVisibleControlByAutomationId(window, "Helpee.InviteTechnicalToken"));
+                Assert.Equal(helpee.ShareInvite, helpee.ShareInviteRawToken);
+
+                var validator = InviteTokenServiceFactory.CreateInviteTokenValidator();
+                var validation = validator.Validate(helpee.ShareInvite, DateTimeOffset.UtcNow);
+                Assert.True(validation.IsSuccess, validation.Message);
+                Assert.Equal(helperIdentity, validation.Invite!.BoundHelperAddress);
+#endif
+            }
+            finally
+            {
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task HelpeePage_PublicInviteFlow_CopyInvite_CopiesInviteShareCode()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+            var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+            var clipboard = new TestClipboardService();
+            using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
+            using var helpee = new HelpeePageViewModel(
+                cancelAction: static () => { },
+                transportConfig,
+                runtime,
+                openDiagnosticsAction: static () => { },
+                clipboardService: clipboard,
+                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null));
+
+            var helperIdentity = new PeerAddress("nlink-helper.boundpublic.copyinvite.1234");
+            var helperToken = HelperIdentityTokenCodec.Encode(helperIdentity);
+            helpee.SetVerifiedInviteHelperIdentity(helperIdentity, normalizedInputOverride: helperToken);
+
+            await WaitUntilAsync(() => !string.IsNullOrWhiteSpace(helpee.ShareInvite), TimeSpan.FromSeconds(3));
+            await helpee.CopyInviteCommand.ExecuteAsync(null);
+
+            Assert.Equal(helpee.ShareInvite, clipboard.LastText);
+            Assert.Equal(helpee.ShareInviteRawToken, clipboard.LastText);
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task HelpeePage_PublicInviteFlow_ShareInvite_UsesInviteShareCode()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+            var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+            var shareService = new TestInviteShareService();
+            using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
+            using var helpee = new HelpeePageViewModel(
+                cancelAction: static () => { },
+                transportConfig,
+                runtime,
+                openDiagnosticsAction: static () => { },
+                clipboardService: new TestClipboardService(),
+                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null),
+                inviteShareService: shareService);
+
+            var helperIdentity = new PeerAddress("nlink-helper.boundpublic.shareinvite.1234");
+            var helperToken = HelperIdentityTokenCodec.Encode(helperIdentity);
+            helpee.SetVerifiedInviteHelperIdentity(helperIdentity, normalizedInputOverride: helperToken);
+
+            await WaitUntilAsync(() => !string.IsNullOrWhiteSpace(helpee.ShareInvite), TimeSpan.FromSeconds(3));
+            await helpee.ShareInviteCommand.ExecuteAsync(null);
+
+            Assert.Equal(helpee.ShareInvite, shareService.LastInviteText);
+            Assert.Equal(helpee.ShareInviteRawToken, shareService.LastInviteText);
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task HelperPage_PublicInviteFlow_ShowsHelperIdentityBootstrapPanel()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+            var transportConfig = CreateNknUiTestConfig();
+            using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
+            using var helper = new HelperPageViewModel(
+                cancelAction: static () => { },
+                transportConfig,
+                runtime,
+                openDiagnosticsAction: static () => { },
+                clipboardService: new TestClipboardService(),
+                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null),
+                bootstrapHelperIdentityResolver: _ => Task.FromResult<PeerAddress?>(new PeerAddress("nlink-helper.bootstrap.actual.1234567890")));
+
+            var view = new HelperPageView { DataContext = helper };
+            var window = new Window { Width = 1080, Height = 760, Content = view };
+            try
+            {
+                window.Show();
+                await FlushUiAsync();
+
+#if DEBUG
+                Assert.Null(FindFirstControlByAutomationId(window, "Helper.CopyHelperIdentity"));
+#else
+                Assert.True(helper.ShowHelperIdentityBootstrapPanel);
+                Assert.False(string.IsNullOrWhiteSpace(helper.HelperIdentityBootstrapText));
+                var shareButton = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "Helper.ShareHelperIdentity"));
+                var copyButton = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "Helper.CopyHelperIdentity"));
+                var verificationCode = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helper.FirstPillVerificationCode"));
+                Assert.Null(FindFirstControlByAutomationId(window, "Helper.IdentityText"));
+                Assert.Equal(helper.HelperIdentityBootstrapVerificationCode, verificationCode.Text);
+                Assert.Null(FindFirstVisibleControlByAutomationId(window, "SessionHeader.VerificationCode"));
+                Assert.Equal("Share helper address", shareButton.Content?.ToString());
+                Assert.Equal("Copy helper address", copyButton.Content?.ToString());
+#endif
+            }
+            finally
+            {
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task HelperPage_PublicInviteFlow_CopyHelperCode_CopiesTokenToClipboard()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+            var transportConfig = CreateNknUiTestConfig();
+            var clipboard = new TestClipboardService();
+            var expectedHelperIdentity = new PeerAddress("nlink-helper.bootstrap.actual.1234567890");
+            using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
+            using var helper = new HelperPageViewModel(
+                cancelAction: static () => { },
+                transportConfig,
+                runtime,
+                openDiagnosticsAction: static () => { },
+                clipboardService: clipboard,
+                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null),
+                bootstrapHelperIdentityResolver: _ => Task.FromResult<PeerAddress?>(expectedHelperIdentity));
+
+            var view = new HelperPageView { DataContext = helper };
+            var window = new Window { Width = 1080, Height = 760, Content = view };
+            try
+            {
+                window.Show();
+                await FlushUiAsync();
+
+#if DEBUG
+                Assert.Null(FindFirstControlByAutomationId(window, "Helper.CopyHelperIdentity"));
+#else
+                Assert.True(helper.ShowHelperIdentityBootstrapPanel);
+                await helper.CopyHelperIdentityCommand.ExecuteAsync(null);
+                Assert.Equal(expectedHelperIdentity.Value, clipboard.LastText);
+#endif
+            }
+            finally
+            {
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task HelperPage_PublicInviteFlow_ShareHelperAddress_UsesShareService()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+            var transportConfig = CreateNknUiTestConfig();
+            var shareService = new TestInviteShareService();
+            var expectedHelperIdentity = new PeerAddress("nlink-helper.bootstrap.actual.1234567890");
+            using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
+            using var helper = new HelperPageViewModel(
+                cancelAction: static () => { },
+                transportConfig,
+                runtime,
+                openDiagnosticsAction: static () => { },
+                clipboardService: new TestClipboardService(),
+                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null),
+                bootstrapHelperIdentityResolver: _ => Task.FromResult<PeerAddress?>(expectedHelperIdentity),
+                inviteShareService: shareService);
+
+            var view = new HelperPageView { DataContext = helper };
+            var window = new Window { Width = 1080, Height = 760, Content = view };
+            try
+            {
+                window.Show();
+                await FlushUiAsync();
+
+#if DEBUG
+                Assert.Null(FindFirstControlByAutomationId(window, "Helper.ShareHelperIdentity"));
+#else
+                Assert.True(helper.ShowHelperIdentityBootstrapPanel);
+                var shareButton = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "Helper.ShareHelperIdentity"));
+                Assert.Equal("Share helper address", shareButton.Content?.ToString());
+                await helper.ShareHelperIdentityCommand.ExecuteAsync(null);
+                Assert.Equal(expectedHelperIdentity.Value, shareService.LastInviteText);
+#endif
+            }
+            finally
+            {
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task HelpeePage_WhenScreenShareNotApproved_ShowsDisabledShareScreenButton()
     {
         await fixture.Session.Dispatch(async () =>
@@ -256,15 +583,14 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
 
                 Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helpee.IncomingApprovalTitle"));
                 Assert.Null(FindFirstControlByAutomationId(window, "Helpee.IncomingApprovalExplanation"));
-                Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helpee.IncomingVerificationCode"));
+                var verificationCode = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "SessionHeader.VerificationCode"));
+                Assert.Equal(helpee.IncomingHelperVerificationCode, verificationCode.Text);
                 Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helpee.RequestedAccessTitle"));
                 Assert.Null(FindFirstControlByAutomationId(window, "Helpee.Status"));
                 Assert.Null(FindFirstControlByAutomationId(window, "Helpee.RequestedCapabilities"));
                 Assert.Null(FindFirstControlByAutomationId(window, "Helpee.ApprovedCapabilities"));
-
-                var verificationHint = FindFirstVisibleControlByAutomationId(window, "Helpee.IncomingVerificationHint") as TextBlock;
-                Assert.NotNull(verificationHint);
-                Assert.Equal("If needed, ask the helper to read this code aloud before allowing.", verificationHint!.Text);
+                Assert.Null(FindFirstVisibleControlByAutomationId(window, "Helpee.IncomingVerificationCode"));
+                Assert.Null(FindFirstVisibleControlByAutomationId(window, "Helpee.IncomingVerificationHint"));
 
                 var chatCapability = FindFirstControlByAutomationId(window, "Helpee.AllowCapability.Chat") as CheckBox;
                 Assert.NotNull(chatCapability);
@@ -463,7 +789,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task HelpeePage_PreparesInviteBeforeHostReady_WhenSecurityStateProvidesAddress()
+    public async Task HelpeePage_DoesNotPrepareInviteUntilHostReady()
     {
         await fixture.Session.Dispatch(async () =>
         {
@@ -486,18 +812,28 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 await FlushUiAsync();
 
                 Assert.Null(runtime.CurrentLocalPeerAddress);
-                Assert.Equal(delayedTransport.LocalPeerAddress, runtime.CurrentInvitePeerAddress?.Value);
+                Assert.Null(runtime.CurrentLocalPeerAddress);
+                Assert.Null(runtime.CurrentInvitePeerAddress);
+                Assert.False(helpee.ShowWaitingInviteActions);
+                Assert.True(string.IsNullOrWhiteSpace(helpee.ShareInvite));
+                Assert.Equal("Preparing invite…", helpee.ShareInviteStatusText);
 
+                delayedTransport.ReleaseHostReady();
+
+                await WaitUntilAsync(
+                    () => string.Equals(runtime.CurrentInvitePeerAddress?.Value, delayedTransport.LocalPeerAddress, StringComparison.Ordinal),
+                    TimeSpan.FromSeconds(2));
                 await WaitUntilAsync(
                     () => !string.IsNullOrWhiteSpace(helpee.ShareInvite),
                     TimeSpan.FromSeconds(2));
-
                 await WaitUntilAsync(
-                    () => helpee.ShowShareInviteQr && !helpee.ShowShareInviteQrPlaceholder,
+                    () => helpee.ShowWaitingInviteActions &&
+                          helpee.ShowShareInviteQr &&
+                          !helpee.ShowShareInviteQrPlaceholder,
                     TimeSpan.FromSeconds(2));
 
                 Assert.Equal("Invite ready", helpee.ShareInviteStatusText);
-                Assert.Null(runtime.CurrentLocalPeerAddress);
+                Assert.Equal(delayedTransport.LocalPeerAddress, runtime.CurrentLocalPeerAddress?.Value);
                 Assert.Equal(delayedTransport.LocalPeerAddress, runtime.CurrentInvitePeerAddress?.Value);
             }
             finally
@@ -637,7 +973,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
             {
                 await FlushUiAsync();
 
-                var verificationCode = FindFirstVisibleControlByAutomationId(window, "Helper.VerificationCode") as TextBlock;
+                var verificationCode = FindFirstVisibleControlByAutomationId(window, "SessionHeader.VerificationCode") as TextBlock;
                 Assert.NotNull(verificationCode);
                 Assert.Equal(helper.HelperVerificationCode, verificationCode!.Text);
             }
@@ -685,7 +1021,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
             {
                 await FlushUiAsync();
 
-                Assert.Null(FindFirstVisibleControlByAutomationId(window, "Helper.VerificationCode"));
+                Assert.Null(FindFirstVisibleControlByAutomationId(window, "SessionHeader.VerificationCode"));
             }
             finally
             {
@@ -758,7 +1094,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                         ? control
                         : null,
                     TimeSpan.FromSeconds(2),
-                    "helper code input");
+                    "helper invite input");
 
                 Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helper.Connect"));
                 Assert.Null(FindFirstControlByAutomationId(window, "Helper.ConnectHint"));
@@ -800,7 +1136,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 Assert.True(
                     Math.Abs(pasteButton.Bounds.Y - scanQrButton.Bounds.Y) < 2,
                     $"Expected helper secondary actions on the same row, got Y={pasteButton.Bounds.Y:N1} and {scanQrButton.Bounds.Y:N1}.");
-                Assert.True(inputCenter.HasValue, "Expected helper code input to translate into window coordinates.");
+                Assert.True(inputCenter.HasValue, "Expected helper invite input to translate into window coordinates.");
                 Assert.True(pasteCenter.HasValue, "Expected helper paste action to translate into window coordinates.");
                 Assert.True(scanCenter.HasValue, "Expected helper scan action to translate into window coordinates.");
                 Assert.True(installCenter.HasValue, "Expected install link to translate into window coordinates.");
@@ -2040,9 +2376,72 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
         return new ConnectedSessionContext(helper, helpee, helperRuntime, helpeeRuntime);
     }
 
+    private static NLink.App.Configuration.TransportRuntimeConfig CreateNknUiTestConfig()
+    {
+        var constructor = typeof(NLink.App.Configuration.TransportRuntimeConfig).GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            new[]
+            {
+                typeof(string),
+                typeof(string),
+                typeof(string),
+                typeof(string),
+                typeof(string),
+                typeof(bool),
+                typeof(bool),
+                typeof(bool),
+                typeof(bool),
+                typeof(string),
+                typeof(string),
+                typeof(string),
+                typeof(BridgeReusePolicy),
+                typeof(Func<NLink.Core.ISignalingTransport>),
+            },
+            modifiers: null);
+
+        Assert.NotNull(constructor);
+
+        return (NLink.App.Configuration.TransportRuntimeConfig)constructor!.Invoke(
+            new object?[]
+            {
+                "NKN",
+                "Internet connection",
+                "Release",
+                "NKN",
+                "ui-test",
+                true,
+                false,
+                false,
+                true,
+                "ui-test",
+                string.Empty,
+                string.Empty,
+                BridgeReusePolicy.Default,
+                (Func<NLink.Core.ISignalingTransport>)(() => new NLink.Infra.DevLocal.DevLocalTransport()),
+            });
+    }
+
     private sealed class TestClipboardService : IClipboardService
     {
-        public Task SetTextAsync(string text) => Task.CompletedTask;
+        public string? LastText { get; private set; }
+
+        public Task SetTextAsync(string text)
+        {
+            LastText = text;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class TestInviteShareService : IInviteShareService
+    {
+        public string? LastInviteText { get; private set; }
+
+        public Task<InviteShareResult> ShareInviteAsync(string inviteText, CancellationToken ct)
+        {
+            LastInviteText = inviteText;
+            return Task.FromResult(new InviteShareResult(true));
+        }
     }
 
     private sealed class FixedRecentConnectTargetsStore : IRecentConnectTargetsStore

@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -33,6 +34,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private const string ControlStateSnapshotFrameType = "control_state_snapshot";
     private const string ControlDisplayInfoFrameType = "control_display_info";
     private const string ScreenSharePayloadFrameType = "screenshare_payload";
+    private const string ScreenShareStopFrameType = "screenshare_stop";
     private const int ConnectTimeoutMs = 2000;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -48,11 +50,19 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private readonly IInviteValidationThrottle inviteValidationThrottle;
     private readonly ISessionHandshakeReplayCache handshakeReplayCache;
     private readonly ScreenShareFrameReassembler screenShareFrameReassembler = new();
+    private readonly object secureStateGate = new();
+    private readonly SessionReplayWindow inboundControlReplayWindow = new();
+    private readonly SessionReplayWindow inboundLifecycleReplayWindow = new();
+    private readonly SessionReplayWindow inboundScreenShareReplayWindow = new();
     private const bool LocalRemoteControlSupported = true;
     private readonly string localPeerAddress;
     private SessionConnection? activeConnection;
     private PendingOutboundHandshakeState? pendingOutboundHandshake;
     private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
+    private byte[]? controlSessionSharedKey;
+    private long nextOutboundControlSecureSequence;
+    private long nextOutboundLifecycleSecureSequence;
+    private long nextOutboundScreenShareSecureSequence;
     private TaskCompletionSource<bool> hostReadyTcs = CreateHostReadyTcs();
     private bool remoteSupportsRemoteControl;
     private bool disposed;
@@ -198,6 +208,13 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         }
 
         var helperAddress = new PeerAddress(localPeerAddress);
+        if (InviteSecurityDiagnostics.RequiresBoundHelperForIssuedSecretInvites() &&
+            validation.Invite.BoundHelperAddress is null)
+        {
+            UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(SessionHandshakeState.Failed, "invite_helper_required"));
+            throw new InvalidOperationException("Invite token must be bound to the verified helper identity.");
+        }
+
         if (validation.Invite.BoundHelperAddress is not null &&
             validation.Invite.BoundHelperAddress != helperAddress)
         {
@@ -366,7 +383,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             new TransportFrame
             {
                 Type = ScreenSharePayloadFrameType,
-                Data = Convert.ToBase64String(payload.Span),
+                Data = Convert.ToBase64String(CreateSecureScreenSharePayload(payload.Span.ToArray())),
             },
             ct);
     }
@@ -385,7 +402,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             new TransportFrame
             {
                 Type = frameType,
-                Data = Convert.ToBase64String(payload),
+                Data = Convert.ToBase64String(CreateSecureControlPayload(frameType, ResolveRequestId(frameType, payload), payload)),
             },
             ct);
     }
@@ -467,7 +484,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
                 var joinRequestArgs = new IncomingJoinRequestEventArgs(
                     approveAsync: (decision, token) => ApproveHostJoinAsync(connection, sharedKey, approvalRequest, decision, token),
-                    rejectAsync: token => RejectHostJoinAsync(connection, approvalRequest, token),
+                    rejectAsync: token => RejectHostJoinAsync(connection, sharedKey, approvalRequest, token),
                     approvalRequest: approvalRequest);
 
                 var handler = IncomingJoinRequest;
@@ -616,7 +633,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ApproveFrameType, StringComparison.Ordinal))
                 {
                     if (!TryGetPayloadBytes(frame, out var payloadBytes) ||
-                        !SessionHandshakeProtocol.TryDeserializeApprovalDecision(payloadBytes, out var decision) ||
+                        pendingSessionKey is null ||
+                        !TryDecryptLifecyclePayload(payloadBytes, pendingSessionKey, ApproveFrameType, pendingOutboundHandshake?.HelpeeAddress, out var securePayload) ||
+                        !SessionHandshakeProtocol.TryDeserializeApprovalDecision(securePayload.Plaintext, out var decision) ||
                         pendingOutboundHandshake is null ||
                         decision.SessionId != pendingOutboundHandshake.SessionId ||
                         decision.HelperIdentity != pendingOutboundHandshake.HelperAddress ||
@@ -631,6 +650,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                     UpdateSessionSecurityState(currentSessionSecurityState.WithApproval(decision.ToGrant()));
                     if (pendingSessionKey is not null)
                     {
+                        SetControlSessionSharedKey(pendingSessionKey);
                         SessionKeyReady?.Invoke(this, new TransportSessionKeyReadyEventArgs(pendingSessionKey));
                     }
 
@@ -641,6 +661,15 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
                 if (string.Equals(frame.Type, RejectFrameType, StringComparison.Ordinal))
                 {
+                    if (!TryGetPayloadBytes(frame, out var rejectPayloadBytes) ||
+                        pendingSessionKey is null ||
+                        !TryDecryptLifecyclePayload(rejectPayloadBytes, pendingSessionKey, RejectFrameType, pendingOutboundHandshake?.HelpeeAddress, out _))
+                    {
+                        AbortOutboundHandshake("reject_payload_invalid");
+                        connection.Dispose();
+                        break;
+                    }
+
                     rejected = true;
                     pendingOutboundHandshake = null;
                     UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(SessionHandshakeState.Invalidated, "join_rejected"));
@@ -661,9 +690,10 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
                 if (string.Equals(frame.Type, ScreenSharePayloadFrameType, StringComparison.Ordinal))
                 {
-                    if (TryGetPayloadBytes(frame, out var payloadBytes))
+                    if (TryGetPayloadBytes(frame, out var payloadBytes) &&
+                        TryDecryptScreenSharePayload(payloadBytes, out var plaintext))
                     {
-                        HandleScreenSharePayload(payloadBytes);
+                        HandleScreenSharePayload(plaintext);
                     }
 
                     continue;
@@ -672,7 +702,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlRequestFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlRequest(payloadBytes, out var message) &&
+                        TryDecryptControlPayload(payloadBytes, ControlRequestFrameType, ResolveExpectedRemotePeerAddressForCurrentSession(), out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlRequest(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlRequestFrameType, securePayload.Metadata, message.RequestId) &&
                         TryValidateControlMessageSession("control_request", message.SessionId, message.RequestId))
                     {
                         SafeRaiseRemoteControlRequestReceived(message);
@@ -684,7 +716,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlResponseFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlResponse(payloadBytes, out var message) &&
+                        TryDecryptControlPayload(payloadBytes, ControlResponseFrameType, ResolveExpectedRemotePeerAddressForCurrentSession(), out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlResponse(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlResponseFrameType, securePayload.Metadata, message.RequestId) &&
                         TryValidateControlMessageSession("control_response", message.SessionId, message.RequestId))
                     {
                         SafeRaiseRemoteControlResponseReceived(message);
@@ -696,7 +730,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlStartFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlStart(payloadBytes, out var message) &&
+                        TryDecryptControlPayload(payloadBytes, ControlStartFrameType, ResolveExpectedRemotePeerAddressForCurrentSession(), out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlStart(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlStartFrameType, securePayload.Metadata, message.RequestId) &&
                         TryValidateControlMessageSession("control_start", message.SessionId, message.RequestId))
                     {
                         SafeRaiseRemoteControlStartReceived(message);
@@ -708,7 +744,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlStopFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlStop(payloadBytes, out var message) &&
+                        TryDecryptControlPayload(payloadBytes, ControlStopFrameType, ResolveExpectedRemotePeerAddressForCurrentSession(), out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlStop(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlStopFrameType, securePayload.Metadata, message.RequestId) &&
                         TryValidateControlMessageSession("control_stop", message.SessionId, message.RequestId))
                     {
                         SafeRaiseRemoteControlStopReceived(message);
@@ -720,7 +758,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlInputFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlInput(payloadBytes, out var message) &&
+                        TryDecryptControlPayload(payloadBytes, ControlInputFrameType, ResolveExpectedRemotePeerAddressForCurrentSession(), out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlInput(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlInputFrameType, securePayload.Metadata, message.RequestId) &&
                         TryValidateControlMessageSession("control_input", message.SessionId, message.RequestId))
                     {
                         SafeRaiseRemoteControlInputReceived(message);
@@ -732,7 +772,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlAckFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlAck(payloadBytes, out var message) &&
+                        TryDecryptControlPayload(payloadBytes, ControlAckFrameType, ResolveExpectedRemotePeerAddressForCurrentSession(), out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlAck(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlAckFrameType, securePayload.Metadata, message.RequestId) &&
                         TryValidateControlMessageSession("control_ack", message.SessionId, message.RequestId))
                     {
                         SafeRaiseRemoteControlAckReceived(message);
@@ -744,7 +786,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlStateSnapshotFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlStateSnapshot(payloadBytes, out var message) &&
+                        TryDecryptControlPayload(payloadBytes, ControlStateSnapshotFrameType, ResolveExpectedRemotePeerAddressForCurrentSession(), out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlStateSnapshot(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlStateSnapshotFrameType, securePayload.Metadata, message.RequestId) &&
                         TryValidateControlMessageSession("control_state_snapshot", message.SessionId, message.RequestId))
                     {
                         SafeRaiseRemoteControlStateSnapshotReceived(message);
@@ -756,7 +800,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlDisplayInfoFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlDisplayInfo(payloadBytes, out var message) &&
+                        TryDecryptControlPayload(payloadBytes, ControlDisplayInfoFrameType, ResolveExpectedRemotePeerAddressForCurrentSession(), out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlDisplayInfo(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlDisplayInfoFrameType, securePayload.Metadata, requestId: null) &&
                         TryValidateControlMessageSession("control_display_info", message.SessionId, requestId: null))
                     {
                         SafeRaiseRemoteControlDisplayInfoReceived(message);
@@ -867,6 +913,16 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                     UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(SessionHandshakeState.Failed, "invite_binding_mismatch"));
                     await connection.WriteFrameAsync(
                         CreateHandshakeFrame(SessionHandshakeResultFrameType, SessionHandshakeProtocol.Serialize(new SessionHandshakeResult(start.SessionId, Verified: false, FailureReason: "invite_binding_mismatch"))),
+                        ct).ConfigureAwait(false);
+                    return new InboundHandshakeResult(false, null, false, null, CapabilityGrant.None);
+                }
+
+                if (InviteSecurityDiagnostics.RequiresBoundHelperForIssuedSecretInvites() &&
+                    validation.Invite.BoundHelperAddress is null)
+                {
+                    UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(SessionHandshakeState.Failed, "invite_helper_required"));
+                    await connection.WriteFrameAsync(
+                        CreateHandshakeFrame(SessionHandshakeResultFrameType, SessionHandshakeProtocol.Serialize(new SessionHandshakeResult(start.SessionId, Verified: false, FailureReason: "invite_helper_required"))),
                         ct).ConfigureAwait(false);
                     return new InboundHandshakeResult(false, null, false, null, CapabilityGrant.None);
                 }
@@ -1015,9 +1071,10 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
                 if (string.Equals(frame.Type, ScreenSharePayloadFrameType, StringComparison.Ordinal))
                 {
-                    if (TryGetPayloadBytes(frame, out var payloadBytes))
+                    if (TryGetPayloadBytes(frame, out var payloadBytes) &&
+                        TryDecryptScreenSharePayload(payloadBytes, out var plaintext))
                     {
-                        HandleScreenSharePayload(payloadBytes);
+                        HandleScreenSharePayload(plaintext);
                     }
 
                     continue;
@@ -1026,7 +1083,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlRequestFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlRequest(payloadBytes, out var message))
+                        TryDecryptControlPayload(payloadBytes, ControlRequestFrameType, currentSessionSecurityState.HelperAddress, out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlRequest(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlRequestFrameType, securePayload.Metadata, message.RequestId))
                     {
                         SafeRaiseRemoteControlRequestReceived(message);
                     }
@@ -1037,7 +1096,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlResponseFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlResponse(payloadBytes, out var message))
+                        TryDecryptControlPayload(payloadBytes, ControlResponseFrameType, currentSessionSecurityState.HelperAddress, out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlResponse(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlResponseFrameType, securePayload.Metadata, message.RequestId))
                     {
                         SafeRaiseRemoteControlResponseReceived(message);
                     }
@@ -1048,7 +1109,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlStartFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlStart(payloadBytes, out var message))
+                        TryDecryptControlPayload(payloadBytes, ControlStartFrameType, currentSessionSecurityState.HelperAddress, out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlStart(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlStartFrameType, securePayload.Metadata, message.RequestId))
                     {
                         SafeRaiseRemoteControlStartReceived(message);
                     }
@@ -1059,7 +1122,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlStopFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlStop(payloadBytes, out var message))
+                        TryDecryptControlPayload(payloadBytes, ControlStopFrameType, currentSessionSecurityState.HelperAddress, out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlStop(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlStopFrameType, securePayload.Metadata, message.RequestId))
                     {
                         SafeRaiseRemoteControlStopReceived(message);
                     }
@@ -1070,7 +1135,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlInputFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlInput(payloadBytes, out var message))
+                        TryDecryptControlPayload(payloadBytes, ControlInputFrameType, currentSessionSecurityState.HelperAddress, out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlInput(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlInputFrameType, securePayload.Metadata, message.RequestId))
                     {
                         SafeRaiseRemoteControlInputReceived(message);
                     }
@@ -1081,7 +1148,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlAckFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlAck(payloadBytes, out var message))
+                        TryDecryptControlPayload(payloadBytes, ControlAckFrameType, currentSessionSecurityState.HelperAddress, out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlAck(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlAckFrameType, securePayload.Metadata, message.RequestId))
                     {
                         SafeRaiseRemoteControlAckReceived(message);
                     }
@@ -1092,7 +1161,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlStateSnapshotFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlStateSnapshot(payloadBytes, out var message))
+                        TryDecryptControlPayload(payloadBytes, ControlStateSnapshotFrameType, currentSessionSecurityState.HelperAddress, out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlStateSnapshot(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlStateSnapshotFrameType, securePayload.Metadata, message.RequestId))
                     {
                         SafeRaiseRemoteControlStateSnapshotReceived(message);
                     }
@@ -1103,7 +1174,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 if (string.Equals(frame.Type, ControlDisplayInfoFrameType, StringComparison.Ordinal))
                 {
                     if (TryGetPayloadBytes(frame, out var payloadBytes) &&
-                        RemoteControlPayloadCodec.TryDeserializeControlDisplayInfo(payloadBytes, out var message))
+                        TryDecryptControlPayload(payloadBytes, ControlDisplayInfoFrameType, currentSessionSecurityState.HelperAddress, out var securePayload) &&
+                        RemoteControlPayloadCodec.TryDeserializeControlDisplayInfo(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ControlDisplayInfoFrameType, securePayload.Metadata, requestId: null))
                     {
                         SafeRaiseRemoteControlDisplayInfoReceived(message);
                     }
@@ -1155,8 +1228,11 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             throw new InvalidOperationException("Approval decision does not match the pending approval request.");
         }
 
+        SetControlSessionSharedKey(sharedKey);
         await connection.WriteFrameAsync(
-            CreateHandshakeFrame(ApproveFrameType, SessionHandshakeProtocol.Serialize(decision)),
+            CreateSecureTransportFrame(
+                ApproveFrameType,
+                CreateSecureLifecyclePayload(ApproveFrameType, SessionHandshakeProtocol.Serialize(decision))),
             ct);
         UpdateSessionSecurityState(currentSessionSecurityState.WithApproval(decision.ToGrant()));
         LocalOperationalLog.Info(
@@ -1166,7 +1242,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         SafeRaiseApproved();
     }
 
-    private async Task RejectHostJoinAsync(SessionConnection connection, ApprovalRequest? approvalRequest, CancellationToken ct)
+    private async Task RejectHostJoinAsync(SessionConnection connection, byte[] sharedKey, ApprovalRequest? approvalRequest, CancellationToken ct)
     {
         if (currentSessionSecurityState.SessionId is SessionId sessionId &&
             currentSessionSecurityState.HelperAddress is PeerAddress helperAddress)
@@ -1176,7 +1252,12 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 $"event=approval_denied; reason=local_reject; session_id={sessionId.Value}; helper_identity={helperAddress.Value}; requested_capabilities={approvalRequest?.RequestedCapabilities ?? CapabilityGrant.None}");
         }
 
-        await connection.WriteFrameAsync(new TransportFrame { Type = RejectFrameType }, ct);
+        SetControlSessionSharedKey(sharedKey);
+        await connection.WriteFrameAsync(
+            CreateSecureTransportFrame(
+                RejectFrameType,
+                CreateSecureLifecyclePayload(RejectFrameType, JsonSerializer.SerializeToUtf8Bytes(new { reason = "join_rejected" }))),
+            ct);
         SafeRaiseRejected();
         connection.Dispose();
     }
@@ -1184,6 +1265,8 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private void OnDisconnected()
     {
         pendingOutboundHandshake = null;
+        ResetControlSecureState();
+        screenShareFrameReassembler.ClearAll();
         UpdateSessionSecurityState(currentSessionSecurityState.Invalidate("transport_disconnected"));
         Disconnected?.Invoke(this, EventArgs.Empty);
     }
@@ -1418,6 +1501,307 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         return false;
     }
 
+    private byte[] CreateSecureControlPayload(string frameType, string? requestId, byte[] plaintextPayload)
+    {
+        ArgumentNullException.ThrowIfNull(plaintextPayload);
+
+        var sessionId = currentSessionSecurityState.SessionId
+            ?? throw new InvalidOperationException("Session security state does not have an active session id.");
+        var metadata = new SessionSecureEnvelopeMetadata(
+            Family: SessionSecureMessageFamily.RemoteControl,
+            MessageType: MapSecureControlFrameType(frameType),
+            SessionId: sessionId,
+            SenderIdentity: ResolveLocalPeerAddressForSecureEnvelope(),
+            Sequence: Interlocked.Increment(ref nextOutboundControlSecureSequence),
+            RequestId: string.IsNullOrWhiteSpace(requestId) ? null : requestId.Trim());
+        return SessionSecureEnvelopeCodec.Encrypt(GetControlSessionSharedKeyOrThrow(), metadata, plaintextPayload);
+    }
+
+    private byte[] CreateSecureLifecyclePayload(string frameType, byte[] plaintextPayload)
+    {
+        ArgumentNullException.ThrowIfNull(plaintextPayload);
+
+        var sessionId = currentSessionSecurityState.SessionId
+            ?? throw new InvalidOperationException("Session security state does not have an active session id.");
+        var metadata = new SessionSecureEnvelopeMetadata(
+            Family: SessionSecureMessageFamily.Lifecycle,
+            MessageType: MapSecureLifecycleFrameType(frameType),
+            SessionId: sessionId,
+            SenderIdentity: ResolveLocalPeerAddressForSecureEnvelope(),
+            Sequence: Interlocked.Increment(ref nextOutboundLifecycleSecureSequence),
+            RequestId: null);
+        return SessionSecureEnvelopeCodec.Encrypt(GetControlSessionSharedKeyOrThrow(), metadata, plaintextPayload);
+    }
+
+    private byte[] CreateSecureScreenSharePayload(byte[] plaintextPayload)
+    {
+        ArgumentNullException.ThrowIfNull(plaintextPayload);
+
+        var sessionId = currentSessionSecurityState.SessionId
+            ?? throw new InvalidOperationException("Session security state does not have an active session id.");
+        string messageType;
+        if (ScreenSharePayloadCodec.TryDeserialize(plaintextPayload, out _))
+        {
+            messageType = ScreenSharePayloadFrameType;
+        }
+        else if (ScreenSharePayloadCodec.TryDeserializeStop(plaintextPayload, out _))
+        {
+            messageType = ScreenShareStopFrameType;
+        }
+        else
+        {
+            throw new InvalidOperationException("Screen share payload is invalid.");
+        }
+
+        var metadata = new SessionSecureEnvelopeMetadata(
+            Family: SessionSecureMessageFamily.ScreenShare,
+            MessageType: MapSecureScreenShareFrameType(messageType),
+            SessionId: sessionId,
+            SenderIdentity: ResolveLocalPeerAddressForSecureEnvelope(),
+            Sequence: Interlocked.Increment(ref nextOutboundScreenShareSecureSequence),
+            RequestId: null);
+        return SessionSecureEnvelopeCodec.Encrypt(GetControlSessionSharedKeyOrThrow(), metadata, plaintextPayload);
+    }
+
+    private bool TryDecryptControlPayload(
+        byte[] encodedPayload,
+        string frameType,
+        PeerAddress? expectedSender,
+        out SessionSecureEnvelopePayload securePayload)
+    {
+        securePayload = default;
+        if (expectedSender is null ||
+            currentSessionSecurityState.SessionId is not SessionId sessionId)
+        {
+            return false;
+        }
+
+        try
+        {
+            securePayload = SessionSecureEnvelopeCodec.Decrypt(
+                GetControlSessionSharedKeyOrThrow(),
+                encodedPayload,
+                new SessionSecureEnvelopeExpectation(
+                    Family: SessionSecureMessageFamily.RemoteControl,
+                    MessageType: MapSecureControlFrameType(frameType),
+                    SessionId: sessionId,
+                    SenderIdentity: expectedSender));
+        }
+        catch (Exception ex) when (ex is CryptographicException or InvalidOperationException or JsonException or FormatException)
+        {
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=control_message_rejected; message_type={frameType}; reason=secure_envelope_invalid; session_id={sessionId.Value}; source=devlocal-peer; ex={ex.GetType().Name}");
+            return false;
+        }
+
+        lock (secureStateGate)
+        {
+            if (inboundControlReplayWindow.EvaluateAndTrack(securePayload.Metadata.Sequence) != SessionReplaySequenceResult.Accepted)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private bool TryDecryptLifecyclePayload(
+        byte[] encodedPayload,
+        byte[] key,
+        string frameType,
+        PeerAddress? expectedSender,
+        out SessionSecureEnvelopePayload securePayload)
+    {
+        securePayload = default;
+        if (expectedSender is null || pendingOutboundHandshake?.SessionId is not SessionId sessionId)
+        {
+            return false;
+        }
+
+        try
+        {
+            securePayload = SessionSecureEnvelopeCodec.Decrypt(
+                key,
+                encodedPayload,
+                new SessionSecureEnvelopeExpectation(
+                    Family: SessionSecureMessageFamily.Lifecycle,
+                    MessageType: MapSecureLifecycleFrameType(frameType),
+                    SessionId: sessionId,
+                    SenderIdentity: expectedSender));
+        }
+        catch (Exception ex) when (ex is CryptographicException or InvalidOperationException or JsonException or FormatException)
+        {
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=lifecycle_message_rejected; message_type={frameType}; reason=secure_envelope_invalid; session_id={sessionId.Value}; source=devlocal-peer; ex={ex.GetType().Name}");
+            return false;
+        }
+
+        lock (secureStateGate)
+        {
+            if (inboundLifecycleReplayWindow.EvaluateAndTrack(securePayload.Metadata.Sequence) != SessionReplaySequenceResult.Accepted)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private bool TryDecryptScreenSharePayload(byte[] encodedPayload, out byte[] plaintextPayload)
+    {
+        plaintextPayload = Array.Empty<byte>();
+        if (ResolveExpectedRemotePeerAddressForCurrentSession() is not PeerAddress expectedSender ||
+            currentSessionSecurityState.SessionId is not SessionId sessionId)
+        {
+            return false;
+        }
+
+        SessionSecureEnvelopePayload securePayload;
+        try
+        {
+            securePayload = SessionSecureEnvelopeCodec.Decrypt(
+                GetControlSessionSharedKeyOrThrow(),
+                encodedPayload,
+                new SessionSecureEnvelopeExpectation(
+                    Family: SessionSecureMessageFamily.ScreenShare,
+                    SessionId: sessionId,
+                    SenderIdentity: expectedSender));
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (!string.Equals(securePayload.Metadata.MessageType, MapSecureScreenShareFrameType(ScreenSharePayloadFrameType), StringComparison.Ordinal) &&
+            !string.Equals(securePayload.Metadata.MessageType, MapSecureScreenShareFrameType(ScreenShareStopFrameType), StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        lock (secureStateGate)
+        {
+            if (inboundScreenShareReplayWindow.EvaluateAndTrack(securePayload.Metadata.Sequence) != SessionReplaySequenceResult.Accepted)
+            {
+                return false;
+            }
+        }
+
+        plaintextPayload = securePayload.Plaintext;
+        return true;
+    }
+
+    private bool TryValidateControlSecureMetadata(string frameType, SessionSecureEnvelopeMetadata metadata, string? requestId)
+    {
+        var normalizedRequestId = string.IsNullOrWhiteSpace(requestId) ? null : requestId.Trim();
+        var normalizedMetadataRequestId = string.IsNullOrWhiteSpace(metadata.RequestId) ? null : metadata.RequestId.Trim();
+        return string.Equals(normalizedMetadataRequestId, normalizedRequestId, StringComparison.Ordinal);
+    }
+
+    private string? ResolveRequestId(string frameType, byte[] payload)
+    {
+        return frameType switch
+        {
+            ControlRequestFrameType when RemoteControlPayloadCodec.TryDeserializeControlRequest(payload, out var message) => message.RequestId,
+            ControlResponseFrameType when RemoteControlPayloadCodec.TryDeserializeControlResponse(payload, out var message) => message.RequestId,
+            ControlStartFrameType when RemoteControlPayloadCodec.TryDeserializeControlStart(payload, out var message) => message.RequestId,
+            ControlStopFrameType when RemoteControlPayloadCodec.TryDeserializeControlStop(payload, out var message) => message.RequestId,
+            ControlInputFrameType when RemoteControlPayloadCodec.TryDeserializeControlInput(payload, out var message) => message.RequestId,
+            ControlAckFrameType when RemoteControlPayloadCodec.TryDeserializeControlAck(payload, out var message) => message.RequestId,
+            ControlStateSnapshotFrameType when RemoteControlPayloadCodec.TryDeserializeControlStateSnapshot(payload, out var message) => message.RequestId,
+            _ => null,
+        };
+    }
+
+    private PeerAddress ResolveLocalPeerAddressForSecureEnvelope()
+        => new(localPeerAddress);
+
+    private PeerAddress? ResolveExpectedRemotePeerAddressForCurrentSession()
+    {
+        if (currentSessionSecurityState.HelperAddress is PeerAddress helperAddress &&
+            !string.Equals(helperAddress.Value, localPeerAddress, StringComparison.Ordinal))
+        {
+            return helperAddress;
+        }
+
+        if (currentSessionSecurityState.HelpeeAddress is PeerAddress helpeeAddress &&
+            !string.Equals(helpeeAddress.Value, localPeerAddress, StringComparison.Ordinal))
+        {
+            return helpeeAddress;
+        }
+
+        return pendingOutboundHandshake?.HelpeeAddress;
+    }
+
+    private byte[] GetControlSessionSharedKeyOrThrow()
+    {
+        lock (secureStateGate)
+        {
+            if (controlSessionSharedKey is null || controlSessionSharedKey.Length == 0)
+            {
+                throw new InvalidOperationException("Session shared key is not available.");
+            }
+
+            return controlSessionSharedKey.AsSpan().ToArray();
+        }
+    }
+
+    private void SetControlSessionSharedKey(byte[] sharedKey)
+    {
+        ArgumentNullException.ThrowIfNull(sharedKey);
+        lock (secureStateGate)
+        {
+            if (controlSessionSharedKey is not null)
+            {
+                CryptographicOperations.ZeroMemory(controlSessionSharedKey);
+            }
+
+            controlSessionSharedKey = sharedKey.AsSpan().ToArray();
+            nextOutboundControlSecureSequence = 0;
+            nextOutboundLifecycleSecureSequence = 0;
+            nextOutboundScreenShareSecureSequence = 0;
+            inboundControlReplayWindow.Reset();
+            inboundLifecycleReplayWindow.Reset();
+            inboundScreenShareReplayWindow.Reset();
+        }
+    }
+
+    private void ResetControlSecureState()
+    {
+        lock (secureStateGate)
+        {
+            if (controlSessionSharedKey is not null)
+            {
+                CryptographicOperations.ZeroMemory(controlSessionSharedKey);
+                controlSessionSharedKey = null;
+            }
+
+            nextOutboundControlSecureSequence = 0;
+            nextOutboundLifecycleSecureSequence = 0;
+            nextOutboundScreenShareSecureSequence = 0;
+            inboundControlReplayWindow.Reset();
+            inboundLifecycleReplayWindow.Reset();
+            inboundScreenShareReplayWindow.Reset();
+        }
+    }
+
+    private static string MapSecureControlFrameType(string frameType) => frameType;
+
+    private static string MapSecureLifecycleFrameType(string frameType) => frameType switch
+    {
+        ApproveFrameType => ApproveFrameType,
+        RejectFrameType => RejectFrameType,
+        _ => throw new ArgumentOutOfRangeException(nameof(frameType), frameType, "Unsupported lifecycle frame type."),
+    };
+
+    private static string MapSecureScreenShareFrameType(string frameType) => frameType switch
+    {
+        ScreenSharePayloadFrameType => "screenshare_frame",
+        ScreenShareStopFrameType => "screenshare_stop",
+        _ => throw new ArgumentOutOfRangeException(nameof(frameType), frameType, "Unsupported screen-share frame type."),
+    };
+
     private ControlRequestMessageV1 EnsureControlSessionId(ControlRequestMessageV1 message)
         => message with { SessionId = ResolveControlSessionId(message.SessionId) };
 
@@ -1560,6 +1944,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             Data = Convert.ToBase64String(payload),
         };
     }
+
+    private static TransportFrame CreateSecureTransportFrame(string frameType, byte[] payload)
+        => CreateHandshakeFrame(frameType, payload);
 
     private void UpdateSessionSecurityState(SessionSecurityState nextState)
     {

@@ -1,7 +1,7 @@
 param(
     [string]$ExePath = ".\src\nLink.App\bin\Release\net8.0\nLink.exe",
     [string]$OutDir = ".\docs\images",
-    [string]$Version = "0.4.1"
+    [string]$Version = "0.4.5"
 )
 
 Set-StrictMode -Version Latest

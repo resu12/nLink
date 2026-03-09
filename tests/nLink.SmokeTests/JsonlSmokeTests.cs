@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
@@ -59,6 +60,65 @@ public sealed class JsonlSmokeTests
         var content = await reader.ReadToEndAsync();
 
         Assert.Equal("{\"x\":1}\n{\"y\":2}\n", content);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task BridgeProtocolClient_SendCommandAndWaitAckAsync_ReportsSerializedJsonlBytes()
+    {
+        var output = new StringWriter();
+        using var writer = new JsonlWriter(output);
+        int? reportedBytes = null;
+
+        var client = new BridgeProtocolClient(
+            getWriter: () => writer,
+            log: static _ => { },
+            onReady: static _ => { },
+            onRpcProgress: static (_, _) => { },
+            onMessage: static _ => { },
+            onDisconnected: static _ => { },
+            onHelloOk: static _ => { },
+            onPong: static _ => { },
+            onUnmatchedBridgeError: static _ => { });
+
+        var sendTask = client.SendCommandAndWaitAckAsync(
+            cmd: "send",
+            payload: new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["destination"] = "peer.test",
+                ["payloadBase64"] = "AQID",
+            },
+            timeout: TimeSpan.FromSeconds(2),
+            ct: CancellationToken.None,
+            onSerialized: bytes => reportedBytes = bytes);
+
+        await WaitUntilAsync(() => output.ToString().Contains('\n'), TimeSpan.FromSeconds(1));
+
+        var line = output.ToString().TrimEnd('\r', '\n');
+        using var doc = JsonDocument.Parse(line);
+        var id = doc.RootElement.GetProperty("id").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(id));
+
+        client.HandleStdoutJsonLine($"{{\"event\":\"ok\",\"id\":\"{id}\"}}");
+        await sendTask;
+
+        Assert.Equal(NknBridgePayloadAccounting.MeasureSerializedJsonlBytes(line), reportedBytes);
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (predicate())
+            {
+                return;
+            }
+
+            await Task.Yield();
+        }
+
+        Assert.True(predicate(), $"Condition not met within {timeout.TotalSeconds:N1}s.");
     }
 
     private static int[] BuildPseudoRandomChunks(int length)

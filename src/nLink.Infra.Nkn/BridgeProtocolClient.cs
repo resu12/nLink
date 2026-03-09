@@ -14,6 +14,7 @@ internal sealed class BridgeProtocolClient
     private readonly Action<JsonElement> onHelloOk;
     private readonly Action<JsonElement> onPong;
     private readonly Action<string> onUnmatchedBridgeError;
+    private readonly Action<string, int>? onCommandSerialized;
 
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> pendingCommands = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> pendingHelloResponses = new(StringComparer.Ordinal);
@@ -30,7 +31,8 @@ internal sealed class BridgeProtocolClient
         Action<JsonElement> onDisconnected,
         Action<JsonElement> onHelloOk,
         Action<JsonElement> onPong,
-        Action<string> onUnmatchedBridgeError)
+        Action<string> onUnmatchedBridgeError,
+        Action<string, int>? onCommandSerialized = null)
     {
         this.getWriter = getWriter;
         this.log = log;
@@ -41,19 +43,22 @@ internal sealed class BridgeProtocolClient
         this.onHelloOk = onHelloOk;
         this.onPong = onPong;
         this.onUnmatchedBridgeError = onUnmatchedBridgeError;
+        this.onCommandSerialized = onCommandSerialized;
     }
 
     public async Task SendCommandAndWaitAckAsync(
         string cmd,
         Dictionary<string, object?>? payload,
         TimeSpan timeout,
-        CancellationToken ct)
+        CancellationToken ct,
+        Action<int>? onSerialized = null)
     {
         var wait = await SendCommandAsync(
             cmd,
             payload,
             pendingCommands,
-            ct).ConfigureAwait(false);
+            ct,
+            onSerialized).ConfigureAwait(false);
 
         await wait.Task.WaitAsync(timeout, ct).ConfigureAwait(false);
     }
@@ -69,7 +74,8 @@ internal sealed class BridgeProtocolClient
             cmd,
             payload,
             GetPendingMap(waitKind),
-            ct).ConfigureAwait(false);
+            ct,
+            onSerialized: null).ConfigureAwait(false);
 
         return await wait.Task.WaitAsync(timeout, ct).ConfigureAwait(false);
     }
@@ -172,7 +178,8 @@ internal sealed class BridgeProtocolClient
         string cmd,
         Dictionary<string, object?>? payload,
         ConcurrentDictionary<string, TaskCompletionSource<JsonElement>> pendingMap,
-        CancellationToken ct)
+        CancellationToken ct,
+        Action<int>? onSerialized)
     {
         var writer = getWriter();
         var id = Interlocked.Increment(ref nextCommandId).ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -199,6 +206,9 @@ internal sealed class BridgeProtocolClient
             }
 
             var json = JsonSerializer.Serialize(command);
+            var jsonlBytes = NknBridgePayloadAccounting.MeasureSerializedJsonlBytes(json);
+            onCommandSerialized?.Invoke(cmd, jsonlBytes);
+            onSerialized?.Invoke(jsonlBytes);
             await writer.WriteLineAsync(json, ct).ConfigureAwait(false);
             return wait;
         }

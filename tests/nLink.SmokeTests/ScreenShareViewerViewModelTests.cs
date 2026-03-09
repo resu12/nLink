@@ -132,7 +132,7 @@ public sealed class ScreenShareViewerViewModelTests : IClassFixture<ScreenShareC
                         WaitForSignal(releaseFirstDecode.Task, TimeSpan.FromSeconds(2));
                     }
 
-                    return CreateBitmap(bytes[0], 1);
+                    return CreateBitmap(bytes.Span[0], 1);
                 });
 
             vm.OnJpegFrame(new byte[] { 1 });
@@ -184,7 +184,7 @@ public sealed class ScreenShareViewerViewModelTests : IClassFixture<ScreenShareC
                             "Timed out waiting to release the first viewer decode.");
                     }
 
-                    return CreateBitmap(bytes[0], 1);
+                    return CreateBitmap(bytes.Span[0], 1);
                 },
                 postToUiAsync: action =>
                 {
@@ -230,7 +230,7 @@ public sealed class ScreenShareViewerViewModelTests : IClassFixture<ScreenShareC
                     Assert.True(
                         decodeGate.Wait(TimeSpan.FromSeconds(2)),
                         "Timed out waiting to release viewer decode.");
-                    return CreateBitmap(bytes[0], 1);
+                    return CreateBitmap(bytes.Span[0], 1);
                 },
                 postToUiAsync: action =>
                 {
@@ -308,7 +308,7 @@ public sealed class ScreenShareViewerViewModelTests : IClassFixture<ScreenShareC
                 decodeFrame: bytes =>
                 {
                     var call = Interlocked.Increment(ref decodeCalls);
-                    Volatile.Write(ref lastDecodedMarker, bytes[0]);
+                    Volatile.Write(ref lastDecodedMarker, bytes.Span[0]);
                     if (call == 1)
                     {
                         firstDecodeStarted.TrySetResult(true);
@@ -317,7 +317,7 @@ public sealed class ScreenShareViewerViewModelTests : IClassFixture<ScreenShareC
                     Assert.True(
                         decodeGate.Wait(TimeSpan.FromSeconds(2)),
                         $"Timed out waiting to release viewer decode {call}.");
-                    return CreateBitmap(bytes[0], 1);
+                    return CreateBitmap(bytes.Span[0], 1);
                 },
                 postToUiAsync: action =>
                 {
@@ -344,6 +344,68 @@ public sealed class ScreenShareViewerViewModelTests : IClassFixture<ScreenShareC
             Assert.NotNull(vm.CurrentFrame);
             Assert.Equal("Live", vm.StatusText);
             Assert.True(vm.IsIdleForDiagnostics, "Expected viewer decode loop to return to idle after applying the latest frame.");
+
+            return true;
+        }, default);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_OnJpegFrame_CopiesInputBeforeAsyncDecode()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var decodeGate = new SemaphoreSlim(0, 1);
+            var decodedMarker = 0;
+
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: bytes =>
+                {
+                    Assert.True(
+                        decodeGate.Wait(TimeSpan.FromSeconds(2)),
+                        "Timed out waiting to release viewer decode.");
+                    decodedMarker = bytes.Span[0];
+                    return CreateBitmap(bytes.Span[0], 1);
+                },
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                });
+
+            var source = new byte[] { 7 };
+            vm.OnJpegFrame(source);
+            source[0] = 9;
+            decodeGate.Release();
+
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap current && current.PixelSize.Width == 7 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            Assert.Equal(7, decodedMarker);
+            Assert.Equal("Live", vm.StatusText);
+
+            return true;
+        }, default);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_DefaultDispatcherPath_RendersFrame_FromBackgroundCaller()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => CreateTinyBitmap());
+
+            await Task.Run(() => vm.OnJpegFrame(CreateTinyJpegBytes()));
+
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is not null && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            Assert.NotNull(vm.CurrentFrame);
+            Assert.Equal("Live", vm.StatusText);
 
             return true;
         }, default);
@@ -436,7 +498,7 @@ public sealed class ScreenShareViewerViewModelTests : IClassFixture<ScreenShareC
         await fixture.Session.Dispatch(async () =>
         {
             using var vm = new ScreenShareViewerViewModel(
-                decodeFrame: bytes => CreateBitmap(bytes[0] == 1 ? 1 : 2, 1));
+                decodeFrame: bytes => CreateBitmap(bytes.Span[0] == 1 ? 1 : 2, 1));
 
             vm.OnJpegFrame(new byte[] { 1 });
             await WaitUntilAsync(
@@ -493,6 +555,40 @@ public sealed class ScreenShareViewerViewModelTests : IClassFixture<ScreenShareC
             Assert.Equal(2, decodeCallCount);
             Assert.Equal(1, metrics.DecodeErrors);
             Assert.Equal(1, metrics.FramesDecoded);
+
+            return true;
+        }, default);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewerViewModel_Metrics_TrackRenderInterval_CaptureToRender_AndStaleFrames()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => CreateTinyBitmap(),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                });
+
+            vm.OnJpegFrame(CreateTinyJpegBytes(), capturedTsUtcMs: DateTimeOffset.UtcNow.AddMilliseconds(-1500).ToUnixTimeMilliseconds());
+            await WaitUntilAsync(() => vm.GetMetricsSnapshot().FramesDecoded >= 1, TimeSpan.FromSeconds(2));
+
+            await Task.Delay(40);
+
+            vm.OnJpegFrame(CreateTinyJpegBytes(), capturedTsUtcMs: DateTimeOffset.UtcNow.AddMilliseconds(-100).ToUnixTimeMilliseconds());
+            await WaitUntilAsync(() => vm.GetMetricsSnapshot().FramesDecoded >= 2, TimeSpan.FromSeconds(2));
+
+            var metrics = vm.GetMetricsSnapshot();
+
+            Assert.Equal(2, metrics.FramesDecoded);
+            Assert.True(metrics.AverageRenderIntervalMs > 0, $"Expected render interval metric to be recorded, got {metrics.AverageRenderIntervalMs}.");
+            Assert.True(metrics.AverageCaptureToRenderMs > 0, $"Expected capture-to-render metric to be recorded, got {metrics.AverageCaptureToRenderMs}.");
+            Assert.Equal(1, metrics.StaleFrameRenders);
+            Assert.InRange(vm.LastRenderedFrameAgeMs, 0, 750);
 
             return true;
         }, default);

@@ -10,8 +10,10 @@ internal static class NknIdentityStore
     {
         Directory.CreateDirectory(Path.GetDirectoryName(options.KeyPath)!);
 
+        var identityFileExists = File.Exists(options.KeyPath);
         PersistedIdentityFile? persisted = null;
-        if (File.Exists(options.KeyPath))
+        var identityFileUnreadable = false;
+        if (identityFileExists)
         {
             try
             {
@@ -20,27 +22,51 @@ internal static class NknIdentityStore
             }
             catch
             {
-                // Regenerate a valid file below if the stored file cannot be read.
+                identityFileUnreadable = true;
             }
         }
 
-        var seedBytes = TryParseSeed(persisted?.SeedBase64) ?? RandomNumberGenerator.GetBytes(32);
+        var seedBytes = ResolveSeedBytes(options.KeyPath, persisted?.SeedBase64, identityFileExists, identityFileUnreadable);
         var identifier = ResolveIdentifier(options.Identifier, persisted?.Identifier);
         var address = DeriveAddress(identifier, seedBytes);
 
         var file = new PersistedIdentityFile
         {
-            Version = 1,
+            Version = NknSecretStore.SupportsProtectedSeedStorage ? 2 : 1,
             CreatedUtc = persisted?.CreatedUtc ?? DateTimeOffset.UtcNow,
             Identifier = identifier,
-            SeedBase64 = Convert.ToBase64String(seedBytes),
+            SeedBase64 = NknSecretStore.SupportsProtectedSeedStorage ? null : Convert.ToBase64String(seedBytes),
             Address = address,
         };
+
+        if (NknSecretStore.SupportsProtectedSeedStorage)
+        {
+            NknSecretStore.SaveSeed(options.KeyPath, seedBytes);
+        }
 
         var serialized = JsonSerializer.Serialize(file, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(options.KeyPath, serialized);
 
         return new NknIdentity(identifier, address);
+    }
+
+    internal static string? ReadSeedBase64ForConnect(string keyPath)
+    {
+        if (NknSecretStore.SupportsProtectedSeedStorage)
+        {
+            var protectedSeedBase64 = NknSecretStore.ReadSeedBase64ForConnect(keyPath);
+            if (!string.IsNullOrWhiteSpace(protectedSeedBase64))
+            {
+                return protectedSeedBase64;
+            }
+
+            throw new InvalidOperationException($"Protected NKN seed is unavailable for '{keyPath}'.");
+        }
+
+        var legacySeedBase64 = ReadLegacySeedBase64(keyPath);
+        return string.IsNullOrWhiteSpace(legacySeedBase64)
+            ? null
+            : legacySeedBase64.Trim();
     }
 
     private static byte[]? TryParseSeed(string? seedBase64)
@@ -91,6 +117,57 @@ internal static class NknIdentityStore
         var hash = sha.ComputeHash(input);
         var shortHash = Convert.ToHexString(hash.AsSpan(0, 10)).ToLowerInvariant();
         return $"{identifier}.{shortHash}";
+    }
+
+    private static byte[] ResolveSeedBytes(string keyPath, string? legacySeedBase64, bool identityFileExists, bool identityFileUnreadable)
+    {
+        var protectedSeed = NknSecretStore.TryLoadSeed(keyPath);
+        if (protectedSeed is not null)
+        {
+            return protectedSeed;
+        }
+
+        var legacySeed = TryParseSeed(legacySeedBase64);
+        if (legacySeed is not null)
+        {
+            return legacySeed;
+        }
+
+        if (identityFileUnreadable)
+        {
+            throw new InvalidOperationException($"Existing NKN identity file '{keyPath}' is unreadable. Refusing to rotate identity silently.");
+        }
+
+        if (identityFileExists)
+        {
+            throw new InvalidOperationException($"Existing NKN identity at '{keyPath}' is missing recoverable seed material. Refusing to rotate identity silently.");
+        }
+
+        return RandomNumberGenerator.GetBytes(32);
+    }
+
+    private static string? ReadLegacySeedBase64(string keyPath)
+    {
+        if (string.IsNullOrWhiteSpace(keyPath) || !File.Exists(keyPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var json = File.ReadAllText(keyPath);
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return null;
+            }
+
+            var persisted = JsonSerializer.Deserialize<PersistedIdentityFile>(json);
+            return persisted?.SeedBase64;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private sealed class PersistedIdentityFile

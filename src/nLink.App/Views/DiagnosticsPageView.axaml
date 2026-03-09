@@ -33,7 +33,7 @@
                                    FontSize="22"
                                    FontWeight="SemiBold"/>
 
-                        <Grid ColumnDefinitions="220,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="8" ColumnSpacing="12">
+                        <Grid ColumnDefinitions="220,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="8" ColumnSpacing="12">
                             <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Version"/>
                             <TextBlock Grid.Row="0" Grid.Column="1" Classes="appBody" Text="{Binding AppVersion}" FontSize="16"/>
 
@@ -73,6 +73,19 @@
                                 <TextBlock Classes="appMuted" Text="Forced by environment: {Binding ForcedByEnvironment}" FontSize="13"/>
                                 <TextBlock Classes="appMuted" Text="{Binding SelectionReason}" FontSize="13" TextWrapping="Wrap"/>
                             </StackPanel>
+
+                            <TextBlock Grid.Row="12" Grid.Column="0" Classes="appLabel" Text="Invite security"/>
+                            <StackPanel Grid.Row="12" Grid.Column="1" Spacing="2">
+                                <TextBlock Classes="appBody" Text="{Binding InviteSecurityMode}" FontSize="16"/>
+                                <TextBlock Classes="appMuted" Text="Release ready: {Binding InviteSecurityReleaseReady}" FontSize="13"/>
+                                <TextBlock Classes="appMuted" Text="{Binding InviteSecurityWarning}" FontSize="13" TextWrapping="Wrap"/>
+                            </StackPanel>
+
+                            <TextBlock Grid.Row="13" Grid.Column="0" Classes="appLabel" Text="Invite signing"/>
+                            <TextBlock Grid.Row="13" Grid.Column="1" Classes="appBody" Text="{Binding InviteSigningConfiguration}" FontSize="16" TextWrapping="Wrap"/>
+
+                            <TextBlock Grid.Row="14" Grid.Column="0" Classes="appLabel" Text="Public invite flow"/>
+                            <TextBlock Grid.Row="14" Grid.Column="1" Classes="appBody" Text="{Binding InvitePublicFlow}" FontSize="16" TextWrapping="Wrap"/>
                         </Grid>
 
                         <TextBlock Classes="appLabel" Text="Last error"/>
@@ -85,6 +98,41 @@
                                        FontSize="13"
                                        TextWrapping="Wrap"/>
                         </Border>
+                    </StackPanel>
+                </Border>
+
+                <Border Classes="appCard" Padding="20">
+                    <StackPanel Spacing="14">
+                        <TextBlock Text="Troubleshooting Summary"
+                                   Foreground="{StaticResource AppTextBrush}"
+                                   FontSize="22"
+                                   FontWeight="SemiBold"/>
+
+                        <Grid ColumnDefinitions="220,*"
+                              RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                              RowSpacing="8"
+                              ColumnSpacing="12">
+                            <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Session UI state"/>
+                            <TextBlock Grid.Row="0" Grid.Column="1" Classes="appBody" Text="{Binding SessionUiState}" FontSize="16"/>
+
+                            <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="Authorization"/>
+                            <TextBlock Grid.Row="1" Grid.Column="1" Classes="appBody" Text="{Binding AuthorizationSummary}" FontSize="16" TextWrapping="Wrap"/>
+
+                            <TextBlock Grid.Row="2" Grid.Column="0" Classes="appLabel" Text="Session security"/>
+                            <TextBlock Grid.Row="2" Grid.Column="1" Classes="appBody" Text="{Binding SessionSecuritySummary}" FontSize="16" TextWrapping="Wrap"/>
+
+                            <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="Remote control"/>
+                            <TextBlock Grid.Row="3" Grid.Column="1" Classes="appBody" Text="{Binding RemoteControlSummary}" FontSize="16" TextWrapping="Wrap"/>
+
+                            <TextBlock Grid.Row="4" Grid.Column="0" Classes="appLabel" Text="Screen share"/>
+                            <TextBlock Grid.Row="4" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareSummary}" FontSize="16" TextWrapping="Wrap"/>
+
+                            <TextBlock Grid.Row="5" Grid.Column="0" Classes="appLabel" Text="Authoritative address"/>
+                            <TextBlock Grid.Row="5" Grid.Column="1" Classes="appBody" Text="{Binding AuthoritativeConnectedAddress}" FontSize="16"/>
+
+                            <TextBlock Grid.Row="6" Grid.Column="0" Classes="appLabel" Text="Last rejected message"/>
+                            <TextBlock Grid.Row="6" Grid.Column="1" Classes="appBody" Text="{Binding LastRejectedMessageSummary}" FontSize="16" TextWrapping="Wrap"/>
+                        </Grid>
                     </StackPanel>
                 </Border>
 

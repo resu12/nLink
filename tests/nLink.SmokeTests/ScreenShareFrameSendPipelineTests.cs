@@ -48,6 +48,8 @@ public sealed class ScreenShareFrameSendPipelineTests
         Assert.Equal(4, metrics.FramesCaptured);
         Assert.Equal(2, metrics.FramesQueued);
         Assert.Equal(2, metrics.FramesDropped);
+        Assert.Equal(2, metrics.FramesDroppedByRateGate);
+        Assert.Equal(0, metrics.FramesDroppedByQueueEvict);
         Assert.Equal(2, metrics.ChunksSent);
     }
 
@@ -93,6 +95,8 @@ public sealed class ScreenShareFrameSendPipelineTests
         Assert.Equal(4, metrics.FramesCaptured);
         Assert.Equal(2, metrics.FramesQueued);
         Assert.Equal(2, metrics.FramesDropped);
+        Assert.Equal(2, metrics.FramesDroppedByRateGate);
+        Assert.Equal(0, metrics.FramesDroppedByQueueEvict);
         Assert.Equal(2, metrics.ChunksSent);
     }
 
@@ -150,6 +154,8 @@ public sealed class ScreenShareFrameSendPipelineTests
         Assert.Equal(5, metrics.FramesCaptured);
         Assert.Equal(5, metrics.FramesQueued);
         Assert.Equal(0, metrics.FramesDropped);
+        Assert.Equal(0, metrics.FramesDroppedByRateGate);
+        Assert.Equal(0, metrics.FramesDroppedByQueueEvict);
         Assert.Equal(5, metrics.ChunksSent);
     }
 
@@ -261,7 +267,40 @@ public sealed class ScreenShareFrameSendPipelineTests
         Assert.Equal(4, metrics.FramesCaptured);
         Assert.Equal(4, metrics.FramesQueued);
         Assert.Equal(1, metrics.FramesDropped);
+        Assert.Equal(0, metrics.FramesDroppedByRateGate);
+        Assert.Equal(1, metrics.FramesDroppedByQueueEvict);
         Assert.Equal(3, metrics.ChunksSent);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareFrameSendPipeline_CaptureToEnqueueMetric_UsesUnixTimestampEpochCorrectly()
+    {
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 8, 12, 0, 0, TimeSpan.Zero));
+
+        await using var pipeline = ScreenShareFrameSendPipeline.CreateForTesting(
+            sendChunkAsync: (_, _) => Task.CompletedTask,
+            capacity: 2,
+            clock: clock,
+            delayAsync: CreateAdvancingDelay(clock));
+
+        var capturedAtUtc = clock.UtcNow.AddMilliseconds(-30);
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "stream-metric",
+            width: 800,
+            height: 600,
+            encoding: "jpeg",
+            encodedFrameBytes: [1, 2, 3],
+            timestampUnixMilliseconds: capturedAtUtc.ToUnixTimeMilliseconds(),
+            cancellationToken: CancellationToken.None);
+
+        await AwaitConditionAsync(
+            () => pipeline.GetMetricsSnapshot().ChunksSent == 1,
+            TimeSpan.FromSeconds(2),
+            "single metric frame send");
+
+        var metrics = pipeline.GetMetricsSnapshot();
+        Assert.InRange(metrics.AverageCaptureToEnqueueMs, 25, 40);
     }
 
     [Fact]
@@ -317,6 +356,8 @@ public sealed class ScreenShareFrameSendPipelineTests
         Assert.Equal(100, metrics.FramesCaptured);
         Assert.Equal(100, metrics.FramesQueued);
         Assert.True(metrics.FramesDropped >= 97);
+        Assert.Equal(0, metrics.FramesDroppedByRateGate);
+        Assert.Equal(metrics.FramesDropped, metrics.FramesDroppedByQueueEvict);
         Assert.True(GetPendingFrameCount(pipeline) <= ScreenShareFrameSendPipeline.MaxBufferedFrames);
     }
 

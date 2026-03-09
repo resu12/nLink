@@ -22,4 +22,5 @@ internal enum MsgType
     SessionHandshakeResponse = 17,
     SessionHandshakeResult = 18,
     ScreenShareStop = 19,
+    ScreenShareFrame = 20,
 }

@@ -1,4 +1,5 @@
 using System.Reflection;
+using NLink.Core.SessionConnect;
 
 namespace NLink.Core.Logging;
 
@@ -21,6 +22,10 @@ public static class LocalOperationalLog
     {
         var version = string.IsNullOrWhiteSpace(appVersion) ? ResolveInformationalVersion() : appVersion!;
         Info("App", $"app start | version={version}");
+        var inviteSecurity = InviteSecurityDiagnostics.Snapshot();
+        Warn(
+            "Security",
+            $"event=invite_security_status; version={version}; mode={inviteSecurity.Mode}; signing={inviteSecurity.SigningConfiguration}; public_invite_flow={inviteSecurity.PublicInviteFlow}; release_ready={(inviteSecurity.ReleaseReady ? "yes" : "no")}; warning={inviteSecurity.Warning}");
     }
 
     private static void Write(string level, string source, string message)

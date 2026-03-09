@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -10,7 +11,7 @@ using NLink.Core.ScreenShare;
 
 namespace NLink.Infra.Nkn;
 
-internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
+internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, IAuthoritativeConnectedAddressSource
 {
     private const int MaxPayloadBytes = 64 * 1024;
     private static readonly TimeSpan CommandAckTimeout = TimeSpan.FromSeconds(3);
@@ -25,6 +26,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         InitialDelay: TimeSpan.FromSeconds(1),
         MaxDelay: TimeSpan.FromSeconds(16),
         JitterRatio: 0d);
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> IdentityUsageLeases = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly object gate = new();
     private readonly NknIdentity identity;
@@ -59,6 +61,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
     private string? inboundScreenShareSourceAddress;
     private long inboundScreenShareExpiresAtUnixMs;
     private int disposeStarted;
+    private SemaphoreSlim? heldIdentityUsageLease;
 
     public RealNknClientAdapter(NknIdentity identity, NknTransportOptions options)
     {
@@ -83,7 +86,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
             },
             onStderrLineAsync: (line, _, _, _) =>
             {
-                Log($"bridge stderr: {line}");
+                Log(BuildBridgeDiagnosticLogMessage("bridge stderr", line));
                 return Task.CompletedTask;
             },
             getCleanupReasonPrefix: () => "bridge",
@@ -235,6 +238,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
     public async Task ConnectAsync(CancellationToken ct)
     {
         ThrowIfDisposed();
+        await AcquireIdentityUsageLeaseAsync(ct).ConfigureAwait(false);
         var connectTask = connectAttempts.GetOrCreateConnectTask(
             bridgeSupervisor.IsProcessRunning,
             sequence => ConnectCoreAsync(sequence, ct));
@@ -266,7 +270,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
 
             readyWait = connectAttempts.RegisterPendingReady(connectId);
 
-            var seedBase64 = ReadPersistedSeedBase64(options.KeyPath);
+            var seedBase64 = NknIdentityStore.ReadSeedBase64ForConnect(options.KeyPath);
 
             var payload = new Dictionary<string, object?>(StringComparer.Ordinal)
             {
@@ -316,39 +320,49 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
 
     public async Task DisconnectAsync()
     {
-        if (disposed)
+        try
         {
-            return;
-        }
-        lock (gate)
-        {
-            if (!bridgeSupervisor.IsProcessRunning)
+            if (disposed)
             {
                 return;
             }
 
-            shuttingDown = true;
-        }
+            lock (gate)
+            {
+                if (!bridgeSupervisor.IsProcessRunning)
+                {
+                    return;
+                }
 
-        try
-        {
-            await StopPingLoopAsync();
-            await bridgeSupervisor.RequestShutdownAndCleanupAsync(
-                sendShutdownAsync: shutdownCt => SendCommandAndWaitAckAsync(
-                    "shutdown",
-                    payload: null,
-                    shutdownCt,
-                    timeoutOverride: CommandAckTimeout),
-                CancellationToken.None).ConfigureAwait(false);
+                shuttingDown = true;
+            }
+
+            try
+            {
+                await StopPingLoopAsync();
+                await bridgeSupervisor.RequestShutdownAndCleanupAsync(
+                    sendShutdownAsync: shutdownCt => SendCommandAndWaitAckAsync(
+                        "shutdown",
+                        payload: null,
+                        shutdownCt,
+                        timeoutOverride: CommandAckTimeout),
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (gate)
+                {
+                    shuttingDown = false;
+                }
+            }
         }
         finally
         {
-            lock (gate)
-            {
-                shuttingDown = false;
-            }
+            ReleaseIdentityUsageLease();
         }
     }
+
+    bool IAuthoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress => connectAttempts.WasConnected();
 
     public Task SubscribeAsync(string topic, CancellationToken ct)
     {
@@ -406,6 +420,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         EnsurePayloadWithinLimit(payload, "send");
 
         MaybeLogBridgeSendSummary(payload.Length, destination.Length);
+        var isScreenSharePayload = LooksLikeScreenSharePayload(payload);
         return SendCommandAndWaitAckAsync(
             "send",
             new Dictionary<string, object?>
@@ -414,7 +429,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
                 ["payloadBase64"] = Convert.ToBase64String(payload),
             },
             ct,
-            timeoutOverride: CommandAckTimeout);
+            timeoutOverride: CommandAckTimeout,
+            onSerialized: isScreenSharePayload
+                ? bytes => NknRuntimeDiagnostics.AddScreenShareBridgeBytesSent(bytes)
+                : null);
     }
 
     internal Task UpdateInboundScreenSharePolicyAsync(
@@ -518,6 +536,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         }
         finally
         {
+            ReleaseIdentityUsageLease();
             disposed = true;
         }
     }
@@ -532,6 +551,58 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
             Interlocked.Exchange(ref disconnectedRaised, 0);
             shuttingDown = false;
         }
+    }
+
+    private async Task AcquireIdentityUsageLeaseAsync(CancellationToken ct)
+    {
+        SemaphoreSlim? existingLease;
+        lock (gate)
+        {
+            existingLease = heldIdentityUsageLease;
+        }
+
+        if (existingLease is not null)
+        {
+            return;
+        }
+
+        var leaseKey = string.IsNullOrWhiteSpace(options.KeyPath)
+            ? "(default)"
+            : Path.GetFullPath(options.KeyPath);
+        var lease = IdentityUsageLeases.GetOrAdd(leaseKey, static _ => new SemaphoreSlim(1, 1));
+        await lease.WaitAsync(ct).ConfigureAwait(false);
+
+        lock (gate)
+        {
+            if (disposed)
+            {
+                lease.Release();
+                throw new ObjectDisposedException(nameof(RealNknClientAdapter));
+            }
+
+            if (heldIdentityUsageLease is null)
+            {
+                heldIdentityUsageLease = lease;
+                return;
+            }
+        }
+
+        lease.Release();
+    }
+
+    private void ReleaseIdentityUsageLease()
+    {
+        SemaphoreSlim? lease = null;
+        lock (gate)
+        {
+            if (heldIdentityUsageLease is not null)
+            {
+                lease = heldIdentityUsageLease;
+                heldIdentityUsageLease = null;
+            }
+        }
+
+        lease?.Release();
     }
 
     private async Task EnsureHelloHandshakeAsync(CancellationToken ct)
@@ -644,14 +715,15 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         string cmd,
         Dictionary<string, object?>? payload,
         CancellationToken ct,
-        TimeSpan? timeoutOverride = null)
+        TimeSpan? timeoutOverride = null,
+        Action<int>? onSerialized = null)
     {
         ThrowIfDisposed();
 
         var timeout = timeoutOverride ?? CommandAckTimeout;
         try
         {
-            await protocolClient.SendCommandAndWaitAckAsync(cmd, payload, timeout, ct).ConfigureAwait(false);
+            await protocolClient.SendCommandAndWaitAckAsync(cmd, payload, timeout, ct, onSerialized).ConfigureAwait(false);
         }
         catch (TimeoutException ex)
         {
@@ -951,6 +1023,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         }
 
         screenShareFrameReassembler.ClearAll();
+        NknRuntimeDiagnostics.SetAuthoritativeConnectedAddressResolved(false);
 
         if (!string.Equals(reason, "shutdown", StringComparison.OrdinalIgnoreCase))
         {
@@ -1259,6 +1332,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         }
     }
 
+    private static bool LooksLikeScreenSharePayload(ReadOnlySpan<byte> payload)
+    {
+        return payload.IndexOf("\"screenshare.frame.v1\""u8) >= 0 ||
+               payload.IndexOf("\"screenshare.stop.v1\""u8) >= 0;
+    }
+
     private string ResolveBridgeScriptPath()
     {
         var overridePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
@@ -1360,23 +1439,6 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         }
     }
 
-    private static string? ReadPersistedSeedBase64(string keyPath)
-    {
-        if (string.IsNullOrWhiteSpace(keyPath) || !File.Exists(keyPath))
-        {
-            return null;
-        }
-
-        using var stream = File.OpenRead(keyPath);
-        using var doc = JsonDocument.Parse(stream);
-        if (!doc.RootElement.TryGetProperty("SeedBase64", out var seedProp))
-        {
-            return null;
-        }
-
-        return seedProp.ValueKind == JsonValueKind.String ? seedProp.GetString() : null;
-    }
-
     private static string GetAssemblyVersionString()
     {
         var assembly = typeof(RealNknClientAdapter).Assembly;
@@ -1437,7 +1499,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
 
     private static void SetNknStartFailed(string shortReason, string? detail)
     {
-        var safeDetail = (detail ?? string.Empty).Trim();
+        var safeDetail = SensitiveDataRedactor.Redact(detail ?? string.Empty).Trim();
         if (safeDetail.Length > 120)
         {
             safeDetail = safeDetail[..120];
@@ -1450,6 +1512,13 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner
         }
 
         NknRuntimeDiagnostics.SetLastError($"NKN_START_FAILED: {shortReason} ({safeDetail})");
+    }
+
+    private static string BuildBridgeDiagnosticLogMessage(string prefix, string? detail)
+    {
+        var safePrefix = string.IsNullOrWhiteSpace(prefix) ? "bridge" : prefix.Trim();
+        var safeDetail = SensitiveDataRedactor.Redact(detail ?? string.Empty).Trim();
+        return string.IsNullOrWhiteSpace(safeDetail) ? safePrefix : $"{safePrefix}: {safeDetail}";
     }
 
     private static string BuildLastProgressSummaryForDiagnostics()

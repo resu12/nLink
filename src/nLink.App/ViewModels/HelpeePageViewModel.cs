@@ -31,7 +31,7 @@ using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
 
-public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanelBindings
+public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanelBindings, IWindowCloseAware
 {
     private enum HelpeeConnectionViewState
     {
@@ -89,15 +89,20 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private SessionReliabilityAttempt? reliabilityAttempt;
     private readonly InlineTransientText copyFeedback = new();
     private string shareInviteText = string.Empty;
+    private string shareInviteRawTokenText = string.Empty;
     private string shareAddressText = string.Empty;
     private string shareInviteStatusText = "Preparing invite…";
     private Bitmap? shareInviteQrBitmap;
     private CancellationTokenSource? shareInviteQrRefreshCts;
     private int shareInviteQrRefreshVersion;
     private string lastInviteAddressForToken = string.Empty;
+    private string lastInviteHelperIdentityForToken = string.Empty;
     private DateTimeOffset shareInviteExpiresAtUtc = DateTimeOffset.MinValue;
     private string shareInviteExpiryText = string.Empty;
     private bool shareInviteAutoRefreshTriggered;
+    private string inviteHelperIdentityInput = string.Empty;
+    private string verifiedInviteHelperIdentity = string.Empty;
+    private bool suppressAutoApplyInviteHelperIdentityInput;
     private string incomingHelperIdentity = string.Empty;
     private string incomingSessionId = string.Empty;
     private CapabilityGrant incomingRequestedCapabilities;
@@ -144,6 +149,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 #endif
     private bool remoteControlDebugPanelExpanded;
     private bool disposed;
+    private int windowCloseDisconnectStarted;
 #if DEBUG
     private Timer? previewSnapshotTimer;
     private int previewSnapshotTickInFlight;
@@ -237,6 +243,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.TransientStatusChanged += OnTransientStatusChanged;
         sessionRuntime.IncomingJoinRequestAvailable += OnIncomingJoinRequestAvailable;
         sessionRuntime.Disconnected += OnRuntimeDisconnected;
+        sessionRuntime.ScreenShareStopped += OnScreenShareStopped;
         sessionRuntime.ChatMessageReceived += OnChatMessageReceived;
         sessionRuntime.ChatMessageReceivedBeforeApproved += OnChatMessageReceivedBeforeApproved;
         sessionRuntime.ChatStateChanged += OnChatStateChanged;
@@ -254,6 +261,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         CopyAddressCommand = new AsyncRelayCommand(CopyAddressAsync);
         ShareInviteCommand = new AsyncRelayCommand(ShareInviteAsync);
         RefreshInviteCommand = new RelayCommand(RefreshInvite);
+        ApplyInviteHelperIdentityCommand = new RelayCommand(ApplyInviteHelperIdentity, CanApplyInviteHelperIdentity);
+        ClearInviteHelperIdentityCommand = new RelayCommand(ClearInviteHelperIdentity, CanClearInviteHelperIdentity);
         AllowCommand = new RelayCommand(AllowIncomingRequest, CanAllowIncomingRequest);
         DeclineCommand = new AsyncRelayCommand(DeclineIncomingRequestAsync, CanDeclineIncomingRequest);
         SendChatCommand = new AsyncRelayCommand(SendChatAsync, CanSendChat);
@@ -292,15 +301,108 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     }
 
     public string ShareInvite => shareInviteText;
+    public string ShareInviteRawToken => shareInviteRawTokenText;
     public string ShareAddress => shareAddressText;
     public string ShareInviteStatusText => shareInviteStatusText;
     public Bitmap? ShareInviteQrImage => shareInviteQrBitmap;
     public bool ShowShareInviteQr => ShareInviteQrImage is not null;
     public bool ShowShareInviteQrPlaceholder => !ShowShareInviteQr;
+    public bool ShowShareInviteStatus => !HasShareInvite && !string.IsNullOrWhiteSpace(ShareInviteStatusText);
     public string ShareInviteExpiryText => shareInviteExpiryText;
     public bool ShowShareInviteExpiry => HasShareInvite && !string.IsNullOrWhiteSpace(ShareInviteExpiryText);
     public bool HasShareInvite => !string.IsNullOrWhiteSpace(ShareInvite);
+    public bool HasShareInviteRawToken =>
+        !string.IsNullOrWhiteSpace(ShareInviteRawToken) &&
+        !string.Equals(ShareInviteRawToken, ShareInvite, StringComparison.Ordinal);
     public bool HasShareAddress => !string.IsNullOrWhiteSpace(ShareAddress);
+    public bool ShowInviteHelperIdentityPanel => ShowWaitingPanel && !IsUnboundPublicInviteFlowAvailable;
+    public bool HasVerifiedInviteHelperIdentity => !string.IsNullOrWhiteSpace(verifiedInviteHelperIdentity);
+
+    public string InviteHelperIdentityInput
+    {
+        get => inviteHelperIdentityInput;
+        set
+        {
+            value ??= string.Empty;
+            if (SetProperty(ref inviteHelperIdentityInput, value))
+            {
+                if (!suppressAutoApplyInviteHelperIdentityInput)
+                {
+                    AutoApplyInviteHelperIdentityIfPossible();
+                }
+
+                OnPropertyChanged(nameof(InviteHelperIdentityStatusText));
+                OnPropertyChanged(nameof(CanApplyInviteHelperIdentityAction));
+                OnPropertyChanged(nameof(CanClearInviteHelperIdentityAction));
+                ApplyInviteHelperIdentityCommand.NotifyCanExecuteChanged();
+                ClearInviteHelperIdentityCommand.NotifyCanExecuteChanged();
+            }
+        }
+    }
+
+    public string InviteHelperIdentityStatusText
+    {
+        get
+        {
+            if (!ShowInviteHelperIdentityPanel)
+            {
+                return string.Empty;
+            }
+
+            var normalizedInput = InviteHelperIdentityInput.Trim();
+            if (HasVerifiedInviteHelperIdentity &&
+                TryResolveInviteHelperIdentityInput(out var resolvedHelperIdentity, out _) &&
+                string.Equals(resolvedHelperIdentity.Value, verifiedInviteHelperIdentity, StringComparison.Ordinal))
+            {
+                return "Invite will only work for this helper.";
+            }
+
+            if (string.IsNullOrWhiteSpace(normalizedInput))
+            {
+                return HasVerifiedInviteHelperIdentity
+                    ? "Paste a different helper address to refresh the invite binding."
+                    : "Paste the helper address your helper shared with you.";
+            }
+
+            if (!TryResolveInviteHelperIdentityInput(out _, out _))
+            {
+                return "Enter a valid helper address.";
+            }
+
+            return HasVerifiedInviteHelperIdentity
+                ? "Use this helper address to refresh the invite."
+                : "Use this helper address to generate a bound invite.";
+        }
+    }
+
+    public bool ShowVerifiedInviteHelperIdentity => ShowInviteHelperIdentityPanel && HasVerifiedInviteHelperIdentity;
+    public string VerifiedInviteHelperIdentityText =>
+        PeerAddress.TryParse(verifiedInviteHelperIdentity, out var helperIdentity)
+            ? helperIdentity.Value
+            : string.Empty;
+    public string VerifiedInviteHelperVerificationCode =>
+        HelperVerificationCodeFormatter.FormatOrNull(verifiedInviteHelperIdentity) ?? string.Empty;
+    public bool HasVerifiedInviteHelperVerificationCode => !string.IsNullOrWhiteSpace(VerifiedInviteHelperVerificationCode);
+    public string HeaderVerificationCodeText =>
+        ShowIncomingRequestPanel && HasIncomingHelperVerificationCode
+            ? IncomingHelperVerificationCode
+            : ShowVerifiedInviteHelperIdentity && HasVerifiedInviteHelperVerificationCode
+                ? VerifiedInviteHelperVerificationCode
+                : string.Empty;
+    public bool ShowHeaderVerificationCode =>
+        !ShowInviteHelperIdentityPanel &&
+        !string.IsNullOrWhiteSpace(HeaderVerificationCodeText);
+    public string FirstPillVerificationCodeText =>
+        ShowInviteHelperIdentityPanel
+            ? HeaderVerificationCodeText
+            : string.Empty;
+    public bool ShowFirstPillVerificationCode =>
+        ShowInviteHelperIdentityPanel &&
+        !string.IsNullOrWhiteSpace(FirstPillVerificationCodeText);
+    public string VerifiedInviteTechnicalHelperIdentityText => verifiedInviteHelperIdentity;
+    public bool HasVerifiedInviteTechnicalHelperIdentity => !string.IsNullOrWhiteSpace(VerifiedInviteTechnicalHelperIdentityText);
+    public bool CanApplyInviteHelperIdentityAction => CanApplyInviteHelperIdentity();
+    public bool CanClearInviteHelperIdentityAction => CanClearInviteHelperIdentity();
 
     public string IncomingHelperName =>
         string.IsNullOrWhiteSpace(incomingHelperIdentity)
@@ -309,7 +411,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public string IncomingHelperIdentityText =>
         string.IsNullOrWhiteSpace(incomingHelperIdentity)
-            ? "Waiting for verified helper identity."
+            ? "Waiting for verified helper address."
             : incomingHelperIdentity;
 
     public string IncomingHelperVerificationCode =>
@@ -439,6 +541,13 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowStartupBlockedPanel));
                 OnPropertyChanged(nameof(ShowWaitingStatusLine));
                 OnPropertyChanged(nameof(ShowWaitingInviteActions));
+                OnPropertyChanged(nameof(ShowInviteHelperIdentityPanel));
+                OnPropertyChanged(nameof(ShowVerifiedInviteHelperIdentity));
+                OnPropertyChanged(nameof(InviteHelperIdentityStatusText));
+                OnPropertyChanged(nameof(HeaderVerificationCodeText));
+                OnPropertyChanged(nameof(ShowHeaderVerificationCode));
+                OnPropertyChanged(nameof(FirstPillVerificationCodeText));
+                OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
                 OnPropertyChanged(nameof(ShowBackButton));
                 OnPropertyChanged(nameof(StatusLineText));
                 OnPropertyChanged(nameof(SecondaryActionText));
@@ -556,6 +665,9 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowStartupBlockedPanel));
                 OnPropertyChanged(nameof(ShowWaitingStatusLine));
                 OnPropertyChanged(nameof(ShowWaitingInviteActions));
+                OnPropertyChanged(nameof(ShowInviteHelperIdentityPanel));
+                OnPropertyChanged(nameof(ShowVerifiedInviteHelperIdentity));
+                OnPropertyChanged(nameof(InviteHelperIdentityStatusText));
                 OnPropertyChanged(nameof(ShowBackButton));
                 OnPropertyChanged(nameof(ShowRetryAction));
                 OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
@@ -566,7 +678,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     }
 
     public bool ShowHostingUi => !IsStartupBlocked;
-    public bool ShowWaitingInviteActions => ShowHostingUi && connectionViewState == HelpeeConnectionViewState.Waiting;
+    public bool ShowWaitingInviteActions =>
+        ShowHostingUi &&
+        connectionViewState == HelpeeConnectionViewState.Waiting &&
+        HasShareInvite &&
+        (IsUnboundPublicInviteFlowAvailable || HasVerifiedInviteHelperIdentity);
 
     public ObservableCollection<ChatLineViewModel> ChatMessages { get; }
 
@@ -624,6 +740,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref canStartOrConnect, value))
             {
                 OnPropertyChanged(nameof(CanStartConnect));
+                OnPropertyChanged(nameof(CanApplyInviteHelperIdentityAction));
+                OnPropertyChanged(nameof(CanClearInviteHelperIdentityAction));
+                ApplyInviteHelperIdentityCommand.NotifyCanExecuteChanged();
+                ClearInviteHelperIdentityCommand.NotifyCanExecuteChanged();
             }
         }
     }
@@ -854,6 +974,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     public IAsyncRelayCommand CopyAddressCommand { get; }
     public IAsyncRelayCommand ShareInviteCommand { get; }
     public IRelayCommand RefreshInviteCommand { get; }
+    public IRelayCommand ApplyInviteHelperIdentityCommand { get; }
+    public IRelayCommand ClearInviteHelperIdentityCommand { get; }
 
     public RelayCommand AllowCommand { get; }
 
@@ -954,6 +1076,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.TransientStatusChanged -= OnTransientStatusChanged;
         sessionRuntime.IncomingJoinRequestAvailable -= OnIncomingJoinRequestAvailable;
         sessionRuntime.Disconnected -= OnRuntimeDisconnected;
+        sessionRuntime.ScreenShareStopped -= OnScreenShareStopped;
         sessionRuntime.ChatMessageReceived -= OnChatMessageReceived;
         sessionRuntime.ChatMessageReceivedBeforeApproved -= OnChatMessageReceivedBeforeApproved;
         sessionRuntime.ChatStateChanged -= OnChatStateChanged;
@@ -979,6 +1102,28 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         incomingRequestTimeoutCts?.Cancel();
         incomingRequestTimeoutCts?.Dispose();
         RunSynchronousCleanup(() => sessionRuntime.ResetAsync());
+    }
+
+    public async Task PrepareForWindowCloseAsync()
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref windowCloseDisconnectStarted, 1, 0) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await sessionRuntime.DisconnectAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best-effort close path. Main disposal still proceeds.
+        }
     }
 
     private void RestartWaitingSession()
@@ -1553,15 +1698,19 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private void EnsureInviteSnapshot(bool forceNewToken)
     {
         var candidateAddress = ResolveInviteAddress();
+        var boundHelperAddress = ResolveVerifiedInviteHelperAddress();
+        var boundHelperIdentity = boundHelperAddress?.Value ?? string.Empty;
         if (!PeerAddress.TryParse(candidateAddress, out var peerAddress))
         {
             UpdateShareAddressText(string.Empty);
             UpdateShareInviteText(string.Empty);
+            UpdateShareInviteRawTokenText(string.Empty);
             UpdateShareInviteStatusText("Preparing invite…");
             shareInviteExpiresAtUtc = DateTimeOffset.MinValue;
             shareInviteAutoRefreshTriggered = false;
             UpdateShareInviteExpiryText(string.Empty);
             lastInviteAddressForToken = string.Empty;
+            lastInviteHelperIdentityForToken = string.Empty;
             RefreshShareQrBitmaps();
             return;
         }
@@ -1569,6 +1718,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         UpdateShareAddressText(peerAddress.Value);
         if (!forceNewToken &&
             string.Equals(lastInviteAddressForToken, peerAddress.Value, StringComparison.Ordinal) &&
+            string.Equals(lastInviteHelperIdentityForToken, boundHelperIdentity, StringComparison.Ordinal) &&
             !string.IsNullOrWhiteSpace(shareInviteText))
         {
             UpdateShareInviteStatusText("Invite ready");
@@ -1578,10 +1728,27 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         if (!SessionId.TryParse($"sess_{Guid.NewGuid():N}", out var sessionId))
         {
             UpdateShareInviteText(string.Empty);
+            UpdateShareInviteRawTokenText(string.Empty);
             UpdateShareInviteStatusText("Couldn't prepare the invite right now.");
             shareInviteExpiresAtUtc = DateTimeOffset.MinValue;
             shareInviteAutoRefreshTriggered = false;
             UpdateShareInviteExpiryText(string.Empty);
+            lastInviteHelperIdentityForToken = string.Empty;
+            RefreshShareQrBitmaps();
+            return;
+        }
+
+        if (boundHelperAddress is null && !IsUnboundPublicInviteFlowAvailable)
+        {
+            UpdateShareInviteText(string.Empty);
+            UpdateShareInviteRawTokenText(string.Empty);
+            UpdateShareInviteStatusText("Invite setup requires a verified helper address.");
+            shareInviteExpiresAtUtc = DateTimeOffset.MinValue;
+            shareInviteAutoRefreshTriggered = false;
+            UpdateShareInviteExpiryText(string.Empty);
+            lastInviteAddressForToken = string.Empty;
+            lastInviteHelperIdentityForToken = string.Empty;
+            AppLog.Warn("Helpee invite generation blocked; reason=helper_identity_required_for_public_flow");
             RefreshShareQrBitmaps();
             return;
         }
@@ -1592,12 +1759,14 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 TargetAddress: peerAddress,
                 SessionId: sessionId,
                 Capabilities: InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl,
-                Lifetime: DefaultInviteLifetime),
+                Lifetime: DefaultInviteLifetime,
+                BoundHelperAddress: boundHelperAddress),
             DateTimeOffset.UtcNow);
 
         if (!created.IsSuccess || string.IsNullOrWhiteSpace(created.Token))
         {
             UpdateShareInviteText(string.Empty);
+            UpdateShareInviteRawTokenText(string.Empty);
             UpdateShareInviteStatusText(
                 created.Error == InviteTokenCreateError.Throttled
                     ? "Please wait a moment before refreshing again."
@@ -1605,25 +1774,155 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             shareInviteExpiresAtUtc = DateTimeOffset.MinValue;
             shareInviteAutoRefreshTriggered = false;
             UpdateShareInviteExpiryText(string.Empty);
+            lastInviteHelperIdentityForToken = string.Empty;
             AppLog.Info($"Helpee invite token refresh failed ({created.Error}): {created.Message ?? "(none)"}");
             RefreshShareQrBitmaps();
             return;
         }
 
         UpdateShareInviteText(created.Token!);
+        UpdateShareInviteRawTokenText(created.Token!);
         UpdateShareInviteStatusText("Invite ready");
         shareInviteExpiresAtUtc = DateTimeOffset.FromUnixTimeMilliseconds(created.Payload!.ExpiresAtUtcMs);
         shareInviteAutoRefreshTriggered = false;
         UpdateShareInviteExpiryText(BuildInviteExpiryText(DateTimeOffset.UtcNow));
         lastInviteAddressForToken = peerAddress.Value;
+        lastInviteHelperIdentityForToken = boundHelperIdentity;
         RefreshShareQrBitmaps();
     }
 
     private string? ResolveInviteAddress()
     {
         return sessionRuntime.CurrentInvitePeerAddress?.Value ??
-               sessionRuntime.CurrentLocalPeerAddress?.Value ??
-               sessionRuntime.SecurityState.HelpeeAddress?.Value;
+               sessionRuntime.CurrentLocalPeerAddress?.Value;
+    }
+
+    internal void SetVerifiedInviteHelperIdentity(
+        PeerAddress? helperIdentity,
+        bool refreshInvite = true,
+        string? normalizedInputOverride = null)
+    {
+        var normalized = helperIdentity?.Value ?? string.Empty;
+        suppressAutoApplyInviteHelperIdentityInput = true;
+        try
+        {
+            InviteHelperIdentityInput = normalizedInputOverride ?? normalized;
+        }
+        finally
+        {
+            suppressAutoApplyInviteHelperIdentityInput = false;
+        }
+
+        if (string.Equals(verifiedInviteHelperIdentity, normalized, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        verifiedInviteHelperIdentity = normalized;
+        OnPropertyChanged(nameof(HasVerifiedInviteHelperIdentity));
+        OnPropertyChanged(nameof(ShowWaitingInviteActions));
+        OnPropertyChanged(nameof(InviteHelperIdentityStatusText));
+        OnPropertyChanged(nameof(ShowVerifiedInviteHelperIdentity));
+        OnPropertyChanged(nameof(VerifiedInviteHelperIdentityText));
+        OnPropertyChanged(nameof(VerifiedInviteHelperVerificationCode));
+        OnPropertyChanged(nameof(HasVerifiedInviteHelperVerificationCode));
+        OnPropertyChanged(nameof(HeaderVerificationCodeText));
+        OnPropertyChanged(nameof(ShowHeaderVerificationCode));
+        OnPropertyChanged(nameof(FirstPillVerificationCodeText));
+        OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+        OnPropertyChanged(nameof(VerifiedInviteTechnicalHelperIdentityText));
+        OnPropertyChanged(nameof(HasVerifiedInviteTechnicalHelperIdentity));
+        OnPropertyChanged(nameof(CanApplyInviteHelperIdentityAction));
+        OnPropertyChanged(nameof(CanClearInviteHelperIdentityAction));
+        ApplyInviteHelperIdentityCommand.NotifyCanExecuteChanged();
+        ClearInviteHelperIdentityCommand.NotifyCanExecuteChanged();
+        if (refreshInvite)
+        {
+            EnsureInviteSnapshot(forceNewToken: true);
+        }
+    }
+
+    private void ApplyInviteHelperIdentity()
+    {
+        if (!TryResolveInviteHelperIdentityInput(out var helperIdentity, out var normalizedInput))
+        {
+            return;
+        }
+
+        SetVerifiedInviteHelperIdentity(helperIdentity, refreshInvite: true, normalizedInputOverride: normalizedInput);
+    }
+
+    private void AutoApplyInviteHelperIdentityIfPossible()
+    {
+        if (!CanStartOrConnect)
+        {
+            return;
+        }
+
+        if (!TryResolveInviteHelperIdentityInput(out var helperIdentity, out var normalizedInput))
+        {
+            return;
+        }
+
+        if (string.Equals(verifiedInviteHelperIdentity, helperIdentity.Value, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        SetVerifiedInviteHelperIdentity(helperIdentity, refreshInvite: true, normalizedInputOverride: normalizedInput);
+    }
+
+    private bool CanApplyInviteHelperIdentity()
+    {
+        return CanStartOrConnect &&
+               TryResolveInviteHelperIdentityInput(out var helperIdentity, out _) &&
+               !string.Equals(verifiedInviteHelperIdentity, helperIdentity.Value, StringComparison.Ordinal);
+    }
+
+    private void ClearInviteHelperIdentity()
+    {
+        InviteHelperIdentityInput = string.Empty;
+        SetVerifiedInviteHelperIdentity(null, refreshInvite: true);
+    }
+
+    private bool CanClearInviteHelperIdentity()
+    {
+        return CanStartOrConnect &&
+               (HasVerifiedInviteHelperIdentity || !string.IsNullOrWhiteSpace(InviteHelperIdentityInput));
+    }
+
+    private bool TryResolveInviteHelperIdentityInput(out PeerAddress helperIdentity, out string normalizedInput)
+    {
+        normalizedInput = InviteHelperIdentityInput.Trim();
+        if (normalizedInput.StartsWith(HelperIdentityTokenCodec.TokenPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            var decodeResult = HelperIdentityTokenCodec.Decode(normalizedInput);
+            if (decodeResult.IsSuccess && decodeResult.Address is not null)
+            {
+                helperIdentity = decodeResult.Address.Value;
+                normalizedInput = HelperIdentityTokenCodec.Encode(helperIdentity);
+                return true;
+            }
+
+            helperIdentity = default;
+            return false;
+        }
+
+        if (PeerAddress.TryParse(normalizedInput, out helperIdentity))
+        {
+            normalizedInput = helperIdentity.Value;
+            return true;
+        }
+
+        helperIdentity = default;
+        return false;
+    }
+
+    private PeerAddress? ResolveVerifiedInviteHelperAddress()
+    {
+        return PeerAddress.TryParse(verifiedInviteHelperIdentity, out var parsed)
+            ? parsed
+            : null;
     }
 
     private void UpdateShareInviteText(string value)
@@ -1633,6 +1932,17 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             OnPropertyChanged(nameof(HasShareInvite));
             OnPropertyChanged(nameof(ShowShareInviteExpiry));
+            OnPropertyChanged(nameof(ShowShareInviteStatus));
+            OnPropertyChanged(nameof(ShowWaitingInviteActions));
+        }
+    }
+
+    private void UpdateShareInviteRawTokenText(string value)
+    {
+        value ??= string.Empty;
+        if (SetProperty(ref shareInviteRawTokenText, value, nameof(ShareInviteRawToken)))
+        {
+            OnPropertyChanged(nameof(HasShareInviteRawToken));
         }
     }
 
@@ -1650,6 +1960,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         value ??= string.Empty;
         if (SetProperty(ref shareInviteStatusText, value, nameof(ShareInviteStatusText)))
         {
+            OnPropertyChanged(nameof(ShowShareInviteStatus));
         }
     }
 
@@ -1770,6 +2081,18 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
+    private static bool IsUnboundPublicInviteFlowAvailable
+    {
+        get
+        {
+#if DEBUG
+            return true;
+#else
+            return AppFeatureFlags.AllowInsecureUnboundPublicInvites;
+#endif
+        }
+    }
+
     private void OnShareInviteExpiryTimerTick(object? sender, EventArgs e)
     {
         if (disposed)
@@ -1885,6 +2208,16 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
             SyncFromRuntime();
         });
+    }
+
+    private void OnScreenShareStopped(object? sender, EventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        RequestStopScreenSharePreview();
     }
 
     private void OnChatMessageReceived(object? sender, ChatMessageEventArgs e)
@@ -2826,6 +3159,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             OnPropertyChanged(nameof(IncomingHelperName));
             OnPropertyChanged(nameof(IncomingHelperVerificationCode));
             OnPropertyChanged(nameof(HasIncomingHelperVerificationCode));
+            OnPropertyChanged(nameof(HeaderVerificationCodeText));
+            OnPropertyChanged(nameof(ShowHeaderVerificationCode));
+            OnPropertyChanged(nameof(FirstPillVerificationCodeText));
+            OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
             OnPropertyChanged(nameof(IncomingTechnicalHelperIdentityText));
             OnPropertyChanged(nameof(HasIncomingTechnicalHelperIdentity));
             OnPropertyChanged(nameof(HasIncomingTechnicalDetails));
