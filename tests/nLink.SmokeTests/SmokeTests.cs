@@ -2933,6 +2933,7 @@ public class SmokeTests
         runtime.ScreenShareFrameCompleted += (_, _) => frameRaised = true;
 
         InvokePrivateMethod(runtime, "OnTransportScreenShareStopped", scripted, EventArgs.Empty);
+        var staleCapturedTsUtcMs = nowUtc.AddMilliseconds(-250).ToUnixTimeMilliseconds();
         InvokePrivateMethod(
             runtime,
             "OnTransportScreenShareFrameCompleted",
@@ -2943,11 +2944,12 @@ public class SmokeTests
                 1,
                 "jpeg",
                 new byte[] { 0x01 },
+                CapturedTsUtcMs: staleCapturedTsUtcMs,
                 SessionId: runtime.SecurityState.SessionId!.Value.Value));
 
         Assert.False(frameRaised);
 
-        nowUtc = nowUtc.AddSeconds(1);
+        nowUtc = nowUtc.AddSeconds(2);
         InvokePrivateMethod(
             runtime,
             "OnTransportScreenShareFrameCompleted",
@@ -2958,6 +2960,22 @@ public class SmokeTests
                 1,
                 "jpeg",
                 new byte[] { 0x02 },
+                CapturedTsUtcMs: staleCapturedTsUtcMs,
+                SessionId: runtime.SecurityState.SessionId!.Value.Value));
+
+        Assert.False(frameRaised);
+
+        InvokePrivateMethod(
+            runtime,
+            "OnTransportScreenShareFrameCompleted",
+            scripted,
+            new ScreenShareFrameCompletedEventArgs(
+                3,
+                1,
+                1,
+                "jpeg",
+                new byte[] { 0x03 },
+                CapturedTsUtcMs: nowUtc.ToUnixTimeMilliseconds(),
                 SessionId: runtime.SecurityState.SessionId!.Value.Value));
 
         Assert.True(frameRaised);

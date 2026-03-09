@@ -308,6 +308,7 @@ public sealed class SessionRuntime : IDisposable
     private long remoteControlSnapshotForcedUpX1Tick;
     private long remoteControlSnapshotForcedUpX2Tick;
     private DateTimeOffset remoteScreenShareFramesSuppressedUntilUtc;
+    private long remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs;
     private long lastScreenShareStopSuppressedLogTick;
 
     public SessionRuntime(Func<ISignalingTransport> createTransport)
@@ -3704,6 +3705,22 @@ public sealed class SessionRuntime : IDisposable
         }
 
         var suppressedUntilUtc = remoteScreenShareFramesSuppressedUntilUtc;
+        var suppressCapturedThroughUtcMs = Interlocked.Read(ref remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs);
+        if (suppressCapturedThroughUtcMs > 0 &&
+            e.CapturedTsUtcMs > 0 &&
+            e.CapturedTsUtcMs <= suppressCapturedThroughUtcMs)
+        {
+            var nowTicks = Environment.TickCount64;
+            if (nowTicks - Interlocked.Read(ref lastScreenShareStopSuppressedLogTick) >= 1000)
+            {
+                Interlocked.Exchange(ref lastScreenShareStopSuppressedLogTick, nowTicks);
+                LocalOperationalLog.Info(
+                    "ScreenShareTransport",
+                    $"event=screenshare_frame_suppressed_pre_stop_capture; session_id={e.SessionId}; captured_ts_utc_ms={e.CapturedTsUtcMs}; suppress_captured_through_utc_ms={suppressCapturedThroughUtcMs}; control_state={remoteControlSessionState.ControlState}; role={role}");
+            }
+            return;
+        }
+
         if (suppressedUntilUtc > DateTimeOffset.MinValue && nowProvider() < suppressedUntilUtc)
         {
             var nowTicks = Environment.TickCount64;
@@ -3717,14 +3734,15 @@ public sealed class SessionRuntime : IDisposable
             return;
         }
 
-        if (suppressedUntilUtc > DateTimeOffset.MinValue)
+        if (suppressedUntilUtc > DateTimeOffset.MinValue || suppressCapturedThroughUtcMs > 0)
         {
             LocalOperationalLog.Info(
                 "ScreenShareTransport",
-                $"event=screenshare_frame_resumed_after_stop; session_id={e.SessionId}; resumed_at_utc={nowProvider():O}; control_state={remoteControlSessionState.ControlState}; role={role}");
+                $"event=screenshare_frame_resumed_after_stop; session_id={e.SessionId}; resumed_at_utc={nowProvider():O}; captured_ts_utc_ms={e.CapturedTsUtcMs}; control_state={remoteControlSessionState.ControlState}; role={role}");
         }
 
         remoteScreenShareFramesSuppressedUntilUtc = default;
+        Interlocked.Exchange(ref remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs, 0);
         lastScreenShareStopSuppressedLogTick = 0;
         CancelRemoteControlScreenShareStopGrace("screenshare_frame_resumed");
 
@@ -3738,7 +3756,10 @@ public sealed class SessionRuntime : IDisposable
             return;
         }
 
-        remoteScreenShareFramesSuppressedUntilUtc = nowProvider().Add(RemoteScreenShareStopFrameSuppressionWindow);
+        var nowUtc = nowProvider();
+        remoteScreenShareFramesSuppressedUntilUtc = nowUtc.Add(RemoteScreenShareStopFrameSuppressionWindow);
+        Interlocked.Exchange(ref remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs, nowUtc.ToUnixTimeMilliseconds());
+        Interlocked.Exchange(ref lastScreenShareStopSuppressedLogTick, 0);
         LocalOperationalLog.Info(
             "ScreenShareTransport",
             $"event=screenshare_stop_received_runtime; suppressed_until_utc={remoteScreenShareFramesSuppressedUntilUtc:O}; control_state={remoteControlSessionState.ControlState}; role={role}; transport={GetTransportNameForLog(sender)}");
@@ -3748,7 +3769,9 @@ public sealed class SessionRuntime : IDisposable
 
     private void NotifyLocalScreenShareStoppedForTeardown(string reason, object? sender)
     {
-        remoteScreenShareFramesSuppressedUntilUtc = nowProvider().Add(RemoteScreenShareStopFrameSuppressionWindow);
+        var nowUtc = nowProvider();
+        remoteScreenShareFramesSuppressedUntilUtc = nowUtc.Add(RemoteScreenShareStopFrameSuppressionWindow);
+        Interlocked.Exchange(ref remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs, nowUtc.ToUnixTimeMilliseconds());
         Interlocked.Exchange(ref lastScreenShareStopSuppressedLogTick, 0);
         LocalOperationalLog.Info(
             "ScreenShareTransport",
@@ -7255,6 +7278,7 @@ public sealed class SessionRuntime : IDisposable
         Interlocked.Exchange(ref remoteControlSnapshotForcedUpX1Tick, 0);
         Interlocked.Exchange(ref remoteControlSnapshotForcedUpX2Tick, 0);
         remoteScreenShareFramesSuppressedUntilUtc = default;
+        Interlocked.Exchange(ref remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs, 0);
         ResetRemoteControlWheelDeltaCarry();
         ResetRemoteControlDebugLastMapped();
         Interlocked.Exchange(ref remoteControlForceNextMoveInjectionLog, 0);
