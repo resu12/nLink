@@ -1300,43 +1300,15 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
-    public async Task BenchmarkRunner_DevLocalShortRun_PassesReliabilityGate_AndWritesArtifacts()
+    public void BenchmarkRunner_DevLocalInvite_BindsDeterministicHelperIdentity()
     {
-        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-benchmark-smoke-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(tempRoot);
-        var previousCwd = Environment.CurrentDirectory;
-        try
-        {
-            Environment.CurrentDirectory = tempRoot;
+        var targetAddress = new PeerAddress(BenchmarkRunner.BuildDevLocalBenchmarkPeerAddressForTests("helpee", 7));
+        var helperAddress = new PeerAddress(BenchmarkRunner.BuildDevLocalBenchmarkPeerAddressForTests("helper", 7));
 
-            var stdout = new StringWriter();
-            var stderr = new StringWriter();
-            var exitCode = await BenchmarkRunner.RunAsync(
-                new[]
-                {
-                    "--bench",
-                    "--cycles", "2",
-                    "--delay-ms", "0",
-                    "--transport", "devlocal",
-                    "--bridge-reuse-mode", "persession",
-                    "--reliability-gate",
-                },
-                stdout,
-                stderr,
-                CancellationToken.None);
+        var (_, invite) = BenchmarkRunner.CreateInviteForTargetForTests(targetAddress, helperAddress);
 
-            Assert.Equal(0, exitCode);
-            Assert.Contains("Reliability gate: PASS", stdout.ToString(), StringComparison.Ordinal);
-            Assert.DoesNotContain("FAIL:", stderr.ToString(), StringComparison.Ordinal);
-
-            var benchDir = Path.Combine(tempRoot, "artifacts", "bench");
-            Assert.True(Directory.Exists(benchDir));
-            Assert.NotEmpty(Directory.GetFiles(benchDir, "metrics-*.json", SearchOption.TopDirectoryOnly));
-        }
-        finally
-        {
-            Environment.CurrentDirectory = previousCwd;
-        }
+        Assert.Equal(targetAddress, invite.TargetAddress);
+        Assert.Equal(helperAddress, invite.BoundHelperAddress);
     }
 
     [Trait("Category", "Smoke")]

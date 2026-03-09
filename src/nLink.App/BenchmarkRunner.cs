@@ -140,6 +140,18 @@ internal static class BenchmarkRunner
         return BenchmarkRunnerOptions.TryParse(args, out options, out error);
     }
 
+    internal static string BuildDevLocalBenchmarkPeerAddressForTests(string roleLabel, int cycleIndex)
+    {
+        return BenchmarkExecution.BuildDevLocalBenchmarkPeerAddress(roleLabel, cycleIndex);
+    }
+
+    internal static (string Token, ValidatedInviteV1 Invite) CreateInviteForTargetForTests(
+        PeerAddress targetAddress,
+        PeerAddress? boundHelperAddress = null)
+    {
+        return BenchmarkExecution.CreateInviteForTarget(targetAddress, boundHelperAddress);
+    }
+
     private static string GetVersion()
     {
         var info = typeof(Program).Assembly
