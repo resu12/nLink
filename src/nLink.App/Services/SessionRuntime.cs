@@ -434,6 +434,7 @@ public sealed class SessionRuntime : IDisposable
     public event EventHandler? Rejected;
 
     public event EventHandler? Disconnected;
+    public event EventHandler? RemoteSessionEnded;
 
     internal event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
     internal event EventHandler? ScreenShareStopped;
@@ -3630,6 +3631,7 @@ public sealed class SessionRuntime : IDisposable
         allowTransportScreenShareAutoStart = false;
         remoteSessionEndHandling = true;
         lastDisconnectWasRemoteEnd = true;
+        RemoteSessionEnded?.Invoke(this, EventArgs.Empty);
         RunCountedBackgroundTask(
             () => transportScreenShareCoordinator.HandleDisconnectedAsync(),
             countAsTransportTask: false);

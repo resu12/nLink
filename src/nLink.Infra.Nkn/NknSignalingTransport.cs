@@ -2209,7 +2209,12 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             }
 
             SetControlSessionSharedKey(sharedKey);
-            UpdateSessionSecurityState(currentSessionSecurityState.WithApproval(decision.ToGrant()));
+            // Approve can arrive before SessionHandshakeResult on a real network. A valid secure
+            // approval envelope proves the same shared-key handshake, so finalize verification here too.
+            UpdateSessionSecurityState(
+                currentSessionSecurityState
+                    .WithHandshakeVerified(outboundHandshake.HelperAddress)
+                    .WithApproval(decision.ToGrant()));
             SessionKeyReady?.Invoke(this, new TransportSessionKeyReadyEventArgs(sharedKey));
             pendingOutboundHandshake = null;
             Approved?.Invoke(this, EventArgs.Empty);

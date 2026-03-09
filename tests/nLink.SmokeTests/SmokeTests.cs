@@ -4244,6 +4244,56 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task HelperPageViewModel_OnRemoteSessionEnded_ClearsActiveSessionAffordancesImmediately()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
+
+        SetPrivateField(helper, "connectionState", "Connected");
+        SetPrivateField(helper, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateField(helper, "wasConnected", true);
+        SetPrivateField(helperRuntime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(
+            helperRuntime,
+            "remoteControlSessionState",
+            new RemoteControlSessionState(
+                ControlState.Active,
+                "peer",
+                "req-1",
+                null,
+                SupportsRemoteControl: true,
+                PeerSupportsRemoteControl: true));
+        SetPrivateField(helper.ScreenShareViewer, "isActive", true);
+        SetPrivateField(helper.ScreenShareViewer, "currentFrame", CreateTestBitmap(1, 1));
+        InvokePrivateMethod(
+            helper,
+            "OnScreenShareViewerPropertyChanged",
+            helper.ScreenShareViewer,
+            new PropertyChangedEventArgs(nameof(ScreenShareViewerViewModel.CurrentFrame)));
+        InvokePrivateMethod(helper, "OnRemoteControlStateChanged", helperRuntime, EventArgs.Empty);
+
+        Assert.True(helper.ShowRemoteScreenShareFrame);
+        Assert.True(helper.ShowStopControlAction);
+        Assert.True(helper.ShowRemoteControlActiveStatus);
+
+        InvokePrivateMethod(helper, "OnRemoteSessionEnded", helperRuntime, EventArgs.Empty);
+
+        await WaitUntilAsync(
+            () => helper.EffectivePhase == SessionUiPhase.Ended &&
+                  string.Equals(helper.ConnectionState, "Idle", StringComparison.Ordinal) &&
+                  !helper.ShowRemoteScreenShareFrame &&
+                  !helper.ShowStopControlAction &&
+                  !helper.ShowRemoteControlActiveStatus,
+            TimeSpan.FromSeconds(5));
+
+        Assert.Equal("The other person ended the session.", helper.HeaderStatusText);
+        Assert.False(helper.IsChatInputEnabled);
+        Assert.False(helper.ShowFailurePanel);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void SessionUxPhaseMapper_SessionEndedBannerStatus_MapsToEndedPhase()
     {
         var status = new UserFacingStatus(
@@ -6993,6 +7043,68 @@ public class SmokeTests
 
             Assert.Equal(1, Volatile.Read(ref helperApprovedCount));
             Assert.Equal("approve_missing_helper_ecdh", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknSignalingTransport_HelperApprove_Succeeds_WhenHandshakeResultIsDropped()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.approve-no-handshake-result.address");
+            var helperClient = new FakeNknClient("helper.approve-no-handshake-result.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var droppedHandshakeResult = 0;
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+
+            hostClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (!string.Equals(destination, helper.LocalPeerAddress, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(true);
+                }
+
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.SessionHandshakeResult)
+                {
+                    return Task.FromResult(true);
+                }
+
+                Interlocked.Increment(ref droppedHandshakeResult);
+                return Task.FromResult(false);
+            };
+
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(new PeerAddress(host.LocalPeerAddress), out var rawToken);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            Assert.True(Volatile.Read(ref droppedHandshakeResult) >= 1);
+            Assert.True(helper.CurrentSessionSecurityState.HandshakeCompleted);
+            Assert.Equal(SessionHandshakeState.Verified, helper.CurrentSessionSecurityState.HandshakeState);
+            Assert.True(helper.CurrentSessionSecurityState.ApprovalGranted);
         }
         finally
         {

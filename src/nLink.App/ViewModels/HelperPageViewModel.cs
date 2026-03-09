@@ -188,6 +188,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.Approved += OnApproved;
         sessionRuntime.Rejected += OnRejected;
         sessionRuntime.Disconnected += OnDisconnected;
+        sessionRuntime.RemoteSessionEnded += OnRemoteSessionEnded;
         sessionRuntime.ScreenShareFrameCompleted += OnScreenShareFrameCompleted;
         sessionRuntime.ScreenShareStopped += OnScreenShareStopped;
         sessionRuntime.ChatMessageReceived += OnChatMessageReceived;
@@ -824,6 +825,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.Approved -= OnApproved;
         sessionRuntime.Rejected -= OnRejected;
         sessionRuntime.Disconnected -= OnDisconnected;
+        sessionRuntime.RemoteSessionEnded -= OnRemoteSessionEnded;
         sessionRuntime.ScreenShareFrameCompleted -= OnScreenShareFrameCompleted;
         sessionRuntime.ScreenShareStopped -= OnScreenShareStopped;
         sessionRuntime.ChatMessageReceived -= OnChatMessageReceived;
@@ -2113,16 +2115,21 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 ConnectionState = "Disconnected";
             }
-            OnPropertyChanged(nameof(ShowChatConnectionHint));
-            OnPropertyChanged(nameof(ShowMainControls));
-            OnPropertyChanged(nameof(ShowRecentTargets));
-            OnPropertyChanged(nameof(ShowConnectAction));
-            OnPropertyChanged(nameof(ShowRetryAction));
-            OnPropertyChanged(nameof(ShowInlineStatusText));
-            OnPropertyChanged(nameof(ShowCopyFeedbackInline));
-            ScanQrFromFileCommand.NotifyCanExecuteChanged();
-            ScanQrFromCameraCommand.NotifyCanExecuteChanged();
-            ClearRecentTargetsCommand.NotifyCanExecuteChanged();
+            NotifyDisconnectedUiAffordancesChanged();
+        });
+    }
+
+    private void OnRemoteSessionEnded(object? sender, EventArgs e)
+    {
+        if (disposed || connectCts?.IsCancellationRequested == true)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(() =>
+        {
+            ApplyPeerEndedDisconnectUiState();
+            NotifyDisconnectedUiAffordancesChanged();
         });
     }
 
@@ -3412,6 +3419,21 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         fallbackUiPhase = SessionUiPhase.Ended;
         ApplySessionBannerPolicy();
         UpdateUiFromSnapshot();
+    }
+
+    private void NotifyDisconnectedUiAffordancesChanged()
+    {
+        OnPropertyChanged(nameof(ShowChatConnectionHint));
+        OnPropertyChanged(nameof(ShowMainControls));
+        OnPropertyChanged(nameof(ShowRecentTargets));
+        OnPropertyChanged(nameof(ShowConnectAction));
+        OnPropertyChanged(nameof(ShowRetryAction));
+        OnPropertyChanged(nameof(ShowInlineStatusText));
+        OnPropertyChanged(nameof(ShowCopyFeedbackInline));
+        OnPropertyChanged(nameof(HeaderStatusText));
+        ScanQrFromFileCommand.NotifyCanExecuteChanged();
+        ScanQrFromCameraCommand.NotifyCanExecuteChanged();
+        ClearRecentTargetsCommand.NotifyCanExecuteChanged();
     }
 
     private void ClearRemoteScreenShareFrame()
