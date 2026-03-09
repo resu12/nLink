@@ -1300,6 +1300,47 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task BenchmarkRunner_DevLocalShortRun_PassesReliabilityGate_AndWritesArtifacts()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-benchmark-smoke-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        var previousCwd = Environment.CurrentDirectory;
+        try
+        {
+            Environment.CurrentDirectory = tempRoot;
+
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exitCode = await BenchmarkRunner.RunAsync(
+                new[]
+                {
+                    "--bench",
+                    "--cycles", "2",
+                    "--delay-ms", "0",
+                    "--transport", "devlocal",
+                    "--bridge-reuse-mode", "persession",
+                    "--reliability-gate",
+                },
+                stdout,
+                stderr,
+                CancellationToken.None);
+
+            Assert.Equal(0, exitCode);
+            Assert.Contains("Reliability gate: PASS", stdout.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("FAIL:", stderr.ToString(), StringComparison.Ordinal);
+
+            var benchDir = Path.Combine(tempRoot, "artifacts", "bench");
+            Assert.True(Directory.Exists(benchDir));
+            Assert.NotEmpty(Directory.GetFiles(benchDir, "metrics-*.json", SearchOption.TopDirectoryOnly));
+        }
+        finally
+        {
+            Environment.CurrentDirectory = previousCwd;
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void SoakRunner_Parses_And_Maps_To_BenchmarkArgs()
     {
         Assert.True(SoakRunner.TryParseOptionsForTests(new[] { "--soak" }, out var defaults, out var defaultError));

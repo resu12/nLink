@@ -527,7 +527,9 @@ internal static class BenchmarkRunner
             try
             {
                 await helpee.StartHelpeeAsync(cycleCts.Token);
-                var (inviteToken, invite) = CreateInviteForTarget(GetHostedAddressOrThrow(helpee));
+                var (inviteToken, invite) = CreateInviteForTarget(
+                    GetHostedAddressOrThrow(helpee),
+                    pair.HelperInviteBindingAddress);
                 await helper.StartHelperAsync(inviteToken, invite, cycleCts.Token);
 
                 await incomingJoin.Task.WaitAsync(TimeSpan.FromSeconds(10), cycleCts.Token);
@@ -578,7 +580,9 @@ internal static class BenchmarkRunner
             throw new InvalidOperationException("Active helpee transport did not expose a local peer address.");
         }
 
-        private static (string Token, ValidatedInviteV1 Invite) CreateInviteForTarget(PeerAddress targetAddress)
+        internal static (string Token, ValidatedInviteV1 Invite) CreateInviteForTarget(
+            PeerAddress targetAddress,
+            PeerAddress? boundHelperAddress = null)
         {
             var nowUtc = DateTimeOffset.UtcNow;
             var factory = InviteTokenServiceFactory.CreateInviteTokenFactory();
@@ -588,7 +592,8 @@ internal static class BenchmarkRunner
                     TargetAddress: targetAddress,
                     SessionId: new SessionId($"sess_bench_{Guid.NewGuid():N}"),
                     Capabilities: InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl | InviteCapabilities.FileTransfer,
-                    Lifetime: TimeSpan.FromMinutes(5)),
+                    Lifetime: TimeSpan.FromMinutes(5),
+                    BoundHelperAddress: boundHelperAddress),
                 nowUtc);
             if (!create.IsSuccess || string.IsNullOrWhiteSpace(create.Token))
             {
@@ -608,9 +613,16 @@ internal static class BenchmarkRunner
         private BenchmarkSessionPair CreateSessionPair(int cycleSeed)
         {
             var reusePolicy = new BridgeReusePolicy(options.BridgeReuseMode, TimeSpan.FromSeconds(60));
+            var helpeeDevLocalAddress = options.Transport == "devlocal"
+                ? new PeerAddress(BuildDevLocalBenchmarkPeerAddress("helpee", cycleSeed))
+                : (PeerAddress?)null;
+            var helperDevLocalAddress = options.Transport == "devlocal"
+                ? new PeerAddress(BuildDevLocalBenchmarkPeerAddress("helper", cycleSeed))
+                : (PeerAddress?)null;
             return new BenchmarkSessionPair(
                 new SessionRuntime(CreateTransportFactory("helpee", cycleSeed), watchdogOptions: null, watchdogDelayAsync: null, telemetrySink: sink, bridgeReusePolicy: reusePolicy),
-                new SessionRuntime(CreateTransportFactory("helper", cycleSeed), watchdogOptions: null, watchdogDelayAsync: null, telemetrySink: sink, bridgeReusePolicy: reusePolicy));
+                new SessionRuntime(CreateTransportFactory("helper", cycleSeed), watchdogOptions: null, watchdogDelayAsync: null, telemetrySink: sink, bridgeReusePolicy: reusePolicy),
+                helperDevLocalAddress);
         }
 
         private Func<ISignalingTransport> CreateTransportFactory(string roleLabel, int cycleIndex)
@@ -618,8 +630,18 @@ internal static class BenchmarkRunner
             return options.Transport switch
             {
                 "nkn" => () => CreateNknBenchmarkTransport(roleLabel, cycleIndex),
-                _ => static () => new DevLocalTransport(),
+                _ => () => new DevLocalTransport(BuildDevLocalBenchmarkPeerAddress(roleLabel, cycleIndex)),
             };
+        }
+
+        internal static string BuildDevLocalBenchmarkPeerAddress(string roleLabel, int cycleIndex)
+        {
+            if (string.IsNullOrWhiteSpace(roleLabel))
+            {
+                throw new ArgumentException("Role label is required.", nameof(roleLabel));
+            }
+
+            return $"bench.devlocal.{roleLabel.Trim().ToLowerInvariant()}.{cycleIndex:D4}";
         }
 
         private static ISignalingTransport CreateNknBenchmarkTransport(string roleLabel, int cycleIndex)
@@ -883,15 +905,18 @@ internal static class BenchmarkRunner
 
     private sealed class BenchmarkSessionPair : IDisposable
     {
-        public BenchmarkSessionPair(SessionRuntime helpee, SessionRuntime helper)
+        public BenchmarkSessionPair(SessionRuntime helpee, SessionRuntime helper, PeerAddress? helperInviteBindingAddress)
         {
             Helpee = helpee;
             Helper = helper;
+            HelperInviteBindingAddress = helperInviteBindingAddress;
         }
 
         public SessionRuntime Helpee { get; }
 
         public SessionRuntime Helper { get; }
+
+        public PeerAddress? HelperInviteBindingAddress { get; }
 
         public void Dispose()
         {
