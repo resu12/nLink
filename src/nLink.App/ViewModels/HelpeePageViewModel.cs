@@ -3766,6 +3766,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             }
             else
             {
+                if (ShouldDeferTransportPreviewTeardownToSessionDisconnect())
+                {
+                    return;
+                }
+
                 if (sessionRuntime.ControlState == ControlState.Active)
                 {
                     await sessionRuntime.StopRemoteControlAsync(
@@ -3789,6 +3794,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             // Best-effort: the local preview remains the user-visible source of truth.
         }
+    }
+
+    private bool ShouldDeferTransportPreviewTeardownToSessionDisconnect()
+    {
+        return endSessionRequested || Volatile.Read(ref windowCloseDisconnectStarted) != 0;
     }
 
     private static bool DetermineIsCaptureSupported(IScreenCaptureSourceFactory captureSourceFactory)

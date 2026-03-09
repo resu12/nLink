@@ -7961,6 +7961,123 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task HelpeePageViewModel_EndSession_WithPreviewAndRemoteControlActive_NotifiesHelperRemoteEnd()
+    {
+        FakeNknClient.ResetNetwork();
+
+        try
+        {
+            var options = NknTransportOptions.Load();
+            using var helpeeTransport = new NknSignalingTransport(
+                new FakeNknClient("helpee.endsession.control.addr." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helpee-endsession-control-test", "helpee.endsession.control.test.fake"));
+            using var helperTransport = new NknSignalingTransport(
+                new FakeNknClient("helper.endsession.control.addr." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helper-endsession-control-test", "helper.endsession.control.test.fake"));
+            using var helpeeRuntime = new SessionRuntime(() => helpeeTransport);
+            using var helperRuntime = new SessionRuntime(() => helperTransport);
+            var fakeSource = new FakeScreenCaptureSource();
+            Task? helpeeDisconnectTask = null;
+            using var helpee = new HelpeePageViewModel(
+                cancelAction: () => helpeeDisconnectTask = helpeeRuntime.DisconnectAsync(),
+                CreateNknTestConfig(),
+                helpeeRuntime,
+                screenCaptureSourceFactory: new FixedCaptureSourceFactory(fakeSource));
+            using var helper = new HelperPageViewModel(cancelAction: static () => { }, CreateNknTestConfig(), helperRuntime);
+            using var previewCts = new CancellationTokenSource();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            await WaitUntilAsync(() => helpeeRuntime.CurrentLocalPeerAddress is not null, TimeSpan.FromSeconds(3));
+
+            var invite = CreateValidatedInviteForTarget(GetHostedAddressOrThrow(helpeeRuntime), out var rawToken);
+            var connectTask = helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+            await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(3));
+            helpee.AllowCommand.Execute(null);
+            await connectTask;
+
+            await WaitUntilAsync(
+                () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                      helperRuntime.State == SessionRuntimeState.Connected &&
+                      helpee.EffectivePhase == SessionUiPhase.Connected &&
+                      helper.EffectivePhase == SessionUiPhase.Connected,
+                TimeSpan.FromSeconds(3));
+
+            var coordinatorField = typeof(HelpeePageViewModel).GetField("screenShareCoordinator", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.NotNull(coordinatorField);
+            var coordinator = coordinatorField!.GetValue(helpee);
+            Assert.NotNull(coordinator);
+
+            SetPrivateField(helpee, "isScreenSharingPreviewActive", true);
+            SetPrivateField(
+                helpee,
+                "screenSharePreviewStatus",
+                new ScreenShareStatus(ScreenShareState.Active, null, DateTimeOffset.UtcNow));
+            SetPrivateFieldDynamic(coordinator!, "screenSharePreviewCaptureSource", fakeSource);
+            SetPrivateFieldDynamic(coordinator!, "screenSharePreviewCts", previewCts);
+
+            SetPrivateField(helper.ScreenShareViewer, "isActive", true);
+            SetPrivateField(helper.ScreenShareViewer, "currentFrame", CreateTestBitmap(1, 1));
+            InvokePrivateMethod(
+                helper,
+                "OnScreenShareViewerPropertyChanged",
+                helper.ScreenShareViewer,
+                new PropertyChangedEventArgs(nameof(ScreenShareViewerViewModel.CurrentFrame)));
+
+            var requested = await helperRuntime.RequestRemoteControlAsync(cts.Token);
+            Assert.True(requested);
+
+            await WaitUntilAsync(() => helpeeRuntime.HasPendingRemoteControlConsentPrompt, TimeSpan.FromSeconds(3));
+            Assert.True(await helpeeRuntime.RespondToRemoteControlRequestAsync(allow: true, cts.Token));
+
+            await WaitUntilAsync(
+                () => helpeeRuntime.ControlState == ControlState.Active &&
+                      helperRuntime.ControlState == ControlState.Active,
+                TimeSpan.FromSeconds(3));
+
+            Assert.True(helper.ShowRemoteScreenShareFrame);
+            Assert.True(helper.ShowStopControlAction);
+            Assert.True(helper.ShowRemoteControlActiveStatus);
+
+            helpee.EndSessionCommand.Execute(null);
+
+            await WaitUntilAsync(() => helpeeDisconnectTask is not null, TimeSpan.FromSeconds(1));
+
+            await WaitUntilAsync(
+                () => helperRuntime.State == SessionRuntimeState.Failed &&
+                      helperRuntime.LastDisconnectWasRemoteEnd &&
+                      helper.EffectivePhase == SessionUiPhase.Ended &&
+                      string.Equals(helper.StatusText, "The other person ended the session.", StringComparison.Ordinal) &&
+                      !helper.ShowRemoteScreenShareFrame &&
+                      !helper.ShowStopControlAction &&
+                      !helper.ShowRemoteControlActiveStatus,
+                TimeSpan.FromSeconds(5));
+
+            if (helpeeDisconnectTask is not null)
+            {
+                await helpeeDisconnectTask;
+            }
+
+            await WaitUntilAsync(
+                () => !helpee.IsScreenSharingPreviewActive &&
+                      helpee.ScreenSharePreviewStatus.State == ScreenShareState.Off,
+                TimeSpan.FromSeconds(2));
+
+            Assert.True(fakeSource.StopCallCount >= 1);
+            Assert.True(fakeSource.DisposeCallCount >= 1);
+            Assert.False(helper.IsChatInputEnabled);
+            Assert.Equal("The other person ended the session.", helper.HeaderStatusText);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void HelperViewModel_RemoteEndAfterSuccessfulSession_RetainsHelperAddress_WhenBootstrapWasMissing()
     {
         var transportConfig = CreateNknTestConfig();

@@ -2878,6 +2878,9 @@ public sealed class SessionRuntime : IDisposable
 
             if (notifyRemoteSessionEnd)
             {
+                // Tell the peer the session is over before best-effort teardown work starts
+                // competing for transport state or outbound bandwidth.
+                await TrySendRemoteSessionEndAsync(oldTransport, oldRole, oldState).ConfigureAwait(false);
                 await TrySendRemoteControlStopAsync(oldTransport, oldControlState, oldControlRequestId, "session_end").ConfigureAwait(false);
                 await StopTransportScreenShareAsync(
                     notifyRemoteStop: oldRole == SessionRuntimeRole.Helpee &&
@@ -2885,7 +2888,6 @@ public sealed class SessionRuntime : IDisposable
                                       oldTransport is NknSignalingTransport,
                     reason: "session_end",
                     CancellationToken.None).ConfigureAwait(false);
-                await TrySendRemoteSessionEndAsync(oldTransport, oldRole, oldState).ConfigureAwait(false);
             }
             else
             {
