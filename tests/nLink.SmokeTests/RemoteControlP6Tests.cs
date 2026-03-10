@@ -182,7 +182,23 @@ public sealed class RemoteControlP6RuntimeTests
             },
             peerId: "controller-peer");
 
-        await WaitUntilAsync(() => GetInjectionQueueCount(runtime) == 2, TimeSpan.FromSeconds(1));
+        await WaitUntilAsync(
+            () =>
+            {
+                if (GetPrivateLongField(runtime, "remoteControlSnapshotLastReceivedSeq") != 1000)
+                {
+                    return false;
+                }
+
+                if (GetInjectionQueueCount(runtime) != 2)
+                {
+                    return false;
+                }
+
+                var queuedItems = GetQueuedInjectionItems(runtime);
+                return queuedItems.SequenceEqual(new[] { "state_snapshot:1000", "key:2" });
+            },
+            TimeSpan.FromSeconds(1));
         var queuedItems = GetQueuedInjectionItems(runtime);
         Assert.Equal(new[] { "state_snapshot:1000", "key:2" }, queuedItems);
 
