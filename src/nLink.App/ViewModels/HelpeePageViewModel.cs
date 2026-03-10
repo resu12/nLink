@@ -22,6 +22,7 @@ using NLink.App.Threading;
 using NLink.Core;
 using NLink.Core.Chat;
 using NLink.Core.FileTransfer;
+using NLink.Core.Logging;
 using NLink.Core.RemoteControl;
 using NLink.Core.SessionConnect;
 using NLink.Core.SessionSecurity;
@@ -87,6 +88,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private DateTimeOffset nextUiRecoveryBannerAllowedAt = DateTimeOffset.MinValue;
     private string uiRecoveryTransientKey = string.Empty;
     private bool uiRecoveryTransientDismissed;
+    private string lastChatPanelStateLog = string.Empty;
+    private long chatSendAttemptCounter;
     private SessionReliabilityAttempt? reliabilityAttempt;
     private readonly InlineTransientText copyFeedback = new();
     private string shareInviteText = string.Empty;
@@ -273,7 +276,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         AllowCommand = new RelayCommand(AllowIncomingRequest, CanAllowIncomingRequest);
         DeclineCommand = new AsyncRelayCommand(DeclineIncomingRequestAsync, CanDeclineIncomingRequest);
         SendFileCommand = new RelayCommand(RequestSendFileWindow, CanExecuteSendFileAction);
-        SendChatCommand = new AsyncRelayCommand(SendChatAsync, CanSendChat);
+        SendChatCommand = new AsyncRelayCommand(
+            SendChatAsync,
+            CanSendChat,
+            AsyncRelayCommandOptions.AllowConcurrentExecutions);
         AcceptIncomingFileCommand = new AsyncRelayCommand<string?>(AcceptIncomingFileAsync, CanAcceptIncomingFile);
         DeclineIncomingFileCommand = new AsyncRelayCommand<string?>(DeclineIncomingFileAsync, CanDeclineIncomingFile);
         CancelFileTransferCommand = new AsyncRelayCommand<string?>(CancelFileTransferAsync, CanCancelFileTransfer);
@@ -1615,6 +1621,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
+        var sendAttempt = Interlocked.Increment(ref chatSendAttemptCounter);
         ChatDraft = string.Empty;
         ShowChatNotice = false;
         var optimisticLine = AddChatLine(optimisticText, isLocal: true);
@@ -1633,7 +1640,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         RemoveChatLine(optimisticLine);
-        if (string.IsNullOrWhiteSpace(ChatDraft))
+        if (sendAttempt == Interlocked.Read(ref chatSendAttemptCounter) &&
+            string.IsNullOrWhiteSpace(ChatDraft))
         {
             ChatDraft = draft;
         }
@@ -2461,6 +2469,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             OnPropertyChanged(nameof(IsChatReady));
             SendChatCommand.NotifyCanExecuteChanged();
+            LogCurrentChatPanelState("chat_state_changed");
         });
     }
 
@@ -2471,7 +2480,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        _ = UiThreadDispatch.RunAsync(UpdateUiFromSnapshot);
+        _ = UiThreadDispatch.RunAsync(() => UpdateUiFromSnapshot("file_transfer_changed"));
     }
 
     private void OnRemoteControlStateChanged(object? sender, EventArgs e)
@@ -3273,6 +3282,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void UpdateUiFromSnapshot()
     {
+        UpdateUiFromSnapshot("refresh");
+    }
+
+    private void UpdateUiFromSnapshot(string source)
+    {
         bool nextChatEnabled;
         bool nextCanStartOrConnect;
         bool nextCanEndSession;
@@ -3364,7 +3378,29 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         DeclineIncomingFileCommand.NotifyCanExecuteChanged();
         CancelFileTransferCommand.NotifyCanExecuteChanged();
         EndSessionCommand.NotifyCanExecuteChanged();
+        LogCurrentChatPanelState(source);
         AssertUiConsistency();
+    }
+
+    private void LogCurrentChatPanelState(string source)
+    {
+        var fileTransferSnapshot = sessionRuntime.FileTransferSnapshot;
+        var payload =
+            $"event=helpee_chat_panel_state; source={source}; phase={EffectivePhase}; connection_state={ConnectionState}; " +
+            $"runtime_state={sessionRuntime.State}; runtime_can_send_chat={sessionRuntime.CanSendChat}; " +
+            $"chat_input_enabled={IsChatInputEnabled}; send_command_enabled={SendChatCommand.CanExecute(null)}; " +
+            $"draft_len={ChatDraft.Length}; can_send_files={CanSendFiles}; " +
+            $"outbound_state={fileTransferSnapshot.Outbound?.State.ToString() ?? "(none)"}; " +
+            $"outbound_terminal={fileTransferSnapshot.Outbound?.IsTerminal.ToString() ?? "(none)"}; " +
+            $"inbound_state={fileTransferSnapshot.Inbound?.State.ToString() ?? "(none)"}; " +
+            $"inbound_terminal={fileTransferSnapshot.Inbound?.IsTerminal.ToString() ?? "(none)"}";
+        if (string.Equals(payload, lastChatPanelStateLog, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        lastChatPanelStateLog = payload;
+        LocalOperationalLog.Info("HelpeeUi", payload);
     }
 
     private void SyncIncomingApprovalRequestFromRuntime()
