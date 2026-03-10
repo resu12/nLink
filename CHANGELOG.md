@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.5.0] - 2026-03-10
+
+### Added
+
+- Final `0.5.0` release notes under `docs/releases/`.
+- Native in-session single-file transfer for helper and helpee, protected by the dedicated `Transfer files` capability.
+- File-transfer diagnostics, runtime summary fields, and troubleshooting logs for transfer state and failure reasons.
+
+### Changed
+
+- README and release-facing documentation now reflect `0.5.0` as the current release.
+- File transfer now uses the authenticated active session model instead of the previous external-tool handoff.
+- Installer references now point to `%LOCALAPPDATA%\Programs\nLink`.
+
+### Fixed
+
+- File transfer is now session-bound, capability-gated, and protected with end-to-end encrypted payload handling on both DevLocal and NKN transports.
+- Receiver-side file save flow now uses temp-first assembly, whole-file integrity verification, safe finalize, and overwrite-blocked defaults.
+- File-transfer UI now shows accept/decline, progress, cancel, success, and failure states inside the shared session/chat pane.
+- NKN file-transfer handling was hardened for chunk ordering, replay-window sizing, transport-aware payload budgeting, and large-file reliability.
+- Diagnostics and logs now expose actionable file-transfer failure details without logging file contents.
+
+### Packaging
+
+- Windows installer and portable release assets for `0.5.0` are prepared together with `SHA256SUMS.txt`.
+
 ## [0.4.5] - 2026-03-08
 
 ### Added

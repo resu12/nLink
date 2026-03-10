@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.IO;
+using NLink.Core.Logging;
 using NLink.Core.SessionConnect;
 
 namespace NLink.Core.SessionSecurity;
@@ -67,12 +68,18 @@ public sealed record FileTransferStoragePolicy(
 public sealed record FileTransferWritePlan(
     string RootDirectoryPath,
     string SafeFileName,
-    string TargetPath,
+    string TempFileName,
+    string TempPath,
+    string FinalPath,
+    bool AllowOverwrite,
     long FileSizeBytes,
     int MaxChunkSizeBytes);
 
 public sealed class FileTransferWriteHandle : IDisposable, IAsyncDisposable
 {
+    private bool finalized;
+    private bool preserveTempArtifact;
+
     public FileTransferWriteHandle(FileTransferWritePlan plan, FileStream stream)
     {
         Plan = plan ?? throw new ArgumentNullException(nameof(plan));
@@ -83,14 +90,77 @@ public sealed class FileTransferWriteHandle : IDisposable, IAsyncDisposable
 
     public FileStream Stream { get; }
 
-    public void Dispose()
+    public async Task FinalizeAsync(CancellationToken ct)
     {
-        Stream.Dispose();
+        if (finalized)
+        {
+            return;
+        }
+
+        await Stream.FlushAsync(ct).ConfigureAwait(false);
+        await Stream.DisposeAsync().ConfigureAwait(false);
+        try
+        {
+            if (!Plan.AllowOverwrite && (File.Exists(Plan.FinalPath) || Directory.Exists(Plan.FinalPath)))
+            {
+                preserveTempArtifact = true;
+                throw new IOException("File-transfer target already exists and overwrite is disabled.");
+            }
+
+            File.Move(Plan.TempPath, Plan.FinalPath, overwrite: Plan.AllowOverwrite);
+            finalized = true;
+        }
+        catch
+        {
+            preserveTempArtifact = true;
+            throw;
+        }
     }
 
-    public ValueTask DisposeAsync()
+    public void Dispose()
     {
-        return Stream.DisposeAsync();
+        try
+        {
+            Stream.Dispose();
+        }
+        finally
+        {
+            CleanupTempFile();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            await Stream.DisposeAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            CleanupTempFile();
+        }
+    }
+
+    private void CleanupTempFile()
+    {
+        if (finalized || preserveTempArtifact || string.IsNullOrWhiteSpace(Plan.TempPath))
+        {
+            return;
+        }
+
+        try
+        {
+            if (File.Exists(Plan.TempPath))
+            {
+                File.Delete(Plan.TempPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                "FileTransferGuard",
+                $"event=temp_cleanup_failed; path={Plan.TempPath}; ex={ex.GetType().Name}");
+        }
     }
 }
 
@@ -260,7 +330,7 @@ public sealed class SessionFileTransferGuard
         try
         {
             Directory.CreateDirectory(plan.RootDirectoryPath);
-            if (Directory.Exists(plan.TargetPath))
+            if (Directory.Exists(plan.FinalPath))
             {
                 return new FileTransferWriteOpenResult(
                     FileTransferAccessResult.Denied(
@@ -269,21 +339,30 @@ public sealed class SessionFileTransferGuard
                     plan);
             }
 
+            if (Directory.Exists(plan.TempPath))
+            {
+                return new FileTransferWriteOpenResult(
+                    FileTransferAccessResult.Denied(
+                        FileTransferValidationFailure.DirectoryTargetBlocked,
+                        "File-transfer temporary path resolves to a directory."),
+                    plan);
+            }
+
             var options = new FileStreamOptions
             {
                 Access = FileAccess.Write,
-                Mode = storagePolicy.AllowOverwrite ? FileMode.Create : FileMode.CreateNew,
+                Mode = FileMode.Create,
                 Share = FileShare.None,
                 Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
                 BufferSize = Math.Clamp(storagePolicy.MaxChunkSizeBytes, 4096, 64 * 1024),
             };
-            var stream = new FileStream(plan.TargetPath, options);
+            var stream = new FileStream(plan.TempPath, options);
             return new FileTransferWriteOpenResult(
                 FileTransferAccessResult.Allowed(),
                 plan,
                 new FileTransferWriteHandle(plan, stream));
         }
-        catch (IOException) when (!storagePolicy.AllowOverwrite && (File.Exists(plan.TargetPath) || Directory.Exists(plan.TargetPath)))
+        catch (IOException) when (!storagePolicy.AllowOverwrite && (File.Exists(plan.FinalPath) || Directory.Exists(plan.FinalPath)))
         {
             return new FileTransferWriteOpenResult(
                 FileTransferAccessResult.Denied(
@@ -406,10 +485,14 @@ public sealed class SessionFileTransferGuard
             return false;
         }
 
+        var tempFileName = CreateTempFileName(safeFileName);
         plan = new FileTransferWritePlan(
             rootPath,
             safeFileName,
+            tempFileName,
+            Path.Combine(rootPath, tempFileName),
             candidatePath,
+            storagePolicy.AllowOverwrite,
             descriptor.FileSizeBytes,
             storagePolicy.MaxChunkSizeBytes);
         validation = FileTransferAccessResult.Allowed();
@@ -527,5 +610,12 @@ public sealed class SessionFileTransferGuard
             : StringComparison.Ordinal;
         var expectedPrefix = normalizedRoot + Path.DirectorySeparatorChar;
         return candidatePath.StartsWith(expectedPrefix, comparison);
+    }
+
+    private static string CreateTempFileName(string safeFileName)
+    {
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"{safeFileName}.part");
     }
 }

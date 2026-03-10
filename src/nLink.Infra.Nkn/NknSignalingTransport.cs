@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using NLink.Core;
+using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
 using NLink.Core.RemoteControl;
 using NLink.Core.ScreenShare;
@@ -13,7 +14,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport
+public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider
 {
     private const int EnvelopeVersion = 1;
     private static readonly TimeSpan AckWaitTimeout = TimeSpan.FromSeconds(2);
@@ -36,6 +37,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         TimeSpan.FromMilliseconds(220),
     };
     private static readonly TimeSpan ScreenShareOutboundGateWaitBudget = TimeSpan.FromMilliseconds(25);
+    private const int FileTransferMaxBridgePayloadBytes = 64 * 1024;
 
     private readonly NknTransportOptions options;
     private readonly NknIdentity identity;
@@ -49,6 +51,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
     private readonly object controlOutboundQueueGate = new();
     private readonly object controlInputReceiveLogGate = new();
     private readonly object hostReadyGate = new();
+    private readonly object inboundFileTransferDispatchGate = new();
     private readonly LinkedList<QueuedControlEnvelope> highPriorityControlOutboundQueue = new();
     private readonly LinkedList<QueuedControlEnvelope> lowPriorityControlOutboundQueue = new();
     private readonly object gate = new();
@@ -57,7 +60,14 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
     private readonly SessionReplayWindow inboundControlReplayWindow = new();
     private readonly SessionReplayWindow inboundLifecycleReplayWindow = new();
     private readonly SessionReplayWindow inboundScreenShareReplayWindow = new();
+    private readonly SessionReplayWindow inboundFileTransferReplayWindow = new(
+        windowSize: FileTransferInboundReplayWindowSize,
+        maxForwardAdvance: FileTransferInboundReplayMaxForwardAdvance);
+    private readonly Dictionary<string, FileTransferTransportState> fileTransferStates = new(StringComparer.Ordinal);
+    private readonly SortedDictionary<long, InboundFileTransferDispatchWork> pendingInboundFileTransferDispatch = new();
     private const bool LocalRemoteControlSupported = true;
+    private const int FileTransferInboundReplayWindowSize = 32768;
+    private const long FileTransferInboundReplayMaxForwardAdvance = 131072;
 
     private string? currentEnvelopeCode;
     private string? remoteEndpoint;
@@ -89,9 +99,15 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
     private long highPriorityControlCoalescedCount;
     private long highPriorityControlDroppedForStopCount;
     private byte[]? controlSessionSharedKey;
+    private byte[]? fileTransferSessionSharedKey;
     private long nextOutboundControlSecureSequence;
     private long nextOutboundLifecycleSecureSequence;
     private long nextOutboundScreenShareSecureSequence;
+    private long nextOutboundFileTransferSecureSequence;
+    private long nextInboundFileTransferDispatchOrder;
+    private long nextInboundFileTransferDispatchToProcess = 1;
+    private long inboundFileTransferDispatchGeneration;
+    private bool inboundFileTransferDispatchActive;
     private TaskCompletionSource<bool> hostReadyTcs = CreateHostReadyTcs();
     private bool disposed;
 
@@ -149,6 +165,14 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
     public event EventHandler<RemoteControlAckReceivedEventArgs>? RemoteControlAckReceived;
     public event EventHandler<RemoteControlDisplayInfoReceivedEventArgs>? RemoteControlDisplayInfoReceived;
     public event EventHandler<RemoteControlStateSnapshotReceivedEventArgs>? RemoteControlStateSnapshotReceived;
+    public event EventHandler<FileTransferOfferReceivedEventArgs>? FileTransferOfferReceived;
+    public event EventHandler<FileTransferAcceptReceivedEventArgs>? FileTransferAcceptReceived;
+    public event EventHandler<FileTransferDeclineReceivedEventArgs>? FileTransferDeclineReceived;
+    public event EventHandler<FileTransferStartReceivedEventArgs>? FileTransferStartReceived;
+    public event EventHandler<FileTransferChunkReceivedEventArgs>? FileTransferChunkReceived;
+    public event EventHandler<FileTransferCancelReceivedEventArgs>? FileTransferCancelReceived;
+    public event EventHandler<FileTransferErrorReceivedEventArgs>? FileTransferErrorReceived;
+    public event EventHandler<FileTransferCompleteReceivedEventArgs>? FileTransferCompleteReceived;
 
     internal event EventHandler<BridgeLifecycleEvent>? BridgeLifecycle;
     public event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
@@ -181,6 +205,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
     internal long ScreenShareOutboundBusyDrops => Interlocked.Read(ref screenShareOutboundBusyDrops);
     internal long ScreenSharePayloadBytesSent => Interlocked.Read(ref screenSharePayloadBytesSent);
     internal long ScreenShareMessagesSent => Interlocked.Read(ref screenShareMessagesSent);
+    internal long NextOutboundFileTransferSecureSequence => Interlocked.Read(ref nextOutboundFileTransferSecureSequence);
     internal long HighPriorityControlQueueOverflowCount => Interlocked.Read(ref highPriorityControlQueueOverflowCount);
     internal long HighPriorityControlRejectedCount => Interlocked.Read(ref highPriorityControlRejectedCount);
     internal long HighPriorityControlCoalescedCount => Interlocked.Read(ref highPriorityControlCoalescedCount);
@@ -1077,6 +1102,211 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         Log($"SendControlStateSnapshotAsync sent ControlStateSnapshot (msg_id={envelope.MessageId}, request_id_len={snapshot.RequestId.Length}, seq={snapshot.Seq}, buttons_mask={snapshot.MouseButtonsMask}, modifiers_mask={snapshot.ModifiersMask})");
     }
 
+    public async Task SendFileTransferOfferAsync(FileTransferOfferV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+        message = EnsureFileTransferSessionId(message);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        await SendFileTransferEnvelopeAsync(
+                MsgType.FileTransferOffer,
+                message.TransferId,
+                FileTransferPayloadCodec.Serialize(message),
+                ct)
+            .ConfigureAwait(false);
+    }
+
+    public async Task SendFileTransferAcceptAsync(FileTransferAcceptV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+        message = EnsureFileTransferSessionId(message);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        await SendFileTransferEnvelopeAsync(
+                MsgType.FileTransferAccept,
+                message.TransferId,
+                FileTransferPayloadCodec.Serialize(message),
+                ct)
+            .ConfigureAwait(false);
+    }
+
+    public async Task SendFileTransferDeclineAsync(FileTransferDeclineV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+        message = EnsureFileTransferSessionId(message);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        await SendFileTransferEnvelopeAsync(
+                MsgType.FileTransferDecline,
+                message.TransferId,
+                FileTransferPayloadCodec.Serialize(message),
+                ct)
+            .ConfigureAwait(false);
+    }
+
+    public async Task SendFileTransferStartAsync(FileTransferStartV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+        message = EnsureFileTransferSessionId(message);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        await SendFileTransferEnvelopeAsync(
+                MsgType.FileTransferStart,
+                message.TransferId,
+                FileTransferPayloadCodec.Serialize(message),
+                ct)
+            .ConfigureAwait(false);
+    }
+
+    public async Task SendFileTransferChunkAsync(FileTransferChunkV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+        message = EnsureFileTransferSessionId(message);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        await SendFileTransferEnvelopeAsync(
+                MsgType.FileTransferChunk,
+                message.TransferId,
+                FileTransferPayloadCodec.Serialize(message),
+                ct)
+            .ConfigureAwait(false);
+    }
+
+    public async Task SendFileTransferCancelAsync(FileTransferCancelV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+        message = EnsureFileTransferSessionId(message);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        await SendFileTransferEnvelopeAsync(
+                MsgType.FileTransferCancel,
+                message.TransferId,
+                FileTransferPayloadCodec.Serialize(message),
+                ct)
+            .ConfigureAwait(false);
+    }
+
+    public async Task SendFileTransferErrorAsync(FileTransferErrorV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+        message = EnsureFileTransferSessionId(message);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        await SendFileTransferEnvelopeAsync(
+                MsgType.FileTransferError,
+                message.TransferId,
+                FileTransferPayloadCodec.Serialize(message),
+                ct)
+            .ConfigureAwait(false);
+    }
+
+    public async Task SendFileTransferCompleteAsync(FileTransferCompleteV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+        message = EnsureFileTransferSessionId(message);
+
+        if (ct.IsCancellationRequested)
+        {
+            await Task.FromCanceled(ct);
+            return;
+        }
+
+        await SendFileTransferEnvelopeAsync(
+                MsgType.FileTransferComplete,
+                message.TransferId,
+                FileTransferPayloadCodec.Serialize(message),
+                ct)
+            .ConfigureAwait(false);
+    }
+
+    public int ResolveSafeOutboundChunkSize(FileTransferChunkBudgetRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        if (request.FileSizeBytes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "File size must be positive.");
+        }
+
+        var requestedChunkSize = Math.Min(request.RequestedChunkSizeBytes, FileTransferProtocol.MaxChunkRawBytes);
+        if (requestedChunkSize <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "Requested chunk size must be positive.");
+        }
+
+        var low = 1;
+        var high = requestedChunkSize;
+        var best = 0;
+        while (low <= high)
+        {
+            var candidate = low + ((high - low) / 2);
+            if (!TryCalculateFileTransferChunkCount(request.FileSizeBytes, candidate, out var chunkCount))
+            {
+                throw new InvalidOperationException("Couldn't determine outbound file-transfer chunk count.");
+            }
+
+            if (DoesFileTransferChunkFitTransportBudget(request.TransferId, chunkCount, candidate))
+            {
+                best = candidate;
+                low = candidate + 1;
+            }
+            else
+            {
+                high = candidate - 1;
+            }
+        }
+
+        if (best <= 0)
+        {
+            throw new InvalidOperationException("No valid file-transfer chunk size fits within the NKN payload budget.");
+        }
+
+        return best;
+    }
+
     private static ControlOutboundLane ResolveControlOutboundLane(MsgType messageType, bool isLowPriorityMouseMove = false)
     {
         return messageType switch
@@ -1092,6 +1322,109 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                 MsgType.ControlStateSnapshot => ControlOutboundLane.High,
             _ => ControlOutboundLane.High,
         };
+    }
+
+    private async Task SendFileTransferEnvelopeAsync(
+        MsgType messageType,
+        string transferId,
+        byte[] plaintextPayload,
+        CancellationToken ct)
+    {
+        var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureFileTransferMessageType(messageType)}_no_session_context");
+            Log($"SendFileTransfer{messageType}Async failed (reason=no_session_context)");
+            throw new InvalidOperationException("Session context is not set.");
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureFileTransferMessageType(messageType)}_no_remote_endpoint");
+            Log($"SendFileTransfer{messageType}Async failed (reason=no_remote_endpoint)");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        if (!TryValidateAndTrackFileTransferMessage(messageType, normalizedTransferId, inbound: false, applyStateChange: false, out var failureReason))
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureFileTransferMessageType(messageType)}_{failureReason}");
+            Log($"SendFileTransfer{messageType}Async failed (reason={failureReason}, transfer_id={normalizedTransferId})");
+            throw new InvalidOperationException($"File-transfer state rejected message '{messageType}': {failureReason}.");
+        }
+
+        var securePayload = CreateSecureFileTransferPayload(messageType, normalizedTransferId, plaintextPayload);
+        var envelope = CreateEnvelope(envelopeCode, messageType, securePayload, replyTo: null);
+        await SendEnvelopeAsync(remoteEndpoint, envelope, ct).ConfigureAwait(false);
+
+        if (!TryValidateAndTrackFileTransferMessage(messageType, normalizedTransferId, inbound: false, applyStateChange: true, out _))
+        {
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=filetransfer_message_state_race; message_type={MapSecureFileTransferMessageType(messageType)}; transfer_id={normalizedTransferId}; source={LocalPeerAddress}");
+        }
+
+        LogFileTransferEnvelopeEvent("sent", messageType, normalizedTransferId, source: LocalPeerAddress);
+        Log($"SendFileTransfer{messageType}Async sent (msg_id={envelope.MessageId}, transfer_id_len={normalizedTransferId.Length})");
+    }
+
+    private bool DoesFileTransferChunkFitTransportBudget(string transferId, int chunkCount, int rawChunkSize)
+    {
+        if (currentSessionSecurityState.SessionId is not SessionId sessionId)
+        {
+            throw new InvalidOperationException("Session security state does not have an active session id.");
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            throw new InvalidOperationException("Session context is not set.");
+        }
+
+        var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
+        var chunkIndex = Math.Max(0, chunkCount - 1);
+        var plaintextPayload = FileTransferPayloadCodec.Serialize(
+            new FileTransferChunkV1
+            {
+                SessionId = sessionId.Value,
+                TransferId = normalizedTransferId,
+                ChunkIndex = chunkIndex,
+                ChunkCount = chunkCount,
+                DataBase64 = Convert.ToBase64String(new byte[rawChunkSize]),
+            });
+
+        var securePayload = CreateSecureFileTransferPayloadForBudgetEstimate(
+            MsgType.FileTransferChunk,
+            normalizedTransferId,
+            plaintextPayload);
+        var envelope = new Envelope(
+            Version: EnvelopeVersion,
+            Code: envelopeCode,
+            MessageId: Guid.NewGuid().ToString("N"),
+            Type: MsgType.FileTransferChunk,
+            Payload: securePayload,
+            UnixTimeMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            ReplyTo: null);
+        var transportPayload = EnvelopeCodec.Serialize(envelope);
+        return transportPayload.Length <= FileTransferMaxBridgePayloadBytes;
+    }
+
+    private static bool TryCalculateFileTransferChunkCount(long fileSizeBytes, int chunkSizeBytes, out int chunkCount)
+    {
+        chunkCount = 0;
+        if (fileSizeBytes <= 0 || chunkSizeBytes <= 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            chunkCount = checked((int)((fileSizeBytes + chunkSizeBytes - 1) / chunkSizeBytes));
+            return chunkCount > 0;
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
     }
 
     private Task QueueControlEnvelopeAsync(
@@ -1643,6 +1976,30 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                 case MsgType.ScreenShareStop:
                     HandleScreenShareStop(e.Source, env);
                     break;
+                case MsgType.FileTransferOffer:
+                    EnqueueInboundFileTransferDispatch(e.Source, env);
+                    break;
+                case MsgType.FileTransferAccept:
+                    EnqueueInboundFileTransferDispatch(e.Source, env);
+                    break;
+                case MsgType.FileTransferDecline:
+                    EnqueueInboundFileTransferDispatch(e.Source, env);
+                    break;
+                case MsgType.FileTransferStart:
+                    EnqueueInboundFileTransferDispatch(e.Source, env);
+                    break;
+                case MsgType.FileTransferChunk:
+                    EnqueueInboundFileTransferDispatch(e.Source, env);
+                    break;
+                case MsgType.FileTransferCancel:
+                    EnqueueInboundFileTransferDispatch(e.Source, env);
+                    break;
+                case MsgType.FileTransferError:
+                    EnqueueInboundFileTransferDispatch(e.Source, env);
+                    break;
+                case MsgType.FileTransferComplete:
+                    EnqueueInboundFileTransferDispatch(e.Source, env);
+                    break;
                 default:
                     NknRuntimeDiagnostics.SetLastError("unexpected_message_type");
                     NknRuntimeDiagnostics.SetLastEnvelopeDropReason("unexpected_type");
@@ -1655,6 +2012,117 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             NknRuntimeDiagnostics.SetLastError(ex);
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"dispatch_{ex.GetType().Name}");
             Log($"Envelope dispatch failed (type={env.Type}, msg_id={env.MessageId}, ex={ex.GetType().Name})");
+        }
+    }
+
+    private void EnqueueInboundFileTransferDispatch(string source, Envelope env)
+    {
+        var dispatchOrder = Interlocked.Increment(ref nextInboundFileTransferDispatchOrder);
+        var work = new InboundFileTransferDispatchWork(
+            Generation: Volatile.Read(ref inboundFileTransferDispatchGeneration),
+            Order: dispatchOrder,
+            Source: source,
+            Envelope: env);
+        var shouldStartDrainer = false;
+
+        lock (inboundFileTransferDispatchGate)
+        {
+            pendingInboundFileTransferDispatch[dispatchOrder] = work;
+            if (!inboundFileTransferDispatchActive)
+            {
+                inboundFileTransferDispatchActive = true;
+                shouldStartDrainer = true;
+            }
+        }
+
+        if (shouldStartDrainer)
+        {
+            _ = Task.Run(ProcessInboundFileTransferDispatchQueueAsync, CancellationToken.None);
+        }
+    }
+
+    private async Task ProcessInboundFileTransferDispatchQueueAsync()
+    {
+        await Task.Yield();
+
+        while (true)
+        {
+            InboundFileTransferDispatchWork work;
+            lock (inboundFileTransferDispatchGate)
+            {
+                if (!pendingInboundFileTransferDispatch.TryGetValue(nextInboundFileTransferDispatchToProcess, out work))
+                {
+                    inboundFileTransferDispatchActive = false;
+                    return;
+                }
+
+                pendingInboundFileTransferDispatch.Remove(nextInboundFileTransferDispatchToProcess);
+                nextInboundFileTransferDispatchToProcess++;
+            }
+
+            if (disposed || work.Generation != Volatile.Read(ref inboundFileTransferDispatchGeneration))
+            {
+                continue;
+            }
+
+            try
+            {
+                DispatchInboundFileTransferEnvelope(work.Source, work.Envelope);
+            }
+            catch (Exception ex)
+            {
+                NknRuntimeDiagnostics.SetLastError(ex);
+                NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"dispatch_{ex.GetType().Name}");
+                Log($"Envelope dispatch failed (type={work.Envelope.Type}, msg_id={work.Envelope.MessageId}, ex={ex.GetType().Name})");
+            }
+        }
+    }
+
+    private void DispatchInboundFileTransferEnvelope(string source, Envelope env)
+    {
+        switch (env.Type)
+        {
+            case MsgType.FileTransferOffer:
+                HandleFileTransferOffer(source, env);
+                break;
+            case MsgType.FileTransferAccept:
+                HandleFileTransferAccept(source, env);
+                break;
+            case MsgType.FileTransferDecline:
+                HandleFileTransferDecline(source, env);
+                break;
+            case MsgType.FileTransferStart:
+                HandleFileTransferStart(source, env);
+                break;
+            case MsgType.FileTransferChunk:
+                HandleFileTransferChunk(source, env);
+                break;
+            case MsgType.FileTransferCancel:
+                HandleFileTransferCancel(source, env);
+                break;
+            case MsgType.FileTransferError:
+                HandleFileTransferError(source, env);
+                break;
+            case MsgType.FileTransferComplete:
+                HandleFileTransferComplete(source, env);
+                break;
+            default:
+                NknRuntimeDiagnostics.SetLastError("unexpected_filetransfer_message_type");
+                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("unexpected_filetransfer_type");
+                Log($"Unexpected file-transfer envelope type (type={env.Type}, msg_id={env.MessageId})");
+                break;
+        }
+    }
+
+    private void ResetInboundFileTransferDispatchQueue()
+    {
+        lock (inboundFileTransferDispatchGate)
+        {
+            pendingInboundFileTransferDispatch.Clear();
+            nextInboundFileTransferDispatchToProcess = 1;
+            nextInboundFileTransferDispatchOrder = 0;
+            inboundFileTransferDispatchActive = false;
+            Interlocked.Increment(ref inboundFileTransferDispatchGeneration);
         }
     }
 
@@ -2641,6 +3109,242 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         ScreenShareStopped?.Invoke(this, EventArgs.Empty);
     }
 
+    private void HandleFileTransferOffer(string source, Envelope env)
+    {
+        if (!TryDecryptFileTransferPayload(source, env, MsgType.FileTransferOffer, out var securePayload))
+        {
+            return;
+        }
+
+        if (!FileTransferPayloadCodec.TryDeserializeOffer(securePayload.Plaintext, out var message))
+        {
+            NknRuntimeDiagnostics.SetLastError("filetransfer_offer_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_offer_payload_invalid");
+            Log($"FileTransferOffer payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateFileTransferSecureMetadata("file_transfer_offer", securePayload.Metadata, message.TransferId, env.MessageId) ||
+            !TryValidateFileTransferMessageSession("file_transfer_offer", message.SessionId, message.TransferId, env.MessageId, source) ||
+            !TryValidateFileTransferDispatchState("file_transfer_offer", MsgType.FileTransferOffer, message.TransferId, env.MessageId, source))
+        {
+            return;
+        }
+
+        LogFileTransferEnvelopeEvent("received", MsgType.FileTransferOffer, message.TransferId, source);
+        Log($"FileTransferOffer received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, file_name_len={message.FileName.Length}, size_bytes={message.FileSizeBytes})");
+        FileTransferOfferReceived?.Invoke(this, new FileTransferOfferReceivedEventArgs(message, source));
+    }
+
+    private void HandleFileTransferAccept(string source, Envelope env)
+    {
+        if (!TryDecryptFileTransferPayload(source, env, MsgType.FileTransferAccept, out var securePayload))
+        {
+            return;
+        }
+
+        if (!FileTransferPayloadCodec.TryDeserializeAccept(securePayload.Plaintext, out var message))
+        {
+            NknRuntimeDiagnostics.SetLastError("filetransfer_accept_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_accept_payload_invalid");
+            Log($"FileTransferAccept payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateFileTransferSecureMetadata("file_transfer_accept", securePayload.Metadata, message.TransferId, env.MessageId) ||
+            !TryValidateFileTransferMessageSession("file_transfer_accept", message.SessionId, message.TransferId, env.MessageId, source) ||
+            !TryValidateFileTransferDispatchState("file_transfer_accept", MsgType.FileTransferAccept, message.TransferId, env.MessageId, source))
+        {
+            return;
+        }
+
+        LogFileTransferEnvelopeEvent("received", MsgType.FileTransferAccept, message.TransferId, source);
+        Log($"FileTransferAccept received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length})");
+        FileTransferAcceptReceived?.Invoke(this, new FileTransferAcceptReceivedEventArgs(message, source));
+    }
+
+    private void HandleFileTransferDecline(string source, Envelope env)
+    {
+        if (!TryDecryptFileTransferPayload(source, env, MsgType.FileTransferDecline, out var securePayload))
+        {
+            return;
+        }
+
+        if (!FileTransferPayloadCodec.TryDeserializeDecline(securePayload.Plaintext, out var message))
+        {
+            NknRuntimeDiagnostics.SetLastError("filetransfer_decline_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_decline_payload_invalid");
+            Log($"FileTransferDecline payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateFileTransferSecureMetadata("file_transfer_decline", securePayload.Metadata, message.TransferId, env.MessageId) ||
+            !TryValidateFileTransferMessageSession("file_transfer_decline", message.SessionId, message.TransferId, env.MessageId, source) ||
+            !TryValidateFileTransferDispatchState("file_transfer_decline", MsgType.FileTransferDecline, message.TransferId, env.MessageId, source))
+        {
+            return;
+        }
+
+        LogFileTransferEnvelopeEvent("received", MsgType.FileTransferDecline, message.TransferId, source);
+        Log($"FileTransferDecline received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, has_reason={message.Reason is not null})");
+        FileTransferDeclineReceived?.Invoke(this, new FileTransferDeclineReceivedEventArgs(message, source));
+    }
+
+    private void HandleFileTransferStart(string source, Envelope env)
+    {
+        if (!TryDecryptFileTransferPayload(source, env, MsgType.FileTransferStart, out var securePayload))
+        {
+            return;
+        }
+
+        if (!FileTransferPayloadCodec.TryDeserializeStart(securePayload.Plaintext, out var message))
+        {
+            NknRuntimeDiagnostics.SetLastError("filetransfer_start_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_start_payload_invalid");
+            Log($"FileTransferStart payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateFileTransferSecureMetadata("file_transfer_start", securePayload.Metadata, message.TransferId, env.MessageId) ||
+            !TryValidateFileTransferMessageSession("file_transfer_start", message.SessionId, message.TransferId, env.MessageId, source) ||
+            !TryValidateFileTransferDispatchState("file_transfer_start", MsgType.FileTransferStart, message.TransferId, env.MessageId, source))
+        {
+            return;
+        }
+
+        LogFileTransferEnvelopeEvent("received", MsgType.FileTransferStart, message.TransferId, source);
+        Log($"FileTransferStart received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, chunk_count={message.ChunkCount}, chunk_size={message.ChunkSizeBytes})");
+        FileTransferStartReceived?.Invoke(this, new FileTransferStartReceivedEventArgs(message, source));
+    }
+
+    private void HandleFileTransferChunk(string source, Envelope env)
+    {
+        if (!TryDecryptFileTransferPayload(source, env, MsgType.FileTransferChunk, out var securePayload))
+        {
+            return;
+        }
+
+        if (!FileTransferPayloadCodec.TryDeserializeChunk(securePayload.Plaintext, out var message))
+        {
+            NknRuntimeDiagnostics.SetLastError("filetransfer_chunk_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_chunk_payload_invalid");
+            Log($"FileTransferChunk payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateFileTransferSecureMetadata("file_transfer_chunk", securePayload.Metadata, message.TransferId, env.MessageId) ||
+            !TryValidateFileTransferMessageSession("file_transfer_chunk", message.SessionId, message.TransferId, env.MessageId, source) ||
+            !TryValidateFileTransferDispatchState("file_transfer_chunk", MsgType.FileTransferChunk, message.TransferId, env.MessageId, source))
+        {
+            return;
+        }
+
+        Log($"FileTransferChunk received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, chunk={message.ChunkIndex + 1}/{message.ChunkCount})");
+        FileTransferChunkReceived?.Invoke(this, new FileTransferChunkReceivedEventArgs(message, source));
+    }
+
+    private void HandleFileTransferCancel(string source, Envelope env)
+    {
+        if (!TryDecryptFileTransferPayload(source, env, MsgType.FileTransferCancel, out var securePayload))
+        {
+            return;
+        }
+
+        if (!FileTransferPayloadCodec.TryDeserializeCancel(securePayload.Plaintext, out var message))
+        {
+            NknRuntimeDiagnostics.SetLastError("filetransfer_cancel_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_cancel_payload_invalid");
+            Log($"FileTransferCancel payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateFileTransferSecureMetadata("file_transfer_cancel", securePayload.Metadata, message.TransferId, env.MessageId) ||
+            !TryValidateFileTransferMessageSession("file_transfer_cancel", message.SessionId, message.TransferId, env.MessageId, source) ||
+            !TryValidateFileTransferDispatchState("file_transfer_cancel", MsgType.FileTransferCancel, message.TransferId, env.MessageId, source))
+        {
+            return;
+        }
+
+        LogFileTransferEnvelopeEvent("received", MsgType.FileTransferCancel, message.TransferId, source);
+        Log($"FileTransferCancel received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, has_reason={message.Reason is not null})");
+        FileTransferCancelReceived?.Invoke(this, new FileTransferCancelReceivedEventArgs(message, source));
+    }
+
+    private void HandleFileTransferError(string source, Envelope env)
+    {
+        if (!TryDecryptFileTransferPayload(source, env, MsgType.FileTransferError, out var securePayload))
+        {
+            return;
+        }
+
+        if (!FileTransferPayloadCodec.TryDeserializeError(securePayload.Plaintext, out var message))
+        {
+            NknRuntimeDiagnostics.SetLastError("filetransfer_error_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_error_payload_invalid");
+            Log($"FileTransferError payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateFileTransferSecureMetadata("file_transfer_error", securePayload.Metadata, message.TransferId, env.MessageId) ||
+            !TryValidateFileTransferMessageSession("file_transfer_error", message.SessionId, message.TransferId, env.MessageId, source) ||
+            !TryValidateFileTransferDispatchState("file_transfer_error", MsgType.FileTransferError, message.TransferId, env.MessageId, source))
+        {
+            return;
+        }
+
+        LogFileTransferEnvelopeEvent("received", MsgType.FileTransferError, message.TransferId, source);
+        Log($"FileTransferError received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, error_code={message.ErrorCode})");
+        FileTransferErrorReceived?.Invoke(this, new FileTransferErrorReceivedEventArgs(message, source));
+    }
+
+    private void HandleFileTransferComplete(string source, Envelope env)
+    {
+        if (!TryDecryptFileTransferPayload(source, env, MsgType.FileTransferComplete, out var securePayload))
+        {
+            return;
+        }
+
+        if (!FileTransferPayloadCodec.TryDeserializeComplete(securePayload.Plaintext, out var message))
+        {
+            NknRuntimeDiagnostics.SetLastError("filetransfer_complete_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_complete_payload_invalid");
+            Log($"FileTransferComplete payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateFileTransferSecureMetadata("file_transfer_complete", securePayload.Metadata, message.TransferId, env.MessageId) ||
+            !TryValidateFileTransferMessageSession("file_transfer_complete", message.SessionId, message.TransferId, env.MessageId, source) ||
+            !TryValidateFileTransferDispatchState("file_transfer_complete", MsgType.FileTransferComplete, message.TransferId, env.MessageId, source))
+        {
+            return;
+        }
+
+        LogFileTransferEnvelopeEvent("received", MsgType.FileTransferComplete, message.TransferId, source);
+        Log($"FileTransferComplete received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, size_bytes={message.FileSizeBytes})");
+        FileTransferCompleteReceived?.Invoke(this, new FileTransferCompleteReceivedEventArgs(message, source));
+    }
+
+    private bool TryValidateFileTransferDispatchState(
+        string messageType,
+        MsgType transportMessageType,
+        string transferId,
+        string messageId,
+        string? source)
+    {
+        if (TryValidateAndTrackFileTransferMessage(transportMessageType, transferId, inbound: true, applyStateChange: true, out var failureReason))
+        {
+            return true;
+        }
+
+        NknRuntimeDiagnostics.SetLastError($"{messageType}_{failureReason}");
+        NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageType}_{failureReason}");
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=filetransfer_message_rejected; message_type={messageType}; reason={failureReason}; transfer_id={transferId}; source={source ?? "(none)"}; msg_id={messageId}");
+        Log($"FileTransfer message rejected (type={messageType}, msg_id={messageId}, reason={failureReason}, transfer_id={transferId})");
+        return false;
+    }
+
     private void HandleControlRequest(string source, Envelope env)
     {
         if (!TryDecryptControlPayload(source, env, MsgType.ControlRequest, out var securePayload))
@@ -3201,6 +3905,44 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         return SessionSecureEnvelopeCodec.Encrypt(key, metadata, plaintextPayload);
     }
 
+    private byte[] CreateSecureFileTransferPayload(MsgType messageType, string transferId, byte[] plaintextPayload)
+    {
+        ArgumentNullException.ThrowIfNull(plaintextPayload);
+
+        var sessionId = currentSessionSecurityState.SessionId
+            ?? throw new InvalidOperationException("Session security state does not have an active session id.");
+        var senderIdentity = ResolveLocalPeerAddressForSecureEnvelope();
+        var key = GetFileTransferSessionSharedKeyOrThrow();
+        var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
+        var metadata = new SessionSecureEnvelopeMetadata(
+            Family: SessionSecureMessageFamily.FileTransfer,
+            MessageType: MapSecureFileTransferMessageType(messageType),
+            SessionId: sessionId,
+            SenderIdentity: senderIdentity,
+            Sequence: Interlocked.Increment(ref nextOutboundFileTransferSecureSequence),
+            RequestId: normalizedTransferId);
+        return SessionSecureEnvelopeCodec.Encrypt(key, metadata, plaintextPayload);
+    }
+
+    private byte[] CreateSecureFileTransferPayloadForBudgetEstimate(MsgType messageType, string transferId, byte[] plaintextPayload)
+    {
+        ArgumentNullException.ThrowIfNull(plaintextPayload);
+
+        var sessionId = currentSessionSecurityState.SessionId
+            ?? throw new InvalidOperationException("Session security state does not have an active session id.");
+        var senderIdentity = ResolveLocalPeerAddressForSecureEnvelope();
+        var key = GetFileTransferSessionSharedKeyOrThrow();
+        var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
+        var metadata = new SessionSecureEnvelopeMetadata(
+            Family: SessionSecureMessageFamily.FileTransfer,
+            MessageType: MapSecureFileTransferMessageType(messageType),
+            SessionId: sessionId,
+            SenderIdentity: senderIdentity,
+            Sequence: Math.Max(1L, Interlocked.Read(ref nextOutboundFileTransferSecureSequence) + 1),
+            RequestId: normalizedTransferId);
+        return SessionSecureEnvelopeCodec.Encrypt(key, metadata, plaintextPayload);
+    }
+
     private bool TryDecryptLifecyclePayload(
         string? source,
         string messageId,
@@ -3369,6 +4111,164 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         return true;
     }
 
+    private bool TryDecryptFileTransferPayload(
+        string? source,
+        Envelope env,
+        MsgType messageType,
+        out SessionSecureEnvelopePayload securePayload)
+    {
+        securePayload = default;
+
+        if (currentSessionSecurityState.SessionId is not SessionId sessionId)
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureFileTransferMessageType(messageType)}_session_unavailable");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureFileTransferMessageType(messageType)}_session_unavailable");
+            Log($"FileTransfer secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason=session_unavailable)");
+            return false;
+        }
+
+        var expectedSender = ResolveExpectedRemotePeerAddressForCurrentSession();
+        if (string.IsNullOrWhiteSpace(expectedSender) || !PeerAddress.TryParse(expectedSender, out var senderIdentity))
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureFileTransferMessageType(messageType)}_expected_sender_unavailable");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureFileTransferMessageType(messageType)}_expected_sender_unavailable");
+            Log($"FileTransfer secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason=expected_sender_unavailable)");
+            return false;
+        }
+
+        byte[] key;
+        try
+        {
+            key = GetFileTransferSessionSharedKeyOrThrow();
+        }
+        catch (InvalidOperationException)
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureFileTransferMessageType(messageType)}_session_key_unavailable");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureFileTransferMessageType(messageType)}_session_key_unavailable");
+            Log($"FileTransfer secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason=session_key_unavailable)");
+            return false;
+        }
+
+        try
+        {
+            securePayload = SessionSecureEnvelopeCodec.Decrypt(
+                key,
+                env.Payload,
+                new SessionSecureEnvelopeExpectation(
+                    Family: SessionSecureMessageFamily.FileTransfer,
+                    MessageType: MapSecureFileTransferMessageType(messageType),
+                    SessionId: sessionId,
+                    SenderIdentity: senderIdentity));
+        }
+        catch (Exception ex) when (ex is CryptographicException or InvalidOperationException or JsonException or FormatException)
+        {
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureFileTransferMessageType(messageType)}_secure_envelope_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureFileTransferMessageType(messageType)}_secure_envelope_invalid");
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=filetransfer_message_rejected; message_type={MapSecureFileTransferMessageType(messageType)}; reason=secure_envelope_invalid; session_id={sessionId.Value}; source={source ?? "(none)"}; expected_source={expectedSender}; msg_id={env.MessageId}; ex={ex.GetType().Name}");
+            Log($"FileTransfer secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason=secure_envelope_invalid, ex={ex.GetType().Name})");
+            return false;
+        }
+
+        SessionReplaySequenceResult replay;
+        lock (controlSecureStateGate)
+        {
+            replay = inboundFileTransferReplayWindow.EvaluateAndTrack(securePayload.Metadata.Sequence);
+        }
+
+        if (replay != SessionReplaySequenceResult.Accepted)
+        {
+            var replayReason = replay switch
+            {
+                SessionReplaySequenceResult.Duplicate => "replay_duplicate",
+                SessionReplaySequenceResult.Stale => "replay_stale",
+                SessionReplaySequenceResult.TooFarAhead => "replay_too_far_ahead",
+                _ => "replay_invalid",
+            };
+            NknRuntimeDiagnostics.SetLastError($"{MapSecureFileTransferMessageType(messageType)}_{replayReason}");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureFileTransferMessageType(messageType)}_{replayReason}");
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=filetransfer_message_rejected; message_type={MapSecureFileTransferMessageType(messageType)}; reason={replayReason}; session_id={sessionId.Value}; source={source ?? "(none)"}; sequence={securePayload.Metadata.Sequence}; msg_id={env.MessageId}");
+            Log($"FileTransfer secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason={replayReason}, seq={securePayload.Metadata.Sequence})");
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool TryValidateFileTransferSecureMetadata(
+        string messageType,
+        SessionSecureEnvelopeMetadata metadata,
+        string transferId,
+        string messageId)
+    {
+        var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
+        var normalizedMetadataTransferId = string.IsNullOrWhiteSpace(metadata.RequestId) ? null : metadata.RequestId.Trim();
+        if (string.Equals(normalizedMetadataTransferId, normalizedTransferId, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        NknRuntimeDiagnostics.SetLastError($"{messageType}_secure_transfer_id_mismatch");
+        NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageType}_secure_transfer_id_mismatch");
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=filetransfer_message_rejected; message_type={messageType}; reason=secure_transfer_id_mismatch; transfer_id={normalizedTransferId}; secure_transfer_id={normalizedMetadataTransferId ?? "(none)"}");
+        Log($"FileTransfer secure envelope rejected (type={messageType}, msg_id={messageId}, reason=secure_transfer_id_mismatch)");
+        return false;
+    }
+
+    private bool TryValidateFileTransferMessageSession(
+        string messageType,
+        string? messageSessionId,
+        string transferId,
+        string messageId,
+        string? source)
+    {
+        var expectedSessionId = currentSessionSecurityState.SessionId?.Value;
+        var expectedSource = ResolveExpectedRemotePeerAddressForCurrentSession();
+        var normalizedMessageSessionId = string.IsNullOrWhiteSpace(messageSessionId) ? null : messageSessionId.Trim();
+        var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
+        var normalizedSource = string.IsNullOrWhiteSpace(source) ? null : source.Trim();
+        string failureReason;
+
+        if (string.IsNullOrWhiteSpace(normalizedMessageSessionId))
+        {
+            failureReason = "missing_session_id";
+        }
+        else if (string.IsNullOrWhiteSpace(expectedSessionId))
+        {
+            failureReason = "session_unavailable";
+        }
+        else if (!string.Equals(normalizedMessageSessionId, expectedSessionId, StringComparison.Ordinal))
+        {
+            failureReason = "session_id_mismatch";
+        }
+        else if (!string.IsNullOrWhiteSpace(expectedSource) && string.IsNullOrWhiteSpace(normalizedSource))
+        {
+            failureReason = "missing_source_identity";
+        }
+        else if (!string.IsNullOrWhiteSpace(expectedSource) &&
+                 !AddressMatchesForSessionPolicy(normalizedSource, expectedSource))
+        {
+            failureReason = "source_identity_mismatch";
+        }
+        else
+        {
+            return true;
+        }
+
+        NknRuntimeDiagnostics.SetLastError($"{messageType}_{failureReason}");
+        NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageType}_{failureReason}");
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=filetransfer_message_rejected; message_type={messageType}; reason={failureReason}; session_id={normalizedMessageSessionId ?? "(none)"}; expected_session_id={expectedSessionId ?? "(none)"}; transfer_id={normalizedTransferId}; source={normalizedSource ?? "(none)"}; expected_source={expectedSource ?? "(none)"}");
+        Log($"FileTransfer message rejected (type={messageType}, msg_id={messageId}, reason={failureReason}, transfer_id={normalizedTransferId})");
+        return false;
+    }
+
     private PeerAddress ResolveLocalPeerAddressForSecureEnvelope()
     {
         if (PeerAddress.TryParse(LocalPeerAddress, out var localAddress))
@@ -3413,14 +4313,25 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                 CryptographicOperations.ZeroMemory(controlSessionSharedKey);
             }
 
+            if (fileTransferSessionSharedKey is not null)
+            {
+                CryptographicOperations.ZeroMemory(fileTransferSessionSharedKey);
+            }
+
             controlSessionSharedKey = sharedKey.AsSpan().ToArray();
+            fileTransferSessionSharedKey = SessionKeyDerivation.DeriveFileTransferKey(sharedKey);
             nextOutboundControlSecureSequence = 0;
             nextOutboundLifecycleSecureSequence = 0;
             nextOutboundScreenShareSecureSequence = 0;
+            nextOutboundFileTransferSecureSequence = 0;
             inboundControlReplayWindow.Reset();
             inboundLifecycleReplayWindow.Reset();
             inboundScreenShareReplayWindow.Reset();
+            inboundFileTransferReplayWindow.Reset();
+            fileTransferStates.Clear();
         }
+
+        ResetInboundFileTransferDispatchQueue();
     }
 
     private void ResetControlSecureState()
@@ -3433,13 +4344,268 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
                 controlSessionSharedKey = null;
             }
 
+            if (fileTransferSessionSharedKey is not null)
+            {
+                CryptographicOperations.ZeroMemory(fileTransferSessionSharedKey);
+                fileTransferSessionSharedKey = null;
+            }
+
             nextOutboundControlSecureSequence = 0;
             nextOutboundLifecycleSecureSequence = 0;
             nextOutboundScreenShareSecureSequence = 0;
+            nextOutboundFileTransferSecureSequence = 0;
             inboundControlReplayWindow.Reset();
             inboundLifecycleReplayWindow.Reset();
             inboundScreenShareReplayWindow.Reset();
+            inboundFileTransferReplayWindow.Reset();
+            fileTransferStates.Clear();
         }
+
+        ResetInboundFileTransferDispatchQueue();
+    }
+
+    private byte[] GetFileTransferSessionSharedKeyOrThrow()
+    {
+        lock (controlSecureStateGate)
+        {
+            if (fileTransferSessionSharedKey is null || fileTransferSessionSharedKey.Length == 0)
+            {
+                throw new InvalidOperationException("File transfer session shared key is not available.");
+            }
+
+            return fileTransferSessionSharedKey.AsSpan().ToArray();
+        }
+    }
+
+    private bool TryValidateAndTrackFileTransferMessage(
+        MsgType messageType,
+        string transferId,
+        bool inbound,
+        bool applyStateChange,
+        out string failureReason)
+    {
+        var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
+
+        lock (controlSecureStateGate)
+        {
+            if (!TryGetNextFileTransferState(messageType, normalizedTransferId, inbound, out var nextState, out failureReason))
+            {
+                return false;
+            }
+
+            if (applyStateChange)
+            {
+                CommitFileTransferStateLocked(normalizedTransferId, nextState);
+            }
+
+            return true;
+        }
+    }
+
+    private bool TryGetNextFileTransferState(
+        MsgType messageType,
+        string transferId,
+        bool inbound,
+        out FileTransferTransportState nextState,
+        out string failureReason)
+    {
+        var hasExisting = fileTransferStates.TryGetValue(transferId, out var currentState);
+        nextState = default;
+        failureReason = string.Empty;
+
+        if (messageType == MsgType.FileTransferOffer)
+        {
+            if (hasExisting)
+            {
+                failureReason = currentState.IsTerminal ? "transfer_id_reused_after_terminal_state" : "duplicate_transfer_id";
+                return false;
+            }
+
+            var initiatedLocally = !inbound;
+            if (HasActiveFileTransferLocked(initiatedLocally))
+            {
+                failureReason = "concurrent_transfer_busy";
+                return false;
+            }
+
+            nextState = new FileTransferTransportState(initiatedLocally, FileTransferTransportPhase.Offered);
+            return true;
+        }
+
+        if (!hasExisting)
+        {
+            failureReason = "unknown_transfer_id";
+            return false;
+        }
+
+        if (currentState.IsTerminal)
+        {
+            failureReason = "transfer_already_terminal";
+            return false;
+        }
+
+        if (messageType == MsgType.FileTransferAccept)
+        {
+            if (currentState.Phase != FileTransferTransportPhase.Offered)
+            {
+                failureReason = "accept_requires_offer";
+                return false;
+            }
+
+            if (currentState.InitiatedLocally != inbound)
+            {
+                failureReason = inbound ? "unexpected_inbound_accept_for_remote_offer" : "unexpected_outbound_accept_for_local_offer";
+                return false;
+            }
+
+            nextState = currentState with { Phase = FileTransferTransportPhase.Accepted };
+            return true;
+        }
+
+        if (messageType == MsgType.FileTransferDecline)
+        {
+            if (currentState.Phase != FileTransferTransportPhase.Offered)
+            {
+                failureReason = "decline_requires_offer";
+                return false;
+            }
+
+            if (currentState.InitiatedLocally != inbound)
+            {
+                failureReason = inbound ? "unexpected_inbound_decline_for_remote_offer" : "unexpected_outbound_decline_for_local_offer";
+                return false;
+            }
+
+            nextState = currentState with { Phase = FileTransferTransportPhase.Declined };
+            return true;
+        }
+
+        if (messageType == MsgType.FileTransferStart)
+        {
+            if (currentState.Phase != FileTransferTransportPhase.Accepted)
+            {
+                failureReason = "start_requires_accept";
+                return false;
+            }
+
+            if (currentState.InitiatedLocally != !inbound)
+            {
+                failureReason = inbound ? "unexpected_inbound_start_for_local_receiver" : "unexpected_outbound_start_for_local_receiver";
+                return false;
+            }
+
+            nextState = currentState with { Phase = FileTransferTransportPhase.Started };
+            return true;
+        }
+
+        if (messageType == MsgType.FileTransferChunk)
+        {
+            if (currentState.Phase is not FileTransferTransportPhase.Started and not FileTransferTransportPhase.Transferring)
+            {
+                failureReason = "chunk_requires_start";
+                return false;
+            }
+
+            if (currentState.InitiatedLocally != !inbound)
+            {
+                failureReason = inbound ? "unexpected_inbound_chunk_for_local_receiver" : "unexpected_outbound_chunk_for_local_receiver";
+                return false;
+            }
+
+            nextState = currentState with { Phase = FileTransferTransportPhase.Transferring };
+            return true;
+        }
+
+        if (messageType == MsgType.FileTransferComplete)
+        {
+            if (currentState.Phase is not FileTransferTransportPhase.Started and not FileTransferTransportPhase.Transferring)
+            {
+                failureReason = "complete_requires_transfer";
+                return false;
+            }
+
+            if (currentState.InitiatedLocally != inbound)
+            {
+                failureReason = inbound ? "unexpected_inbound_complete_for_remote_sender" : "unexpected_outbound_complete_for_local_sender";
+                return false;
+            }
+
+            nextState = currentState with { Phase = FileTransferTransportPhase.Completed };
+            return true;
+        }
+
+        if (messageType == MsgType.FileTransferCancel)
+        {
+            if (!CanTransitionToTerminalFileTransferState(currentState.Phase))
+            {
+                failureReason = "cancel_not_allowed_in_current_state";
+                return false;
+            }
+
+            nextState = currentState with { Phase = FileTransferTransportPhase.Canceled };
+            return true;
+        }
+
+        if (messageType == MsgType.FileTransferError)
+        {
+            if (!CanTransitionToTerminalFileTransferState(currentState.Phase))
+            {
+                failureReason = "error_not_allowed_in_current_state";
+                return false;
+            }
+
+            nextState = currentState with { Phase = FileTransferTransportPhase.Failed };
+            return true;
+        }
+
+        failureReason = "unsupported_message_type";
+        return false;
+    }
+
+    private bool HasActiveFileTransferLocked(bool initiatedLocally)
+    {
+        foreach (var state in fileTransferStates.Values)
+        {
+            if (!state.IsTerminal && state.InitiatedLocally == initiatedLocally)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void CommitFileTransferStateLocked(string transferId, FileTransferTransportState nextState)
+    {
+        if (nextState.IsTerminal)
+        {
+            fileTransferStates.Remove(transferId);
+            return;
+        }
+
+        fileTransferStates[transferId] = nextState;
+    }
+
+    private static bool CanTransitionToTerminalFileTransferState(FileTransferTransportPhase phase)
+        => phase is FileTransferTransportPhase.Offered or
+            FileTransferTransportPhase.Accepted or
+            FileTransferTransportPhase.Started or
+            FileTransferTransportPhase.Transferring;
+
+    private static string NormalizeRequiredFileTransferId(string? transferId)
+    {
+        if (string.IsNullOrWhiteSpace(transferId))
+        {
+            throw new ArgumentException("Transfer id is required.", nameof(transferId));
+        }
+
+        var normalized = transferId.Trim();
+        if (normalized.Length == 0 || normalized.Length > FileTransferProtocol.MaxTransferIdLength)
+        {
+            throw new ArgumentException("Transfer id is invalid.", nameof(transferId));
+        }
+
+        return normalized;
     }
 
     private static string MapSecureControlMessageType(MsgType messageType)
@@ -3477,6 +4643,34 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             MsgType.ScreenShareStop => "screenshare_stop",
             _ => throw new ArgumentOutOfRangeException(nameof(messageType), messageType, "Unsupported secure screen-share message type."),
         };
+    }
+
+    private static string MapSecureFileTransferMessageType(MsgType messageType)
+    {
+        return messageType switch
+        {
+            MsgType.FileTransferOffer => "file_transfer_offer",
+            MsgType.FileTransferAccept => "file_transfer_accept",
+            MsgType.FileTransferDecline => "file_transfer_decline",
+            MsgType.FileTransferStart => "file_transfer_start",
+            MsgType.FileTransferChunk => "file_transfer_chunk",
+            MsgType.FileTransferCancel => "file_transfer_cancel",
+            MsgType.FileTransferError => "file_transfer_error",
+            MsgType.FileTransferComplete => "file_transfer_complete",
+            _ => throw new ArgumentOutOfRangeException(nameof(messageType), messageType, "Unsupported secure file-transfer message type."),
+        };
+    }
+
+    private static void LogFileTransferEnvelopeEvent(string direction, MsgType messageType, string transferId, string? source)
+    {
+        if (messageType == MsgType.FileTransferChunk)
+        {
+            return;
+        }
+
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=filetransfer_envelope_{direction}; transport=nkn; message_type={MapSecureFileTransferMessageType(messageType)}; transfer_id={transferId}; source={source ?? "(none)"}");
     }
 
     private bool TryValidatePendingOutboundLifecycleMessage(
@@ -3715,6 +4909,62 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
     private ControlDisplayInfoMessageV1 EnsureControlSessionId(ControlDisplayInfoMessageV1 message)
         => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private FileTransferOfferV1 EnsureFileTransferSessionId(FileTransferOfferV1 message)
+        => message with
+        {
+            SessionId = ResolveControlSessionId(message.SessionId),
+            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
+        };
+
+    private FileTransferAcceptV1 EnsureFileTransferSessionId(FileTransferAcceptV1 message)
+        => message with
+        {
+            SessionId = ResolveControlSessionId(message.SessionId),
+            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
+        };
+
+    private FileTransferDeclineV1 EnsureFileTransferSessionId(FileTransferDeclineV1 message)
+        => message with
+        {
+            SessionId = ResolveControlSessionId(message.SessionId),
+            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
+        };
+
+    private FileTransferStartV1 EnsureFileTransferSessionId(FileTransferStartV1 message)
+        => message with
+        {
+            SessionId = ResolveControlSessionId(message.SessionId),
+            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
+        };
+
+    private FileTransferChunkV1 EnsureFileTransferSessionId(FileTransferChunkV1 message)
+        => message with
+        {
+            SessionId = ResolveControlSessionId(message.SessionId),
+            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
+        };
+
+    private FileTransferCancelV1 EnsureFileTransferSessionId(FileTransferCancelV1 message)
+        => message with
+        {
+            SessionId = ResolveControlSessionId(message.SessionId),
+            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
+        };
+
+    private FileTransferErrorV1 EnsureFileTransferSessionId(FileTransferErrorV1 message)
+        => message with
+        {
+            SessionId = ResolveControlSessionId(message.SessionId),
+            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
+        };
+
+    private FileTransferCompleteV1 EnsureFileTransferSessionId(FileTransferCompleteV1 message)
+        => message with
+        {
+            SessionId = ResolveControlSessionId(message.SessionId),
+            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
+        };
 
     private string ResolveControlSessionId(string? current)
     {
@@ -4386,9 +5636,26 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             return;
         }
 
+        if (!ShouldRetainCapabilitySecureState(nextState))
+        {
+            ResetControlSecureState();
+        }
+
         currentSessionSecurityState = nextState;
         SyncInboundScreenSharePolicyToBridge(nextState);
         SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(nextState));
+    }
+
+    private static bool ShouldRetainCapabilitySecureState(SessionSecurityState state)
+    {
+        var nowUtc = DateTimeOffset.UtcNow;
+        return state.InviteValidated &&
+               state.HandshakeCompleted &&
+               state.HandshakeState == SessionHandshakeState.Verified &&
+               state.ApprovalGranted &&
+               state.IsApprovalActive(nowUtc) &&
+               state.SessionId is not null &&
+               state.HelperAddress is not null;
     }
 
     private void SyncInboundScreenSharePolicyToBridge(SessionSecurityState nextState)
@@ -4607,50 +5874,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         var saltInput = Encoding.UTF8.GetBytes("nlink-session-salt:" + codeDigits);
         var salt = SHA256.HashData(saltInput);
         var info = Encoding.UTF8.GetBytes("nlink-v1");
-        return HkdfSha256(ikm, salt, info, 32);
-    }
-
-    private static byte[] HkdfSha256(byte[] ikm, byte[] salt, byte[] info, int okmLen)
-    {
-        if (okmLen <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(okmLen));
-        }
-
-        byte[] prk;
-        using (var extract = new HMACSHA256(salt))
-        {
-            prk = extract.ComputeHash(ikm);
-        }
-
-        try
-        {
-            var okm = new byte[okmLen];
-            var previous = Array.Empty<byte>();
-            var offset = 0;
-            byte counter = 1;
-
-            while (offset < okmLen)
-            {
-                using var expand = new HMACSHA256(prk);
-                var blockInput = new byte[previous.Length + info.Length + 1];
-                Buffer.BlockCopy(previous, 0, blockInput, 0, previous.Length);
-                Buffer.BlockCopy(info, 0, blockInput, previous.Length, info.Length);
-                blockInput[^1] = counter;
-
-                previous = expand.ComputeHash(blockInput);
-                var bytesToCopy = Math.Min(previous.Length, okmLen - offset);
-                Buffer.BlockCopy(previous, 0, okm, offset, bytesToCopy);
-                offset += bytesToCopy;
-                counter++;
-            }
-
-            return okm;
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(prk);
-        }
+        return SessionKeyDerivation.HkdfSha256(ikm, salt, info, 32);
     }
 
     private static Envelope CreateEnvelope(string code, MsgType type, byte[] payload, string? replyTo)
@@ -5094,6 +6318,29 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         public string? reason { get; set; }
     }
 
+    private enum FileTransferTransportPhase
+    {
+        Offered = 0,
+        Accepted = 1,
+        Started = 2,
+        Transferring = 3,
+        Completed = 4,
+        Declined = 5,
+        Canceled = 6,
+        Failed = 7,
+    }
+
+    private readonly record struct FileTransferTransportState(
+        bool InitiatedLocally,
+        FileTransferTransportPhase Phase)
+    {
+        public bool IsTerminal =>
+            Phase is FileTransferTransportPhase.Completed or
+                FileTransferTransportPhase.Declined or
+                FileTransferTransportPhase.Canceled or
+                FileTransferTransportPhase.Failed;
+    }
+
     private sealed class PendingJoinRequestState
     {
         public PendingJoinRequestState(
@@ -5223,5 +6470,11 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
             Ecdh.Dispose();
         }
     }
+
+    private readonly record struct InboundFileTransferDispatchWork(
+        long Generation,
+        long Order,
+        string Source,
+        Envelope Envelope);
 }
 #pragma warning restore CS0067

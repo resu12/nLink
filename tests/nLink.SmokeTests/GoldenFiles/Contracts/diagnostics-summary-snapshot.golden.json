@@ -6,5 +6,18 @@
   "LastFailureMessage": "(none)",
   "LastConnectDurationMs": null,
   "LastHandshakeDurationMs": null,
-  "LastBridgeStartDurationMs": null
+  "LastBridgeStartDurationMs": null,
+  "AuthorizationSummary": "chat=no (SecurityTransportRequired); file_transfer=no (SecurityTransportRequired); screenshare=no (SecurityTransportRequired); remote_control=no (SecurityTransportRequired)",
+  "SessionSecuritySummary": "invite_validated=no; handshake=None; approval_granted=no; approval_active=no; capabilities=none",
+  "RemoteControlSummary": "state=Off; available=no; local_support=yes; remote_support=no; session_support=no; status_hint=(none)",
+  "ScreenShareSummary": "active=no; authorized=no; auto_start=yes; host_ready=no",
+  "FileTransferSummary": "authorized=no; inbound_state=Idle; inbound_transfer_id=(none); inbound_bytes=(none); outbound_state=Idle; outbound_transfer_id=(none); outbound_bytes=(none); last_failure_code=(none); last_saved_path=(none)",
+  "ActiveInboundFileTransferId": "(none)",
+  "ActiveInboundFileTransferState": "Idle",
+  "ActiveInboundFileTransferBytes": null,
+  "ActiveOutboundFileTransferId": "(none)",
+  "ActiveOutboundFileTransferState": "Idle",
+  "ActiveOutboundFileTransferBytes": null,
+  "LastFileTransferFailureCode": "(none)",
+  "LastFileTransferSavedPath": "(none)"
 }

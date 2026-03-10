@@ -7,6 +7,7 @@
     <AssemblyName>NLink.SmokeTests</AssemblyName>
     <RootNamespace>NLink.SmokeTests</RootNamespace>
     <Product>nLink</Product>
+    <BuildInParallel>false</BuildInParallel>
 
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>

@@ -7,7 +7,7 @@
 #endif
 
 #ifndef AppVersion
-  #define AppVersion "0.4.5.1"
+  #define AppVersion "0.5.0"
 #endif
 
 #define MyAppName "nLink"
@@ -23,7 +23,7 @@ AppId={{9D5C9C2D-7D66-4E6E-8A5A-20F64C2F31A7}
 AppName={#MyAppName}
 AppVersion={#AppVersion}
 AppPublisher=nLink
-DefaultDirName={localappdata}\Programs\nLink Helper
+DefaultDirName={localappdata}\Programs\nLink
 DefaultGroupName=nLink
 DisableProgramGroupPage=yes
 OutputDir={#OutDir}

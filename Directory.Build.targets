@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'nLink.App' or '$(MSBuildProjectName)' == 'NLink.SmokeTests'">
+    <!-- Disable Avalonia package telemetry during builds; it is non-functional in this environment and blocks smoke/test builds. -->
+    <UsedAvaloniaProducts></UsedAvaloniaProducts>
+  </PropertyGroup>
+</Project>

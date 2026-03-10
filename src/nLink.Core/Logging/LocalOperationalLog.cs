@@ -5,8 +5,10 @@ namespace NLink.Core.Logging;
 
 public static class LocalOperationalLog
 {
+    private const int RecentEntryCapacity = 512;
     private static readonly object Gate = new();
     private static readonly RollingFileLogger Logger = new(GetDefaultLogPath());
+    private static readonly Queue<string> RecentEntries = new();
 
     public static string LogsDirectoryPath => Logger.LogsDirectoryPath;
 
@@ -36,12 +38,26 @@ public static class LocalOperationalLog
             {
                 var safeSource = SensitiveDataRedactor.Redact(source);
                 var safeMessage = SensitiveDataRedactor.Redact(message);
-                Logger.WriteLine($"[{DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm:ss'Z'}] [{level}] [{safeSource}] {safeMessage}");
+                var line = $"[{DateTimeOffset.UtcNow:yyyy-MM-dd HH:mm:ss'Z'}] [{level}] [{safeSource}] {safeMessage}";
+                Logger.WriteLine(line);
+                RecentEntries.Enqueue(line);
+                while (RecentEntries.Count > RecentEntryCapacity)
+                {
+                    RecentEntries.Dequeue();
+                }
             }
         }
         catch
         {
             // Logging must never break application flow.
+        }
+    }
+
+    public static string GetRecentLogText()
+    {
+        lock (Gate)
+        {
+            return string.Join(Environment.NewLine, RecentEntries);
         }
     }
 

@@ -109,7 +109,7 @@
                                    FontWeight="SemiBold"/>
 
                         <Grid ColumnDefinitions="220,*"
-                              RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                              RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
                               RowSpacing="8"
                               ColumnSpacing="12">
                             <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Session UI state"/>
@@ -127,11 +127,14 @@
                             <TextBlock Grid.Row="4" Grid.Column="0" Classes="appLabel" Text="Screen share"/>
                             <TextBlock Grid.Row="4" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareSummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                            <TextBlock Grid.Row="5" Grid.Column="0" Classes="appLabel" Text="Authoritative address"/>
-                            <TextBlock Grid.Row="5" Grid.Column="1" Classes="appBody" Text="{Binding AuthoritativeConnectedAddress}" FontSize="16"/>
+                            <TextBlock Grid.Row="5" Grid.Column="0" Classes="appLabel" Text="File transfer"/>
+                            <TextBlock Grid.Row="5" Grid.Column="1" Classes="appBody" Text="{Binding FileTransferSummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                            <TextBlock Grid.Row="6" Grid.Column="0" Classes="appLabel" Text="Last rejected message"/>
-                            <TextBlock Grid.Row="6" Grid.Column="1" Classes="appBody" Text="{Binding LastRejectedMessageSummary}" FontSize="16" TextWrapping="Wrap"/>
+                            <TextBlock Grid.Row="6" Grid.Column="0" Classes="appLabel" Text="Authoritative address"/>
+                            <TextBlock Grid.Row="6" Grid.Column="1" Classes="appBody" Text="{Binding AuthoritativeConnectedAddress}" FontSize="16"/>
+
+                            <TextBlock Grid.Row="7" Grid.Column="0" Classes="appLabel" Text="Last rejected message"/>
+                            <TextBlock Grid.Row="7" Grid.Column="1" Classes="appBody" Text="{Binding LastRejectedMessageSummary}" FontSize="16" TextWrapping="Wrap"/>
                         </Grid>
                     </StackPanel>
                 </Border>

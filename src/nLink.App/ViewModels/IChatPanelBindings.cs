@@ -23,9 +23,25 @@ public interface IChatPanelBindings
 
     bool IsChatInputEnabled { get; }
 
+    bool ShowSendFileAction { get; }
+
+    bool CanSendFileAction { get; }
+
+    FileTransferPanelItemViewModel? InboundFileTransfer { get; }
+
+    FileTransferPanelItemViewModel? OutboundFileTransfer { get; }
+
     bool CanEndSession { get; }
 
+    IRelayCommand SendFileCommand { get; }
+
     IAsyncRelayCommand SendChatCommand { get; }
+
+    IAsyncRelayCommand<string?> AcceptIncomingFileCommand { get; }
+
+    IAsyncRelayCommand<string?> DeclineIncomingFileCommand { get; }
+
+    IAsyncRelayCommand<string?> CancelFileTransferCommand { get; }
 
     IRelayCommand EndSessionCommand { get; }
 }

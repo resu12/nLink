@@ -91,6 +91,37 @@ public sealed class FileTransferSecurityGuardTests
     }
 
     [Fact]
+    public void OpenReceiveWriteStream_RejectsReservedDeviceName()
+    {
+        var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_200_000_000);
+        var guard = new SessionFileTransferGuard(() => nowUtc);
+        var state = CreateApprovedSecurityState(nowUtc, CapabilityGrant.FileTransfer);
+        var grant = CreateGrant(state, nowUtc, CapabilityGrant.FileTransfer);
+        var tempRoot = CreateTempRoot();
+
+        try
+        {
+            var result = guard.OpenReceiveWriteStream(
+                hasSecurityTransport: true,
+                securityState: state,
+                grant: grant,
+                descriptor: new FileTransferDescriptor(
+                    state.SessionId!.Value,
+                    state.HelperAddress!.Value,
+                    "CON.txt",
+                    128),
+                storagePolicy: new FileTransferStoragePolicy(tempRoot));
+
+            Assert.False(result.IsAllowed);
+            Assert.Equal(FileTransferValidationFailure.InvalidFileName, result.Access.Failure);
+        }
+        finally
+        {
+            CleanupTempRoot(tempRoot);
+        }
+    }
+
+    [Fact]
     public void OpenReceiveWriteStream_RejectsOversizedFile()
     {
         var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_200_000_000);
@@ -242,15 +273,21 @@ public sealed class FileTransferSecurityGuardTests
             Assert.NotNull(first.Handle);
             Assert.StartsWith(
                 Path.GetFullPath(tempRoot) + Path.DirectorySeparatorChar,
-                first.Plan!.TargetPath,
+                first.Plan!.FinalPath,
                 OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+            Assert.EndsWith(".part", first.Plan.TempPath, StringComparison.OrdinalIgnoreCase);
+            Assert.False(File.Exists(first.Plan.FinalPath));
 
             await using (first.Handle!)
             {
                 await first.Handle.Stream.WriteAsync("hello"u8.ToArray());
+                Assert.True(File.Exists(first.Plan.TempPath));
+                Assert.False(File.Exists(first.Plan.FinalPath));
+                await first.Handle.FinalizeAsync(CancellationToken.None);
             }
 
-            Assert.True(File.Exists(first.Plan.TargetPath));
+            Assert.True(File.Exists(first.Plan.FinalPath));
+            Assert.False(File.Exists(first.Plan.TempPath));
 
             var second = guard.OpenReceiveWriteStream(
                 hasSecurityTransport: true,
@@ -265,6 +302,47 @@ public sealed class FileTransferSecurityGuardTests
 
             Assert.False(second.IsAllowed);
             Assert.Equal(FileTransferValidationFailure.OverwriteBlocked, second.Access.Failure);
+        }
+        finally
+        {
+            CleanupTempRoot(tempRoot);
+        }
+    }
+
+    [Fact]
+    public async Task FinalizeAsync_PreservesTempArtifact_WhenFinalPathAppearsBeforeMove()
+    {
+        var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_200_000_000);
+        var guard = new SessionFileTransferGuard(() => nowUtc);
+        var state = CreateApprovedSecurityState(nowUtc, CapabilityGrant.FileTransfer);
+        var grant = CreateGrant(state, nowUtc, CapabilityGrant.FileTransfer);
+        var tempRoot = CreateTempRoot();
+
+        try
+        {
+            var result = guard.OpenReceiveWriteStream(
+                hasSecurityTransport: true,
+                securityState: state,
+                grant: grant,
+                descriptor: new FileTransferDescriptor(
+                    state.SessionId!.Value,
+                    state.HelperAddress!.Value,
+                    "late-collision.txt",
+                    5),
+                storagePolicy: new FileTransferStoragePolicy(tempRoot));
+
+            Assert.True(result.IsAllowed);
+            Assert.NotNull(result.Plan);
+            Assert.NotNull(result.Handle);
+
+            await using var handle = result.Handle!;
+            await handle.Stream.WriteAsync("hello"u8.ToArray());
+            File.WriteAllText(result.Plan!.FinalPath, "existing");
+
+            var ex = await Assert.ThrowsAsync<IOException>(() => handle.FinalizeAsync(CancellationToken.None));
+            Assert.Contains("already exists", ex.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.True(File.Exists(result.Plan.FinalPath));
+            Assert.True(File.Exists(result.Plan.TempPath));
         }
         finally
         {

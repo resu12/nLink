@@ -8,16 +8,16 @@ Powered by NKN. Official website: https://nkn.org/
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
-## Current Release (0.4.5)
+## Current Release (0.5.0)
 
-`0.4.5` is the current cumulative release since `0.4.2`. It combines the recent screen-sharing improvements, invite/session security hardening, and the simplified helper/helpee connection flow into one release.
+`0.5.0` is the current release. It adds the first native in-session file transfer flow on top of the existing chat, screen sharing, remote control, and authenticated session model.
 
-- Helper shares a helper address, the helpee enters that helper address, and the app shows a short verification code so both sides can confirm they are using the same helper before the helpee shares a helper-bound invite.
-- Helper connects by pasting the invite or scanning the QR code.
-- Screen sharing now keeps fresher frames under pressure and reacts better to unstable links.
-- Screen sharing preserves more readable UI text by default on stable links and recovers more cleanly after resize/display changes.
-- Invite, transport, and diagnostics handling are hardened for release, including helper-bound one-time invites, stronger post-handshake protection, and safer local secret storage on Windows.
-- Installer and bundled bridge packaging are hardened for upgrade, shutdown, and release consistency.
+- File transfer is now a native nLink feature instead of the older external tool flow.
+- Both helper and helpee can send a single file inside an active authenticated session when the `Transfer files` capability is allowed.
+- Incoming files are accepted or declined per file, transfer progress is visible on both sides, and transfers can be canceled.
+- File payloads are protected end-to-end, checked for integrity before success, and received through a temp-first safe save flow.
+- Helper-bound one-time invites, verified helper flow, and release diagnostics remain the default release path.
+- Screen sharing, remote control, diagnostics, and release packaging remain included in the same session shell.
 
 ## Quick Start (Windows)
 
@@ -27,6 +27,7 @@ Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke
 4. Helper pastes the invite or scans the QR code, and clicks `Connect`.
 5. Helpee clicks `Allow`.
 6. Chat opens on both sides.
+7. If `Transfer files` is allowed for the session, either side can click `Send file`.
 
 Home:
 
@@ -61,8 +62,12 @@ Normal release UX uses a raw helper address plus a short verification code, then
 
 Notes:
 - Windows x64 only
-- Current release (`0.4.5`)
-- Installer path: `%LOCALAPPDATA%\Programs\nLink Helper`
+- Current release (`0.5.0`)
+- File transfer in `0.5.0` is single-file only. No folders, drag-and-drop, or resume after restart yet.
+- Received files are saved into an app-owned folder under `%LOCALAPPDATA%\nLink\transfers\incoming\...`
+- Safe-by-default file size cap for `0.5.0`: `256 MiB`
+- Large file transfers over NKN can be noticeably slower than local or direct network copy.
+- Installer path: `%LOCALAPPDATA%\Programs\nLink`
 
 License:
 - MIT (see `LICENSE`)
@@ -98,7 +103,9 @@ License:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
 - Final release notes:
-  [`docs/releases/0.4.5.md`](docs/releases/0.4.5.md)
+  [`docs/releases/0.5.0.md`](docs/releases/0.5.0.md)
+- GitHub release body:
+  [`docs/releases/0.5.0-github.md`](docs/releases/0.5.0-github.md)
 - Screenshare RC/final validation checklist:
   [`docs/release/0.3.0-rc-validation-checklist.md`](docs/release/0.3.0-rc-validation-checklist.md)
 - Promotion criteria:
@@ -180,7 +187,7 @@ What the script does:
 
 Notes:
 - If Inno Setup is not installed, the script still builds the portable helper folder and then prints a clear message.
-- The installer is a simple per-user install (`LocalAppData\Programs\nLink Helper`) to avoid admin prompts.
+- The installer is a simple per-user install (`LocalAppData\Programs\nLink`) to avoid admin prompts.
 - If `artifacts/bridge/win-x64/` is missing, installer build stops with:
   `Bridge runtime not found. Run the bridge bundle build step first.`
 

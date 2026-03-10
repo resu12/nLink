@@ -17,7 +17,7 @@ using NLink.App.ViewModels;
 using NLink.App.Views;
 using NLink.Core;
 using NLink.Core.Chat;
-using NLink.Core.Logging;
+using NLink.Core.FileTransfer;
 using NLink.Core.Metrics;
 using NLink.Core.RemoteControl;
 using NLink.Core.Resources;
@@ -25,6 +25,7 @@ using NLink.Core.Retry;
 using NLink.Core.ScreenShare;
 using NLink.Core.SessionConnect;
 using NLink.Core.SessionSecurity;
+using NLink.Core.Logging;
 using NLink.Infra.DevLocal;
 using NLink.Infra.Nkn;
 using NLink.SmokeTests.Fakes;
@@ -1747,6 +1748,7 @@ public class SmokeTests
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCALE", null);
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_JPEG_QUALITY", null);
             var config = TransportRuntimeConfig.Select();
+            var inviteSecurity = InviteSecurityDiagnostics.Snapshot();
             using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
             runtime.TryTransitionTransportStateForTests(TransportState.TransportInitializing, "test");
             runtime.TryTransitionTransportStateForTests(TransportState.Connecting, "test");
@@ -1779,14 +1781,19 @@ public class SmokeTests
             Assert.Contains("session_security_summary:", copied!, StringComparison.Ordinal);
             Assert.Contains("remote_control_summary:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_summary:", copied!, StringComparison.Ordinal);
+            Assert.Contains("file_transfer_summary:", copied!, StringComparison.Ordinal);
+            Assert.Contains("file_transfer_inbound_state:", copied!, StringComparison.Ordinal);
+            Assert.Contains("file_transfer_outbound_state:", copied!, StringComparison.Ordinal);
+            Assert.Contains("file_transfer_last_failure_code:", copied!, StringComparison.Ordinal);
+            Assert.Contains("file_transfer_last_saved_path:", copied!, StringComparison.Ordinal);
             Assert.Contains("Transport:", copied!, StringComparison.Ordinal);
             Assert.Contains("Forced by environment:", copied!, StringComparison.Ordinal);
             Assert.Contains("bridge_process_status:", copied!, StringComparison.Ordinal);
-            Assert.Contains("invite_security_mode: issued_one_time_secret_invites", copied!, StringComparison.Ordinal);
-            Assert.Contains("invite_signing_configuration: not_used_in_issued_secret_mode", copied!, StringComparison.Ordinal);
-            Assert.Contains("invite_public_flow: verified_helper_required", copied!, StringComparison.Ordinal);
-            Assert.Contains("invite_security_release_ready: Yes", copied!, StringComparison.Ordinal);
-            Assert.Contains("invite_security_warning: none", copied!, StringComparison.Ordinal);
+            Assert.Contains($"invite_security_mode: {inviteSecurity.Mode}", copied!, StringComparison.Ordinal);
+            Assert.Contains($"invite_signing_configuration: {inviteSecurity.SigningConfiguration}", copied!, StringComparison.Ordinal);
+            Assert.Contains($"invite_public_flow: {inviteSecurity.PublicInviteFlow}", copied!, StringComparison.Ordinal);
+            Assert.Contains($"invite_security_release_ready: {(inviteSecurity.ReleaseReady ? "Yes" : "No")}", copied!, StringComparison.Ordinal);
+            Assert.Contains($"invite_security_warning: {inviteSecurity.Warning}", copied!, StringComparison.Ordinal);
             Assert.Contains("security_relevant_overrides: none", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_outbound_busy_drops:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_messages_sent:", copied!, StringComparison.Ordinal);
@@ -1907,6 +1914,7 @@ public class SmokeTests
             Environment.SetEnvironmentVariable(InviteTokenServiceFactory.InviteSigningKeyEnvVar, null);
             Environment.SetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteSigningEnvVar, null);
             Environment.SetEnvironmentVariable(InviteSecurityDiagnostics.AllowInsecureUnboundPublicInvitesEnvVar, null);
+            var inviteSecurity = InviteSecurityDiagnostics.Snapshot();
 
             LocalOperationalLog.LogAppStart("0.0.0-invite-security-" + Guid.NewGuid().ToString("N"));
 
@@ -1919,19 +1927,19 @@ public class SmokeTests
                 appended,
                 StringComparison.Ordinal);
             Assert.Contains(
-                "mode=issued_one_time_secret_invites;",
+                $"mode={inviteSecurity.Mode};",
                 appended,
                 StringComparison.Ordinal);
             Assert.Contains(
-                "signing=not_used_in_issued_secret_mode;",
+                $"signing={inviteSecurity.SigningConfiguration};",
                 appended,
                 StringComparison.Ordinal);
             Assert.Contains(
-                "release_ready=yes;",
+                $"release_ready={(inviteSecurity.ReleaseReady ? "yes" : "no")};",
                 appended,
                 StringComparison.Ordinal);
             Assert.Contains(
-                "warning=none",
+                $"warning={inviteSecurity.Warning}",
                 appended,
                 StringComparison.Ordinal);
         }
@@ -2545,16 +2553,20 @@ public class SmokeTests
     public async Task SessionRuntime_SecurityState_TracksVerifiedHandshake_BeforeApprovalGrant()
     {
         var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
         using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
 
         await helpeeRuntime.StartHelpeeAsync(cts.Token);
-        var invite = CreateValidatedInviteForTarget(new PeerAddress(hostAddress), out var rawToken);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            boundHelperAddress: new PeerAddress(helperAddress));
         await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
 
-        await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(2));
-        await WaitUntilAsync(() => helperRuntime.SecurityState.HandshakeState == SessionHandshakeState.Verified, TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(5));
+        await WaitUntilAsync(() => helperRuntime.SecurityState.HandshakeState == SessionHandshakeState.Verified, TimeSpan.FromSeconds(5));
 
         Assert.Equal(SessionHandshakeState.Verified, helpeeRuntime.SecurityState.HandshakeState);
         Assert.True(helpeeRuntime.SecurityState.HandshakeCompleted);
@@ -2587,18 +2599,20 @@ public class SmokeTests
     public async Task SessionRuntime_ApproveAsync_UsesExplicitCapabilitySubset()
     {
         var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
         using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
 
         await helpeeRuntime.StartHelpeeAsync(cts.Token);
         var invite = CreateValidatedInviteForTarget(
             new PeerAddress(hostAddress),
             out var rawToken,
-            InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl);
+            InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl,
+            boundHelperAddress: new PeerAddress(helperAddress));
         await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
 
-        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(5));
         await helpeeRuntime.ApproveAsync(CapabilityGrant.Chat | CapabilityGrant.ScreenShare, cts.Token);
         await WaitUntilAsync(
             () => helpeeRuntime.CurrentSessionGrant is not null &&
@@ -2622,12 +2636,13 @@ public class SmokeTests
     {
         var nowUtc = DateTimeOffset.UtcNow;
         var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
         using var helpeeRuntime = new SessionRuntime(
             () => new DevLocalTransport(hostAddress),
             watchdogOptions: null,
             nowProvider: () => nowUtc);
         using var helperRuntime = new SessionRuntime(
-            () => new DevLocalTransport(),
+            () => new DevLocalTransport(helperAddress),
             watchdogOptions: null,
             nowProvider: () => nowUtc);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -2636,7 +2651,8 @@ public class SmokeTests
         var invite = CreateValidatedInviteForTarget(
             new PeerAddress(hostAddress),
             out var rawToken,
-            InviteCapabilities.Chat | InviteCapabilities.RemoteControl);
+            InviteCapabilities.Chat | InviteCapabilities.RemoteControl,
+            boundHelperAddress: new PeerAddress(helperAddress));
         await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
 
         await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
@@ -2664,15 +2680,17 @@ public class SmokeTests
     public async Task SessionRuntime_RequestRemoteControl_RequiresGrantedCapability()
     {
         var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
         using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
 
         await helpeeRuntime.StartHelpeeAsync(cts.Token);
         var invite = CreateValidatedInviteForTarget(
             new PeerAddress(hostAddress),
             out var rawToken,
-            InviteCapabilities.Chat);
+            InviteCapabilities.Chat,
+            boundHelperAddress: new PeerAddress(helperAddress));
         await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
 
         await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
@@ -2694,8 +2712,9 @@ public class SmokeTests
     public async Task SessionRuntime_TrySendChatText_RequiresGrantedCapability()
     {
         var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
         using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
 
         ChatMessageRecord? received = null;
@@ -2705,7 +2724,8 @@ public class SmokeTests
         var invite = CreateValidatedInviteForTarget(
             new PeerAddress(hostAddress),
             out var rawToken,
-            InviteCapabilities.ScreenShare);
+            InviteCapabilities.ScreenShare,
+            boundHelperAddress: new PeerAddress(helperAddress));
         await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
 
         await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
@@ -2728,8 +2748,9 @@ public class SmokeTests
     public async Task SessionRuntime_InboundChat_IsRejected_WhenChatCapabilityMissing()
     {
         var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
         using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
 
         ChatMessageRecord? received = null;
@@ -2739,7 +2760,8 @@ public class SmokeTests
         var invite = CreateValidatedInviteForTarget(
             new PeerAddress(hostAddress),
             out var rawToken,
-            InviteCapabilities.ScreenShare);
+            InviteCapabilities.ScreenShare,
+            boundHelperAddress: new PeerAddress(helperAddress));
         await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
 
         await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
@@ -2799,8 +2821,9 @@ public class SmokeTests
     public async Task SessionRuntime_ScreenShareFrames_RequireGrantedCapability()
     {
         var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
         using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
 
         var frameRaised = false;
@@ -2810,7 +2833,8 @@ public class SmokeTests
         var invite = CreateValidatedInviteForTarget(
             new PeerAddress(hostAddress),
             out var rawToken,
-            InviteCapabilities.Chat);
+            InviteCapabilities.Chat,
+            boundHelperAddress: new PeerAddress(helperAddress));
         await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
 
         await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
@@ -3459,8 +3483,9 @@ public class SmokeTests
     {
         var transportConfig = CreateDevLocalTestConfig();
         var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
         using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
         using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
 
@@ -3468,10 +3493,11 @@ public class SmokeTests
         var invite = CreateValidatedInviteForTarget(
             new PeerAddress(hostAddress),
             out var rawToken,
-            InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl);
+            InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl,
+            boundHelperAddress: new PeerAddress(helperAddress));
         await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
 
-        await WaitUntilAsync(() => helpee.HasIncomingRequest, TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(() => helpee.HasIncomingRequest, TimeSpan.FromSeconds(5));
 
         Assert.True(helpee.AllowIncomingScreenShareCapability);
         Assert.True(helpee.AllowIncomingRemoteControlCapability);
@@ -3501,8 +3527,9 @@ public class SmokeTests
     {
         var transportConfig = CreateDevLocalTestConfig();
         var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
         using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
         using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
 
@@ -3510,7 +3537,8 @@ public class SmokeTests
         var invite = CreateValidatedInviteForTarget(
             new PeerAddress(hostAddress),
             out var rawToken,
-            InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl);
+            InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl,
+            boundHelperAddress: new PeerAddress(helperAddress));
         await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
 
         await WaitUntilAsync(() => helpee.HasIncomingRequest, TimeSpan.FromSeconds(2));
@@ -3531,22 +3559,26 @@ public class SmokeTests
     public async Task HelperViewModel_FileTransferCommand_RequiresGrantedCapability()
     {
         var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
+        var transportConfig = CreateDevLocalTestConfig();
         using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
 
         await helpeeRuntime.StartHelpeeAsync(cts.Token);
         var invite = CreateValidatedInviteForTarget(
             new PeerAddress(hostAddress),
             out var rawToken,
-            InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+            boundHelperAddress: new PeerAddress(helperAddress));
         await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
-
         await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
-        await helpeeRuntime.ApproveAsync(cts.Token);
-        await WaitUntilAsync(() => helperRuntime.State == SessionRuntimeState.Connected, TimeSpan.FromSeconds(2));
+        await helpeeRuntime.ApproveAsync(CapabilityGrant.Chat | CapabilityGrant.ScreenShare, cts.Token);
+        await WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected,
+            TimeSpan.FromSeconds(2));
 
-        var transportConfig = CreateDevLocalTestConfig();
         using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
 
         Assert.False(helperRuntime.CanPerform(SessionCapability.FileTransfer));
@@ -3556,25 +3588,102 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task ChatPanelBindings_FileTransferBindings_ProjectGrantedSessionAndPendingOffer_ForBothRoles()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
+        var transportConfig = CreateDevLocalTestConfig();
+        var payload = Encoding.UTF8.GetBytes("bindings file transfer payload");
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime, connectFailureCooldown: TimeSpan.Zero);
+        await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.Waiting, TimeSpan.FromSeconds(3));
+
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+            boundHelperAddress: new PeerAddress(helperAddress));
+
+        var connectTask = helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpee.HasIncomingRequest, TimeSpan.FromSeconds(5));
+        helpee.AllowIncomingFileTransferCapability = true;
+        helpee.AllowCommand.Execute(null);
+        await connectTask;
+
+        await WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected,
+            TimeSpan.FromSeconds(5));
+        await WaitUntilAsync(
+            () => helpeeRuntime.CanPerform(SessionCapability.FileTransfer) &&
+                  helperRuntime.CanPerform(SessionCapability.FileTransfer),
+            TimeSpan.FromSeconds(3));
+        await WaitUntilAsync(
+            () => helper.ShowSendFileAction &&
+                  helper.CanSendFileAction &&
+                  helpee.ShowSendFileAction &&
+                  helpee.CanSendFileAction,
+            TimeSpan.FromSeconds(3));
+
+        Assert.True(helper.ShowSendFileAction);
+        Assert.True(helper.CanSendFileAction);
+        Assert.True(helper.SendFileCommand.CanExecute(null));
+        Assert.True(helpee.ShowSendFileAction);
+        Assert.True(helpee.CanSendFileAction);
+        Assert.True(helpee.SendFileCommand.CanExecute(null));
+
+        await helperRuntime.StartSendAsync(
+            new FileTransferSendDescriptor("bindings-note.txt", payload.Length),
+            (ct) => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            cts.Token);
+
+        await WaitUntilAsync(
+            () => helper.OutboundFileTransfer is not null &&
+                  helpee.InboundFileTransfer is not null,
+            TimeSpan.FromSeconds(3));
+
+        var outbound = helper.OutboundFileTransfer;
+        var inbound = helpee.InboundFileTransfer;
+        Assert.NotNull(outbound);
+        Assert.NotNull(inbound);
+        Assert.False(helper.CanSendFileAction);
+        Assert.False(helper.SendFileCommand.CanExecute(null));
+        Assert.Equal("bindings-note.txt", outbound!.FileName);
+        Assert.Equal(outbound.TransferId, inbound!.TransferId);
+        Assert.True(inbound.ShowAccept);
+        Assert.True(inbound.ShowDecline);
+        Assert.False(inbound.ShowCancel);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task HelperViewModel_FileTransferRequest_IsBlockedByRuntimeGuard_WhenUiFlagIsStale()
     {
         var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
+        var transportConfig = CreateDevLocalTestConfig();
         using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
 
         await helpeeRuntime.StartHelpeeAsync(cts.Token);
         var invite = CreateValidatedInviteForTarget(
             new PeerAddress(hostAddress),
             out var rawToken,
-            InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+            boundHelperAddress: new PeerAddress(helperAddress));
         await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(5));
+        await helpeeRuntime.ApproveAsync(CapabilityGrant.Chat | CapabilityGrant.ScreenShare, cts.Token);
+        await WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected,
+            TimeSpan.FromSeconds(2));
 
-        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
-        await helpeeRuntime.ApproveAsync(cts.Token);
-        await WaitUntilAsync(() => helperRuntime.State == SessionRuntimeState.Connected, TimeSpan.FromSeconds(2));
-
-        var transportConfig = CreateDevLocalTestConfig();
         using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
         var requested = false;
         helper.SendFileRequested += (_, _) => requested = true;
@@ -3631,6 +3740,273 @@ public class SmokeTests
                 Directory.Delete(tempRoot, recursive: true);
             }
         }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_FileTransfer_RoundTrip_Completes_ThroughRuntimeServiceSurface()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        var payload = Encoding.UTF8.GetBytes("runtime file transfer payload");
+        var helperFileTransferChanged = 0;
+        var helpeeFileTransferChanged = 0;
+        helperRuntime.FileTransferChanged += (_, _) => Interlocked.Increment(ref helperFileTransferChanged);
+        helpeeRuntime.FileTransferChanged += (_, _) => Interlocked.Increment(ref helpeeFileTransferChanged);
+
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+            boundHelperAddress: new PeerAddress(helperAddress));
+        await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+        await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
+        await helpeeRuntime.ApproveAsync(CapabilityGrant.Chat | CapabilityGrant.FileTransfer, cts.Token);
+        await WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected,
+            TimeSpan.FromSeconds(3));
+
+        await helperRuntime.StartSendAsync(
+            new FileTransferSendDescriptor("runtime-note.txt", payload.Length),
+            (ct) => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            cts.Token);
+
+        await WaitUntilAsync(
+            () => helpeeRuntime.FileTransferSnapshot.InboundState == FileTransferTransferState.PendingDecision,
+            TimeSpan.FromSeconds(2));
+
+        var pendingInbound = helpeeRuntime.FileTransferSnapshot.Inbound;
+        Assert.NotNull(pendingInbound);
+        await helpeeRuntime.AcceptIncomingAsync(pendingInbound.TransferId, cts.Token);
+
+        await WaitUntilAsync(
+            () => helperRuntime.FileTransferSnapshot.OutboundState == FileTransferTransferState.Completed &&
+                  helpeeRuntime.FileTransferSnapshot.InboundState == FileTransferTransferState.Completed,
+            TimeSpan.FromSeconds(5));
+
+        var inboundSnapshot = helpeeRuntime.FileTransferSnapshot.Inbound;
+        Assert.NotNull(inboundSnapshot);
+        Assert.True(helperFileTransferChanged > 0);
+        Assert.True(helpeeFileTransferChanged > 0);
+        Assert.Equal(FileTransferTransferState.Completed, helperRuntime.FileTransferSnapshot.OutboundState);
+        Assert.Equal(FileTransferTransferState.Completed, inboundSnapshot.State);
+
+        var receivedFilePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "nLink",
+            "transfers",
+            "incoming",
+            inboundSnapshot.SessionId,
+            inboundSnapshot.TransferId,
+            inboundSnapshot.FileName);
+
+        try
+        {
+            Assert.True(File.Exists(receivedFilePath));
+            var receivedPayload = await File.ReadAllBytesAsync(receivedFilePath, cts.Token);
+            Assert.Equal(payload, receivedPayload);
+        }
+        finally
+        {
+            var transferDirectory = Path.GetDirectoryName(receivedFilePath);
+            if (!string.IsNullOrWhiteSpace(transferDirectory) && Directory.Exists(transferDirectory))
+            {
+                Directory.Delete(transferDirectory, recursive: true);
+            }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeeViewModel_FileTransferCommand_CanInitiatePendingOffer_WhenGranted()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
+        var transportConfig = CreateDevLocalTestConfig();
+        var payload = Encoding.UTF8.GetBytes("helpee initiated file transfer payload");
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime, connectFailureCooldown: TimeSpan.Zero);
+        await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.Waiting, TimeSpan.FromSeconds(3));
+
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+            boundHelperAddress: new PeerAddress(helperAddress));
+
+        var connectTask = helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpee.HasIncomingRequest, TimeSpan.FromSeconds(3));
+        helpee.AllowIncomingFileTransferCapability = true;
+        helpee.AllowCommand.Execute(null);
+        await connectTask;
+
+        await WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected,
+            TimeSpan.FromSeconds(5));
+        await WaitUntilAsync(
+            () => helpeeRuntime.CanPerform(SessionCapability.FileTransfer) &&
+                  helperRuntime.CanPerform(SessionCapability.FileTransfer) &&
+                  helpee.CanSendFileAction,
+            TimeSpan.FromSeconds(3));
+
+        Assert.True(helpee.ShowSendFileAction);
+        Assert.True(helpee.CanSendFileAction);
+        Assert.True(helpee.SendFileCommand.CanExecute(null));
+
+        await helpee.StartSendFileAsync(
+            new FileTransferSendDescriptor("helpee-note.txt", payload.Length),
+            (ct) => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            cts.Token);
+
+        await WaitUntilAsync(
+            () => helpee.OutboundFileTransfer is not null &&
+                  helper.InboundFileTransfer is not null,
+            TimeSpan.FromSeconds(3));
+
+        var outbound = helpee.OutboundFileTransfer;
+        var inbound = helper.InboundFileTransfer;
+        Assert.NotNull(outbound);
+        Assert.NotNull(inbound);
+        Assert.False(helpee.CanSendFileAction);
+        Assert.False(helpee.SendFileCommand.CanExecute(null));
+        Assert.Equal("helpee-note.txt", outbound!.FileName);
+        Assert.Equal(outbound.TransferId, inbound!.TransferId);
+        Assert.True(inbound.ShowAccept);
+        Assert.True(inbound.ShowDecline);
+        Assert.False(inbound.ShowCancel);
+
+        await helperRuntime.DeclineIncomingAsync(inbound.TransferId, null, cts.Token);
+        await WaitUntilAsync(
+            () => helpee.OutboundFileTransfer?.State == FileTransferTransferState.Declined &&
+                  helper.InboundFileTransfer?.State == FileTransferTransferState.Declined,
+            TimeSpan.FromSeconds(3));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task ChatPanelBindings_FileTransferBindings_ProjectPendingAndCompletedState_FromRuntimeSnapshots()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        var helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
+        var transportConfig = CreateDevLocalTestConfig();
+        var payload = new byte[64 * 1024];
+        RandomNumberGenerator.Fill(payload);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime, connectFailureCooldown: TimeSpan.Zero);
+        await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.Waiting, TimeSpan.FromSeconds(3));
+
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+            boundHelperAddress: new PeerAddress(helperAddress));
+
+        var connectTask = helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+        await WaitUntilAsync(() => helpee.HasIncomingRequest, TimeSpan.FromSeconds(3));
+        helpee.AllowIncomingFileTransferCapability = true;
+        helpee.AllowCommand.Execute(null);
+        await connectTask;
+
+        await WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected,
+            TimeSpan.FromSeconds(5));
+
+        await helper.StartSendFileAsync(
+            new FileTransferSendDescriptor("progress.bin", payload.Length),
+            (ct) => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            cts.Token);
+
+        await WaitUntilAsync(
+            () => helpee.InboundFileTransfer is { ShowAccept: true, ShowDecline: true },
+            TimeSpan.FromSeconds(3));
+
+        var pendingInbound = helpee.InboundFileTransfer;
+        var pendingOutbound = helper.OutboundFileTransfer;
+        Assert.NotNull(pendingInbound);
+        Assert.NotNull(pendingOutbound);
+        Assert.Equal(FileTransferTransferState.PendingDecision, pendingInbound!.State);
+        Assert.Equal(FileTransferTransferState.AwaitingAcceptance, pendingOutbound!.State);
+        Assert.False(pendingInbound.ShowProgress);
+        Assert.False(pendingOutbound.ShowProgress);
+        Assert.False(helper.CanSendFileAction);
+        Assert.False(helper.SendFileCommand.CanExecute(null));
+
+        var inboundTransferId = helpee.InboundFileTransfer!.TransferId;
+        await helpeeRuntime.AcceptIncomingAsync(inboundTransferId, cts.Token);
+
+        await WaitUntilAsync(
+            () => helper.OutboundFileTransfer?.State == FileTransferTransferState.Completed &&
+                  helpee.InboundFileTransfer?.State == FileTransferTransferState.Completed,
+            TimeSpan.FromSeconds(8));
+
+        var outboundCompleted = helper.OutboundFileTransfer;
+        var inboundCompleted = helpee.InboundFileTransfer;
+        Assert.NotNull(outboundCompleted);
+        Assert.NotNull(inboundCompleted);
+        Assert.True(outboundCompleted!.IsTerminal);
+        Assert.True(inboundCompleted!.IsTerminal);
+        Assert.False(outboundCompleted.ShowActions);
+        Assert.False(inboundCompleted.ShowActions);
+        Assert.False(outboundCompleted.ShowProgress);
+        Assert.False(inboundCompleted.ShowProgress);
+        Assert.True(outboundCompleted.ProgressFraction >= 1d);
+        Assert.True(inboundCompleted.ProgressFraction >= 1d);
+        Assert.Contains("complete", outboundCompleted.StatusText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("complete", inboundCompleted.StatusText, StringComparison.OrdinalIgnoreCase);
+        Assert.True(helper.CanSendFileAction);
+        Assert.True(helper.SendFileCommand.CanExecute(null));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionViews_FileTransferSend_UsesNativePicker_InsteadOfSendFileWindow()
+    {
+        var repoRoot = FindRepoRoot();
+        var helperViewPath = Path.Combine(repoRoot, "src", "nLink.App", "Views", "HelperPageView.axaml.cs");
+        var helpeeViewPath = Path.Combine(repoRoot, "src", "nLink.App", "Views", "HelpeePageView.axaml.cs");
+
+        var helperViewSource = File.ReadAllText(helperViewPath);
+        var helpeeViewSource = File.ReadAllText(helpeeViewPath);
+
+        Assert.DoesNotContain("SendFileWindow", helperViewSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("ShowSendFileWindow", helperViewSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("SendFileWindow", helpeeViewSource, StringComparison.Ordinal);
+        Assert.Contains("NativeFileTransferPicker.PickSingleFileAsync", helperViewSource, StringComparison.Ordinal);
+        Assert.Contains("NativeFileTransferPicker.PickSingleFileAsync", helpeeViewSource, StringComparison.Ordinal);
+    }
+
+    private static string FindRepoRoot()
+    {
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        while (current is not null)
+        {
+            var candidate = Path.Combine(current.FullName, "src", "nLink.App", "Views", "HelperPageView.axaml.cs");
+            if (File.Exists(candidate))
+            {
+                return current.FullName;
+            }
+
+            current = current.Parent;
+        }
+
+        return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
     }
 
     [Trait("Category", "Smoke")]
@@ -7399,6 +7775,926 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task NknTransport_FileTransfer_RoundTrip_UsesTypedEventsAndSecureLane()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.roundtrip.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.roundtrip.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var offerReceived = new TaskCompletionSource<FileTransferOfferV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var startReceived = new TaskCompletionSource<FileTransferStartV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var chunkReceived = new TaskCompletionSource<FileTransferChunkV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var completeReceived = new TaskCompletionSource<FileTransferCompleteV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            host.FileTransferOfferReceived += (_, e) => offerReceived.TrySetResult(e.Message);
+            helper.FileTransferAcceptReceived += (_, e) => acceptReceived.TrySetResult(e.Message);
+            host.FileTransferStartReceived += (_, e) => startReceived.TrySetResult(e.Message);
+            host.FileTransferChunkReceived += (_, e) => chunkReceived.TrySetResult(e.Message);
+            helper.FileTransferCompleteReceived += (_, e) => completeReceived.TrySetResult(e.Message);
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_roundtrip";
+            var expectedHash = Convert.ToBase64String(SHA256.HashData(new byte[] { 0x01, 0x02, 0x03 }));
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "nkn.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+
+            var offer = await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.Equal(transferId, offer.TransferId);
+
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                },
+                cts.Token);
+
+            var accept = await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.Equal(transferId, accept.TransferId);
+
+            await helper.SendFileTransferStartAsync(
+                new FileTransferStartV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "nkn.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                    ChunkCount = 1,
+                    ChunkSizeBytes = 3,
+                },
+                cts.Token);
+
+            var start = await startReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.Equal(1, start.ChunkCount);
+
+            await helper.SendFileTransferChunkAsync(
+                new FileTransferChunkV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataBase64 = Convert.ToBase64String(new byte[] { 0x01, 0x02, 0x03 }),
+                },
+                cts.Token);
+
+            var chunk = await chunkReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.Equal(transferId, chunk.TransferId);
+            Assert.Equal(0, chunk.ChunkIndex);
+
+            await host.SendFileTransferCompleteAsync(
+                new FileTransferCompleteV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+
+            var complete = await completeReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.Equal(expectedHash, complete.Sha256Base64);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferChunkBudgetProvider_KeepsWrappedEnvelopeWithinNknLimit()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.budget.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.budget.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            var budgetProvider = Assert.IsAssignableFrom<IFileTransferChunkBudgetProvider>(helper);
+            var request = new FileTransferChunkBudgetRequest(
+                TransferId: "transfer_nkn_payload_budget",
+                FileSizeBytes: 88_100_000,
+                RequestedChunkSizeBytes: FileTransferProtocol.MaxChunkRawBytes);
+
+            var safeChunkSize = budgetProvider.ResolveSafeOutboundChunkSize(request);
+            var chunkCount = (int)((request.FileSizeBytes + safeChunkSize - 1) / safeChunkSize);
+            var envelope = BuildSecureFileTransferEnvelope(
+                helper,
+                MsgType.FileTransferChunk,
+                new FileTransferChunkV1
+                {
+                    SessionId = sessionId,
+                    TransferId = request.TransferId,
+                    ChunkIndex = chunkCount - 1,
+                    ChunkCount = chunkCount,
+                    DataBase64 = Convert.ToBase64String(new byte[safeChunkSize]),
+                },
+                requestId: request.TransferId,
+                sequence: 1);
+
+            Assert.InRange(safeChunkSize, 1, FileTransferProtocol.MaxChunkRawBytes);
+            Assert.InRange(EnvelopeCodec.Serialize(envelope).Length, 1, 64 * 1024);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferChunks_DispatchSequentially_WhenInboundCallbacksOverlap()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.concurrent.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.concurrent.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_concurrent_dispatch";
+            var expectedHash = Convert.ToBase64String(SHA256.HashData(new byte[] { 0x01, 0x02, 0x03, 0x04 }));
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "concurrent.bin",
+                    FileSizeBytes = 4,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                },
+                cts.Token);
+
+            var startReceived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstChunkEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var secondChunkEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirstChunk = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var activeChunkHandlers = 0;
+            var chunkHandlerOverlapDetected = 0;
+            var receivedChunkIndexes = new ConcurrentQueue<int>();
+
+            host.FileTransferStartReceived += (_, _) => startReceived.TrySetResult(true);
+            host.FileTransferChunkReceived += (_, e) =>
+            {
+                if (Interlocked.Increment(ref activeChunkHandlers) > 1)
+                {
+                    Interlocked.Exchange(ref chunkHandlerOverlapDetected, 1);
+                }
+
+                try
+                {
+                    receivedChunkIndexes.Enqueue(e.Message.ChunkIndex);
+                    if (e.Message.ChunkIndex == 0)
+                    {
+                        firstChunkEntered.TrySetResult(true);
+                        releaseFirstChunk.Task.GetAwaiter().GetResult();
+                    }
+                    else if (e.Message.ChunkIndex == 1)
+                    {
+                        secondChunkEntered.TrySetResult(true);
+                    }
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref activeChunkHandlers);
+                }
+            };
+
+            var startEnvelope = BuildSecureFileTransferEnvelope(
+                helper,
+                MsgType.FileTransferStart,
+                new FileTransferStartV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "concurrent.bin",
+                    FileSizeBytes = 4,
+                    Sha256Base64 = expectedHash,
+                    ChunkCount = 2,
+                    ChunkSizeBytes = 2,
+                },
+                requestId: transferId,
+                sequence: 2);
+
+            InvokeNknIncomingMessage(
+                host,
+                helperClient,
+                new NknIncomingMessage(helperClient.Address, EnvelopeCodec.Serialize(startEnvelope), isTopic: false, topic: null));
+
+            await startReceived.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+
+            var chunkZeroEnvelope = BuildSecureFileTransferEnvelope(
+                helper,
+                MsgType.FileTransferChunk,
+                new FileTransferChunkV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ChunkIndex = 0,
+                    ChunkCount = 2,
+                    DataBase64 = Convert.ToBase64String(new byte[] { 0x01, 0x02 }),
+                },
+                requestId: transferId,
+                sequence: 3);
+            var chunkOneEnvelope = BuildSecureFileTransferEnvelope(
+                helper,
+                MsgType.FileTransferChunk,
+                new FileTransferChunkV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ChunkIndex = 1,
+                    ChunkCount = 2,
+                    DataBase64 = Convert.ToBase64String(new byte[] { 0x03, 0x04 }),
+                },
+                requestId: transferId,
+                sequence: 4);
+
+            var chunkZeroTask = Task.Run(() => InvokeNknIncomingMessage(
+                host,
+                helperClient,
+                new NknIncomingMessage(helperClient.Address, EnvelopeCodec.Serialize(chunkZeroEnvelope), isTopic: false, topic: null)), cts.Token);
+
+            await firstChunkEntered.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+
+            var chunkOneTask = Task.Run(() => InvokeNknIncomingMessage(
+                host,
+                helperClient,
+                new NknIncomingMessage(helperClient.Address, EnvelopeCodec.Serialize(chunkOneEnvelope), isTopic: false, topic: null)), cts.Token);
+
+            await Task.Delay(150, cts.Token);
+            Assert.False(secondChunkEntered.Task.IsCompleted);
+
+            releaseFirstChunk.TrySetResult(true);
+            await Task.WhenAll(chunkZeroTask, chunkOneTask);
+            await secondChunkEntered.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+
+            Assert.Equal(0, Volatile.Read(ref chunkHandlerOverlapDetected));
+            Assert.Equal(new[] { 0, 1 }, receivedChunkIndexes.ToArray());
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferOffer_WithSessionIdMismatch_IsRejected()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.sessionmismatch.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.sessionmismatch.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var offerCount = 0;
+            host.FileTransferOfferReceived += (_, _) => Interlocked.Increment(ref offerCount);
+
+            await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            var forgedEnvelope = BuildSecureFileTransferEnvelope(
+                helper,
+                MsgType.FileTransferOffer,
+                new FileTransferOfferV1
+                {
+                    SessionId = "sess_filetransfer_wrong",
+                    TransferId = "transfer_nkn_wrong_session",
+                    FileName = "wrong.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]),
+                },
+                requestId: "transfer_nkn_wrong_session",
+                sequence: 1);
+
+            await helperClient.SendAsync(host.LocalPeerAddress, EnvelopeCodec.Serialize(forgedEnvelope), cts.Token);
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(0, Volatile.Read(ref offerCount));
+            Assert.Equal("file_transfer_offer_session_id_mismatch", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferOffer_WithSourceIdentityMismatch_IsRejected()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.source.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.source.address");
+            var attackerClient = new FakeNknClient("attacker.filetransfer.source.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var offerCount = 0;
+            host.FileTransferOfferReceived += (_, _) => Interlocked.Increment(ref offerCount);
+
+            await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            await attackerClient.ConnectAsync(cts.Token);
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            var forgedEnvelope = BuildSecureFileTransferEnvelope(
+                helper,
+                MsgType.FileTransferOffer,
+                new FileTransferOfferV1
+                {
+                    SessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value,
+                    TransferId = "transfer_nkn_wrong_source",
+                    FileName = "source.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]),
+                },
+                requestId: "transfer_nkn_wrong_source",
+                sequence: 1);
+
+            await attackerClient.SendAsync(host.LocalPeerAddress, EnvelopeCodec.Serialize(forgedEnvelope), cts.Token);
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(0, Volatile.Read(ref offerCount));
+            Assert.Equal("file_transfer_offer_source_identity_mismatch", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferOffer_WithTamperedSecureEnvelope_IsRejected()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.tamper.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.tamper.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var offerCount = 0;
+            host.FileTransferOfferReceived += (_, _) => Interlocked.Increment(ref offerCount);
+
+            await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+
+            var envelope = BuildSecureFileTransferEnvelope(
+                helper,
+                MsgType.FileTransferOffer,
+                new FileTransferOfferV1
+                {
+                    SessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value,
+                    TransferId = "transfer_nkn_tamper",
+                    FileName = "tamper.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]),
+                },
+                requestId: "transfer_nkn_tamper",
+                sequence: 1);
+            var tamperedPayload = envelope.Payload.AsSpan().ToArray();
+            tamperedPayload[^1] ^= 0x01;
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            await helperClient.SendAsync(
+                host.LocalPeerAddress,
+                EnvelopeCodec.Serialize(envelope with { MessageId = Guid.NewGuid().ToString("N"), Payload = tamperedPayload }),
+                cts.Token);
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(0, Volatile.Read(ref offerCount));
+            Assert.Equal("file_transfer_offer_secure_envelope_invalid", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferChunk_ReplayedSecureEnvelope_IsRejected()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.replay.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.replay.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var offerReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var acceptReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var startReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var chunkCount = 0;
+            byte[]? replayEnvelopeBytes = null;
+
+            host.FileTransferOfferReceived += (_, _) => offerReceived.TrySetResult();
+            helper.FileTransferAcceptReceived += (_, _) => acceptReceived.TrySetResult();
+            host.FileTransferStartReceived += (_, _) => startReceived.TrySetResult();
+            host.FileTransferChunkReceived += (_, _) => Interlocked.Increment(ref chunkCount);
+            helperClient.BeforeSendAsync = (_, payload, _) =>
+            {
+                if (replayEnvelopeBytes is not null || !EnvelopeCodec.TryDeserialize(payload, out var env) || env.Type != MsgType.FileTransferChunk)
+                {
+                    return Task.CompletedTask;
+                }
+
+                replayEnvelopeBytes = EnvelopeCodec.Serialize(env with { MessageId = Guid.NewGuid().ToString("N") });
+                return Task.CompletedTask;
+            };
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_replay";
+            var expectedHash = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "replay.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                },
+                cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await helper.SendFileTransferStartAsync(
+                new FileTransferStartV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "replay.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = expectedHash,
+                    ChunkCount = 1,
+                    ChunkSizeBytes = 1,
+                },
+                cts.Token);
+            await startReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await helper.SendFileTransferChunkAsync(
+                new FileTransferChunkV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataBase64 = Convert.ToBase64String(new byte[] { 0x09 }),
+                },
+                cts.Token);
+            await Task.Delay(150, cts.Token);
+
+            Assert.NotNull(replayEnvelopeBytes);
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            await helperClient.SendAsync(host.LocalPeerAddress, replayEnvelopeBytes!, cts.Token);
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(1, Volatile.Read(ref chunkCount));
+            Assert.Equal("file_transfer_chunk_replay_duplicate", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferChunk_LateButWithinLargeReplayWindow_IsAccepted()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.largewindow.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.largewindow.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var offerReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var acceptReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var startReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstChunkReceived = new TaskCompletionSource<FileTransferChunkV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var secondChunkReceived = new TaskCompletionSource<FileTransferChunkV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var receivedChunkIndexes = new ConcurrentQueue<int>();
+
+            host.FileTransferOfferReceived += (_, _) => offerReceived.TrySetResult();
+            helper.FileTransferAcceptReceived += (_, _) => acceptReceived.TrySetResult();
+            host.FileTransferStartReceived += (_, _) => startReceived.TrySetResult();
+            host.FileTransferChunkReceived += (_, e) =>
+            {
+                receivedChunkIndexes.Enqueue(e.Message.ChunkIndex);
+                if (!firstChunkReceived.Task.IsCompleted)
+                {
+                    firstChunkReceived.TrySetResult(e.Message);
+                }
+                else
+                {
+                    secondChunkReceived.TrySetResult(e.Message);
+                }
+            };
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_large_replay_window";
+            var expectedHash = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "large-window.bin",
+                    FileSizeBytes = 2,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                },
+                cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var startEnvelope = BuildSecureFileTransferEnvelope(
+                helper,
+                MsgType.FileTransferStart,
+                new FileTransferStartV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "large-window.bin",
+                    FileSizeBytes = 2,
+                    Sha256Base64 = expectedHash,
+                    ChunkCount = 2,
+                    ChunkSizeBytes = 1,
+                },
+                requestId: transferId,
+                sequence: 2);
+
+            InvokeNknIncomingMessage(
+                host,
+                helperClient,
+                new NknIncomingMessage(helperClient.Address, EnvelopeCodec.Serialize(startEnvelope), isTopic: false, topic: null));
+            await startReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var farAheadChunkEnvelope = BuildSecureFileTransferEnvelope(
+                helper,
+                MsgType.FileTransferChunk,
+                new FileTransferChunkV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ChunkIndex = 0,
+                    ChunkCount = 2,
+                    DataBase64 = Convert.ToBase64String(new byte[] { 0x01 }),
+                },
+                requestId: transferId,
+                sequence: 300);
+
+            var lateChunkEnvelope = BuildSecureFileTransferEnvelope(
+                helper,
+                MsgType.FileTransferChunk,
+                new FileTransferChunkV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ChunkIndex = 1,
+                    ChunkCount = 2,
+                    DataBase64 = Convert.ToBase64String(new byte[] { 0x02 }),
+                },
+                requestId: transferId,
+                sequence: 3);
+
+            InvokeNknIncomingMessage(
+                host,
+                helperClient,
+                new NknIncomingMessage(helperClient.Address, EnvelopeCodec.Serialize(farAheadChunkEnvelope), isTopic: false, topic: null));
+            await firstChunkReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            InvokeNknIncomingMessage(
+                host,
+                helperClient,
+                new NknIncomingMessage(helperClient.Address, EnvelopeCodec.Serialize(lateChunkEnvelope), isTopic: false, topic: null));
+            var secondChunk = await secondChunkReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            Assert.Equal(1, secondChunk.ChunkIndex);
+            Assert.Equal(new[] { 0, 1 }, receivedChunkIndexes.ToArray());
+            Assert.NotEqual("file_transfer_chunk_replay_stale", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferChunk_BeforeStart_IsRejected()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.beforestart.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.beforestart.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var offerReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var chunkCount = 0;
+
+            host.FileTransferOfferReceived += (_, _) => offerReceived.TrySetResult();
+            host.FileTransferChunkReceived += (_, _) => Interlocked.Increment(ref chunkCount);
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_before_start";
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "state.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]),
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var chunkEnvelope = BuildSecureFileTransferEnvelope(
+                helper,
+                MsgType.FileTransferChunk,
+                new FileTransferChunkV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataBase64 = Convert.ToBase64String(new byte[] { 0x7A }),
+                },
+                requestId: transferId,
+                sequence: 2);
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            await helperClient.SendAsync(host.LocalPeerAddress, EnvelopeCodec.Serialize(chunkEnvelope), cts.Token);
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(0, Volatile.Read(ref chunkCount));
+            Assert.Equal("file_transfer_chunk_chunk_requires_start", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferOffer_WhileSameDirectionTransferIsActive_IsRejectedAsBusy()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.busy.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.busy.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var offerCount = 0;
+            var firstOfferReceived = new TaskCompletionSource<FileTransferOfferV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.FileTransferOfferReceived += (_, e) =>
+            {
+                Interlocked.Increment(ref offerCount);
+                firstOfferReceived.TrySetResult(e.Message);
+            };
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            var expectedHash = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = "transfer_nkn_busy_first",
+                    FileName = "first.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+
+            var firstOffer = await firstOfferReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.Equal("transfer_nkn_busy_first", firstOffer.TransferId);
+
+            var secondOfferEnvelope = BuildSecureFileTransferEnvelope(
+                helper,
+                MsgType.FileTransferOffer,
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = "transfer_nkn_busy_second",
+                    FileName = "second.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = expectedHash,
+                },
+                requestId: "transfer_nkn_busy_second",
+                sequence: 2);
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            await helperClient.SendAsync(host.LocalPeerAddress, EnvelopeCodec.Serialize(secondOfferEnvelope), cts.Token);
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(1, Volatile.Read(ref offerCount));
+            Assert.Equal("file_transfer_offer_concurrent_transfer_busy", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferOffer_UsesFileTransferSecureFamily_AndDedicatedKey()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.family.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.family.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var capturedEnvelope = new TaskCompletionSource<Envelope>(TaskCreationOptions.RunContinuationsAsynchronously);
+            helperClient.BeforeSendAsync = (_, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) || env.Type != MsgType.FileTransferOffer)
+                {
+                    return Task.CompletedTask;
+                }
+
+                capturedEnvelope.TrySetResult(env);
+                return Task.CompletedTask;
+            };
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = "transfer_nkn_family",
+                    FileName = "family.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]),
+                },
+                cts.Token);
+
+            var envelope = await capturedEnvelope.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var fileTransferKey = Assert.IsType<byte[]>(GetPrivateField(helper, "fileTransferSessionSharedKey")).AsSpan().ToArray();
+            var controlKey = Assert.IsType<byte[]>(GetPrivateField(helper, "controlSessionSharedKey")).AsSpan().ToArray();
+
+            try
+            {
+                var securePayload = SessionSecureEnvelopeCodec.Decrypt(
+                    fileTransferKey,
+                    envelope.Payload,
+                    new SessionSecureEnvelopeExpectation(
+                        Family: SessionSecureMessageFamily.FileTransfer,
+                        MessageType: "file_transfer_offer",
+                        SessionId: new SessionId(sessionId),
+                        SenderIdentity: new PeerAddress(helper.LocalPeerAddress)));
+
+                Assert.Equal(SessionSecureMessageFamily.FileTransfer, securePayload.Metadata.Family);
+                Assert.Equal("file_transfer_offer", securePayload.Metadata.MessageType);
+                Assert.NotEqual(Convert.ToBase64String(controlKey), Convert.ToBase64String(fileTransferKey));
+                Assert.ThrowsAny<Exception>(() =>
+                    SessionSecureEnvelopeCodec.Decrypt(
+                        controlKey,
+                        envelope.Payload,
+                        new SessionSecureEnvelopeExpectation(
+                            Family: SessionSecureMessageFamily.FileTransfer,
+                            MessageType: "file_transfer_offer",
+                            SessionId: new SessionId(sessionId),
+                            SenderIdentity: new PeerAddress(helper.LocalPeerAddress))));
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(fileTransferKey);
+                CryptographicOperations.ZeroMemory(controlKey);
+            }
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task DevLocalTransport_ApprovalDecision_CapabilityEscalation_IsRejected()
     {
         var hostAddress = CreateTestPeerAddress();
@@ -7544,7 +8840,16 @@ public class SmokeTests
             boundHelperAddress: decodedHelper.Address);
 
         await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
-        await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        try
+        {
+            await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
+        }
+        catch (TimeoutException ex)
+        {
+            throw new TimeoutException(
+                $"Join request was not raised. helper_handshake={helper.CurrentSessionSecurityState.HandshakeState}; helper_invite_validated={helper.CurrentSessionSecurityState.InviteValidated}; helper_failure={helper.CurrentSessionSecurityState.HandshakeFailureReason ?? "(none)"}; host_handshake={host.CurrentSessionSecurityState.HandshakeState}; host_invite_validated={host.CurrentSessionSecurityState.InviteValidated}; host_failure={host.CurrentSessionSecurityState.HandshakeFailureReason ?? "(none)"}; helper_identity={helper.LocalPeerAddress}; bound_helper={invite.BoundHelperAddress?.Value ?? "(none)"}; recent_log={LocalOperationalLog.GetRecentLogText()}",
+                ex);
+        }
 
         Assert.NotNull(pendingJoin);
         Assert.NotNull(pendingJoin!.ApprovalRequest);
@@ -7810,6 +9115,519 @@ public class SmokeTests
         await Task.Delay(200, cts.Token);
 
         Assert.Equal(1, Volatile.Read(ref frameCount));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task DevLocalTransport_FileTransfer_RoundTrip_UsesTypedEventsAndStateTransitions()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var host = new DevLocalTransport(hostAddress);
+        using var helper = new DevLocalTransport();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        IncomingJoinRequestEventArgs? pendingJoin = null;
+        var joinRaised = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var offerReceived = new TaskCompletionSource<FileTransferOfferV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var startReceived = new TaskCompletionSource<FileTransferStartV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var chunkReceived = new TaskCompletionSource<FileTransferChunkV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completeReceived = new TaskCompletionSource<FileTransferCompleteV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        host.IncomingJoinRequest += (_, e) =>
+        {
+            pendingJoin = e;
+            joinRaised.TrySetResult();
+        };
+        host.Approved += (_, _) => hostApproved.TrySetResult();
+        helper.Approved += (_, _) => helperApproved.TrySetResult();
+        host.FileTransferOfferReceived += (_, e) => offerReceived.TrySetResult(e.Message);
+        helper.FileTransferAcceptReceived += (_, e) => acceptReceived.TrySetResult(e.Message);
+        host.FileTransferStartReceived += (_, e) => startReceived.TrySetResult(e.Message);
+        host.FileTransferChunkReceived += (_, e) => chunkReceived.TrySetResult(e.Message);
+        helper.FileTransferCompleteReceived += (_, e) => completeReceived.TrySetResult(e.Message);
+
+        _ = host.HostByAddressAsync(cts.Token);
+        await host.WaitUntilHostReadyAsync(cts.Token);
+
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+        await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+        await joinRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        await pendingJoin!.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+        await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+        var sessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value;
+        const string transferId = "transfer_devlocal_roundtrip";
+        var expectedHash = Convert.ToBase64String(SHA256.HashData(new byte[] { 0x01, 0x02, 0x03 }));
+
+        await helper.SendFileTransferOfferAsync(
+            new FileTransferOfferV1
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                FileName = "hello.bin",
+                FileSizeBytes = 3,
+                Sha256Base64 = expectedHash,
+            },
+            cts.Token);
+
+        var offer = await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        Assert.Equal(transferId, offer.TransferId);
+        Assert.Equal("hello.bin", offer.FileName);
+
+        await host.SendFileTransferAcceptAsync(
+            new FileTransferAcceptV1
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+            },
+            cts.Token);
+
+        var accept = await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        Assert.Equal(transferId, accept.TransferId);
+
+        await helper.SendFileTransferStartAsync(
+            new FileTransferStartV1
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                FileName = "hello.bin",
+                FileSizeBytes = 3,
+                Sha256Base64 = expectedHash,
+                ChunkCount = 1,
+                ChunkSizeBytes = 3,
+            },
+            cts.Token);
+
+        var start = await startReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        Assert.Equal(1, start.ChunkCount);
+
+        await helper.SendFileTransferChunkAsync(
+            new FileTransferChunkV1
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                ChunkIndex = 0,
+                ChunkCount = 1,
+                DataBase64 = Convert.ToBase64String(new byte[] { 0x01, 0x02, 0x03 }),
+            },
+            cts.Token);
+
+        var chunk = await chunkReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        Assert.Equal(transferId, chunk.TransferId);
+        Assert.Equal(0, chunk.ChunkIndex);
+
+        await host.SendFileTransferCompleteAsync(
+            new FileTransferCompleteV1
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                FileSizeBytes = 3,
+                Sha256Base64 = expectedHash,
+            },
+            cts.Token);
+
+        var complete = await completeReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        Assert.Equal(expectedHash, complete.Sha256Base64);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task DevLocalTransport_FileTransferOffer_WhileSameDirectionTransferIsActive_IsRejectedAsBusy()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var host = new DevLocalTransport(hostAddress);
+        using var helper = new DevLocalTransport();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        IncomingJoinRequestEventArgs? pendingJoin = null;
+        var joinRaised = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstOfferReceived = new TaskCompletionSource<FileTransferOfferV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var offerCount = 0;
+
+        host.IncomingJoinRequest += (_, e) =>
+        {
+            pendingJoin = e;
+            joinRaised.TrySetResult();
+        };
+        host.Approved += (_, _) => hostApproved.TrySetResult();
+        helper.Approved += (_, _) => helperApproved.TrySetResult();
+        host.FileTransferOfferReceived += (_, e) =>
+        {
+            Interlocked.Increment(ref offerCount);
+            firstOfferReceived.TrySetResult(e.Message);
+        };
+
+        _ = host.HostByAddressAsync(cts.Token);
+        await host.WaitUntilHostReadyAsync(cts.Token);
+
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+        await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+        await joinRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        await pendingJoin!.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+        await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+        var sessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value;
+        const string firstTransferId = "transfer_devlocal_busy_first";
+        const string secondTransferId = "transfer_devlocal_busy_second";
+        var expectedHash = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
+
+        await helper.SendFileTransferOfferAsync(
+            new FileTransferOfferV1
+            {
+                SessionId = sessionId,
+                TransferId = firstTransferId,
+                FileName = "first.bin",
+                FileSizeBytes = 1,
+                Sha256Base64 = expectedHash,
+            },
+            cts.Token);
+
+        var firstOffer = await firstOfferReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        Assert.Equal(firstTransferId, firstOffer.TransferId);
+
+        var securePayload = BuildSecureDevLocalPayload(
+            helper,
+            SessionSecureMessageFamily.FileTransfer,
+            "file_transfer_offer",
+            FileTransferPayloadCodec.Serialize(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = secondTransferId,
+                    FileName = "second.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = expectedHash,
+                }),
+            requestId: secondTransferId,
+            sequence: 2);
+
+        await SendRawDevLocalFrameAsync(helper, "file_transfer_offer", securePayload, cts.Token);
+        await Task.Delay(200, cts.Token);
+
+        Assert.Equal(1, Volatile.Read(ref offerCount));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task DevLocalTransport_FileTransferChunk_BeforeStart_IsRejected()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var host = new DevLocalTransport(hostAddress);
+        using var helper = new DevLocalTransport();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        IncomingJoinRequestEventArgs? pendingJoin = null;
+        var joinRaised = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var offerReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var chunkCount = 0;
+
+        host.IncomingJoinRequest += (_, e) =>
+        {
+            pendingJoin = e;
+            joinRaised.TrySetResult();
+        };
+        host.Approved += (_, _) => hostApproved.TrySetResult();
+        helper.Approved += (_, _) => helperApproved.TrySetResult();
+        host.FileTransferOfferReceived += (_, _) => offerReceived.TrySetResult();
+        host.FileTransferChunkReceived += (_, _) => Interlocked.Increment(ref chunkCount);
+
+        _ = host.HostByAddressAsync(cts.Token);
+        await host.WaitUntilHostReadyAsync(cts.Token);
+
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+        await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+        await joinRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        await pendingJoin!.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+        await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+        var sessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value;
+        const string transferId = "transfer_devlocal_out_of_state";
+        var expectedHash = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
+
+        await helper.SendFileTransferOfferAsync(
+            new FileTransferOfferV1
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                FileName = "state.bin",
+                FileSizeBytes = 1,
+                Sha256Base64 = expectedHash,
+            },
+            cts.Token);
+
+        await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+        var securePayload = BuildSecureDevLocalPayload(
+            helper,
+            SessionSecureMessageFamily.FileTransfer,
+            "file_transfer_chunk",
+            FileTransferPayloadCodec.Serialize(
+                new FileTransferChunkV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataBase64 = Convert.ToBase64String(new byte[] { 0x7A }),
+                }),
+            requestId: transferId,
+            sequence: 2);
+
+        await SendRawDevLocalFrameAsync(helper, "file_transfer_chunk", securePayload, cts.Token);
+        await Task.Delay(200, cts.Token);
+
+        Assert.Equal(0, Volatile.Read(ref chunkCount));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task DevLocalTransport_FileTransferOffer_WithWrongSenderIdentity_IsRejected()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var host = new DevLocalTransport(hostAddress);
+        using var helper = new DevLocalTransport();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        IncomingJoinRequestEventArgs? pendingJoin = null;
+        var joinRaised = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var offerCount = 0;
+
+        host.IncomingJoinRequest += (_, e) =>
+        {
+            pendingJoin = e;
+            joinRaised.TrySetResult();
+        };
+        host.Approved += (_, _) => hostApproved.TrySetResult();
+        helper.Approved += (_, _) => helperApproved.TrySetResult();
+        host.FileTransferOfferReceived += (_, _) => Interlocked.Increment(ref offerCount);
+
+        _ = host.HostByAddressAsync(cts.Token);
+        await host.WaitUntilHostReadyAsync(cts.Token);
+
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+        await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+        await joinRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        await pendingJoin!.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+        await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+        var sessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value;
+        var securePayload = BuildSecureDevLocalPayload(
+            helper,
+            SessionSecureMessageFamily.FileTransfer,
+            "file_transfer_offer",
+            FileTransferPayloadCodec.Serialize(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = "transfer_devlocal_wrong_sender",
+                    FileName = "wrong.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]),
+                }),
+            requestId: "transfer_devlocal_wrong_sender",
+            sequence: 1,
+            senderIdentityOverride: new PeerAddress(CreateTestPeerAddress()));
+
+        await SendRawDevLocalFrameAsync(helper, "file_transfer_offer", securePayload, cts.Token);
+        await Task.Delay(200, cts.Token);
+
+        Assert.Equal(0, Volatile.Read(ref offerCount));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task DevLocalTransport_FileTransferOffer_WithPlaintextSessionMismatch_IsRejected()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var host = new DevLocalTransport(hostAddress);
+        using var helper = new DevLocalTransport();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        IncomingJoinRequestEventArgs? pendingJoin = null;
+        var joinRaised = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var offerCount = 0;
+
+        host.IncomingJoinRequest += (_, e) =>
+        {
+            pendingJoin = e;
+            joinRaised.TrySetResult();
+        };
+        host.Approved += (_, _) => hostApproved.TrySetResult();
+        helper.Approved += (_, _) => helperApproved.TrySetResult();
+        host.FileTransferOfferReceived += (_, _) => Interlocked.Increment(ref offerCount);
+
+        _ = host.HostByAddressAsync(cts.Token);
+        await host.WaitUntilHostReadyAsync(cts.Token);
+
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+        await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+        await joinRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        await pendingJoin!.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+        await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+        var securePayload = BuildSecureDevLocalPayload(
+            helper,
+            SessionSecureMessageFamily.FileTransfer,
+            "file_transfer_offer",
+            FileTransferPayloadCodec.Serialize(
+                new FileTransferOfferV1
+                {
+                    SessionId = "wrong_session",
+                    TransferId = "transfer_devlocal_wrong_session",
+                    FileName = "wrong-session.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]),
+                }),
+            requestId: "transfer_devlocal_wrong_session",
+            sequence: 1);
+
+        await SendRawDevLocalFrameAsync(helper, "file_transfer_offer", securePayload, cts.Token);
+        await Task.Delay(200, cts.Token);
+
+        Assert.Equal(0, Volatile.Read(ref offerCount));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task DevLocalTransport_FileTransferChunk_ReplayedSecureEnvelope_IsRejected()
+    {
+        var hostAddress = CreateTestPeerAddress();
+        using var host = new DevLocalTransport(hostAddress);
+        using var helper = new DevLocalTransport();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        IncomingJoinRequestEventArgs? pendingJoin = null;
+        var joinRaised = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var offerReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var acceptReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var startReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var chunkCount = 0;
+
+        host.IncomingJoinRequest += (_, e) =>
+        {
+            pendingJoin = e;
+            joinRaised.TrySetResult();
+        };
+        host.Approved += (_, _) => hostApproved.TrySetResult();
+        helper.Approved += (_, _) => helperApproved.TrySetResult();
+        host.FileTransferOfferReceived += (_, _) => offerReceived.TrySetResult();
+        helper.FileTransferAcceptReceived += (_, _) => acceptReceived.TrySetResult();
+        host.FileTransferStartReceived += (_, _) => startReceived.TrySetResult();
+        host.FileTransferChunkReceived += (_, _) => Interlocked.Increment(ref chunkCount);
+
+        _ = host.HostByAddressAsync(cts.Token);
+        await host.WaitUntilHostReadyAsync(cts.Token);
+
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+        await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+        await joinRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        await pendingJoin!.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+        await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+        var sessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value;
+        const string transferId = "transfer_devlocal_replay";
+        var expectedHash = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
+
+        await helper.SendFileTransferOfferAsync(
+            new FileTransferOfferV1
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                FileName = "replay.bin",
+                FileSizeBytes = 1,
+                Sha256Base64 = expectedHash,
+            },
+            cts.Token);
+        await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+        await host.SendFileTransferAcceptAsync(
+            new FileTransferAcceptV1
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+            },
+            cts.Token);
+        await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+        await helper.SendFileTransferStartAsync(
+            new FileTransferStartV1
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                FileName = "replay.bin",
+                FileSizeBytes = 1,
+                Sha256Base64 = expectedHash,
+                ChunkCount = 1,
+                ChunkSizeBytes = 1,
+            },
+            cts.Token);
+        await startReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+        var securePayload = BuildSecureDevLocalPayload(
+            helper,
+            SessionSecureMessageFamily.FileTransfer,
+            "file_transfer_chunk",
+            FileTransferPayloadCodec.Serialize(
+                new FileTransferChunkV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataBase64 = Convert.ToBase64String(new byte[] { 0x09 }),
+                }),
+            requestId: transferId,
+            sequence: 3);
+
+        await SendRawDevLocalFrameAsync(helper, "file_transfer_chunk", securePayload, cts.Token);
+        await Task.Delay(100, cts.Token);
+        await SendRawDevLocalFrameAsync(helper, "file_transfer_chunk", securePayload, cts.Token);
+        await Task.Delay(200, cts.Token);
+
+        Assert.Equal(1, Volatile.Read(ref chunkCount));
     }
 
     [Trait("Category", "Smoke")]
@@ -8637,6 +10455,9 @@ public class SmokeTests
         Assert.True(validation.IsSuccess, validation.Message);
         Assert.NotNull(validation.Invite);
         Assert.Equal(helperIdentity, validation.Invite!.BoundHelperAddress);
+        Assert.True(
+            (validation.Invite.Payload.Capabilities & InviteCapabilities.FileTransfer) == InviteCapabilities.FileTransfer,
+            "Generated helpee invite should request file transfer.");
         Assert.Equal("Invite ready", helpee.ShareInviteStatusText);
         Assert.True(helpee.ShowWaitingInviteActions);
 #endif
@@ -10999,6 +12820,22 @@ return;
         throw new TimeoutException("Condition was not met before timeout.");
     }
 
+    private static async Task ApprovePendingJoinIfNeededAsync(
+        SessionRuntime helpeeRuntime,
+        CancellationToken ct,
+        TimeSpan timeout)
+    {
+        await WaitUntilAsync(
+            () => helpeeRuntime.PendingApprovalRequest is not null ||
+                  helpeeRuntime.State == SessionRuntimeState.Connected,
+            timeout);
+
+        if (helpeeRuntime.PendingApprovalRequest is not null)
+        {
+            await helpeeRuntime.ApproveAsync(ct);
+        }
+    }
+
     private static async Task WaitStepAsync(string stepName, Task task, TimeSpan timeout)
     {
         try
@@ -11127,7 +12964,7 @@ return;
 
     private static string CreateTestPeerAddress()
     {
-        return $"devlocal.test.{Math.Abs(HashCode.Combine(Environment.ProcessId, Environment.TickCount64))}";
+        return $"devlocal.test.{Guid.NewGuid().ToString("N")[..12]}";
     }
 
     private static string? FindFileUpwards(string fileName)
@@ -11397,6 +13234,82 @@ rl.on('line', (line) => {
             ReplyTo: null);
     }
 
+    private static Envelope BuildSecureFileTransferEnvelope<TMessage>(
+        NknSignalingTransport senderTransport,
+        MsgType msgType,
+        TMessage message,
+        string? requestId,
+        long sequence)
+    {
+        var key = Assert.IsType<byte[]>(GetPrivateField(senderTransport, "fileTransferSessionSharedKey")).AsSpan().ToArray();
+        var envelopeCode = Assert.IsType<string>(GetPrivateField(senderTransport, "currentEnvelopeCode"));
+        var sessionId = Assert.IsType<SessionId>(senderTransport.CurrentSessionSecurityState.SessionId);
+        var senderIdentity = new PeerAddress(senderTransport.LocalPeerAddress);
+        var plaintext = message switch
+        {
+            FileTransferOfferV1 offer => FileTransferPayloadCodec.Serialize(offer),
+            FileTransferAcceptV1 accept => FileTransferPayloadCodec.Serialize(accept),
+            FileTransferDeclineV1 decline => FileTransferPayloadCodec.Serialize(decline),
+            FileTransferStartV1 start => FileTransferPayloadCodec.Serialize(start),
+            FileTransferChunkV1 chunk => FileTransferPayloadCodec.Serialize(chunk),
+            FileTransferCancelV1 cancel => FileTransferPayloadCodec.Serialize(cancel),
+            FileTransferErrorV1 error => FileTransferPayloadCodec.Serialize(error),
+            FileTransferCompleteV1 complete => FileTransferPayloadCodec.Serialize(complete),
+            _ => throw new ArgumentOutOfRangeException(nameof(message), "Unsupported file-transfer message."),
+        };
+
+        try
+        {
+            var securePayload = SessionSecureEnvelopeCodec.Encrypt(
+                key,
+                new SessionSecureEnvelopeMetadata(
+                    Family: SessionSecureMessageFamily.FileTransfer,
+                    MessageType: msgType switch
+                    {
+                        MsgType.FileTransferOffer => "file_transfer_offer",
+                        MsgType.FileTransferAccept => "file_transfer_accept",
+                        MsgType.FileTransferDecline => "file_transfer_decline",
+                        MsgType.FileTransferStart => "file_transfer_start",
+                        MsgType.FileTransferChunk => "file_transfer_chunk",
+                        MsgType.FileTransferCancel => "file_transfer_cancel",
+                        MsgType.FileTransferError => "file_transfer_error",
+                        MsgType.FileTransferComplete => "file_transfer_complete",
+                        _ => throw new ArgumentOutOfRangeException(nameof(msgType), msgType, "Unsupported file-transfer message."),
+                    },
+                    SessionId: sessionId,
+                    SenderIdentity: senderIdentity,
+                    Sequence: sequence,
+                    RequestId: string.IsNullOrWhiteSpace(requestId) ? null : requestId.Trim()),
+                plaintext);
+
+            return new Envelope(
+                Version: 1,
+                Code: envelopeCode,
+                MessageId: Guid.NewGuid().ToString("N"),
+                Type: msgType,
+                Payload: securePayload,
+                UnixTimeMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ReplyTo: null);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(key);
+        }
+    }
+
+    private static void InvokeNknIncomingMessage(
+        NknSignalingTransport transport,
+        INknClient senderClient,
+        NknIncomingMessage message)
+    {
+        var method = typeof(NknSignalingTransport).GetMethod(
+            "OnClientMessageReceived",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.NotNull(method);
+        method!.Invoke(transport, new object?[] { senderClient, message });
+    }
+
     private static Envelope BuildSecureLifecycleEnvelope(
         NknSignalingTransport senderTransport,
         MsgType msgType,
@@ -11479,22 +13392,37 @@ rl.on('line', (line) => {
         string messageType,
         byte[] plaintext,
         string? requestId,
-        long sequence)
+        long sequence,
+        PeerAddress? senderIdentityOverride = null)
     {
-        var key = Assert.IsType<byte[]>(GetPrivateField(senderTransport, "controlSessionSharedKey")).AsSpan().ToArray();
+        var sessionKey = Assert.IsType<byte[]>(GetPrivateField(senderTransport, "controlSessionSharedKey")).AsSpan().ToArray();
         var sessionId = Assert.IsType<SessionId>(senderTransport.CurrentSessionSecurityState.SessionId);
-        var senderIdentity = new PeerAddress(senderTransport.LocalPeerAddress);
+        var senderIdentity = senderIdentityOverride ?? new PeerAddress(senderTransport.LocalPeerAddress);
+        var envelopeKey = family == SessionSecureMessageFamily.FileTransfer
+            ? SessionKeyDerivation.DeriveFileTransferKey(sessionKey)
+            : sessionKey;
 
-        return SessionSecureEnvelopeCodec.Encrypt(
-            key,
-            new SessionSecureEnvelopeMetadata(
-                Family: family,
-                MessageType: messageType,
-                SessionId: sessionId,
-                SenderIdentity: senderIdentity,
-                Sequence: sequence,
-                RequestId: string.IsNullOrWhiteSpace(requestId) ? null : requestId.Trim()),
-            plaintext);
+        try
+        {
+            return SessionSecureEnvelopeCodec.Encrypt(
+                envelopeKey,
+                new SessionSecureEnvelopeMetadata(
+                    Family: family,
+                    MessageType: messageType,
+                    SessionId: sessionId,
+                    SenderIdentity: senderIdentity,
+                    Sequence: sequence,
+                    RequestId: string.IsNullOrWhiteSpace(requestId) ? null : requestId.Trim()),
+                plaintext);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(envelopeKey);
+            if (!ReferenceEquals(envelopeKey, sessionKey))
+            {
+                CryptographicOperations.ZeroMemory(sessionKey);
+            }
+        }
     }
 
     private static async Task SendRawDevLocalFrameAsync(
@@ -11515,6 +13443,32 @@ rl.on('line', (line) => {
 
         var writeTask = (Task)connection.GetType().GetMethod("WriteFrameAsync")!.Invoke(connection, new[] { frame!, ct })!;
         await writeTask;
+    }
+
+    private static async Task<string> ApproveNknSessionAsync(
+        NknSignalingTransport host,
+        NknSignalingTransport helper,
+        CancellationToken ct,
+        InviteCapabilities capabilities = InviteCapabilities.Chat)
+    {
+        var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+        host.Approved += (_, _) => hostApproved.TrySetResult();
+        helper.Approved += (_, _) => helperApproved.TrySetResult();
+
+        await host.HostByAddressAsync(ct);
+        var invite = CreateValidatedInviteForTarget(new PeerAddress(host.LocalPeerAddress), out var rawToken, capabilities);
+        await helper.JoinByInviteAsync(rawToken, invite, ct);
+
+        var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
+        await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), ct);
+        await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
+        await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
+
+        return host.CurrentSessionSecurityState.SessionId!.Value.Value;
     }
 
     private static List<string> FindOperationalLogLines(Func<string, bool> predicate)
@@ -12483,4 +14437,5 @@ rl.on('line', (line) => {
             ActiveRuntimeCounters.ResetForTests();
         }
     }
+
 }

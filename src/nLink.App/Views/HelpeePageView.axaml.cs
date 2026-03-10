@@ -1,3 +1,5 @@
+using System;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using NLink.App.Services;
@@ -7,10 +9,60 @@ namespace NLink.App.Views;
 
 public partial class HelpeePageView : UserControl
 {
+    private HelpeePageViewModel? currentViewModel;
+
     public HelpeePageView()
     {
         InitializeComponent();
+        PropertyChanged += OnViewPropertyChanged;
         AttachedToVisualTree += (_, _) => BindClipboardTopLevel();
+        SyncViewModelSubscription();
+    }
+
+    private void OnViewPropertyChanged(object? sender, AvaloniaPropertyChangedEventArgs e)
+    {
+        if (e.Property == DataContextProperty)
+        {
+            SyncViewModelSubscription();
+        }
+    }
+
+    private void SyncViewModelSubscription()
+    {
+        if (currentViewModel is not null)
+        {
+            currentViewModel.SendFileRequested -= OnSendFileRequested;
+        }
+
+        currentViewModel = DataContext as HelpeePageViewModel;
+
+        if (currentViewModel is not null)
+        {
+            currentViewModel.SendFileRequested += OnSendFileRequested;
+        }
+    }
+
+    private async void OnSendFileRequested(object? sender, EventArgs e)
+    {
+        if (currentViewModel is not HelpeePageViewModel vm)
+        {
+            return;
+        }
+
+        try
+        {
+            var selection = await NativeFileTransferPicker.PickSingleFileAsync(this);
+            if (selection is null)
+            {
+                return;
+            }
+
+            await vm.StartSendFileAsync(selection.Descriptor, selection.OpenReadStreamAsync);
+        }
+        catch
+        {
+            vm.NotifySendFileError("Couldn't open the selected file.");
+        }
     }
 
     private void ChatDraftTextBox_KeyDown(object? sender, KeyEventArgs e)

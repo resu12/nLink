@@ -112,6 +112,15 @@ public sealed class HangReportService
             $"last_connect_duration_ms: {FormatDuration(snapshot.Value.LastConnectDurationMs)}",
             $"last_handshake_duration_ms: {FormatDuration(snapshot.Value.LastHandshakeDurationMs)}",
             $"last_bridge_start_duration_ms: {FormatDuration(snapshot.Value.LastBridgeStartDurationMs)}",
+            $"file_transfer_summary: {snapshot.Value.FileTransferSummary}",
+            $"file_transfer_inbound_id: {snapshot.Value.ActiveInboundFileTransferId}",
+            $"file_transfer_inbound_state: {snapshot.Value.ActiveInboundFileTransferState}",
+            $"file_transfer_inbound_bytes: {snapshot.Value.ActiveInboundFileTransferBytes?.ToString() ?? "(none)"}",
+            $"file_transfer_outbound_id: {snapshot.Value.ActiveOutboundFileTransferId}",
+            $"file_transfer_outbound_state: {snapshot.Value.ActiveOutboundFileTransferState}",
+            $"file_transfer_outbound_bytes: {snapshot.Value.ActiveOutboundFileTransferBytes?.ToString() ?? "(none)"}",
+            $"file_transfer_last_failure_code: {snapshot.Value.LastFileTransferFailureCode}",
+            $"file_transfer_last_saved_path: {snapshot.Value.LastFileTransferSavedPath}",
         };
         return string.Join(Environment.NewLine, lines);
     }

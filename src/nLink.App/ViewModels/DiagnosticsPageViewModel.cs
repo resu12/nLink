@@ -206,6 +206,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string SessionSecuritySummary => runtimeDiagnosticsSnapshot.SessionSecuritySummary;
     public string RemoteControlSummary => runtimeDiagnosticsSnapshot.RemoteControlSummary;
     public string ScreenShareSummary => runtimeDiagnosticsSnapshot.ScreenShareSummary;
+    public string FileTransferSummary => runtimeDiagnosticsSnapshot.FileTransferSummary;
     public string AuthoritativeConnectedAddress => nknDiagnosticsSnapshot.AuthoritativeConnectedAddressResolved ? "Yes" : "No";
     public string LastRejectedMessageSummary => BuildLastRejectedMessageSummary();
 
@@ -474,6 +475,15 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"session_security_summary: {SessionSecuritySummary}",
             $"remote_control_summary: {RemoteControlSummary}",
             $"screenshare_summary: {ScreenShareSummary}",
+            $"file_transfer_summary: {FileTransferSummary}",
+            $"file_transfer_inbound_id: {runtimeDiagnosticsSnapshot.ActiveInboundFileTransferId}",
+            $"file_transfer_inbound_state: {runtimeDiagnosticsSnapshot.ActiveInboundFileTransferState}",
+            $"file_transfer_inbound_bytes: {runtimeDiagnosticsSnapshot.ActiveInboundFileTransferBytes?.ToString() ?? "(none)"}",
+            $"file_transfer_outbound_id: {runtimeDiagnosticsSnapshot.ActiveOutboundFileTransferId}",
+            $"file_transfer_outbound_state: {runtimeDiagnosticsSnapshot.ActiveOutboundFileTransferState}",
+            $"file_transfer_outbound_bytes: {runtimeDiagnosticsSnapshot.ActiveOutboundFileTransferBytes?.ToString() ?? "(none)"}",
+            $"file_transfer_last_failure_code: {runtimeDiagnosticsSnapshot.LastFileTransferFailureCode}",
+            $"file_transfer_last_saved_path: {runtimeDiagnosticsSnapshot.LastFileTransferSavedPath}",
             string.Empty,
             $"Transport: {TransportSummary}",
             $"Connection method: {ActiveTransport}",

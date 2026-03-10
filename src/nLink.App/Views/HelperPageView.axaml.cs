@@ -5,8 +5,6 @@ using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
-using Avalonia.Layout;
-using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using NLink.App.Services;
@@ -62,38 +60,26 @@ public partial class HelperPageView : UserControl
         ScheduleFocusHelperCodeInput();
     }
 
-    private void OnSendFileRequested(object? sender, EventArgs e)
+    private async void OnSendFileRequested(object? sender, EventArgs e)
     {
+        if (currentViewModel is not HelperPageViewModel vm)
+        {
+            return;
+        }
+
         try
         {
-            ShowSendFileWindow();
-        }
-        catch
-        {
-            var errorWindow = new Window
+            var selection = await NativeFileTransferPicker.PickSingleFileAsync(this);
+            if (selection is null)
             {
-                Title = "Send file",
-                Width = 680,
-                Height = 260,
-                Background = Brushes.Black,
-                Content = new TextBlock
-                {
-                    Text = "Could not open the send file screen." + Environment.NewLine +
-                           "Please open https://nftp.nkn.org in your browser.",
-                    Foreground = Brushes.White,
-                    Margin = new Thickness(16),
-                    TextWrapping = TextWrapping.Wrap,
-                    VerticalAlignment = VerticalAlignment.Center,
-                },
-            };
-
-            if (TopLevel.GetTopLevel(this) is Window owner)
-            {
-                errorWindow.Show(owner);
                 return;
             }
 
-            errorWindow.Show();
+            await vm.StartSendFileAsync(selection.Descriptor, selection.OpenReadStreamAsync);
+        }
+        catch
+        {
+            vm.NotifySendFileError("Couldn't open the selected file.");
         }
     }
 
@@ -198,19 +184,6 @@ public partial class HelperPageView : UserControl
         }
 
         surface.Focus();
-    }
-
-    private void ShowSendFileWindow()
-    {
-        var window = new SendFileWindow();
-
-        if (TopLevel.GetTopLevel(this) is Window owner)
-        {
-            window.Show(owner);
-            return;
-        }
-
-        window.Show();
     }
 
     private void BindClipboardTopLevel()

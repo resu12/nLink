@@ -21,6 +21,7 @@ using NLink.App.Services.SessionConnect;
 using NLink.App.Threading;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.FileTransfer;
 using NLink.Core.RemoteControl;
 using NLink.Core.SessionConnect;
 using NLink.Core.SessionSecurity;
@@ -126,6 +127,9 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool canStartOrConnect = true;
     private bool canEndSession = true;
     private bool canOpenDiagnostics;
+    private bool canSendFiles;
+    private FileTransferPanelItemViewModel? inboundFileTransfer;
+    private FileTransferPanelItemViewModel? outboundFileTransfer;
     private bool isChatInputEnabled;
     private SessionUiPhase effectivePhase;
     private bool endInvoked;
@@ -249,6 +253,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.ChatMessageReceived += OnChatMessageReceived;
         sessionRuntime.ChatMessageReceivedBeforeApproved += OnChatMessageReceivedBeforeApproved;
         sessionRuntime.ChatStateChanged += OnChatStateChanged;
+        sessionRuntime.FileTransferChanged += OnFileTransferChanged;
         sessionRuntime.RemoteControlStateChanged += OnRemoteControlStateChanged;
 #if DEBUG
         sessionRuntime.RemoteControlInputReceived += OnRemoteControlInputReceived;
@@ -267,7 +272,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         ClearInviteHelperIdentityCommand = new RelayCommand(ClearInviteHelperIdentity, CanClearInviteHelperIdentity);
         AllowCommand = new RelayCommand(AllowIncomingRequest, CanAllowIncomingRequest);
         DeclineCommand = new AsyncRelayCommand(DeclineIncomingRequestAsync, CanDeclineIncomingRequest);
+        SendFileCommand = new RelayCommand(RequestSendFileWindow, CanExecuteSendFileAction);
         SendChatCommand = new AsyncRelayCommand(SendChatAsync, CanSendChat);
+        AcceptIncomingFileCommand = new AsyncRelayCommand<string?>(AcceptIncomingFileAsync, CanAcceptIncomingFile);
+        DeclineIncomingFileCommand = new AsyncRelayCommand<string?>(DeclineIncomingFileAsync, CanDeclineIncomingFile);
+        CancelFileTransferCommand = new AsyncRelayCommand<string?>(CancelFileTransferAsync, CanCancelFileTransfer);
         RetryCommand = new AsyncRelayCommand(RetryAsync);
         CancelTransientCommand = new AsyncRelayCommand(CancelTransientAsync, CanCancelTransientOperation);
         OpenDiagnosticsCommand = new RelayCommand(OpenDiagnostics, CanOpenDiagnosticsCommand);
@@ -977,6 +986,36 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         private set => SetProperty(ref isChatInputEnabled, value);
     }
 
+    public bool ShowSendFileAction =>
+        EffectivePhase == SessionUiPhase.Connected &&
+        sessionRuntime.CanPerform(SessionCapability.FileTransfer);
+
+    public bool CanSendFileAction => CanSendFiles;
+
+    public bool CanSendFiles
+    {
+        get => canSendFiles;
+        private set
+        {
+            if (SetProperty(ref canSendFiles, value))
+            {
+                OnPropertyChanged(nameof(CanSendFileAction));
+            }
+        }
+    }
+
+    public FileTransferPanelItemViewModel? InboundFileTransfer
+    {
+        get => inboundFileTransfer;
+        private set => SetProperty(ref inboundFileTransfer, value);
+    }
+
+    public FileTransferPanelItemViewModel? OutboundFileTransfer
+    {
+        get => outboundFileTransfer;
+        private set => SetProperty(ref outboundFileTransfer, value);
+    }
+
     public bool ShowChatNotice
     {
         get => showChatNotice;
@@ -996,7 +1035,15 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public IAsyncRelayCommand DeclineCommand { get; }
 
+    public IRelayCommand SendFileCommand { get; }
+
     public IAsyncRelayCommand SendChatCommand { get; }
+
+    public IAsyncRelayCommand<string?> AcceptIncomingFileCommand { get; }
+
+    public IAsyncRelayCommand<string?> DeclineIncomingFileCommand { get; }
+
+    public IAsyncRelayCommand<string?> CancelFileTransferCommand { get; }
 
     public IAsyncRelayCommand RetryCommand { get; }
     public IAsyncRelayCommand CancelTransientCommand { get; }
@@ -1015,6 +1062,32 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     public IAsyncRelayCommand DenyControlConsentCommand { get; }
     public IRelayCommand StatusBannerCopyDiagnosticsCommand => OpenDiagnosticsCommand;
     public IAsyncRelayCommand StatusBannerCancelCommand => CancelTransientCommand;
+    public event EventHandler? SendFileRequested;
+
+    public void NotifySendFileError(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return;
+        }
+
+        copyFeedback.Show(message);
+    }
+
+    public async Task StartSendFileAsync(
+        FileTransferSendDescriptor descriptor,
+        FileTransferReadStreamFactory openReadStreamAsync,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(descriptor);
+        ArgumentNullException.ThrowIfNull(openReadStreamAsync);
+
+        var snapshot = await sessionRuntime.StartSendAsync(descriptor, openReadStreamAsync, ct);
+        if (snapshot is null)
+        {
+            copyFeedback.Show("Couldn't start the file transfer.");
+        }
+    }
 
     public bool ShowRetryAction => !IsStartupBlocked && connectionViewState == HelpeeConnectionViewState.Failed;
     public bool ShowTransientBanner
@@ -1095,6 +1168,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.ChatMessageReceived -= OnChatMessageReceived;
         sessionRuntime.ChatMessageReceivedBeforeApproved -= OnChatMessageReceivedBeforeApproved;
         sessionRuntime.ChatStateChanged -= OnChatStateChanged;
+        sessionRuntime.FileTransferChanged -= OnFileTransferChanged;
         sessionRuntime.RemoteControlStateChanged -= OnRemoteControlStateChanged;
 #if DEBUG
         sessionRuntime.RemoteControlInputReceived -= OnRemoteControlInputReceived;
@@ -1274,6 +1348,97 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private void OpenDiagnostics()
     {
         openDiagnosticsAction?.Invoke();
+    }
+
+    private void RequestSendFileWindow()
+    {
+        if (!CanExecuteSendFileAction())
+        {
+            return;
+        }
+
+        if (!sessionRuntime.TryAuthorizeFileTransferSend())
+        {
+            CanSendFiles = false;
+            OnPropertyChanged(nameof(CanSendFileAction));
+            SendFileCommand.NotifyCanExecuteChanged();
+            return;
+        }
+
+        SendFileRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private bool CanExecuteSendFileAction()
+    {
+        return CanSendFiles;
+    }
+
+    private async Task AcceptIncomingFileAsync(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        if (!CanAcceptIncomingFile(normalizedTransferId))
+        {
+            return;
+        }
+
+        await sessionRuntime.AcceptIncomingAsync(normalizedTransferId!, CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private bool CanAcceptIncomingFile(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        return normalizedTransferId is not null &&
+               InboundFileTransfer is { ShowAccept: true } inbound &&
+               string.Equals(inbound.TransferId, normalizedTransferId, StringComparison.Ordinal);
+    }
+
+    private async Task DeclineIncomingFileAsync(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        if (!CanDeclineIncomingFile(normalizedTransferId))
+        {
+            return;
+        }
+
+        await sessionRuntime.DeclineIncomingAsync(normalizedTransferId!, uiCt: CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private bool CanDeclineIncomingFile(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        return normalizedTransferId is not null &&
+               InboundFileTransfer is { ShowDecline: true } inbound &&
+               string.Equals(inbound.TransferId, normalizedTransferId, StringComparison.Ordinal);
+    }
+
+    private async Task CancelFileTransferAsync(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        if (!CanCancelFileTransfer(normalizedTransferId))
+        {
+            return;
+        }
+
+        await sessionRuntime.CancelTransferAsync(normalizedTransferId!, uiCt: CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private bool CanCancelFileTransfer(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        if (normalizedTransferId is null)
+        {
+            return false;
+        }
+
+        return (InboundFileTransfer is { ShowCancel: true } inbound &&
+                string.Equals(inbound.TransferId, normalizedTransferId, StringComparison.Ordinal)) ||
+               (OutboundFileTransfer is { ShowCancel: true } outbound &&
+                string.Equals(outbound.TransferId, normalizedTransferId, StringComparison.Ordinal));
+    }
+
+    private static string? NormalizeTransferActionId(string? transferId)
+    {
+        return string.IsNullOrWhiteSpace(transferId) ? null : transferId.Trim();
     }
 
     private bool CanCancelTransientOperation()
@@ -1770,7 +1935,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 IssuerAddress: peerAddress,
                 TargetAddress: peerAddress,
                 SessionId: sessionId,
-                Capabilities: InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl,
+                Capabilities: InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl | InviteCapabilities.FileTransfer,
                 Lifetime: DefaultInviteLifetime,
                 BoundHelperAddress: boundHelperAddress),
             DateTimeOffset.UtcNow);
@@ -2297,6 +2462,16 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             OnPropertyChanged(nameof(IsChatReady));
             SendChatCommand.NotifyCanExecuteChanged();
         });
+    }
+
+    private void OnFileTransferChanged(object? sender, EventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(UpdateUiFromSnapshot);
     }
 
     private void OnRemoteControlStateChanged(object? sender, EventArgs e)
@@ -3102,6 +3277,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         bool nextCanStartOrConnect;
         bool nextCanEndSession;
         bool nextCanOpenDiagnostics;
+        bool nextCanSendFiles;
+        var fileTransferSnapshot = sessionRuntime.FileTransferSnapshot;
+        InboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(fileTransferSnapshot.Inbound);
+        OutboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(fileTransferSnapshot.Outbound);
+        var hasActiveOutboundTransfer = fileTransferSnapshot.Outbound is { IsTerminal: false };
         var phase = GetEffectivePhase();
         EffectivePhase = phase;
         nextCanEndSession = CanEndForPhase(phase);
@@ -3119,6 +3299,9 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                     or SessionUiPhase.Recovering
                     or SessionUiPhase.Failed
                     or SessionUiPhase.Ended;
+            nextCanSendFiles = phase == SessionUiPhase.Connected &&
+                               sessionRuntime.CanPerform(SessionCapability.FileTransfer) &&
+                               !hasActiveOutboundTransfer;
             nextChatEnabled = phase == SessionUiPhase.Connected;
         }
         else
@@ -3129,12 +3312,15 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                     nextChatEnabled = true;
                     nextCanStartOrConnect = false;
                     nextCanOpenDiagnostics = openDiagnosticsAction is not null;
+                    nextCanSendFiles = sessionRuntime.CanPerform(SessionCapability.FileTransfer) &&
+                                       !hasActiveOutboundTransfer;
                     break;
 
                 case SessionUiPhase.Connecting:
                     nextChatEnabled = false;
                     nextCanStartOrConnect = false;
                     nextCanOpenDiagnostics = openDiagnosticsAction is not null;
+                    nextCanSendFiles = false;
                     break;
 
                 case SessionUiPhase.Failed:
@@ -3142,6 +3328,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                     nextChatEnabled = false;
                     nextCanStartOrConnect = !IsStartupBlocked;
                     nextCanOpenDiagnostics = openDiagnosticsAction is not null;
+                    nextCanSendFiles = false;
                     break;
 
                 case SessionUiPhase.Idle:
@@ -3149,12 +3336,14 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                     nextChatEnabled = false;
                     nextCanStartOrConnect = !IsStartupBlocked;
                     nextCanOpenDiagnostics = false;
+                    nextCanSendFiles = false;
                     break;
 
                 default:
                     nextChatEnabled = false;
                     nextCanStartOrConnect = !IsStartupBlocked;
                     nextCanOpenDiagnostics = openDiagnosticsAction is not null;
+                    nextCanSendFiles = false;
                     break;
             }
         }
@@ -3163,10 +3352,17 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         CanStartOrConnect = nextCanStartOrConnect;
         CanEndSession = nextCanEndSession;
         CanOpenDiagnostics = nextCanOpenDiagnostics;
+        CanSendFiles = nextCanSendFiles;
 
         OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
+        OnPropertyChanged(nameof(ShowSendFileAction));
+        OnPropertyChanged(nameof(CanSendFileAction));
         OpenDiagnosticsCommand.NotifyCanExecuteChanged();
+        SendFileCommand.NotifyCanExecuteChanged();
         SendChatCommand.NotifyCanExecuteChanged();
+        AcceptIncomingFileCommand.NotifyCanExecuteChanged();
+        DeclineIncomingFileCommand.NotifyCanExecuteChanged();
+        CancelFileTransferCommand.NotifyCanExecuteChanged();
         EndSessionCommand.NotifyCanExecuteChanged();
         AssertUiConsistency();
     }

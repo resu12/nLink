@@ -23,4 +23,12 @@ internal enum MsgType
     SessionHandshakeResult = 18,
     ScreenShareStop = 19,
     ScreenShareFrame = 20,
+    FileTransferOffer = 21,
+    FileTransferAccept = 22,
+    FileTransferDecline = 23,
+    FileTransferStart = 24,
+    FileTransferChunk = 25,
+    FileTransferCancel = 26,
+    FileTransferError = 27,
+    FileTransferComplete = 28,
 }

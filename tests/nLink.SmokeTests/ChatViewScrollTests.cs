@@ -5,6 +5,7 @@ using Avalonia.Headless;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.Input;
 using NLink.App.ViewModels;
+using NLink.Core.FileTransfer;
 using NLink.App.Views;
 
 namespace NLink.SmokeTests;
@@ -156,9 +157,28 @@ public sealed class ChatViewScrollTests : IClassFixture<ChatViewScrollFixture>
 
         public bool IsChatInputEnabled => true;
 
+        public bool ShowSendFileAction => false;
+
+        public bool CanSendFileAction => false;
+
+        public FileTransferPanelItemViewModel? InboundFileTransfer => null;
+
+        public FileTransferPanelItemViewModel? OutboundFileTransfer => null;
+
         public bool CanEndSession => true;
 
+        public IRelayCommand SendFileCommand { get; } = new RelayCommand(() => { });
+
         public IAsyncRelayCommand SendChatCommand { get; } = new AsyncRelayCommand(() => Task.CompletedTask);
+
+        public IAsyncRelayCommand<string?> AcceptIncomingFileCommand { get; } =
+            new AsyncRelayCommand<string?>(_ => Task.CompletedTask, _ => false);
+
+        public IAsyncRelayCommand<string?> DeclineIncomingFileCommand { get; } =
+            new AsyncRelayCommand<string?>(_ => Task.CompletedTask, _ => false);
+
+        public IAsyncRelayCommand<string?> CancelFileTransferCommand { get; } =
+            new AsyncRelayCommand<string?>(_ => Task.CompletedTask, _ => false);
 
         public IRelayCommand EndSessionCommand { get; } = new RelayCommand(() => { });
     }
