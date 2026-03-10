@@ -1390,7 +1390,13 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
             clock.Advance(TimeSpan.FromMilliseconds(40));
         }
 
-        await Task.Delay(50);
+        await WaitUntilAsync(
+            () =>
+            {
+                var metrics = coordinator.GetMetricsSnapshot();
+                return metrics.FramesDroppedByRateGate > 0 && metrics.LastCaptureToSendAgeMs >= 0;
+            },
+            TimeSpan.FromSeconds(2));
         autoTuneTick!.Invoke(coordinator, Array.Empty<object>());
 
         Assert.Equal(FeatureFlags.ScreenShareTransportMaxFps - 1, fakeSource.LastCaptureFrameRateHint);
@@ -1404,7 +1410,13 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
                 new byte[] { 99, 4, 5 },
                 "jpeg",
                 capturedTsUtcMs: clock.UtcNow.ToUnixTimeMilliseconds()));
-        await Task.Delay(50);
+        await WaitUntilAsync(
+            () =>
+            {
+                var metrics = coordinator.GetMetricsSnapshot();
+                return metrics.ChunksSent >= 3 && metrics.LastCaptureToSendAgeMs >= 0;
+            },
+            TimeSpan.FromSeconds(2));
 
         autoTuneTick.Invoke(coordinator, Array.Empty<object>());
         autoTuneTick.Invoke(coordinator, Array.Empty<object>());
