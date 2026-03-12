@@ -8,6 +8,11 @@ public interface IScreenShareSignalingTransport
     Task SendScreenSharePayloadAsync(ReadOnlyMemory<byte> payload, CancellationToken ct);
 }
 
+public interface IScreenShareTransportBackpressureProbe
+{
+    bool IsScreenShareTransportCongested { get; }
+}
+
 public sealed record ScreenShareFrameCompletedEventArgs(
     long FrameId,
     int Width,

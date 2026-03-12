@@ -38,12 +38,19 @@ try {
   });
 }
 
+const CONTROL_CHANNEL = 'control';
+const MEDIA_CHANNEL = 'media';
+
 const state = {
-  client: null,
+  controlClient: null,
+  mediaClient: null,
+  controlReady: false,
+  mediaReady: false,
   readyEmitted: false,
   shuttingDown: false,
   subscriptions: new Set(),
-  clientIdentifier: '',
+  controlIdentifier: '',
+  mediaIdentifier: '',
   connectId: '',
   preflightProgressEnabled: false,
   inboundScreenSharePolicy: {
@@ -54,7 +61,8 @@ const state = {
   },
   lastScreenShareDropLogTs: 0,
   lastScreenShareDropReason: '',
-  lastScreenShareDropSessionId: ''
+  lastScreenShareDropSessionId: '',
+  connectAttemptId: 0
 };
 
 let rpcCandidateCursor = 0;
@@ -237,6 +245,55 @@ function getClientIdentifier(client) {
   return '';
 }
 
+function getMediaIdentifier(identifier) {
+  const normalized = typeof identifier === 'string' ? identifier.trim() : '';
+  if (!normalized) {
+    return 'nlink-media';
+  }
+
+  if (normalized.endsWith('-media')) {
+    return normalized;
+  }
+
+  return `${normalized}-media`;
+}
+
+function getClientForChannel(channel) {
+  return channel === MEDIA_CHANNEL ? state.mediaClient : state.controlClient;
+}
+
+function resetBridgeClientState() {
+  state.controlClient = null;
+  state.mediaClient = null;
+  state.controlReady = false;
+  state.mediaReady = false;
+  state.readyEmitted = false;
+  state.subscriptions.clear();
+  state.controlIdentifier = '';
+  state.mediaIdentifier = '';
+  state.inboundScreenSharePolicy = {
+    enabled: false,
+    sessionId: null,
+    sourceAddress: null,
+    expiresAtUnixMs: 0
+  };
+}
+
+function maybeEmitReady() {
+  if (state.readyEmitted || !state.controlReady || !state.mediaReady) {
+    return;
+  }
+
+  state.readyEmitted = true;
+  emitJson({
+    event: 'ready',
+    address: getClientAddress(state.controlClient),
+    controlAddress: getClientAddress(state.controlClient),
+    mediaAddress: getClientAddress(state.mediaClient),
+    ...(state.connectId ? { connectId: state.connectId } : {})
+  });
+}
+
 function normalizeMessageEvent(args) {
   if (args.length === 1 && args[0] && typeof args[0] === 'object') {
     const msg = args[0];
@@ -328,7 +385,9 @@ function tryParseInboundScreenShare(payload) {
     }
 
     const type = typeof parsed.type === 'string' ? parsed.type.trim() : '';
-    if (type !== 'screenshare.frame.v1' && type !== 'screenshare.stop.v1') {
+    if (type !== 'screenshare.frame.v1' &&
+        type !== 'screenshare.frame.v2' &&
+        type !== 'screenshare.stop.v1') {
       return null;
     }
 
@@ -393,17 +452,14 @@ function shouldDropInboundScreenShare(msg) {
   return false;
 }
 
-function attachClientHandlers(client) {
+function attachClientHandlers(client, channel) {
   const onReady = () => {
-    if (state.readyEmitted) {
-      return;
+    if (channel === MEDIA_CHANNEL) {
+      state.mediaReady = true;
+    } else {
+      state.controlReady = true;
     }
-    state.readyEmitted = true;
-    emitJson({
-      event: 'ready',
-      address: getClientAddress(client),
-      ...(state.connectId ? { connectId: state.connectId } : {})
-    });
+    maybeEmitReady();
   };
 
   const onDisconnected = (reason) => {
@@ -416,12 +472,13 @@ function attachClientHandlers(client) {
   const onMessage = (...args) => {
     try {
       const msg = normalizeMessageEvent(args);
-      if (shouldDropInboundScreenShare(msg)) {
+      if (channel === MEDIA_CHANNEL && shouldDropInboundScreenShare(msg)) {
         return;
       }
 
       const evt = {
         event: 'message',
+        channel,
         source: msg.source,
         payloadBase64: msg.payload.toString('base64'),
         isTopic: Boolean(msg.isTopic),
@@ -496,19 +553,7 @@ function attachClientHandlers(client) {
   // which causes a false-ready race ("client not ready" on subscribe/publish).
 }
 
-async function closeClient() {
-  const client = state.client;
-  state.client = null;
-  state.readyEmitted = false;
-  state.subscriptions.clear();
-  state.clientIdentifier = '';
-  state.inboundScreenSharePolicy = {
-    enabled: false,
-    sessionId: null,
-    sourceAddress: null,
-    expiresAtUnixMs: 0
-  };
-
+async function closeSingleClient(client) {
   if (!client) {
     return;
   }
@@ -529,17 +574,26 @@ async function closeClient() {
   }
 }
 
+async function closeClients() {
+  const controlClient = state.controlClient;
+  const mediaClient = state.mediaClient;
+  resetBridgeClientState();
+
+  await closeSingleClient(mediaClient);
+  await closeSingleClient(controlClient);
+}
+
 async function handleConnect(command) {
   if (!nkn) {
     throw new Error('nkn-sdk is not loaded.');
   }
 
-  await closeClient();
+  await closeClients();
   state.connectId = typeof command.connectId === 'string' ? command.connectId : '';
   state.preflightProgressEnabled = Boolean(command.preflightRpcEnabled);
 
   const seed = decodeSeed(command.seedHex, command.seedBase64);
-  const options = {
+  const baseOptions = {
     // MultiClient reliability defaults inspired by production NKN apps.
     numSubClients: 4,
     originalClient: true,
@@ -552,18 +606,19 @@ async function handleConnect(command) {
   };
 
   if (seed) {
-    options.seed = seed;
+    baseOptions.seed = seed;
   }
 
-  if (typeof command.identifier === 'string' && command.identifier.trim().length > 0) {
-    options.identifier = command.identifier.trim();
-  }
+  const controlIdentifier = typeof command.identifier === 'string' && command.identifier.trim().length > 0
+    ? command.identifier.trim()
+    : '';
+  const mediaIdentifier = getMediaIdentifier(controlIdentifier);
 
   const rpcCandidates = rotateCandidates(parseRpcCandidates(command.seedRpc));
   if (rpcCandidates.length > 0) {
     // Keep both keys for compatibility with SDK versions/docs naming differences.
-    options.rpcServerAddr = rpcCandidates[0];
-    options.seedRPCServerAddr = rpcCandidates[0];
+    baseOptions.rpcServerAddr = rpcCandidates[0];
+    baseOptions.seedRPCServerAddr = rpcCandidates[0];
   }
 
   if (state.preflightProgressEnabled) {
@@ -575,27 +630,41 @@ async function handleConnect(command) {
       cacheTtlMs: Number(command.preflightCacheTtlMs) || null,
       ts: Date.now()
     });
-    if (options.rpcServerAddr) {
+    if (baseOptions.rpcServerAddr) {
       emitJson({
         event: 'rpc_selected',
         connectId: state.connectId || null,
-        rpc: options.rpcServerAddr,
+        rpc: baseOptions.rpcServerAddr,
         stage: 'initial',
         ts: Date.now()
       });
     }
   }
 
-  logStderr(`Creating NKN client (rpc=${options.rpcServerAddr || 'default'})`);
+  logStderr(`Creating NKN clients (rpc=${baseOptions.rpcServerAddr || 'default'})`);
   const ClientCtor = nkn.MultiClient || nkn.Client;
   if (typeof ClientCtor !== 'function') {
     throw new Error('NKN Client constructor not found in SDK.');
   }
 
-  const client = new ClientCtor(options);
-  state.client = client;
-  state.clientIdentifier = typeof options.identifier === 'string' ? options.identifier : getClientIdentifier(client);
-  attachClientHandlers(client);
+  const controlOptions = { ...baseOptions };
+  if (controlIdentifier) {
+    controlOptions.identifier = controlIdentifier;
+  }
+
+  const mediaOptions = {
+    ...baseOptions,
+    identifier: mediaIdentifier
+  };
+
+  const controlClient = new ClientCtor(controlOptions);
+  const mediaClient = new ClientCtor(mediaOptions);
+  state.controlClient = controlClient;
+  state.mediaClient = mediaClient;
+  state.controlIdentifier = typeof controlOptions.identifier === 'string' ? controlOptions.identifier : getClientIdentifier(controlClient);
+  state.mediaIdentifier = typeof mediaOptions.identifier === 'string' ? mediaOptions.identifier : getClientIdentifier(mediaClient);
+  attachClientHandlers(controlClient, CONTROL_CHANNEL);
+  attachClientHandlers(mediaClient, MEDIA_CHANNEL);
 
   // If the first bootstrap RPC is unhealthy for this network, try a few alternatives
   // before .NET bridge connect times out.
@@ -632,12 +701,12 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
           ts: Date.now()
         });
       }
-      await closeClient();
+      await closeClients();
       state.connectId = typeof originalCommand.connectId === 'string' ? originalCommand.connectId : '';
       state.preflightProgressEnabled = Boolean(originalCommand.preflightRpcEnabled);
 
       const seed = decodeSeed(originalCommand.seedHex, originalCommand.seedBase64);
-      const options = {
+      const baseOptions = {
         numSubClients: 4,
         originalClient: true,
         reconnectIntervalMin: 1000,
@@ -649,19 +718,36 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
       };
 
       if (seed) {
-        options.seed = seed;
+        baseOptions.seed = seed;
       }
 
-      if (typeof originalCommand.identifier === 'string' && originalCommand.identifier.trim().length > 0) {
-        options.identifier = originalCommand.identifier.trim();
-      }
+      const controlIdentifier = typeof originalCommand.identifier === 'string' && originalCommand.identifier.trim().length > 0
+        ? originalCommand.identifier.trim()
+        : '';
+      const mediaIdentifier = getMediaIdentifier(controlIdentifier);
 
       const ClientCtor = nkn.MultiClient || nkn.Client;
-      const client = new ClientCtor(options);
-      state.client = client;
+      const controlOptions = { ...baseOptions };
+      if (controlIdentifier) {
+        controlOptions.identifier = controlIdentifier;
+      }
+
+      const mediaOptions = {
+        ...baseOptions,
+        identifier: mediaIdentifier
+      };
+
+      const controlClient = new ClientCtor(controlOptions);
+      const mediaClient = new ClientCtor(mediaOptions);
+      state.controlClient = controlClient;
+      state.mediaClient = mediaClient;
+      state.controlReady = false;
+      state.mediaReady = false;
       state.readyEmitted = false;
-      state.clientIdentifier = typeof options.identifier === 'string' ? options.identifier : getClientIdentifier(client);
-      attachClientHandlers(client);
+      state.controlIdentifier = typeof controlOptions.identifier === 'string' ? controlOptions.identifier : getClientIdentifier(controlClient);
+      state.mediaIdentifier = typeof mediaOptions.identifier === 'string' ? mediaOptions.identifier : getClientIdentifier(mediaClient);
+      attachClientHandlers(controlClient, CONTROL_CHANNEL);
+      attachClientHandlers(mediaClient, MEDIA_CHANNEL);
       if (state.preflightProgressEnabled) {
         emitJson({
           event: 'rpc_selected',
@@ -682,16 +768,17 @@ function delay(ms) {
 }
 
 async function callClientMethod(methodName, args) {
-  if (!state.client) {
+  const client = state.controlClient;
+  if (!client) {
     throw new Error('Not connected.');
   }
 
-  const fn = state.client[methodName];
+  const fn = client[methodName];
   if (typeof fn !== 'function') {
     throw new Error(`Client method not available: ${methodName}`);
   }
 
-  const result = fn.apply(state.client, args);
+  const result = fn.apply(client, args);
   if (result && typeof result.then === 'function') {
     return await result;
   }
@@ -706,8 +793,8 @@ async function handleSubscribe(command) {
   }
 
   // Prefer SDK method, but track locally either way.
-  if (state.client && typeof state.client.subscribe === 'function') {
-    const identifier = String(state.clientIdentifier || getClientIdentifier(state.client) || '').trim();
+  if (state.controlClient && typeof state.controlClient.subscribe === 'function') {
+    const identifier = String(state.controlIdentifier || getClientIdentifier(state.controlClient) || '').trim();
     try {
       await callClientMethod('subscribe', [topic, DEFAULT_SUBSCRIBE_DURATION, identifier]);
     } catch (error) {
@@ -716,7 +803,7 @@ async function handleSubscribe(command) {
       }
       // Treat known txpool duplicate subscription races as success.
     }
-  } else if (!state.client) {
+  } else if (!state.controlClient) {
     throw new Error('Not connected.');
   } else {
     throw new Error('subscribe is not supported by this SDK client type.');
@@ -731,8 +818,8 @@ async function handleUnsubscribe(command) {
     throw new Error('topic is required.');
   }
 
-  if (state.client && typeof state.client.unsubscribe === 'function') {
-    const identifier = String(state.clientIdentifier || getClientIdentifier(state.client) || '').trim();
+  if (state.controlClient && typeof state.controlClient.unsubscribe === 'function') {
+    const identifier = String(state.controlIdentifier || getClientIdentifier(state.controlClient) || '').trim();
     try {
       await callClientMethod('unsubscribe', [topic, identifier]);
     } catch (error) {
@@ -741,7 +828,7 @@ async function handleUnsubscribe(command) {
       }
       // Treat known txpool duplicate subscription unsubscribe races as success.
     }
-  } else if (!state.client) {
+  } else if (!state.controlClient) {
     throw new Error('Not connected.');
   } else {
     throw new Error('unsubscribe is not supported by this SDK client type.');
@@ -780,8 +867,26 @@ async function handleSend(command) {
     throw new Error('destination is required.');
   }
 
+  const channel = typeof command.channel === 'string' ? command.channel.trim().toLowerCase() : CONTROL_CHANNEL;
+  if (channel !== CONTROL_CHANNEL && channel !== MEDIA_CHANNEL) {
+    throw new Error('channel must be control or media.');
+  }
+
+  const client = getClientForChannel(channel);
+  if (!client) {
+    throw new Error(`Client not connected for channel: ${channel}`);
+  }
+
   const payload = toBufferFromBase64(command.payloadBase64);
-  await callClientMethod('send', [destination, payload, { noReply: true }]);
+  const fn = client.send;
+  if (typeof fn !== 'function') {
+    throw new Error(`Client method not available: send (${channel})`);
+  }
+
+  const result = fn.apply(client, [destination, payload, { noReply: true }]);
+  if (result && typeof result.then === 'function') {
+    await result;
+  }
 }
 
 async function handleSetScreenSharePolicy(command) {
@@ -808,7 +913,7 @@ async function handleSetScreenSharePolicy(command) {
 
 async function handleShutdown() {
   state.shuttingDown = true;
-  await closeClient();
+  await closeClients();
   emitJson({ event: 'disconnected', reason: 'shutdown' });
   process.exit(0);
 }

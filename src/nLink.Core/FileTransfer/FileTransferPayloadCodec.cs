@@ -103,6 +103,18 @@ public static class FileTransferPayloadCodec
         return best;
     }
 
+    public static byte[] Serialize(FileTransferWindowUpdateV2 msg)
+    {
+        ArgumentNullException.ThrowIfNull(msg);
+        return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
+    }
+
+    public static byte[] Serialize(FileTransferMissingRangeV1 msg)
+    {
+        ArgumentNullException.ThrowIfNull(msg);
+        return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
+    }
+
     public static byte[] Serialize(FileTransferCancelV1 msg)
     {
         ArgumentNullException.ThrowIfNull(msg);
@@ -237,6 +249,55 @@ public static class FileTransferPayloadCodec
             SessionId = sessionId,
             TransferId = transferId,
             DataBase64 = dataBase64,
+        };
+        return true;
+    }
+
+    public static bool TryDeserializeWindowUpdate(ReadOnlySpan<byte> utf8Json, out FileTransferWindowUpdateV2 msg)
+    {
+        msg = default!;
+        if (!TryDeserialize(utf8Json, out FileTransferWindowUpdateV2? parsed) ||
+            parsed is null ||
+            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.WindowUpdateTypeV2, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
+            parsed.NextExpectedChunkIndex < 0 ||
+            parsed.GrantedUntilChunkIndexExclusive < parsed.NextExpectedChunkIndex ||
+            parsed.GrantedUntilChunkIndexExclusive - parsed.NextExpectedChunkIndex > FileTransferProtocol.MaxWindowGrantChunkCount ||
+            parsed.BytesReceived < 0)
+        {
+            return false;
+        }
+
+        msg = parsed with
+        {
+            Kind = FileTransferProtocol.Kind,
+            Type = FileTransferProtocol.WindowUpdateTypeV2,
+            SessionId = sessionId,
+            TransferId = transferId,
+        };
+        return true;
+    }
+
+    public static bool TryDeserializeMissingRange(ReadOnlySpan<byte> utf8Json, out FileTransferMissingRangeV1 msg)
+    {
+        msg = default!;
+        if (!TryDeserialize(utf8Json, out FileTransferMissingRangeV1? parsed) ||
+            parsed is null ||
+            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.MissingRangeTypeV1, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
+            parsed.NextExpectedChunkIndex < 0 ||
+            parsed.HighestBufferedChunkIndex < -1 ||
+            !TryNormalizeChunkRanges(parsed.Ranges, out var normalizedRanges) ||
+            (parsed.HighestBufferedChunkIndex >= 0 && parsed.HighestBufferedChunkIndex < parsed.NextExpectedChunkIndex))
+        {
+            return false;
+        }
+
+        msg = parsed with
+        {
+            Kind = FileTransferProtocol.Kind,
+            Type = FileTransferProtocol.MissingRangeTypeV1,
+            SessionId = sessionId,
+            TransferId = transferId,
+            Ranges = normalizedRanges,
         };
         return true;
     }
@@ -465,6 +526,41 @@ public static class FileTransferPayloadCodec
         {
             return false;
         }
+    }
+
+    private static bool TryNormalizeChunkRanges(
+        IReadOnlyList<FileTransferChunkRangeV1>? ranges,
+        out IReadOnlyList<FileTransferChunkRangeV1> normalized)
+    {
+        normalized = [];
+        if (ranges is null || ranges.Count == 0 || ranges.Count > FileTransferProtocol.MaxMissingRangeCount)
+        {
+            return false;
+        }
+
+        var normalizedRanges = new FileTransferChunkRangeV1[ranges.Count];
+        var previousEnd = -1;
+        for (var index = 0; index < ranges.Count; index++)
+        {
+            var range = ranges[index];
+            if (range is null ||
+                range.StartChunkIndex < 0 ||
+                range.EndChunkIndexInclusive < range.StartChunkIndex ||
+                range.StartChunkIndex <= previousEnd)
+            {
+                return false;
+            }
+
+            normalizedRanges[index] = new FileTransferChunkRangeV1
+            {
+                StartChunkIndex = range.StartChunkIndex,
+                EndChunkIndexInclusive = range.EndChunkIndexInclusive,
+            };
+            previousEnd = range.EndChunkIndexInclusive;
+        }
+
+        normalized = normalizedRanges;
+        return true;
     }
 
     private static string BuildChunkSerializationDiagnostics(FileTransferChunkV1 msg, int serializedLength)

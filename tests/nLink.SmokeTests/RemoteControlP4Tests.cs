@@ -1086,6 +1086,33 @@ public sealed class RemoteControlP4Tests
     }
 
     [Fact]
+    public async Task HelperDisplayInfoFirstReceive_WhenRequesting_DoesNotAutoStopRemoteControl()
+    {
+        var transport = new TestRemoteControlTransport();
+        var injector = new CountingRemoteInputInjector();
+        var mapper = new FixedRemoteCoordinateMapper();
+        using var runtime = CreateRuntime(transport, injector, mapper);
+        AttachConnectedRuntime(runtime, transport, SessionRuntimeRole.Helper);
+        SetRemoteControlState(runtime, ControlState.Requesting, "helpee-peer", "req-1");
+
+        var first = CreateDisplayInfoMessage(
+            displayId: "primary",
+            revision: 1,
+            captureX: 0,
+            captureY: 0,
+            captureWidth: 1920,
+            captureHeight: 1080,
+            frameWidth: 960,
+            frameHeight: 540);
+
+        transport.InjectIncomingControlDisplayInfo(first, peerId: "helpee-peer");
+        await WaitUntilAsync(() => runtime.RemoteControlMappingAvailable, TimeSpan.FromSeconds(1));
+
+        Assert.Equal(ControlState.Requesting, runtime.ControlState);
+        Assert.Equal(0, transport.SentControlStopCount);
+    }
+
+    [Fact]
     public void DefaultRemoteCoordinateMapper_ClampsCoordinates()
     {
         var (x, y) = DefaultRemoteCoordinateMapper.MapNormalizedToBounds(

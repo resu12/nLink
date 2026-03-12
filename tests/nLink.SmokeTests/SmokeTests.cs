@@ -1782,6 +1782,11 @@ public class SmokeTests
             Assert.Contains("remote_control_summary:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_summary:", copied!, StringComparison.Ordinal);
             Assert.Contains("file_transfer_summary:", copied!, StringComparison.Ordinal);
+            Assert.Contains("transport_lane_summary:", copied!, StringComparison.Ordinal);
+            Assert.Contains("control_plane:", copied!, StringComparison.Ordinal);
+            Assert.Contains("media_plane:", copied!, StringComparison.Ordinal);
+            Assert.Contains("recovery:", copied!, StringComparison.Ordinal);
+            Assert.Contains("transport_correlation:", copied!, StringComparison.Ordinal);
             Assert.Contains("file_transfer_inbound_state:", copied!, StringComparison.Ordinal);
             Assert.Contains("file_transfer_outbound_state:", copied!, StringComparison.Ordinal);
             Assert.Contains("file_transfer_last_failure_code:", copied!, StringComparison.Ordinal);
@@ -1799,6 +1804,9 @@ public class SmokeTests
             Assert.Contains("screenshare_messages_sent:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_payload_bytes_sent:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_bridge_bytes_sent:", copied!, StringComparison.Ordinal);
+            Assert.Contains("control_lane:", copied!, StringComparison.Ordinal);
+            Assert.Contains("file_transfer_lane:", copied!, StringComparison.Ordinal);
+            Assert.Contains("screenshare_lane:", copied!, StringComparison.Ordinal);
             Assert.Contains("high_priority_control_queue_overflows:", copied!, StringComparison.Ordinal);
             Assert.Contains("high_priority_control_rejected:", copied!, StringComparison.Ordinal);
             Assert.Contains("high_priority_control_coalesced:", copied!, StringComparison.Ordinal);
@@ -2709,6 +2717,92 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task SessionRuntime_NknControlRequestAckTimeout_DoesNotDisconnectSession()
+    {
+        FakeNknClient.ResetNetwork();
+
+        try
+        {
+            var options = NknTransportOptions.Load();
+            using var helpeeTransport = new NknSignalingTransport(
+                new FakeNknClient("helpee.controlrequest.timeout.addr." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helpee-controlrequest-timeout-test", "helpee.controlrequest.timeout.test.fake"));
+            using var helperTransport = new NknSignalingTransport(
+                new FakeNknClient("helper.controlrequest.timeout.addr." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helper-controlrequest-timeout-test", "helper.controlrequest.timeout.test.fake"));
+            using var helpeeRuntime = new SessionRuntime(() => helpeeTransport);
+            using var helperRuntime = new SessionRuntime(() => helperTransport);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(50));
+
+            var helperDisconnectedCount = 0;
+            var helperRemoteEndCount = 0;
+            var helpeeDisconnectedCount = 0;
+            var helpeeRemoteEndCount = 0;
+            helperRuntime.Disconnected += (_, _) => Interlocked.Increment(ref helperDisconnectedCount);
+            helperRuntime.RemoteSessionEnded += (_, _) => Interlocked.Increment(ref helperRemoteEndCount);
+            helpeeRuntime.Disconnected += (_, _) => Interlocked.Increment(ref helpeeDisconnectedCount);
+            helpeeRuntime.RemoteSessionEnded += (_, _) => Interlocked.Increment(ref helpeeRemoteEndCount);
+
+            var helperClient = Assert.IsType<FakeNknClient>(GetPrivateField(helperTransport, "client"));
+            helperClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.ControlRequest)
+                {
+                    return Task.FromResult(true);
+                }
+
+                return Task.FromResult(false);
+            };
+
+            await helpeeRuntime.StartHelpeeAsync(cts.Token);
+            await WaitUntilAsync(() => helpeeRuntime.CurrentLocalPeerAddress is not null, TimeSpan.FromSeconds(3));
+
+            var invite = CreateValidatedInviteForTarget(
+                GetHostedAddressOrThrow(helpeeRuntime),
+                out var rawToken,
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl);
+            var connectTask = helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
+
+            await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(3));
+            await helpeeRuntime.ApproveAsync(cts.Token);
+            await connectTask;
+
+            await WaitUntilAsync(
+                () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                      helperRuntime.State == SessionRuntimeState.Connected &&
+                      helpeeRuntime.ControlState == ControlState.Off &&
+                      helperRuntime.ControlState == ControlState.Off,
+                TimeSpan.FromSeconds(4));
+
+            var requested = await helperRuntime.RequestRemoteControlAsync(cts.Token);
+
+            Assert.True(requested);
+            Assert.Equal(SessionRuntimeState.Connected, helperRuntime.State);
+            Assert.Equal(SessionRuntimeState.Connected, helpeeRuntime.State);
+            Assert.Equal(ControlState.Requesting, helperRuntime.ControlState);
+            Assert.Equal(ControlState.Off, helpeeRuntime.ControlState);
+            Assert.False(helpeeRuntime.HasPendingRemoteControlConsentPrompt);
+            Assert.Equal(0, Volatile.Read(ref helperDisconnectedCount));
+            Assert.Equal(0, Volatile.Read(ref helperRemoteEndCount));
+            Assert.Equal(0, Volatile.Read(ref helpeeDisconnectedCount));
+            Assert.Equal(0, Volatile.Read(ref helpeeRemoteEndCount));
+            Assert.True(helperRuntime.SecurityState.ApprovalGranted);
+            Assert.True(helpeeRuntime.SecurityState.ApprovalGranted);
+
+            var diagnostics = NknRuntimeDiagnostics.Snapshot();
+            Assert.Equal("control_request_ack_timeout", diagnostics.LastError);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task SessionRuntime_TrySendChatText_RequiresGrantedCapability()
     {
         var hostAddress = CreateTestPeerAddress();
@@ -3357,6 +3451,94 @@ public class SmokeTests
 
         Assert.False(runtime.CanPerform(SessionCapability.FileTransfer));
         Assert.False(allowed);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_FileTransferFlowControl_RemoteControlActive_UsesInteractiveMode()
+    {
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(), SessionRuntimeWatchdogOptions.Default with { Enabled = false });
+
+        SetPrivateField(
+            runtime,
+            "remoteControlSessionState",
+            RemoteControlSessionState.Default with { ControlState = ControlState.Active });
+
+        var policy = Assert.IsType<FileTransferFlowControlPolicy>(InvokePrivateMethod(runtime, "ResolveFileTransferFlowControlPolicy")!);
+
+        Assert.Equal(FileTransferFlowControlMode.Interactive, policy.Mode);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_FileTransferFlowControl_PendingRequestWithActiveTransfer_UsesInteractiveCriticalMode()
+    {
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(), SessionRuntimeWatchdogOptions.Default with { Enabled = false });
+        var service = Assert.IsType<SessionFileTransferService>(GetPrivateField(runtime, "fileTransferService"));
+        var contextType = typeof(SessionFileTransferService).GetNestedType("OutboundTransferContext", BindingFlags.NonPublic);
+        Assert.NotNull(contextType);
+        var constructor = contextType!.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic).Single();
+        FileTransferReadStreamFactory openReadStreamAsync =
+            _ => Task.FromResult<Stream>(new MemoryStream(new byte[] { 0x01 }, writable: false));
+        var context = constructor.Invoke(
+            new object?[]
+            {
+                new FileTransferSendDescriptor("runtime-flow-policy.bin", 1, "transfer_runtime_flow_policy", ChunkSizeBytes: 1),
+                openReadStreamAsync,
+                FileTransferFlowControlPolicy.BackgroundDefault,
+            });
+
+        SetPrivateField(service, "outboundTransfer", context);
+        SetPrivateField(
+            runtime,
+            "remoteControlSessionState",
+            RemoteControlSessionState.Default with { ControlState = ControlState.Requesting });
+
+        var criticalPolicy = Assert.IsType<FileTransferFlowControlPolicy>(InvokePrivateMethod(runtime, "ResolveFileTransferFlowControlPolicy")!);
+        Assert.Equal(FileTransferFlowControlMode.InteractiveCritical, criticalPolicy.Mode);
+
+        SetPrivateField(
+            runtime,
+            "remoteControlSessionState",
+            RemoteControlSessionState.Default with { ControlState = ControlState.Active });
+
+        var interactivePolicy = Assert.IsType<FileTransferFlowControlPolicy>(InvokePrivateMethod(runtime, "ResolveFileTransferFlowControlPolicy")!);
+        Assert.Equal(FileTransferFlowControlMode.Interactive, interactivePolicy.Mode);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_FileTransferChanged_RefreshesStartupPolicy_ToInteractiveBeforeGrant()
+    {
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(), SessionRuntimeWatchdogOptions.Default with { Enabled = false });
+        var service = Assert.IsType<SessionFileTransferService>(GetPrivateField(runtime, "fileTransferService"));
+        var contextType = typeof(SessionFileTransferService).GetNestedType("InboundTransferContext", BindingFlags.NonPublic);
+        Assert.NotNull(contextType);
+        var constructor = contextType!.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic).Single();
+        var offer = new FileTransferOfferV1
+        {
+            SessionId = "runtime_startup_policy",
+            TransferId = "transfer_runtime_startup_policy",
+            FileName = "runtime-startup-policy.bin",
+            FileSizeBytes = 1024,
+            Sha256Base64 = Convert.ToBase64String(new byte[32]),
+        };
+        var context = constructor.Invoke(
+            new object?[]
+            {
+                offer,
+                FileTransferFlowControlPolicy.BackgroundDefault,
+            });
+
+        SetPrivateField(service, "inboundTransfer", context);
+        SetPrivateField(service, "currentFlowControlPolicy", FileTransferFlowControlPolicy.BackgroundDefault);
+        SetPrivateField(runtime, "remoteScreenShareActiveForFileTransfer", 1);
+
+        var snapshot = Assert.IsType<SessionFileTransferSnapshot>(InvokePrivateMethod(service, "CreateSnapshot")!);
+        InvokePrivateMethod(runtime, "OnFileTransferChanged", service, new SessionFileTransferSnapshotChangedEventArgs(snapshot));
+
+        var flow = service.GetFlowControlDiagnosticsSnapshot();
+        Assert.Equal(FileTransferFlowControlMode.Interactive, flow.FlowMode);
     }
 
     [Trait("Category", "Smoke")]
@@ -7716,6 +7898,394 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task NknSignalingTransport_ControlRequest_RetriesUntilDelivered_WhenFirstPacketIsDropped()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.controlrequestretry.address");
+            var helperClient = new FakeNknClient("helper.controlrequestretry.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var controlRequestAttempts = 0;
+            var controlRequestReceived = new TaskCompletionSource<ControlRequestMessageV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            host.RemoteControlRequestReceived += (_, e) => controlRequestReceived.TrySetResult(e.Message);
+
+            helperClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (!string.Equals(destination, host.LocalPeerAddress, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(true);
+                }
+
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.ControlRequest)
+                {
+                    return Task.FromResult(true);
+                }
+
+                var nextAttempt = Interlocked.Increment(ref controlRequestAttempts);
+                return Task.FromResult(nextAttempt != 1);
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.RemoteControl | InviteCapabilities.ScreenShare);
+
+            await helper.SendControlRequestAsync(
+                new ControlRequestMessageV1
+                {
+                    SessionId = sessionId,
+                    RequestId = "control_req_retry",
+                    Caps = new[] { "mouse", "keyboard" },
+                    Reason = "retry regression",
+                },
+                cts.Token);
+
+            var received = await controlRequestReceived.Task.WaitAsync(TimeSpan.FromSeconds(4), cts.Token);
+            Assert.Equal("control_req_retry", received.RequestId);
+            Assert.True(Volatile.Read(ref controlRequestAttempts) >= 2);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknSignalingTransport_ControlRequest_RetriesUntilAckReceived_WhenFirstAckIsDropped()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.controlrequestackdrop.address");
+            var helperClient = new FakeNknClient("helper.controlrequestackdrop.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var controlRequestAttempts = 0;
+            var ackDrops = 0;
+            var ackSends = 0;
+            var controlRequestReceiveCount = 0;
+            var controlRequestReceived = new TaskCompletionSource<ControlRequestMessageV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            host.RemoteControlRequestReceived += (_, e) =>
+            {
+                Interlocked.Increment(ref controlRequestReceiveCount);
+                controlRequestReceived.TrySetResult(e.Message);
+            };
+
+            helperClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (!string.Equals(destination, host.LocalPeerAddress, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(true);
+                }
+
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.ControlRequest)
+                {
+                    return Task.FromResult(true);
+                }
+
+                Interlocked.Increment(ref controlRequestAttempts);
+                return Task.FromResult(true);
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.RemoteControl | InviteCapabilities.ScreenShare);
+
+            hostClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.Ack)
+                {
+                    return Task.FromResult(true);
+                }
+
+                Interlocked.Increment(ref ackSends);
+                var nextDrop = Interlocked.Increment(ref ackDrops);
+                return Task.FromResult(nextDrop != 1);
+            };
+
+            await helper.SendControlRequestAsync(
+                new ControlRequestMessageV1
+                {
+                    SessionId = sessionId,
+                    RequestId = "control_req_ack_retry",
+                    Caps = new[] { "mouse", "keyboard" },
+                    Reason = "ack retry regression",
+                },
+                cts.Token);
+
+            var received = await controlRequestReceived.Task.WaitAsync(TimeSpan.FromSeconds(4), cts.Token);
+            Assert.Equal("control_req_ack_retry", received.RequestId);
+            Assert.True(Volatile.Read(ref controlRequestAttempts) >= 2);
+            Assert.True(Volatile.Read(ref ackSends) >= 2);
+            Assert.Equal(1, Volatile.Read(ref controlRequestReceiveCount));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknSignalingTransport_ControlRequest_RetriesWithFreshEnvelopeId_WhenPreviousEnvelopeIdKeepsDropping()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.controlrequestfreshid.address");
+            var helperClient = new FakeNknClient("helper.controlrequestfreshid.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            string? firstMessageId = null;
+            var distinctMessageIds = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
+            var controlRequestReceived = new TaskCompletionSource<ControlRequestMessageV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            host.RemoteControlRequestReceived += (_, e) => controlRequestReceived.TrySetResult(e.Message);
+
+            helperClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (!string.Equals(destination, host.LocalPeerAddress, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(true);
+                }
+
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.ControlRequest)
+                {
+                    return Task.FromResult(true);
+                }
+
+                distinctMessageIds.TryAdd(env.MessageId, 0);
+                firstMessageId ??= env.MessageId;
+                return Task.FromResult(!string.Equals(env.MessageId, firstMessageId, StringComparison.Ordinal));
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.RemoteControl | InviteCapabilities.ScreenShare);
+
+            await helper.SendControlRequestAsync(
+                new ControlRequestMessageV1
+                {
+                    SessionId = sessionId,
+                    RequestId = "control_req_fresh_id_retry",
+                    Caps = new[] { "mouse", "keyboard" },
+                    Reason = "fresh message id retry regression",
+                },
+                cts.Token);
+
+            var received = await controlRequestReceived.Task.WaitAsync(TimeSpan.FromSeconds(4), cts.Token);
+            Assert.Equal("control_req_fresh_id_retry", received.RequestId);
+            Assert.True(distinctMessageIds.Count >= 2);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknSignalingTransport_ControlResponse_RetriesUntilAckReceived_WhenFirstAckIsDropped()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.controlresponseackdrop.address");
+            var helperClient = new FakeNknClient("helper.controlresponseackdrop.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var responseAttempts = 0;
+            var ackDrops = 0;
+            var ackSends = 0;
+            var responseReceiveCount = 0;
+            var responseReceived = new TaskCompletionSource<ControlResponseMessageV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            helper.RemoteControlResponseReceived += (_, e) =>
+            {
+                Interlocked.Increment(ref responseReceiveCount);
+                responseReceived.TrySetResult(e.Message);
+            };
+
+            hostClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (!string.Equals(destination, helper.LocalPeerAddress, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(true);
+                }
+
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.ControlResponse)
+                {
+                    return Task.FromResult(true);
+                }
+
+                Interlocked.Increment(ref responseAttempts);
+                return Task.FromResult(true);
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.RemoteControl | InviteCapabilities.ScreenShare);
+
+            helperClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.Ack)
+                {
+                    return Task.FromResult(true);
+                }
+
+                Interlocked.Increment(ref ackSends);
+                var nextDrop = Interlocked.Increment(ref ackDrops);
+                return Task.FromResult(nextDrop != 1);
+            };
+
+            await host.SendControlResponseAsync(
+                new ControlResponseMessageV1
+                {
+                    SessionId = sessionId,
+                    RequestId = "control_response_ack_retry",
+                    Decision = "allow",
+                    ConsentToken = "token",
+                    TtlMs = 60000,
+                },
+                cts.Token);
+
+            var received = await responseReceived.Task.WaitAsync(TimeSpan.FromSeconds(4), cts.Token);
+            Assert.Equal("control_response_ack_retry", received.RequestId);
+            Assert.True(Volatile.Read(ref responseAttempts) >= 2);
+            Assert.True(Volatile.Read(ref ackSends) >= 2);
+            Assert.Equal(1, Volatile.Read(ref responseReceiveCount));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknSignalingTransport_ControlStart_RetriesUntilAckReceived_WhenFirstAckIsDropped()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.controlstartackdrop.address");
+            var helperClient = new FakeNknClient("helper.controlstartackdrop.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var startAttempts = 0;
+            var ackDrops = 0;
+            var ackSends = 0;
+            var startReceiveCount = 0;
+            var startReceived = new TaskCompletionSource<ControlStartMessageV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            helper.RemoteControlStartReceived += (_, e) =>
+            {
+                Interlocked.Increment(ref startReceiveCount);
+                startReceived.TrySetResult(e.Message);
+            };
+
+            hostClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (!string.Equals(destination, helper.LocalPeerAddress, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(true);
+                }
+
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.ControlStart)
+                {
+                    return Task.FromResult(true);
+                }
+
+                Interlocked.Increment(ref startAttempts);
+                return Task.FromResult(true);
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.RemoteControl | InviteCapabilities.ScreenShare);
+
+            helperClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.Ack)
+                {
+                    return Task.FromResult(true);
+                }
+
+                Interlocked.Increment(ref ackSends);
+                var nextDrop = Interlocked.Increment(ref ackDrops);
+                return Task.FromResult(nextDrop != 1);
+            };
+
+            await host.SendControlStartAsync(
+                new ControlStartMessageV1
+                {
+                    SessionId = sessionId,
+                    RequestId = "control_start_ack_retry",
+                    ConsentToken = "token",
+                },
+                cts.Token);
+
+            var received = await startReceived.Task.WaitAsync(TimeSpan.FromSeconds(4), cts.Token);
+            Assert.Equal("control_start_ack_retry", received.RequestId);
+            Assert.True(Volatile.Read(ref startAttempts) >= 2);
+            Assert.True(Volatile.Read(ref ackSends) >= 2);
+            Assert.Equal(1, Volatile.Read(ref startReceiveCount));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task NknSignalingTransport_HandshakeStart_RetriesUntilDelivered_WhenFirstPacketIsDropped()
     {
         FakeNknClient.ResetNetwork();
@@ -7874,6 +8444,791 @@ public class SmokeTests
 
             var complete = await completeReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             Assert.Equal(expectedHash, complete.Sha256Base64);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferWindowUpdate_DoesNotRetryOrCreateAckWaiter_WhenAckIsDropped()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.windowupdate.ackdrop.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.windowupdate.ackdrop.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var offerReceived = new TaskCompletionSource<FileTransferOfferV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var startReceived = new TaskCompletionSource<FileTransferStartV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var windowUpdateReceived = new TaskCompletionSource<FileTransferWindowUpdateV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var windowUpdateReceiveCount = 0;
+            var windowUpdateSendCount = 0;
+            var droppedAckCount = 0;
+
+            host.FileTransferOfferReceived += (_, e) => offerReceived.TrySetResult(e.Message);
+            helper.FileTransferAcceptReceived += (_, e) => acceptReceived.TrySetResult(e.Message);
+            host.FileTransferStartReceived += (_, e) => startReceived.TrySetResult(e.Message);
+            helper.FileTransferWindowUpdateReceived += (_, e) =>
+            {
+                Interlocked.Increment(ref windowUpdateReceiveCount);
+                windowUpdateReceived.TrySetResult(e.Message);
+            };
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_window_update_ackdrop";
+            var expectedHash = Convert.ToBase64String(SHA256.HashData(new byte[] { 0x01, 0x02, 0x03 }));
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "window-update.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                },
+                cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await helper.SendFileTransferStartAsync(
+                new FileTransferStartV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "window-update.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                    ChunkCount = 4,
+                    ChunkSizeBytes = 1,
+                },
+                cts.Token);
+            await startReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            helperClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) || env.Type != MsgType.Ack)
+                {
+                    return Task.FromResult(true);
+                }
+
+                Interlocked.Increment(ref droppedAckCount);
+                return Task.FromResult(false);
+            };
+
+            hostClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) || env.Type != MsgType.FileTransferWindowUpdate)
+                {
+                    return Task.FromResult(true);
+                }
+
+                Interlocked.Increment(ref windowUpdateSendCount);
+                return Task.FromResult(true);
+            };
+
+            await host.SendFileTransferWindowUpdateAsync(
+                new FileTransferWindowUpdateV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    NextExpectedChunkIndex = 0,
+                    GrantedUntilChunkIndexExclusive = 4,
+                    BytesReceived = 0,
+                },
+                cts.Token);
+
+            var received = await windowUpdateReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.Equal(transferId, received.TransferId);
+            Assert.Equal(4, received.GrantedUntilChunkIndexExclusive);
+
+            await Task.Delay(1500, cts.Token);
+
+            Assert.Equal(1, Volatile.Read(ref windowUpdateSendCount));
+            Assert.Equal(1, Volatile.Read(ref windowUpdateReceiveCount));
+            Assert.True(Volatile.Read(ref droppedAckCount) >= 1);
+            Assert.Equal(0, (int)GetPrivateProperty(GetPrivateField(host, "pendingAcks")!, "Count")!);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferMissingRange_DoesNotRetryOrCreateAckWaiter_WhenAckIsDropped()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.missingrange.ackdrop.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.missingrange.ackdrop.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var offerReceived = new TaskCompletionSource<FileTransferOfferV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var startReceived = new TaskCompletionSource<FileTransferStartV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var missingRangeReceived = new TaskCompletionSource<FileTransferMissingRangeV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var missingRangeReceiveCount = 0;
+            var missingRangeSendCount = 0;
+
+            host.FileTransferOfferReceived += (_, e) => offerReceived.TrySetResult(e.Message);
+            helper.FileTransferAcceptReceived += (_, e) => acceptReceived.TrySetResult(e.Message);
+            host.FileTransferStartReceived += (_, e) => startReceived.TrySetResult(e.Message);
+            helper.FileTransferMissingRangeReceived += (_, e) =>
+            {
+                Interlocked.Increment(ref missingRangeReceiveCount);
+                missingRangeReceived.TrySetResult(e.Message);
+            };
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_missing_range_ackdrop";
+            var expectedHash = Convert.ToBase64String(SHA256.HashData(new byte[] { 0x01, 0x02, 0x03 }));
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "missing-range.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                },
+                cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await helper.SendFileTransferStartAsync(
+                new FileTransferStartV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "missing-range.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                    ChunkCount = 8,
+                    ChunkSizeBytes = 1,
+                },
+                cts.Token);
+            await startReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            helperClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) || env.Type != MsgType.Ack)
+                {
+                    return Task.FromResult(true);
+                }
+
+                return Task.FromResult(false);
+            };
+
+            hostClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) || env.Type != MsgType.FileTransferMissingRange)
+                {
+                    return Task.FromResult(true);
+                }
+
+                Interlocked.Increment(ref missingRangeSendCount);
+                return Task.FromResult(true);
+            };
+
+            await host.SendFileTransferMissingRangeAsync(
+                new FileTransferMissingRangeV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    NextExpectedChunkIndex = 0,
+                    HighestBufferedChunkIndex = 3,
+                    Ranges =
+                    [
+                        new FileTransferChunkRangeV1
+                        {
+                            StartChunkIndex = 0,
+                            EndChunkIndexInclusive = 0,
+                        }
+                    ],
+                },
+                cts.Token);
+
+            var received = await missingRangeReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.Equal(transferId, received.TransferId);
+            Assert.Single(received.Ranges);
+            Assert.Equal(0, received.Ranges[0].StartChunkIndex);
+
+            await Task.Delay(1500, cts.Token);
+
+            Assert.Equal(1, Volatile.Read(ref missingRangeSendCount));
+            Assert.Equal(1, Volatile.Read(ref missingRangeReceiveCount));
+            Assert.Equal(0, (int)GetPrivateProperty(GetPrivateField(host, "pendingAcks")!, "Count")!);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferHintLane_CoalescesQueuedWindowUpdates()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.hint.coalesce.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.hint.coalesce.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var offerReceived = new TaskCompletionSource<FileTransferOfferV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var startReceived = new TaskCompletionSource<FileTransferStartV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var windowUpdatesReceived = new List<long>();
+            var releaseFirstHint = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstHintBlocked = 0;
+            var hintSnapshotBefore = NknRuntimeDiagnostics.Snapshot();
+
+            host.FileTransferOfferReceived += (_, e) => offerReceived.TrySetResult(e.Message);
+            helper.FileTransferAcceptReceived += (_, e) => acceptReceived.TrySetResult(e.Message);
+            host.FileTransferStartReceived += (_, e) => startReceived.TrySetResult(e.Message);
+            helper.FileTransferWindowUpdateReceived += (_, e) =>
+            {
+                lock (windowUpdatesReceived)
+                {
+                    windowUpdatesReceived.Add(e.Message.GrantedUntilChunkIndexExclusive);
+                }
+            };
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_hint_coalesced";
+            var expectedHash = Convert.ToBase64String(SHA256.HashData(new byte[] { 0x01, 0x02, 0x03 }));
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "hint-coalesced.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                },
+                cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await helper.SendFileTransferStartAsync(
+                new FileTransferStartV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "hint-coalesced.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                    ChunkCount = 96,
+                    ChunkSizeBytes = 1,
+                },
+                cts.Token);
+            await startReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            hostClient.BeforeSendAsync = async (_, payload, token) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) || env.Type != MsgType.FileTransferWindowUpdate)
+                {
+                    return;
+                }
+
+                if (Interlocked.CompareExchange(ref firstHintBlocked, 1, 0) == 0)
+                {
+                    await releaseFirstHint.Task.WaitAsync(token);
+                }
+            };
+
+            var sendFirst = host.SendFileTransferWindowUpdateAsync(
+                new FileTransferWindowUpdateV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    NextExpectedChunkIndex = 0,
+                    GrantedUntilChunkIndexExclusive = 48,
+                    BytesReceived = 0,
+                },
+                cts.Token);
+
+            var hintLane = GetPrivateField(host, "fileTransferHintOutboundLaneState");
+            Assert.NotNull(hintLane);
+            await WaitUntilAsync(
+                () => (int)GetPrivateProperty(hintLane!, "CurrentInFlight")! >= 1,
+                TimeSpan.FromSeconds(3));
+
+            var sendSecond = host.SendFileTransferWindowUpdateAsync(
+                new FileTransferWindowUpdateV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    NextExpectedChunkIndex = 8,
+                    GrantedUntilChunkIndexExclusive = 64,
+                    BytesReceived = 8,
+                },
+                cts.Token);
+
+            await WaitUntilAsync(
+                () => (int)GetPrivateProperty(hintLane!, "CurrentQueueDepth")! >= 1,
+                TimeSpan.FromSeconds(3));
+
+            var sendThird = host.SendFileTransferWindowUpdateAsync(
+                new FileTransferWindowUpdateV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    NextExpectedChunkIndex = 16,
+                    GrantedUntilChunkIndexExclusive = 80,
+                    BytesReceived = 16,
+                },
+                cts.Token);
+
+            await Task.Delay(200, cts.Token);
+            releaseFirstHint.TrySetResult(true);
+
+            await Task.WhenAll(sendFirst, sendSecond, sendThird).WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+            await WaitUntilAsync(
+                () =>
+                {
+                    lock (windowUpdatesReceived)
+                    {
+                        return windowUpdatesReceived.Count >= 2;
+                    }
+                },
+                TimeSpan.FromSeconds(3));
+
+            long[] grants;
+            lock (windowUpdatesReceived)
+            {
+                grants = windowUpdatesReceived.ToArray();
+            }
+
+            Assert.Equal(2, grants.Length);
+            Assert.Equal(48L, grants[0]);
+            Assert.Equal(80L, grants[1]);
+
+            var hintSnapshotAfter = NknRuntimeDiagnostics.Snapshot();
+            Assert.True(hintSnapshotAfter.FileTransferHintReplaced - hintSnapshotBefore.FileTransferHintReplaced >= 1);
+            Assert.True(hintSnapshotAfter.FileTransferHintSent - hintSnapshotBefore.FileTransferHintSent >= 2);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferStart_RetriesUntilDelivered_WhenFirstPacketIsDropped()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.start.retry.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.start.retry.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            using var sender = new SessionFileTransferService();
+            using var receiver = new SessionFileTransferService();
+
+            sender.AttachTransport(helper);
+            receiver.AttachTransport(host);
+
+            string? firstStartMessageId = null;
+            var distinctStartMessageIds = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
+            helperClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.FileTransferStart)
+                {
+                    return Task.FromResult(true);
+                }
+
+                distinctStartMessageIds.TryAdd(env.MessageId, 0);
+                firstStartMessageId ??= env.MessageId;
+                return Task.FromResult(!string.Equals(env.MessageId, firstStartMessageId, StringComparison.Ordinal));
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+
+            const string transferId = "transfer_start_retry_roundtrip";
+            var payload = Enumerable.Range(0, 32_768).Select(static i => (byte)(i % 251)).ToArray();
+            using var destination = new MemoryStream();
+
+            var started = await sender.TryStartSendAsync(
+                new FileTransferSendDescriptor("start-retry.bin", payload.Length, transferId, ChunkSizeBytes: 4096),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+                cts.Token);
+
+            Assert.NotNull(started);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+
+            var accepted = await receiver.AcceptIncomingTransferAsync(
+                transferId,
+                (_, _) => Task.FromResult<Stream>(destination),
+                cts.Token);
+
+            Assert.NotNull(accepted);
+
+            await WaitUntilAsync(
+                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+                TimeSpan.FromSeconds(8));
+
+            Assert.True(distinctStartMessageIds.Count >= 2);
+            Assert.Equal(payload, destination.ToArray());
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferAccept_CommitsBeforeAckRetry_And_StartCanArriveBeforeAcceptReturns()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.accept.ackdelay.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.accept.ackdelay.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var offerReceived = new TaskCompletionSource<FileTransferOfferV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var startReceived = new TaskCompletionSource<FileTransferStartV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dropFirstAcceptAck = 1;
+            var duplicateAcceptCountBefore = NknRuntimeDiagnostics.Snapshot().FileTransferStartIdempotentAccepts;
+
+            host.FileTransferOfferReceived += (_, e) => offerReceived.TrySetResult(e.Message);
+            helper.FileTransferAcceptReceived += (_, e) => acceptReceived.TrySetResult(e.Message);
+            host.FileTransferStartReceived += (_, e) => startReceived.TrySetResult(e.Message);
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_accept_ackdelay";
+            var expectedHash = Convert.ToBase64String(SHA256.HashData(new byte[] { 0x01, 0x02, 0x03 }));
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "accept-ackdelay.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            helperClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) || env.Type != MsgType.Ack)
+                {
+                    return Task.FromResult(true);
+                }
+
+                return Task.FromResult(Interlocked.Exchange(ref dropFirstAcceptAck, 0) == 0);
+            };
+
+            var acceptTask = host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                },
+                cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.False(acceptTask.IsCompleted);
+
+            var startTask = helper.SendFileTransferStartAsync(
+                new FileTransferStartV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "accept-ackdelay.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                    ChunkCount = 4,
+                    ChunkSizeBytes = 1,
+                },
+                cts.Token);
+
+            await startReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await acceptTask.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+            await startTask.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+
+            var duplicateAcceptCountAfter = NknRuntimeDiagnostics.Snapshot().FileTransferStartIdempotentAccepts;
+            Assert.True(duplicateAcceptCountAfter - duplicateAcceptCountBefore >= 1);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferStart_CommitsBeforeAckRetry_And_DuplicateStartIsAcked()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.start.ackdelay.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.start.ackdelay.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var offerReceived = new TaskCompletionSource<FileTransferOfferV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var startReceived = new TaskCompletionSource<FileTransferStartV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var windowUpdateReceived = new TaskCompletionSource<FileTransferWindowUpdateV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var startReceiveCount = 0;
+            var dropFirstStartAck = 1;
+            var duplicateStartCountBefore = NknRuntimeDiagnostics.Snapshot().FileTransferStartIdempotentAccepts;
+
+            host.FileTransferOfferReceived += (_, e) => offerReceived.TrySetResult(e.Message);
+            helper.FileTransferAcceptReceived += (_, e) => acceptReceived.TrySetResult(e.Message);
+            host.FileTransferStartReceived += (_, e) =>
+            {
+                Interlocked.Increment(ref startReceiveCount);
+                startReceived.TrySetResult(e.Message);
+            };
+            helper.FileTransferWindowUpdateReceived += (_, e) => windowUpdateReceived.TrySetResult(e.Message);
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_start_ackdelay";
+            var expectedHash = Convert.ToBase64String(SHA256.HashData(new byte[] { 0x01, 0x02, 0x03 }));
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "start-ackdelay.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                },
+                cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            hostClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) || env.Type != MsgType.Ack)
+                {
+                    return Task.FromResult(true);
+                }
+
+                return Task.FromResult(Interlocked.Exchange(ref dropFirstStartAck, 0) == 0);
+            };
+
+            var startTask = helper.SendFileTransferStartAsync(
+                new FileTransferStartV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "start-ackdelay.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                    ChunkCount = 4,
+                    ChunkSizeBytes = 1,
+                },
+                cts.Token);
+
+            await startReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.False(startTask.IsCompleted);
+
+            await host.SendFileTransferWindowUpdateAsync(
+                new FileTransferWindowUpdateV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    NextExpectedChunkIndex = 0,
+                    GrantedUntilChunkIndexExclusive = 4,
+                    BytesReceived = 0,
+                },
+                cts.Token);
+
+            var receivedWindowUpdate = await windowUpdateReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.Equal(transferId, receivedWindowUpdate.TransferId);
+            Assert.Equal(4, receivedWindowUpdate.GrantedUntilChunkIndexExclusive);
+
+            await startTask.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+
+            var duplicateStartCountAfter = NknRuntimeDiagnostics.Snapshot().FileTransferStartIdempotentAccepts;
+            Assert.Equal(1, Volatile.Read(ref startReceiveCount));
+            Assert.True(duplicateStartCountAfter - duplicateStartCountBefore >= 1);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferCancel_RetriesUntilDelivered_WhenFirstPacketIsDropped()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.cancel.retry.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.cancel.retry.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            using var sender = new SessionFileTransferService();
+            using var receiver = new SessionFileTransferService();
+
+            sender.AttachTransport(helper);
+            receiver.AttachTransport(host);
+
+            string? firstCancelMessageId = null;
+            var distinctCancelMessageIds = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
+            helperClient.BeforeSendAsync = async (_, payload, token) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.FileTransferChunk)
+                {
+                    return;
+                }
+
+                await Task.Delay(15, token);
+            };
+            helperClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.FileTransferCancel)
+                {
+                    return Task.FromResult(true);
+                }
+
+                distinctCancelMessageIds.TryAdd(env.MessageId, 0);
+                firstCancelMessageId ??= env.MessageId;
+                return Task.FromResult(!string.Equals(env.MessageId, firstCancelMessageId, StringComparison.Ordinal));
+            };
+
+            await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+
+            const string transferId = "transfer_cancel_retry_roundtrip";
+            var payload = Enumerable.Range(0, 32_768).Select(static i => (byte)(i % 251)).ToArray();
+            using var destination = new MemoryStream();
+
+            var started = await sender.TryStartSendAsync(
+                new FileTransferSendDescriptor("cancel-retry.bin", payload.Length, transferId, ChunkSizeBytes: 4096),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+                cts.Token);
+
+            Assert.NotNull(started);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+
+            var accepted = await receiver.AcceptIncomingTransferAsync(
+                transferId,
+                (_, _) => Task.FromResult<Stream>(destination),
+                cts.Token);
+
+            Assert.NotNull(accepted);
+            await WaitUntilAsync(
+                () => receiver.Snapshot.Inbound?.State == FileTransferTransferState.Receiving &&
+                      receiver.Snapshot.Inbound.BytesTransferred > 0,
+                TimeSpan.FromSeconds(3));
+
+            var canceled = await sender.CancelTransferAsync(transferId, "user_canceled", cts.Token);
+            Assert.NotNull(canceled);
+
+            await WaitUntilAsync(
+                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Canceled &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Canceled,
+                TimeSpan.FromSeconds(8));
+
+            Assert.True(distinctCancelMessageIds.Count >= 2);
         }
         finally
         {
@@ -8686,6 +10041,1781 @@ public class SmokeTests
                 CryptographicOperations.ZeroMemory(fileTransferKey);
                 CryptographicOperations.ZeroMemory(controlKey);
             }
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_ControlMessage_IsNotBlockedBehindFileTransferChunkBurst()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.transport.lanes.control.address");
+            var helperClient = new FakeNknClient("helper.transport.lanes.control.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var controlReceived = new TaskCompletionSource<ControlRequestMessageV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var screenshareBlocks = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var fileTransferSendCount = 0;
+
+            host.RemoteControlRequestReceived += (_, e) => controlReceived.TrySetResult(e.Message);
+            helperClient.BeforeSendAsync = async (_, payload, ct) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env))
+                {
+                    return;
+                }
+
+                if (env.Type == MsgType.FileTransferChunk)
+                {
+                    Interlocked.Increment(ref fileTransferSendCount);
+                    await Task.Delay(120, ct);
+                }
+                else if (env.Type == MsgType.ControlRequest)
+                {
+                    screenshareBlocks.TrySetResult();
+                }
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.RemoteControl | InviteCapabilities.ScreenShare);
+
+            const string transferId = "transport_lane_control_vs_file";
+            var expectedHash = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "burst.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                },
+                cts.Token);
+
+            await helper.SendFileTransferStartAsync(
+                new FileTransferStartV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "burst.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                    ChunkCount = 3,
+                    ChunkSizeBytes = 1,
+                },
+                cts.Token);
+
+            var chunkTasks = new[]
+            {
+                helper.SendFileTransferChunkAsync(
+                    new FileTransferChunkV1
+                    {
+                        SessionId = sessionId,
+                        TransferId = transferId,
+                        ChunkIndex = 0,
+                        ChunkCount = 3,
+                        DataBase64 = Convert.ToBase64String(new byte[] { 0x01 }),
+                    },
+                    cts.Token),
+                helper.SendFileTransferChunkAsync(
+                    new FileTransferChunkV1
+                    {
+                        SessionId = sessionId,
+                        TransferId = transferId,
+                        ChunkIndex = 1,
+                        ChunkCount = 3,
+                        DataBase64 = Convert.ToBase64String(new byte[] { 0x02 }),
+                    },
+                    cts.Token),
+                helper.SendFileTransferChunkAsync(
+                    new FileTransferChunkV1
+                    {
+                        SessionId = sessionId,
+                        TransferId = transferId,
+                        ChunkIndex = 2,
+                        ChunkCount = 3,
+                        DataBase64 = Convert.ToBase64String(new byte[] { 0x03 }),
+                    },
+                    cts.Token),
+            };
+
+            await helper.SendControlRequestAsync(
+                new ControlRequestMessageV1
+                {
+                    SessionId = sessionId,
+                    RequestId = "control_req_transport_lane",
+                    Caps = new[] { "mouse", "keyboard" },
+                    Reason = "transport lane responsiveness",
+                },
+                cts.Token);
+
+            var control = await controlReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.Equal("control_req_transport_lane", control.RequestId);
+            Assert.True(Volatile.Read(ref fileTransferSendCount) > 0);
+
+            await Task.WhenAll(chunkTasks).WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await screenshareBlocks.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferChunk_AndScreenShareFrame_CanProgress_OnSeparateLanes()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.transport.lanes.mixed.address");
+            var helperClient = new FakeNknClient("helper.transport.lanes.mixed.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var chunkReceived = new TaskCompletionSource<FileTransferChunkV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var frameReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.FileTransferChunkReceived += (_, e) => chunkReceived.TrySetResult(e.Message);
+            host.ScreenShareFrameCompleted += (_, _) => frameReceived.TrySetResult();
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+
+            const string transferId = "transport_lane_file_vs_screenshare";
+            var expectedHash = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "mixed.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                },
+                cts.Token);
+
+            await helper.SendFileTransferStartAsync(
+                new FileTransferStartV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "mixed.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = expectedHash,
+                    ChunkCount = 1,
+                    ChunkSizeBytes = 1,
+                },
+                cts.Token);
+
+            var framePayload = ScreenSharePayloadCodec.Serialize(
+                new ScreenShareFrameChunkV1
+                {
+                    SessionId = sessionId,
+                    FrameId = 1,
+                    Width = 1,
+                    Height = 1,
+                    TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    Encoding = "jpeg",
+                    ChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataBase64 = Convert.ToBase64String(new byte[] { 0x2A }),
+                });
+
+            var fileTask = helper.SendFileTransferChunkAsync(
+                new FileTransferChunkV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataBase64 = Convert.ToBase64String(new byte[] { 0x01 }),
+                },
+                cts.Token);
+            var frameTask = helper.SendScreenSharePayloadAsync(framePayload, cts.Token);
+
+            await Task.WhenAll(fileTask, frameTask).WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var chunk = await chunkReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await frameReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            Assert.Equal(transferId, chunk.TransferId);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_ScreenShareFrame_RawMediaPath_DoesNotUseEnvelopeLaneReplacement()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.transport.screenshare.replace.address");
+            var helperClient = new FakeNknClient("helper.transport.screenshare.replace.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var framesReceived = new ConcurrentQueue<long>();
+            var frameSetReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.ScreenShareFrameCompleted += (_, e) =>
+            {
+                framesReceived.Enqueue(e.FrameId);
+                if (framesReceived.Count >= 3)
+                {
+                    frameSetReceived.TrySetResult();
+                }
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+
+            var firstFrameStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirstFrame = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var screenFrameSendCount = 0;
+            helperClient.BeforeSendAsync = async (_, payload, token) =>
+            {
+                if (!TryParseRawScreenShareFramePayload(payload, out var _))
+                {
+                    return;
+                }
+
+                if (Interlocked.Increment(ref screenFrameSendCount) == 1)
+                {
+                    firstFrameStarted.TrySetResult();
+                    await releaseFirstFrame.Task.WaitAsync(token);
+                }
+            };
+
+            Task SendFrameAsync(long frameId, byte marker) =>
+                helper.SendScreenSharePayloadAsync(
+                    ScreenSharePayloadCodec.Serialize(
+                        new ScreenShareFrameChunkV1
+                        {
+                            SessionId = sessionId,
+                            FrameId = frameId,
+                            Width = 1,
+                            Height = 1,
+                            TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                            Encoding = "jpeg",
+                            ChunkIndex = 0,
+                            ChunkCount = 1,
+                            DataBase64 = Convert.ToBase64String(new[] { marker }),
+                        }),
+                    cts.Token);
+
+            var frame1Task = SendFrameAsync(1, 0x01);
+            await firstFrameStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            var frame2Task = SendFrameAsync(2, 0x02);
+            var frame3Task = SendFrameAsync(3, 0x03);
+
+            releaseFirstFrame.TrySetResult();
+
+            await Task.WhenAll(frame1Task, frame2Task, frame3Task).WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await frameSetReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var receivedIds = framesReceived.OrderBy(static x => x).ToArray();
+            Assert.Equal(new long[] { 1, 2, 3 }, receivedIds);
+
+            var diagnostics = NknRuntimeDiagnostics.Snapshot();
+            Assert.Equal(0, diagnostics.ScreenShareLaneStaleFrameDrops);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_ScreenShareBurst_DoesNotBlockControlRequest()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.transport.screenshare.control.address");
+            var helperClient = new FakeNknClient("helper.transport.screenshare.control.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var controlReceived = new TaskCompletionSource<ControlRequestMessageV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var frameReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.RemoteControlRequestReceived += (_, e) => controlReceived.TrySetResult(e.Message);
+            host.ScreenShareFrameCompleted += (_, _) => frameReceived.TrySetResult();
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl);
+
+            helperClient.BeforeSendAsync = (destination, payload, token) =>
+            {
+                if (TryParseRawScreenShareFramePayload(payload, out var _))
+                {
+                    return Task.Delay(40, token);
+                }
+
+                return Task.CompletedTask;
+            };
+
+            var frameTasks = Enumerable.Range(0, 6)
+                .Select(i => helper.SendScreenSharePayloadAsync(
+                    ScreenSharePayloadCodec.Serialize(
+                        new ScreenShareFrameChunkV1
+                        {
+                            SessionId = sessionId,
+                            FrameId = i + 1,
+                            Width = 1,
+                            Height = 1,
+                            TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                            Encoding = "jpeg",
+                            ChunkIndex = 0,
+                            ChunkCount = 1,
+                            DataBase64 = Convert.ToBase64String(new[] { (byte)(i + 1) }),
+                        }),
+                    cts.Token))
+                .ToArray();
+
+            await helper.SendControlRequestAsync(
+                new ControlRequestMessageV1
+                {
+                    SessionId = sessionId,
+                    RequestId = "control_req_screenshare_burst",
+                    Caps = new[] { "mouse" },
+                    Reason = "control responsiveness during screen-share burst",
+                },
+                cts.Token);
+
+            var control = await controlReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await frameReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await Task.WhenAll(frameTasks).WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            Assert.Equal("control_req_screenshare_burst", control.RequestId);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_PipelinedFileTransfer_Completes_WhileScreenShareFramesAreActive()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            var totalStopwatch = Stopwatch.StartNew();
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.transport.file.screenshare.address");
+            var helperClient = new FakeNknClient("helper.transport.file.screenshare.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            using var sender = new SessionFileTransferService();
+            using var receiver = new SessionFileTransferService();
+
+            sender.AttachTransport(helper);
+            receiver.AttachTransport(host);
+
+            var screenFrameReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.ScreenShareFrameCompleted += (_, _) => screenFrameReceived.TrySetResult();
+
+            var chunkBurstObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var chunkEnvelopeCount = 0;
+            helperClient.BeforeSendAsync = (_, payload, token) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env))
+                {
+                    return Task.CompletedTask;
+                }
+
+                if (env.Type == MsgType.FileTransferChunk)
+                {
+                    if (Interlocked.Increment(ref chunkEnvelopeCount) >= 4)
+                    {
+                        chunkBurstObserved.TrySetResult();
+                    }
+
+                    return Task.Delay(20, token);
+                }
+
+                return Task.CompletedTask;
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+
+            const string transferId = "transport_file_screenshare_roundtrip";
+            var payload = Enumerable.Range(0, 131_072).Select(static i => (byte)(i % 251)).ToArray();
+            using var destination = new MemoryStream();
+
+            var started = await sender.TryStartSendAsync(
+                new FileTransferSendDescriptor("mixed.bin", payload.Length, transferId, ChunkSizeBytes: 4096),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+                cts.Token);
+
+            Assert.NotNull(started);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+
+            var accepted = await receiver.AcceptIncomingTransferAsync(
+                transferId,
+                (_, _) => Task.FromResult<Stream>(destination),
+                cts.Token);
+
+            Assert.NotNull(accepted);
+            await chunkBurstObserved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var frameTasks = Enumerable.Range(0, 6)
+                .Select(i => helper.SendScreenSharePayloadAsync(
+                    ScreenSharePayloadCodec.Serialize(
+                        new ScreenShareFrameChunkV1
+                        {
+                            SessionId = sessionId,
+                            FrameId = i + 1,
+                            Width = 1,
+                            Height = 1,
+                            TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                            Encoding = "jpeg",
+                            ChunkIndex = 0,
+                            ChunkCount = 1,
+                            DataBase64 = Convert.ToBase64String(new[] { (byte)(0x40 + i) }),
+                        }),
+                    cts.Token))
+                .ToArray();
+
+            await screenFrameReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await Task.WhenAll(frameTasks).WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await WaitUntilAsync(
+                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+                TimeSpan.FromSeconds(8));
+            var fileTransferCompletedAtMs = totalStopwatch.ElapsedMilliseconds;
+
+            Assert.Equal(payload, destination.ToArray());
+
+            var diagnostics = NknRuntimeDiagnostics.Snapshot();
+            Assert.True(diagnostics.FileTransferLane.MessagesSent > 0);
+            Assert.True(diagnostics.FileTransferLane.BytesSent > 0);
+            Assert.True(diagnostics.ScreenShareMessagesSent > 0);
+            Assert.True(diagnostics.ScreenSharePayloadBytesSent > 0);
+            Assert.True(screenFrameReceived.Task.IsCompletedSuccessfully);
+            Assert.True(fileTransferCompletedAtMs > 0);
+            Assert.True(totalStopwatch.ElapsedMilliseconds >= fileTransferCompletedAtMs);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_MixedFileTransferAndScreenShareBurst_StopStillDelivers_AndStaleFramesDrop()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            var totalStopwatch = Stopwatch.StartNew();
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.transport.mixed.regression.address");
+            var helperClient = new FakeNknClient("helper.transport.mixed.regression.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            using var sender = new SessionFileTransferService();
+            using var receiver = new SessionFileTransferService();
+
+            sender.AttachTransport(helper);
+            receiver.AttachTransport(host);
+
+            var frameReceived = new TaskCompletionSource<ScreenShareFrameCompletedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var stopReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.ScreenShareFrameCompleted += (_, e) => frameReceived.TrySetResult(e);
+            host.ScreenShareStopped += (_, _) => stopReceived.TrySetResult();
+
+            var chunkBurstObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstScreenFrameStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirstScreenFrame = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var chunkEnvelopeCount = 0;
+            var screenFrameEnvelopeCount = 0;
+
+            helperClient.BeforeSendAsync = async (_, payload, token) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env))
+                {
+                    if (!TryParseRawScreenShareFramePayload(payload, out var _))
+                    {
+                        return;
+                    }
+
+                    if (!firstScreenFrameStarted.Task.IsCompleted)
+                    {
+                        firstScreenFrameStarted.TrySetResult();
+                        await releaseFirstScreenFrame.Task.WaitAsync(token);
+                        return;
+                    }
+
+                    await Task.Delay(10, token);
+                    return;
+                }
+
+                if (env.Type == MsgType.FileTransferChunk)
+                {
+                    if (Interlocked.Increment(ref chunkEnvelopeCount) >= 4)
+                    {
+                        chunkBurstObserved.TrySetResult();
+                    }
+
+                    await Task.Delay(20, token);
+                    return;
+                }
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+
+            const string transferId = "transport_mixed_regression";
+            var payload = Enumerable.Range(0, 131_072).Select(static i => (byte)(i % 251)).ToArray();
+            using var destination = new MemoryStream();
+
+            var started = await sender.TryStartSendAsync(
+                new FileTransferSendDescriptor("mixed-regression.bin", payload.Length, transferId, ChunkSizeBytes: 4096),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+                cts.Token);
+
+            Assert.NotNull(started);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+
+            var accepted = await receiver.AcceptIncomingTransferAsync(
+                transferId,
+                (_, _) => Task.FromResult<Stream>(destination),
+                cts.Token);
+
+            Assert.NotNull(accepted);
+            await chunkBurstObserved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            Task SendFrameAsync(long frameId, byte marker) =>
+                helper.SendScreenSharePayloadAsync(
+                    ScreenSharePayloadCodec.Serialize(
+                        new ScreenShareFrameChunkV1
+                        {
+                            SessionId = sessionId,
+                            FrameId = frameId,
+                            Width = 1,
+                            Height = 1,
+                            TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                            Encoding = "jpeg",
+                            ChunkIndex = 0,
+                            ChunkCount = 1,
+                            DataBase64 = Convert.ToBase64String(new[] { marker }),
+                        }),
+                    cts.Token);
+
+            var frame1Task = SendFrameAsync(1, 0x11);
+            await firstScreenFrameStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            var frame2Task = SendFrameAsync(2, 0x22);
+            var frame3Task = SendFrameAsync(3, 0x33);
+            var stopTask = helper.SendScreenSharePayloadAsync(
+                ScreenSharePayloadCodec.SerializeStop(
+                    new ScreenShareStopMessageV1
+                    {
+                        SessionId = sessionId,
+                        Reason = "mixed_burst_stop",
+                    }),
+                cts.Token);
+
+            releaseFirstScreenFrame.TrySetResult();
+
+            await frameReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await stopReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await Task.WhenAll(frame1Task, frame2Task, frame3Task, stopTask).WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await WaitUntilAsync(
+                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+                TimeSpan.FromSeconds(8));
+            var fileTransferCompletedAtMs = totalStopwatch.ElapsedMilliseconds;
+
+            Assert.Equal(payload, destination.ToArray());
+
+            var diagnostics = NknRuntimeDiagnostics.Snapshot();
+            var controlLaneWaits = diagnostics.ControlLane.WaitCount;
+            Assert.True(diagnostics.FileTransferLane.MessagesSent > 0);
+            Assert.True(diagnostics.FileTransferLane.BytesSent > 0);
+            Assert.Equal(0, diagnostics.FileTransferLane.CurrentQueueDepth);
+            Assert.Equal(0, diagnostics.FileTransferLane.CurrentInFlight);
+            Assert.True(diagnostics.ScreenShareMessagesSent > 0);
+            Assert.True(diagnostics.ScreenSharePayloadBytesSent > 0);
+            Assert.True(diagnostics.ControlLane.MessagesSent > 0);
+            Assert.Equal(0, diagnostics.ControlLane.CurrentQueueDepth);
+            Assert.Equal(0, diagnostics.ControlLane.CurrentInFlight);
+            Assert.Equal(0, diagnostics.ControlLane.RejectedOrDroppedCount);
+            Assert.True(controlLaneWaits >= 0);
+            Assert.Equal(0, diagnostics.ScreenShareLaneStaleFrameDrops);
+            Assert.True(fileTransferCompletedAtMs > 0);
+            Assert.True(totalStopwatch.ElapsedMilliseconds >= fileTransferCompletedAtMs);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_SustainedMixedBurst_FileTransferScreenShareAndControlRemainResponsive()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(16));
+            var totalStopwatch = Stopwatch.StartNew();
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.transport.sustained.mixed.address");
+            var helperClient = new FakeNknClient("helper.transport.sustained.mixed.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            using var sender = new SessionFileTransferService();
+            using var receiver = new SessionFileTransferService();
+
+            sender.AttachTransport(helper);
+            receiver.AttachTransport(host);
+
+            var frameCompletedCount = 0;
+            var firstFrameReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var stopReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var controlReceived = new TaskCompletionSource<ControlRequestMessageV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.ScreenShareFrameCompleted += (_, _) =>
+            {
+                if (Interlocked.Increment(ref frameCompletedCount) == 1)
+                {
+                    firstFrameReceived.TrySetResult();
+                }
+            };
+            host.ScreenShareStopped += (_, _) => stopReceived.TrySetResult();
+            host.RemoteControlRequestReceived += (_, e) => controlReceived.TrySetResult(e.Message);
+
+            var chunkBurstObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstScreenFrameStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirstScreenFrame = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var chunkEnvelopeCount = 0;
+            var screenFrameEnvelopeCount = 0;
+
+            helperClient.BeforeSendAsync = async (_, payload, token) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env))
+                {
+                    if (!TryParseRawScreenShareFramePayload(payload, out var _))
+                    {
+                        return;
+                    }
+
+                    if (!firstScreenFrameStarted.Task.IsCompleted)
+                    {
+                        firstScreenFrameStarted.TrySetResult();
+                        await releaseFirstScreenFrame.Task.WaitAsync(token);
+                        return;
+                    }
+
+                    await Task.Delay(10, token);
+                    return;
+                }
+
+                if (env.Type == MsgType.FileTransferChunk)
+                {
+                    if (Interlocked.Increment(ref chunkEnvelopeCount) >= 6)
+                    {
+                        chunkBurstObserved.TrySetResult();
+                    }
+
+                    await Task.Delay(16, token);
+                    return;
+                }
+
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl);
+
+            const string transferId = "transport_sustained_mixed_regression";
+            var payload = Enumerable.Range(0, 262_144).Select(static i => (byte)(i % 251)).ToArray();
+            using var destination = new MemoryStream();
+
+            var started = await sender.TryStartSendAsync(
+                new FileTransferSendDescriptor("sustained-mixed.bin", payload.Length, transferId, ChunkSizeBytes: 4096),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+                cts.Token);
+
+            Assert.NotNull(started);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+
+            var accepted = await receiver.AcceptIncomingTransferAsync(
+                transferId,
+                (_, _) => Task.FromResult<Stream>(destination),
+                cts.Token);
+
+            Assert.NotNull(accepted);
+            await chunkBurstObserved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            Task SendFrameAsync(long frameId, byte marker) =>
+                helper.SendScreenSharePayloadAsync(
+                    ScreenSharePayloadCodec.Serialize(
+                        new ScreenShareFrameChunkV1
+                        {
+                            SessionId = sessionId,
+                            FrameId = frameId,
+                            Width = 1,
+                            Height = 1,
+                            TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                            Encoding = "jpeg",
+                            ChunkIndex = 0,
+                            ChunkCount = 1,
+                            DataBase64 = Convert.ToBase64String(new[] { marker }),
+                        }),
+                    cts.Token);
+
+            var frame1Task = SendFrameAsync(1, 0x31);
+            await firstScreenFrameStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+
+            var sustainedFrameTasks = Enumerable.Range(2, 8)
+                .Select(i => SendFrameAsync(i, (byte)(0x30 + i)))
+                .ToArray();
+
+            releaseFirstScreenFrame.TrySetResult();
+
+            await helper.SendControlRequestAsync(
+                new ControlRequestMessageV1
+                {
+                    SessionId = sessionId,
+                    RequestId = "control_req_sustained_mixed",
+                    Caps = new[] { "mouse" },
+                    Reason = "control responsiveness during sustained mixed burst",
+                },
+                cts.Token);
+
+            await controlReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await firstFrameReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var stopTask = helper.SendScreenSharePayloadAsync(
+                ScreenSharePayloadCodec.SerializeStop(
+                    new ScreenShareStopMessageV1
+                    {
+                        SessionId = sessionId,
+                        Reason = "sustained_mixed_stop",
+                    }),
+                cts.Token);
+
+            await stopReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await Task.WhenAll(new[] { frame1Task, stopTask }.Concat(sustainedFrameTasks)).WaitAsync(TimeSpan.FromSeconds(4), cts.Token);
+
+            await WaitUntilAsync(
+                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+                TimeSpan.FromSeconds(8));
+            var fileTransferCompletedAtMs = totalStopwatch.ElapsedMilliseconds;
+
+            Assert.Equal("control_req_sustained_mixed", controlReceived.Task.Result.RequestId);
+            Assert.True(Volatile.Read(ref frameCompletedCount) > 0);
+            Assert.Equal(payload, destination.ToArray());
+
+            var diagnostics = NknRuntimeDiagnostics.Snapshot();
+            var controlLaneWaits = diagnostics.ControlLane.WaitCount;
+            Assert.True(diagnostics.FileTransferLane.MessagesSent > 0);
+            Assert.True(diagnostics.FileTransferLane.BytesSent > 0);
+            Assert.True(diagnostics.ScreenShareMessagesSent > 0);
+            Assert.True(diagnostics.ScreenSharePayloadBytesSent > 0);
+            Assert.True(diagnostics.ControlLane.MessagesSent > 0);
+            Assert.True(controlLaneWaits >= 0);
+            Assert.Equal(0, diagnostics.ControlLane.RejectedOrDroppedCount);
+            Assert.Equal(0, diagnostics.ScreenShareLaneStaleFrameDrops);
+            Assert.True(fileTransferCompletedAtMs > 0);
+            Assert.True(totalStopwatch.ElapsedMilliseconds >= fileTransferCompletedAtMs);
+
+            var diagnosticsVm = new DiagnosticsPageViewModel(static () => { }, TransportRuntimeConfig.Select());
+            Assert.Contains($"messages_sent={diagnostics.FileTransferLane.MessagesSent}", diagnosticsVm.FileTransferLaneSummary, StringComparison.Ordinal);
+            Assert.Contains($"bytes_sent={diagnostics.FileTransferLane.BytesSent}", diagnosticsVm.FileTransferLaneSummary, StringComparison.Ordinal);
+            Assert.Contains($"stale_drops={diagnostics.ScreenShareLaneStaleFrameDrops}", diagnosticsVm.ScreenShareLaneSummary, StringComparison.Ordinal);
+            Assert.Contains($"congestion_hits={diagnostics.ScreenShareLaneCongestionHits}", diagnosticsVm.ScreenShareLaneSummary, StringComparison.Ordinal);
+            Assert.Contains($"rejected_or_dropped={diagnostics.ControlLane.RejectedOrDroppedCount}", diagnosticsVm.ControlLaneSummary, StringComparison.Ordinal);
+            Assert.Contains($"ack_timeouts={diagnostics.ControlPlane.AckTimeouts}", diagnosticsVm.ControlPlaneSummary, StringComparison.Ordinal);
+            Assert.Contains($"frames_sent={diagnostics.MediaPlane.FramesSent}", diagnosticsVm.MediaPlaneSummary, StringComparison.Ordinal);
+            Assert.Contains($"reconnects={diagnostics.ControlPlane.ReconnectCount}", diagnosticsVm.RecoverySummary, StringComparison.Ordinal);
+            Assert.Contains("transport_generation=", diagnosticsVm.CorrelationSummary, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_OutboundLaneState_ResetsCorrectly_OnSessionReset()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.transport.lanes.reset.address");
+            var helperClient = new FakeNknClient("helper.transport.lanes.reset.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = "transport_lane_reset",
+                    FileName = "reset.bin",
+                    FileSizeBytes = 1,
+                    Sha256Base64 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]),
+                },
+                cts.Token);
+
+            var diagnosticsBeforeReset = NknRuntimeDiagnostics.Snapshot();
+            InvokePrivateMethod(helper, "ResetSessionTracking");
+
+            var fileLane = GetPrivateField(helper, "fileTransferOutboundLaneState");
+            var screenLane = GetPrivateField(helper, "screenShareOutboundLaneState");
+            var controlLane = GetPrivateField(helper, "controlOutboundLaneState");
+            var diagnosticsAfterReset = NknRuntimeDiagnostics.Snapshot();
+
+            Assert.NotNull(fileLane);
+            Assert.NotNull(screenLane);
+            Assert.NotNull(controlLane);
+
+            Assert.Equal(0, (int)GetPrivateProperty(fileLane, "CurrentQueueDepth")!);
+            Assert.Equal(0, (int)GetPrivateProperty(fileLane, "CurrentInFlight")!);
+            Assert.Equal(0, (int)GetPrivateProperty(screenLane, "CurrentQueueDepth")!);
+            Assert.Equal(0, (int)GetPrivateProperty(screenLane, "CurrentInFlight")!);
+            Assert.Equal(0, (int)GetPrivateProperty(controlLane, "CurrentQueueDepth")!);
+            Assert.Equal(0, (int)GetPrivateProperty(controlLane, "CurrentInFlight")!);
+            Assert.Equal(0, diagnosticsAfterReset.ControlLane.CurrentQueueDepth);
+            Assert.Equal(0, diagnosticsAfterReset.ControlLane.CurrentInFlight);
+            Assert.Equal(0, diagnosticsAfterReset.FileTransferLane.CurrentQueueDepth);
+            Assert.Equal(0, diagnosticsAfterReset.FileTransferLane.CurrentInFlight);
+            Assert.Equal(0, diagnosticsAfterReset.ScreenShareLane.CurrentQueueDepth);
+            Assert.Equal(0, diagnosticsAfterReset.ScreenShareLane.CurrentInFlight);
+            Assert.True(diagnosticsBeforeReset.ControlLane.MessagesSent > 0);
+            Assert.True(diagnosticsAfterReset.ControlLane.MessagesSent >= diagnosticsBeforeReset.ControlLane.MessagesSent);
+            Assert.True(diagnosticsAfterReset.MediaPlane.MediaGeneration > diagnosticsBeforeReset.MediaPlane.MediaGeneration);
+            Assert.False(diagnosticsAfterReset.MediaPlane.Attached);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_RoutingRefactor_PreservesSecureEnvelopeSemantics()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.transport.lanes.secure.address");
+            var helperClient = new FakeNknClient("helper.transport.lanes.secure.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var capturedScreenPayload = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            helperClient.BeforeSendAsync = (_, payload, _) =>
+            {
+                if (!TryParseRawScreenShareFramePayload(payload, out var _))
+                {
+                    return Task.CompletedTask;
+                }
+
+                capturedScreenPayload.TrySetResult(payload.ToArray());
+                return Task.CompletedTask;
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare);
+
+            var framePayload = ScreenSharePayloadCodec.Serialize(
+                new ScreenShareFrameChunkV1
+                {
+                    SessionId = sessionId,
+                    FrameId = 7,
+                    Width = 1,
+                    Height = 1,
+                    TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    Encoding = "jpeg",
+                    ChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataBase64 = Convert.ToBase64String(new byte[] { 0x33 }),
+                });
+
+            await helper.SendScreenSharePayloadAsync(framePayload, cts.Token);
+            var rawPayload = await capturedScreenPayload.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var mediaKey = Assert.IsType<byte[]>(GetPrivateField(helper, "screenShareMediaSessionSharedKey")).AsSpan().ToArray();
+            try
+            {
+                Assert.True(ScreenShareMediaPacketCodec.TryDecryptFrame(mediaKey, rawPayload, out var metadata, out var securePayload));
+                Assert.Equal(sessionId, metadata.SessionId);
+                Assert.Equal(helper.LocalPeerAddress, securePayload.SenderIdentity);
+                Assert.Equal(7, securePayload.Chunk.FrameId);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(mediaKey);
+            }
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_MixedLoad_ControlRequestAckTimeout_DoesNotDisconnectSessionOrStopBulkTraffic()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(50));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.controlrequest.timeout.mixed.address");
+            var helperClient = new FakeNknClient("helper.controlrequest.timeout.mixed.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            using var sender = new SessionFileTransferService();
+            using var receiver = new SessionFileTransferService();
+
+            sender.AttachTransport(helper);
+            receiver.AttachTransport(host);
+
+            var helperDisconnectedCount = 0;
+            var helperRemoteEndCount = 0;
+            var hostDisconnectedCount = 0;
+            var hostRemoteEndCount = 0;
+            helper.Disconnected += (_, _) => Interlocked.Increment(ref helperDisconnectedCount);
+            helper.RemoteSessionEnded += (_, _) => Interlocked.Increment(ref helperRemoteEndCount);
+            host.Disconnected += (_, _) => Interlocked.Increment(ref hostDisconnectedCount);
+            host.RemoteSessionEnded += (_, _) => Interlocked.Increment(ref hostRemoteEndCount);
+
+            var frameReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.ScreenShareFrameCompleted += (_, _) => frameReceived.TrySetResult();
+
+            var chunkBurstObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstScreenFrameStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirstScreenFrame = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var chunkEnvelopeCount = 0;
+
+            helperClient.BeforeSendAsync = async (_, payload, token) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env))
+                {
+                    if (TryParseRawScreenShareFramePayload(payload, out var _))
+                    {
+                        await Task.Delay(10, token);
+                    }
+
+                    return;
+                }
+
+                if (env.Type == MsgType.FileTransferChunk)
+                {
+                    if (Interlocked.Increment(ref chunkEnvelopeCount) >= 4)
+                    {
+                        chunkBurstObserved.TrySetResult();
+                    }
+
+                    await Task.Delay(20, token);
+                    return;
+                }
+            };
+
+            helperClient.ShouldDeliverSendAsync = (_, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.ControlRequest)
+                {
+                    return Task.FromResult(true);
+                }
+
+                return Task.FromResult(false);
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl);
+
+            const string transferId = "transport_control_timeout_mixed";
+            var payload = Enumerable.Range(0, 131_072).Select(static i => (byte)(i % 251)).ToArray();
+            using var destination = new MemoryStream();
+
+            var started = await sender.TryStartSendAsync(
+                new FileTransferSendDescriptor("control-timeout-mixed.bin", payload.Length, transferId, ChunkSizeBytes: 4096),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+                cts.Token);
+
+            Assert.NotNull(started);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+
+            var accepted = await receiver.AcceptIncomingTransferAsync(
+                transferId,
+                (_, _) => Task.FromResult<Stream>(destination),
+                cts.Token);
+
+            Assert.NotNull(accepted);
+            await chunkBurstObserved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var frameTask = helper.SendScreenSharePayloadAsync(
+                ScreenSharePayloadCodec.Serialize(
+                    new ScreenShareFrameChunkV1
+                    {
+                        SessionId = sessionId,
+                        FrameId = 1,
+                        Width = 1,
+                        Height = 1,
+                        TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        Encoding = "jpeg",
+                        ChunkIndex = 0,
+                        ChunkCount = 1,
+                        DataBase64 = Convert.ToBase64String(new byte[] { 0x41 }),
+                    }),
+                cts.Token);
+
+            var requestTask = helper.SendControlRequestAsync(
+                new ControlRequestMessageV1
+                {
+                    SessionId = sessionId,
+                    RequestId = "control_req_timeout_mixed",
+                    Caps = new[] { "mouse" },
+                    Reason = "mixed load timeout regression",
+                },
+                cts.Token);
+
+            await frameReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await frameTask.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var timeout = await Assert.ThrowsAsync<TimeoutException>(() => requestTask);
+            Assert.Equal("control_request_ack_timeout", Assert.IsType<string>(timeout.Data["nlink_reason"]));
+            await WaitUntilAsync(
+                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+                TimeSpan.FromSeconds(8));
+            Assert.Equal(payload, destination.ToArray());
+            Assert.True(host.CurrentSessionSecurityState.ApprovalGranted);
+            Assert.True(helper.CurrentSessionSecurityState.ApprovalGranted);
+            Assert.Equal(0, Volatile.Read(ref helperDisconnectedCount));
+            Assert.Equal(0, Volatile.Read(ref helperRemoteEndCount));
+            Assert.Equal(0, Volatile.Read(ref hostDisconnectedCount));
+            Assert.Equal(0, Volatile.Read(ref hostRemoteEndCount));
+
+            var diagnostics = NknRuntimeDiagnostics.Snapshot();
+            Assert.Equal("control_request_ack_timeout", diagnostics.LastError);
+            Assert.True(diagnostics.FileTransferLane.MessagesSent > 0);
+            Assert.True(diagnostics.FileTransferLane.BytesSent > 0);
+            Assert.True(diagnostics.ScreenShareMessagesSent > 0);
+            Assert.True(diagnostics.ControlLane.MessagesSent > 0);
+            Assert.True(diagnostics.ControlPlane.AckTimeouts > 0);
+            Assert.True(diagnostics.ControlPlane.ControlRequestAckTimeouts > 0);
+            Assert.Equal("control_request_ack_timeout", diagnostics.ControlPlane.LastRejectReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_MixedLoad_ControlRequest_DeliversDuringActiveFileTransferAndScreenShare()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.controlrequest.deliver.mixed.address");
+            var helperClient = new FakeNknClient("helper.controlrequest.deliver.mixed.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            using var sender = new SessionFileTransferService();
+            using var receiver = new SessionFileTransferService();
+
+            sender.AttachTransport(helper);
+            receiver.AttachTransport(host);
+
+            var controlReceived = new TaskCompletionSource<ControlRequestMessageV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var frameReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var chunkBurstObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var chunkEnvelopeCount = 0;
+
+            host.RemoteControlRequestReceived += (_, e) => controlReceived.TrySetResult(e.Message);
+            host.ScreenShareFrameCompleted += (_, _) => frameReceived.TrySetResult();
+
+            helperClient.BeforeSendAsync = async (_, payload, token) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env))
+                {
+                    if (TryParseRawScreenShareFramePayload(payload, out var _))
+                    {
+                        await Task.Delay(10, token);
+                    }
+
+                    return;
+                }
+
+                if (env.Type == MsgType.FileTransferChunk)
+                {
+                    if (Interlocked.Increment(ref chunkEnvelopeCount) >= 4)
+                    {
+                        chunkBurstObserved.TrySetResult();
+                    }
+
+                    await Task.Delay(20, token);
+                    return;
+                }
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.FileTransfer | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl);
+
+            const string transferId = "transport_control_request_mixed";
+            var payload = Enumerable.Range(0, 131_072).Select(static i => (byte)(i % 251)).ToArray();
+            using var destination = new MemoryStream();
+
+            var started = await sender.TryStartSendAsync(
+                new FileTransferSendDescriptor("control-request-mixed.bin", payload.Length, transferId, ChunkSizeBytes: 4096),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+                cts.Token);
+
+            Assert.NotNull(started);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+
+            var accepted = await receiver.AcceptIncomingTransferAsync(
+                transferId,
+                (_, _) => Task.FromResult<Stream>(destination),
+                cts.Token);
+
+            Assert.NotNull(accepted);
+            await chunkBurstObserved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var frameTask = helper.SendScreenSharePayloadAsync(
+                ScreenSharePayloadCodec.Serialize(
+                    new ScreenShareFrameChunkV1
+                    {
+                        SessionId = sessionId,
+                        FrameId = 1,
+                        Width = 1,
+                        Height = 1,
+                        TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        Encoding = "jpeg",
+                        ChunkIndex = 0,
+                        ChunkCount = 1,
+                        DataBase64 = Convert.ToBase64String(new byte[] { 0x41 }),
+                    }),
+                cts.Token);
+
+            var requestTask = helper.SendControlRequestAsync(
+                new ControlRequestMessageV1
+                {
+                    SessionId = sessionId,
+                    RequestId = "control_req_deliver_mixed",
+                    Caps = new[] { "mouse" },
+                    Reason = "mixed load delivery regression",
+                },
+                cts.Token);
+
+            var request = await controlReceived.Task.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+            await requestTask.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+            await frameReceived.Task.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+            await frameTask.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+            await WaitUntilAsync(
+                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+                TimeSpan.FromSeconds(8));
+
+            Assert.Equal("control_req_deliver_mixed", request.RequestId);
+            Assert.Equal(payload, destination.ToArray());
+
+            var diagnostics = NknRuntimeDiagnostics.Snapshot();
+            Assert.True(diagnostics.FileTransferLane.MessagesSent > 0);
+            Assert.True(diagnostics.ScreenShareMessagesSent > 0);
+            Assert.True(diagnostics.ControlLane.MessagesSent > 0);
+            Assert.True(diagnostics.MediaPlane.FramesSent > 0);
+            Assert.True(diagnostics.MediaPlane.LastCaptureToSendAgeMs >= 0);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_ControlRequest_PreemptsQueuedFileTransferChunks()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.controlrequest.preempt.filetransfer.address");
+            var helperClient = new FakeNknClient("helper.controlrequest.preempt.filetransfer.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            using var sender = new SessionFileTransferService();
+            using var receiver = new SessionFileTransferService();
+
+            sender.AttachTransport(helper);
+            receiver.AttachTransport(host);
+
+            var controlReceived = new TaskCompletionSource<ControlRequestMessageV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var controlSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var requestIssued = 0;
+            var chunkSendsAfterRequest = 0;
+            var chunkEnvelopeCount = 0;
+
+            host.RemoteControlRequestReceived += (_, e) => controlReceived.TrySetResult(e.Message);
+
+            helperClient.BeforeSendAsync = async (_, payload, token) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env))
+                {
+                    return;
+                }
+
+                if (env.Type == MsgType.FileTransferChunk)
+                {
+                    Interlocked.Increment(ref chunkEnvelopeCount);
+                    if (Volatile.Read(ref requestIssued) != 0)
+                    {
+                        Interlocked.Increment(ref chunkSendsAfterRequest);
+                    }
+
+                    await Task.Delay(25, token);
+                    return;
+                }
+
+                if (env.Type == MsgType.ControlRequest)
+                {
+                    controlSent.TrySetResult();
+                }
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.FileTransfer | InviteCapabilities.RemoteControl);
+
+            const string transferId = "transport_control_request_preempt";
+            var payload = Enumerable.Range(0, 4 * 1024 * 1024).Select(static i => (byte)(i % 251)).ToArray();
+            using var destination = new MemoryStream();
+
+            var started = await sender.TryStartSendAsync(
+                new FileTransferSendDescriptor("control-preempt.bin", payload.Length, transferId, ChunkSizeBytes: 4096),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+                cts.Token);
+
+            Assert.NotNull(started);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+
+            var accepted = await receiver.AcceptIncomingTransferAsync(
+                transferId,
+                (_, _) => Task.FromResult<Stream>(destination),
+                cts.Token);
+
+            Assert.NotNull(accepted);
+
+            var fileLane = GetPrivateField(helper, "fileTransferOutboundLaneState");
+            Assert.NotNull(fileLane);
+            await WaitUntilAsync(
+                () => Volatile.Read(ref chunkEnvelopeCount) >= 4 &&
+                      (int)GetPrivateProperty(fileLane!, "CurrentQueueDepth")! >= 1 &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Receiving,
+                TimeSpan.FromSeconds(5));
+
+            Volatile.Write(ref requestIssued, 1);
+            var requestTask = helper.SendControlRequestAsync(
+                new ControlRequestMessageV1
+                {
+                    SessionId = sessionId,
+                    RequestId = "control_req_preempt_file_transfer",
+                    Caps = new[] { "mouse" },
+                    Reason = "preempt_file_transfer_backlog",
+                },
+                cts.Token);
+
+            var request = await controlReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await controlSent.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await requestTask.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            Assert.Equal("control_req_preempt_file_transfer", request.RequestId);
+            Assert.True(Volatile.Read(ref chunkSendsAfterRequest) <= 1, $"Expected control request to preempt queued chunks, but observed {Volatile.Read(ref chunkSendsAfterRequest)} chunk send(s) after request issuance.");
+
+            await sender.CancelTransferAsync(transferId, "cleanup_after_control_request_preempt", cts.Token);
+            await WaitUntilAsync(
+                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Canceled &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Canceled,
+                TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferCancel_PreemptsQueuedFileTransferChunks()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfercancel.preempt.address");
+            var helperClient = new FakeNknClient("helper.filetransfercancel.preempt.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            using var sender = new SessionFileTransferService();
+            using var receiver = new SessionFileTransferService();
+
+            sender.AttachTransport(helper);
+            receiver.AttachTransport(host);
+
+            var cancelSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var cancelIssued = 0;
+            var chunkSendsAfterCancel = 0;
+            var chunkEnvelopeCount = 0;
+
+            helperClient.BeforeSendAsync = async (_, payload, token) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env))
+                {
+                    return;
+                }
+
+                if (env.Type == MsgType.FileTransferChunk)
+                {
+                    Interlocked.Increment(ref chunkEnvelopeCount);
+                    if (Volatile.Read(ref cancelIssued) != 0)
+                    {
+                        Interlocked.Increment(ref chunkSendsAfterCancel);
+                    }
+
+                    await Task.Delay(25, token);
+                    return;
+                }
+
+                if (env.Type == MsgType.FileTransferCancel)
+                {
+                    cancelSent.TrySetResult();
+                }
+            };
+
+            _ = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.FileTransfer);
+
+            const string transferId = "transport_file_transfer_cancel_preempt";
+            var payload = Enumerable.Range(0, 4 * 1024 * 1024).Select(static i => (byte)(i % 251)).ToArray();
+            using var destination = new MemoryStream();
+
+            var started = await sender.TryStartSendAsync(
+                new FileTransferSendDescriptor("cancel-preempt.bin", payload.Length, transferId, ChunkSizeBytes: 4096),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+                cts.Token);
+
+            Assert.NotNull(started);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+
+            var accepted = await receiver.AcceptIncomingTransferAsync(
+                transferId,
+                (_, _) => Task.FromResult<Stream>(destination),
+                cts.Token);
+
+            Assert.NotNull(accepted);
+
+            var fileLane = GetPrivateField(helper, "fileTransferOutboundLaneState");
+            Assert.NotNull(fileLane);
+            await WaitUntilAsync(
+                () => Volatile.Read(ref chunkEnvelopeCount) >= 4 &&
+                      (int)GetPrivateProperty(fileLane!, "CurrentQueueDepth")! >= 1 &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Receiving,
+                TimeSpan.FromSeconds(5));
+
+            Volatile.Write(ref cancelIssued, 1);
+            await sender.CancelTransferAsync(transferId, "user_canceled", cts.Token);
+
+            await cancelSent.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await WaitUntilAsync(
+                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Canceled &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Canceled,
+                TimeSpan.FromSeconds(3));
+
+            Assert.True(Volatile.Read(ref chunkSendsAfterCancel) <= 1, $"Expected cancel to preempt queued chunks, but observed {Volatile.Read(ref chunkSendsAfterCancel)} chunk send(s) after cancel issuance.");
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_LocalCancel_AllowsImmediateNextOffer_And_IgnoresLateTerminalTraffic()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.cancel.tombstone.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.cancel.tombstone.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var firstOfferReceived = new TaskCompletionSource<FileTransferOfferV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var secondOfferReceived = new TaskCompletionSource<FileTransferOfferV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var startReceived = new TaskCompletionSource<FileTransferStartV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var cancelReceived = new TaskCompletionSource<FileTransferCancelV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseCancelAck = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var blockedCancelAck = 0;
+            var diagnosticsBefore = NknRuntimeDiagnostics.Snapshot();
+
+            host.FileTransferOfferReceived += (_, e) =>
+            {
+                if (e.Message.TransferId == "transfer_nkn_cancel_first")
+                {
+                    firstOfferReceived.TrySetResult(e.Message);
+                }
+                else if (e.Message.TransferId == "transfer_nkn_cancel_second")
+                {
+                    secondOfferReceived.TrySetResult(e.Message);
+                }
+            };
+            helper.FileTransferAcceptReceived += (_, e) => acceptReceived.TrySetResult(e.Message);
+            host.FileTransferStartReceived += (_, e) => startReceived.TrySetResult(e.Message);
+            host.FileTransferCancelReceived += (_, e) => cancelReceived.TrySetResult(e.Message);
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            var expectedHash = Convert.ToBase64String(SHA256.HashData(new byte[] { 0x01, 0x02, 0x03 }));
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = "transfer_nkn_cancel_first",
+                    FileName = "cancel-first.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+            await firstOfferReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = "transfer_nkn_cancel_first",
+                },
+                cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await helper.SendFileTransferStartAsync(
+                new FileTransferStartV1
+                {
+                    SessionId = sessionId,
+                    TransferId = "transfer_nkn_cancel_first",
+                    FileName = "cancel-first.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                    ChunkCount = 4,
+                    ChunkSizeBytes = 1,
+                },
+                cts.Token);
+            await startReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            hostClient.BeforeSendAsync = async (_, payload, token) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) || env.Type != MsgType.Ack)
+                {
+                    return;
+                }
+
+                if (Interlocked.CompareExchange(ref blockedCancelAck, 1, 0) == 0)
+                {
+                    await releaseCancelAck.Task.WaitAsync(token);
+                }
+            };
+
+            var cancelTask = helper.SendFileTransferCancelAsync(
+                new FileTransferCancelV1
+                {
+                    SessionId = sessionId,
+                    TransferId = "transfer_nkn_cancel_first",
+                    Reason = "local_cancel_then_reoffer",
+                },
+                cts.Token);
+
+            await cancelReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var secondOfferTask = helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV1
+                {
+                    SessionId = sessionId,
+                    TransferId = "transfer_nkn_cancel_second",
+                    FileName = "cancel-second.bin",
+                    FileSizeBytes = 3,
+                    Sha256Base64 = expectedHash,
+                },
+                cts.Token);
+            await secondOfferReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            releaseCancelAck.TrySetResult(true);
+            await secondOfferTask;
+            await cancelTask.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+
+            var staleCancelEnvelope = BuildSecureFileTransferEnvelope(
+                host,
+                MsgType.FileTransferCancel,
+                new FileTransferCancelV1
+                {
+                    SessionId = sessionId,
+                    TransferId = "transfer_nkn_cancel_first",
+                    Reason = "late_remote_cancel",
+                },
+                requestId: "transfer_nkn_cancel_first",
+                sequence: 128);
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            await hostClient.SendAsync(helper.LocalPeerAddress, EnvelopeCodec.Serialize(staleCancelEnvelope), cts.Token);
+            await WaitUntilAsync(
+                () =>
+                {
+                    var snapshot = NknRuntimeDiagnostics.Snapshot();
+                    return snapshot.StalePostTerminalIgnored > diagnosticsBefore.StalePostTerminalIgnored ||
+                           snapshot.FileTransferDuplicateCancelAcked > diagnosticsBefore.FileTransferDuplicateCancelAcked;
+                },
+                TimeSpan.FromSeconds(3));
+            Assert.NotEqual(
+                "file_transfer_cancel_unknown_transfer_id",
+                NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_PipelinedFileTransfer_Completes_AndControlRemainsResponsive()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.transport.pipeline.service.address");
+            var helperClient = new FakeNknClient("helper.transport.pipeline.service.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            using var sender = new SessionFileTransferService();
+            using var receiver = new SessionFileTransferService();
+
+            sender.AttachTransport(helper);
+            receiver.AttachTransport(host);
+
+            var controlReceived = new TaskCompletionSource<ControlRequestMessageV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.RemoteControlRequestReceived += (_, e) => controlReceived.TrySetResult(e.Message);
+
+            var chunkBurstObserved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var chunkEnvelopeCount = 0;
+            helperClient.BeforeSendAsync = (_, payload, token) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) || env.Type != MsgType.FileTransferChunk)
+                {
+                    return Task.CompletedTask;
+                }
+
+                if (Interlocked.Increment(ref chunkEnvelopeCount) >= 4)
+                {
+                    chunkBurstObserved.TrySetResult();
+                }
+
+                return Task.Delay(25, token);
+            };
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer | InviteCapabilities.RemoteControl);
+
+            const string transferId = "transport_pipeline_roundtrip";
+            var payload = Enumerable.Range(0, 131_072).Select(static i => (byte)(i % 251)).ToArray();
+            using var destination = new MemoryStream();
+
+            var started = await sender.TryStartSendAsync(
+                new FileTransferSendDescriptor("pipeline.bin", payload.Length, transferId, ChunkSizeBytes: 4096),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+                cts.Token);
+
+            Assert.NotNull(started);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(3));
+
+            var accepted = await receiver.AcceptIncomingTransferAsync(
+                transferId,
+                (_, _) => Task.FromResult<Stream>(destination),
+                cts.Token);
+
+            Assert.NotNull(accepted);
+            await chunkBurstObserved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await helper.SendControlRequestAsync(
+                new ControlRequestMessageV1
+                {
+                    SessionId = sessionId,
+                    RequestId = "control_req_pipeline_burst",
+                    Caps = new[] { "mouse" },
+                    Reason = "control responsiveness during pipelined file transfer",
+                },
+                cts.Token);
+
+            var control = await controlReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.Equal("control_req_pipeline_burst", control.RequestId);
+            Assert.True(Volatile.Read(ref chunkEnvelopeCount) >= 4);
+
+            await WaitUntilAsync(
+                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+                TimeSpan.FromSeconds(8));
+
+            Assert.Equal(payload.Length, sender.Snapshot.Outbound!.BytesTransferred);
+            Assert.Equal(payload.Length, receiver.Snapshot.Inbound!.BytesTransferred);
+            Assert.Equal(payload, destination.ToArray());
+
+            var diagnostics = NknRuntimeDiagnostics.Snapshot();
+            Assert.True(diagnostics.FileTransferLane.MessagesSent > 0);
+            Assert.True(diagnostics.FileTransferLane.BytesSent > 0);
+            Assert.True(diagnostics.FileTransferNextOutboundSecureSequence > 0);
+            Assert.Equal(0, diagnostics.FileTransferLane.CurrentQueueDepth);
+            Assert.Equal(0, diagnostics.FileTransferLane.CurrentInFlight);
         }
         finally
         {
@@ -13170,6 +16300,13 @@ rl.on('line', (line) => {
         return field!.GetValue(target);
     }
 
+    private static object? GetPrivateProperty(object target, string propertyName)
+    {
+        var property = target.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        Assert.NotNull(property);
+        return property!.GetValue(target);
+    }
+
     private static void SetPrivateFieldDynamic(object target, string fieldName, object? value)
     {
         var field = target.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
@@ -13384,6 +16521,13 @@ rl.on('line', (line) => {
             Payload: securePayload,
             UnixTimeMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             ReplyTo: null);
+    }
+
+    private static bool TryParseRawScreenShareFramePayload(byte[] payload, out ScreenShareMediaFrameMetadataV2 metadata)
+    {
+        var ok = ScreenShareMediaPacketCodec.TryDeserializeFrame(payload, out var parsed);
+        metadata = ok ? parsed : default!;
+        return ok;
     }
 
     private static byte[] BuildSecureDevLocalPayload(
