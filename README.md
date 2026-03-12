@@ -108,10 +108,6 @@ License:
   [`docs/releases/0.5.0-github.md`](docs/releases/0.5.0-github.md)
 - Screenshare RC/final validation checklist:
   [`docs/release/0.3.0-rc-validation-checklist.md`](docs/release/0.3.0-rc-validation-checklist.md)
-- Promotion criteria:
-  [`docs/release/0.3.0-promotion.md`](docs/release/0.3.0-promotion.md)
-- Optional beta hardening extras (offline/permissions/installer upgrade rollback/hang checks):
-  see `docs/BETA_HARDENING_EXTRAS.md`
 
 ### Dead-Code Report (Local, Non-Destructive)
 
