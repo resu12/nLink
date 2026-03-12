@@ -2,12 +2,14 @@
 using System.Collections.Concurrent;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using NLink.Core;
 using NLink.Core.Logging;
 using NLink.Core.Retry;
 using NLink.Core.ScreenShare;
+using NLink.Core.SessionSecurity;
 
 namespace NLink.Infra.Nkn;
 
@@ -40,7 +42,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private TimeSpan? connectReadyTimeoutOverrideForTests;
     private CancellationTokenSource? pingLoopCts;
     private Task? pingLoopTask;
-    private string address;
+    private string controlAddress;
+    private string mediaAddress;
     private int disconnectedRaised;
     private int unexpectedRestartLoopActive;
     private bool helloCompleted;
@@ -60,6 +63,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private string? inboundScreenShareSessionId;
     private string? inboundScreenShareSourceAddress;
     private long inboundScreenShareExpiresAtUnixMs;
+    private byte[]? inboundScreenShareMediaKey;
+    private string? inboundScreenShareExpectedSenderIdentity;
+    private long inboundScreenShareMediaGeneration;
+    private readonly SessionReplayWindow inboundScreenShareMediaReplayWindow = new();
     private int disposeStarted;
     private SemaphoreSlim? heldIdentityUsageLease;
 
@@ -67,7 +74,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     {
         this.identity = identity ?? throw new ArgumentNullException(nameof(identity));
         this.options = options ?? throw new ArgumentNullException(nameof(options));
-        address = identity.Address;
+        controlAddress = identity.Address;
+        mediaAddress = identity.Address;
         bridgeSupervisor = new BridgeSupervisor(
             callbacks: new BridgeSupervisorCallbacks
             {
@@ -111,11 +119,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             identity.Address,
             connectAttempts,
             getCurrentPid: () => bridgeSupervisor.CurrentPid,
-            setConnectedAddress: addr =>
+            setConnectedAddresses: (controlAddr, mediaAddr) =>
             {
                 lock (gate)
                 {
-                    address = addr;
+                    controlAddress = controlAddr;
+                    mediaAddress = string.IsNullOrWhiteSpace(mediaAddr) ? controlAddr : mediaAddr;
                 }
             },
             log: Log);
@@ -140,7 +149,29 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         {
             lock (gate)
             {
-                return address;
+                return controlAddress;
+            }
+        }
+    }
+
+    internal string ControlAddress
+    {
+        get
+        {
+            lock (gate)
+            {
+                return controlAddress;
+            }
+        }
+    }
+
+    internal string MediaAddress
+    {
+        get
+        {
+            lock (gate)
+            {
+                return mediaAddress;
             }
         }
     }
@@ -306,11 +337,15 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
             lock (gate)
             {
-                address = string.IsNullOrWhiteSpace(readyAddress) ? identity.Address : readyAddress;
+                controlAddress = string.IsNullOrWhiteSpace(readyAddress) ? identity.Address : readyAddress;
+                if (string.IsNullOrWhiteSpace(mediaAddress))
+                {
+                    mediaAddress = controlAddress;
+                }
             }
 
             StartPingLoopIfNeeded();
-            Log($"Connected bridge (address_len={Address.Length})");
+            Log($"Connected bridge (control_address_len={ControlAddress.Length}, media_address_len={MediaAddress.Length})");
         }
         finally
         {
@@ -427,12 +462,48 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             {
                 ["destination"] = destination,
                 ["payloadBase64"] = Convert.ToBase64String(payload),
+                ["channel"] = "control",
             },
             ct,
             timeoutOverride: CommandAckTimeout,
-            onSerialized: isScreenSharePayload
-                ? bytes => NknRuntimeDiagnostics.AddScreenShareBridgeBytesSent(bytes)
-                : null);
+            onSerialized: bytes =>
+            {
+                NknRuntimeDiagnostics.IncrementBridgeControlMessagesSent();
+                NknRuntimeDiagnostics.AddBridgeControlBytesSent(bytes);
+                if (isScreenSharePayload)
+                {
+                    NknRuntimeDiagnostics.AddScreenShareBridgeBytesSent(bytes);
+                }
+            });
+    }
+
+    internal Task SendScreenShareFrameAsync(string destination, byte[] payload, CancellationToken ct)
+        => SendMediaAsync(destination, payload, ct);
+
+    internal Task SendMediaAsync(string destination, byte[] payload, CancellationToken ct)
+    {
+        ThrowIfDisposed();
+        ArgumentException.ThrowIfNullOrWhiteSpace(destination);
+        ArgumentNullException.ThrowIfNull(payload);
+        EnsurePayloadWithinLimit(payload, "send");
+
+        MaybeLogBridgeSendSummary(payload.Length, destination.Length);
+        return SendCommandAndWaitAckAsync(
+            "send",
+            new Dictionary<string, object?>
+            {
+                ["destination"] = destination,
+                ["payloadBase64"] = Convert.ToBase64String(payload),
+                ["channel"] = "media",
+            },
+            ct,
+            timeoutOverride: CommandAckTimeout,
+            onSerialized: bytes =>
+            {
+                NknRuntimeDiagnostics.IncrementBridgeMediaMessagesSent();
+                NknRuntimeDiagnostics.AddBridgeMediaBytesSent(bytes);
+                NknRuntimeDiagnostics.AddScreenShareBridgeBytesSent(bytes);
+            });
     }
 
     internal Task UpdateInboundScreenSharePolicyAsync(
@@ -440,7 +511,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         string? sessionId,
         string? sourceAddress,
         DateTimeOffset? expiresAtUtc,
-        CancellationToken ct)
+        CancellationToken ct,
+        byte[]? mediaKey = null,
+        string? expectedSenderIdentity = null,
+        long mediaGeneration = 0)
     {
         if (disposed)
         {
@@ -449,6 +523,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? null : sessionId.Trim();
         var normalizedSourceAddress = string.IsNullOrWhiteSpace(sourceAddress) ? null : sourceAddress.Trim();
+        var normalizedExpectedSenderIdentity = string.IsNullOrWhiteSpace(expectedSenderIdentity) ? null : expectedSenderIdentity.Trim();
         DateTimeOffset? normalizedExpiresAtUtc = expiresAtUtc is DateTimeOffset value ? value.ToUniversalTime() : null;
         var effectiveEnabled =
             enabled &&
@@ -464,7 +539,23 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             inboundScreenShareExpiresAtUnixMs = effectiveEnabled
                 ? normalizedExpiresAtUtc!.Value.ToUnixTimeMilliseconds()
                 : 0L;
+            if (inboundScreenShareMediaKey is not null)
+            {
+                CryptographicOperations.ZeroMemory(inboundScreenShareMediaKey);
+            }
+
+            inboundScreenShareMediaKey = effectiveEnabled && mediaKey is { Length: > 0 }
+                ? mediaKey.AsSpan().ToArray()
+                : null;
+            inboundScreenShareExpectedSenderIdentity = effectiveEnabled ? normalizedExpectedSenderIdentity : null;
+            inboundScreenShareMediaGeneration = Math.Max(0L, mediaGeneration);
+            inboundScreenShareMediaReplayWindow.Reset();
         }
+
+        screenShareFrameReassembler.ClearAll();
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event={(effectiveEnabled ? "media_policy_attached" : "media_policy_detached")}; session_id={(effectiveEnabled ? normalizedSessionId : "(none)")}; source={(effectiveEnabled ? normalizedSourceAddress : "(none)")}; expected_sender={(effectiveEnabled ? normalizedExpectedSenderIdentity : "(none)")}; media_generation={Math.Max(0L, mediaGeneration)}");
 
         if (!bridgeSupervisor.IsProcessRunning)
         {
@@ -753,6 +844,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var payloadBase64 = TryGetString(root, "payloadBase64", out var p) ? p : string.Empty;
         var isTopic = root.TryGetProperty("isTopic", out var isTopicProp) && isTopicProp.ValueKind == JsonValueKind.True;
         var topic = TryGetString(root, "topic", out var t) ? t : null;
+        var channel = TryGetString(root, "channel", out var channelValue) &&
+                      string.Equals(channelValue, "media", StringComparison.OrdinalIgnoreCase)
+            ? NknClientChannel.Media
+            : NknClientChannel.Control;
 
         NknRuntimeDiagnostics.IncrementBridgeRawMessagesReceived();
         NknRuntimeDiagnostics.SetLastBridgeMessage(source, isTopic);
@@ -780,18 +875,99 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             return;
         }
 
-        if (TryHandleScreenSharePayload(payloadBytes, source))
+        if (channel == NknClientChannel.Media)
+        {
+            NknRuntimeDiagnostics.IncrementBridgeMediaMessagesReceived();
+            NknRuntimeDiagnostics.AddBridgeMediaBytesReceived(payloadBytes.Length);
+        }
+        else
+        {
+            NknRuntimeDiagnostics.IncrementBridgeControlMessagesReceived();
+            NknRuntimeDiagnostics.AddBridgeControlBytesReceived(payloadBytes.Length);
+        }
+
+        if (channel == NknClientChannel.Media &&
+            TryHandleScreenSharePayload(payloadBytes, source))
         {
             MaybeLogScreenShareMessageSummary(payloadBytes.Length, source.Length, isTopic);
             return;
         }
 
         MaybeLogBridgeMessageSummary(payloadBytes.Length, source.Length, isTopic);
-        MessageReceived?.Invoke(this, new NknIncomingMessage(source, payloadBytes, isTopic, topic));
+        MessageReceived?.Invoke(this, new NknIncomingMessage(source, payloadBytes, isTopic, topic, channel));
     }
 
     private bool TryHandleScreenSharePayload(byte[] payloadBytes, string? source)
     {
+        if (ScreenShareMediaPacketCodec.TryDeserializeFrame(payloadBytes, out var mediaMetadata))
+        {
+            if (!TryAuthorizeInboundScreenShare(mediaMetadata.SessionId, source, out var mediaFailureReason))
+            {
+                screenShareFrameReassembler.ClearSession(mediaMetadata.SessionId);
+                LogInboundScreenShareDropped(mediaFailureReason, source, mediaMetadata.SessionId, "frame_v2");
+                return true;
+            }
+
+            byte[]? mediaKey;
+            string? expectedSenderIdentity;
+            lock (gate)
+            {
+                mediaKey = inboundScreenShareMediaKey?.AsSpan().ToArray();
+                expectedSenderIdentity = inboundScreenShareExpectedSenderIdentity;
+            }
+
+            if (mediaKey is null || mediaKey.Length == 0)
+            {
+                screenShareFrameReassembler.ClearSession(mediaMetadata.SessionId);
+                LogInboundScreenShareDropped("media_key_unavailable", source, mediaMetadata.SessionId, "frame_v2");
+                return true;
+            }
+
+            if (!ScreenShareMediaPacketCodec.TryDecryptFrame(mediaKey, payloadBytes, out var decryptedMetadata, out var mediaPayload))
+            {
+                screenShareFrameReassembler.ClearSession(mediaMetadata.SessionId);
+                LogInboundScreenShareDropped("media_decrypt_failed", source, mediaMetadata.SessionId, "frame_v2");
+                return true;
+            }
+
+            if (!string.Equals(decryptedMetadata.SessionId, mediaMetadata.SessionId, StringComparison.Ordinal))
+            {
+                screenShareFrameReassembler.ClearSession(mediaMetadata.SessionId);
+                LogInboundScreenShareDropped("session_id_mismatch", source, mediaMetadata.SessionId, "frame_v2");
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(expectedSenderIdentity) ||
+                !NknSignalingTransport.AddressMatchesForSessionPolicy(mediaPayload.SenderIdentity, expectedSenderIdentity))
+            {
+                screenShareFrameReassembler.ClearSession(mediaMetadata.SessionId);
+                LogInboundScreenShareDropped("sender_identity_mismatch", source, mediaMetadata.SessionId, "frame_v2");
+                return true;
+            }
+
+            SessionReplaySequenceResult replayResult;
+            lock (gate)
+            {
+                replayResult = inboundScreenShareMediaReplayWindow.EvaluateAndTrack(decryptedMetadata.Sequence);
+            }
+
+            if (replayResult != SessionReplaySequenceResult.Accepted)
+            {
+                var replayReason = replayResult switch
+                {
+                    SessionReplaySequenceResult.Duplicate => "replay_duplicate",
+                    SessionReplaySequenceResult.Stale => "replay_stale",
+                    SessionReplaySequenceResult.TooFarAhead => "replay_too_far_ahead",
+                    _ => "replay_invalid",
+                };
+                LogInboundScreenShareDropped(replayReason, source, mediaMetadata.SessionId, "frame_v2");
+                return true;
+            }
+
+            screenShareFrameReassembler.OnChunk(mediaPayload.Chunk);
+            return true;
+        }
+
         if (!ScreenSharePayloadCodec.TryDeserialize(payloadBytes, out var chunk))
         {
             if (!ScreenSharePayloadCodec.TryDeserializeStop(payloadBytes, out var stop))
@@ -890,8 +1066,25 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
     private void LogInboundScreenShareDropped(string reason, string? source, string? sessionId, string messageType)
     {
+        if (string.Equals(reason, "session_id_mismatch", StringComparison.Ordinal))
+        {
+            NknRuntimeDiagnostics.IncrementMediaPlaneSessionMismatchRejectCount();
+        }
+        else if (reason.StartsWith("replay_", StringComparison.Ordinal))
+        {
+            NknRuntimeDiagnostics.IncrementMediaPlaneReplayRejectCount();
+        }
+        else
+        {
+            NknRuntimeDiagnostics.IncrementMediaPlanePolicyRejectCount();
+        }
+
+        NknRuntimeDiagnostics.SetLastMediaPlaneRejectReason(reason);
         NknRuntimeDiagnostics.SetLastError($"bridge_screenshare_{reason}");
         NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"bridge_screenshare_{reason}");
+        LocalOperationalLog.Warn(
+            "ScreenShareTransport",
+            $"event=media_frame_rejected; message_type={messageType}; reason={reason}; session_id={sessionId ?? "(none)"}; source={source ?? "(none)"}; media_generation={Volatile.Read(ref inboundScreenShareMediaGeneration)}");
         LocalOperationalLog.Warn(
             "SessionSecurity",
             $"event=bridge_screenshare_dropped; message_type={messageType}; reason={reason}; session_id={sessionId ?? "(none)"}; source={source ?? "(none)"}");
@@ -1022,6 +1215,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             return;
         }
 
+        ResetInboundScreenShareMediaState();
         screenShareFrameReassembler.ClearAll();
         NknRuntimeDiagnostics.SetAuthoritativeConnectedAddressResolved(false);
 
@@ -1335,7 +1529,23 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private static bool LooksLikeScreenSharePayload(ReadOnlySpan<byte> payload)
     {
         return payload.IndexOf("\"screenshare.frame.v1\""u8) >= 0 ||
+               payload.IndexOf("\"screenshare.frame.v2\""u8) >= 0 ||
                payload.IndexOf("\"screenshare.stop.v1\""u8) >= 0;
+    }
+
+    private void ResetInboundScreenShareMediaState()
+    {
+        lock (gate)
+        {
+            if (inboundScreenShareMediaKey is not null)
+            {
+                CryptographicOperations.ZeroMemory(inboundScreenShareMediaKey);
+                inboundScreenShareMediaKey = null;
+            }
+
+            inboundScreenShareExpectedSenderIdentity = null;
+            inboundScreenShareMediaReplayWindow.Reset();
+        }
     }
 
     private string ResolveBridgeScriptPath()

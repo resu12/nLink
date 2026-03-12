@@ -31,4 +31,6 @@ internal enum MsgType
     FileTransferCancel = 26,
     FileTransferError = 27,
     FileTransferComplete = 28,
+    FileTransferWindowUpdate = 29,
+    FileTransferMissingRange = 30,
 }

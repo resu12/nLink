@@ -23,6 +23,8 @@ internal sealed class NknTransportOptions
 
     public int PreflightCacheTtlMs { get; private set; }
 
+    public int FileTransferChunkPacingMs { get; private set; }
+
     public static NknTransportOptions Load()
     {
         var appSettings = AppSettingsJson.Load();
@@ -62,6 +64,11 @@ internal sealed class NknTransportOptions
             appSettings.Get("NLINK_NKN_PREFLIGHT_CACHE_TTL_MS"),
             appSettings.Get("nLink:nkn:preflightCacheTtlMs"));
 
+        var fileTransferChunkPacingMs = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_CHUNK_PACING_MS"),
+            appSettings.Get("NLINK_NKN_FILE_TRANSFER_CHUNK_PACING_MS"),
+            appSettings.Get("nLink:nkn:fileTransferChunkPacingMs"));
+
         return new NknTransportOptions
         {
             SeedRpc = seedRpc,
@@ -71,6 +78,7 @@ internal sealed class NknTransportOptions
             PreflightTimeoutMs = ParseInt(preflightTimeoutMs, defaultValue: 700, minValue: 1, maxValue: 60_000),
             PreflightConcurrency = ParseInt(preflightConcurrency, defaultValue: 8, minValue: 1, maxValue: 256),
             PreflightCacheTtlMs = ParseInt(preflightCacheTtlMs, defaultValue: 600_000, minValue: 0, maxValue: 86_400_000),
+            FileTransferChunkPacingMs = ParseInt(fileTransferChunkPacingMs, defaultValue: 2, minValue: 0, maxValue: 1_000),
         };
     }
 

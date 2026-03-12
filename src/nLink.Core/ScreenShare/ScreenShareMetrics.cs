@@ -22,4 +22,6 @@ public sealed record ScreenShareMetrics(
     double AverageCaptureToSendMs = 0,
     long StaleFrameRenders = 0,
     double AverageRenderIntervalMs = 0,
-    double AverageCaptureToRenderMs = 0);
+    double AverageCaptureToRenderMs = 0,
+    bool TransferDownshiftActive = false,
+    long TransferDownshiftFramesSuppressed = 0);

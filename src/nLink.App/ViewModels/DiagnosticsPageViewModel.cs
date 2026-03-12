@@ -103,10 +103,27 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         BridgeRestarts = nknDiagnosticsSnapshot.BridgeRestartCount.ToString();
         LastBridgeExit = BuildLastBridgeExitText(nknDiagnosticsSnapshot.BridgeLastExitCode, nknDiagnosticsSnapshot.BridgeLastExitReason);
         BridgeRawMessagesReceived = nknDiagnosticsSnapshot.BridgeRawMessagesReceived.ToString();
+        ControlLaneActivityState = nknDiagnosticsSnapshot.ControlLane.ActivityState;
+        ControlLaneQueuedMessages = nknDiagnosticsSnapshot.ControlLane.CurrentQueueDepth.ToString();
+        ControlLanePeakQueuedMessages = nknDiagnosticsSnapshot.ControlLane.PeakQueueDepth.ToString();
+        ControlLaneInFlight = nknDiagnosticsSnapshot.ControlLane.CurrentInFlight.ToString();
+        ControlLaneWaits = nknDiagnosticsSnapshot.ControlLane.WaitCount.ToString();
+        ControlLaneRejectedOrDropped = nknDiagnosticsSnapshot.ControlLane.RejectedOrDroppedCount.ToString();
         ScreenShareOutboundBusyDrops = nknDiagnosticsSnapshot.ScreenShareOutboundBusyDrops.ToString();
         ScreenSharePayloadBytesSent = nknDiagnosticsSnapshot.ScreenSharePayloadBytesSent.ToString();
         ScreenShareMessagesSent = nknDiagnosticsSnapshot.ScreenShareMessagesSent.ToString();
         ScreenShareBridgeBytesSent = nknDiagnosticsSnapshot.ScreenShareBridgeBytesSent.ToString();
+        FileTransferLaneQueuedMessages = nknDiagnosticsSnapshot.FileTransferLane.CurrentQueueDepth.ToString();
+        FileTransferLaneWaits = nknDiagnosticsSnapshot.FileTransferLane.WaitCount.ToString();
+        FileTransferLaneInFlight = nknDiagnosticsSnapshot.FileTransferLane.CurrentInFlight.ToString();
+        FileTransferLaneBytesSent = nknDiagnosticsSnapshot.FileTransferLane.BytesSent.ToString();
+        FileTransferLaneMessagesSent = nknDiagnosticsSnapshot.FileTransferLane.MessagesSent.ToString();
+        FileTransferNextOutboundSecureSequence = nknDiagnosticsSnapshot.FileTransferNextOutboundSecureSequence.ToString();
+        FileTransferLaneActivityState = nknDiagnosticsSnapshot.FileTransferLane.ActivityState;
+        ScreenShareLaneQueuedFrames = nknDiagnosticsSnapshot.ScreenShareLaneQueueDepth.ToString();
+        ScreenShareLaneCongestionHits = nknDiagnosticsSnapshot.ScreenShareLaneCongestionHits.ToString();
+        ScreenShareLaneStaleFrameDrops = nknDiagnosticsSnapshot.ScreenShareLaneStaleFrameDrops.ToString();
+        LastScreenShareDroppedFrameId = nknDiagnosticsSnapshot.LastScreenShareDroppedFrameId;
         HighPriorityControlQueueOverflows = nknDiagnosticsSnapshot.HighPriorityControlQueueOverflows.ToString();
         HighPriorityControlRejected = nknDiagnosticsSnapshot.HighPriorityControlRejected.ToString();
         HighPriorityControlCoalesced = nknDiagnosticsSnapshot.HighPriorityControlCoalesced.ToString();
@@ -207,6 +224,17 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string RemoteControlSummary => runtimeDiagnosticsSnapshot.RemoteControlSummary;
     public string ScreenShareSummary => runtimeDiagnosticsSnapshot.ScreenShareSummary;
     public string FileTransferSummary => runtimeDiagnosticsSnapshot.FileTransferSummary;
+    public string FileTransferFlowSummary => runtimeDiagnosticsSnapshot.FileTransferFlowSummary;
+    public string TransportLaneSummary => runtimeDiagnosticsSnapshot.TransportLaneSummary;
+    public string RuntimeSessionId => runtimeDiagnosticsSnapshot.SessionId;
+    public string RuntimeControllerPeerId => runtimeDiagnosticsSnapshot.ControllerPeerId;
+    public string RuntimeTransportGeneration => runtimeDiagnosticsSnapshot.TransportGeneration.ToString(CultureInfo.InvariantCulture);
+    public string RuntimeMediaGeneration => runtimeDiagnosticsSnapshot.MediaGeneration.ToString(CultureInfo.InvariantCulture);
+    public string ControlPlaneSummary => runtimeDiagnosticsSnapshot.ControlPlaneSummary;
+    public string MediaPlaneSummary => runtimeDiagnosticsSnapshot.MediaPlaneSummary;
+    public string RecoverySummary => runtimeDiagnosticsSnapshot.RecoverySummary;
+    public string CorrelationSummary =>
+        $"session_id={RuntimeSessionId}; transport_generation={RuntimeTransportGeneration}; media_generation={RuntimeMediaGeneration}; controller_peer_id={RuntimeControllerPeerId}";
     public string AuthoritativeConnectedAddress => nknDiagnosticsSnapshot.AuthoritativeConnectedAddressResolved ? "Yes" : "No";
     public string LastRejectedMessageSummary => BuildLastRejectedMessageSummary();
 
@@ -236,6 +264,21 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     public string BridgeRawMessagesReceived { get; }
 
+    public string ControlLaneActivityState { get; }
+
+    public string ControlLaneQueuedMessages { get; }
+
+    public string ControlLanePeakQueuedMessages { get; }
+
+    public string ControlLaneInFlight { get; }
+
+    public string ControlLaneWaits { get; }
+
+    public string ControlLaneRejectedOrDropped { get; }
+
+    public string ControlLaneSummary =>
+        $"activity={ControlLaneActivityState}; queue={ControlLaneQueuedMessages}; in_flight={ControlLaneInFlight}; waits={ControlLaneWaits}; rejected_or_dropped={ControlLaneRejectedOrDropped}";
+
     public string ScreenShareOutboundBusyDrops { get; }
 
     public string ScreenSharePayloadBytesSent { get; }
@@ -243,6 +286,34 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string ScreenShareMessagesSent { get; }
 
     public string ScreenShareBridgeBytesSent { get; }
+
+    public string FileTransferLaneQueuedMessages { get; }
+
+    public string FileTransferLaneWaits { get; }
+
+    public string FileTransferLaneInFlight { get; }
+
+    public string FileTransferLaneBytesSent { get; }
+
+    public string FileTransferLaneMessagesSent { get; }
+
+    public string FileTransferNextOutboundSecureSequence { get; }
+
+    public string FileTransferLaneActivityState { get; }
+
+    public string FileTransferLaneSummary =>
+        $"activity={FileTransferLaneActivityState}; queue={FileTransferLaneQueuedMessages}; in_flight={FileTransferLaneInFlight}; waits={FileTransferLaneWaits}; messages_sent={FileTransferLaneMessagesSent}; bytes_sent={FileTransferLaneBytesSent}";
+
+    public string ScreenShareLaneQueuedFrames { get; }
+
+    public string ScreenShareLaneCongestionHits { get; }
+
+    public string ScreenShareLaneStaleFrameDrops { get; }
+
+    public string LastScreenShareDroppedFrameId { get; }
+
+    public string ScreenShareLaneSummary =>
+        $"queue={ScreenShareLaneQueuedFrames}; in_flight={nknDiagnosticsSnapshot.ScreenShareLane.CurrentInFlight}; stale_drops={ScreenShareLaneStaleFrameDrops}; congestion_hits={ScreenShareLaneCongestionHits}";
 
     public string HighPriorityControlQueueOverflows { get; }
 
@@ -476,6 +547,12 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"remote_control_summary: {RemoteControlSummary}",
             $"screenshare_summary: {ScreenShareSummary}",
             $"file_transfer_summary: {FileTransferSummary}",
+            $"file_transfer_flow_summary: {FileTransferFlowSummary}",
+            $"transport_lane_summary: {TransportLaneSummary}",
+            $"control_plane: {ControlPlaneSummary}",
+            $"media_plane: {MediaPlaneSummary}",
+            $"recovery: {RecoverySummary}",
+            $"transport_correlation: {CorrelationSummary}",
             $"file_transfer_inbound_id: {runtimeDiagnosticsSnapshot.ActiveInboundFileTransferId}",
             $"file_transfer_inbound_state: {runtimeDiagnosticsSnapshot.ActiveInboundFileTransferState}",
             $"file_transfer_inbound_bytes: {runtimeDiagnosticsSnapshot.ActiveInboundFileTransferBytes?.ToString() ?? "(none)"}",
@@ -522,10 +599,15 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"Last bridge exit: {LastBridgeExit}",
             $"bridge_process_status: {BuildBridgeProcessStatus()}",
             $"bridge_raw_messages_received: {BridgeRawMessagesReceived}",
+            $"control_lane: {ControlLaneSummary}",
             $"screenshare_outbound_busy_drops: {ScreenShareOutboundBusyDrops}",
             $"screenshare_messages_sent: {ScreenShareMessagesSent}",
             $"screenshare_payload_bytes_sent: {ScreenSharePayloadBytesSent}",
             $"screenshare_bridge_bytes_sent: {ScreenShareBridgeBytesSent}",
+            $"file_transfer_lane: {FileTransferLaneSummary}",
+            $"file_transfer_next_outbound_secure_sequence: {FileTransferNextOutboundSecureSequence}",
+            $"screenshare_lane: {ScreenShareLaneSummary}",
+            $"screenshare_last_dropped_frame_id: {LastScreenShareDroppedFrameId}",
             $"high_priority_control_queue_overflows: {HighPriorityControlQueueOverflows}",
             $"high_priority_control_rejected: {HighPriorityControlRejected}",
             $"high_priority_control_coalesced: {HighPriorityControlCoalesced}",

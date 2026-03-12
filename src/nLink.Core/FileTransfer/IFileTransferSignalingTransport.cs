@@ -17,6 +17,8 @@ public interface IFileTransferSignalingTransport
     event EventHandler<FileTransferDeclineReceivedEventArgs>? FileTransferDeclineReceived;
     event EventHandler<FileTransferStartReceivedEventArgs>? FileTransferStartReceived;
     event EventHandler<FileTransferChunkReceivedEventArgs>? FileTransferChunkReceived;
+    event EventHandler<FileTransferWindowUpdateReceivedEventArgs>? FileTransferWindowUpdateReceived;
+    event EventHandler<FileTransferMissingRangeReceivedEventArgs>? FileTransferMissingRangeReceived;
     event EventHandler<FileTransferCancelReceivedEventArgs>? FileTransferCancelReceived;
     event EventHandler<FileTransferErrorReceivedEventArgs>? FileTransferErrorReceived;
     event EventHandler<FileTransferCompleteReceivedEventArgs>? FileTransferCompleteReceived;
@@ -26,6 +28,8 @@ public interface IFileTransferSignalingTransport
     Task SendFileTransferDeclineAsync(FileTransferDeclineV1 message, CancellationToken ct);
     Task SendFileTransferStartAsync(FileTransferStartV1 message, CancellationToken ct);
     Task SendFileTransferChunkAsync(FileTransferChunkV1 message, CancellationToken ct);
+    Task SendFileTransferWindowUpdateAsync(FileTransferWindowUpdateV2 message, CancellationToken ct);
+    Task SendFileTransferMissingRangeAsync(FileTransferMissingRangeV1 message, CancellationToken ct);
     Task SendFileTransferCancelAsync(FileTransferCancelV1 message, CancellationToken ct);
     Task SendFileTransferErrorAsync(FileTransferErrorV1 message, CancellationToken ct);
     Task SendFileTransferCompleteAsync(FileTransferCompleteV1 message, CancellationToken ct);
@@ -92,6 +96,32 @@ public sealed class FileTransferChunkReceivedEventArgs : EventArgs
     }
 
     public FileTransferChunkV1 Message { get; }
+
+    public string? PeerId { get; }
+}
+
+public sealed class FileTransferWindowUpdateReceivedEventArgs : EventArgs
+{
+    public FileTransferWindowUpdateReceivedEventArgs(FileTransferWindowUpdateV2 message, string? peerId)
+    {
+        Message = message ?? throw new ArgumentNullException(nameof(message));
+        PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
+    }
+
+    public FileTransferWindowUpdateV2 Message { get; }
+
+    public string? PeerId { get; }
+}
+
+public sealed class FileTransferMissingRangeReceivedEventArgs : EventArgs
+{
+    public FileTransferMissingRangeReceivedEventArgs(FileTransferMissingRangeV1 message, string? peerId)
+    {
+        Message = message ?? throw new ArgumentNullException(nameof(message));
+        PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
+    }
+
+    public FileTransferMissingRangeV1 Message { get; }
 
     public string? PeerId { get; }
 }

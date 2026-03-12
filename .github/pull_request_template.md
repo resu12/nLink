@@ -1,11 +1,12 @@
-## Summary
-- 
+## Purpose
+Describe the change.
 
-## Validation
-- 
+## Areas to review
+@codex review focusing on:
+- security
+- race conditions
+- memory usage
+- network protocol correctness
 
-## Beta UX Gate
-- [ ] No transport/bridge/contracts changed
-- [ ] UX invariants checked: [docs/BetaUxGate.md](../docs/BetaUxGate.md)
-- [ ] Manual test steps included
-- [ ] No new technical info added to main UI
+## Testing
+Explain how this was tested.

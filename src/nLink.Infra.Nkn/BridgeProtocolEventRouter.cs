@@ -7,20 +7,20 @@ internal sealed class BridgeProtocolEventRouter
     private readonly string identityAddress;
     private readonly ConnectAttemptCoordinator connectAttempts;
     private readonly Func<int?> getCurrentPid;
-    private readonly Action<string> setConnectedAddress;
+    private readonly Action<string, string> setConnectedAddresses;
     private readonly Action<string> log;
 
     public BridgeProtocolEventRouter(
         string identityAddress,
         ConnectAttemptCoordinator connectAttempts,
         Func<int?> getCurrentPid,
-        Action<string> setConnectedAddress,
+        Action<string, string> setConnectedAddresses,
         Action<string> log)
     {
         this.identityAddress = identityAddress;
         this.connectAttempts = connectAttempts;
         this.getCurrentPid = getCurrentPid;
-        this.setConnectedAddress = setConnectedAddress;
+        this.setConnectedAddresses = setConnectedAddresses;
         this.log = log;
     }
 
@@ -49,10 +49,16 @@ internal sealed class BridgeProtocolEventRouter
 
     public void HandleReady(JsonElement root)
     {
-        var readyAddress = TryGetString(root, "address", out var a) ? a : string.Empty;
+        var readyAddress = TryGetString(root, "controlAddress", out var controlAddressValue)
+            ? controlAddressValue
+            : TryGetString(root, "address", out var a) ? a : string.Empty;
+        var readyMediaAddress = TryGetString(root, "mediaAddress", out var mediaAddressValue)
+            ? mediaAddressValue
+            : readyAddress;
         var hasConnectId = TryGetString(root, "connectId", out var readyConnectId) && !string.IsNullOrWhiteSpace(readyConnectId);
 
         var resolvedAddress = string.IsNullOrWhiteSpace(readyAddress) ? identityAddress : readyAddress;
+        var resolvedMediaAddress = string.IsNullOrWhiteSpace(readyMediaAddress) ? resolvedAddress : readyMediaAddress;
         var accept = connectAttempts.AcceptReady(resolvedAddress, hasConnectId, readyConnectId);
         switch (accept.Kind)
         {
@@ -67,7 +73,7 @@ internal sealed class BridgeProtocolEventRouter
                 break;
         }
 
-        setConnectedAddress(resolvedAddress);
+        setConnectedAddresses(resolvedAddress, resolvedMediaAddress);
         NknRuntimeDiagnostics.SetAuthoritativeConnectedAddressResolved(true);
     }
 

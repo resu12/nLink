@@ -1171,6 +1171,54 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_TransferDownshift_SuppressesRapidFrames_AndReportsMetrics()
+    {
+        var fakeSource = new FakeScreenCaptureSource();
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 12, 17, 0, 0, TimeSpan.Zero));
+        var sentPayloads = new List<byte[]>();
+
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: (payload, _) =>
+            {
+                lock (sentPayloads)
+                {
+                    sentPayloads.Add(payload.ToArray());
+                }
+
+                return Task.CompletedTask;
+            },
+            clock: clock);
+
+        await coordinator.StartAsync("transfer-downshift", CancellationToken.None);
+        coordinator.SetTransferMixedLoadDownshift(true);
+
+        for (var i = 0; i < 10; i++)
+        {
+            fakeSource.RaiseFrame(
+                new ScreenCaptureFrameEventArgs(
+                    1280,
+                    720,
+                    new byte[] { (byte)i, 0x02, 0x03 },
+                    "jpeg",
+                    capturedTsUtcMs: clock.UtcNow.ToUnixTimeMilliseconds()));
+            clock.Advance(TimeSpan.FromMilliseconds(25));
+        }
+
+        await Task.Delay(50);
+
+        var metrics = coordinator.GetMetricsSnapshot();
+        lock (sentPayloads)
+        {
+            Assert.True(sentPayloads.Count < 10);
+        }
+
+        Assert.True(metrics.TransferDownshiftActive);
+        Assert.True(metrics.TransferDownshiftFramesSuppressed > 0);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportScreenShareCoordinator_Stop_UnderRapidBlockedFrameLoad_Completes()
     {
         await RunStopOrDisconnectUnderLoadScenarioAsync(
@@ -1547,6 +1595,67 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
 
         var senderMetrics = coordinator.GetMetricsSnapshot();
         Assert.True(senderMetrics.FramesDropped >= 3, $"Expected unstable freshest-only mode to drop stale queued frames. Metrics={senderMetrics}");
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_TransportCongestion_DropsQueuedFrames_ToKeepFreshestOnly()
+    {
+        var fakeSource = new FakeScreenCaptureSource();
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 11, 12, 0, 0, TimeSpan.Zero));
+        var probe = new ScreenShareSendProbe(recentPayloadCapacity: 4, maxInFlight: 1, startBlocked: true);
+        var transportCongested = 1;
+
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: probe.SendReadOnlyPayloadAsync,
+            isTransportCongested: () => Volatile.Read(ref transportCongested) == 1,
+            clock: clock);
+
+        await AwaitCompletesAsync(
+            coordinator.StartAsync("session-transport-congestion", CancellationToken.None),
+            TimeSpan.FromSeconds(2),
+            "transport congestion start");
+
+        fakeSource.RaiseFrame(640, 360, new byte[] { 1 }, "jpeg");
+        await AwaitCompletesAsync(
+            probe.FirstSendStarted,
+            TimeSpan.FromSeconds(2),
+            "transport congestion first send");
+
+        for (byte marker = 2; marker <= 4; marker++)
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(500));
+            fakeSource.RaiseFrame(640, 360, new[] { marker }, "jpeg");
+        }
+
+        clock.Advance(TimeSpan.FromMilliseconds(500));
+        fakeSource.RaiseFrame(640, 360, new byte[] { 5 }, "jpeg");
+        clock.Advance(TimeSpan.FromMilliseconds(500));
+        fakeSource.RaiseFrame(640, 360, new byte[] { 6 }, "jpeg");
+
+        probe.ReleaseBlockedSends();
+        await AwaitCompletesAsync(
+            probe.WaitForPayloadCountAsync(2, TimeSpan.FromSeconds(2)),
+            TimeSpan.FromSeconds(2),
+            "transport congestion payload send");
+        await Task.Delay(100);
+
+        var payloads = probe.GetRecentPayloadsSnapshot();
+        Assert.Equal(2, probe.PayloadsSent);
+        Assert.Equal(2, payloads.Length);
+
+        Assert.True(ScreenSharePayloadCodec.TryDeserialize(payloads[0], out var firstChunk));
+        Assert.True(ScreenSharePayloadCodec.TryDeserialize(payloads[1], out var lastChunk));
+        Assert.Equal(new byte[] { 1 }, Convert.FromBase64String(firstChunk.DataBase64));
+        Assert.Equal(new byte[] { 5 }, Convert.FromBase64String(lastChunk.DataBase64));
+        Assert.True(probe.MaxObservedInFlight <= 1, $"Expected bounded transport backlog. MaxObservedInFlight={probe.MaxObservedInFlight}");
+        Assert.Equal(0, probe.CurrentInFlight);
+
+        var metrics = coordinator.GetMetricsSnapshot();
+        // Under explicit transport congestion some stale frames are skipped before they ever reach the
+        // send pipeline, so the pipeline metrics only guarantee that at least one queued frame was dropped.
+        Assert.True(metrics.FramesDropped >= 1, $"Expected congestion freshest-only mode to drop stale queued frames. Metrics={metrics}");
     }
 
     [Fact]

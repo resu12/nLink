@@ -9,6 +9,7 @@ public sealed class ScreenShareFrameReassembler
     public const int MaxChunkCount = 128;
     public const int MaxAssembledFrameBytes = 512_000;
 
+    private readonly object gate = new();
     private readonly Dictionary<string, SessionAssemblyState> sessions = new(StringComparer.Ordinal);
     private long framesCompleted;
     private long framesDropped;
@@ -41,96 +42,110 @@ public sealed class ScreenShareFrameReassembler
             return;
         }
 
-        var sessionId = chunk.SessionId.Trim();
-        if (!sessions.TryGetValue(sessionId, out var session))
+        ScreenShareFrameChunkV1? acceptedChunk = null;
+        ScreenShareFrameReadyEventArgs? frameReady = null;
+
+        lock (gate)
         {
-            session = new SessionAssemblyState();
-            sessions.Add(sessionId, session);
-        }
+            var sessionId = chunk.SessionId.Trim();
+            if (!sessions.TryGetValue(sessionId, out var session))
+            {
+                session = new SessionAssemblyState();
+                sessions.Add(sessionId, session);
+            }
 
-        if (chunk.FrameId <= session.LastCompletedFrameId)
-        {
-            return;
-        }
-
-        if (session.InvalidatedFrameIds.Contains(chunk.FrameId))
-        {
-            return;
-        }
-
-        AssertBufferBounds(session);
-
-        if (!TryGetOrCreateAssembly(session, sessionId, chunk, out var assembly))
-        {
-            return;
-        }
-
-        if (assembly.ChunkBytes[chunk.ChunkIndex] is not null)
-        {
-            return;
-        }
-
-        ChunkAccepted?.Invoke(this, chunk);
-
-        assembly.ChunkBytes[chunk.ChunkIndex] = chunkBytes;
-        assembly.ReceivedChunkCount++;
-        assembly.TotalBytes += chunkBytes.Length;
-
-        if (assembly.TotalBytes > MaxAssembledFrameBytes)
-        {
-            Interlocked.Increment(ref framesRejectedOversize);
-            InvalidateFrame(sessionId, chunk.FrameId);
-            return;
-        }
-
-        if (assembly.ReceivedChunkCount != assembly.ChunkCount)
-        {
-            return;
-        }
-
-        var frameBytes = new byte[assembly.TotalBytes];
-        var offset = 0;
-        for (var i = 0; i < assembly.ChunkCount; i++)
-        {
-            var bytes = assembly.ChunkBytes[i];
-            if (bytes is null)
+            if (chunk.FrameId <= session.LastCompletedFrameId)
             {
                 return;
             }
 
-            Buffer.BlockCopy(bytes, 0, frameBytes, offset, bytes.Length);
-            offset += bytes.Length;
-        }
+            if (session.InvalidatedFrameIds.Contains(chunk.FrameId))
+            {
+                return;
+            }
 
-        session.InFlightFrames.Remove(chunk.FrameId);
-        session.LastCompletedFrameId = Math.Max(session.LastCompletedFrameId, chunk.FrameId);
+            AssertBufferBounds(session);
 
-        var staleFrameIds = session.InFlightFrames.Keys
-            .Where(frameId => frameId < session.LastCompletedFrameId)
-            .ToArray();
-        foreach (var staleFrameId in staleFrameIds)
-        {
-            session.InFlightFrames.Remove(staleFrameId);
-            Interlocked.Increment(ref framesDropped);
-        }
+            if (!TryGetOrCreateAssembly(session, sessionId, chunk, out var assembly))
+            {
+                return;
+            }
 
-        session.InvalidatedFrameIds.RemoveWhere(frameId => frameId <= session.LastCompletedFrameId);
-        Interlocked.Increment(ref framesCompleted);
+            if (assembly.ChunkBytes[chunk.ChunkIndex] is not null)
+            {
+                return;
+            }
 
-        FrameReady?.Invoke(
-            this,
-            new ScreenShareFrameReadyEventArgs(
+            acceptedChunk = chunk;
+
+            assembly.ChunkBytes[chunk.ChunkIndex] = chunkBytes;
+            assembly.ReceivedChunkCount++;
+            assembly.TotalBytes += chunkBytes.Length;
+
+            if (assembly.TotalBytes > MaxAssembledFrameBytes)
+            {
+                Interlocked.Increment(ref framesRejectedOversize);
+                InvalidateFrameCore(sessionId, chunk.FrameId);
+                return;
+            }
+
+            if (assembly.ReceivedChunkCount != assembly.ChunkCount)
+            {
+                return;
+            }
+
+            var frameBytes = new byte[assembly.TotalBytes];
+            var offset = 0;
+            for (var i = 0; i < assembly.ChunkCount; i++)
+            {
+                var bytes = assembly.ChunkBytes[i];
+                if (bytes is null)
+                {
+                    return;
+                }
+
+                Buffer.BlockCopy(bytes, 0, frameBytes, offset, bytes.Length);
+                offset += bytes.Length;
+            }
+
+            session.InFlightFrames.Remove(chunk.FrameId);
+            session.LastCompletedFrameId = Math.Max(session.LastCompletedFrameId, chunk.FrameId);
+
+            var staleFrameIds = session.InFlightFrames.Keys
+                .Where(frameId => frameId < session.LastCompletedFrameId)
+                .ToArray();
+            foreach (var staleFrameId in staleFrameIds)
+            {
+                session.InFlightFrames.Remove(staleFrameId);
+                Interlocked.Increment(ref framesDropped);
+            }
+
+            session.InvalidatedFrameIds.RemoveWhere(frameId => frameId <= session.LastCompletedFrameId);
+            Interlocked.Increment(ref framesCompleted);
+
+            frameReady = new ScreenShareFrameReadyEventArgs(
                 sessionId,
                 assembly.FrameId,
                 assembly.Width,
                 assembly.Height,
                 assembly.TimestampUnixMilliseconds,
                 assembly.Encoding,
-                frameBytes));
+                frameBytes);
 
-        if (session.InFlightFrames.Count == 0)
+            if (session.InFlightFrames.Count == 0)
+            {
+                sessions.Remove(sessionId);
+            }
+        }
+
+        if (acceptedChunk is not null)
         {
-            sessions.Remove(sessionId);
+            ChunkAccepted?.Invoke(this, acceptedChunk);
+        }
+
+        if (frameReady is not null)
+        {
+            FrameReady?.Invoke(this, frameReady);
         }
     }
 
@@ -141,12 +156,18 @@ public sealed class ScreenShareFrameReassembler
             return;
         }
 
-        sessions.Remove(sessionId.Trim());
+        lock (gate)
+        {
+            sessions.Remove(sessionId.Trim());
+        }
     }
 
     public void ClearAll()
     {
-        sessions.Clear();
+        lock (gate)
+        {
+            sessions.Clear();
+        }
     }
 
     private void InvalidateFrame(ScreenShareFrameChunkV1 chunk)
@@ -160,6 +181,14 @@ public sealed class ScreenShareFrameReassembler
     }
 
     private void InvalidateFrame(string sessionId, long frameId)
+    {
+        lock (gate)
+        {
+            InvalidateFrameCore(sessionId, frameId);
+        }
+    }
+
+    private void InvalidateFrameCore(string sessionId, long frameId)
     {
         if (!sessions.TryGetValue(sessionId, out var session))
         {

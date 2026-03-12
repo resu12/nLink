@@ -16,9 +16,11 @@ namespace NLink.App.Services.ScreenCapture;
 internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
 {
     private const int MinAutoTuneFramesPerSecond = 2;
+    private const double TransferDownshiftFactor = 0.70d;
     private const int HighCaptureToSendAgeMs = 450;
     private const int LowCaptureToSendAgeMs = 220;
     private const int StableLowAgeTicksForIncrease = 3;
+    private static readonly TimeSpan CongestedFrameMinInterval = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan DisplayInfoMappingChangeDebounce = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan AutoTuneInterval = TimeSpan.FromSeconds(1);
 #if DEBUG
@@ -27,6 +29,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
 
     private readonly Func<IScreenCaptureSource> captureSourceFactory;
     private readonly Func<ReadOnlyMemory<byte>, CancellationToken, Task> sendPayloadAsync;
+    private readonly Func<bool>? isTransportCongested;
     private readonly Func<ReadOnlyMemory<byte>, long>? estimateBridgeBytes;
     private readonly Func<string, ControlDisplayInfoMessageV1, CancellationToken, Task>? sendDisplayInfoAsync;
     private readonly ScreenShareDisplayInfoProvider displayInfoProvider;
@@ -60,7 +63,12 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
     private long displayInfoSendCount;
     private long serializedChunkBytesSent;
     private long bridgeBytesSent;
+    private long lastCongestedFrameEnqueueUtcMs;
+    private long lastTransferDownshiftFrameEnqueueUtcMs;
+    private long transferDownshiftFramesSuppressed;
     private ScreenShareMetrics lastMetricsSnapshot = new();
+    private long latestObservedFrameSequence;
+    private int transferDownshiftActive;
     private bool disposed;
 #if DEBUG
     private Timer? snapshotTimer;
@@ -70,6 +78,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
     public TransportScreenShareCoordinator(
         Func<IScreenCaptureSource> captureSourceFactory,
         Func<ReadOnlyMemory<byte>, CancellationToken, Task> sendPayloadAsync,
+        Func<bool>? isTransportCongested = null,
         IScreenShareClock? clock = null,
         Func<string, ControlDisplayInfoMessageV1, CancellationToken, Task>? sendDisplayInfoAsync = null,
         ScreenShareDisplayInfoProvider? displayInfoProvider = null,
@@ -77,6 +86,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
     {
         this.captureSourceFactory = captureSourceFactory ?? throw new ArgumentNullException(nameof(captureSourceFactory));
         this.sendPayloadAsync = sendPayloadAsync ?? throw new ArgumentNullException(nameof(sendPayloadAsync));
+        this.isTransportCongested = isTransportCongested;
         this.sendDisplayInfoAsync = sendDisplayInfoAsync;
         this.displayInfoProvider = displayInfoProvider ?? new ScreenShareDisplayInfoProvider();
         this.clock = clock ?? SystemScreenShareClock.Instance;
@@ -169,6 +179,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             lastAutoTuneQueueEvictDrops = 0;
             serializedChunkBytesSent = 0;
             bridgeBytesSent = 0;
+            lastTransferDownshiftFrameEnqueueUtcMs = 0;
             nextCaptureSource.FrameArrived += OnFrameArrived;
             if (nextCaptureSource is IScreenCaptureAdaptiveTuning tunableCaptureSource)
             {
@@ -384,6 +395,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         ScreenShareFrameSendPipeline? currentPipeline;
         IScreenCaptureSource? currentCaptureSource;
         string currentSessionId;
+        long currentFrameSequence;
         Task enqueueTask;
 
         lock (gate)
@@ -397,6 +409,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                 return;
             }
 
+            currentFrameSequence = checked(++latestObservedFrameSequence);
             inFlightEnqueues++;
         }
 
@@ -405,7 +418,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             TryPublishDisplayInfo(currentCaptureSource, e.Width, e.Height);
         }
 
-        enqueueTask = TryEnqueueFrameAsync(currentPipeline, currentSessionId, e);
+        enqueueTask = TryEnqueueFrameAsync(currentPipeline, currentSessionId, e, currentFrameSequence);
         _ = enqueueTask.ContinueWith(
             static (_, state) => ((TransportScreenShareCoordinator)state!).OnEnqueueCompleted(),
             this,
@@ -417,16 +430,37 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
     private async Task TryEnqueueFrameAsync(
         ScreenShareFrameSendPipeline currentPipeline,
         string currentSessionId,
-        ScreenCaptureFrameEventArgs e)
+        ScreenCaptureFrameEventArgs e,
+        long frameSequence)
     {
         try
         {
-            if (Volatile.Read(ref preferFreshestPendingFrameOnly) == 1)
+            var transportCongested = IsTransportCongested();
+            if (transportCongested &&
+                frameSequence != Interlocked.Read(ref latestObservedFrameSequence))
+            {
+                LogDebug("Skipped stale frame enqueue because a newer frame was already available under transport congestion.");
+                return;
+            }
+
+            if (transportCongested &&
+                !TryReserveCongestedFrameSendBudget(frameSequence))
+            {
+                return;
+            }
+
+            if (IsTransferDownshiftActive() &&
+                !TryReserveTransferDownshiftFrameBudget(frameSequence))
+            {
+                return;
+            }
+
+            if (Volatile.Read(ref preferFreshestPendingFrameOnly) == 1 || transportCongested)
             {
                 var flushedQueuedFrames = currentPipeline.FlushPendingFrames();
                 if (flushedQueuedFrames > 0)
                 {
-                    LogDebug("Dropped queued frame(s) to keep only the freshest frame under unstable transport pressure.");
+                    LogDebug("Dropped queued frame(s) to keep only the freshest frame under transport pressure.");
                 }
             }
 
@@ -470,6 +504,8 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                     DisplayInfoSendCount = Interlocked.Read(ref displayInfoSendCount),
                     SerializedChunkBytesSent = Interlocked.Read(ref serializedChunkBytesSent),
                     BridgeBytesSent = Interlocked.Read(ref bridgeBytesSent),
+                    TransferDownshiftActive = IsTransferDownshiftActive(),
+                    TransferDownshiftFramesSuppressed = Interlocked.Read(ref transferDownshiftFramesSuppressed),
                 };
             }
             else
@@ -479,6 +515,8 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                     DisplayInfoSendCount = Interlocked.Read(ref displayInfoSendCount),
                     SerializedChunkBytesSent = Interlocked.Read(ref serializedChunkBytesSent),
                     BridgeBytesSent = Interlocked.Read(ref bridgeBytesSent),
+                    TransferDownshiftActive = IsTransferDownshiftActive(),
+                    TransferDownshiftFramesSuppressed = Interlocked.Read(ref transferDownshiftFramesSuppressed),
                 };
             }
 
@@ -528,10 +566,49 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         timer?.Dispose();
         lowAgeStableTicks = 0;
         captureFpsHint = 0;
+        Interlocked.Exchange(ref lastCongestedFrameEnqueueUtcMs, 0);
+        Interlocked.Exchange(ref lastTransferDownshiftFrameEnqueueUtcMs, 0);
         Volatile.Write(ref preferFreshestPendingFrameOnly, 0);
         transportPressureHintActive = false;
         lastAutoTuneRateGateDrops = 0;
         lastAutoTuneQueueEvictDrops = 0;
+    }
+
+    private bool IsTransferDownshiftActive()
+        => Volatile.Read(ref transferDownshiftActive) == 1;
+
+    private bool TryReserveTransferDownshiftFrameBudget(long frameSequence)
+    {
+        var currentHint = captureFpsHint <= 0
+            ? Math.Max(MinAutoTuneFramesPerSecond, Math.Min(FeatureFlags.ScreenShareMaxFps, FeatureFlags.ScreenShareTransportMaxFps))
+            : captureFpsHint;
+        var effectiveFps = Math.Max(MinAutoTuneFramesPerSecond, (int)Math.Floor(currentHint * TransferDownshiftFactor));
+        var minimumGapMs = Math.Max(1L, (long)Math.Ceiling(1000d / effectiveFps));
+        var nowUtcMs = clock.UtcNow.ToUnixTimeMilliseconds();
+
+        while (true)
+        {
+            var previousUtcMs = Interlocked.Read(ref lastTransferDownshiftFrameEnqueueUtcMs);
+            if (previousUtcMs > 0 && nowUtcMs - previousUtcMs < minimumGapMs)
+            {
+                Interlocked.Increment(ref transferDownshiftFramesSuppressed);
+                if (frameSequence != Interlocked.Read(ref latestObservedFrameSequence))
+                {
+                    LogDebug("Skipped stale frame enqueue due to active file-transfer downshift.");
+                }
+                else
+                {
+                    LogDebug("Skipped frame enqueue due to active file-transfer downshift.");
+                }
+
+                return false;
+            }
+
+            if (Interlocked.CompareExchange(ref lastTransferDownshiftFrameEnqueueUtcMs, nowUtcMs, previousUtcMs) == previousUtcMs)
+            {
+                return true;
+            }
+        }
     }
 
     private void OnAutoTuneTimerTick()
@@ -568,6 +645,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             var queueEvictDropDelta = ConsumeAutoTuneCounterDelta(
                 metrics.FramesDroppedByQueueEvict,
                 ref lastAutoTuneQueueEvictDrops);
+            var hasTransportCongestion = IsTransportCongested();
 
             var maxTransportFps = FeatureFlags.ScreenShareTransportMaxFps;
             var minAutoTuneFps = Math.Min(MinAutoTuneFramesPerSecond, maxTransportFps);
@@ -582,14 +660,18 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             var hasLowAgeHeadroom = captureToSendAgeMs >= 0 && captureToSendAgeMs <= LowCaptureToSendAgeMs;
             var hasRateGatePressure = rateGateDropDelta > 0;
             var hasQueuePressure = queueEvictDropDelta > 0;
-            var shouldPreferLowerBandwidth = hasQueuePressure || hasHighAgePressure || hasRateGatePressure;
+            var shouldPreferLowerBandwidth =
+                hasQueuePressure ||
+                hasHighAgePressure ||
+                hasRateGatePressure ||
+                hasTransportCongestion;
 
-            if (hasQueuePressure || hasHighAgePressure)
+            if (hasQueuePressure || hasHighAgePressure || hasTransportCongestion)
             {
                 Volatile.Write(ref preferFreshestPendingFrameOnly, 1);
             }
 
-            if (captureToSendAgeMs < 0 && !hasRateGatePressure && !hasQueuePressure)
+            if (captureToSendAgeMs < 0 && !hasRateGatePressure && !hasQueuePressure && !hasTransportCongestion)
             {
                 return;
             }
@@ -601,7 +683,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                 nextTransportPressureHint = true;
             }
 
-            if (hasQueuePressure)
+            if (hasQueuePressure || hasTransportCongestion)
             {
                 nextHint = Math.Max(minAutoTuneFps, currentHint - 2);
                 lowAgeStableTicks = 0;
@@ -660,6 +742,67 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         {
             Interlocked.Exchange(ref autoTuneTickInFlight, 0);
         }
+    }
+
+    private bool IsTransportCongested()
+    {
+        if (isTransportCongested is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            return isTransportCongested();
+        }
+        catch (Exception ex)
+        {
+            LogDebug($"Transport congestion probe failed: {ex.GetType().Name}: {ex.Message}");
+            return false;
+        }
+    }
+
+    private bool TryReserveCongestedFrameSendBudget(long frameSequence)
+    {
+        var nowUtcMs = clock.UtcNow.ToUnixTimeMilliseconds();
+        var minimumGapMs = (long)CongestedFrameMinInterval.TotalMilliseconds;
+
+        while (true)
+        {
+            var previousUtcMs = Interlocked.Read(ref lastCongestedFrameEnqueueUtcMs);
+            if (previousUtcMs > 0 && nowUtcMs - previousUtcMs < minimumGapMs)
+            {
+                if (frameSequence != Interlocked.Read(ref latestObservedFrameSequence))
+                {
+                    LogDebug("Skipped stale frame enqueue due to congested transport rate limit.");
+                }
+                else
+                {
+                    LogDebug("Skipped frame enqueue due to congested transport rate limit.");
+                }
+
+                return false;
+            }
+
+            if (Interlocked.CompareExchange(ref lastCongestedFrameEnqueueUtcMs, nowUtcMs, previousUtcMs) == previousUtcMs)
+            {
+                return true;
+            }
+        }
+    }
+
+    public void SetTransferMixedLoadDownshift(bool isActive)
+    {
+        var nextValue = isActive ? 1 : 0;
+        if (Interlocked.Exchange(ref transferDownshiftActive, nextValue) == nextValue)
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref lastTransferDownshiftFrameEnqueueUtcMs, 0);
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event={(isActive ? "screenshare_transfer_downshift_entered" : "screenshare_transfer_downshift_exited")}; active={(isActive ? "yes" : "no")}");
     }
 
     private static long ConsumeAutoTuneCounterDelta(long currentValue, ref long previousValue)
