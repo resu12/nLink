@@ -10,6 +10,7 @@ public static class FileTransferProtocol
     public const string StartTypeV1 = "filetransfer.start.v1";
     public const string ChunkTypeV1 = "filetransfer.chunk.v1";
     public const string WindowUpdateTypeV1 = "filetransfer.window_update.v1";
+    public const string WindowUpdateTypeV2 = "filetransfer.window_update.v2";
     public const string MissingRangeTypeV1 = "filetransfer.missing_range.v1";
     public const string PressureStateTypeV1 = "filetransfer.pressure_state.v1";
     public const string SessionOpenTypeV2 = "filetransfer.session_open.v2";
