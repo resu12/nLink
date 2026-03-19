@@ -11,6 +11,7 @@ namespace NLink.App;
 
 internal static class BridgeSelfTestRunner
 {
+    private const int BridgeProtocolVersion = 2;
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan PingTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(2);
@@ -84,7 +85,7 @@ internal static class BridgeSelfTestRunner
 
         try
         {
-            await process.StandardInput.WriteLineAsync("{\"id\":\"1\",\"cmd\":\"hello\",\"protocol\":1,\"appVersion\":\"self-test\"}").ConfigureAwait(false);
+            await process.StandardInput.WriteLineAsync($"{{\"id\":\"1\",\"cmd\":\"hello\",\"protocol\":{BridgeProtocolVersion},\"appVersion\":\"self-test\"}}").ConfigureAwait(false);
             var helloLine = await ReadLineWithTimeoutAsync(process, HelloTimeout, ct).ConfigureAwait(false);
             var helloEvent = ParseEvent(helloLine);
             if (!string.Equals(helloEvent.Name, "hello_ok", StringComparison.Ordinal))
@@ -162,7 +163,8 @@ internal static class BridgeSelfTestRunner
 
         var candidates = new List<string>
         {
-            Path.Combine(AppContext.BaseDirectory, "bridge", rid, "index.js")
+            Path.Combine(AppContext.BaseDirectory, "bridge", rid, "index.js"),
+            Path.Combine(AppContext.BaseDirectory, "bridge", "index.js"),
         };
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
@@ -170,14 +172,13 @@ internal static class BridgeSelfTestRunner
             candidates.Add(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Resources", "bridge", rid, "index.js")));
         }
 
-#if DEBUG
         candidates.Add(Path.Combine(AppContext.BaseDirectory, "tools", "nkn-bridge", "index.js"));
         var current = new DirectoryInfo(AppContext.BaseDirectory);
         for (var i = 0; i < 8 && current is not null; i++, current = current.Parent)
         {
             candidates.Add(Path.Combine(current.FullName, "tools", "nkn-bridge", "index.js"));
+            candidates.Add(Path.Combine(current.FullName, "artifacts", "bridge", rid, "index.js"));
         }
-#endif
 
         foreach (var candidate in candidates)
         {
@@ -187,7 +188,7 @@ internal static class BridgeSelfTestRunner
             }
         }
 
-        throw new FileNotFoundException($"Bridge script not found. Expected bridge/{rid}/index.js.");
+        throw new FileNotFoundException($"Bridge script not found. Expected bridge/{rid}/index.js, bridge/index.js, or a local debug bridge bundle.");
     }
 
     private static string ResolveNodeExecutablePath(string rid)
@@ -205,7 +206,8 @@ internal static class BridgeSelfTestRunner
         var exeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "node.exe" : "node";
         var candidates = new List<string>
         {
-            Path.Combine(AppContext.BaseDirectory, "bridge", rid, exeName)
+            Path.Combine(AppContext.BaseDirectory, "bridge", rid, exeName),
+            Path.Combine(AppContext.BaseDirectory, "bridge", exeName),
         };
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
@@ -213,7 +215,13 @@ internal static class BridgeSelfTestRunner
             candidates.Add(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Resources", "bridge", rid, exeName)));
         }
 
-#if DEBUG
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 8 && current is not null; i++, current = current.Parent)
+        {
+            candidates.Add(Path.Combine(current.FullName, "artifacts", "bridge", rid, exeName));
+            candidates.Add(Path.Combine(current.FullName, "tools", "node", rid, exeName));
+        }
+
         foreach (var candidate in candidates)
         {
             if (File.Exists(candidate))
@@ -223,17 +231,6 @@ internal static class BridgeSelfTestRunner
         }
 
         return "node";
-#else
-        foreach (var candidate in candidates)
-        {
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-        }
-
-        throw new FileNotFoundException($"Bundled node runtime not found. Expected bridge/{rid}/{exeName}.");
-#endif
     }
 
     private static string GetBridgeRid()
