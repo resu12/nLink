@@ -233,14 +233,3 @@ If it fails (copy diagnostics):
 1. In the app, open `Diagnostics`
 2. Click `Copy diagnostics`
 3. Include the copied text when reporting the issue
-
-### Chat (E2E) over NKN transport
-
-nLink includes a simple 1:1 in-session chat (message list + text box + Send button).
-
-How it works at a high level:
-- Chat works separately from screen sharing, so you can use it right away.
-- Messages are protected end-to-end before they are sent.
-- The app creates a temporary chat key for each session during the connection approval step.
-- Chat messages travel through the selected connection transport (`DevLocal` for same-PC testing, `NKN` for internet connection).
-- Message text is not written to logs.
