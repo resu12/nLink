@@ -129,7 +129,7 @@ public sealed class ScreenShareMediaTransportBoundaryTests
 
         await InvokePrivateAsync(
             runtime,
-            "SendScreenShareMediaPayloadAsync",
+            "SendScreenSharePayloadCoreAsync",
             new ReadOnlyMemory<byte>(CreateFramePayload("other_session")),
             CancellationToken.None);
         Assert.Empty(transport.SentScreenSharePayloads);
@@ -137,7 +137,7 @@ public sealed class ScreenShareMediaTransportBoundaryTests
         var sessionId = runtime.SecurityState.SessionId!.Value.Value;
         await InvokePrivateAsync(
             runtime,
-            "SendScreenShareMediaPayloadAsync",
+            "SendScreenSharePayloadCoreAsync",
             new ReadOnlyMemory<byte>(CreateFramePayload(sessionId)),
             CancellationToken.None);
 
@@ -207,20 +207,17 @@ public sealed class ScreenShareMediaTransportBoundaryTests
 
         runtime.ScreenShareFrameCompleted += (_, _) => frameCount++;
         var sessionId = runtime.SecurityState.SessionId!.Value.Value;
-        var currentAdapter = Assert.IsType<LegacyScreenShareMediaTransportAdapter>(GetPrivateField(runtime, "screenShareMediaTransport"));
-
         InvokePrivateMethod(
             runtime,
             "OnTransportScreenShareFrameCompleted",
-            currentAdapter,
+            currentTransport,
             new ScreenShareFrameCompletedEventArgs(1, 1, 1, "jpeg", new byte[] { 0x01 }, SessionId: sessionId));
 
         using var staleTransport = new LegacyScreenShareTransportDouble();
-        var staleAdapter = new LegacyScreenShareMediaTransportAdapter(staleTransport);
         InvokePrivateMethod(
             runtime,
             "OnTransportScreenShareFrameCompleted",
-            staleAdapter,
+            staleTransport,
             new ScreenShareFrameCompletedEventArgs(2, 1, 1, "jpeg", new byte[] { 0x02 }, SessionId: sessionId));
 
         Assert.Equal(1, frameCount);
@@ -382,7 +379,7 @@ public sealed class ScreenShareMediaTransportBoundaryTests
         }
     }
 
-    private sealed class MediaOnlySignalingTransport : ISignalingTransport, IRemoteControlSignalingTransport, IScreenShareMediaTransport, ISessionSecuritySignalingTransport
+    private sealed class MediaOnlySignalingTransport : ISignalingTransport, IRemoteControlSignalingTransport, IScreenShareMediaTransport, IScreenShareSignalingTransport, ISessionSecuritySignalingTransport
     {
         private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
 
