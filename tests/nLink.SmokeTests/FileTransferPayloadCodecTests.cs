@@ -245,7 +245,7 @@ public sealed class FileTransferPayloadCodecTests
     }
 
     [Fact]
-    public void WindowUpdate_RoundTrips_AndNormalizesEnvelope()
+    public void WindowUpdateV1_RoundTrips_AndNormalizesEnvelope()
     {
         var payload = FileTransferPayloadCodec.Serialize(
             new FileTransferWindowUpdateV1
@@ -267,7 +267,7 @@ public sealed class FileTransferPayloadCodecTests
     }
 
     [Fact]
-    public void MissingRange_RoundTrips_AndNormalizesEnvelope()
+    public void MissingRangeV1_RoundTrips_AndNormalizesEnvelope()
     {
         var payload = FileTransferPayloadCodec.Serialize(
             new FileTransferMissingRangeV1
@@ -396,9 +396,9 @@ public sealed class FileTransferPayloadCodecTests
     }
 
     [Fact]
-    public void WindowUpdate_RoundTrips_AndNormalizesEnvelope()
+    public void WindowUpdateV2_IsRejectedByCurrentCodec()
     {
-        var payload = FileTransferPayloadCodec.Serialize(
+        var payload = JsonSerializer.SerializeToUtf8Bytes(
             new FileTransferWindowUpdateV2
             {
                 SessionId = " session_a ",
@@ -408,14 +408,7 @@ public sealed class FileTransferPayloadCodecTests
                 BytesReceived = 16_384,
             });
 
-        var parsed = FileTransferPayloadCodec.TryDeserializeWindowUpdate(payload, out var message);
-
-        Assert.True(parsed);
-        Assert.Equal("session_a", message.SessionId);
-        Assert.Equal("transfer_a", message.TransferId);
-        Assert.Equal(4, message.NextExpectedChunkIndex);
-        Assert.Equal(12, message.GrantedUntilChunkIndexExclusive);
-        Assert.Equal(16_384, message.BytesReceived);
+        Assert.False(FileTransferPayloadCodec.TryDeserializeWindowUpdate(payload, out _));
     }
 
     [Fact]
@@ -437,35 +430,28 @@ public sealed class FileTransferPayloadCodecTests
     }
 
     [Fact]
-    public void MissingRange_RoundTrips_AndNormalizesEnvelope()
+    public void MissingRange_WithRanges_IsRejectedByCurrentCodec()
     {
-        var payload = FileTransferPayloadCodec.Serialize(
-            new FileTransferMissingRangeV1
+        var payload = JsonSerializer.SerializeToUtf8Bytes(
+            new
             {
-                SessionId = " session_a ",
-                TransferId = " transfer_a ",
-                Ranges =
-                [
-                    new FileTransferChunkRangeV1
+                kind = FileTransferProtocol.Kind,
+                type = FileTransferProtocol.MissingRangeTypeV1,
+                sessionId = " session_a ",
+                transferId = " transfer_a ",
+                ranges = new[]
+                {
+                    new
                     {
-                        StartChunkIndex = 4,
-                        EndChunkIndexInclusive = 7,
+                        startChunkIndex = 4,
+                        endChunkIndexInclusive = 7,
                     },
-                ],
-                NextExpectedChunkIndex = 4,
-                HighestBufferedChunkIndex = 12,
+                },
+                nextExpectedChunkIndex = 4,
+                highestBufferedChunkIndex = 12,
             });
 
-        var parsed = FileTransferPayloadCodec.TryDeserializeMissingRange(payload, out var message);
-
-        Assert.True(parsed);
-        Assert.Equal("session_a", message.SessionId);
-        Assert.Equal("transfer_a", message.TransferId);
-        Assert.Single(message.Ranges);
-        Assert.Equal(4, message.Ranges[0].StartChunkIndex);
-        Assert.Equal(7, message.Ranges[0].EndChunkIndexInclusive);
-        Assert.Equal(4, message.NextExpectedChunkIndex);
-        Assert.Equal(12, message.HighestBufferedChunkIndex);
+        Assert.False(FileTransferPayloadCodec.TryDeserializeMissingRange(payload, out _));
     }
 
     [Fact]

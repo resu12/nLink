@@ -244,17 +244,17 @@ public sealed class ScreenShareMediaTransportBoundaryTests
                 new PeerAddress("flow-mode.helper"),
                 CapabilityGrant.ScreenShare));
 
-        Assert.Contains("mode=Background", runtime.GetDiagnosticsSnapshot().FileTransferFlowSummary, StringComparison.Ordinal);
+        Assert.Equal("Background", GetFileTransferFlowControlMode(runtime));
 
         var sessionId = runtime.SecurityState.SessionId!.Value.Value;
         transport.RaiseScreenShareFrameCompleted(
             new ScreenShareFrameCompletedEventArgs(1, 1, 1, "jpeg", new byte[] { 0x01 }, SessionId: sessionId));
 
-        Assert.Contains("mode=Interactive", runtime.GetDiagnosticsSnapshot().FileTransferFlowSummary, StringComparison.Ordinal);
+        Assert.Equal("Interactive", GetFileTransferFlowControlMode(runtime));
 
         transport.RaiseScreenShareStopped();
 
-        Assert.Contains("mode=Background", runtime.GetDiagnosticsSnapshot().FileTransferFlowSummary, StringComparison.Ordinal);
+        Assert.Equal("Background", GetFileTransferFlowControlMode(runtime));
     }
 
     private static SessionSecurityState CreateApprovedSecurityState(
@@ -302,6 +302,17 @@ public sealed class ScreenShareMediaTransportBoundaryTests
         var field = target.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(field);
         return Assert.IsAssignableFrom<object>(field!.GetValue(target));
+    }
+
+    private static string GetFileTransferFlowControlMode(SessionRuntime runtime)
+    {
+        var fileTransferService = GetPrivateField(runtime, "fileTransferService");
+        var policyField = fileTransferService.GetType().GetField("flowControlPolicy", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(policyField);
+        var policy = Assert.IsAssignableFrom<object>(policyField!.GetValue(fileTransferService));
+        var modeProperty = policy.GetType().GetProperty("Mode", BindingFlags.Instance | BindingFlags.Public);
+        Assert.NotNull(modeProperty);
+        return Assert.IsAssignableFrom<object>(modeProperty!.GetValue(policy)).ToString()!;
     }
 
     private static object? InvokePrivateMethod(object target, string methodName, params object?[] args)
