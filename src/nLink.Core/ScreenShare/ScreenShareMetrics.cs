@@ -24,4 +24,6 @@ public sealed record ScreenShareMetrics(
     long StaleFrameRenders = 0,
     string FreshnessMode = "normal",
     double AverageRenderIntervalMs = 0,
-    double AverageCaptureToRenderMs = 0);
+    double AverageCaptureToRenderMs = 0,
+    bool TransferDownshiftActive = false,
+    long TransferDownshiftFramesSuppressed = 0);

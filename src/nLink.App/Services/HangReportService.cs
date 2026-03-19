@@ -115,6 +115,7 @@ public sealed class HangReportService
             $"last_handshake_duration_ms: {FormatDuration(snapshot.Value.LastHandshakeDurationMs)}",
             $"last_bridge_start_duration_ms: {FormatDuration(snapshot.Value.LastBridgeStartDurationMs)}",
             $"file_transfer_summary: {snapshot.Value.FileTransferSummary}",
+            $"transport_lane_summary: {snapshot.Value.TransportLaneSummary}",
             $"file_transfer_inbound_id: {snapshot.Value.ActiveInboundFileTransferId}",
             $"file_transfer_inbound_state: {snapshot.Value.ActiveInboundFileTransferState}",
             $"file_transfer_inbound_bytes: {snapshot.Value.ActiveInboundFileTransferBytes?.ToString() ?? "(none)"}",

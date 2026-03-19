@@ -396,6 +396,104 @@ public sealed class FileTransferPayloadCodecTests
     }
 
     [Fact]
+    public void WindowUpdate_RoundTrips_AndNormalizesEnvelope()
+    {
+        var payload = FileTransferPayloadCodec.Serialize(
+            new FileTransferWindowUpdateV2
+            {
+                SessionId = " session_a ",
+                TransferId = " transfer_a ",
+                NextExpectedChunkIndex = 4,
+                GrantedUntilChunkIndexExclusive = 12,
+                BytesReceived = 16_384,
+            });
+
+        var parsed = FileTransferPayloadCodec.TryDeserializeWindowUpdate(payload, out var message);
+
+        Assert.True(parsed);
+        Assert.Equal("session_a", message.SessionId);
+        Assert.Equal("transfer_a", message.TransferId);
+        Assert.Equal(4, message.NextExpectedChunkIndex);
+        Assert.Equal(12, message.GrantedUntilChunkIndexExclusive);
+        Assert.Equal(16_384, message.BytesReceived);
+    }
+
+    [Fact]
+    public void WindowUpdate_RejectsInvalidGrantRange()
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(
+            new
+            {
+                kind = FileTransferProtocol.Kind,
+                type = FileTransferProtocol.WindowUpdateTypeV2,
+                sessionId = "session_a",
+                transferId = "transfer_a",
+                nextExpectedChunkIndex = 4,
+                grantedUntilChunkIndexExclusive = 3,
+                bytesReceived = 16_384L,
+            });
+
+        Assert.False(FileTransferPayloadCodec.TryDeserializeWindowUpdate(payload, out _));
+    }
+
+    [Fact]
+    public void MissingRange_RoundTrips_AndNormalizesEnvelope()
+    {
+        var payload = FileTransferPayloadCodec.Serialize(
+            new FileTransferMissingRangeV1
+            {
+                SessionId = " session_a ",
+                TransferId = " transfer_a ",
+                Ranges =
+                [
+                    new FileTransferChunkRangeV1
+                    {
+                        StartChunkIndex = 4,
+                        EndChunkIndexInclusive = 7,
+                    },
+                ],
+                NextExpectedChunkIndex = 4,
+                HighestBufferedChunkIndex = 12,
+            });
+
+        var parsed = FileTransferPayloadCodec.TryDeserializeMissingRange(payload, out var message);
+
+        Assert.True(parsed);
+        Assert.Equal("session_a", message.SessionId);
+        Assert.Equal("transfer_a", message.TransferId);
+        Assert.Single(message.Ranges);
+        Assert.Equal(4, message.Ranges[0].StartChunkIndex);
+        Assert.Equal(7, message.Ranges[0].EndChunkIndexInclusive);
+        Assert.Equal(4, message.NextExpectedChunkIndex);
+        Assert.Equal(12, message.HighestBufferedChunkIndex);
+    }
+
+    [Fact]
+    public void MissingRange_RejectsInvalidRange()
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(
+            new
+            {
+                kind = FileTransferProtocol.Kind,
+                type = FileTransferProtocol.MissingRangeTypeV1,
+                sessionId = "session_a",
+                transferId = "transfer_a",
+                ranges = new[]
+                {
+                    new
+                    {
+                        startChunkIndex = 8,
+                        endChunkIndexInclusive = 7,
+                    },
+                },
+                nextExpectedChunkIndex = 4,
+                highestBufferedChunkIndex = 12,
+            });
+
+        Assert.False(FileTransferPayloadCodec.TryDeserializeMissingRange(payload, out _));
+    }
+
+    [Fact]
     public void Error_RoundTrips_AndNormalizesMessage()
     {
         var payload = FileTransferPayloadCodec.Serialize(

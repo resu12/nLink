@@ -7,6 +7,7 @@ public static class SessionKeyDerivation
 {
     public const int DefaultKeyLengthBytes = 32;
     public const string FileTransferInfoLabel = "nlink-file-transfer-v1";
+    public const string ScreenShareMediaInfoLabel = "nlink-screen-share-media-v1";
 
     private const int MaxInfoLabelLength = 128;
     private static readonly byte[] SessionSubkeySalt =
@@ -15,6 +16,11 @@ public static class SessionKeyDerivation
     public static byte[] DeriveFileTransferKey(byte[] sessionRootKey, int keyLengthBytes = DefaultKeyLengthBytes)
     {
         return DeriveLabeledSubkey(sessionRootKey, FileTransferInfoLabel, keyLengthBytes);
+    }
+
+    public static byte[] DeriveScreenShareMediaKey(byte[] sessionRootKey, int keyLengthBytes = DefaultKeyLengthBytes)
+    {
+        return DeriveLabeledSubkey(sessionRootKey, ScreenShareMediaInfoLabel, keyLengthBytes);
     }
 
     public static byte[] DeriveLabeledSubkey(byte[] sessionRootKey, string infoLabel, int keyLengthBytes = DefaultKeyLengthBytes)
