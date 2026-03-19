@@ -12,14 +12,6 @@ Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke
 
 `0.5.1` is the current release. It is the follow-up stabilization and hardening release after the first native `0.5.0` file-transfer release.
 
-- File transfer remains a native in-session feature with accept/decline, progress, cancel, integrity verification, and temp-first safe save behavior.
-- Chat now uses the same session-secure transport envelope path as the other sensitive session traffic instead of being the odd one out.
-- Protected NKN seed storage is now required across supported desktop platforms; plaintext seed fallback is no longer part of the intended release path.
-- Diagnostics now state clearly that redaction is best-effort, and persistence/storage failures are surfaced in diagnostics instead of failing silently.
-- The bridge hot path no longer sends large payloads as JSON `payloadBase64`; `0.5.1` moves hot send/receive traffic to a framed binary stdio protocol.
-- File-transfer transport handling was hardened for reconnects, bulk-path behavior, and active-session recovery after the initial `0.5.0` rollout.
-- Helper-bound one-time invites, verified helper flow, screen sharing, remote control, and release packaging remain part of the same session shell.
-
 ## Quick Start (Windows)
 
 1. Go to the GitHub Releases page and download the Installer (recommended) or Portable ZIP.
