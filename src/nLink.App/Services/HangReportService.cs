@@ -102,6 +102,8 @@ public sealed class HangReportService
 
         var lines = new[]
         {
+            $"privacy_notice: {DiagnosticsExportBuilder.BestEffortPrivacyNotice}",
+            string.Empty,
             "diagnostics_snapshot",
             "-------------------",
             $"current_state: {snapshot.Value.CurrentState}",
@@ -120,7 +122,9 @@ public sealed class HangReportService
             $"file_transfer_outbound_state: {snapshot.Value.ActiveOutboundFileTransferState}",
             $"file_transfer_outbound_bytes: {snapshot.Value.ActiveOutboundFileTransferBytes?.ToString() ?? "(none)"}",
             $"file_transfer_last_failure_code: {snapshot.Value.LastFileTransferFailureCode}",
-            $"file_transfer_last_saved_path: {snapshot.Value.LastFileTransferSavedPath}",
+            $"file_transfer_last_saved_path: {DiagnosticsExportBuilder.RedactStructuredValue("file_transfer_last_saved_path", snapshot.Value.LastFileTransferSavedPath)}",
+            $"persistence_summary: {snapshot.Value.PersistenceSummary}",
+            $"persistence_warning: {DiagnosticsExportBuilder.RedactStructuredValue("persistence_warning", snapshot.Value.PersistenceWarning)}",
         };
         return string.Join(Environment.NewLine, lines);
     }
@@ -182,6 +186,7 @@ public sealed class HangReportService
         {
             "hang_report",
             "===========",
+            $"privacy_notice: {DiagnosticsExportBuilder.BestEffortPrivacyNotice}",
             $"captured_utc: {now.UtcDateTime:u}",
             $"trigger: {triggerKind}",
             $"reason: {reason}",
@@ -192,7 +197,9 @@ public sealed class HangReportService
             $"session_ui_state: {diagnosticsSnapshot?.SessionUiState ?? "(unavailable)"}",
             $"attempt: {diagnosticsSnapshot?.AttemptNumber.ToString() ?? "(unavailable)"}",
             $"last_failure_category: {diagnosticsSnapshot?.LastFailureCategory ?? "(unavailable)"}",
-            $"last_failure_message: {diagnosticsSnapshot?.LastFailureMessage ?? "(unavailable)"}",
+            $"last_failure_message: {DiagnosticsExportBuilder.RedactStructuredValue("last_failure_message", diagnosticsSnapshot?.LastFailureMessage ?? "(unavailable)")}",
+            $"persistence_summary: {diagnosticsSnapshot?.PersistenceSummary ?? "(unavailable)"}",
+            $"persistence_warning: {DiagnosticsExportBuilder.RedactStructuredValue("persistence_warning", diagnosticsSnapshot?.PersistenceWarning ?? "(unavailable)")}",
             string.Empty,
             "active_counters",
             "---------------",

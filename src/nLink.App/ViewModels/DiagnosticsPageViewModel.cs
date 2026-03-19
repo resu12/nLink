@@ -11,6 +11,7 @@ using NLink.App.Configuration;
 using NLink.App.Services;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.Diagnostics;
 using NLink.Core.Logging;
 using NLink.Core.Metrics;
 using NLink.Core.SessionConnect;
@@ -36,6 +37,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private readonly Func<string> diagnosticsExportRootProvider;
     private readonly InviteSecurityStatus inviteSecurityStatus;
     private readonly NknRuntimeDiagnosticsSnapshot nknDiagnosticsSnapshot;
+    private readonly PersistenceDiagnosticsSnapshot persistenceDiagnosticsSnapshot;
 
     public DiagnosticsPageViewModel(
         Action backAction,
@@ -74,6 +76,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         ProcessArchitecture = RuntimeInformation.ProcessArchitecture.ToString();
         OsArchitecture = RuntimeInformation.OSArchitecture.ToString();
         BridgeResolutionRid = ResolveBridgeRidForDiagnostics();
+        persistenceDiagnosticsSnapshot = PersistenceDiagnostics.Snapshot();
         runtimeDiagnosticsSnapshot = sessionRuntime?.GetDiagnosticsSnapshot() ?? new DiagnosticsSnapshot(
             CurrentState: "(unknown)",
             SessionUiState: "(unknown)",
@@ -82,7 +85,9 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             LastFailureMessage: "(none)",
             LastConnectDurationMs: null,
             LastHandshakeDurationMs: null,
-            LastBridgeStartDurationMs: null);
+            LastBridgeStartDurationMs: null,
+            PersistenceSummary: persistenceDiagnosticsSnapshot.Summary,
+            PersistenceWarning: persistenceDiagnosticsSnapshot.LastWarning);
 
         if (string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase))
         {
@@ -207,6 +212,9 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string RemoteControlSummary => runtimeDiagnosticsSnapshot.RemoteControlSummary;
     public string ScreenShareSummary => runtimeDiagnosticsSnapshot.ScreenShareSummary;
     public string FileTransferSummary => runtimeDiagnosticsSnapshot.FileTransferSummary;
+    public string PersistenceSummary => runtimeDiagnosticsSnapshot.PersistenceSummary;
+    public string PersistenceWarning => runtimeDiagnosticsSnapshot.PersistenceWarning;
+    public string DiagnosticsPrivacyNotice => DiagnosticsExportBuilder.BestEffortPrivacyNotice;
     public string AuthoritativeConnectedAddress => nknDiagnosticsSnapshot.AuthoritativeConnectedAddressResolved ? "Yes" : "No";
     public string LastRejectedMessageSummary => BuildLastRejectedMessageSummary();
 
@@ -427,8 +435,15 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             OpenHangReportFolderRequested?.Invoke(this, result.FolderPath);
             copyFeedback.Show("Hang report saved");
         }
-        catch
+        catch (Exception ex)
         {
+            PersistenceDiagnostics.Record(
+                domain: "diagnostics_export",
+                operation: "save_hang_report",
+                severity: PersistenceDiagnosticSeverity.Warning,
+                outcome: PersistenceDiagnosticOutcome.Fallback,
+                reason: ex.GetType().Name,
+                userWarning: "Could not save diagnostics hang report.");
             copyFeedback.Show("Could not save hang report");
         }
     }
@@ -441,8 +456,15 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             OpenMetricsExportFolderRequested?.Invoke(this, Path.GetDirectoryName(outputPath) ?? diagnosticsExportRootProvider());
             copyFeedback.Show("Metrics exported");
         }
-        catch
+        catch (Exception ex)
         {
+            PersistenceDiagnostics.Record(
+                domain: "diagnostics_export",
+                operation: "export_metrics_json",
+                severity: PersistenceDiagnosticSeverity.Warning,
+                outcome: PersistenceDiagnosticOutcome.Fallback,
+                reason: ex.GetType().Name,
+                userWarning: "Could not export diagnostics metrics file.");
             copyFeedback.Show("Could not export metrics");
         }
     }
@@ -461,6 +483,10 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         var timelineText = BuildSessionTimelineText(SessionTimeline.SnapshotRecent(30));
         var lines = new List<string>
         {
+            "Privacy notice",
+            "--------------",
+            DiagnosticsExportBuilder.BestEffortPrivacyNotice,
+            string.Empty,
             "Status",
             "------",
             $"App version: {AppVersion}",
@@ -483,7 +509,9 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"file_transfer_outbound_state: {runtimeDiagnosticsSnapshot.ActiveOutboundFileTransferState}",
             $"file_transfer_outbound_bytes: {runtimeDiagnosticsSnapshot.ActiveOutboundFileTransferBytes?.ToString() ?? "(none)"}",
             $"file_transfer_last_failure_code: {runtimeDiagnosticsSnapshot.LastFileTransferFailureCode}",
-            $"file_transfer_last_saved_path: {runtimeDiagnosticsSnapshot.LastFileTransferSavedPath}",
+            $"file_transfer_last_saved_path: {DiagnosticsExportBuilder.RedactStructuredValue("file_transfer_last_saved_path", runtimeDiagnosticsSnapshot.LastFileTransferSavedPath)}",
+            $"persistence_summary: {PersistenceSummary}",
+            $"persistence_warning: {DiagnosticsExportBuilder.RedactStructuredValue("persistence_warning", PersistenceWarning)}",
             string.Empty,
             $"Transport: {TransportSummary}",
             $"Connection method: {ActiveTransport}",
@@ -538,7 +566,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"incoming_join_request_raised: {IncomingJoinRequestRaisedCount}",
             $"acks_received: {AcksReceived}",
             $"acks_ignored_source_mismatch: {AcksIgnoredSourceMismatch}",
-            $"last_disconnect_reason: {LastDisconnectReason}",
+            $"last_disconnect_reason: {DiagnosticsExportBuilder.RedactStructuredValue("last_disconnect_reason", LastDisconnectReason)}",
             $"bridge_first_cold_start_observed: {FirstColdStartObserved}",
             $"bridge_first_cold_start_ms: {FirstColdStartMs}",
             $"bridge_first_cold_start_recorded_utc: {FirstColdStartRecordedUtc}",
@@ -569,8 +597,12 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             "Errors",
             "------",
             $"last_failure_category: {LastFailureCategory}",
-            $"last_failure_message: {LastFailureMessage}",
-            $"last_error: {LastError}",
+            $"last_failure_message: {DiagnosticsExportBuilder.RedactStructuredValue("last_failure_message", LastFailureMessage)}",
+            $"last_error: {DiagnosticsExportBuilder.RedactStructuredValue("last_error", LastError)}",
+            string.Empty,
+            "Persistence diagnostics",
+            "-----------------------",
+            BuildPersistenceDiagnosticsSummary(),
             string.Empty,
             "Session timeline (last 30)",
             "----------------------",
@@ -581,6 +613,31 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         };
 
         return DiagnosticsRedactor.Redact(string.Join(Environment.NewLine, lines));
+    }
+
+    private string BuildPersistenceDiagnosticsSummary()
+    {
+        var lines = new List<string>
+        {
+            $"summary: {PersistenceSummary}",
+            $"warning_count: {persistenceDiagnosticsSnapshot.WarningCount}",
+            $"error_count: {persistenceDiagnosticsSnapshot.ErrorCount}",
+            $"last_warning: {DiagnosticsExportBuilder.RedactStructuredValue("persistence_warning", PersistenceWarning)}",
+        };
+
+        if (persistenceDiagnosticsSnapshot.RecentEvents.Count == 0)
+        {
+            lines.Add("recent_events: (none)");
+            return string.Join(Environment.NewLine, lines);
+        }
+
+        lines.Add("recent_events:");
+        foreach (var entry in persistenceDiagnosticsSnapshot.RecentEvents)
+        {
+            lines.Add($"  {entry.TimestampUtc:u} | {entry.Domain} | {entry.Operation} | {entry.Severity} | {entry.Outcome} | {entry.Reason}");
+        }
+
+        return string.Join(Environment.NewLine, lines);
     }
 
     private string BuildCompactResourceSummary()

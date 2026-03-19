@@ -2,6 +2,7 @@ using NLink.App.Configuration;
 using NLink.App.Services;
 using NLink.App.ViewModels;
 using NLink.Core;
+using NLink.Core.Diagnostics;
 using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
@@ -40,6 +41,7 @@ public sealed class DiagnosticsRedactorTests
         var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
         try
         {
+            PersistenceDiagnostics.ClearForTests();
             SessionTimeline.Clear();
             Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
             NknRuntimeDiagnostics.SetLastError("walletSeed: top secret wallet seed");
@@ -59,6 +61,7 @@ public sealed class DiagnosticsRedactorTests
         }
         finally
         {
+            PersistenceDiagnostics.ClearForTests();
             SessionTimeline.Clear();
             NknRuntimeDiagnostics.SetLastError("(none)");
             NknRuntimeDiagnostics.SetLastDisconnectReason("(none)");
@@ -99,5 +102,39 @@ public sealed class DiagnosticsRedactorTests
         Assert.DoesNotContain("run-444", redacted, StringComparison.Ordinal);
         Assert.Contains("normal=value", redacted, StringComparison.Ordinal);
         Assert.Contains("[REDACTED]", redacted, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void DiagnosticsCopy_IncludesBestEffortNotice_AndPersistenceSummary()
+    {
+        var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
+        try
+        {
+            PersistenceDiagnostics.ClearForTests();
+            PersistenceDiagnostics.Record(
+                domain: "recent_connect_targets",
+                operation: "save",
+                severity: PersistenceDiagnosticSeverity.Warning,
+                outcome: PersistenceDiagnosticOutcome.Fallback,
+                reason: "UnauthorizedAccessException",
+                userWarning: "Recent targets could not be saved.");
+
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            var config = TransportRuntimeConfig.Select();
+            var vm = new DiagnosticsPageViewModel(static () => { }, config);
+
+            var copied = vm.BuildDiagnosticsCopyTextForTests();
+
+            Assert.Contains("Redaction is best-effort only", copied, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("persistence_summary:", copied, StringComparison.Ordinal);
+            Assert.Contains("persistence_warning:", copied, StringComparison.Ordinal);
+            Assert.Contains("Recent targets could not be saved.", copied, StringComparison.Ordinal);
+        }
+        finally
+        {
+            PersistenceDiagnostics.ClearForTests();
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
+        }
     }
 }

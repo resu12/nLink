@@ -144,6 +144,29 @@ public sealed class FileTransferPayloadCodecTests
     }
 
     [Fact]
+    public void SessionOpenV2_RoundTrips_AndNormalizesEnvelope()
+    {
+        var payload = FileTransferPayloadCodec.Serialize(
+            new FileTransferSessionOpenV2
+            {
+                SessionId = " session_a ",
+                TransferId = " transfer_a ",
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV2,
+                SessionRole = " sender ",
+                ChunkSizeBytes = 4096,
+                InitialPipelineDepth = 8,
+            });
+
+        var parsed = FileTransferPayloadCodec.TryDeserializeSessionOpen(payload, out var message);
+
+        Assert.True(parsed);
+        Assert.Equal("session_a", message.SessionId);
+        Assert.Equal("transfer_a", message.TransferId);
+        Assert.Equal(FileTransferProtocol.SessionRoleSender, message.SessionRole);
+        Assert.Equal(FileTransferProtocol.SessionOpenTypeV2, message.Type);
+    }
+
+    [Fact]
     public void Chunk_RoundTrips_WithinBudget()
     {
         var chunkBytes = new byte[1024];
@@ -207,17 +230,88 @@ public sealed class FileTransferPayloadCodecTests
         var chunkBytes = new byte[FileTransferProtocol.MaxChunkRawBytes];
         new Random(12345).NextBytes(chunkBytes);
 
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            FileTransferPayloadCodec.Serialize(
+                new FileTransferChunkV1
+                {
+                    SessionId = "session_a",
+                    TransferId = "transfer_a",
+                    ChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataBase64 = Convert.ToBase64String(chunkBytes),
+                }));
+
+        Assert.Contains("exceeded safe budget", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WindowUpdate_RoundTrips_AndNormalizesEnvelope()
+    {
         var payload = FileTransferPayloadCodec.Serialize(
-            new FileTransferChunkV1
+            new FileTransferWindowUpdateV1
             {
-                SessionId = "session_a",
-                TransferId = "transfer_a",
-                ChunkIndex = 0,
-                ChunkCount = 1,
-                DataBase64 = Convert.ToBase64String(chunkBytes),
+                SessionId = " session_a ",
+                TransferId = " transfer_a ",
+                NextExpectedChunkIndex = 4,
+                GrantedUntilChunkIndexExclusive = 12,
+                BytesReceived = 16384,
             });
 
-        Assert.InRange(payload.Length, 1, FileTransferProtocol.MaxSerializedChunkPayloadBytes);
+        var parsed = FileTransferPayloadCodec.TryDeserializeWindowUpdate(payload, out var message);
+
+        Assert.True(parsed);
+        Assert.Equal("session_a", message.SessionId);
+        Assert.Equal("transfer_a", message.TransferId);
+        Assert.Equal(FileTransferProtocol.WindowUpdateTypeV1, message.Type);
+        Assert.Equal(12, message.GrantedUntilChunkIndexExclusive);
+    }
+
+    [Fact]
+    public void MissingRange_RoundTrips_AndNormalizesEnvelope()
+    {
+        var payload = FileTransferPayloadCodec.Serialize(
+            new FileTransferMissingRangeV1
+            {
+                SessionId = " session_a ",
+                TransferId = " transfer_a ",
+                StartChunkIndex = 9,
+                EndChunkIndexExclusive = 12,
+            });
+
+        var parsed = FileTransferPayloadCodec.TryDeserializeMissingRange(payload, out var message);
+
+        Assert.True(parsed);
+        Assert.Equal("session_a", message.SessionId);
+        Assert.Equal("transfer_a", message.TransferId);
+        Assert.Equal(FileTransferProtocol.MissingRangeTypeV1, message.Type);
+        Assert.Equal(9, message.StartChunkIndex);
+    }
+
+    [Fact]
+    public void PressureState_RoundTrips_AndNormalizesEnvelope()
+    {
+        var payload = FileTransferPayloadCodec.Serialize(
+            new FileTransferPressureStateV1
+            {
+                SessionId = " session_a ",
+                TransferId = " transfer_a ",
+                Revision = 3,
+                Mode = " catchuponly ",
+                SuggestedSendAheadChunks = 2,
+                ReceiverNextExpectedChunkIndex = 17,
+                Reason = " bulkbacklog ",
+            });
+
+        var parsed = FileTransferPayloadCodec.TryDeserializePressureState(payload, out var message);
+
+        Assert.True(parsed);
+        Assert.Equal("session_a", message.SessionId);
+        Assert.Equal("transfer_a", message.TransferId);
+        Assert.Equal(FileTransferProtocol.PressureStateTypeV1, message.Type);
+        Assert.Equal(FileTransferProtocol.PressureModeCatchUpOnly, message.Mode);
+        Assert.Equal(FileTransferProtocol.PressureReasonBulkBacklog, message.Reason);
+        Assert.Equal(2, message.SuggestedSendAheadChunks);
+        Assert.Equal(17, message.ReceiverNextExpectedChunkIndex);
     }
 
     [Fact]
@@ -225,7 +319,7 @@ public sealed class FileTransferPayloadCodecTests
     {
         var sessionId = new string('s', 37);
         var transferId = new string('t', 32);
-        var requestedChunkSize = 32 * 1024;
+        var requestedChunkSize = FileTransferProtocol.MaxChunkRawBytes;
         var safeChunkSize = FileTransferPayloadCodec.ComputeSafeRawChunkSizeForBudget(
             sessionId,
             transferId,
@@ -243,6 +337,7 @@ public sealed class FileTransferPayloadCodecTests
             });
 
         Assert.True(safeChunkSize < requestedChunkSize);
+        Assert.True(safeChunkSize > 0);
         Assert.InRange(payload.Length, 1, FileTransferProtocol.MaxSerializedChunkPayloadBytes);
     }
 

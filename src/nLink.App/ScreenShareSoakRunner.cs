@@ -59,10 +59,9 @@ internal static class ScreenShareSoakRunner
                 return Task.CompletedTask;
             },
             sendDisplayInfoAsync: (_, _, _) => Task.CompletedTask,
-            estimateBridgeBytes: payload => NknBridgePayloadAccounting.MeasureSendCommandJsonlBytes(
+            estimateBridgeBytes: payload => NknBridgePayloadAccounting.MeasureSendFrameBytes(
                 destination: "screenshare-soak",
-                payload.Span,
-                commandId: "1"));
+                payload.Span));
         using var viewer = new ScreenShareViewerViewModel(
             postToUiAsync: action =>
             {

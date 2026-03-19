@@ -1,5 +1,6 @@
 using System.Text.Json;
 using NLink.App.Services;
+using NLink.Core.Diagnostics;
 using NLink.Core.Metrics;
 using NLink.Infra.DevLocal;
 
@@ -40,6 +41,7 @@ public sealed class ContractFreezeTests
     [Fact]
     public void DiagnosticsSummarySnapshot_Schema_Freeze()
     {
+        PersistenceDiagnostics.ClearForTests();
         using var runtime = new SessionRuntime(() => new DevLocalTransport());
         var snapshot = runtime.GetDiagnosticsSnapshot();
         var json = JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true });

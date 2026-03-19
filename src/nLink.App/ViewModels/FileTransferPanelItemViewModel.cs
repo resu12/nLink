@@ -142,6 +142,7 @@ public sealed record FileTransferPanelItemViewModel(
             FileTransferResultCodes.FinalizeFailed => "Couldn't save file",
             FileTransferResultCodes.PayloadBudgetExceeded => "Transfer payload too large",
             FileTransferResultCodes.ReadFailed => "Couldn't read file",
+            FileTransferResultCodes.TransportIncompatible => "Update nLink and retry",
             FileTransferResultCodes.TransportDisconnected => "Connection lost",
             FileTransferResultCodes.TransportDetached => "Transfer stopped",
             _ => snapshot.StatusMessage,
@@ -153,6 +154,15 @@ public sealed record FileTransferPanelItemViewModel(
         if (snapshot.FileSizeBytes <= 0)
         {
             return fileSizeText;
+        }
+
+        if (snapshot.Direction == FileTransferDirection.Outbound)
+        {
+            var sent = FormatByteSize(snapshot.BytesAcceptedForTransport ?? snapshot.BytesTransferred);
+            var confirmed = FormatByteSize(snapshot.BytesAcknowledgedByReceiver ?? snapshot.BytesTransferred);
+            return string.Create(
+                CultureInfo.InvariantCulture,
+                $"{sent} sent / {confirmed} confirmed / {fileSizeText}");
         }
 
         var transferred = FormatByteSize(snapshot.BytesTransferred);

@@ -13,12 +13,24 @@ using NLink.Core.Diagnostics;
 
 namespace NLink.App.Services.ScreenCapture;
 
+internal sealed class ScreenShareSenderDegradedModeChangedEventArgs : EventArgs
+{
+    public ScreenShareSenderDegradedModeChangedEventArgs(bool isActive)
+    {
+        IsActive = isActive;
+    }
+
+    public bool IsActive { get; }
+}
+
 internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
 {
     private const int MinAutoTuneFramesPerSecond = 2;
+    private const int DegradedSenderFramesPerSecond = 2;
     private const int HighCaptureToSendAgeMs = 450;
     private const int LowCaptureToSendAgeMs = 220;
     private const int StableLowAgeTicksForIncrease = 3;
+    private static readonly TimeSpan SenderDegradedExitHoldDuration = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DisplayInfoMappingChangeDebounce = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan AutoTuneInterval = TimeSpan.FromSeconds(1);
 #if DEBUG
@@ -38,6 +50,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
     private IScreenCaptureSource? captureSource;
     private ScreenShareFrameSendPipeline? sendPipeline;
     private string sessionId = string.Empty;
+    private string lastActiveSessionId = string.Empty;
     private ScreenShareDisplayInfoSnapshot? lastSentDisplayInfo;
     private DisplayInfoMappingKey? lastSentDisplayInfoMapping;
     private long lastSentDisplayInfoRevision;
@@ -55,11 +68,15 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
     private int lowAgeStableTicks;
     private int preferFreshestPendingFrameOnly;
     private bool transportPressureHintActive;
+    private bool fileTransferDegradedHintActive;
+    private bool fileTransferCatchUpOnlyHintActive;
+    private bool senderDegradedModeActive;
     private long lastAutoTuneRateGateDrops;
     private long lastAutoTuneQueueEvictDrops;
     private long displayInfoSendCount;
     private long serializedChunkBytesSent;
     private long bridgeBytesSent;
+    private DateTimeOffset? lastSenderDegradedPressureUtc;
     private ScreenShareMetrics lastMetricsSnapshot = new();
     private bool disposed;
 #if DEBUG
@@ -149,6 +166,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             captureSource = nextCaptureSource;
             sendPipeline = nextPipeline;
             sessionId = normalizedSessionId;
+            lastActiveSessionId = normalizedSessionId;
             lastSentDisplayInfo = null;
             lastSentDisplayInfoMapping = null;
             lastSentDisplayInfoRevision = 0;
@@ -165,8 +183,10 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                 FeatureFlags.ScreenShareTransportMaxFps);
             lowAgeStableTicks = 0;
             Volatile.Write(ref preferFreshestPendingFrameOnly, 0);
+            senderDegradedModeActive = false;
             lastAutoTuneRateGateDrops = 0;
             lastAutoTuneQueueEvictDrops = 0;
+            lastSenderDegradedPressureUtc = null;
             serializedChunkBytesSent = 0;
             bridgeBytesSent = 0;
             nextCaptureSource.FrameArrived += OnFrameArrived;
@@ -184,6 +204,14 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
 #if DEBUG
             StartSnapshotTimer();
 #endif
+            if (fileTransferDegradedHintActive)
+            {
+                SetFileTransferDegradedHint(true);
+            }
+            else if (fileTransferCatchUpOnlyHintActive)
+            {
+                SetFileTransferCatchUpOnlyHint(true);
+            }
         }
         catch (Exception ex)
         {
@@ -421,12 +449,14 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
     {
         try
         {
-            if (Volatile.Read(ref preferFreshestPendingFrameOnly) == 1)
+            if (Volatile.Read(ref preferFreshestPendingFrameOnly) == 1 || IsSenderDegradedModeActive())
             {
-                var flushedQueuedFrames = currentPipeline.FlushPendingFrames();
-                if (flushedQueuedFrames > 0)
+                var droppedQueuedFrames = currentPipeline.FlushPendingFrames();
+                if (droppedQueuedFrames > 0)
                 {
-                    LogDebug("Dropped queued frame(s) to keep only the freshest frame under unstable transport pressure.");
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_sender_frame_dropped_backlog; session_id={currentSessionId}; dropped_count={droppedQueuedFrames}");
                 }
             }
 
@@ -470,6 +500,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                     DisplayInfoSendCount = Interlocked.Read(ref displayInfoSendCount),
                     SerializedChunkBytesSent = Interlocked.Read(ref serializedChunkBytesSent),
                     BridgeBytesSent = Interlocked.Read(ref bridgeBytesSent),
+                    FreshnessMode = senderDegradedModeActive ? "degraded" : "normal",
                 };
             }
             else
@@ -479,6 +510,7 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
                     DisplayInfoSendCount = Interlocked.Read(ref displayInfoSendCount),
                     SerializedChunkBytesSent = Interlocked.Read(ref serializedChunkBytesSent),
                     BridgeBytesSent = Interlocked.Read(ref bridgeBytesSent),
+                    FreshnessMode = senderDegradedModeActive ? "degraded" : "normal",
                 };
             }
 
@@ -530,8 +562,54 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         captureFpsHint = 0;
         Volatile.Write(ref preferFreshestPendingFrameOnly, 0);
         transportPressureHintActive = false;
+        senderDegradedModeActive = false;
         lastAutoTuneRateGateDrops = 0;
         lastAutoTuneQueueEvictDrops = 0;
+        lastSenderDegradedPressureUtc = null;
+    }
+
+    internal void SetFileTransferDegradedHint(bool active)
+    {
+        ScreenShareFrameSendPipeline? currentPipeline;
+        IScreenCaptureSource? currentCaptureSource;
+        string currentSessionId;
+
+        lock (gate)
+        {
+            fileTransferDegradedHintActive = active;
+            currentPipeline = sendPipeline;
+            currentCaptureSource = captureSource;
+            currentSessionId = sessionId;
+        }
+
+        ApplySenderDegradedMode(
+            currentPipeline,
+            currentCaptureSource,
+            currentSessionId,
+            shouldEnable: active || fileTransferCatchUpOnlyHintActive || ComputeLocalSenderPressure(currentPipeline),
+            reason: active ? "file_transfer" : "recovered");
+    }
+
+    internal void SetFileTransferCatchUpOnlyHint(bool active)
+    {
+        ScreenShareFrameSendPipeline? currentPipeline;
+        IScreenCaptureSource? currentCaptureSource;
+        string currentSessionId;
+
+        lock (gate)
+        {
+            fileTransferCatchUpOnlyHintActive = active;
+            currentPipeline = sendPipeline;
+            currentCaptureSource = captureSource;
+            currentSessionId = sessionId;
+        }
+
+        ApplySenderDegradedMode(
+            currentPipeline,
+            currentCaptureSource,
+            currentSessionId,
+            shouldEnable: active || fileTransferDegradedHintActive || ComputeLocalSenderPressure(currentPipeline),
+            reason: active ? "file_transfer_pressure" : "recovered");
     }
 
     private void OnAutoTuneTimerTick()
@@ -550,10 +628,14 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         {
             ScreenShareFrameSendPipeline? currentPipeline;
             IScreenCaptureSource? currentCaptureSource;
+            string currentSessionId;
+            bool fileTransferDegradedHint;
             lock (gate)
             {
                 currentPipeline = sendPipeline;
                 currentCaptureSource = captureSource;
+                currentSessionId = sessionId;
+                fileTransferDegradedHint = fileTransferDegradedHintActive;
             }
 
             if (currentPipeline is null)
@@ -583,8 +665,9 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
             var hasRateGatePressure = rateGateDropDelta > 0;
             var hasQueuePressure = queueEvictDropDelta > 0;
             var shouldPreferLowerBandwidth = hasQueuePressure || hasHighAgePressure || hasRateGatePressure;
+            var nextSenderDegradedMode = fileTransferCatchUpOnlyHintActive || fileTransferDegradedHint || hasQueuePressure || hasHighAgePressure;
 
-            if (hasQueuePressure || hasHighAgePressure)
+            if (hasQueuePressure || hasHighAgePressure || fileTransferDegradedHint)
             {
                 Volatile.Write(ref preferFreshestPendingFrameOnly, 1);
             }
@@ -596,12 +679,17 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
 
             var nextHint = currentHint;
             var nextTransportPressureHint = transportPressureHintActive;
-            if (shouldPreferLowerBandwidth)
+            if (shouldPreferLowerBandwidth || fileTransferDegradedHint)
             {
                 nextTransportPressureHint = true;
             }
 
-            if (hasQueuePressure)
+            if (nextSenderDegradedMode)
+            {
+                nextHint = DegradedSenderFramesPerSecond;
+                lowAgeStableTicks = 0;
+            }
+            else if (hasQueuePressure)
             {
                 nextHint = Math.Max(minAutoTuneFps, currentHint - 2);
                 lowAgeStableTicks = 0;
@@ -643,14 +731,31 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
 
             if (nextHint == currentHint)
             {
+                ApplySenderDegradedMode(
+                    currentPipeline,
+                    currentCaptureSource,
+                    currentSessionId,
+                    nextSenderDegradedMode,
+                    nextSenderDegradedMode
+                        ? (fileTransferDegradedHint ? "file_transfer" : hasQueuePressure ? "queue_pressure" : "capture_age")
+                        : "recovered");
                 return;
             }
 
             captureFpsHint = nextHint;
             tunableCaptureSource.SetCaptureFrameRateHint(nextHint);
+            currentPipeline.SetMaxFramesPerSecond(nextHint);
             LogDebug(
                 $"Auto-tuned capture fps hint to {nextHint} " +
                 $"(capture_to_send_age_ms={captureToSendAgeMs}, rate_gate_delta={rateGateDropDelta}, queue_evict_delta={queueEvictDropDelta}).");
+            ApplySenderDegradedMode(
+                currentPipeline,
+                currentCaptureSource,
+                currentSessionId,
+                nextSenderDegradedMode,
+                nextSenderDegradedMode
+                    ? (fileTransferDegradedHint ? "file_transfer" : hasQueuePressure ? "queue_pressure" : "capture_age")
+                    : "recovered");
         }
         catch (Exception ex)
         {
@@ -667,6 +772,132 @@ internal sealed class TransportScreenShareCoordinator : IAsyncDisposable
         var delta = Math.Max(0, currentValue - previousValue);
         previousValue = currentValue;
         return delta;
+    }
+
+    private bool IsSenderDegradedModeActive()
+    {
+        lock (gate)
+        {
+            return senderDegradedModeActive;
+        }
+    }
+
+    internal event EventHandler<ScreenShareSenderDegradedModeChangedEventArgs>? SenderDegradedModeChanged;
+
+    private static bool ComputeLocalSenderPressure(ScreenShareFrameSendPipeline? pipeline)
+    {
+        if (pipeline is null)
+        {
+            return false;
+        }
+
+        var metrics = pipeline.GetMetricsSnapshot();
+        return pipeline.PendingFrameCount > 1 ||
+               pipeline.PendingSignalCount > 0 ||
+               metrics.LastCaptureToSendAgeMs >= HighCaptureToSendAgeMs;
+    }
+
+    private void ApplySenderDegradedMode(
+        ScreenShareFrameSendPipeline? currentPipeline,
+        IScreenCaptureSource? currentCaptureSource,
+        string currentSessionId,
+        bool shouldEnable,
+        string reason)
+    {
+        if (string.IsNullOrWhiteSpace(currentSessionId))
+        {
+            lock (gate)
+            {
+                currentSessionId = sessionId;
+                if (string.IsNullOrWhiteSpace(currentSessionId))
+                {
+                    currentSessionId = lastActiveSessionId;
+                }
+            }
+        }
+
+        var now = clock.UtcNow;
+        bool entered;
+        bool exited;
+        string effectiveReason;
+        lock (gate)
+        {
+            if (fileTransferCatchUpOnlyHintActive)
+            {
+                shouldEnable = true;
+                reason = "file_transfer_pressure";
+                lastSenderDegradedPressureUtc = now;
+            }
+            else if (shouldEnable)
+            {
+                lastSenderDegradedPressureUtc = now;
+            }
+            else if (senderDegradedModeActive &&
+                     lastSenderDegradedPressureUtc is DateTimeOffset lastPressureUtc &&
+                     now - lastPressureUtc < SenderDegradedExitHoldDuration)
+            {
+                shouldEnable = true;
+                reason = "sticky_hold";
+            }
+
+            entered = shouldEnable && !senderDegradedModeActive;
+            exited = !shouldEnable && senderDegradedModeActive;
+            senderDegradedModeActive = shouldEnable;
+            effectiveReason = reason;
+
+            if (exited)
+            {
+                lastSenderDegradedPressureUtc = null;
+            }
+        }
+
+        if (currentPipeline is not null)
+        {
+            currentPipeline.SetMaxFramesPerSecond(shouldEnable ? DegradedSenderFramesPerSecond : FeatureFlags.ScreenShareTransportMaxFps);
+            if (shouldEnable)
+            {
+                var droppedQueuedFrames = currentPipeline.FlushPendingFrames();
+                if (droppedQueuedFrames > 0)
+                {
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_sender_frame_dropped_backlog; session_id={currentSessionId}; dropped_count={droppedQueuedFrames}");
+                }
+            }
+            else if (exited)
+            {
+                currentPipeline.FlushPendingFrames();
+                currentPipeline.ResetPacingWindow();
+                LocalOperationalLog.Info(
+                    "ScreenShareTransport",
+                    $"event=screenshare_sender_refresh_requested; session_id={currentSessionId}; reason={effectiveReason}");
+            }
+        }
+
+        if (currentCaptureSource is IScreenCaptureAdaptiveTuning tunableCaptureSource)
+        {
+            var normalHint = Math.Clamp(
+                Math.Min(FeatureFlags.ScreenShareMaxFps, FeatureFlags.ScreenShareTransportMaxFps),
+                Math.Min(MinAutoTuneFramesPerSecond, FeatureFlags.ScreenShareTransportMaxFps),
+                FeatureFlags.ScreenShareTransportMaxFps);
+            tunableCaptureSource.SetCaptureFrameRateHint(shouldEnable ? DegradedSenderFramesPerSecond : (captureFpsHint <= 0 ? normalHint : captureFpsHint));
+            tunableCaptureSource.SetTransportPressureHint(shouldEnable || transportPressureHintActive);
+        }
+
+        if (entered)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_sender_degraded_entered; session_id={currentSessionId}; reason={effectiveReason}");
+            SenderDegradedModeChanged?.Invoke(this, new ScreenShareSenderDegradedModeChangedEventArgs(true));
+        }
+        else if (exited)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_sender_degraded_exited; session_id={currentSessionId}; reason={effectiveReason}");
+            SenderDegradedModeChanged?.Invoke(this, new ScreenShareSenderDegradedModeChangedEventArgs(false));
+        }
     }
 
     private void TryPublishDisplayInfo(IScreenCaptureSource currentCaptureSource, int frameWidth, int frameHeight)

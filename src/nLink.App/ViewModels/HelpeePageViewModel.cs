@@ -1873,8 +1873,17 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 await UiThreadDispatch.RunAsync(() =>
                 {
-                    ConnectionStatus = "Could not start. Refresh invite and try again.";
-                    ConnectionState = "Disconnected";
+                    var message = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
+                        ? "Could not start. Refresh invite and try again."
+                        : sessionRuntime.StatusText;
+                    ConnectionStatus = message;
+                    ConnectionState = sessionRuntime.State is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected
+                        ? "Failed"
+                        : "Disconnected";
+                    if (!HasShareInvite)
+                    {
+                        UpdateShareInviteStatusText(message);
+                    }
                 });
             }
         }

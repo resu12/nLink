@@ -11,6 +11,10 @@ internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddress
     private readonly HashSet<string> subscriptions = new(StringComparer.Ordinal);
     private readonly string initialAddress;
     private readonly string connectedAddress;
+    private readonly string initialMediaAddress;
+    private readonly string connectedMediaAddress;
+    private readonly string initialBulkAddress;
+    private readonly string connectedBulkAddress;
     private bool connected;
     private bool disposed;
 
@@ -24,6 +28,10 @@ internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddress
     {
         initialAddress = address ?? throw new ArgumentNullException(nameof(address));
         this.connectedAddress = string.IsNullOrWhiteSpace(connectedAddress) ? initialAddress : connectedAddress.Trim();
+        initialMediaAddress = BuildMediaAddress(initialAddress);
+        connectedMediaAddress = BuildMediaAddress(this.connectedAddress);
+        initialBulkAddress = BuildBulkAddress(initialAddress);
+        connectedBulkAddress = BuildBulkAddress(this.connectedAddress);
     }
 
     public string Address
@@ -40,6 +48,32 @@ internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddress
     public string InitialAddress => initialAddress;
 
     public string ConnectedAddress => connectedAddress;
+
+    public string MediaAddress
+    {
+        get
+        {
+            lock (Gate)
+            {
+                return connected ? connectedMediaAddress : initialMediaAddress;
+            }
+        }
+    }
+
+    public string ConnectedMediaAddress => connectedMediaAddress;
+
+    public string BulkAddress
+    {
+        get
+        {
+            lock (Gate)
+            {
+                return connected ? connectedBulkAddress : initialBulkAddress;
+            }
+        }
+    }
+
+    public string ConnectedBulkAddress => connectedBulkAddress;
 
     bool IAuthoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress => connected;
 
@@ -72,6 +106,8 @@ internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddress
         lock (Gate)
         {
             ClientsByAddress[connectedAddress] = this;
+            ClientsByAddress[connectedMediaAddress] = this;
+            ClientsByAddress[connectedBulkAddress] = this;
             connected = true;
         }
 
@@ -91,6 +127,8 @@ internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddress
             wasConnected = connected;
             connected = false;
             ClientsByAddress.Remove(connectedAddress);
+            ClientsByAddress.Remove(connectedMediaAddress);
+            ClientsByAddress.Remove(connectedBulkAddress);
 
             foreach (var topic in subscriptions.ToArray())
             {
@@ -193,6 +231,21 @@ internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddress
 
     public async Task SendAsync(string destination, byte[] payload, CancellationToken ct)
     {
+        await SendCoreAsync(destination, payload, NknBridgeChannel.Control, ct).ConfigureAwait(false);
+    }
+
+    public async Task SendMediaAsync(string destination, byte[] payload, CancellationToken ct)
+    {
+        await SendCoreAsync(destination, payload, NknBridgeChannel.Media, ct).ConfigureAwait(false);
+    }
+
+    public async Task SendBulkAsync(string destination, byte[] payload, CancellationToken ct)
+    {
+        await SendCoreAsync(destination, payload, NknBridgeChannel.Bulk, ct).ConfigureAwait(false);
+    }
+
+    private async Task SendCoreAsync(string destination, byte[] payload, NknBridgeChannel channel, CancellationToken ct)
+    {
         ct.ThrowIfCancellationRequested();
         ThrowIfDisposed();
         EnsureConnected();
@@ -226,10 +279,16 @@ internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddress
         }
 
         recipient.Receive(new NknIncomingMessage(
-            source: Address,
+            source: channel switch
+            {
+                NknBridgeChannel.Media => MediaAddress,
+                NknBridgeChannel.Bulk => BulkAddress,
+                _ => Address,
+            },
             payload: payload.AsSpan().ToArray(),
             isTopic: false,
-            topic: null));
+            topic: null,
+            channel: channel));
 
         await Task.CompletedTask;
     }
@@ -266,5 +325,39 @@ internal sealed class FakeNknClient : INknClient, IAuthoritativeConnectedAddress
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(disposed, this);
+    }
+
+    private static string BuildMediaAddress(string address)
+    {
+        if (string.IsNullOrWhiteSpace(address))
+        {
+            return string.Empty;
+        }
+
+        var normalized = address.Trim();
+        var separatorIndex = normalized.IndexOf('.');
+        if (separatorIndex <= 0 || separatorIndex >= normalized.Length - 1)
+        {
+            return normalized + "-media";
+        }
+
+        return normalized[..separatorIndex] + "-media" + normalized[separatorIndex..];
+    }
+
+    private static string BuildBulkAddress(string address)
+    {
+        if (string.IsNullOrWhiteSpace(address))
+        {
+            return string.Empty;
+        }
+
+        var normalized = address.Trim();
+        var separatorIndex = normalized.IndexOf('.');
+        if (separatorIndex <= 0 || separatorIndex >= normalized.Length - 1)
+        {
+            return normalized + "-bulk";
+        }
+
+        return normalized[..separatorIndex] + "-bulk" + normalized[separatorIndex..];
     }
 }

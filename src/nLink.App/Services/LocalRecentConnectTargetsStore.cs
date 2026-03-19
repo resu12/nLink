@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using NLink.Core.Diagnostics;
 using NLink.Core.SessionConnect;
 
 namespace NLink.App.Services;
@@ -49,8 +50,15 @@ public sealed class LocalRecentConnectTargetsStore : IRecentConnectTargetsStore
             var sanitized = SanitizeTargets(parsed.Targets);
             return sanitized;
         }
-        catch
+        catch (Exception ex)
         {
+            PersistenceDiagnostics.Record(
+                domain: "recent_connect_targets",
+                operation: "load",
+                severity: PersistenceDiagnosticSeverity.Warning,
+                outcome: PersistenceDiagnosticOutcome.Fallback,
+                reason: ex.GetType().Name,
+                userWarning: "Recent targets could not be loaded.");
             return Array.Empty<string>();
         }
     }
@@ -77,9 +85,15 @@ public sealed class LocalRecentConnectTargetsStore : IRecentConnectTargetsStore
             File.Copy(tempPath, filePath, overwrite: true);
             File.Delete(tempPath);
         }
-        catch
+        catch (Exception ex)
         {
-            // Persistence failures are non-fatal.
+            PersistenceDiagnostics.Record(
+                domain: "recent_connect_targets",
+                operation: "save",
+                severity: PersistenceDiagnosticSeverity.Warning,
+                outcome: PersistenceDiagnosticOutcome.Fallback,
+                reason: ex.GetType().Name,
+                userWarning: "Recent targets could not be saved.");
         }
     }
 

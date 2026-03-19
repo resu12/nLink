@@ -5,6 +5,12 @@ namespace NLink.Infra.Nkn;
 
 public static class NknBridgePayloadAccounting
 {
+    public static int MeasureSendFrameBytes(string destination, ReadOnlySpan<byte> payload)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(destination);
+        return BridgeBinaryProtocol.MeasureSendFrameBytes(destination, payload);
+    }
+
     public static int MeasureSendCommandJsonlBytes(string destination, ReadOnlySpan<byte> payload, string commandId = "1")
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);

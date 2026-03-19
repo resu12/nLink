@@ -107,7 +107,25 @@ public sealed class ScreenShareFrameAssemblerTests
         Assert.Equal(0, metrics.FramesTooLargeDropped);
     }
 
-    private static ScreenShareFrameChunkV1 BuildChunk(long frameId, int chunkIndex, int chunkCount, byte[] bytes, string? dataBase64 = null)
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void ScreenShareFrameAssembler_DropsCompletedFrame_WhenFrameAgeExceedsCutoff()
+    {
+        var assembler = new ScreenShareFrameAssembler();
+        ScreenShareFrameCompletedEventArgs? completed = null;
+        assembler.FrameCompleted += (_, frame) => completed = frame;
+
+        var staleTimestampUnixMilliseconds = DateTimeOffset.UtcNow.AddMilliseconds(-2500).ToUnixTimeMilliseconds();
+        assembler.OnChunk(BuildChunk(frameId: 99, chunkIndex: 0, chunkCount: 2, bytes: new byte[] { 1, 2 }, timestampUnixMilliseconds: staleTimestampUnixMilliseconds));
+        assembler.OnChunk(BuildChunk(frameId: 99, chunkIndex: 1, chunkCount: 2, bytes: new byte[] { 3, 4 }, timestampUnixMilliseconds: staleTimestampUnixMilliseconds));
+
+        Assert.Null(completed);
+        var metrics = assembler.GetMetricsSnapshot();
+        Assert.Equal(1, metrics.FramesDroppedStaleAge);
+        Assert.Equal("degraded", metrics.FreshnessMode);
+    }
+
+    private static ScreenShareFrameChunkV1 BuildChunk(long frameId, int chunkIndex, int chunkCount, byte[] bytes, string? dataBase64 = null, long timestampUnixMilliseconds = 0)
     {
         return new ScreenShareFrameChunkV1
         {
@@ -116,6 +134,7 @@ public sealed class ScreenShareFrameAssemblerTests
             Width = 1280,
             Height = 720,
             Encoding = "jpeg",
+            TimestampUnixMilliseconds = timestampUnixMilliseconds,
             ChunkIndex = chunkIndex,
             ChunkCount = chunkCount,
             DataBase64 = dataBase64 ?? Convert.ToBase64String(bytes),

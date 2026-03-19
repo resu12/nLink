@@ -66,8 +66,8 @@ public sealed class JsonlSmokeTests
     [Trait("Category", "Smoke")]
     public async Task BridgeProtocolClient_SendCommandAndWaitAckAsync_ReportsSerializedJsonlBytes()
     {
-        var output = new StringWriter();
-        using var writer = new JsonlWriter(output);
+        await using var output = new MemoryStream();
+        using var writer = new BridgeStdioWriter(output, leaveOpen: true);
         int? reportedBytes = null;
 
         var client = new BridgeProtocolClient(
@@ -92,9 +92,9 @@ public sealed class JsonlSmokeTests
             ct: CancellationToken.None,
             onSerialized: bytes => reportedBytes = bytes);
 
-        await WaitUntilAsync(() => output.ToString().Contains('\n'), TimeSpan.FromSeconds(1));
+        await WaitUntilAsync(() => Encoding.UTF8.GetString(output.ToArray()).Contains('\n'), TimeSpan.FromSeconds(1));
 
-        var line = output.ToString().TrimEnd('\r', '\n');
+        var line = Encoding.UTF8.GetString(output.ToArray()).TrimEnd('\r', '\n');
         using var doc = JsonDocument.Parse(line);
         var id = doc.RootElement.GetProperty("id").GetString();
         Assert.False(string.IsNullOrWhiteSpace(id));
@@ -103,6 +103,68 @@ public sealed class JsonlSmokeTests
         await sendTask;
 
         Assert.Equal(NknBridgePayloadAccounting.MeasureSerializedJsonlBytes(line), reportedBytes);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task BridgeStdioWriter_WriteSendFrameAsync_WritesBinarySendFrame()
+    {
+        await using var stream = new MemoryStream();
+        using var writer = new BridgeStdioWriter(stream, leaveOpen: true);
+
+        var payload = new byte[] { 1, 2, 3, 4 };
+        await writer.WriteSendFrameAsync("peer.test", payload, NknBridgeChannel.Bulk, CancellationToken.None);
+
+        var bytes = stream.ToArray();
+        var header = BridgeBinaryProtocol.ParseHeader(bytes.AsSpan(0, BridgeBinaryProtocol.HeaderSize));
+        var frame = BridgeBinaryProtocol.DecodeFrame(header, bytes.AsSpan(BridgeBinaryProtocol.HeaderSize));
+
+        Assert.Equal(BridgeBinaryFrameKind.Send, frame.Kind);
+        Assert.Equal(NknBridgeChannel.Bulk, frame.Channel);
+        Assert.Equal("peer.test", frame.PrimaryText);
+        Assert.Equal(payload, frame.Payload);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task BridgeMixedStreamReader_ReadsJsonLines_AndBinaryFrames_FromSameStream()
+    {
+        var json = Encoding.UTF8.GetBytes("{\"event\":\"ready\",\"protocol\":2}\n");
+        var binary = BridgeBinaryProtocol.BuildMessageFrame(
+            source: "peer.test",
+            payload: new byte[] { 9, 8, 7 },
+            channel: NknBridgeChannel.Media,
+            isTopic: false,
+            topic: null);
+        var combined = new byte[json.Length + binary.Length];
+        json.CopyTo(combined, 0);
+        binary.CopyTo(combined, json.Length);
+
+        using var stream = new ChunkedReadStream(combined, BuildPseudoRandomChunks(combined.Length));
+        var reader = new BridgeMixedStreamReader();
+        string? jsonLine = null;
+        BridgeBinaryFrame? binaryFrame = null;
+
+        await reader.ReadAsync(
+            stream,
+            (line, _) =>
+            {
+                jsonLine = line;
+                return Task.CompletedTask;
+            },
+            (frame, _) =>
+            {
+                binaryFrame = frame;
+                return Task.CompletedTask;
+            },
+            CancellationToken.None);
+
+        Assert.Equal("{\"event\":\"ready\",\"protocol\":2}", jsonLine);
+        Assert.NotNull(binaryFrame);
+        Assert.Equal(BridgeBinaryFrameKind.Message, binaryFrame!.Kind);
+        Assert.Equal(NknBridgeChannel.Media, binaryFrame.Channel);
+        Assert.Equal("peer.test", binaryFrame.PrimaryText);
+        Assert.Equal(new byte[] { 9, 8, 7 }, binaryFrame.Payload);
     }
 
     private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)

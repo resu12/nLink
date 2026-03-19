@@ -3,6 +3,8 @@ namespace NLink.Infra.Nkn;
 internal interface INknClient : IDisposable
 {
     string Address { get; }
+    string MediaAddress { get; }
+    string BulkAddress { get; }
 
     Task ConnectAsync(CancellationToken ct);
 
@@ -15,6 +17,8 @@ internal interface INknClient : IDisposable
     Task PublishAsync(string topic, byte[] payload, CancellationToken ct);
 
     Task SendAsync(string destination, byte[] payload, CancellationToken ct);
+    Task SendMediaAsync(string destination, byte[] payload, CancellationToken ct);
+    Task SendBulkAsync(string destination, byte[] payload, CancellationToken ct);
 
     event EventHandler<NknIncomingMessage>? MessageReceived;
 

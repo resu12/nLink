@@ -102,19 +102,7 @@ public sealed class SessionChatService : IChatService
             Text = trimmed,
         };
 
-        var plaintextBytes = ChatEnvelopeCodec.SerializePayload(payload);
-        var encrypted = ChatAesGcmCrypto.Encrypt(sessionKey, plaintextBytes);
-
-        var envelope = new ChatEnvelope
-        {
-            Version = ChatProtocol.Version,
-            Type = ChatProtocol.ChatMessageType,
-            NonceBase64 = Convert.ToBase64String(encrypted.Nonce),
-            TagBase64 = Convert.ToBase64String(encrypted.Tag),
-            CiphertextBase64 = Convert.ToBase64String(encrypted.Ciphertext),
-        };
-
-        var bytes = ChatEnvelopeCodec.SerializeEnvelope(envelope);
+        var bytes = ChatEnvelopeCodec.SerializePayload(payload);
         ChatRuntimeCounters.IncrementSent();
         SessionTimeline.Record("ChatSent");
         if (reliabilityAttempt is not null)
@@ -184,20 +172,7 @@ public sealed class SessionChatService : IChatService
 
         try
         {
-            var envelope = ChatEnvelopeCodec.DeserializeEnvelope(e.Payload);
-            if (envelope.Version != ChatProtocol.Version || !string.Equals(envelope.Type, ChatProtocol.ChatMessageType, StringComparison.Ordinal))
-            {
-                ChatRuntimeCounters.IncrementDecryptFailed();
-                Warn($"Rejected chat envelope version/type (v={envelope.Version}, t={envelope.Type}).");
-                return;
-            }
-
-            var nonce = Convert.FromBase64String(envelope.NonceBase64);
-            var tag = Convert.FromBase64String(envelope.TagBase64);
-            var ciphertext = Convert.FromBase64String(envelope.CiphertextBase64);
-            var plaintext = ChatAesGcmCrypto.Decrypt(sessionKey, nonce, tag, ciphertext);
-
-            var payload = ChatEnvelopeCodec.DeserializePayload(plaintext);
+            var payload = ChatEnvelopeCodec.DeserializePayload(e.Payload);
             if (string.IsNullOrWhiteSpace(payload.MessageId))
             {
                 ChatRuntimeCounters.IncrementDecryptFailed();
@@ -226,11 +201,6 @@ public sealed class SessionChatService : IChatService
             MessageReceived?.Invoke(
                 this,
                 new ChatMessageEventArgs(new ChatMessageRecord(payload.MessageId, payload.Text, timestamp, IsLocal: false)));
-        }
-        catch (CryptographicException)
-        {
-            ChatRuntimeCounters.IncrementDecryptFailed();
-            Warn("Chat decrypt failed (authentication).");
         }
         catch (FormatException)
         {

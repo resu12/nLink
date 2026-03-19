@@ -13,6 +13,7 @@ using NLink.App.Services.RemoteControl;
 using NLink.App.Services.ScreenCapture;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.Diagnostics;
 using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
 using NLink.Core.RemoteControl;
@@ -125,7 +126,9 @@ public readonly record struct DiagnosticsSnapshot(
     string ActiveOutboundFileTransferState = "Idle",
     long? ActiveOutboundFileTransferBytes = null,
     string LastFileTransferFailureCode = "(none)",
-    string LastFileTransferSavedPath = "(none)");
+    string LastFileTransferSavedPath = "(none)",
+    string PersistenceSummary = "Healthy",
+    string PersistenceWarning = "(none)");
 
 internal sealed record SessionRuntimeWatchdogOptions(
     bool Enabled,
@@ -201,6 +204,11 @@ public sealed class SessionRuntime : IDisposable
     private readonly SessionAuthorizationGuard authorizationGuard;
     private readonly SessionClipboardGuard clipboardGuard;
     private readonly SessionFileTransferGuard fileTransferGuard;
+    private readonly SessionAuthorizationCommandExecutor privilegedCommandExecutor;
+    private readonly SessionRuntimeApprovalActions approvalActions;
+    private readonly SessionRuntimeFileTransferActions fileTransferActions;
+    private readonly SessionRuntimeRemoteControlActions remoteControlActions;
+    private readonly SessionRuntimeScreenShareActions screenShareActions;
     private readonly RetryPolicy watchdogRetryPolicy;
     private readonly TransportScreenShareCoordinator transportScreenShareCoordinator;
     private readonly IRemoteInputInjector remoteInputInjector;
@@ -325,6 +333,7 @@ public sealed class SessionRuntime : IDisposable
     private DateTimeOffset remoteScreenShareFramesSuppressedUntilUtc;
     private long remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs;
     private long lastScreenShareStopSuppressedLogTick;
+    private bool remoteScreenShareActive;
 
     public SessionRuntime(Func<ISignalingTransport> createTransport)
         : this(createTransport, SessionRuntimeWatchdogOptions.Default, DefaultWatchdogDelayAsync, TransportTelemetry.Noop, BridgeReusePolicy.Default, null, null, null)
@@ -352,6 +361,11 @@ public sealed class SessionRuntime : IDisposable
         authorizationGuard = new SessionAuthorizationGuard(this.nowProvider);
         clipboardGuard = new SessionClipboardGuard(this.nowProvider);
         fileTransferGuard = new SessionFileTransferGuard(this.nowProvider);
+        privilegedCommandExecutor = new SessionAuthorizationCommandExecutor(this);
+        approvalActions = new SessionRuntimeApprovalActions(this);
+        fileTransferActions = new SessionRuntimeFileTransferActions(this);
+        remoteControlActions = new SessionRuntimeRemoteControlActions(this);
+        screenShareActions = new SessionRuntimeScreenShareActions(this);
         this.remoteInputInjector = remoteInputInjector ?? RemoteInputInjectorFactory.CreateDefault();
         this.remoteCoordinateMapper = remoteCoordinateMapper ?? new DefaultRemoteCoordinateMapper();
         remoteControlProcessElevated = WindowsInputIntegrityProbe.IsCurrentProcessElevated();
@@ -365,8 +379,9 @@ public sealed class SessionRuntime : IDisposable
         transportStateEntryTimestamps[transportState] = Stopwatch.GetTimestamp();
         transportScreenShareCoordinator = new TransportScreenShareCoordinator(
             ScreenCaptureFactory.CreateDefault,
-            SendScreenSharePayloadAsync,
+            screenShareActions.SendPayloadAsync,
             sendDisplayInfoAsync: SendRemoteControlDisplayInfoAsync);
+        transportScreenShareCoordinator.SenderDegradedModeChanged += OnScreenShareSenderDegradedModeChanged;
 
         chatService.MessageReceived += OnChatMessageReceived;
         chatService.MessageReceivedBeforeApproved += OnChatMessageReceivedBeforeApproved;
@@ -601,6 +616,27 @@ public sealed class SessionRuntime : IDisposable
 
         LogAuthorizationDenied(operation, capability, authorization.Failure);
         return false;
+    }
+
+    internal bool TryAuthorizePrivilegedAction(SessionPrivilegedAction action)
+    {
+        return action.Kind switch
+        {
+            SessionPrivilegedActionKind.ApprovalGrant or SessionPrivilegedActionKind.ApprovalDeny => true,
+            SessionPrivilegedActionKind.FileTransferStartSend or
+            SessionPrivilegedActionKind.FileTransferAcceptIncoming or
+            SessionPrivilegedActionKind.FileTransferDeclineIncoming or
+            SessionPrivilegedActionKind.FileTransferCancel => TryAuthorizeFileTransferSend(),
+            SessionPrivilegedActionKind.ClipboardSync or SessionPrivilegedActionKind.ClipboardApply => TryAuthorizeClipboardSync(),
+            SessionPrivilegedActionKind.ScreenShareDispatch => RequireCapability(SessionCapability.ScreenShare, action.Operation),
+            SessionPrivilegedActionKind.ChatSend => RequireCapability(SessionCapability.Chat, action.Operation),
+            SessionPrivilegedActionKind.RemoteControlRequest or
+            SessionPrivilegedActionKind.RemoteControlRespond or
+            SessionPrivilegedActionKind.RemoteControlStop or
+            SessionPrivilegedActionKind.RemoteControlInputSend or
+            SessionPrivilegedActionKind.RemoteControlSnapshotSend => RequireCapability(SessionCapability.RemoteControl, action.Operation),
+            _ => false,
+        };
     }
 
     private SessionAuthorizationResult EvaluateCapabilityAuthorization(SessionCapability capability)
@@ -889,6 +925,7 @@ public sealed class SessionRuntime : IDisposable
     public DiagnosticsSnapshot GetDiagnosticsSnapshot()
     {
         var fileTransferSnapshot = fileTransferService.Snapshot;
+        var persistenceSnapshot = PersistenceDiagnostics.Snapshot();
         return new DiagnosticsSnapshot(
             CurrentState: transportState.ToString(),
             SessionUiState: state.ToString(),
@@ -910,7 +947,9 @@ public sealed class SessionRuntime : IDisposable
             ActiveOutboundFileTransferState: fileTransferSnapshot.OutboundState.ToString(),
             ActiveOutboundFileTransferBytes: fileTransferSnapshot.Outbound?.BytesTransferred,
             LastFileTransferFailureCode: NormalizeDiagnosticsText(GetLastFileTransferFailureCode(fileTransferSnapshot)),
-            LastFileTransferSavedPath: NormalizeDiagnosticsText(GetLastFileTransferSavedPath(fileTransferSnapshot)));
+            LastFileTransferSavedPath: NormalizeDiagnosticsText(GetLastFileTransferSavedPath(fileTransferSnapshot)),
+            PersistenceSummary: persistenceSnapshot.Summary,
+            PersistenceWarning: persistenceSnapshot.LastWarning);
     }
 
     private string BuildAuthorizationSummary()
@@ -943,10 +982,41 @@ public sealed class SessionRuntime : IDisposable
     private string BuildScreenShareSummary()
     {
         var authorized = EvaluateCapabilityAuthorization(SessionCapability.ScreenShare).IsAuthorized;
-        return $"active={FormatYesNo(transportScreenShareCoordinator.IsActive)}; " +
+        return $"active={FormatYesNo(IsSessionScreenShareActive())}; " +
                $"authorized={FormatYesNo(authorized)}; " +
                $"auto_start={FormatYesNo(allowTransportScreenShareAutoStart)}; " +
                $"host_ready={FormatYesNo(hostReady)}";
+    }
+
+    private bool IsSessionScreenShareActive()
+        => transportScreenShareCoordinator.IsActive || remoteScreenShareActive;
+
+    private FileTransferFlowControlMode ResolveFileTransferFlowControlMode()
+    {
+        if (remoteControlSessionState.ControlState == ControlState.Requesting || hasPendingRemoteControlConsentPrompt)
+        {
+            return FileTransferFlowControlMode.InteractiveCritical;
+        }
+
+        if (remoteControlSessionState.ControlState == ControlState.Active || IsSessionScreenShareActive())
+        {
+            return FileTransferFlowControlMode.Interactive;
+        }
+
+        return FileTransferFlowControlMode.Background;
+    }
+
+    private void SyncFileTransferFlowControlMode()
+    {
+        fileTransferService.SetSessionScreenShareActive(IsSessionScreenShareActive());
+        fileTransferService.SetSessionScreenShareDegraded(
+            IsSessionScreenShareActive() &&
+            string.Equals(transportScreenShareCoordinator.GetMetricsSnapshot().FreshnessMode, "degraded", StringComparison.Ordinal));
+        fileTransferService.SetFlowControlMode(ResolveFileTransferFlowControlMode());
+        transportScreenShareCoordinator.SetFileTransferDegradedHint(
+            IsSessionScreenShareActive() && fileTransferService.IsTransferDegraded);
+        transportScreenShareCoordinator.SetFileTransferCatchUpOnlyHint(
+            IsSessionScreenShareActive() && fileTransferService.IsCatchUpOnlyPressureActive);
     }
 
     private string BuildFileTransferSummary(SessionFileTransferSnapshot snapshot)
@@ -1125,49 +1195,61 @@ public sealed class SessionRuntime : IDisposable
             ThrowIfStartInProgress();
             startInProgress = true;
 
-            await ResetCoreAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
-            BeginConnectAttempt(SessionRuntimeRole.Helpee, "address_native");
-            TransitionTo(TransportState.TransportInitializing, "start_helpee");
-
-            var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(uiCt);
-            var nextTransport = AcquireTransportForNewSession(out var reusedCachedBridge);
-            EnsureSessionSecurityTransport(nextTransport);
-            sessionCts = linkedCts;
-            transport = nextTransport;
-            role = SessionRuntimeRole.Helpee;
-            hostReady = false;
-            currentHelperTargetAddress = null;
-            pendingJoinRequest = null;
-            RefreshRemoteControlCapabilitiesFromTransport();
-            SessionTimeline.Record("Started");
-            SessionTimeline.Record("Hosting");
-
-            WireTransport(nextTransport);
-            chatService.AttachTransport(nextTransport);
-            AttachFileTransferTransport(nextTransport);
-            if (nextTransport is NknSignalingTransport)
+            try
             {
-                TransitionTo(TransportState.BridgeStarting, "nkn_bridge_starting");
-                if (reusedCachedBridge)
+                await ResetCoreAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
+                BeginConnectAttempt(SessionRuntimeRole.Helpee, "address_native");
+                TransitionTo(TransportState.TransportInitializing, "start_helpee");
+
+                var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(uiCt);
+                var nextTransport = AcquireTransportForNewSession(out var reusedCachedBridge);
+                EnsureSessionSecurityTransport(nextTransport);
+                sessionCts = linkedCts;
+                transport = nextTransport;
+                role = SessionRuntimeRole.Helpee;
+                hostReady = false;
+                currentHelperTargetAddress = null;
+                pendingJoinRequest = null;
+                RefreshRemoteControlCapabilitiesFromTransport();
+                SessionTimeline.Record("Started");
+                SessionTimeline.Record("Hosting");
+
+                WireTransport(nextTransport);
+                chatService.AttachTransport(nextTransport);
+                AttachFileTransferTransport(nextTransport);
+                if (nextTransport is NknSignalingTransport)
                 {
-                    EmitSyntheticWarmBridgeLifecycle();
+                    TransitionTo(TransportState.BridgeStarting, "nkn_bridge_starting");
+                    if (reusedCachedBridge)
+                    {
+                        EmitSyntheticWarmBridgeLifecycle();
+                    }
                 }
+                else
+                {
+                    TransitionTo(TransportState.Connecting, "host_start");
+                }
+
+                SetState(SessionRuntimeState.Waiting, "Waiting for helper…");
+
+                _ = RunHostAsync(nextTransport, linkedCts.Token);
+                if (nextTransport is IHostReadySignalingTransport hostReadyTransport)
+                {
+                    await hostReadyTransport.WaitUntilHostReadyAsync(linkedCts.Token).ConfigureAwait(false);
+                }
+
+                hostReady = true;
+                SetState(SessionRuntimeState.Waiting, "Waiting for helper…");
             }
-            else
+            catch (OperationCanceledException)
             {
-                TransitionTo(TransportState.Connecting, "host_start");
+                throw;
             }
-
-            SetState(SessionRuntimeState.Waiting, "Waiting for helper…");
-
-            _ = RunHostAsync(nextTransport, linkedCts.Token);
-            if (nextTransport is IHostReadySignalingTransport hostReadyTransport)
+            catch (Exception ex)
             {
-                await hostReadyTransport.WaitUntilHostReadyAsync(linkedCts.Token).ConfigureAwait(false);
+                HandleSynchronousStartFailure(ex, "host_start_sync_failed");
+                throw;
             }
-
-            hostReady = true;
-            SetState(SessionRuntimeState.Waiting, "Waiting for helper…");
         }
         finally
         {
@@ -1341,7 +1423,15 @@ public sealed class SessionRuntime : IDisposable
         await ApproveAsync(approvalRequest.RequestedCapabilities, uiCt).ConfigureAwait(false);
     }
 
-    public async Task ApproveAsync(CapabilityGrant approvedCapabilities, CancellationToken uiCt)
+    public Task ApproveAsync(CapabilityGrant approvedCapabilities, CancellationToken uiCt)
+    {
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.ApprovalGrant, "approval_grant"),
+            ct => approvalActions.ApproveAsync(approvedCapabilities, ct),
+            uiCt);
+    }
+
+    internal async Task ApproveCoreAsync(CapabilityGrant approvedCapabilities, CancellationToken uiCt)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
 
@@ -1396,7 +1486,15 @@ public sealed class SessionRuntime : IDisposable
         return RejectAsync(reason: null, uiCt);
     }
 
-    public async Task RejectAsync(string? reason, CancellationToken uiCt)
+    public Task RejectAsync(string? reason, CancellationToken uiCt)
+    {
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.ApprovalDeny, "approval_deny"),
+            ct => approvalActions.RejectAsync(reason, ct),
+            uiCt);
+    }
+
+    internal async Task RejectCoreAsync(string? reason, CancellationToken uiCt)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
 
@@ -1441,11 +1539,15 @@ public sealed class SessionRuntime : IDisposable
 
     public Task<ChatMessageRecord?> TrySendChatTextAsync(string text, CancellationToken uiCt)
     {
-        if (!RequireCapability(SessionCapability.Chat, "chat_send"))
-        {
-            return Task.FromResult<ChatMessageRecord?>(null);
-        }
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.ChatSend, "chat_send"),
+            _ => TrySendChatTextCoreAsync(text, uiCt),
+            deniedValue: null,
+            uiCt);
+    }
 
+    internal Task<ChatMessageRecord?> TrySendChatTextCoreAsync(string text, CancellationToken uiCt)
+    {
         return chatService.TrySendTextAsync(text, uiCt);
     }
 
@@ -1454,11 +1556,23 @@ public sealed class SessionRuntime : IDisposable
         FileTransferReadStreamFactory openReadStreamAsync,
         CancellationToken uiCt = default)
     {
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.FileTransferStartSend, "file_transfer_send"),
+            ct => fileTransferActions.StartSendAsync(descriptor, openReadStreamAsync, ct),
+            deniedValue: null,
+            uiCt);
+    }
+
+    internal Task<FileTransferTransferSnapshot?> StartSendCoreAsync(
+        FileTransferSendDescriptor descriptor,
+        FileTransferReadStreamFactory openReadStreamAsync,
+        CancellationToken uiCt)
+    {
         ArgumentNullException.ThrowIfNull(descriptor);
         ArgumentNullException.ThrowIfNull(openReadStreamAsync);
         ObjectDisposedException.ThrowIf(disposed, this);
 
-        if (!TryAuthorizeFileTransferSend() || transport is not IFileTransferSignalingTransport)
+        if (transport is not IFileTransferSignalingTransport)
         {
             return Task.FromResult<FileTransferTransferSnapshot?>(null);
         }
@@ -1470,6 +1584,15 @@ public sealed class SessionRuntime : IDisposable
     }
 
     public Task<FileTransferTransferSnapshot?> AcceptIncomingAsync(string transferId, CancellationToken uiCt = default)
+    {
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.FileTransferAcceptIncoming, "file_transfer_accept"),
+            ct => fileTransferActions.AcceptIncomingAsync(transferId, ct),
+            deniedValue: null,
+            uiCt);
+    }
+
+    internal Task<FileTransferTransferSnapshot?> AcceptIncomingCoreAsync(string transferId, CancellationToken uiCt)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         LocalOperationalLog.Info(
@@ -1483,6 +1606,18 @@ public sealed class SessionRuntime : IDisposable
         string? reason = null,
         CancellationToken uiCt = default)
     {
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.FileTransferDeclineIncoming, "file_transfer_decline"),
+            ct => fileTransferActions.DeclineIncomingAsync(transferId, reason, ct),
+            deniedValue: null,
+            uiCt);
+    }
+
+    internal Task<FileTransferTransferSnapshot?> DeclineIncomingCoreAsync(
+        string transferId,
+        string? reason,
+        CancellationToken uiCt)
+    {
         ObjectDisposedException.ThrowIf(disposed, this);
         LocalOperationalLog.Info(
             "Session",
@@ -1495,6 +1630,18 @@ public sealed class SessionRuntime : IDisposable
         string? reason = null,
         CancellationToken uiCt = default)
     {
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.FileTransferCancel, "file_transfer_cancel"),
+            ct => fileTransferActions.CancelTransferAsync(transferId, reason, ct),
+            deniedValue: null,
+            uiCt);
+    }
+
+    internal Task<FileTransferTransferSnapshot?> CancelTransferCoreAsync(
+        string transferId,
+        string? reason,
+        CancellationToken uiCt)
+    {
         ObjectDisposedException.ThrowIf(disposed, this);
         LocalOperationalLog.Info(
             "Session",
@@ -1504,12 +1651,16 @@ public sealed class SessionRuntime : IDisposable
 
     public Task SendChatAsync(ReadOnlyMemory<byte> payload, CancellationToken uiCt)
     {
-        ObjectDisposedException.ThrowIf(disposed, this);
-        if (!RequireCapability(SessionCapability.Chat, "chat_send"))
-        {
-            throw new InvalidOperationException("Chat capability is not authorized for the current session.");
-        }
+        return privilegedCommandExecutor.ExecuteRequiredAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.ChatSend, "chat_send"),
+            "Chat capability is not authorized for the current session.",
+            ct => SendChatCoreAsync(payload, ct),
+            uiCt);
+    }
 
+    internal Task SendChatCoreAsync(ReadOnlyMemory<byte> payload, CancellationToken uiCt)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
         var currentTransport = transport ?? throw new InvalidOperationException("No active session.");
         return currentTransport.SendChatMessageAsync(payload, uiCt);
     }
@@ -1581,6 +1732,7 @@ public sealed class SessionRuntime : IDisposable
 
         if (!notifyStateChanged)
         {
+            SyncFileTransferFlowControlMode();
             return;
         }
 
@@ -1588,6 +1740,10 @@ public sealed class SessionRuntime : IDisposable
         {
             LogRemoteControlTransition(previousState, transition.NextState, reducerEvent.Reason);
             NotifyRemoteControlStateChanged();
+        }
+        else
+        {
+            SyncFileTransferFlowControlMode();
         }
     }
 
@@ -1912,7 +2068,16 @@ public sealed class SessionRuntime : IDisposable
         }
     }
 
-    public async Task<bool> RequestRemoteControlAsync(CancellationToken uiCt = default)
+    public Task<bool> RequestRemoteControlAsync(CancellationToken uiCt = default)
+    {
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.RemoteControlRequest, "remote_control_request"),
+            ct => remoteControlActions.RequestAsync(ct),
+            deniedValue: false,
+            uiCt);
+    }
+
+    internal async Task<bool> RequestRemoteControlCoreAsync(CancellationToken uiCt)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         IRemoteControlSignalingTransport? controlTransport;
@@ -1923,7 +2088,6 @@ public sealed class SessionRuntime : IDisposable
         {
             if (role != SessionRuntimeRole.Helper ||
                 state != SessionRuntimeState.Connected ||
-                !RequireCapability(SessionCapability.RemoteControl, "remote_control_request") ||
                 !SessionSupportsRemoteControl ||
                 remoteControlSessionState.ControlState != ControlState.Off)
             {
@@ -1980,7 +2144,16 @@ public sealed class SessionRuntime : IDisposable
         }
     }
 
-    public async Task<bool> RespondToRemoteControlRequestAsync(bool allow, CancellationToken uiCt = default)
+    public Task<bool> RespondToRemoteControlRequestAsync(bool allow, CancellationToken uiCt = default)
+    {
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.RemoteControlRespond, "remote_control_respond"),
+            ct => remoteControlActions.RespondAsync(allow, ct),
+            deniedValue: false,
+            uiCt);
+    }
+
+    internal async Task<bool> RespondToRemoteControlRequestCoreAsync(bool allow, CancellationToken uiCt)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         IRemoteControlSignalingTransport? controlTransport = null;
@@ -2021,14 +2194,9 @@ public sealed class SessionRuntime : IDisposable
             controllerPeerId = remoteControlSessionState.ControllerPeerId;
             if (allow)
             {
-                if (!RequireCapability(SessionCapability.RemoteControl))
-                {
-                    allow = false;
-                }
-
-                var controllerPeerIdValue = string.IsNullOrWhiteSpace(remoteControlSessionState.ControllerPeerId)
-                    ? null
-                    : remoteControlSessionState.ControllerPeerId;
+                    var controllerPeerIdValue = string.IsNullOrWhiteSpace(remoteControlSessionState.ControllerPeerId)
+                        ? null
+                        : remoteControlSessionState.ControllerPeerId;
                 if (string.IsNullOrWhiteSpace(controllerPeerIdValue))
                 {
                     response = new ControlResponseMessageV1
@@ -2151,7 +2319,16 @@ public sealed class SessionRuntime : IDisposable
 
     }
 
-    public async Task<bool> StopRemoteControlAsync(string reason, CancellationToken uiCt = default)
+    public Task<bool> StopRemoteControlAsync(string reason, CancellationToken uiCt = default)
+    {
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.RemoteControlStop, "remote_control_stop"),
+            ct => remoteControlActions.StopAsync(reason, ct),
+            deniedValue: false,
+            uiCt);
+    }
+
+    internal async Task<bool> StopRemoteControlCoreAsync(string reason, CancellationToken uiCt)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         reason = string.IsNullOrWhiteSpace(reason) ? "stopped" : reason.Trim();
@@ -2188,12 +2365,17 @@ public sealed class SessionRuntime : IDisposable
 
     public Task<bool> SendRemoteControlInputAsync(ControlInputMessageV1 message, CancellationToken uiCt = default)
     {
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.RemoteControlInputSend, "remote_control_input_send"),
+            ct => remoteControlActions.SendInputAsync(message, ct),
+            deniedValue: false,
+            uiCt);
+    }
+
+    internal Task<bool> SendRemoteControlInputCoreAsync(ControlInputMessageV1 message, CancellationToken uiCt)
+    {
         ArgumentNullException.ThrowIfNull(message);
         ObjectDisposedException.ThrowIf(disposed, this);
-        if (!RequireCapability(SessionCapability.RemoteControl, "remote_control_input_send"))
-        {
-            return Task.FromResult(false);
-        }
 
         if (!IsLowPriorityMouseMoveInput(message))
         {
@@ -2218,7 +2400,16 @@ public sealed class SessionRuntime : IDisposable
         return Task.FromResult(true);
     }
 
-    public async Task<bool> SendRemoteControlStateSnapshotAsync(ControlStateSnapshotV1 snapshot, CancellationToken uiCt = default)
+    public Task<bool> SendRemoteControlStateSnapshotAsync(ControlStateSnapshotV1 snapshot, CancellationToken uiCt = default)
+    {
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.RemoteControlSnapshotSend, "remote_control_snapshot_send"),
+            ct => remoteControlActions.SendStateSnapshotAsync(snapshot, ct),
+            deniedValue: false,
+            uiCt);
+    }
+
+    internal async Task<bool> SendRemoteControlStateSnapshotCoreAsync(ControlStateSnapshotV1 snapshot, CancellationToken uiCt)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         ObjectDisposedException.ThrowIf(disposed, this);
@@ -2240,7 +2431,6 @@ public sealed class SessionRuntime : IDisposable
                 resetInProgress ||
                 role != SessionRuntimeRole.Helper ||
                 state != SessionRuntimeState.Connected ||
-                !RequireCapability(SessionCapability.RemoteControl, "remote_control_snapshot_send") ||
                 !SessionSupportsRemoteControl ||
                 remoteControlSessionState.ControlState != ControlState.Active)
             {
@@ -2997,6 +3187,37 @@ public sealed class SessionRuntime : IDisposable
             LogTransportFailure(failure, "host_start_failed");
             Disconnected?.Invoke(this, EventArgs.Empty);
         }
+    }
+
+    private void HandleSynchronousStartFailure(Exception ex, string reason)
+    {
+        if (disposed || lastTransportFailure is not null || transportState == TransportState.Failed)
+        {
+            return;
+        }
+
+        var nknSnapshot = NknRuntimeDiagnostics.Snapshot();
+        var failure = TransportFailureMapper.FromException(
+            ex,
+            nknSnapshot.LastError,
+            nknSnapshot.LastDisconnectReason);
+        var persistenceWarning = PersistenceDiagnostics.Snapshot().LastWarning;
+        var message = !string.IsNullOrWhiteSpace(persistenceWarning) &&
+                      !string.Equals(persistenceWarning, "(none)", StringComparison.Ordinal)
+            ? persistenceWarning
+            : failure.Category == TransportFailureCategory.BridgeStartFailure && UserErrorMapper.IsNknStartFailure(nknSnapshot.LastError)
+                ? UserErrorMapper.NknStartFailedReinstall()
+                : FailureCopyMap.For(failure.Category).Message;
+
+        if (transportState != TransportState.Failed &&
+            IsTransportTransitionAllowed(transportState, TransportState.Failed))
+        {
+            TransitionTo(TransportState.Failed, reason);
+        }
+
+        SetState(SessionRuntimeState.Disconnected, message);
+        LogTransportFailure(failure, reason);
+        Disconnected?.Invoke(this, EventArgs.Empty);
     }
 
     private async Task ResetCoreAsync(bool notifyRemoteSessionEnd)
@@ -3922,6 +4143,8 @@ public sealed class SessionRuntime : IDisposable
         Interlocked.Exchange(ref remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs, 0);
         lastScreenShareStopSuppressedLogTick = 0;
         CancelRemoteControlScreenShareStopGrace("screenshare_frame_resumed");
+        remoteScreenShareActive = true;
+        SyncFileTransferFlowControlMode();
 
         ScreenShareFrameCompleted?.Invoke(this, e);
     }
@@ -3937,10 +4160,12 @@ public sealed class SessionRuntime : IDisposable
         remoteScreenShareFramesSuppressedUntilUtc = nowUtc.Add(RemoteScreenShareStopFrameSuppressionWindow);
         Interlocked.Exchange(ref remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs, nowUtc.ToUnixTimeMilliseconds());
         Interlocked.Exchange(ref lastScreenShareStopSuppressedLogTick, 0);
+        remoteScreenShareActive = false;
         LocalOperationalLog.Info(
             "ScreenShareTransport",
             $"event=screenshare_stop_received_runtime; suppressed_until_utc={remoteScreenShareFramesSuppressedUntilUtc:O}; control_state={remoteControlSessionState.ControlState}; role={role}; transport={GetTransportNameForLog(sender)}");
         ScheduleRemoteControlScreenShareStopGrace();
+        SyncFileTransferFlowControlMode();
         ScreenShareStopped?.Invoke(this, EventArgs.Empty);
     }
 
@@ -3950,10 +4175,12 @@ public sealed class SessionRuntime : IDisposable
         remoteScreenShareFramesSuppressedUntilUtc = nowUtc.Add(RemoteScreenShareStopFrameSuppressionWindow);
         Interlocked.Exchange(ref remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs, nowUtc.ToUnixTimeMilliseconds());
         Interlocked.Exchange(ref lastScreenShareStopSuppressedLogTick, 0);
+        remoteScreenShareActive = false;
         LocalOperationalLog.Info(
             "ScreenShareTransport",
             $"event=screenshare_stop_local_runtime; reason={reason}; suppressed_until_utc={remoteScreenShareFramesSuppressedUntilUtc:O}; control_state={remoteControlSessionState.ControlState}; role={role}; transport={GetTransportNameForLog(sender)}");
         ScheduleRemoteControlScreenShareStopGrace();
+        SyncFileTransferFlowControlMode();
         try
         {
             ScreenShareStopped?.Invoke(this, EventArgs.Empty);
@@ -6359,7 +6586,25 @@ public sealed class SessionRuntime : IDisposable
     private void OnFileTransferChanged(object? sender, SessionFileTransferSnapshotChangedEventArgs e)
     {
         LogRuntimeFileTransferSnapshot(e.Snapshot);
+        fileTransferService.SetSessionScreenShareDegraded(
+            IsSessionScreenShareActive() &&
+            string.Equals(transportScreenShareCoordinator.GetMetricsSnapshot().FreshnessMode, "degraded", StringComparison.Ordinal));
+        transportScreenShareCoordinator.SetFileTransferDegradedHint(
+            IsSessionScreenShareActive() && fileTransferService.IsTransferDegraded);
+        transportScreenShareCoordinator.SetFileTransferCatchUpOnlyHint(
+            IsSessionScreenShareActive() && fileTransferService.IsCatchUpOnlyPressureActive);
         FileTransferChanged?.Invoke(this, e);
+    }
+
+    private void OnScreenShareSenderDegradedModeChanged(object? sender, ScreenShareSenderDegradedModeChangedEventArgs e)
+    {
+        try
+        {
+            fileTransferService.SetSessionScreenShareDegraded(IsSessionScreenShareActive() && e.IsActive);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
     }
 
     private void AttachFileTransferTransport(ISignalingTransport nextTransport)
@@ -6369,6 +6614,7 @@ public sealed class SessionRuntime : IDisposable
         if (nextTransport is IFileTransferSignalingTransport fileTransferTransport)
         {
             fileTransferService.AttachTransport(fileTransferTransport);
+            SyncFileTransferFlowControlMode();
             return;
         }
 
@@ -7591,6 +7837,7 @@ public sealed class SessionRuntime : IDisposable
         Interlocked.Exchange(ref remoteControlSnapshotForcedUpX2Tick, 0);
         remoteScreenShareFramesSuppressedUntilUtc = default;
         Interlocked.Exchange(ref remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs, 0);
+        remoteScreenShareActive = false;
         ResetRemoteControlWheelDeltaCarry();
         ResetRemoteControlDebugLastMapped();
         Interlocked.Exchange(ref remoteControlForceNextMoveInjectionLog, 0);
@@ -8081,6 +8328,7 @@ public sealed class SessionRuntime : IDisposable
 
     private void NotifyRemoteControlStateChanged()
     {
+        SyncFileTransferFlowControlMode();
         PublishRemoteControlDebugDiagnostics();
         RemoteControlStateChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -9137,13 +9385,16 @@ public sealed class SessionRuntime : IDisposable
         }
     }
 
-    private async Task SendScreenSharePayloadAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
+    internal Task SendScreenSharePayloadCoreAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
     {
-        if (!RequireCapability(SessionCapability.ScreenShare, "screen_share_stream"))
-        {
-            return;
-        }
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.ScreenShareDispatch, "screen_share_stream"),
+            token => SendScreenSharePayloadAuthorizedCoreAsync(payload, token),
+            ct);
+    }
 
+    private async Task SendScreenSharePayloadAuthorizedCoreAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
+    {
         if (!TryValidateScreenSharePayload(payload.Span, "screen_share_stream"))
         {
             return;

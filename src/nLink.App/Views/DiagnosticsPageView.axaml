@@ -25,6 +25,18 @@
                            TextAlignment="Center"
                            HorizontalAlignment="Center"/>
 
+                <Border Classes="appCard" Padding="16">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Privacy notice"
+                                   Foreground="{StaticResource AppTextBrush}"
+                                   FontSize="20"
+                                   FontWeight="SemiBold"/>
+                        <TextBlock Classes="appBody"
+                                   Text="{Binding DiagnosticsPrivacyNotice}"
+                                   TextWrapping="Wrap"/>
+                    </StackPanel>
+                </Border>
+
                 <!-- Section 1: Status -->
                 <Border Classes="appCard" Padding="20">
                     <StackPanel Spacing="14">
@@ -109,7 +121,7 @@
                                    FontWeight="SemiBold"/>
 
                         <Grid ColumnDefinitions="220,*"
-                              RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                              RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
                               RowSpacing="8"
                               ColumnSpacing="12">
                             <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Session UI state"/>
@@ -135,6 +147,12 @@
 
                             <TextBlock Grid.Row="7" Grid.Column="0" Classes="appLabel" Text="Last rejected message"/>
                             <TextBlock Grid.Row="7" Grid.Column="1" Classes="appBody" Text="{Binding LastRejectedMessageSummary}" FontSize="16" TextWrapping="Wrap"/>
+
+                            <TextBlock Grid.Row="8" Grid.Column="0" Classes="appLabel" Text="Persistence health"/>
+                            <TextBlock Grid.Row="8" Grid.Column="1" Classes="appBody" Text="{Binding PersistenceSummary}" FontSize="16" TextWrapping="Wrap"/>
+
+                            <TextBlock Grid.Row="9" Grid.Column="0" Classes="appLabel" Text="Persistence warning"/>
+                            <TextBlock Grid.Row="9" Grid.Column="1" Classes="appBody" Text="{Binding PersistenceWarning}" FontSize="16" TextWrapping="Wrap"/>
                         </Grid>
                     </StackPanel>
                 </Border>

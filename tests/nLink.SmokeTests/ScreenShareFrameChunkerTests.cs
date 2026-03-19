@@ -72,7 +72,7 @@ public sealed class ScreenShareFrameChunkerTests
         var serialized = ScreenSharePayloadCodec.Serialize(chunks[0]);
         Assert.InRange(serialized.Length, 1, ScreenSharePayloadCodec.MaxSerializedFramePayloadBytes);
         Assert.InRange(
-            NknBridgePayloadAccounting.MeasureSendCommandJsonlBytes("peer.test", serialized, "1"),
+            NknBridgePayloadAccounting.MeasureSendFrameBytes("peer.test", serialized),
             1,
             24_000);
     }

@@ -165,6 +165,45 @@ public sealed class ScreenShareFrameReassemblerTests
         Assert.True(metrics.FramesDropped >= 1);
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void ScreenShareFrameReassembler_DropsCompletedFrame_WhenFrameAgeExceedsCutoff()
+    {
+        var reassembler = new ScreenShareFrameReassembler();
+        ScreenShareFrameReadyEventArgs? completed = null;
+        reassembler.FrameReady += (_, frame) => completed = frame;
+
+        var staleTimestampUnixMilliseconds = DateTimeOffset.UtcNow.AddMilliseconds(-2500).ToUnixTimeMilliseconds();
+        reassembler.OnChunk(BuildChunk("session-stale", 21, 0, 2, new byte[] { 1, 2 }, staleTimestampUnixMilliseconds));
+        reassembler.OnChunk(BuildChunk("session-stale", 21, 1, 2, new byte[] { 3, 4 }, staleTimestampUnixMilliseconds));
+
+        Assert.Null(completed);
+        var metrics = reassembler.GetMetricsSnapshot();
+        Assert.Equal(1, metrics.FramesDroppedStaleAge);
+        Assert.Equal("degraded", metrics.FreshnessMode);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void ScreenShareFrameReassembler_DegradedFreshness_KeepsNewestInFlightFrame()
+    {
+        var reassembler = new ScreenShareFrameReassembler();
+        var completed = new List<ScreenShareFrameReadyEventArgs>();
+        reassembler.FrameReady += (_, frame) => completed.Add(frame);
+
+        var degradedTimestampUnixMilliseconds = DateTimeOffset.UtcNow.AddMilliseconds(-1700).ToUnixTimeMilliseconds();
+        reassembler.OnChunk(BuildChunk("session-freshness", 1, 0, 1, new byte[] { 1 }, degradedTimestampUnixMilliseconds));
+        reassembler.OnChunk(BuildChunk("session-freshness", 2, 0, 2, new byte[] { 2 }, degradedTimestampUnixMilliseconds));
+        reassembler.OnChunk(BuildChunk("session-freshness", 3, 0, 2, new byte[] { 3 }, degradedTimestampUnixMilliseconds));
+        reassembler.OnChunk(BuildChunk("session-freshness", 2, 1, 2, new byte[] { 9 }, degradedTimestampUnixMilliseconds));
+        reassembler.OnChunk(BuildChunk("session-freshness", 3, 1, 2, new byte[] { 4 }, degradedTimestampUnixMilliseconds));
+
+        Assert.Equal(2, completed.Count);
+        Assert.DoesNotContain(completed, frame => frame.FrameId == 2);
+        Assert.Contains(completed, frame => frame.FrameId == 3);
+        Assert.Equal("degraded", reassembler.GetMetricsSnapshot().FreshnessMode);
+    }
+
     private static ScreenShareFrameChunkV1 BuildChunk(
         string sessionId,
         long frameId,

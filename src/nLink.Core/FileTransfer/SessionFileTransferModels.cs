@@ -114,6 +114,30 @@ public enum FileTransferTransferState
     Failed = 12,
 }
 
+internal enum FileTransferFlowControlMode
+{
+    InteractiveCritical = 0,
+    Interactive = 1,
+    Background = 2,
+}
+
+internal readonly record struct FileTransferFlowControlPolicy(
+    FileTransferFlowControlMode Mode,
+    int GrantChunks,
+    int LowWatermarkChunks,
+    int StartupGrantChunks)
+{
+    public static FileTransferFlowControlPolicy ForMode(FileTransferFlowControlMode mode)
+    {
+        return mode switch
+        {
+            FileTransferFlowControlMode.InteractiveCritical => new(mode, GrantChunks: 24, LowWatermarkChunks: 8, StartupGrantChunks: 24),
+            FileTransferFlowControlMode.Interactive => new(mode, GrantChunks: 96, LowWatermarkChunks: 32, StartupGrantChunks: 64),
+            _ => new(FileTransferFlowControlMode.Background, GrantChunks: 192, LowWatermarkChunks: 64, StartupGrantChunks: 128),
+        };
+    }
+}
+
 public sealed record FileTransferSendDescriptor(
     string FileName,
     long FileSizeBytes,
@@ -143,7 +167,9 @@ public sealed record FileTransferTransferSnapshot(
     string? StatusMessage,
     string? SavedFilePath = null,
     string? SavedDirectoryPath = null,
-    string? SavedFileName = null)
+    string? SavedFileName = null,
+    long? BytesAcceptedForTransport = null,
+    long? BytesAcknowledgedByReceiver = null)
 {
     public bool IsTerminal
         => State is FileTransferTransferState.Completed or
@@ -151,10 +177,15 @@ public sealed record FileTransferTransferSnapshot(
             FileTransferTransferState.Canceled or
             FileTransferTransferState.Failed;
 
+    public long ProgressBytes
+        => Direction == FileTransferDirection.Outbound
+            ? Math.Max(0L, BytesAcceptedForTransport ?? BytesTransferred)
+            : Math.Max(0L, BytesTransferred);
+
     public double ProgressFraction
         => FileSizeBytes <= 0
             ? 0d
-            : Math.Clamp((double)BytesTransferred / FileSizeBytes, 0d, 1d);
+            : Math.Clamp((double)ProgressBytes / FileSizeBytes, 0d, 1d);
 }
 
 public sealed record SessionFileTransferSnapshot(

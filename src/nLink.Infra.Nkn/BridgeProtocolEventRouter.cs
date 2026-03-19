@@ -5,22 +5,28 @@ namespace NLink.Infra.Nkn;
 internal sealed class BridgeProtocolEventRouter
 {
     private readonly string identityAddress;
+    private readonly string identityMediaAddress;
+    private readonly string identityBulkAddress;
     private readonly ConnectAttemptCoordinator connectAttempts;
     private readonly Func<int?> getCurrentPid;
-    private readonly Action<string> setConnectedAddress;
+    private readonly Action<string, string, string> setConnectedAddresses;
     private readonly Action<string> log;
 
     public BridgeProtocolEventRouter(
         string identityAddress,
+        string identityMediaAddress,
+        string identityBulkAddress,
         ConnectAttemptCoordinator connectAttempts,
         Func<int?> getCurrentPid,
-        Action<string> setConnectedAddress,
+        Action<string, string, string> setConnectedAddresses,
         Action<string> log)
     {
         this.identityAddress = identityAddress;
+        this.identityMediaAddress = identityMediaAddress;
+        this.identityBulkAddress = identityBulkAddress;
         this.connectAttempts = connectAttempts;
         this.getCurrentPid = getCurrentPid;
-        this.setConnectedAddress = setConnectedAddress;
+        this.setConnectedAddresses = setConnectedAddresses;
         this.log = log;
     }
 
@@ -49,11 +55,32 @@ internal sealed class BridgeProtocolEventRouter
 
     public void HandleReady(JsonElement root)
     {
-        var readyAddress = TryGetString(root, "address", out var a) ? a : string.Empty;
+        var readyAddress =
+            TryGetString(root, "controlAddress", out var controlAddress) ? controlAddress :
+            TryGetString(root, "address", out var legacyAddress) ? legacyAddress :
+            string.Empty;
+        var readyMediaAddress = TryGetString(root, "mediaAddress", out var mediaAddress) ? mediaAddress : string.Empty;
+        var readyBulkAddress = TryGetString(root, "bulkAddress", out var bulkAddress) ? bulkAddress : string.Empty;
+        int? protocol = TryGetInt32(root, "protocol", out var protocolValue) ? protocolValue : null;
+        var supportedChannels = TryGetStringArray(root, "channels", out var channels)
+            ? channels
+            : [];
+        var bridgeAppVersion = TryGetString(root, "bridgeAppVersion", out var bridgeVersion) && !string.IsNullOrWhiteSpace(bridgeVersion)
+            ? bridgeVersion
+            : null;
         var hasConnectId = TryGetString(root, "connectId", out var readyConnectId) && !string.IsNullOrWhiteSpace(readyConnectId);
 
         var resolvedAddress = string.IsNullOrWhiteSpace(readyAddress) ? identityAddress : readyAddress;
-        var accept = connectAttempts.AcceptReady(resolvedAddress, hasConnectId, readyConnectId);
+        var resolvedMediaAddress = string.IsNullOrWhiteSpace(readyMediaAddress) ? identityMediaAddress : readyMediaAddress;
+        var resolvedBulkAddress = string.IsNullOrWhiteSpace(readyBulkAddress) ? identityBulkAddress : readyBulkAddress;
+        var readyInfo = new BridgeReadyInfo(
+            resolvedAddress,
+            resolvedMediaAddress,
+            resolvedBulkAddress,
+            protocol,
+            supportedChannels,
+            bridgeAppVersion);
+        var accept = connectAttempts.AcceptReady(readyInfo, hasConnectId, readyConnectId);
         switch (accept.Kind)
         {
             case ConnectReadyAcceptKind.NoPending:
@@ -67,7 +94,7 @@ internal sealed class BridgeProtocolEventRouter
                 break;
         }
 
-        setConnectedAddress(resolvedAddress);
+        setConnectedAddresses(resolvedAddress, resolvedMediaAddress, resolvedBulkAddress);
         NknRuntimeDiagnostics.SetAuthoritativeConnectedAddressResolved(true);
     }
 
@@ -101,6 +128,44 @@ internal sealed class BridgeProtocolEventRouter
         }
 
         value = prop.GetString() ?? string.Empty;
+        return true;
+    }
+
+    private static bool TryGetInt32(JsonElement root, string propertyName, out int value)
+    {
+        value = default;
+        if (!root.TryGetProperty(propertyName, out var prop))
+        {
+            return false;
+        }
+
+        return prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out value);
+    }
+
+    private static bool TryGetStringArray(JsonElement root, string propertyName, out string[] values)
+    {
+        values = [];
+        if (!root.TryGetProperty(propertyName, out var prop) || prop.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        var items = new List<string>();
+        foreach (var item in prop.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            var value = item.GetString();
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                items.Add(value.Trim());
+            }
+        }
+
+        values = items.ToArray();
         return true;
     }
 }

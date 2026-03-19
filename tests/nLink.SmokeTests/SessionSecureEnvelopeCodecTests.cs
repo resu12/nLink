@@ -38,10 +38,11 @@ public sealed class SessionSecureEnvelopeCodecTests
     {
         var metadata = CreateMetadata(SessionSecureMessageFamily.ScreenShare, "frame_chunk", requestId: null);
         var encoded = SessionSecureEnvelopeCodec.Encrypt(TestKey, metadata, Encoding.UTF8.GetBytes("frame-bytes"));
-        var tampered = Encoding.UTF8.GetString(encoded).Replace("\"messageType\":\"frame_chunk\"", "\"messageType\":\"frame_stop\"", StringComparison.Ordinal);
+        var tampered = (byte[])encoded.Clone();
+        FlipUtf8Byte(tampered, "frame_chunk"u8.ToArray());
 
         Assert.ThrowsAny<CryptographicException>(() =>
-            SessionSecureEnvelopeCodec.Decrypt(TestKey, Encoding.UTF8.GetBytes(tampered)));
+            SessionSecureEnvelopeCodec.Decrypt(TestKey, tampered));
     }
 
     [Fact]
@@ -139,6 +140,35 @@ public sealed class SessionSecureEnvelopeCodecTests
             SessionSecureEnvelopeCodec.Encrypt(TestKey, metadata, Encoding.UTF8.GetBytes("hello")));
     }
 
+    [Fact]
+    public void Decrypt_InvalidMagic_Fails()
+    {
+        var encoded = SessionSecureEnvelopeCodec.Encrypt(
+            TestKey,
+            CreateMetadata(SessionSecureMessageFamily.Chat, "chat_message", null),
+            Encoding.UTF8.GetBytes("hello"));
+
+        var tampered = (byte[])encoded.Clone();
+        tampered[0] ^= 0x01;
+
+        var ex = Assert.Throws<CryptographicException>(() => SessionSecureEnvelopeCodec.Decrypt(TestKey, tampered));
+        Assert.Equal("session_secure_payload_invalid", ex.Message);
+    }
+
+    [Fact]
+    public void Decrypt_TruncatedPayload_Fails()
+    {
+        var encoded = SessionSecureEnvelopeCodec.Encrypt(
+            TestKey,
+            CreateMetadata(SessionSecureMessageFamily.Chat, "chat_message", "req_1"),
+            Encoding.UTF8.GetBytes("hello"));
+
+        var truncated = encoded[..^5];
+
+        var ex = Assert.Throws<CryptographicException>(() => SessionSecureEnvelopeCodec.Decrypt(TestKey, truncated));
+        Assert.Equal("session_secure_payload_invalid", ex.Message);
+    }
+
     private static SessionSecureEnvelopeMetadata CreateMetadata(
         SessionSecureMessageFamily family,
         string messageType,
@@ -151,5 +181,25 @@ public sealed class SessionSecureEnvelopeCodecTests
             new PeerAddress("nlink-helper.123"),
             42,
             requestId);
+    }
+
+    private static void FlipUtf8Byte(byte[] buffer, byte[] pattern)
+    {
+        var index = FindPattern(buffer, pattern);
+        Assert.True(index >= 0);
+        buffer[index] ^= 0x01;
+    }
+
+    private static int FindPattern(byte[] buffer, byte[] pattern)
+    {
+        for (var i = 0; i <= buffer.Length - pattern.Length; i++)
+        {
+            if (buffer.AsSpan(i, pattern.Length).SequenceEqual(pattern))
+            {
+                return i;
+            }
+        }
+
+        return -1;
     }
 }

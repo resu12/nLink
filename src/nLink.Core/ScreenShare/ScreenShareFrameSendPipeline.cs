@@ -30,7 +30,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
     private readonly object gate = new();
     private readonly Task sendLoopTask;
     private readonly int capacity;
-    private readonly TimeSpan minimumFrameInterval;
+    private long minimumFrameIntervalTicks;
     private DateTimeOffset lastQueuedFrameAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset lastSendStartedAtUtc = DateTimeOffset.MinValue;
     private long framesCaptured;
@@ -99,7 +99,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
         this.capacity = capacity;
         this.clock = clock ?? SystemScreenShareClock.Instance;
         this.delayAsync = delayAsync ?? Task.Delay;
-        minimumFrameInterval = TimeSpan.FromMilliseconds(1000d / maxFramesPerSecond);
+        minimumFrameIntervalTicks = TimeSpan.FromMilliseconds(1000d / maxFramesPerSecond).Ticks;
         pendingSignals = Channel.CreateBounded<bool>(new BoundedChannelOptions(1)
         {
             SingleReader = true,
@@ -149,6 +149,17 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
 
     internal bool IsSendLoopCompleted => sendLoopTask.IsCompleted;
 
+    internal int PendingFrameCount
+    {
+        get
+        {
+            lock (gate)
+            {
+                return pendingFrames.Count;
+            }
+        }
+    }
+
     internal int FlushPendingFrames()
     {
         lock (gate)
@@ -164,6 +175,52 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
             pendingFrames.Clear();
             Interlocked.Add(ref framesDropped, droppedCount);
             return droppedCount;
+        }
+    }
+
+    internal int KeepOnlyNewestPendingFrame()
+    {
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+
+            if (pendingFrames.Count <= 1)
+            {
+                return 0;
+            }
+
+            PendingFrame newestFrame = default!;
+            foreach (var frame in pendingFrames)
+            {
+                newestFrame = frame;
+            }
+
+            var droppedCount = pendingFrames.Count - 1;
+            pendingFrames.Clear();
+            pendingFrames.Enqueue(newestFrame);
+            Interlocked.Add(ref framesDropped, droppedCount);
+            return droppedCount;
+        }
+    }
+
+    internal void SetMaxFramesPerSecond(int maxFramesPerSecond)
+    {
+        if (maxFramesPerSecond <= 0 || maxFramesPerSecond > MaxFramesPerSecond)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxFramesPerSecond));
+        }
+
+        Interlocked.Exchange(
+            ref minimumFrameIntervalTicks,
+            TimeSpan.FromMilliseconds(1000d / maxFramesPerSecond).Ticks);
+    }
+
+    internal void ResetPacingWindow()
+    {
+        lock (gate)
+        {
+            lastQueuedFrameAtUtc = DateTimeOffset.MinValue;
+            lastSendStartedAtUtc = DateTimeOffset.MinValue;
         }
     }
 
@@ -226,7 +283,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
 
             var now = clock.UtcNow;
             if (lastQueuedFrameAtUtc != DateTimeOffset.MinValue &&
-                now - lastQueuedFrameAtUtc < minimumFrameInterval)
+                now - lastQueuedFrameAtUtc < GetMinimumFrameInterval())
             {
                 Interlocked.Increment(ref framesDropped);
                 Interlocked.Increment(ref framesDroppedByRateGate);
@@ -460,7 +517,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
                 return;
             }
 
-            var scheduledSendAtUtc = lastSendStartedAtUtc + minimumFrameInterval;
+            var scheduledSendAtUtc = lastSendStartedAtUtc + GetMinimumFrameInterval();
             var remaining = scheduledSendAtUtc - now;
             if (remaining <= TimeSpan.Zero)
             {
@@ -476,6 +533,9 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
             return;
         }
     }
+
+    private TimeSpan GetMinimumFrameInterval()
+        => TimeSpan.FromTicks(Math.Max(1, Interlocked.Read(ref minimumFrameIntervalTicks)));
 
     [Conditional("DEBUG")]
     private void AssertBufferBounds()

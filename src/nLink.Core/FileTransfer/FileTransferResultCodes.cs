@@ -13,6 +13,9 @@ public static class FileTransferResultCodes
     public const string FinalizeFailed = "finalize_failed";
     public const string PayloadBudgetExceeded = "payload_budget_exceeded";
     public const string ReadFailed = "read_failed";
+    public const string TransportIncompatible = "transport_incompatible";
+    public const string WindowTimeout = "window_timeout";
+    public const string PullSessionStalled = "pull_session_stalled";
     public const string CanceledLocal = "canceled_local";
     public const string CanceledRemote = "canceled_remote";
     public const string TransportDisconnected = "transport_disconnected";

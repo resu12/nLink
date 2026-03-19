@@ -4,6 +4,7 @@ public sealed record ScreenShareMetrics(
     long FramesCaptured = 0,
     long FramesQueued = 0,
     long FramesDropped = 0,
+    long FramesDroppedStaleAge = 0,
     long FramesDroppedByRateGate = 0,
     long FramesDroppedByQueueEvict = 0,
     long ChunksSent = 0,
@@ -21,5 +22,6 @@ public sealed record ScreenShareMetrics(
     double AverageEnqueueToSendMs = 0,
     double AverageCaptureToSendMs = 0,
     long StaleFrameRenders = 0,
+    string FreshnessMode = "normal",
     double AverageRenderIntervalMs = 0,
     double AverageCaptureToRenderMs = 0);

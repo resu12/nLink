@@ -4,7 +4,7 @@ internal sealed class ConnectAttemptCoordinator
 {
     private readonly object gate = new();
 
-    private TaskCompletionSource<string>? pendingReady;
+    private TaskCompletionSource<BridgeReadyInfo>? pendingReady;
     private string? pendingReadyConnectId;
     private Task? connectInFlightTask;
     private long connectInFlightSequence;
@@ -30,17 +30,17 @@ internal sealed class ConnectAttemptCoordinator
         }
     }
 
-    public TaskCompletionSource<string> RegisterPendingReady(string connectId)
+    public TaskCompletionSource<BridgeReadyInfo> RegisterPendingReady(string connectId)
     {
         lock (gate)
         {
-            pendingReady = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            pendingReady = new TaskCompletionSource<BridgeReadyInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
             pendingReadyConnectId = connectId;
             return pendingReady;
         }
     }
 
-    public ConnectReadyAcceptResult AcceptReady(string resolvedAddress, bool hasConnectId, string? readyConnectId)
+    public ConnectReadyAcceptResult AcceptReady(BridgeReadyInfo readyInfo, bool hasConnectId, string? readyConnectId)
     {
         lock (gate)
         {
@@ -61,12 +61,12 @@ internal sealed class ConnectAttemptCoordinator
                 }
                 else
                 {
-                    pendingReady.TrySetResult(resolvedAddress);
+                    pendingReady.TrySetResult(readyInfo);
                     return ConnectReadyAcceptResult.AcceptedMissingConnectId(expected);
                 }
             }
 
-            pendingReady.TrySetResult(resolvedAddress);
+            pendingReady.TrySetResult(readyInfo);
             return ConnectReadyAcceptResult.Accepted(expected);
         }
     }

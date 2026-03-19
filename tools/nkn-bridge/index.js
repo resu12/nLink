@@ -1,7 +1,11 @@
 'use strict';
 
-const readline = require('readline');
-const BRIDGE_PROTOCOL_VERSION = 1;
+const BRIDGE_PROTOCOL_VERSION = 2;
+const BINARY_FRAME_MAGIC = 0x00;
+const BINARY_FRAME_HEADER_SIZE = 16;
+const BINARY_FRAME_KIND_SEND = 1;
+const BINARY_FRAME_KIND_MESSAGE = 2;
+const BINARY_FLAG_IS_TOPIC = 0x01;
 const SDK_LABEL = 'nkn-sdk@1.3.6';
 const MAX_INPUT_LINE_BYTES = 256 * 1024;
 const MAX_DECODED_PAYLOAD_BYTES = 64 * 1024;
@@ -12,6 +16,8 @@ const DEFAULT_RPC_SERVERS = [
   'https://seed.nkn.org:30003',
   'http://seed.nkn.org:30003'
 ];
+const SUPPORTED_CHANNELS = ['control', 'media', 'bulk'];
+let BRIDGE_APP_VERSION = '';
 
 // Redirect accidental console output (including some library logs) away from stdout.
 const stderrWrite = (msg) => {
@@ -38,13 +44,30 @@ try {
   });
 }
 
+try {
+  const bridgePackage = require('./package.json');
+  if (bridgePackage && typeof bridgePackage.version === 'string') {
+    BRIDGE_APP_VERSION = bridgePackage.version.trim();
+  }
+} catch {
+  BRIDGE_APP_VERSION = '';
+}
+
 const state = {
-  client: null,
+  controlClient: null,
+  mediaClient: null,
+  bulkClient: null,
   readyEmitted: false,
+  controlReady: false,
+  mediaReady: false,
+  bulkReady: false,
   shuttingDown: false,
   subscriptions: new Set(),
-  clientIdentifier: '',
+  controlClientIdentifier: '',
+  mediaClientIdentifier: '',
+  bulkClientIdentifier: '',
   connectId: '',
+  connectAttemptId: 0,
   preflightProgressEnabled: false,
   inboundScreenSharePolicy: {
     enabled: false,
@@ -58,10 +81,121 @@ const state = {
 };
 
 let rpcCandidateCursor = 0;
+let stdinBuffer = Buffer.alloc(0);
+let stdinProcessing = false;
 
 function emitJson(obj) {
-  // stdout must be JSONL only.
+  // Control/status events stay on the JSONL control plane.
   process.stdout.write(JSON.stringify(obj) + '\n');
+}
+
+function channelToByte(channel) {
+  if (channel === 'media') {
+    return 1;
+  }
+
+  if (channel === 'bulk') {
+    return 2;
+  }
+
+  return 0;
+}
+
+function byteToChannel(value) {
+  if (value === 1) {
+    return 'media';
+  }
+
+  if (value === 2) {
+    return 'bulk';
+  }
+
+  return 'control';
+}
+
+function buildBinaryFrame(kind, channel, flags, primaryText, secondaryText, payload) {
+  const primary = Buffer.from(String(primaryText || ''), 'utf8');
+  const secondary = secondaryText ? Buffer.from(String(secondaryText), 'utf8') : Buffer.alloc(0);
+  const bodyLength = primary.length + secondary.length + payload.length;
+  const frame = Buffer.alloc(BINARY_FRAME_HEADER_SIZE + bodyLength);
+  frame[0] = BINARY_FRAME_MAGIC;
+  frame[1] = BRIDGE_PROTOCOL_VERSION;
+  frame[2] = kind;
+  frame[3] = channelToByte(channel);
+  frame[4] = flags & 0xff;
+  frame[5] = 0;
+  frame.writeUInt16LE(primary.length, 6);
+  frame.writeUInt16LE(secondary.length, 8);
+  frame.writeUInt32LE(payload.length, 10);
+  frame[14] = 0;
+  frame[15] = 0;
+  primary.copy(frame, BINARY_FRAME_HEADER_SIZE);
+  secondary.copy(frame, BINARY_FRAME_HEADER_SIZE + primary.length);
+  payload.copy(frame, BINARY_FRAME_HEADER_SIZE + primary.length + secondary.length);
+  return frame;
+}
+
+function emitBinaryMessage(channel, source, payload, isTopic, topic) {
+  const frame = buildBinaryFrame(
+    BINARY_FRAME_KIND_MESSAGE,
+    channel,
+    isTopic ? BINARY_FLAG_IS_TOPIC : 0,
+    source,
+    isTopic && topic ? topic : null,
+    payload);
+  process.stdout.write(frame);
+}
+
+function tryDecodeBinaryFrameHeader(buffer) {
+  if (buffer.length < BINARY_FRAME_HEADER_SIZE) {
+    return null;
+  }
+
+  if (buffer[0] !== BINARY_FRAME_MAGIC) {
+    throw new Error('Invalid binary frame magic.');
+  }
+
+  if (buffer[1] !== BRIDGE_PROTOCOL_VERSION) {
+    throw new Error(`Unsupported binary frame protocol: ${buffer[1]}`);
+  }
+
+  const kind = buffer[2];
+  const channel = byteToChannel(buffer[3]);
+  const flags = buffer[4];
+  const primaryLength = buffer.readUInt16LE(6);
+  const secondaryLength = buffer.readUInt16LE(8);
+  const payloadLength = buffer.readUInt32LE(10);
+  const totalLength = BINARY_FRAME_HEADER_SIZE + primaryLength + secondaryLength + payloadLength;
+  return {
+    kind,
+    channel,
+    flags,
+    primaryLength,
+    secondaryLength,
+    payloadLength,
+    totalLength
+  };
+}
+
+function decodeBinaryFrame(buffer) {
+  const header = tryDecodeBinaryFrameHeader(buffer);
+  if (!header || buffer.length < header.totalLength) {
+    return null;
+  }
+
+  const primaryStart = BINARY_FRAME_HEADER_SIZE;
+  const secondaryStart = primaryStart + header.primaryLength;
+  const payloadStart = secondaryStart + header.secondaryLength;
+  return {
+    kind: header.kind,
+    channel: header.channel,
+    flags: header.flags,
+    primaryText: buffer.subarray(primaryStart, secondaryStart).toString('utf8'),
+    secondaryText: header.secondaryLength > 0
+      ? buffer.subarray(secondaryStart, payloadStart).toString('utf8')
+      : null,
+    payload: buffer.subarray(payloadStart, payloadStart + header.payloadLength)
+  };
 }
 
 function logStderr(message) {
@@ -237,6 +371,40 @@ function getClientIdentifier(client) {
   return '';
 }
 
+function buildChannelIdentifier(identifier, suffix) {
+  const normalized = typeof identifier === 'string' ? identifier.trim() : '';
+  if (!normalized) {
+    return `nlink-${suffix}`;
+  }
+
+  const lower = normalized.toLowerCase();
+  if (lower.endsWith(`-${suffix}`)) {
+    return `${normalized}-${suffix}-client`;
+  }
+
+  return `${normalized}-${suffix}`;
+}
+
+function buildMediaIdentifier(identifier) {
+  return buildChannelIdentifier(identifier, 'media');
+}
+
+function buildBulkIdentifier(identifier) {
+  return buildChannelIdentifier(identifier, 'bulk');
+}
+
+function getClientByChannel(channel) {
+  if (channel === 'media') {
+    return state.mediaClient;
+  }
+
+  if (channel === 'bulk') {
+    return state.bulkClient;
+  }
+
+  return state.controlClient;
+}
+
 function normalizeMessageEvent(args) {
   if (args.length === 1 && args[0] && typeof args[0] === 'object') {
     const msg = args[0];
@@ -393,20 +561,49 @@ function shouldDropInboundScreenShare(msg) {
   return false;
 }
 
-function attachClientHandlers(client) {
-  const onReady = () => {
-    if (state.readyEmitted) {
+function attachClientHandlers(client, channel) {
+  const markChannelReady = (isReady) => {
+    if (channel === 'media') {
+      state.mediaReady = isReady;
+    } else if (channel === 'bulk') {
+      state.bulkReady = isReady;
+    } else {
+      state.controlReady = isReady;
+    }
+  };
+
+  const maybeEmitReady = () => {
+    if (state.readyEmitted || !state.controlReady || !state.mediaReady || !state.bulkReady) {
       return;
     }
+
     state.readyEmitted = true;
     emitJson({
       event: 'ready',
-      address: getClientAddress(client),
-      ...(state.connectId ? { connectId: state.connectId } : {})
+      protocol: BRIDGE_PROTOCOL_VERSION,
+      channels: SUPPORTED_CHANNELS,
+      address: getClientAddress(state.controlClient),
+      controlAddress: getClientAddress(state.controlClient),
+      mediaAddress: getClientAddress(state.mediaClient),
+      bulkAddress: getClientAddress(state.bulkClient),
+      ...(BRIDGE_APP_VERSION ? { bridgeAppVersion: BRIDGE_APP_VERSION } : {}),
+      ...(state.connectId ? { connectId: state.connectId } : {}),
     });
   };
 
+  const onReady = () => {
+    markChannelReady(true);
+    maybeEmitReady();
+  };
+
   const onDisconnected = (reason) => {
+    markChannelReady(false);
+
+    if (channel !== 'control') {
+      logStderr(`Ignoring ${channel} disconnect while control channel remains authoritative (${reason || 'Disconnected'})`);
+      return;
+    }
+
     emitJson({
       event: 'disconnected',
       reason: reason || 'Disconnected'
@@ -416,23 +613,10 @@ function attachClientHandlers(client) {
   const onMessage = (...args) => {
     try {
       const msg = normalizeMessageEvent(args);
-      if (shouldDropInboundScreenShare(msg)) {
+      if (channel === 'media' && shouldDropInboundScreenShare(msg)) {
         return;
       }
-
-      const evt = {
-        event: 'message',
-        source: msg.source,
-        payloadBase64: msg.payload.toString('base64'),
-        isTopic: Boolean(msg.isTopic),
-        ts: Date.now()
-      };
-
-      if (msg.topic) {
-        evt.topic = msg.topic;
-      }
-
-      emitJson(evt);
+      emitBinaryMessage(channel, msg.source, msg.payload, Boolean(msg.isTopic), msg.topic || null);
     } catch (error) {
       logStderr(`Failed to normalize message event: ${safeErrorMessage(error)}`);
     }
@@ -496,19 +680,7 @@ function attachClientHandlers(client) {
   // which causes a false-ready race ("client not ready" on subscribe/publish).
 }
 
-async function closeClient() {
-  const client = state.client;
-  state.client = null;
-  state.readyEmitted = false;
-  state.subscriptions.clear();
-  state.clientIdentifier = '';
-  state.inboundScreenSharePolicy = {
-    enabled: false,
-    sessionId: null,
-    sourceAddress: null,
-    expiresAtUnixMs: 0
-  };
-
+async function closeSingleClient(client) {
   if (!client) {
     return;
   }
@@ -529,6 +701,38 @@ async function closeClient() {
   }
 }
 
+async function closeClient() {
+  const controlClient = state.controlClient;
+  const mediaClient = state.mediaClient;
+  const bulkClient = state.bulkClient;
+  state.controlClient = null;
+  state.mediaClient = null;
+  state.bulkClient = null;
+  state.readyEmitted = false;
+  state.controlReady = false;
+  state.mediaReady = false;
+  state.bulkReady = false;
+  state.subscriptions.clear();
+  state.controlClientIdentifier = '';
+  state.mediaClientIdentifier = '';
+  state.bulkClientIdentifier = '';
+  state.connectAttemptId = 0;
+  state.inboundScreenSharePolicy = {
+    enabled: false,
+    sessionId: null,
+    sourceAddress: null,
+    expiresAtUnixMs: 0
+  };
+
+  await closeSingleClient(controlClient);
+  if (mediaClient && mediaClient !== controlClient) {
+    await closeSingleClient(mediaClient);
+  }
+  if (bulkClient && bulkClient !== controlClient && bulkClient !== mediaClient) {
+    await closeSingleClient(bulkClient);
+  }
+}
+
 async function handleConnect(command) {
   if (!nkn) {
     throw new Error('nkn-sdk is not loaded.');
@@ -539,7 +743,7 @@ async function handleConnect(command) {
   state.preflightProgressEnabled = Boolean(command.preflightRpcEnabled);
 
   const seed = decodeSeed(command.seedHex, command.seedBase64);
-  const options = {
+  const baseOptions = {
     // MultiClient reliability defaults inspired by production NKN apps.
     numSubClients: 4,
     originalClient: true,
@@ -552,18 +756,18 @@ async function handleConnect(command) {
   };
 
   if (seed) {
-    options.seed = seed;
+    baseOptions.seed = seed;
   }
 
-  if (typeof command.identifier === 'string' && command.identifier.trim().length > 0) {
-    options.identifier = command.identifier.trim();
-  }
+  const requestedIdentifier = typeof command.identifier === 'string' && command.identifier.trim().length > 0
+    ? command.identifier.trim()
+    : '';
 
   const rpcCandidates = rotateCandidates(parseRpcCandidates(command.seedRpc));
   if (rpcCandidates.length > 0) {
     // Keep both keys for compatibility with SDK versions/docs naming differences.
-    options.rpcServerAddr = rpcCandidates[0];
-    options.seedRPCServerAddr = rpcCandidates[0];
+    baseOptions.rpcServerAddr = rpcCandidates[0];
+    baseOptions.seedRPCServerAddr = rpcCandidates[0];
   }
 
   if (state.preflightProgressEnabled) {
@@ -575,27 +779,48 @@ async function handleConnect(command) {
       cacheTtlMs: Number(command.preflightCacheTtlMs) || null,
       ts: Date.now()
     });
-    if (options.rpcServerAddr) {
+    if (baseOptions.rpcServerAddr) {
       emitJson({
         event: 'rpc_selected',
         connectId: state.connectId || null,
-        rpc: options.rpcServerAddr,
+        rpc: baseOptions.rpcServerAddr,
         stage: 'initial',
         ts: Date.now()
       });
     }
   }
 
-  logStderr(`Creating NKN client (rpc=${options.rpcServerAddr || 'default'})`);
+  logStderr(`Creating NKN clients (rpc=${baseOptions.rpcServerAddr || 'default'})`);
   const ClientCtor = nkn.MultiClient || nkn.Client;
   if (typeof ClientCtor !== 'function') {
     throw new Error('NKN Client constructor not found in SDK.');
   }
 
-  const client = new ClientCtor(options);
-  state.client = client;
-  state.clientIdentifier = typeof options.identifier === 'string' ? options.identifier : getClientIdentifier(client);
-  attachClientHandlers(client);
+  const controlOptions = {
+    ...baseOptions,
+    ...(requestedIdentifier ? { identifier: requestedIdentifier } : {})
+  };
+  const mediaOptions = {
+    ...baseOptions,
+    identifier: buildMediaIdentifier(requestedIdentifier || 'nlink')
+  };
+  const bulkOptions = {
+    ...baseOptions,
+    identifier: buildBulkIdentifier(requestedIdentifier || 'nlink')
+  };
+
+  const controlClient = new ClientCtor(controlOptions);
+  const mediaClient = new ClientCtor(mediaOptions);
+  const bulkClient = new ClientCtor(bulkOptions);
+  state.controlClient = controlClient;
+  state.mediaClient = mediaClient;
+  state.bulkClient = bulkClient;
+  state.controlClientIdentifier = typeof controlOptions.identifier === 'string' ? controlOptions.identifier : getClientIdentifier(controlClient);
+  state.mediaClientIdentifier = typeof mediaOptions.identifier === 'string' ? mediaOptions.identifier : getClientIdentifier(mediaClient);
+  state.bulkClientIdentifier = typeof bulkOptions.identifier === 'string' ? bulkOptions.identifier : getClientIdentifier(bulkClient);
+  attachClientHandlers(controlClient, 'control');
+  attachClientHandlers(mediaClient, 'media');
+  attachClientHandlers(bulkClient, 'bulk');
 
   // If the first bootstrap RPC is unhealthy for this network, try a few alternatives
   // before .NET bridge connect times out.
@@ -633,11 +858,12 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
         });
       }
       await closeClient();
+      state.connectAttemptId = connectAttemptId;
       state.connectId = typeof originalCommand.connectId === 'string' ? originalCommand.connectId : '';
       state.preflightProgressEnabled = Boolean(originalCommand.preflightRpcEnabled);
 
       const seed = decodeSeed(originalCommand.seedHex, originalCommand.seedBase64);
-      const options = {
+      const baseOptions = {
         numSubClients: 4,
         originalClient: true,
         reconnectIntervalMin: 1000,
@@ -649,19 +875,42 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
       };
 
       if (seed) {
-        options.seed = seed;
+        baseOptions.seed = seed;
       }
 
-      if (typeof originalCommand.identifier === 'string' && originalCommand.identifier.trim().length > 0) {
-        options.identifier = originalCommand.identifier.trim();
-      }
+      const requestedIdentifier = typeof originalCommand.identifier === 'string' && originalCommand.identifier.trim().length > 0
+        ? originalCommand.identifier.trim()
+        : '';
 
       const ClientCtor = nkn.MultiClient || nkn.Client;
-      const client = new ClientCtor(options);
-      state.client = client;
+      const controlOptions = {
+        ...baseOptions,
+        ...(requestedIdentifier ? { identifier: requestedIdentifier } : {})
+      };
+      const mediaOptions = {
+        ...baseOptions,
+        identifier: buildMediaIdentifier(requestedIdentifier || 'nlink')
+      };
+      const controlClient = new ClientCtor(controlOptions);
+      const mediaClient = new ClientCtor(mediaOptions);
+      const bulkOptions = {
+        ...baseOptions,
+        identifier: buildBulkIdentifier(requestedIdentifier || 'nlink')
+      };
+      const bulkClient = new ClientCtor(bulkOptions);
+      state.controlClient = controlClient;
+      state.mediaClient = mediaClient;
+      state.bulkClient = bulkClient;
       state.readyEmitted = false;
-      state.clientIdentifier = typeof options.identifier === 'string' ? options.identifier : getClientIdentifier(client);
-      attachClientHandlers(client);
+      state.controlReady = false;
+      state.mediaReady = false;
+      state.bulkReady = false;
+      state.controlClientIdentifier = typeof controlOptions.identifier === 'string' ? controlOptions.identifier : getClientIdentifier(controlClient);
+      state.mediaClientIdentifier = typeof mediaOptions.identifier === 'string' ? mediaOptions.identifier : getClientIdentifier(mediaClient);
+      state.bulkClientIdentifier = typeof bulkOptions.identifier === 'string' ? bulkOptions.identifier : getClientIdentifier(bulkClient);
+      attachClientHandlers(controlClient, 'control');
+      attachClientHandlers(mediaClient, 'media');
+      attachClientHandlers(bulkClient, 'bulk');
       if (state.preflightProgressEnabled) {
         emitJson({
           event: 'rpc_selected',
@@ -681,17 +930,18 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function callClientMethod(methodName, args) {
-  if (!state.client) {
+async function callClientMethod(methodName, args, channel = 'control') {
+  const client = getClientByChannel(channel);
+  if (!client) {
     throw new Error('Not connected.');
   }
 
-  const fn = state.client[methodName];
+  const fn = client[methodName];
   if (typeof fn !== 'function') {
     throw new Error(`Client method not available: ${methodName}`);
   }
 
-  const result = fn.apply(state.client, args);
+  const result = fn.apply(client, args);
   if (result && typeof result.then === 'function') {
     return await result;
   }
@@ -706,17 +956,17 @@ async function handleSubscribe(command) {
   }
 
   // Prefer SDK method, but track locally either way.
-  if (state.client && typeof state.client.subscribe === 'function') {
-    const identifier = String(state.clientIdentifier || getClientIdentifier(state.client) || '').trim();
+  if (state.controlClient && typeof state.controlClient.subscribe === 'function') {
+    const identifier = String(state.controlClientIdentifier || getClientIdentifier(state.controlClient) || '').trim();
     try {
-      await callClientMethod('subscribe', [topic, DEFAULT_SUBSCRIBE_DURATION, identifier]);
+      await callClientMethod('subscribe', [topic, DEFAULT_SUBSCRIBE_DURATION, identifier], 'control');
     } catch (error) {
       if (!isBenignSubscribeError(error)) {
         throw error;
       }
       // Treat known txpool duplicate subscription races as success.
     }
-  } else if (!state.client) {
+  } else if (!state.controlClient) {
     throw new Error('Not connected.');
   } else {
     throw new Error('subscribe is not supported by this SDK client type.');
@@ -731,17 +981,17 @@ async function handleUnsubscribe(command) {
     throw new Error('topic is required.');
   }
 
-  if (state.client && typeof state.client.unsubscribe === 'function') {
-    const identifier = String(state.clientIdentifier || getClientIdentifier(state.client) || '').trim();
+  if (state.controlClient && typeof state.controlClient.unsubscribe === 'function') {
+    const identifier = String(state.controlClientIdentifier || getClientIdentifier(state.controlClient) || '').trim();
     try {
-      await callClientMethod('unsubscribe', [topic, identifier]);
+      await callClientMethod('unsubscribe', [topic, identifier], 'control');
     } catch (error) {
       if (!isBenignUnsubscribeError(error)) {
         throw error;
       }
       // Treat known txpool duplicate subscription unsubscribe races as success.
     }
-  } else if (!state.client) {
+  } else if (!state.controlClient) {
     throw new Error('Not connected.');
   } else {
     throw new Error('unsubscribe is not supported by this SDK client type.');
@@ -771,7 +1021,7 @@ async function handlePublish(command) {
   }
 
   const payload = toBufferFromBase64(command.payloadBase64);
-  await callClientMethod('publish', [topic, payload, { txPool: true }]);
+  await callClientMethod('publish', [topic, payload, { txPool: true }], 'control');
 }
 
 async function handleSend(command) {
@@ -781,7 +1031,36 @@ async function handleSend(command) {
   }
 
   const payload = toBufferFromBase64(command.payloadBase64);
-  await callClientMethod('send', [destination, payload, { noReply: true }]);
+  const normalizedChannel = typeof command.channel === 'string'
+    ? command.channel.trim().toLowerCase()
+    : '';
+  const channel = normalizedChannel === 'media'
+    ? 'media'
+    : normalizedChannel === 'bulk'
+      ? 'bulk'
+      : 'control';
+  await callClientMethod('send', [destination, payload, { noReply: true }], channel);
+}
+
+async function handleBinarySendFrame(frame) {
+  if (frame.kind !== BINARY_FRAME_KIND_SEND) {
+    throw new Error(`Unsupported binary frame kind: ${frame.kind}`);
+  }
+
+  const destination = String(frame.primaryText || '').trim();
+  if (!destination) {
+    throw new Error('binary send destination is required.');
+  }
+
+  if (!Buffer.isBuffer(frame.payload) && !(frame.payload instanceof Uint8Array)) {
+    throw new Error('binary send payload is required.');
+  }
+
+  if (frame.payload.length > MAX_DECODED_PAYLOAD_BYTES) {
+    throw new Error('binary send payload too large.');
+  }
+
+  await callClientMethod('send', [destination, frame.payload, { noReply: true }], frame.channel);
 }
 
 async function handleSetScreenSharePolicy(command) {
@@ -823,7 +1102,9 @@ async function handleHello(command) {
     event: 'hello_ok',
     id: command.id ?? null,
     protocol: BRIDGE_PROTOCOL_VERSION,
-    sdk: SDK_LABEL
+    sdk: SDK_LABEL,
+    channels: SUPPORTED_CHANNELS,
+    ...(BRIDGE_APP_VERSION ? { bridgeAppVersion: BRIDGE_APP_VERSION } : {})
   });
 }
 
@@ -913,36 +1194,7 @@ function emitLineTooLargeError(line) {
   });
 }
 
-process.on('uncaughtException', (error) => {
-  logStderr(`uncaughtException: ${safeErrorMessage(error)}`);
-  emitJson({ event: 'disconnected', reason: `uncaughtException: ${safeErrorMessage(error)}` });
-});
-
-process.on('unhandledRejection', (error) => {
-  logStderr(`unhandledRejection: ${safeErrorMessage(error)}`);
-  emitJson({ event: 'disconnected', reason: `unhandledRejection: ${safeErrorMessage(error)}` });
-});
-
-process.on('SIGINT', async () => {
-  if (state.shuttingDown) {
-    process.exit(0);
-    return;
-  }
-
-  try {
-    await handleShutdown();
-  } catch {
-    process.exit(0);
-  }
-});
-
-const rl = readline.createInterface({
-  input: process.stdin,
-  crlfDelay: Infinity,
-  terminal: false
-});
-
-rl.on('line', async (line) => {
+async function processJsonLine(line) {
   if (Buffer.byteLength(line, 'utf8') > MAX_INPUT_LINE_BYTES) {
     emitLineTooLargeError(line);
     return;
@@ -968,8 +1220,6 @@ rl.on('line', async (line) => {
 
   try {
     const shouldEmitAck = await dispatchCommand(message);
-
-    // "shutdown" exits before here. "hello"/"ping" emit their own responses.
     if (shouldEmitAck !== false) {
       emitCommandAck(message);
     }
@@ -977,9 +1227,128 @@ rl.on('line', async (line) => {
     logStderr(`Command failed (${message.cmd || message.command || 'unknown'}): ${safeErrorMessage(error)}`);
     emitCommandError(message, error);
   }
+}
+
+async function processBinaryFrame(frame) {
+  try {
+    await handleBinarySendFrame(frame);
+  } catch (error) {
+    logStderr(`Binary frame failed (${frame.kind}): ${safeErrorMessage(error)}`);
+  }
+}
+
+async function processStdinBuffer() {
+  while (stdinBuffer.length > 0) {
+    const first = stdinBuffer[0];
+
+    if (first === 0x0a || first === 0x0d || first === 0x20 || first === 0x09) {
+      stdinBuffer = stdinBuffer.subarray(1);
+      return true;
+    }
+
+    if (first === BINARY_FRAME_MAGIC) {
+      if (stdinBuffer.length < BINARY_FRAME_HEADER_SIZE) {
+        return false;
+      }
+
+      let header;
+      try {
+        header = tryDecodeBinaryFrameHeader(stdinBuffer);
+      } catch (error) {
+        logStderr(`Invalid binary stdin frame header: ${safeErrorMessage(error)}`);
+        stdinBuffer = Buffer.alloc(0);
+        return false;
+      }
+
+      if (!header || stdinBuffer.length < header.totalLength) {
+        return false;
+      }
+
+      const frameBuffer = stdinBuffer.subarray(0, header.totalLength);
+      stdinBuffer = stdinBuffer.subarray(header.totalLength);
+      const frame = decodeBinaryFrame(frameBuffer);
+      if (!frame) {
+        return false;
+      }
+
+      await processBinaryFrame(frame);
+      return true;
+    }
+
+    const newlineIndex = stdinBuffer.indexOf(0x0a);
+    if (newlineIndex < 0) {
+      if (stdinBuffer.length > MAX_INPUT_LINE_BYTES) {
+        emitLineTooLargeError(stdinBuffer.toString('utf8', 0, MAX_INPUT_LINE_BYTES));
+        stdinBuffer = Buffer.alloc(0);
+        return false;
+      }
+
+      return false;
+    }
+
+    const lineBuffer = stdinBuffer.subarray(0, newlineIndex);
+    stdinBuffer = stdinBuffer.subarray(newlineIndex + 1);
+    await processJsonLine(lineBuffer.toString('utf8'));
+    return true;
+  }
+
+  return false;
+}
+
+function scheduleStdinProcessing() {
+  if (stdinProcessing) {
+    return;
+  }
+
+  stdinProcessing = true;
+  (async () => {
+    while (await processStdinBuffer()) { }
+  })()
+    .catch((error) => {
+      logStderr(`stdin processing failed: ${safeErrorMessage(error)}`);
+      emitJson({ event: 'disconnected', reason: `stdin_processing_failed: ${safeErrorMessage(error)}` });
+    })
+    .finally(() => {
+      stdinProcessing = false;
+      if (stdinBuffer.length > 0) {
+        scheduleStdinProcessing();
+      }
+    });
+}
+
+process.on('uncaughtException', (error) => {
+  logStderr(`uncaughtException: ${safeErrorMessage(error)}`);
+  emitJson({ event: 'disconnected', reason: `uncaughtException: ${safeErrorMessage(error)}` });
 });
 
-rl.on('close', async () => {
+process.on('unhandledRejection', (error) => {
+  logStderr(`unhandledRejection: ${safeErrorMessage(error)}`);
+  emitJson({ event: 'disconnected', reason: `unhandledRejection: ${safeErrorMessage(error)}` });
+});
+
+process.on('SIGINT', async () => {
+  if (state.shuttingDown) {
+    process.exit(0);
+    return;
+  }
+
+  try {
+    await handleShutdown();
+  } catch {
+    process.exit(0);
+  }
+});
+
+process.stdin.on('data', (chunk) => {
+  if (!chunk || chunk.length === 0) {
+    return;
+  }
+
+  stdinBuffer = stdinBuffer.length === 0 ? Buffer.from(chunk) : Buffer.concat([stdinBuffer, chunk]);
+  scheduleStdinProcessing();
+});
+
+process.stdin.on('end', async () => {
   if (state.shuttingDown) {
     return;
   }
@@ -990,5 +1359,7 @@ rl.on('close', async () => {
     process.exit(0);
   }
 });
+
+process.stdin.resume();
 
 logStderr('Bridge started');

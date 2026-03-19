@@ -208,4 +208,76 @@ public sealed class FileTransferPanelItemViewModelTests
         Assert.NotNull(item);
         Assert.Equal("Couldn't save file", item!.StatusText);
     }
+
+    [Fact]
+    public void FailedTransfer_MapsPayloadBudgetExceededToTransferPayloadTooLarge()
+    {
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-a",
+                Direction: FileTransferDirection.Outbound,
+                State: FileTransferTransferState.Failed,
+                FileName: "too-large.bin",
+                FileSizeBytes: 128,
+                Sha256Base64: null,
+                BytesTransferred: 0,
+                ChunksTransferred: 0,
+                ChunkCount: 1,
+                ChunkSizeBytes: 128,
+                ErrorCode: FileTransferResultCodes.PayloadBudgetExceeded,
+                StatusMessage: "Bridge payload too large for 'send' (max 65536 bytes)."));
+
+        Assert.NotNull(item);
+        Assert.Equal("Transfer payload too large", item!.StatusText);
+    }
+
+    [Fact]
+    public void FailedTransfer_MapsTransportIncompatibleToUpgradeStatus()
+    {
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-a",
+                Direction: FileTransferDirection.Outbound,
+                State: FileTransferTransferState.Failed,
+                FileName: "bad.bin",
+                FileSizeBytes: 128,
+                Sha256Base64: null,
+                BytesTransferred: 0,
+                ChunksTransferred: 0,
+                ChunkCount: 1,
+                ChunkSizeBytes: 128,
+                ErrorCode: FileTransferResultCodes.TransportIncompatible,
+                StatusMessage: "bridge_protocol_outdated_bulk_missing"));
+
+        Assert.NotNull(item);
+        Assert.Equal("Update nLink and retry", item!.StatusText);
+    }
+
+    [Fact]
+    public void OutboundTransfer_ShowsSentAndConfirmedProgressText()
+    {
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-a",
+                Direction: FileTransferDirection.Outbound,
+                State: FileTransferTransferState.Sending,
+                FileName: "archive.bin",
+                FileSizeBytes: 57_400_000,
+                Sha256Base64: null,
+                BytesTransferred: 11_800_000,
+                ChunksTransferred: 2881,
+                ChunkCount: 14_014,
+                ChunkSizeBytes: 4096,
+                ErrorCode: null,
+                StatusMessage: "Sending file data.",
+                BytesAcceptedForTransport: 13_200_000,
+                BytesAcknowledgedByReceiver: 11_800_000));
+
+        Assert.NotNull(item);
+        Assert.Equal("12.6 MB sent / 11.3 MB confirmed / 54.7 MB", item!.ProgressText);
+        Assert.Equal(13_200_000d / 57_400_000d, item.ProgressFraction, 6);
+    }
 }

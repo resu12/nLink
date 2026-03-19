@@ -14,6 +14,7 @@ namespace NLink.Infra.Nkn;
 internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, IAuthoritativeConnectedAddressSource
 {
     private const int MaxPayloadBytes = 64 * 1024;
+    private const int BridgeProtocolVersion = BridgeBinaryProtocol.ProtocolVersion;
     private static readonly TimeSpan CommandAckTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ConnectReadyTimeout = TimeSpan.FromSeconds(30);
@@ -21,6 +22,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private static readonly TimeSpan PingTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ScreenShareBridgeLogInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan BridgeTrafficLogInterval = TimeSpan.FromSeconds(2);
+    private static readonly string[] RequiredBridgeChannels = ["control", "media", "bulk"];
+    internal const string BridgeProtocolOutdatedBulkMissingCode = "bridge_protocol_outdated_bulk_missing";
     private static readonly RetryPolicyOptions UnexpectedExitRestartRetryOptions = new(
         MaxAttempts: 5,
         InitialDelay: TimeSpan.FromSeconds(1),
@@ -41,6 +44,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private CancellationTokenSource? pingLoopCts;
     private Task? pingLoopTask;
     private string address;
+    private string mediaAddress;
+    private string bulkAddress;
     private int disconnectedRaised;
     private int unexpectedRestartLoopActive;
     private bool helloCompleted;
@@ -56,10 +61,16 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private long bridgeMessageCountSinceLastLog;
     private long bridgeMessagePayloadBytesSinceLastLog;
     private long lastBridgeMessageSummaryLogTick;
+    private long bulkBridgeMessageCountSinceLastLog;
+    private long bulkBridgeMessagePayloadBytesSinceLastLog;
+    private long lastBulkBridgeMessageSummaryLogTick;
     private bool inboundScreenShareEnabled;
     private string? inboundScreenShareSessionId;
     private string? inboundScreenShareSourceAddress;
     private long inboundScreenShareExpiresAtUnixMs;
+    private string[] supportedBridgeChannels = [];
+    private int? negotiatedBridgeProtocol;
+    private string? bridgeAppVersion;
     private int disposeStarted;
     private SemaphoreSlim? heldIdentityUsageLease;
 
@@ -68,6 +79,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         this.identity = identity ?? throw new ArgumentNullException(nameof(identity));
         this.options = options ?? throw new ArgumentNullException(nameof(options));
         address = identity.Address;
+        mediaAddress = BuildFallbackMediaAddress(identity.Identifier, identity.Address);
+        bulkAddress = BuildFallbackBulkAddress(identity.Identifier, identity.Address);
         bridgeSupervisor = new BridgeSupervisor(
             callbacks: new BridgeSupervisorCallbacks
             {
@@ -79,9 +92,14 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             },
             resolveNodePath: ResolveNodeExecutablePath,
             resolveBridgePath: ResolveBridgeScriptPath,
-            onStdoutLineAsync: (line, _, _, _) =>
+            onStdoutJsonLineAsync: (line, _) =>
             {
                 protocolClient!.HandleStdoutJsonLine(line);
+                return Task.CompletedTask;
+            },
+            onStdoutBinaryFrameAsync: (frame, _) =>
+            {
+                HandleBinaryBridgeFrame(frame);
                 return Task.CompletedTask;
             },
             onStderrLineAsync: (line, _, _, _) =>
@@ -109,19 +127,27 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         protocolEventRouter = new BridgeProtocolEventRouter(
             identity.Address,
+            BuildFallbackMediaAddress(identity.Identifier, identity.Address),
+            BuildFallbackBulkAddress(identity.Identifier, identity.Address),
             connectAttempts,
             getCurrentPid: () => bridgeSupervisor.CurrentPid,
-            setConnectedAddress: addr =>
+            setConnectedAddresses: (controlAddr, mediaAddr, bulkAddr) =>
             {
                 lock (gate)
                 {
-                    address = addr;
+                    address = controlAddr;
+                    mediaAddress = string.IsNullOrWhiteSpace(mediaAddr)
+                        ? BuildFallbackMediaAddress(identity.Identifier, controlAddr)
+                        : mediaAddr;
+                    bulkAddress = string.IsNullOrWhiteSpace(bulkAddr)
+                        ? BuildFallbackBulkAddress(identity.Identifier, controlAddr)
+                        : bulkAddr;
                 }
             },
             log: Log);
 
         protocolClient = new BridgeProtocolClient(
-            getWriter: () => bridgeSupervisor.GetActiveIoOrThrow().JsonlWriter,
+            getWriter: () => bridgeSupervisor.GetActiveIoOrThrow().Writer,
             log: Log,
             onReady: root => protocolEventRouter.HandleReady(root),
             onRpcProgress: (eventName, root) => protocolEventRouter.HandleRpcProgress(eventName, root),
@@ -141,6 +167,39 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             lock (gate)
             {
                 return address;
+            }
+        }
+    }
+
+    public string MediaAddress
+    {
+        get
+        {
+            lock (gate)
+            {
+                return mediaAddress;
+            }
+        }
+    }
+
+    public string BulkAddress
+    {
+        get
+        {
+            lock (gate)
+            {
+                return bulkAddress;
+            }
+        }
+    }
+
+    internal bool SupportsBulkBridgeChannel
+    {
+        get
+        {
+            lock (gate)
+            {
+                return supportedBridgeChannels.Any(value => string.Equals(value, "bulk", StringComparison.OrdinalIgnoreCase));
             }
         }
     }
@@ -201,6 +260,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         protocolClient.HandleStdoutJsonLine(line);
     }
 
+    internal void HandleBinaryBridgeFrameForTests(BridgeBinaryFrame frame)
+    {
+        HandleBinaryBridgeFrame(frame);
+    }
+
     internal async Task StartBridgeAsync(CancellationToken ct)
     {
         ThrowIfDisposed();
@@ -247,7 +311,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
     private async Task ConnectCoreAsync(long sequence, CancellationToken ct)
     {
-        TaskCompletionSource<string> readyWait;
+        TaskCompletionSource<BridgeReadyInfo> readyWait;
         string connectId = Guid.NewGuid().ToString("N");
 
         try
@@ -290,10 +354,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
             await SendCommandAndWaitAckAsync("connect", payload, ct, timeoutOverride: CommandAckTimeout);
 
-            string readyAddress;
+            BridgeReadyInfo readyInfo;
             try
             {
-                readyAddress = await readyWait.Task.WaitAsync(connectReadyTimeoutOverrideForTests ?? ConnectReadyTimeout, ct);
+                readyInfo = await readyWait.Task.WaitAsync(connectReadyTimeoutOverrideForTests ?? ConnectReadyTimeout, ct);
             }
             catch (TimeoutException ex)
             {
@@ -304,13 +368,40 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 throw new TimeoutException("Timed out waiting for NKN bridge ready(address) after connect.", ex);
             }
 
+            ValidateBridgeCapabilitiesOrThrow(readyInfo);
+
             lock (gate)
             {
-                address = string.IsNullOrWhiteSpace(readyAddress) ? identity.Address : readyAddress;
+                address = string.IsNullOrWhiteSpace(readyInfo.ControlAddress) ? identity.Address : readyInfo.ControlAddress;
+                supportedBridgeChannels = readyInfo.SupportedChannels.Length == 0
+                    ? []
+                    : readyInfo.SupportedChannels
+                        .Where(static value => !string.IsNullOrWhiteSpace(value))
+                        .Select(static value => value.Trim())
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToArray();
+                negotiatedBridgeProtocol = readyInfo.Protocol;
+                bridgeAppVersion = string.IsNullOrWhiteSpace(readyInfo.BridgeAppVersion) ? null : readyInfo.BridgeAppVersion;
+                if (string.IsNullOrWhiteSpace(mediaAddress))
+                {
+                    mediaAddress = BuildFallbackMediaAddress(identity.Identifier, address);
+                }
+
+                if (string.IsNullOrWhiteSpace(bulkAddress))
+                {
+                    bulkAddress = BuildFallbackBulkAddress(identity.Identifier, address);
+                }
             }
 
             StartPingLoopIfNeeded();
-            Log($"Connected bridge (address_len={Address.Length})");
+            var channelsSummary = supportedBridgeChannels.Length == 0
+                ? "(none)"
+                : string.Join(",", supportedBridgeChannels.OrderBy(static value => value, StringComparer.OrdinalIgnoreCase));
+            Log(
+                "Connected bridge " +
+                $"(control_address_len={Address.Length}, media_address_len={MediaAddress.Length}, bulk_address_len={BulkAddress.Length}, " +
+                $"channels={channelsSummary}, protocol={(negotiatedBridgeProtocol?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "(none)")}, " +
+                $"bridge_app_version={(bridgeAppVersion ?? "(none)")})");
         }
         finally
         {
@@ -414,25 +505,36 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
     public Task SendAsync(string destination, byte[] payload, CancellationToken ct)
     {
+        return SendCoreAsync(destination, payload, NknBridgeChannel.Control, ct);
+    }
+
+    public Task SendMediaAsync(string destination, byte[] payload, CancellationToken ct)
+    {
+        return SendCoreAsync(destination, payload, NknBridgeChannel.Media, ct);
+    }
+
+    public Task SendBulkAsync(string destination, byte[] payload, CancellationToken ct)
+    {
+        return SendCoreAsync(destination, payload, NknBridgeChannel.Bulk, ct);
+    }
+
+    private Task SendCoreAsync(string destination, byte[] payload, NknBridgeChannel channel, CancellationToken ct)
+    {
         ThrowIfDisposed();
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
         ArgumentNullException.ThrowIfNull(payload);
         EnsurePayloadWithinLimit(payload, "send");
+        EnsureChannelSupported(channel);
 
         MaybeLogBridgeSendSummary(payload.Length, destination.Length);
-        var isScreenSharePayload = LooksLikeScreenSharePayload(payload);
-        return SendCommandAndWaitAckAsync(
-            "send",
-            new Dictionary<string, object?>
-            {
-                ["destination"] = destination,
-                ["payloadBase64"] = Convert.ToBase64String(payload),
-            },
-            ct,
-            timeoutOverride: CommandAckTimeout,
-            onSerialized: isScreenSharePayload
-                ? bytes => NknRuntimeDiagnostics.AddScreenShareBridgeBytesSent(bytes)
-                : null);
+        var isScreenSharePayload = channel == NknBridgeChannel.Media || LooksLikeScreenSharePayload(payload);
+        var serializedBytes = BridgeBinaryProtocol.MeasureSendFrameBytes(destination, payload);
+        if (isScreenSharePayload)
+        {
+            NknRuntimeDiagnostics.AddScreenShareBridgeBytesSent(serializedBytes);
+        }
+
+        return bridgeSupervisor.GetActiveIoOrThrow().Writer.WriteSendFrameAsync(destination, payload, channel, ct);
     }
 
     internal Task UpdateInboundScreenSharePolicyAsync(
@@ -638,16 +740,17 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         try
         {
-            await SendCommandAndWaitBridgeEventAsync(
+            var helloResponse = await SendCommandAndWaitBridgeEventAsync(
                 "hello",
                 new Dictionary<string, object?>(StringComparer.Ordinal)
                 {
-                    ["protocol"] = 1,
+                    ["protocol"] = BridgeProtocolVersion,
                     ["appVersion"] = GetAssemblyVersionString(),
                 },
                 BridgeWaitKind.HelloOk,
                 HelloTimeout,
                 ct);
+            ValidateHelloProtocolOrThrow(helloResponse);
 
             var pingStopwatch = Stopwatch.StartNew();
             await SendBridgePingAndWaitPongAsync(PingTimeout, ct);
@@ -747,10 +850,34 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         return await protocolClient.SendCommandAndWaitBridgeEventAsync(cmd, payload, waitKind, timeout, ct).ConfigureAwait(false);
     }
 
+    private void ValidateHelloProtocolOrThrow(JsonElement root)
+    {
+        if (TryGetInt32(root, "protocol", out var protocol) && protocol == BridgeProtocolVersion)
+        {
+            return;
+        }
+
+        var actualProtocol = TryGetInt32(root, "protocol", out var actual)
+            ? actual.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : "(none)";
+        var message =
+            $"bridge_protocol_outdated: Installed bridge hello protocol {actualProtocol} does not match required protocol {BridgeProtocolVersion}. " +
+            "Reinstall/update nLink package.";
+        NknRuntimeDiagnostics.SetLastError("bridge_protocol_outdated");
+        SetNknStartFailed("bridge_protocol_outdated", message);
+        RecordBridgeFailure("bridge_protocol_outdated", "Installed bridge hello protocol version is outdated.");
+        Log(message);
+        throw new InvalidOperationException(message);
+    }
+
     private void HandleMessage(JsonElement root)
     {
         var source = TryGetString(root, "source", out var s) ? s : string.Empty;
         var payloadBase64 = TryGetString(root, "payloadBase64", out var p) ? p : string.Empty;
+        var hasChannel = TryGetString(root, "channel", out var channelText);
+        var channel = hasChannel
+            ? ParseBridgeChannel(channelText)
+            : NknBridgeChannel.Control;
         var isTopic = root.TryGetProperty("isTopic", out var isTopicProp) && isTopicProp.ValueKind == JsonValueKind.True;
         var topic = TryGetString(root, "topic", out var t) ? t : null;
 
@@ -780,14 +907,62 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             return;
         }
 
-        if (TryHandleScreenSharePayload(payloadBytes, source))
+        if (!hasChannel && TryHandleScreenSharePayload(payloadBytes, source))
         {
             MaybeLogScreenShareMessageSummary(payloadBytes.Length, source.Length, isTopic);
             return;
         }
 
-        MaybeLogBridgeMessageSummary(payloadBytes.Length, source.Length, isTopic);
-        MessageReceived?.Invoke(this, new NknIncomingMessage(source, payloadBytes, isTopic, topic));
+        HandleInboundBridgeMessage(source, payloadBytes, channel, isTopic, topic);
+    }
+
+    private void HandleBinaryBridgeFrame(BridgeBinaryFrame frame)
+    {
+        if (frame.Kind != BridgeBinaryFrameKind.Message)
+        {
+            Log($"Bridge binary frame ignored (kind={(byte)frame.Kind})");
+            return;
+        }
+
+        NknRuntimeDiagnostics.IncrementBridgeRawMessagesReceived();
+        NknRuntimeDiagnostics.SetLastBridgeMessage(frame.PrimaryText, frame.IsTopic);
+        if (frame.Payload.Length > MaxPayloadBytes)
+        {
+            NknRuntimeDiagnostics.SetLastError("bridge_incoming_payload_too_large");
+            Log($"Bridge binary frame ignored (payload too large, payload_len={frame.Payload.Length})");
+            return;
+        }
+
+        HandleInboundBridgeMessage(frame.PrimaryText, frame.Payload, frame.Channel, frame.IsTopic, frame.SecondaryText);
+    }
+
+    private void HandleInboundBridgeMessage(string source, byte[] payloadBytes, NknBridgeChannel channel, bool isTopic, string? topic)
+    {
+        if (channel == NknBridgeChannel.Media)
+        {
+            var handledMediaPayload = TryHandleScreenSharePayload(payloadBytes, source);
+            MaybeLogScreenShareMessageSummary(payloadBytes.Length, source.Length, isTopic);
+            if (handledMediaPayload)
+            {
+                return;
+            }
+        }
+
+        if (channel == NknBridgeChannel.Bulk)
+        {
+            MaybeLogBridgeBulkMessageSummary(payloadBytes.Length, source.Length, isTopic);
+        }
+        else if (channel != NknBridgeChannel.Media)
+        {
+            MaybeLogBridgeMessageSummary(payloadBytes.Length, source.Length, isTopic);
+        }
+        else
+        {
+            // Media-channel payloads should always stay classified as media even when they
+            // fall back to generic envelope handling.
+        }
+
+        MessageReceived?.Invoke(this, new NknIncomingMessage(source, payloadBytes, isTopic, topic, channel));
     }
 
     private bool TryHandleScreenSharePayload(byte[] payloadBytes, string? source)
@@ -899,6 +1074,112 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             $"Bridge screenshare dropped before dispatch (type={messageType}, reason={reason}, session_id={sessionId ?? "(none)"}, source={source ?? "(none)"})");
     }
 
+    private static string BuildFallbackMediaAddress(string identifier, string controlAddress)
+    {
+        var normalizedIdentifier = string.IsNullOrWhiteSpace(identifier) ? "nlink-media" : identifier.Trim() + "-media";
+        if (!string.IsNullOrWhiteSpace(controlAddress))
+        {
+            var separatorIndex = controlAddress.IndexOf('.');
+            if (separatorIndex >= 0 && separatorIndex < controlAddress.Length - 1)
+            {
+                return normalizedIdentifier + controlAddress[separatorIndex..];
+            }
+        }
+
+        return normalizedIdentifier;
+    }
+
+    private static string BuildFallbackBulkAddress(string identifier, string controlAddress)
+    {
+        var normalizedIdentifier = string.IsNullOrWhiteSpace(identifier) ? "nlink-bulk" : identifier.Trim() + "-bulk";
+        if (!string.IsNullOrWhiteSpace(controlAddress))
+        {
+            var separatorIndex = controlAddress.IndexOf('.');
+            if (separatorIndex >= 0 && separatorIndex < controlAddress.Length - 1)
+            {
+                return normalizedIdentifier + controlAddress[separatorIndex..];
+            }
+        }
+
+        return normalizedIdentifier;
+    }
+
+    private static NknBridgeChannel ParseBridgeChannel(string? channelText)
+    {
+        if (string.Equals(channelText, "media", StringComparison.OrdinalIgnoreCase))
+        {
+            return NknBridgeChannel.Media;
+        }
+
+        if (string.Equals(channelText, "bulk", StringComparison.OrdinalIgnoreCase))
+        {
+            return NknBridgeChannel.Bulk;
+        }
+
+        return NknBridgeChannel.Control;
+    }
+
+    private void ValidateBridgeCapabilitiesOrThrow(BridgeReadyInfo readyInfo)
+    {
+        if (readyInfo.Protocol != BridgeProtocolVersion)
+        {
+            var actualProtocol = readyInfo.Protocol?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "(none)";
+            var protocolMessage =
+                $"bridge_protocol_outdated: Installed bridge protocol {actualProtocol} does not match required protocol {BridgeProtocolVersion}. " +
+                "Reinstall/update nLink package.";
+            NknRuntimeDiagnostics.SetLastError("bridge_protocol_outdated");
+            SetNknStartFailed("bridge_protocol_outdated", protocolMessage);
+            RecordBridgeFailure("bridge_protocol_outdated", "Installed bridge protocol version is outdated.");
+            Log(protocolMessage);
+            throw new InvalidOperationException(protocolMessage);
+        }
+
+        var missingChannels = RequiredBridgeChannels
+            .Where(required => !readyInfo.SupportsChannel(required))
+            .ToArray();
+        if (missingChannels.Length == 0)
+        {
+            return;
+        }
+
+        var channelsSummary = readyInfo.ChannelsSummary;
+        var message =
+            $"{BridgeProtocolOutdatedBulkMissingCode}: Installed bridge does not support required channels " +
+            $"[{string.Join(",", missingChannels)}]; supported=[{channelsSummary}]. Reinstall/update nLink package.";
+        NknRuntimeDiagnostics.SetLastError(BridgeProtocolOutdatedBulkMissingCode);
+        SetNknStartFailed("bridge_protocol_outdated", message);
+        RecordBridgeFailure(BridgeProtocolOutdatedBulkMissingCode, "Installed bridge does not support the required transport channels.");
+        Log(message);
+        throw new InvalidOperationException(message);
+    }
+
+    private void EnsureChannelSupported(NknBridgeChannel channel)
+    {
+        string requiredChannel = channel switch
+        {
+            NknBridgeChannel.Media => "media",
+            NknBridgeChannel.Bulk => "bulk",
+            _ => "control",
+        };
+
+        string[] channelsSnapshot;
+        lock (gate)
+        {
+            channelsSnapshot = supportedBridgeChannels;
+        }
+
+        if (channelsSnapshot.Any(value => string.Equals(value, requiredChannel, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        var channelsSummary = channelsSnapshot.Length == 0
+            ? "(none)"
+            : string.Join(",", channelsSnapshot.OrderBy(static value => value, StringComparer.OrdinalIgnoreCase));
+        throw new InvalidOperationException(
+            $"{BridgeProtocolOutdatedBulkMissingCode}: Installed bridge does not support {requiredChannel} channel; supported=[{channelsSummary}]. Reinstall/update nLink package.");
+    }
+
     private void MaybeLogScreenShareMessageSummary(int payloadLength, int sourceLength, bool isTopic)
     {
         Interlocked.Increment(ref screenShareBridgeMessageCountSinceLastLog);
@@ -982,6 +1263,34 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var messageCount = Interlocked.Exchange(ref bridgeMessageCountSinceLastLog, 0);
         var totalPayloadBytes = Interlocked.Exchange(ref bridgeMessagePayloadBytesSinceLastLog, 0);
         Log($"Bridge control/session traffic (messages={messageCount}, payload_bytes={totalPayloadBytes}, source_len={sourceLength}, is_topic={isTopic})");
+    }
+
+    private void MaybeLogBridgeBulkMessageSummary(int payloadLength, int sourceLength, bool isTopic)
+    {
+        Interlocked.Increment(ref bulkBridgeMessageCountSinceLastLog);
+        Interlocked.Add(ref bulkBridgeMessagePayloadBytesSinceLastLog, payloadLength);
+
+        var nowTick = Stopwatch.GetTimestamp();
+        var previousTick = Volatile.Read(ref lastBulkBridgeMessageSummaryLogTick);
+        if (previousTick == 0)
+        {
+            Interlocked.CompareExchange(ref lastBulkBridgeMessageSummaryLogTick, nowTick, 0);
+            return;
+        }
+
+        if (Stopwatch.GetElapsedTime(previousTick, nowTick) < BridgeTrafficLogInterval)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref lastBulkBridgeMessageSummaryLogTick, nowTick, previousTick) != previousTick)
+        {
+            return;
+        }
+
+        var messageCount = Interlocked.Exchange(ref bulkBridgeMessageCountSinceLastLog, 0);
+        var totalPayloadBytes = Interlocked.Exchange(ref bulkBridgeMessagePayloadBytesSinceLastLog, 0);
+        Log($"Bridge filetransfer bulk traffic (messages={messageCount}, payload_bytes={totalPayloadBytes}, source_len={sourceLength}, is_topic={isTopic})");
     }
 
     private void OnScreenShareFrameReady(object? sender, ScreenShareFrameReadyEventArgs e)
@@ -1309,6 +1618,17 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         value = prop.ToString();
         return true;
+    }
+
+    private static bool TryGetInt32(JsonElement root, string propertyName, out int value)
+    {
+        value = default;
+        if (!root.TryGetProperty(propertyName, out var prop))
+        {
+            return false;
+        }
+
+        return prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out value);
     }
 
     private static bool TryGetId(JsonElement root, out string id)

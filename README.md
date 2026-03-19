@@ -8,16 +8,17 @@ Powered by NKN. Official website: https://nkn.org/
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
-## Current Release (0.5.0)
+## Current Release (0.5.1)
 
-`0.5.0` is the current release. It adds the first native in-session file transfer flow on top of the existing chat, screen sharing, remote control, and authenticated session model.
+`0.5.1` is the current release. It is the follow-up stabilization and hardening release after the first native `0.5.0` file-transfer release.
 
-- File transfer is now a native nLink feature instead of the older external tool flow.
-- Both helper and helpee can send a single file inside an active authenticated session when the `Transfer files` capability is allowed.
-- Incoming files are accepted or declined per file, transfer progress is visible on both sides, and transfers can be canceled.
-- File payloads are protected end-to-end, checked for integrity before success, and received through a temp-first safe save flow.
-- Helper-bound one-time invites, verified helper flow, and release diagnostics remain the default release path.
-- Screen sharing, remote control, diagnostics, and release packaging remain included in the same session shell.
+- File transfer remains a native in-session feature with accept/decline, progress, cancel, integrity verification, and temp-first safe save behavior.
+- Chat now uses the same session-secure transport envelope path as the other sensitive session traffic instead of being the odd one out.
+- Protected NKN seed storage is now required across supported desktop platforms; plaintext seed fallback is no longer part of the intended release path.
+- Diagnostics now state clearly that redaction is best-effort, and persistence/storage failures are surfaced in diagnostics instead of failing silently.
+- The bridge hot path no longer sends large payloads as JSON `payloadBase64`; `0.5.1` moves hot send/receive traffic to a framed binary stdio protocol.
+- File-transfer transport handling was hardened for reconnects, bulk-path behavior, and active-session recovery after the initial `0.5.0` rollout.
+- Helper-bound one-time invites, verified helper flow, screen sharing, remote control, and release packaging remain part of the same session shell.
 
 ## Quick Start (Windows)
 
@@ -62,10 +63,10 @@ Normal release UX uses a raw helper address plus a short verification code, then
 
 Notes:
 - Windows x64 only
-- Current release (`0.5.0`)
-- File transfer in `0.5.0` is single-file only. No folders, drag-and-drop, or resume after restart yet.
+- Current release (`0.5.1`)
+- File transfer in `0.5.1` is single-file only. No folders, drag-and-drop, or resume after restart yet.
 - Received files are saved into an app-owned folder under `%LOCALAPPDATA%\nLink\transfers\incoming\...`
-- Safe-by-default file size cap for `0.5.0`: `256 MiB`
+- Safe-by-default file size cap for `0.5.1`: `256 MiB`
 - Large file transfers over NKN can be noticeably slower than local or direct network copy.
 - Installer path: `%LOCALAPPDATA%\Programs\nLink`
 
@@ -103,9 +104,9 @@ License:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
 - Final release notes:
-  [`docs/releases/0.5.0.md`](docs/releases/0.5.0.md)
+  [`docs/releases/0.5.1.md`](docs/releases/0.5.1.md)
 - GitHub release body:
-  [`docs/releases/0.5.0-github.md`](docs/releases/0.5.0-github.md)
+  [`docs/releases/0.5.1-github.md`](docs/releases/0.5.1-github.md)
 - Screenshare RC/final validation checklist:
   [`docs/release/0.3.0-rc-validation-checklist.md`](docs/release/0.3.0-rc-validation-checklist.md)
 

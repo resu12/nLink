@@ -51,6 +51,15 @@
             <Setter Property="VerticalContentAlignment" Value="Center"/>
         </Style>
 
+        <Style Selector="Path.chatAttachGlyph">
+            <Setter Property="Width" Value="18"/>
+            <Setter Property="Height" Value="18"/>
+            <Setter Property="Stretch" Value="Uniform"/>
+            <Setter Property="Stroke" Value="{StaticResource AppTextBrush}"/>
+            <Setter Property="StrokeThickness" Value="1.9"/>
+            <Setter Property="StrokeLineCap" Value="Round"/>
+        </Style>
+
         <Style Selector="Border.transferCard">
             <Setter Property="Background" Value="#111A2A"/>
             <Setter Property="CornerRadius" Value="12"/>
@@ -232,13 +241,23 @@
               VerticalAlignment="Center">
             <Button Grid.Column="0"
                     AutomationProperties.AutomationId="Chat.SendFile"
+                    AutomationProperties.Name="Send file"
                     Classes="appButton secondaryButton"
-                    Content="Send file"
                     Command="{Binding SendFileCommand}"
                     IsVisible="{Binding ShowSendFileAction}"
                     IsEnabled="{Binding CanSendFileAction}"
                     Height="48"
-                    MinWidth="112"/>
+                    Width="48"
+                    Padding="0"
+                    ToolTip.Tip="Send file">
+                <Grid Width="18"
+                      Height="18"
+                      HorizontalAlignment="Center"
+                      VerticalAlignment="Center">
+                    <Path Classes="chatAttachGlyph"
+                          Data="M11.5 6.5L7 11C5.9 12.1 5.9 13.9 7 15C8.1 16.1 9.9 16.1 11 15L16.5 9.5C18.3 7.7 18.3 4.8 16.5 3C14.7 1.2 11.8 1.2 10 3L4.5 8.5C1.9 11.1 1.9 15.4 4.5 18C7.1 20.6 11.4 20.6 14 18L18 14"/>
+                </Grid>
+            </Button>
 
             <TextBox Grid.Column="1"
                      x:Name="ChatInputTextBox"

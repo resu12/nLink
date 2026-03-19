@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using NLink.Core.ScreenShare;
+using NLink.Core.Logging;
 
 namespace NLink.Infra.Nkn;
 
@@ -8,6 +9,8 @@ internal sealed class ScreenShareFrameAssembler
     private const int MaxChunkCount = 256;
     private const int MaxAssembledFrameBytes = 2_048_000;
     private const int MaxAssemblyAgeMs = 500;
+    private const long DegradedFreshnessAgeMs = 1500;
+    private const long StaleFrameCutoffAgeMs = 2000;
 
     private AssemblyState? currentAssembly;
     private long lastCompletedFrameId = -1;
@@ -19,6 +22,8 @@ internal sealed class ScreenShareFrameAssembler
     private long chunksDuplicateIgnored;
     private long chunksInvalidDropped;
     private long framesTooLargeDropped;
+    private long framesDroppedStaleAge;
+    private volatile string freshnessMode = "normal";
 
     public event EventHandler<ScreenShareFrameChunkV1>? ChunkReceived;
 
@@ -33,7 +38,9 @@ internal sealed class ScreenShareFrameAssembler
             FramesCompleted: Interlocked.Read(ref framesCompleted),
             ChunksDuplicateIgnored: Interlocked.Read(ref chunksDuplicateIgnored),
             ChunksInvalidDropped: Interlocked.Read(ref chunksInvalidDropped),
-            FramesTooLargeDropped: Interlocked.Read(ref framesTooLargeDropped));
+            FramesTooLargeDropped: Interlocked.Read(ref framesTooLargeDropped),
+            FramesDroppedStaleAge: Interlocked.Read(ref framesDroppedStaleAge),
+            FreshnessMode: freshnessMode);
     }
 
     public void OnChunk(ScreenShareFrameChunkV1 chunk)
@@ -162,11 +169,37 @@ internal sealed class ScreenShareFrameAssembler
             ChunksDroppedOlderFrame: Interlocked.Read(ref chunksDroppedOlderFrame),
             AssembliesExpired: Interlocked.Read(ref assembliesExpired),
             SessionId: currentAssembly.SessionId);
+        var frameAgeMs = GetFrameAgeMs(currentAssembly.CapturedTsUtcMs);
+        freshnessMode = frameAgeMs >= DegradedFreshnessAgeMs ? "degraded" : "normal";
 
         lastCompletedFrameId = currentAssembly.FrameId;
         currentAssembly = null;
+        if (frameAgeMs > StaleFrameCutoffAgeMs)
+        {
+            Interlocked.Increment(ref framesDroppedStaleAge);
+            LogStaleFrameDropped(completed.SessionId, completed.FrameId, frameAgeMs);
+            return;
+        }
+
         Interlocked.Increment(ref framesCompleted);
         FrameCompleted?.Invoke(this, completed);
+    }
+
+    private static long GetFrameAgeMs(long capturedTsUtcMs)
+    {
+        if (capturedTsUtcMs < 1_577_836_800_000L)
+        {
+            return 0;
+        }
+
+        return Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - capturedTsUtcMs);
+    }
+
+    private static void LogStaleFrameDropped(string sessionId, long frameId, long ageMs)
+    {
+        LocalOperationalLog.Info(
+            "ScreenShare",
+            $"event=screenshare_frame_dropped_stale; session_id={sessionId}; frame_id={frameId}; age_ms={ageMs}");
     }
 
     private static bool TryDecodeChunk(ScreenShareFrameChunkV1 chunk, out byte[] chunkBytes)
@@ -280,4 +313,6 @@ internal sealed record ScreenShareFrameAssemblerMetrics(
     long FramesCompleted,
     long ChunksDuplicateIgnored,
     long ChunksInvalidDropped,
-    long FramesTooLargeDropped);
+    long FramesTooLargeDropped,
+    long FramesDroppedStaleAge,
+    string FreshnessMode);

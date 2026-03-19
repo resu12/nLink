@@ -191,6 +191,27 @@ public sealed class ScreenCaptureAbstractionTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void RealNknClientAdapter_MediaChannelUnknownPayload_RemainsClassifiedAsMedia()
+    {
+        var options = NknTransportOptions.Load();
+        var identity = new NknIdentity("screenshare-media-unknown", "screenshare-media-unknown.fake");
+        using var adapter = new RealNknClientAdapter(identity, options);
+
+        NknIncomingMessage? receivedRawMessage = null;
+        adapter.MessageReceived += (_, message) => receivedRawMessage = message;
+
+        var payloadJson = "{\"kind\":\"other\",\"type\":\"other.frame.v1\",\"value\":1}";
+        var payloadBase64 = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(payloadJson));
+        var line = $"{{\"event\":\"message\",\"source\":\"peer.test\",\"channel\":\"media\",\"payloadBase64\":\"{payloadBase64}\",\"isTopic\":false,\"ts\":1731000000000}}";
+
+        adapter.HandleStdoutJsonLineForTests(line);
+
+        Assert.NotNull(receivedRawMessage);
+        Assert.Equal(NknBridgeChannel.Media, receivedRawMessage!.Channel);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void RealNknClientAdapter_BridgeMessages_WithCompleteScreenShareFrame_RaisesCompletedFrame()
     {
         var options = NknTransportOptions.Load();
@@ -387,7 +408,7 @@ public sealed class ScreenCaptureAbstractionTests
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task NknSignalingTransport_SendScreenSharePayloadAsync_UsesExistingMessagePath()
+    public async Task NknSignalingTransport_SendScreenSharePayloadAsync_UsesMediaChannel()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -454,9 +475,10 @@ public sealed class ScreenCaptureAbstractionTests
             var deliveredFrame = await frameReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             var diagnosticsAfterSend = NknRuntimeDiagnostics.Snapshot();
 
-            Assert.Equal(helperIdentity.Address, received.Source);
+            Assert.Equal(helperClient.ConnectedMediaAddress, received.Source);
             Assert.False(received.IsTopic);
             Assert.Null(received.Topic);
+            Assert.Equal(NknBridgeChannel.Media, received.Channel);
             Assert.True(EnvelopeCodec.TryDeserialize(received.Payload, out var env));
             Assert.Equal(MsgType.ScreenShareFrame, env.Type);
             Assert.Equal(frameBytes, deliveredFrame.EncodedFrameBytes);
@@ -484,7 +506,7 @@ public sealed class ScreenCaptureAbstractionTests
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task NknSignalingTransport_ChatSend_PrioritizesOverConcurrentScreenSharePayload_AndScreenShareCanUseBriefWaitBudget()
+    public async Task NknSignalingTransport_ChatSend_AndScreenShareFrame_UseSeparateChannels()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -566,19 +588,23 @@ public sealed class ScreenCaptureAbstractionTests
             var diagnosticsBeforeSend = NknRuntimeDiagnostics.Snapshot();
 
             var screenSendTask = helper.SendScreenSharePayloadAsync(screenPayload, cts.Token);
-            Assert.Equal(0, Volatile.Read(ref rawScreenPayloadReceived));
+            var receivedEnvelope = await screenEnvelopeReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var receivedFrame = await screenFrameReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            Assert.Equal(1, Volatile.Read(ref rawScreenPayloadReceived));
+            Assert.Equal(NknBridgeChannel.Media, receivedEnvelope.Channel);
+            Assert.Equal(helperClient.ConnectedMediaAddress, receivedEnvelope.Source);
+            Assert.Equal(new byte[] { 1, 2, 3, 4 }, receivedFrame.EncodedFrameBytes);
+            Assert.False(chatTask.IsCompleted);
 
             releaseFirstSend.TrySetResult();
 
             await chatTask;
             await screenSendTask.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             var receivedChat = await hostChatReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
-            var receivedFrame = await screenFrameReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
-            var receivedEnvelope = await screenEnvelopeReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             var diagnosticsAfterSend = NknRuntimeDiagnostics.Snapshot();
 
             Assert.Equal(chatPayload, receivedChat);
-            Assert.Equal(new byte[] { 1, 2, 3, 4 }, receivedFrame.EncodedFrameBytes);
             Assert.Equal(1, Volatile.Read(ref rawScreenPayloadReceived));
             Assert.Equal(0, helper.ScreenShareOutboundBusyDrops);
             Assert.Equal(1, helper.ScreenShareMessagesSent);
@@ -601,7 +627,7 @@ public sealed class ScreenCaptureAbstractionTests
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task NknSignalingTransport_ScreenSharePayload_DropsAfterBriefWaitBudget_WhenOutboundGateRemainsBusy()
+    public async Task NknSignalingTransport_ScreenSharePayload_BypassesBusyControlGate()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -633,7 +659,9 @@ public sealed class ScreenCaptureAbstractionTests
             host.ChatMessageReceived += (_, e) => hostChatReceived.TrySetResult(e.Payload);
             hostClient.MessageReceived += (_, e) =>
             {
-                if (!e.IsTopic && e.Payload.SequenceEqual(screenPayload))
+                if (!e.IsTopic &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.ScreenShareFrame)
                 {
                     Interlocked.Increment(ref rawScreenPayloadReceived);
                 }
@@ -678,20 +706,20 @@ public sealed class ScreenCaptureAbstractionTests
 
             await helper.SendScreenSharePayloadAsync(screenPayload, cts.Token).WaitAsync(TimeSpan.FromMilliseconds(300), cts.Token);
 
-            var diagnosticsAfterDrop = NknRuntimeDiagnostics.Snapshot();
-            Assert.Equal(0, Volatile.Read(ref rawScreenPayloadReceived));
-            Assert.Equal(1, helper.ScreenShareOutboundBusyDrops);
-            Assert.Equal(0, helper.ScreenShareMessagesSent);
-            Assert.Equal(0, helper.ScreenSharePayloadBytesSent);
+            var diagnosticsAfterSend = NknRuntimeDiagnostics.Snapshot();
+            Assert.Equal(1, Volatile.Read(ref rawScreenPayloadReceived));
+            Assert.Equal(0, helper.ScreenShareOutboundBusyDrops);
+            Assert.Equal(1, helper.ScreenShareMessagesSent);
+            Assert.True(helper.ScreenSharePayloadBytesSent > 0);
             Assert.Equal(
-                diagnosticsBeforeDrop.ScreenShareOutboundBusyDrops + 1,
-                diagnosticsAfterDrop.ScreenShareOutboundBusyDrops);
+                diagnosticsBeforeDrop.ScreenShareOutboundBusyDrops,
+                diagnosticsAfterSend.ScreenShareOutboundBusyDrops);
             Assert.Equal(
-                diagnosticsBeforeDrop.ScreenShareMessagesSent,
-                diagnosticsAfterDrop.ScreenShareMessagesSent);
-            Assert.Equal(
-                diagnosticsBeforeDrop.ScreenSharePayloadBytesSent,
-                diagnosticsAfterDrop.ScreenSharePayloadBytesSent);
+                diagnosticsBeforeDrop.ScreenShareMessagesSent + 1,
+                diagnosticsAfterSend.ScreenShareMessagesSent);
+            Assert.True(
+                diagnosticsAfterSend.ScreenSharePayloadBytesSent >
+                diagnosticsBeforeDrop.ScreenSharePayloadBytesSent);
 
             releaseFirstSend.TrySetResult();
             await chatTask;
@@ -706,7 +734,7 @@ public sealed class ScreenCaptureAbstractionTests
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task NknSignalingTransport_ScreenShareStop_WaitsForBusyOutboundGate_AndStillDelivers()
+    public async Task NknSignalingTransport_ScreenShareStop_UsesControlChannel_WhileFrameSendIsBlockedOnMediaChannel()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -790,16 +818,16 @@ public sealed class ScreenCaptureAbstractionTests
             await firstSendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
 
             var stopSendTask = helper.SendScreenSharePayloadAsync(stopPayload, cts.Token);
-            Assert.False(stopSendTask.IsCompleted);
+            var receivedStop = await stopPayloadReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await stopReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await stopSendTask.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
 
             releaseFirstSend.TrySetResult();
 
-            await frameSendTask;
-            await stopSendTask;
-            var receivedStop = await stopPayloadReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
-            await stopReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await frameSendTask.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
 
             Assert.Equal(helperIdentity.Address, receivedStop.Source);
+            Assert.Equal(NknBridgeChannel.Control, receivedStop.Channel);
             Assert.True(EnvelopeCodec.TryDeserialize(receivedStop.Payload, out var env));
             Assert.Equal(MsgType.ScreenShareStop, env.Type);
         }
@@ -885,6 +913,7 @@ public sealed class ScreenCaptureAbstractionTests
             await stopReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
 
             Assert.Equal(helperIdentity.Address, receivedStop.Source);
+            Assert.Equal(NknBridgeChannel.Control, receivedStop.Channel);
             Assert.True(Volatile.Read(ref droppedFirstStop) == 1);
             Assert.True(EnvelopeCodec.TryDeserialize(receivedStop.Payload, out var env));
             Assert.Equal(MsgType.ScreenShareStop, env.Type);

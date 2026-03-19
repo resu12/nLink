@@ -12,7 +12,8 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
     private readonly BridgeSupervisorCallbacks callbacks;
     private readonly Func<string> resolveNodePath;
     private readonly Func<string> resolveBridgePath;
-    private readonly Func<string, string, bool, CancellationToken, Task> onStdoutLineAsync;
+    private readonly Func<string, CancellationToken, Task> onStdoutJsonLineAsync;
+    private readonly Func<BridgeBinaryFrame, CancellationToken, Task> onStdoutBinaryFrameAsync;
     private readonly Func<string, string, bool, CancellationToken, Task> onStderrLineAsync;
     private readonly Func<string> getCleanupReasonPrefix;
     private readonly Func<bool> isDisposed;
@@ -24,8 +25,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
     private Task? stdoutReaderTask;
     private Task? stderrReaderTask;
     private CancellationTokenSource? readerLoopCts;
-    private StreamWriter? stdin;
-    private JsonlWriter? stdinJsonlWriter;
+    private BridgeStdioWriter? stdinWriter;
     private bool forcedKillRequested;
     private long currentBridgeSpawnTicks;
     private int trackedBridgePid;
@@ -35,7 +35,8 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         BridgeSupervisorCallbacks callbacks,
         Func<string> resolveNodePath,
         Func<string> resolveBridgePath,
-        Func<string, string, bool, CancellationToken, Task> onStdoutLineAsync,
+        Func<string, CancellationToken, Task> onStdoutJsonLineAsync,
+        Func<BridgeBinaryFrame, CancellationToken, Task> onStdoutBinaryFrameAsync,
         Func<string, string, bool, CancellationToken, Task> onStderrLineAsync,
         Func<string> getCleanupReasonPrefix,
         Func<bool> isDisposed,
@@ -46,7 +47,8 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         this.callbacks = callbacks;
         this.resolveNodePath = resolveNodePath;
         this.resolveBridgePath = resolveBridgePath;
-        this.onStdoutLineAsync = onStdoutLineAsync;
+        this.onStdoutJsonLineAsync = onStdoutJsonLineAsync;
+        this.onStdoutBinaryFrameAsync = onStdoutBinaryFrameAsync;
         this.onStderrLineAsync = onStderrLineAsync;
         this.getCleanupReasonPrefix = getCleanupReasonPrefix;
         this.isDisposed = isDisposed;
@@ -112,26 +114,25 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         {
             return new BridgeProcessDebugState(
                 HasProcessReference: process is not null,
-                HasStdinReference: stdin is not null,
+                HasStdinReference: stdinWriter is not null,
                 HasStdoutReaderTaskReference: stdoutReaderTask is not null,
                 HasStderrReaderTaskReference: stderrReaderTask is not null,
                 TrackedPid: trackedBridgePid);
         }
     }
 
-    public (StreamWriter Writer, JsonlWriter JsonlWriter, Process Process) GetActiveIoOrThrow()
+    public (BridgeStdioWriter Writer, Process Process) GetActiveIoOrThrow()
     {
         lock (gate)
         {
-            var w = stdin ?? throw new InvalidOperationException("NKN bridge is not running.");
-            var jw = stdinJsonlWriter ?? throw new InvalidOperationException("NKN bridge is not running.");
+            var w = stdinWriter ?? throw new InvalidOperationException("NKN bridge is not running.");
             var p = process ?? throw new InvalidOperationException("NKN bridge is not running.");
             if (p.HasExited)
             {
                 throw new InvalidOperationException("NKN bridge process is not available.");
             }
 
-            return (w, jw, p);
+            return (w, p);
         }
     }
 
@@ -141,7 +142,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         lock (gate)
         {
             existing = process;
-            if (existing is not null && !existing.HasExited && stdin is not null)
+            if (existing is not null && !existing.HasExited && stdinWriter is not null)
             {
                 callbacks.Log($"double_spawn_prevented (reuse_existing_bridge pid={existing.Id})");
                 callbacks.EmitBridgeLifecycle(new BridgeLifecycleEvent(
@@ -188,9 +189,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
 
         ct.ThrowIfCancellationRequested();
 
-        var newStdin = newProcess.StandardInput;
-        newStdin.AutoFlush = true;
-        var newJsonlWriter = new JsonlWriter(newStdin, leaveOpen: true);
+        var newStdinWriter = new BridgeStdioWriter(newProcess.StandardInput.BaseStream, leaveOpen: true);
 
         // Wait for old reader loops to stop before wiring the new process. This avoids
         // stale stdout/stderr lines from a previous bridge instance racing into startup.
@@ -201,8 +200,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         lock (gate)
         {
             process = newProcess;
-            stdin = newStdin;
-            stdinJsonlWriter = newJsonlWriter;
+            stdinWriter = newStdinWriter;
             forcedKillRequested = false;
             currentBridgeSpawnTicks = Stopwatch.GetTimestamp();
             trackedBridgePid = newProcess.Id;
@@ -359,10 +357,11 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
     {
         try
         {
-            var reader = new JsonlReader(Encoding.UTF8);
-            await reader.ReadLinesAsync(
+            var reader = new BridgeMixedStreamReader();
+            await reader.ReadAsync(
                 targetProcess.StandardOutput.BaseStream,
-                (line, token) => onStdoutLineAsync(line, "stdout", false, token),
+                onStdoutJsonLineAsync,
+                onStdoutBinaryFrameAsync,
                 ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ShouldIgnoreReaderLoopException(targetProcess, ex))
@@ -463,8 +462,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         {
             var snapshot = new ProcessStateSnapshot(
                 process,
-                stdin,
-                stdinJsonlWriter,
+                stdinWriter,
                 stdoutReaderTask,
                 stderrReaderTask,
                 readerLoopCts,
@@ -472,8 +470,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
                 trackedBridgeStartTimeUtcFileTime);
 
             process = null;
-            stdin = null;
-            stdinJsonlWriter = null;
+            stdinWriter = null;
             forcedKillRequested = false;
             currentBridgeSpawnTicks = 0;
             stdoutReaderTask = null;
@@ -497,8 +494,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
             TryKillTrackedOrphanBridgeProcess(snapshot.TrackedPid, snapshot.TrackedStartTimeUtcFileTime, cleanupReason);
         }
 
-        try { snapshot.JsonlWriter?.Dispose(); } catch { }
-        try { snapshot.Stdin?.Dispose(); } catch { }
+        try { snapshot.Writer?.Dispose(); } catch { }
         try { snapshot.ReaderLoopCts?.Dispose(); } catch { }
         if (waitForReaders)
         {
@@ -524,8 +520,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
             await TryKillTrackedOrphanBridgeProcessAsync(snapshot.TrackedPid, snapshot.TrackedStartTimeUtcFileTime, cleanupReason).ConfigureAwait(false);
         }
 
-        try { snapshot.JsonlWriter?.Dispose(); } catch { }
-        try { snapshot.Stdin?.Dispose(); } catch { }
+        try { snapshot.Writer?.Dispose(); } catch { }
         try { snapshot.ReaderLoopCts?.Dispose(); } catch { }
         if (waitForReaders)
         {
@@ -854,8 +849,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
 
     private sealed record ProcessStateSnapshot(
         Process? Process,
-        StreamWriter? Stdin,
-        JsonlWriter? JsonlWriter,
+        BridgeStdioWriter? Writer,
         Task? StdoutReaderTask,
         Task? StderrReaderTask,
         CancellationTokenSource? ReaderLoopCts,

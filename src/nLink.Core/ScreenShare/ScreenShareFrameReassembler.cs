@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using NLink.Core.Logging;
 
 namespace NLink.Core.ScreenShare;
 
@@ -8,11 +9,15 @@ public sealed class ScreenShareFrameReassembler
     public const int MaxInFlightFramesPerSession = 2;
     public const int MaxChunkCount = 128;
     public const int MaxAssembledFrameBytes = 512_000;
+    private const long DegradedFreshnessAgeMs = 1500;
+    private const long StaleFrameCutoffAgeMs = 2000;
 
     private readonly Dictionary<string, SessionAssemblyState> sessions = new(StringComparer.Ordinal);
     private long framesCompleted;
     private long framesDropped;
+    private long framesDroppedStaleAge;
     private long framesRejectedOversize;
+    private volatile string freshnessMode = "normal";
 
     public event EventHandler<ScreenShareFrameChunkV1>? ChunkAccepted;
 
@@ -22,8 +27,10 @@ public sealed class ScreenShareFrameReassembler
     {
         return new ScreenShareMetrics(
             FramesDropped: Interlocked.Read(ref framesDropped),
+            FramesDroppedStaleAge: Interlocked.Read(ref framesDroppedStaleAge),
             FramesCompleted: Interlocked.Read(ref framesCompleted),
-            FramesRejectedOversize: Interlocked.Read(ref framesRejectedOversize));
+            FramesRejectedOversize: Interlocked.Read(ref framesRejectedOversize),
+            FreshnessMode: freshnessMode);
     }
 
     public void OnChunk(ScreenShareFrameChunkV1 chunk)
@@ -46,6 +53,11 @@ public sealed class ScreenShareFrameReassembler
         {
             session = new SessionAssemblyState();
             sessions.Add(sessionId, session);
+        }
+
+        if (session.DegradedFreshnessMode)
+        {
+            KeepOnlyNewestInFlightFrame(session, chunk.FrameId);
         }
 
         if (chunk.FrameId <= session.LastCompletedFrameId)
@@ -104,6 +116,10 @@ public sealed class ScreenShareFrameReassembler
 
         session.InFlightFrames.Remove(chunk.FrameId);
         session.LastCompletedFrameId = Math.Max(session.LastCompletedFrameId, chunk.FrameId);
+        var frameAgeMs = GetFrameAgeMs(assembly.TimestampUnixMilliseconds);
+        session.LastCompletedFrameAgeMs = frameAgeMs;
+        session.DegradedFreshnessMode = frameAgeMs >= DegradedFreshnessAgeMs;
+        freshnessMode = session.DegradedFreshnessMode ? "degraded" : "normal";
 
         var staleFrameIds = session.InFlightFrames.Keys
             .Where(frameId => frameId < session.LastCompletedFrameId)
@@ -115,6 +131,19 @@ public sealed class ScreenShareFrameReassembler
         }
 
         session.InvalidatedFrameIds.RemoveWhere(frameId => frameId <= session.LastCompletedFrameId);
+        if (frameAgeMs > StaleFrameCutoffAgeMs)
+        {
+            Interlocked.Increment(ref framesDropped);
+            Interlocked.Increment(ref framesDroppedStaleAge);
+            LogStaleFrameDropped(sessionId, assembly.FrameId, frameAgeMs);
+            if (session.InFlightFrames.Count == 0 && !session.DegradedFreshnessMode)
+            {
+                sessions.Remove(sessionId);
+            }
+
+            return;
+        }
+
         Interlocked.Increment(ref framesCompleted);
 
         FrameReady?.Invoke(
@@ -128,7 +157,7 @@ public sealed class ScreenShareFrameReassembler
                 assembly.Encoding,
                 frameBytes));
 
-        if (session.InFlightFrames.Count == 0)
+        if (session.InFlightFrames.Count == 0 && !session.DegradedFreshnessMode)
         {
             sessions.Remove(sessionId);
         }
@@ -265,9 +294,49 @@ public sealed class ScreenShareFrameReassembler
         return true;
     }
 
+    private static long GetFrameAgeMs(long timestampUnixMilliseconds)
+    {
+        if (timestampUnixMilliseconds < 1_577_836_800_000L)
+        {
+            return 0;
+        }
+
+        return Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - timestampUnixMilliseconds);
+    }
+
+    private static void LogStaleFrameDropped(string sessionId, long frameId, long ageMs)
+    {
+        LocalOperationalLog.Info(
+            "ScreenShare",
+            $"event=screenshare_frame_dropped_stale; session_id={sessionId}; frame_id={frameId}; age_ms={ageMs}");
+    }
+
+    private void KeepOnlyNewestInFlightFrame(SessionAssemblyState session, long incomingFrameId)
+    {
+        if (session.InFlightFrames.Count == 0)
+        {
+            return;
+        }
+
+        var newestFrameId = Math.Max(incomingFrameId, session.InFlightFrames.Keys.Max());
+        var staleFrameIds = session.InFlightFrames.Keys
+            .Where(frameId => frameId < newestFrameId)
+            .ToArray();
+        foreach (var staleFrameId in staleFrameIds)
+        {
+            session.InFlightFrames.Remove(staleFrameId);
+            session.InvalidatedFrameIds.Add(staleFrameId);
+            Interlocked.Increment(ref framesDropped);
+        }
+    }
+
     private sealed class SessionAssemblyState
     {
         public long LastCompletedFrameId { get; set; } = -1;
+
+        public long LastCompletedFrameAgeMs { get; set; }
+
+        public bool DegradedFreshnessMode { get; set; }
 
         public SortedDictionary<long, AssemblyState> InFlightFrames { get; } = new();
 

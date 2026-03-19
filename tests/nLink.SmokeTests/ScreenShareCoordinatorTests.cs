@@ -1311,7 +1311,7 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
             await Task.Delay(50);
             autoTuneTick!.Invoke(coordinator, Array.Empty<object>());
 
-            Assert.Equal(FeatureFlags.ScreenShareTransportMaxFps - 1, fakeSource.LastCaptureFrameRateHint);
+            Assert.Equal(2, fakeSource.LastCaptureFrameRateHint);
             Assert.Contains(FeatureFlags.ScreenShareTransportMaxFps, fakeSource.CaptureFrameRateHints);
 
             await AwaitCompletesAsync(
@@ -1486,7 +1486,7 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
         await Task.Delay(50);
         autoTuneTick!.Invoke(coordinator, Array.Empty<object>());
 
-        Assert.Equal(FeatureFlags.ScreenShareTransportMaxFps - 2, fakeSource.LastCaptureFrameRateHint);
+        Assert.Equal(2, fakeSource.LastCaptureFrameRateHint);
     }
 
     [Fact]
@@ -1551,6 +1551,128 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_FileTransferDegradedHint_DropsBacklogAndReducesSenderFps()
+    {
+        var fakeSource = new AdaptiveFakeScreenCaptureSource();
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 13, 12, 0, 0, TimeSpan.Zero));
+        var probe = new ScreenShareSendProbe(recentPayloadCapacity: 4, maxInFlight: 1, startBlocked: true);
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: probe.SendReadOnlyPayloadAsync,
+            clock: clock);
+
+        await AwaitCompletesAsync(
+            coordinator.StartAsync("session-filetransfer-pressure", CancellationToken.None),
+            TimeSpan.FromSeconds(2),
+            "file-transfer degraded screenshare start");
+
+        coordinator.SetFileTransferDegradedHint(true);
+        Assert.Equal(2, fakeSource.LastCaptureFrameRateHint);
+
+        fakeSource.RaiseFrame(new ScreenCaptureFrameEventArgs(640, 360, new byte[] { 1 }, "jpeg"));
+        await AwaitCompletesAsync(
+            probe.FirstSendStarted,
+            TimeSpan.FromSeconds(2),
+            "degraded sender blocked first send");
+
+        for (byte marker = 2; marker <= 5; marker++)
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(500));
+            fakeSource.RaiseFrame(new ScreenCaptureFrameEventArgs(640, 360, new[] { marker }, "jpeg"));
+        }
+
+        probe.ReleaseBlockedSends();
+        await AwaitCompletesAsync(
+            probe.WaitForPayloadCountAsync(2, TimeSpan.FromSeconds(2)),
+            TimeSpan.FromSeconds(2),
+            "degraded sender freshest payloads");
+
+        var payloads = probe.GetRecentPayloadsSnapshot();
+        Assert.Equal(2, probe.PayloadsSent);
+        Assert.Equal(2, payloads.Length);
+        Assert.True(ScreenSharePayloadCodec.TryDeserialize(payloads[0], out var firstChunk));
+        Assert.True(ScreenSharePayloadCodec.TryDeserialize(payloads[1], out var secondChunk));
+        Assert.Equal(new byte[] { 1 }, Convert.FromBase64String(firstChunk.DataBase64));
+        Assert.Equal(new byte[] { 5 }, Convert.FromBase64String(secondChunk.DataBase64));
+
+        var senderMetrics = coordinator.GetMetricsSnapshot();
+        Assert.Equal("degraded", senderMetrics.FreshnessMode);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_FileTransferDegradedHint_StaysStickyBeforeExiting()
+    {
+        var fakeSource = new AdaptiveFakeScreenCaptureSource();
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 15, 10, 0, 0, TimeSpan.Zero));
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: static (_, _) => Task.CompletedTask,
+            clock: clock);
+
+        await AwaitCompletesAsync(
+            coordinator.StartAsync("session-sticky-degraded", CancellationToken.None),
+            TimeSpan.FromSeconds(2),
+            "sticky degraded start");
+
+        coordinator.SetFileTransferDegradedHint(true);
+        Assert.Equal(2, fakeSource.LastCaptureFrameRateHint);
+        Assert.Equal("degraded", coordinator.GetMetricsSnapshot().FreshnessMode);
+
+        coordinator.SetFileTransferDegradedHint(false);
+        Assert.Equal(2, fakeSource.LastCaptureFrameRateHint);
+        Assert.Equal("degraded", coordinator.GetMetricsSnapshot().FreshnessMode);
+
+        clock.Advance(TimeSpan.FromSeconds(3));
+        coordinator.SetFileTransferDegradedHint(false);
+        Assert.Equal(2, fakeSource.LastCaptureFrameRateHint);
+        Assert.Equal("degraded", coordinator.GetMetricsSnapshot().FreshnessMode);
+
+        clock.Advance(TimeSpan.FromSeconds(2));
+        coordinator.SetFileTransferDegradedHint(false);
+
+        Assert.NotEqual(2, fakeSource.LastCaptureFrameRateHint);
+        Assert.Equal("normal", coordinator.GetMetricsSnapshot().FreshnessMode);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_FileTransferCatchUpOnlyHint_KeepsSenderDegradedUntilReleased()
+    {
+        var fakeSource = new AdaptiveFakeScreenCaptureSource();
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 15, 11, 0, 0, TimeSpan.Zero));
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: static (_, _) => Task.CompletedTask,
+            clock: clock);
+
+        await AwaitCompletesAsync(
+            coordinator.StartAsync("session-catchup-pressure", CancellationToken.None),
+            TimeSpan.FromSeconds(2),
+            "catch-up pressure start");
+
+        coordinator.SetFileTransferCatchUpOnlyHint(true);
+        Assert.Equal(2, fakeSource.LastCaptureFrameRateHint);
+        Assert.Equal("degraded", coordinator.GetMetricsSnapshot().FreshnessMode);
+
+        clock.Advance(TimeSpan.FromSeconds(3));
+        coordinator.SetFileTransferCatchUpOnlyHint(true);
+        Assert.Equal(2, fakeSource.LastCaptureFrameRateHint);
+        Assert.Equal("degraded", coordinator.GetMetricsSnapshot().FreshnessMode);
+
+        coordinator.SetFileTransferCatchUpOnlyHint(false);
+        Assert.Equal(2, fakeSource.LastCaptureFrameRateHint);
+        Assert.Equal("degraded", coordinator.GetMetricsSnapshot().FreshnessMode);
+
+        clock.Advance(TimeSpan.FromSeconds(5));
+        coordinator.SetFileTransferCatchUpOnlyHint(false);
+
+        Assert.NotEqual(2, fakeSource.LastCaptureFrameRateHint);
+        Assert.Equal("normal", coordinator.GetMetricsSnapshot().FreshnessMode);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportScreenShareCoordinator_Metrics_TrackRawSerializedAndBridgeBytes()
     {
         var fakeSource = new FakeScreenCaptureSource();
@@ -1559,10 +1681,9 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
         await using var coordinator = new TransportScreenShareCoordinator(
             captureSourceFactory: () => fakeSource,
             sendPayloadAsync: probe.SendReadOnlyPayloadAsync,
-            estimateBridgeBytes: payload => NknBridgePayloadAccounting.MeasureSendCommandJsonlBytes(
+            estimateBridgeBytes: payload => NknBridgePayloadAccounting.MeasureSendFrameBytes(
                 destination: "peer.test",
-                payload.Span,
-                commandId: "1"));
+                payload.Span));
 
         await AwaitCompletesAsync(
             coordinator.StartAsync("session-byte-metrics", CancellationToken.None),
@@ -1587,7 +1708,7 @@ public sealed class ScreenShareCoordinatorTests : IClassFixture<ScreenShareCoord
         Assert.Equal(frameBytes.Length, metrics.RawFrameBytesSent);
         Assert.Equal(payloads.Sum(static payload => payload.Length), metrics.SerializedChunkBytesSent);
         Assert.Equal(
-            payloads.Sum(payload => NknBridgePayloadAccounting.MeasureSendCommandJsonlBytes("peer.test", payload, "1")),
+            payloads.Sum(payload => NknBridgePayloadAccounting.MeasureSendFrameBytes("peer.test", payload)),
             metrics.BridgeBytesSent);
     }
 

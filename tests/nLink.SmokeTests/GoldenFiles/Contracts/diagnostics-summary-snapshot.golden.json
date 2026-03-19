@@ -19,5 +19,7 @@
   "ActiveOutboundFileTransferState": "Idle",
   "ActiveOutboundFileTransferBytes": null,
   "LastFileTransferFailureCode": "(none)",
-  "LastFileTransferSavedPath": "(none)"
+  "LastFileTransferSavedPath": "(none)",
+  "PersistenceSummary": "Healthy",
+  "PersistenceWarning": "(none)"
 }

@@ -16,6 +16,26 @@ function Get-NormalizedRelativePath {
     return $relative.Replace('\', '/')
 }
 
+function Assert-BridgeSupportsBulkChannel {
+    param(
+        [Parameter(Mandatory = $true)][string]$BridgeScriptPath
+    )
+
+    $content = Get-Content -Path $BridgeScriptPath -Raw
+    $requiredMarkers = @(
+        'bulkClient',
+        'bulkAddress',
+        'SUPPORTED_CHANNELS',
+        "'bulk'"
+    )
+
+    foreach ($marker in $requiredMarkers) {
+        if ($content -notlike "*$marker*") {
+            throw "Packaged bridge script does not advertise/implement bulk channel support: missing marker '$marker' in $BridgeScriptPath"
+        }
+    }
+}
+
 $resolvedStageDir = (Resolve-Path $StageDir).Path
 $resolvedManifestPath = (Resolve-Path $ManifestPath).Path
 
@@ -95,6 +115,26 @@ if (Test-Path -Path $bridgeRoot -PathType Container) {
 
     if ($unexpectedBridgeRuntimes.Count -gt 0) {
         throw "Package staging contains unexpected bridge runtime directories: $($unexpectedBridgeRuntimes -join ', ')"
+    }
+
+    $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+    $bridgeSourcePath = Join-Path $repoRoot "tools\nkn-bridge\index.js"
+    $expectedBridgeHash = if (Test-Path $bridgeSourcePath) { (Get-FileHash -Path $bridgeSourcePath -Algorithm SHA256).Hash } else { $null }
+
+    foreach ($runtime in $actualBridgeRuntimes) {
+        $stagedBridgePath = Join-Path $bridgeRoot (Join-Path $runtime 'index.js')
+        if (-not (Test-Path -Path $stagedBridgePath -PathType Leaf)) {
+            continue
+        }
+
+        Assert-BridgeSupportsBulkChannel -BridgeScriptPath $stagedBridgePath
+
+        if ($expectedBridgeHash) {
+            $stagedHash = (Get-FileHash -Path $stagedBridgePath -Algorithm SHA256).Hash
+            if ($stagedHash -ne $expectedBridgeHash) {
+                throw "Packaged bridge script does not match repo source for runtime '$runtime'."
+            }
+        }
     }
 }
 

@@ -143,6 +143,26 @@ function Assert-BridgeBundleOutput {
     }
 }
 
+function Assert-BridgeBundleSupportsBulkChannel {
+    param(
+        [Parameter(Mandatory = $true)][string]$BridgeScriptPath
+    )
+
+    $content = Get-Content -Path $BridgeScriptPath -Raw
+    $requiredMarkers = @(
+        'bulkClient',
+        'bulkAddress',
+        'SUPPORTED_CHANNELS',
+        "'bulk'"
+    )
+
+    foreach ($marker in $requiredMarkers) {
+        if ($content -notlike "*$marker*") {
+            throw "Bridge bundle validation failed: missing required bulk-channel marker '$marker' in $BridgeScriptPath"
+        }
+    }
+}
+
 function Get-DirectorySizeBytes {
     param(
         [Parameter(Mandatory = $true)][string]$Path
@@ -252,7 +272,7 @@ function Test-BridgeBundleHealth {
     })
 
     try {
-        $proc.StandardInput.WriteLine('{"id":"1","cmd":"hello","protocol":1,"appVersion":"bundle-check"}')
+        $proc.StandardInput.WriteLine('{"id":"1","cmd":"hello","protocol":2,"appVersion":"bundle-check"}')
         $helloTask = $proc.StandardOutput.ReadLineAsync()
         if (-not $helloTask.Wait(5000)) {
             throw "Bridge health check failed: timed out waiting for hello_ok."
@@ -385,6 +405,7 @@ $sizeAfterTotal = Get-DirectorySizeBytes -Path $outAbs
 $sizeAfterNodeModules = Get-DirectorySizeBytes -Path (Join-Path $outAbs "node_modules")
 
 Assert-BridgeBundleOutput -OutDir $outAbs
+Assert-BridgeBundleSupportsBulkChannel -BridgeScriptPath (Join-Path $outAbs "index.js")
 Test-BridgeBundleHealth -NodePath (Join-Path $outAbs "node.exe") -BridgeScriptPath (Join-Path $outAbs "index.js")
 
 Write-Host "[nLink] Bridge bundle output: $outAbs" -ForegroundColor Green

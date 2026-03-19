@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.5.1] - 2026-03-13
+
+### Added
+
+- Final `0.5.1` release notes under `docs/releases/`.
+- Persistence diagnostics and warning reporting for secret-store, identity-store, and diagnostics-export failures.
+- Explicit diagnostics privacy messaging that redaction is best-effort and should be reviewed before sharing.
+
+### Changed
+
+- README and release-facing documentation now reflect `0.5.1` as the current release.
+- Release version sources and packaging defaults now resolve to `0.5.1`.
+- Chat now uses the session-secure transport envelope path.
+- Protected secret storage is now the intended seed-storage path across supported desktop platforms; plaintext fallback is no longer part of the normal release model.
+- The local .NET <-> bridge hot path now uses a framed binary stdio protocol instead of JSON `payloadBase64` for hot send/receive traffic.
+- Privileged session actions now route through a stricter internal authorization boundary.
+
+### Fixed
+
+- File transfer was hardened for transport-aware pause/resume, reconnect handling, NKN bulk dispatch behavior, and mixed-session recovery after the initial `0.5.0` rollout.
+- Helpee invite preparation no longer stays stuck in `TransportInitializing` when protected seed loading fails during startup.
+- Runtime and transport responsibilities were split into narrower internal components to reduce audit and regression risk.
+
+### Packaging
+
+- Installer and portable naming defaults now target `0.5.1` release assets.
+
 ## [0.5.0] - 2026-03-10
 
 ### Added

@@ -5,7 +5,7 @@ namespace NLink.Infra.Nkn;
 
 internal sealed class BridgeProtocolClient
 {
-    private readonly Func<JsonlWriter> getWriter;
+    private readonly Func<BridgeStdioWriter> getWriter;
     private readonly Action<string> log;
     private readonly Action<JsonElement> onReady;
     private readonly Action<string, JsonElement> onRpcProgress;
@@ -23,7 +23,7 @@ internal sealed class BridgeProtocolClient
     private long nextCommandId;
 
     public BridgeProtocolClient(
-        Func<JsonlWriter> getWriter,
+        Func<BridgeStdioWriter> getWriter,
         Action<string> log,
         Action<JsonElement> onReady,
         Action<string, JsonElement> onRpcProgress,
@@ -98,7 +98,7 @@ internal sealed class BridgeProtocolClient
                 ["id"] = id,
             });
 
-            await writer.WriteLineAsync(ping, ct).ConfigureAwait(false);
+            await writer.WriteJsonLineAsync(ping, ct).ConfigureAwait(false);
             return await wait.Task.WaitAsync(timeout, ct).ConfigureAwait(false);
         }
         finally
@@ -209,7 +209,7 @@ internal sealed class BridgeProtocolClient
             var jsonlBytes = NknBridgePayloadAccounting.MeasureSerializedJsonlBytes(json);
             onCommandSerialized?.Invoke(cmd, jsonlBytes);
             onSerialized?.Invoke(jsonlBytes);
-            await writer.WriteLineAsync(json, ct).ConfigureAwait(false);
+            await writer.WriteJsonLineAsync(json, ct).ConfigureAwait(false);
             return wait;
         }
         catch

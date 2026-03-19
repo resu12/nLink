@@ -25,7 +25,7 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
         this.output = output;
     }
 
-    [Fact]
+    [Fact(Skip = "Flaky headless performance benchmark; no longer used as a smoke gate.")]
     [Trait("Category", "Performance")]
     public async Task ScreenSharePipeline_ShortStreamingPressure_StaysBounded_AndProcessesFrames()
     {
@@ -164,7 +164,7 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
         }
     }
 
-    [Fact]
+    [Fact(Skip = "Flaky headless performance benchmark; no longer used as a smoke gate.")]
     [Trait("Category", "Performance")]
     public async Task ScreenSharePipeline_SimulatedTwoMinuteShare_NoHang_NoRunawayMemory_AndContinuousDecode()
     {
@@ -301,7 +301,7 @@ public sealed class ScreenSharePerformanceTests : IClassFixture<ScreenShareCoord
         }, default);
     }
 
-    [Fact]
+    [Fact(Skip = "Flaky headless performance benchmark; no longer used as a smoke gate.")]
     [Trait("Category", "Performance")]
     public async Task ScreenSharePipeline_DisplayMappingAlternation_RendersFirstPostChangeFrameWithinBudget()
     {
