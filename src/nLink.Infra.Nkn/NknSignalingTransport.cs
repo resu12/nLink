@@ -4712,7 +4712,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         MsgType messageType,
         out SessionSecureEnvelopePayload securePayload)
     {
-        securePayload = default;
+        securePayload = default!;
 
         if (currentSessionSecurityState.SessionId is not SessionId sessionId)
         {
@@ -4907,7 +4907,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         SessionReplayWindow replayWindow,
         out SessionSecureEnvelopePayload securePayload)
     {
-        securePayload = default;
+        securePayload = default!;
 
         if (key is null || key.Length == 0)
         {
@@ -4965,7 +4965,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         MsgType messageType,
         out SessionSecureEnvelopePayload securePayload)
     {
-        securePayload = default;
+        securePayload = default!;
 
         if (currentSessionSecurityState.SessionId is not SessionId sessionId)
         {
@@ -5073,7 +5073,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         MsgType messageType,
         out SessionSecureEnvelopePayload securePayload)
     {
-        securePayload = default;
+        securePayload = default!;
 
         if (currentSessionSecurityState.SessionId is not SessionId sessionId)
         {
@@ -5682,7 +5682,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
     private void DeliverFileTransferDataFrame(FileTransferDataFrameV2 frame, NknBridgeChannel channel)
     {
-        TransportFileTransferDataSession session;
+        TransportFileTransferDataSession? session;
         lock (gate)
         {
             if (!fileTransferDataSessions.TryGetValue(frame.TransferId, out session))
@@ -7316,7 +7316,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
         try
         {
-            parsed = JsonSerializer.Deserialize<RejectPayload>(payload);
+            parsed = JsonSerializer.Deserialize<RejectPayload>(payload) ?? default!;
             return parsed is not null &&
                    !string.IsNullOrWhiteSpace(parsed.sessionId) &&
                    !string.IsNullOrWhiteSpace(parsed.helpeeEcdhPublicKey) &&
@@ -7365,7 +7365,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
 
         try
         {
-            parsed = JsonSerializer.Deserialize<SessionEndPayload>(payload);
+            parsed = JsonSerializer.Deserialize<SessionEndPayload>(payload) ?? default!;
             return parsed is not null && !string.IsNullOrWhiteSpace(parsed.sessionId);
         }
         catch
@@ -7867,7 +7867,7 @@ public sealed class NknSignalingTransport : ISignalingTransport, IAddressTargetS
         Envelope env,
         out SessionSecureEnvelopePayload securePayload)
     {
-        securePayload = default;
+        securePayload = default!;
 
         if (currentSessionSecurityState.SessionId is not SessionId sessionId)
         {

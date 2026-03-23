@@ -195,11 +195,11 @@ internal sealed class ScreenShareFrameAssembler
         return Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - capturedTsUtcMs);
     }
 
-    private static void LogStaleFrameDropped(string sessionId, long frameId, long ageMs)
+    private static void LogStaleFrameDropped(string? sessionId, long frameId, long ageMs)
     {
         LocalOperationalLog.Info(
             "ScreenShare",
-            $"event=screenshare_frame_dropped_stale; session_id={sessionId}; frame_id={frameId}; age_ms={ageMs}");
+            $"event=screenshare_frame_dropped_stale; session_id={sessionId ?? "(none)"}; frame_id={frameId}; age_ms={ageMs}");
     }
 
     private static bool TryDecodeChunk(ScreenShareFrameChunkV1 chunk, out byte[] chunkBytes)

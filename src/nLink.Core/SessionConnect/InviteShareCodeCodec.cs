@@ -235,7 +235,7 @@ public static class InviteShareCodeCodec
                 return false;
             }
 
-            buffer = (buffer << 5) | value;
+            buffer = (buffer << 5) | (value & 0x1F);
             bitsLeft += 5;
 
             while (bitsLeft >= 8)

@@ -13,7 +13,9 @@ public sealed class NotSupportedCaptureSource : IScreenCaptureSource
     public bool IsSupported => false;
 
     /// <inheritdoc />
+#pragma warning disable CS0067
     public event EventHandler<ScreenCaptureFrameEventArgs>? FrameArrived;
+#pragma warning restore CS0067
 
     /// <inheritdoc />
     public Task StartAsync(CancellationToken cancellationToken)
