@@ -13063,6 +13063,75 @@ return;
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void NknTransportOptions_StartupCleanup_EnumerationFailure_IsBestEffort()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-instance-cleanup-enumerate-failure", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        PersistenceDiagnostics.ClearForTests();
+        try
+        {
+            var localAppData = Path.Combine(tempDir, "appdata");
+            var nlinkDir = Path.Combine(localAppData, "nLink");
+            Directory.CreateDirectory(nlinkDir);
+
+            using var localAppDataOverride = NknTransportOptions.OverrideLocalAppDataPathForTests(localAppData);
+            using var enumerateOverride = NknTransportOptions.OverrideEnumerateInstanceIdentityFilesForTests(_ =>
+                throw new UnauthorizedAccessException("enumeration failed"));
+
+            var options = NknTransportOptions.Load();
+
+            Assert.Equal(Path.Combine(nlinkDir, "identity.json"), options.KeyPath);
+            var snapshot = PersistenceDiagnostics.Snapshot();
+            Assert.Contains(snapshot.RecentEvents, e =>
+                string.Equals(e.Operation, "cleanup_stale_instance_identities", StringComparison.Ordinal) &&
+                e.Severity == PersistenceDiagnosticSeverity.Warning &&
+                e.Outcome == PersistenceDiagnosticOutcome.Partial);
+        }
+        finally
+        {
+            PersistenceDiagnostics.ClearForTests();
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void NknTransportOptions_StartupCleanup_DeletesStaleSeed_ThroughSecretStoreBackend()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-instance-cleanup-backend-seed", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        PersistenceDiagnostics.ClearForTests();
+        try
+        {
+            var localAppData = Path.Combine(tempDir, "appdata");
+            var nlinkDir = Path.Combine(localAppData, "nLink");
+            Directory.CreateDirectory(nlinkDir);
+            var staleIdentityPath = Path.Combine(nlinkDir, "identity.instance-4242.json");
+            WriteIdentityFile(staleIdentityPath, "stale-backend-delete-test");
+            File.Delete(NknSecretStore.GetSecretPath(staleIdentityPath));
+
+            var backend = new FakeProtectedSeedBackend();
+            backend.SaveSeed(staleIdentityPath, new byte[] { 1, 2, 3, 4 });
+
+            using var backendOverride = NknSecretStore.OverrideBackendForTests(backend);
+            using var localAppDataOverride = NknTransportOptions.OverrideLocalAppDataPathForTests(localAppData);
+            using var perProcessOverride = NknTransportOptions.OverrideShouldUsePerProcessLocalIdentityForTests(true);
+            using var runningOverride = NknTransportOptions.OverrideIsProcessRunningForTests(_ => false);
+
+            _ = NknTransportOptions.Load();
+
+            Assert.False(File.Exists(staleIdentityPath));
+            Assert.False(backend.StoredSeeds.ContainsKey(Path.GetFullPath(staleIdentityPath)));
+        }
+        finally
+        {
+            PersistenceDiagnostics.ClearForTests();
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void NknIdentityStore_OnWindows_InvalidLegacySeed_DoesNotSilentlyRotateIdentity()
     {
         if (!OperatingSystem.IsWindows())

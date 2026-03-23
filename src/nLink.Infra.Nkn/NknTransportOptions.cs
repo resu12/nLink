@@ -194,8 +194,22 @@ internal sealed class NknTransportOptions
         var staleFound = 0;
         var deleted = 0;
         var failed = 0;
+        IEnumerable<string> identityPaths;
+        try
+        {
+            identityPaths = EnumerateInstanceIdentityFiles(directory);
+        }
+        catch (Exception ex)
+        {
+            failed++;
+            LocalOperationalLog.Warn(
+                "NKN.IdentityCleanup",
+                $"event=stale_instance_identity_cleanup_enumerate_failed; directory={directory}; reason={ex.GetType().Name}");
+            RecordCleanupSummary(scanned, staleFound, deleted, failed, directory);
+            return;
+        }
 
-        foreach (var identityPath in EnumerateInstanceIdentityFiles(directory))
+        foreach (var identityPath in identityPaths)
         {
             scanned++;
             if (!TryParseInstanceIdentityPid(identityPath, out var pid))
@@ -210,9 +224,14 @@ internal sealed class NknTransportOptions
 
             staleFound++;
             deleted += TryDeleteFile(identityPath, ref failed);
-            deleted += TryDeleteFile(NknSecretStore.GetSecretPath(identityPath), ref failed);
+            deleted += TryDeleteSeed(identityPath, ref failed);
         }
 
+        RecordCleanupSummary(scanned, staleFound, deleted, failed, directory);
+    }
+
+    private static void RecordCleanupSummary(int scanned, int staleFound, int deleted, int failed, string directory)
+    {
         if (scanned == 0 && staleFound == 0 && deleted == 0 && failed == 0)
         {
             return;
@@ -321,6 +340,37 @@ internal sealed class NknTransportOptions
             LocalOperationalLog.Warn(
                 "NKN.IdentityCleanup",
                 $"event=stale_instance_identity_cleanup_delete_failed; path={path}; reason={ex.GetType().Name}");
+            return 0;
+        }
+    }
+
+    private static int TryDeleteSeed(string identityPath, ref int failed)
+    {
+        try
+        {
+            if (deleteFileOverrideForTests is not null)
+            {
+                var secretPath = NknSecretStore.GetSecretPath(identityPath);
+                if (!File.Exists(secretPath))
+                {
+                    return 0;
+                }
+
+                deleteFileOverrideForTests(secretPath);
+            }
+            else
+            {
+                NknSecretStore.DeleteSeed(identityPath);
+            }
+
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            failed++;
+            LocalOperationalLog.Warn(
+                "NKN.IdentityCleanup",
+                $"event=stale_instance_identity_cleanup_delete_seed_failed; key_path={identityPath}; reason={ex.GetType().Name}");
             return 0;
         }
     }
