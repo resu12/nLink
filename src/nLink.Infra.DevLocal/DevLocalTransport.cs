@@ -3054,7 +3054,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
         public bool IsAvailable => true;
 
+#pragma warning disable CS0067
         public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged;
+#pragma warning restore CS0067
 
         public async ValueTask<FileTransferDataFrameV2> ReceiveAsync(CancellationToken ct)
         {
