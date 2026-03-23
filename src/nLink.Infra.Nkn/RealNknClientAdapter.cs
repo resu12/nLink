@@ -104,6 +104,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             },
             onStderrLineAsync: (line, _, _, _) =>
             {
+                if (ShouldSuppressBridgeStderrDuringShutdown(line))
+                {
+                    return Task.CompletedTask;
+                }
+
                 Log(BuildBridgeDiagnosticLogMessage("bridge stderr", line));
                 return Task.CompletedTask;
             },
@@ -1863,6 +1868,24 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     {
         Console.WriteLine($"[nLink][NKN][Bridge] {message}");
         LocalOperationalLog.Info("NKN.Bridge", message);
+    }
+
+    private bool ShouldSuppressBridgeStderrDuringShutdown(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return false;
+        }
+
+        if (!line.Contains("WebSocket was closed before the connection was established", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        lock (gate)
+        {
+            return shuttingDown || disposed;
+        }
     }
 
     private void RecordBridgeFailure(string errorCode, string? errorHint)

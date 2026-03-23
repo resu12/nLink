@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,6 +17,7 @@ using NLink.App.Services.SessionConnect;
 using NLink.App.Threading;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.Diagnostics;
 using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
 using NLink.Core.RemoteControl;
@@ -52,15 +54,16 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly IClipboardService? clipboardService;
     private readonly IInviteShareService inviteShareService;
     private readonly ShareMessageConfig shareMessageConfig;
-    private readonly IRecentConnectTargetsStore? recentConnectTargetsStore;
     private readonly SessionUiStateStore? uiStateStore;
     private readonly IConnectInputResolver connectInputResolver;
     private readonly DispatcherTimer remoteControlStateSnapshotTimer;
     private readonly Func<CancellationToken, Task<PeerAddress?>> bootstrapHelperIdentityResolver;
+    private string automaticIdentityRecoveryWarning = string.Empty;
     private CancellationTokenSource? bootstrapHelperIdentityResolutionCts;
     private PeerAddress? bootstrapHelperIdentity;
     private PeerAddress? previewInviteBoundHelperIdentity;
     private bool helperIdentityBootstrapPending;
+    private string helperIdentityBootstrapErrorText = string.Empty;
     private string lastChatPanelStateLog = string.Empty;
     private long chatSendAttemptCounter;
 
@@ -106,7 +109,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private Task? bootstrapHelperIdentityResolutionTask;
     private readonly InlineTransientText copyFeedback = new();
     private readonly Func<DateTimeOffset> nowProvider;
-    private readonly ObservableCollection<string> recentTargets = new();
     private readonly TimeSpan connectFailureCooldown;
     private readonly TimeSpan approvalTimeout;
     private DateTimeOffset lastFailedAttemptUtc = DateTimeOffset.MinValue;
@@ -151,7 +153,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         SessionUiStateStore? uiStateStore = null,
         Action? backAction = null,
         IConnectInputResolver? connectInputResolver = null,
-        IRecentConnectTargetsStore? recentConnectTargetsStore = null,
         Func<CancellationToken, Task<PeerAddress?>>? bootstrapHelperIdentityResolver = null,
         IInviteShareService? inviteShareService = null)
     {
@@ -167,8 +168,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         this.shareMessageConfig = shareMessageConfig ?? new ShareMessageConfig(null);
         this.uiStateStore = uiStateStore;
         this.connectInputResolver = connectInputResolver ?? ConnectInputResolverFactory.CreateDefault();
-        this.recentConnectTargetsStore = recentConnectTargetsStore;
         this.bootstrapHelperIdentityResolver = bootstrapHelperIdentityResolver ?? NknLocalPeerAddressResolver.ResolveAsync;
+        RefreshAutomaticIdentityRecoveryWarning();
         this.approvalTimeout = approvalTimeout ?? DefaultApprovalTimeout;
         this.connectFailureCooldown = connectFailureCooldown ?? DefaultConnectFailureCooldown;
         this.nowProvider = nowProvider ?? (() => DateTimeOffset.UtcNow);
@@ -185,7 +186,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         lastKnownHeaderStatusText = HeaderStatusText;
 
         ChatMessages = new ObservableCollection<ChatLineViewModel>();
-        recentTargets.CollectionChanged += (_, _) => OnPropertyChanged(nameof(ShowRecentTargets));
 
         sessionRuntime.StateChanged += OnSessionRuntimeStateChanged;
         sessionRuntime.SessionSecurityStateChanged += OnSessionSecurityStateChanged;
@@ -228,13 +228,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         EndSessionCommand = new RelayCommand(EndSession, CanTriggerEndSession);
         ScanQrFromFileCommand = new RelayCommand(RequestScanQrFromFile, () => ShowMainControls);
         ScanQrFromCameraCommand = new RelayCommand(RequestScanQrFromCamera, () => ShowMainControls);
-        UseRecentTargetCommand = new RelayCommand<string>(UseRecentTarget);
-        ClearRecentTargetsCommand = new RelayCommand(ClearRecentTargets, () => recentTargets.Count > 0);
         RequestControlCommand = new RelayCommand(RequestRemoteControl, CanRequestRemoteControlAction);
         StopControlCommand = new RelayCommand(StopRemoteControl, CanStopRemoteControlAction);
         ToggleControlModeCommand = new RelayCommand(ToggleControlMode, CanToggleControlModeAction);
         ToggleRemoteControlDebugPanelCommand = new RelayCommand(ToggleRemoteControlDebugPanel, CanToggleRemoteControlDebugPanel);
-        LoadRecentTargets();
 
         InitializeStartupAvailabilityState();
         presenterBannerStatus = NormalizeStatusForDisplay(this.statusPresenter.CurrentStatus);
@@ -295,7 +292,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowChatPanel));
                 OnPropertyChanged(nameof(ShowChatConnectionHint));
                 OnPropertyChanged(nameof(ShowMainControls));
-                OnPropertyChanged(nameof(ShowRecentTargets));
                 OnPropertyChanged(nameof(ShowConnectAction));
                 OnPropertyChanged(nameof(ShowStartupBlockedPanel));
                 OnPropertyChanged(nameof(ShowInlineStatusText));
@@ -325,7 +321,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 ToggleControlModeCommand.NotifyCanExecuteChanged();
                 ScanQrFromFileCommand.NotifyCanExecuteChanged();
                 ScanQrFromCameraCommand.NotifyCanExecuteChanged();
-                ClearRecentTargetsCommand.NotifyCanExecuteChanged();
                 EnsureControlModeConsistency();
             }
         }
@@ -359,7 +354,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             : string.Empty;
 
     public string HelperIdentityBootstrapHintText =>
-        string.IsNullOrWhiteSpace(HelperIdentityBootstrapText)
+        !string.IsNullOrWhiteSpace(helperIdentityBootstrapErrorText)
+            ? helperIdentityBootstrapErrorText
+            : !string.IsNullOrWhiteSpace(HelperIdentityBootstrapText) &&
+              !string.IsNullOrWhiteSpace(automaticIdentityRecoveryWarning)
+            ? $"{automaticIdentityRecoveryWarning} Copy this helper address into the helpee's helper field before they generate the invite."
+            : string.IsNullOrWhiteSpace(HelperIdentityBootstrapText)
             ? "Preparing your helper address. Share it with the helpee before they generate the invite."
             : "Copy this helper address into the helpee's helper field before they generate the invite.";
 
@@ -372,7 +372,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool ShowHelperIdentityBootstrapPanel =>
         ShowMainControls &&
         RequiresHelperIdentityBootstrap &&
-        (helperIdentityBootstrapPending || !string.IsNullOrWhiteSpace(HelperIdentityBootstrapText));
+        (helperIdentityBootstrapPending ||
+         !string.IsNullOrWhiteSpace(HelperIdentityBootstrapText) ||
+         !string.IsNullOrWhiteSpace(helperIdentityBootstrapErrorText));
 
     public string HelperVerificationCode =>
         HelperVerificationCodeFormatter.FormatOrNull(HelperVerificationIdentity) ?? string.Empty;
@@ -462,7 +464,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (SetProperty(ref startupBlocked, value))
             {
                 OnPropertyChanged(nameof(ShowMainControls));
-                OnPropertyChanged(nameof(ShowRecentTargets));
                 OnPropertyChanged(nameof(ShowConnectAction));
                 OnPropertyChanged(nameof(ShowRetryAction));
                 OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
@@ -486,9 +487,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     }
 
     public bool ShowMainControls => !IsStartupBlocked && !ShowRetryAction && !IsConnectedView;
-    public ObservableCollection<string> RecentTargets => recentTargets;
-    public bool ShowRecentTargets => ShowMainControls && recentTargets.Count > 0;
-
     public bool ShowConnectAction => ShowMainControls && !ShowRetryAction;
     public bool ShowStartupBlockedPanel => IsStartupBlocked && !ShowFailurePanel;
 
@@ -786,8 +784,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public IRelayCommand EndSessionCommand { get; }
     public IRelayCommand ScanQrFromFileCommand { get; }
     public IRelayCommand ScanQrFromCameraCommand { get; }
-    public IRelayCommand<string> UseRecentTargetCommand { get; }
-    public IRelayCommand ClearRecentTargetsCommand { get; }
     public IRelayCommand RequestControlCommand { get; }
     public IRelayCommand StopControlCommand { get; }
     public IRelayCommand ToggleControlModeCommand { get; }
@@ -955,88 +951,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private static string NormalizeConnectInputForDisplay(string incoming)
     {
         return incoming;
-    }
-
-    private void LoadRecentTargets()
-    {
-        recentTargets.Clear();
-        if (recentConnectTargetsStore is null)
-        {
-            ClearRecentTargetsCommand.NotifyCanExecuteChanged();
-            return;
-        }
-
-        foreach (var target in recentConnectTargetsStore.LoadTargets())
-        {
-            if (PeerAddress.TryParse(target, out var parsed))
-            {
-                recentTargets.Add(parsed.Value);
-            }
-        }
-
-        OnPropertyChanged(nameof(ShowRecentTargets));
-        ClearRecentTargetsCommand.NotifyCanExecuteChanged();
-    }
-
-    private void AddRecentTarget(string targetAddress)
-    {
-        if (!PeerAddress.TryParse(targetAddress, out var parsed))
-        {
-            return;
-        }
-
-        var existingIndex = -1;
-        for (var i = 0; i < recentTargets.Count; i++)
-        {
-            if (string.Equals(recentTargets[i], parsed.Value, StringComparison.OrdinalIgnoreCase))
-            {
-                existingIndex = i;
-                break;
-            }
-        }
-
-        if (existingIndex >= 0)
-        {
-            recentTargets.RemoveAt(existingIndex);
-        }
-
-        recentTargets.Insert(0, parsed.Value);
-        while (recentTargets.Count > 8)
-        {
-            recentTargets.RemoveAt(recentTargets.Count - 1);
-        }
-
-        PersistRecentTargets();
-        OnPropertyChanged(nameof(ShowRecentTargets));
-        ClearRecentTargetsCommand.NotifyCanExecuteChanged();
-    }
-
-    private void PersistRecentTargets()
-    {
-        recentConnectTargetsStore?.SaveTargets(recentTargets);
-    }
-
-    private void UseRecentTarget(string? target)
-    {
-        if (string.IsNullOrWhiteSpace(target))
-        {
-            return;
-        }
-
-        CodeInput = target.Trim();
-    }
-
-    private void ClearRecentTargets()
-    {
-        if (recentTargets.Count == 0)
-        {
-            return;
-        }
-
-        recentTargets.Clear();
-        PersistRecentTargets();
-        OnPropertyChanged(nameof(ShowRecentTargets));
-        ClearRecentTargetsCommand.NotifyCanExecuteChanged();
     }
 
     private void RequestScanQrFromFile()
@@ -1327,7 +1241,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             ConnectionState = "Idle";
             ShowChatNotice = false;
             OnPropertyChanged(nameof(ShowMainControls));
-            OnPropertyChanged(nameof(ShowRecentTargets));
             OnPropertyChanged(nameof(ShowConnectAction));
             OnPropertyChanged(nameof(ShowRetryAction));
             OnPropertyChanged(nameof(ShowCopyFeedbackInline));
@@ -1335,7 +1248,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             RetryCommand.NotifyCanExecuteChanged();
             ScanQrFromFileCommand.NotifyCanExecuteChanged();
             ScanQrFromCameraCommand.NotifyCanExecuteChanged();
-            ClearRecentTargetsCommand.NotifyCanExecuteChanged();
         });
     }
 
@@ -1990,6 +1902,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         CancelBootstrapHelperIdentityResolution();
+        helperIdentityBootstrapErrorText = string.Empty;
         bootstrapHelperIdentityResolutionCts = new CancellationTokenSource();
         helperIdentityBootstrapPending = true;
         bootstrapHelperIdentityResolutionTask = ResolveBootstrapHelperIdentityAsync(bootstrapHelperIdentityResolutionCts.Token);
@@ -2021,6 +1934,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             bootstrapHelperIdentity.Value != verifiedIdentity;
 
         bootstrapHelperIdentity = verifiedIdentity;
+        helperIdentityBootstrapErrorText = string.Empty;
         helperIdentityBootstrapPending = false;
         CancelBootstrapHelperIdentityResolution();
         bootstrapHelperIdentityResolutionTask = null;
@@ -2045,6 +1959,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         bootstrapHelperIdentity = resolvedIdentity;
+        helperIdentityBootstrapErrorText = string.Empty;
         helperIdentityBootstrapPending = false;
         CancelBootstrapHelperIdentityResolution();
         bootstrapHelperIdentityResolutionTask = null;
@@ -2079,11 +1994,14 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
             await UiThreadDispatch.RunAsync(() =>
             {
+                RefreshAutomaticIdentityRecoveryWarning();
                 // Keep the first stable helper identity visible through pre-connected UI states.
                 if (bootstrapHelperIdentity is null && resolved is not null)
                 {
                     bootstrapHelperIdentity = resolved;
                 }
+
+                helperIdentityBootstrapErrorText = string.Empty;
                 helperIdentityBootstrapPending = false;
                 NotifyHelperIdentityBootstrapChanged();
             });
@@ -2097,6 +2015,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
             await UiThreadDispatch.RunAsync(() =>
             {
+                RefreshAutomaticIdentityRecoveryWarning();
                 helperIdentityBootstrapPending = false;
                 NotifyHelperIdentityBootstrapChanged();
             });
@@ -2111,6 +2030,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
             await UiThreadDispatch.RunAsync(() =>
             {
+                RefreshAutomaticIdentityRecoveryWarning();
+                helperIdentityBootstrapErrorText = IsProtectedSeedStorageReadFailure(ex)
+                    ? "Protected seed storage could not be read."
+                    : "Helper address is unavailable right now.";
                 helperIdentityBootstrapPending = false;
                 NotifyHelperIdentityBootstrapChanged();
             });
@@ -2137,6 +2060,25 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             cts.Dispose();
         }
+    }
+
+    private static bool IsProtectedSeedStorageReadFailure(Exception ex)
+    {
+        return ex is CryptographicException ||
+               ex.Message.Contains("Protected seed storage could not be read.", StringComparison.OrdinalIgnoreCase) ||
+               ex.Message.Contains("seed storage", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void RefreshAutomaticIdentityRecoveryWarning()
+    {
+        var warning = PersistenceDiagnostics.Snapshot().LastWarning;
+        if (!warning.Contains("created a new local identity", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(automaticIdentityRecoveryWarning, warning, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        automaticIdentityRecoveryWarning = warning;
     }
 
     private async Task AwaitBootstrapHelperIdentityResolutionCompletionAsync()
@@ -2836,7 +2778,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowInlineStatusText));
         OnPropertyChanged(nameof(ShowFailurePanel));
         OnPropertyChanged(nameof(ShowMainControls));
-        OnPropertyChanged(nameof(ShowRecentTargets));
         OnPropertyChanged(nameof(ShowCopyFeedbackInline));
         OnPropertyChanged(nameof(HeaderStatusText));
         OnPropertyChanged(nameof(HelperVerificationCode));
@@ -2868,7 +2809,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         ToggleControlModeCommand.NotifyCanExecuteChanged();
         ScanQrFromFileCommand.NotifyCanExecuteChanged();
         ScanQrFromCameraCommand.NotifyCanExecuteChanged();
-        ClearRecentTargetsCommand.NotifyCanExecuteChanged();
         EnsureControlModeConsistency();
         SendChatCommand.NotifyCanExecuteChanged();
         RetryCommand.NotifyCanExecuteChanged();
@@ -3643,7 +3583,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         OnPropertyChanged(nameof(ShowChatConnectionHint));
         OnPropertyChanged(nameof(ShowMainControls));
-        OnPropertyChanged(nameof(ShowRecentTargets));
         OnPropertyChanged(nameof(ShowConnectAction));
         OnPropertyChanged(nameof(ShowRetryAction));
         OnPropertyChanged(nameof(ShowInlineStatusText));
@@ -3651,7 +3590,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(HeaderStatusText));
         ScanQrFromFileCommand.NotifyCanExecuteChanged();
         ScanQrFromCameraCommand.NotifyCanExecuteChanged();
-        ClearRecentTargetsCommand.NotifyCanExecuteChanged();
     }
 
     private void ClearRemoteScreenShareFrame()

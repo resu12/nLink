@@ -30,4 +30,18 @@ public sealed record FileTransferStartV1
 
     [JsonPropertyName("chunkSizeBytes")]
     public int ChunkSizeBytes { get; init; }
+
+    public static implicit operator FileTransferStartV2(FileTransferStartV1 value)
+        => new()
+        {
+            Kind = FileTransferProtocol.Kind,
+            Type = FileTransferProtocol.StartTypeV2,
+            SessionId = value.SessionId,
+            TransferId = value.TransferId,
+            FileName = value.FileName,
+            FileSizeBytes = value.FileSizeBytes,
+            Sha256Base64 = value.Sha256Base64,
+            ChunkCount = value.ChunkCount,
+            ChunkSizeBytes = value.ChunkSizeBytes,
+        };
 }

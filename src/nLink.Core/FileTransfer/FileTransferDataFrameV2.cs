@@ -45,7 +45,7 @@ public sealed record FileTransferRequestChunksFrameV2 : FileTransferDataFrameV2
     public int PipelineDepth { get; init; }
 }
 
-public sealed record FileTransferChunkDataFrameV2 : FileTransferDataFrameV2
+public record FileTransferChunkDataFrameV2 : FileTransferDataFrameV2
 {
     private byte[] data = [];
 
@@ -74,7 +74,7 @@ public sealed record FileTransferChunkDataFrameV2 : FileTransferDataFrameV2
     }
 }
 
-public sealed record FileTransferChunkBatchFrameV2 : FileTransferDataFrameV2
+public record FileTransferChunkBatchFrameV2 : FileTransferDataFrameV2
 {
     private IReadOnlyList<byte[]> dataSegments = Array.Empty<byte[]>();
 

@@ -103,15 +103,17 @@ public enum FileTransferTransferState
     Offering = 1,
     AwaitingAcceptance = 2,
     PendingDecision = 3,
-    AwaitingStart = 4,
-    Sending = 5,
-    AwaitingCompletion = 6,
-    Receiving = 7,
-    Verifying = 8,
-    Completed = 9,
-    Declined = 10,
-    Canceled = 11,
-    Failed = 12,
+    AwaitingMetadata = 4,
+    PreparingMetadata = 5,
+    AwaitingStart = 6,
+    Sending = 7,
+    AwaitingCompletion = 8,
+    Receiving = 9,
+    Verifying = 10,
+    Completed = 11,
+    Declined = 12,
+    Canceled = 13,
+    Failed = 14,
 }
 
 internal enum FileTransferFlowControlMode
@@ -149,7 +151,7 @@ public sealed record FileTransferIncomingOffer(
     string TransferId,
     string FileName,
     long FileSizeBytes,
-    string Sha256Base64);
+    string? Sha256Base64);
 
 public sealed record FileTransferTransferSnapshot(
     string SessionId,

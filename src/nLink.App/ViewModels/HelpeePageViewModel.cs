@@ -21,14 +21,12 @@ using NLink.App.Services.SessionConnect;
 using NLink.App.Threading;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.Diagnostics;
 using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
 using NLink.Core.RemoteControl;
 using NLink.Core.SessionConnect;
 using NLink.Core.SessionSecurity;
-#if DEBUG
-using NLink.Core.Diagnostics;
-#endif
 using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
@@ -96,6 +94,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private string shareInviteRawTokenText = string.Empty;
     private string shareAddressText = string.Empty;
     private string shareInviteStatusText = "Preparing invite…";
+    private string automaticIdentityRecoveryWarning = string.Empty;
     private Bitmap? shareInviteQrBitmap;
     private CancellationTokenSource? shareInviteQrRefreshCts;
     private int shareInviteQrRefreshVersion;
@@ -122,6 +121,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private CancellationTokenSource? incomingRequestTimeoutCts;
     private readonly TimeSpan incomingRequestTimeout;
     private bool startupBlocked;
+    private bool startupFailureBlocksAutoRestart;
     private bool autoRegeneratingAfterDisconnect;
     private UserFacingStatus bannerStatus = UserFacingStatus.IdleStatus;
     private UserFacingStatus presenterBannerStatus = UserFacingStatus.IdleStatus;
@@ -222,6 +222,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         this.clipboardService = clipboardService;
         this.inviteShareService = inviteShareService ?? new DefaultInviteShareService();
         this.qrCodeService = qrCodeService ?? new QrCodeService();
+        RefreshAutomaticIdentityRecoveryWarning();
         inviteTokenFactory = ConnectInputResolverFactory.CreateInviteTokenFactory();
         this.incomingRequestTimeout = incomingRequestTimeout ?? DefaultIncomingRequestTimeout;
         this.uiStateStore = uiStateStore;
@@ -324,7 +325,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     public Bitmap? ShareInviteQrImage => shareInviteQrBitmap;
     public bool ShowShareInviteQr => ShareInviteQrImage is not null;
     public bool ShowShareInviteQrPlaceholder => !ShowShareInviteQr;
-    public bool ShowShareInviteStatus => !HasShareInvite && !string.IsNullOrWhiteSpace(ShareInviteStatusText);
+    public bool ShowShareInviteStatus => (!HasShareInvite || HasAutomaticIdentityRecoveryNotice) && !string.IsNullOrWhiteSpace(ShareInviteStatusText);
     public string ShareInviteExpiryText => shareInviteExpiryText;
     public bool ShowShareInviteExpiry => HasShareInvite && !string.IsNullOrWhiteSpace(ShareInviteExpiryText);
     public string IncomingRequestTimeoutText => incomingRequestTimeoutText;
@@ -333,6 +334,9 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         HasIncomingRequest &&
         !string.IsNullOrWhiteSpace(IncomingRequestTimeoutText);
     public bool HasShareInvite => !string.IsNullOrWhiteSpace(ShareInvite);
+    private bool HasAutomaticIdentityRecoveryNotice =>
+        !string.IsNullOrWhiteSpace(automaticIdentityRecoveryWarning) &&
+        shareInviteStatusText.Contains(automaticIdentityRecoveryWarning, StringComparison.Ordinal);
     public bool HasShareInviteRawToken =>
         !string.IsNullOrWhiteSpace(ShareInviteRawToken) &&
         !string.Equals(ShareInviteRawToken, ShareInvite, StringComparison.Ordinal);
@@ -1262,6 +1266,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private async Task RetryAsync()
     {
+        startupFailureBlocksAutoRestart = false;
         PrepareForNewSession();
 
         CancelIncomingRequestTimeout();
@@ -1580,6 +1585,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void RefreshInvite()
     {
+        startupFailureBlocksAutoRestart = false;
         EnsureInviteSnapshot(forceNewToken: true);
     }
 
@@ -1842,7 +1848,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         PrepareForNewSession();
         EnsureInviteSnapshot(forceNewToken: false);
 
-        if (IsStartupBlocked)
+        if (IsStartupBlocked || startupFailureBlocksAutoRestart)
         {
             return;
         }
@@ -1862,6 +1868,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             await sessionRuntime.ResetAsync();
             await sessionRuntime.StartHelpeeAsync(CancellationToken.None);
+            await UiThreadDispatch.RunAsync(() =>
+            {
+                RefreshAutomaticIdentityRecoveryWarning();
+                EnsureInviteSnapshot(forceNewToken: false);
+            });
         }
         catch (OperationCanceledException)
         {
@@ -1873,14 +1884,22 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 await UiThreadDispatch.RunAsync(() =>
                 {
+                    RefreshAutomaticIdentityRecoveryWarning();
                     var message = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
                         ? "Could not start. Refresh invite and try again."
                         : sessionRuntime.StatusText;
+                    if (IsProtectedSeedStorageReadFailure(message))
+                    {
+                        startupFailureBlocksAutoRestart = true;
+                        pendingAutoRegenerateAfterDisconnect = false;
+                        autoRegeneratingAfterDisconnect = false;
+                    }
+
                     ConnectionStatus = message;
                     ConnectionState = sessionRuntime.State is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected
                         ? "Failed"
                         : "Disconnected";
-                    if (!HasShareInvite)
+                    if (!HasShareInvite || IsProtectedSeedStorageReadFailure(message))
                     {
                         UpdateShareInviteStatusText(message);
                     }
@@ -1899,7 +1918,9 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             UpdateShareAddressText(string.Empty);
             UpdateShareInviteText(string.Empty);
             UpdateShareInviteRawTokenText(string.Empty);
-            UpdateShareInviteStatusText("Preparing invite…");
+            UpdateShareInviteStatusText(startupFailureBlocksAutoRestart && IsProtectedSeedStorageReadFailure(sessionRuntime.StatusText)
+                ? sessionRuntime.StatusText
+                : "Preparing invite…");
             shareInviteExpiresAtUtc = DateTimeOffset.MinValue;
             shareInviteAutoRefreshTriggered = false;
             UpdateShareInviteExpiryText(string.Empty);
@@ -2151,11 +2172,38 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void UpdateShareInviteStatusText(string value)
     {
-        value ??= string.Empty;
+        value = ComposeShareInviteStatusText(value);
         if (SetProperty(ref shareInviteStatusText, value, nameof(ShareInviteStatusText)))
         {
             OnPropertyChanged(nameof(ShowShareInviteStatus));
         }
+    }
+
+    private string ComposeShareInviteStatusText(string? value)
+    {
+        var normalized = value ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(automaticIdentityRecoveryWarning) ||
+            string.IsNullOrWhiteSpace(normalized) ||
+            IsProtectedSeedStorageReadFailure(normalized) ||
+            normalized.Contains(automaticIdentityRecoveryWarning, StringComparison.Ordinal))
+        {
+            return normalized;
+        }
+
+        return $"{automaticIdentityRecoveryWarning} {normalized}";
+    }
+
+    private void RefreshAutomaticIdentityRecoveryWarning()
+    {
+        var warning = NknIdentityStore.GetAutomaticRecoveryUserWarning();
+        if (string.IsNullOrWhiteSpace(warning) ||
+            string.Equals(automaticIdentityRecoveryWarning, warning, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        automaticIdentityRecoveryWarning = warning;
+        OnPropertyChanged(nameof(ShowShareInviteStatus));
     }
 
     private void UpdateShareInviteExpiryText(string value)
@@ -2762,6 +2810,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         EnsureInviteSnapshot(forceNewToken: false);
         SyncIncomingApprovalRequestFromRuntime();
+        PromoteProtectedSeedStorageStartupFailureIfNeeded();
 
         var autoRegeneratedAfterDisconnect = false;
         var runtimeTerminalFailure = false;
@@ -3881,7 +3930,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private bool TryAutoRegenerateAfterConnectedSessionEnd()
     {
-        if (!pendingAutoRegenerateAfterDisconnect || autoRegeneratingAfterDisconnect || IsStartupBlocked)
+        if (!pendingAutoRegenerateAfterDisconnect || autoRegeneratingAfterDisconnect || IsStartupBlocked || startupFailureBlocksAutoRestart)
         {
             return false;
         }
@@ -3901,7 +3950,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private bool RestartWaitingSessionAfterTerminalSession()
     {
-        if (IsStartupBlocked || disposed)
+        if (IsStartupBlocked || startupFailureBlocksAutoRestart || disposed)
         {
             return false;
         }
@@ -3914,7 +3963,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private bool ShouldQueueAutoRegenerateAfterTerminalTransition()
     {
-        if (IsStartupBlocked || disposed || autoRegeneratingAfterDisconnect)
+        if (IsStartupBlocked || startupFailureBlocksAutoRestart || disposed || autoRegeneratingAfterDisconnect)
         {
             return false;
         }
@@ -4031,6 +4080,25 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         _ = StopScreenSharePreviewAsync();
+    }
+
+    private static bool IsProtectedSeedStorageReadFailure(string? message)
+    {
+        return !string.IsNullOrWhiteSpace(message) &&
+               message.Contains("Protected seed storage could not be read.", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void PromoteProtectedSeedStorageStartupFailureIfNeeded()
+    {
+        if (!IsProtectedSeedStorageReadFailure(sessionRuntime.StatusText))
+        {
+            return;
+        }
+
+        startupFailureBlocksAutoRestart = true;
+        pendingAutoRegenerateAfterDisconnect = false;
+        autoRegeneratingAfterDisconnect = false;
+        UpdateShareInviteStatusText(sessionRuntime.StatusText);
     }
 
     private async Task StopScreenSharePreviewAsync()

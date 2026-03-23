@@ -126,6 +126,631 @@ public sealed partial class SessionFileTransferServiceTests
     }
 
     [Fact]
+    public async Task PullSession_V3Streaming_CompletesWithoutV2RequestLoop()
+    {
+        const string transferId = "transfer_service_pull_v3_streaming";
+        var payload = Enumerable.Range(0, 256_000).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_pull_v3_streaming")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_v3_streaming")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        senderTransport.Connect(receiverTransport);
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pull-v3-streaming.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() =>
+            sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+            receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 15000);
+
+        Assert.Equal(payload, destination.ToArray());
+        Assert.Contains(senderTransport.SentDataFrames, static frame => frame is FileTransferManifestFrameV3);
+        Assert.Contains(senderTransport.SentDataFrames, static frame => frame is FileTransferChunkDataFrameV3 or FileTransferChunkBatchFrameV3);
+        Assert.Contains(receiverTransport.SentDataFrames, static frame => frame is FileTransferGrantWindowFrameV3);
+        Assert.DoesNotContain(receiverTransport.SentDataFrames, static frame => frame is FileTransferRequestChunksFrameV2);
+        Assert.Contains(senderTransport.SentDataFrames, static frame => frame is FileTransferAckProgressFrameV3 or FileTransferGrantWindowFrameV3 or FileTransferChunkDataFrameV3 or FileTransferChunkBatchFrameV3);
+    }
+
+    [Fact]
+    public async Task PullSession_V3Streaming_UsesLargerChunks_AndHealthyGrantWindow_WithMinimalLegacyControlNoise()
+    {
+        const string transferId = "transfer_service_pull_v3_tuned_healthy";
+        var payload = Enumerable.Range(0, 3_500_000).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_pull_v3_tuned_healthy")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_v3_tuned_healthy")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        senderTransport.Connect(receiverTransport);
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pull-v3-tuned-healthy.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() =>
+            sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+            receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 20000);
+
+        Assert.Equal(payload, destination.ToArray());
+        var manifest = Assert.Single(senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV3>());
+        Assert.Equal(40 * 1024, manifest.ChunkSizeBytes);
+
+        var maxGrantWindowBytes = receiverTransport.SentDataFrames
+            .OfType<FileTransferGrantWindowFrameV3>()
+            .Select(frame => (frame.GrantedUntilChunkIndexExclusive - frame.NextExpectedChunkIndex) * manifest.ChunkSizeBytes)
+            .DefaultIfEmpty(0)
+            .Max();
+        Assert.True(
+            maxGrantWindowBytes >= (2 * 1024 * 1024) - manifest.ChunkSizeBytes,
+            $"Expected a healthy V3 grant window near 2 MiB, but saw {maxGrantWindowBytes} bytes.");
+        Assert.Empty(receiverTransport.SentWindowUpdates);
+        Assert.True(
+            receiverTransport.SentPressureStates.Count <= 3,
+            $"Expected V3 healthy flow to keep pressure chatter low, but saw {receiverTransport.SentPressureStates.Count} pressure-state messages.");
+    }
+
+    [Fact]
+    public async Task PullSession_V3Streaming_ExpandsHealthyGrantWindow_AfterSustainedProgress()
+    {
+        const string transferId = "transfer_service_pull_v3_tuned_expand";
+        var payload = Enumerable.Range(0, 8 * 1024 * 1024).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_pull_v3_tuned_expand")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_v3_tuned_expand")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        senderTransport.Connect(receiverTransport);
+        senderTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, ct) =>
+        {
+            if (frame is FileTransferChunkDataFrameV3 or FileTransferChunkBatchFrameV3)
+            {
+                await Task.Delay(20, ct).ConfigureAwait(false);
+            }
+
+            return false;
+        };
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pull-v3-tuned-expand.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() =>
+            sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+            receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 30000);
+
+        Assert.Equal(payload, destination.ToArray());
+        var manifest = Assert.Single(senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV3>());
+        Assert.Equal(40 * 1024, manifest.ChunkSizeBytes);
+        var maxGrantWindowBytes = receiverTransport.SentDataFrames
+            .OfType<FileTransferGrantWindowFrameV3>()
+            .Select(frame => (frame.GrantedUntilChunkIndexExclusive - frame.NextExpectedChunkIndex) * manifest.ChunkSizeBytes)
+            .DefaultIfEmpty(0)
+            .Max();
+        Assert.True(
+            maxGrantWindowBytes >= (4 * 1024 * 1024) - manifest.ChunkSizeBytes,
+            $"Expected V3 healthy flow to step up near 4 MiB, but saw {maxGrantWindowBytes} bytes.");
+    }
+
+    [Fact]
+    public async Task PullSession_V3Streaming_WithScreenshare_UsesBalancedChunkAndGrantTargets()
+    {
+        const string transferId = "transfer_service_pull_v3_tuned_screenshare";
+        var payload = Enumerable.Range(0, 1_500_000).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_pull_v3_tuned_screenshare")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_v3_tuned_screenshare")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        senderTransport.Connect(receiverTransport);
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+        sender.SetSessionScreenShareActive(true);
+        receiver.SetSessionScreenShareActive(true);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pull-v3-tuned-screenshare.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() =>
+            sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+            receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 20000);
+
+        Assert.Equal(payload, destination.ToArray());
+        var manifest = Assert.Single(senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV3>());
+        Assert.Equal(24 * 1024, manifest.ChunkSizeBytes);
+
+        var maxGrantWindowBytes = receiverTransport.SentDataFrames
+            .OfType<FileTransferGrantWindowFrameV3>()
+            .Select(frame => (frame.GrantedUntilChunkIndexExclusive - frame.NextExpectedChunkIndex) * manifest.ChunkSizeBytes)
+            .DefaultIfEmpty(0)
+            .Max();
+        Assert.True(
+            maxGrantWindowBytes >= (256 * 1024) - manifest.ChunkSizeBytes,
+            $"Expected balanced screenshare V3 grant window near 256 KiB, but saw {maxGrantWindowBytes} bytes.");
+        Assert.True(maxGrantWindowBytes < 2 * 1024 * 1024, "Expected screenshare-balanced V3 window to stay below the healthy 2 MiB target.");
+    }
+
+    [Fact]
+    public async Task PullSession_V3Streaming_WhenScreenshareActivatesMidTransfer_ForcesReducedGrantWindow()
+    {
+        const string transferId = "transfer_service_pull_v3_midstream_screenshare_clamp";
+        var payload = Enumerable.Range(0, 5 * 1024 * 1024).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_pull_v3_midstream_screenshare_clamp")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_v3_midstream_screenshare_clamp")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        senderTransport.Connect(receiverTransport);
+        senderTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, ct) =>
+        {
+            if (frame is FileTransferChunkDataFrameV3 or FileTransferChunkBatchFrameV3)
+            {
+                await Task.Delay(10, ct).ConfigureAwait(false);
+            }
+
+            return false;
+        };
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pull-v3-midstream-screenshare-clamp.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() =>
+            receiverTransport.SentDataFrames
+                .OfType<FileTransferGrantWindowFrameV3>()
+                .Any(frame => (frame.GrantedUntilChunkIndexExclusive - frame.NextExpectedChunkIndex) * 40 * 1024 >= (2 * 1024 * 1024) - (40 * 1024)),
+            timeoutMs: 10000);
+
+        var grantCountBeforeScreenshare = receiverTransport.SentDataFrames.OfType<FileTransferGrantWindowFrameV3>().Count();
+        sender.SetSessionScreenShareActive(true);
+        receiver.SetSessionScreenShareActive(true);
+
+        await WaitUntilAsync(() =>
+            receiverTransport.SentDataFrames
+                .OfType<FileTransferGrantWindowFrameV3>()
+                .Skip(grantCountBeforeScreenshare)
+                .Any(frame => (frame.GrantedUntilChunkIndexExclusive - frame.NextExpectedChunkIndex) * 40 * 1024 <= 256 * 1024),
+            timeoutMs: 10000);
+
+        var reducedGrant = receiverTransport.SentDataFrames
+            .OfType<FileTransferGrantWindowFrameV3>()
+            .Skip(grantCountBeforeScreenshare)
+            .First(frame => (frame.GrantedUntilChunkIndexExclusive - frame.NextExpectedChunkIndex) * 40 * 1024 <= 256 * 1024);
+        var reducedGrantBytes = (reducedGrant.GrantedUntilChunkIndexExclusive - reducedGrant.NextExpectedChunkIndex) * 40 * 1024;
+        Assert.True(reducedGrantBytes <= 256 * 1024, $"Expected a forced reduced grant at or below 256 KiB, but saw {reducedGrantBytes} bytes.");
+    }
+
+    [Fact]
+    public async Task PullSession_V3Streaming_WhenDegraded_UsesReducedChunkTarget()
+    {
+        const string transferId = "transfer_service_pull_v3_tuned_degraded";
+        var payload = Enumerable.Range(0, 900_000).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_pull_v3_tuned_degraded")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_v3_tuned_degraded")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        senderTransport.Connect(receiverTransport);
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+        sender.SetSessionScreenShareDegraded(true);
+        receiver.SetSessionScreenShareDegraded(true);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pull-v3-tuned-degraded.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() =>
+            sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+            receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 20000);
+
+        Assert.Equal(payload, destination.ToArray());
+        var manifest = Assert.Single(senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV3>());
+        Assert.Equal(20 * 1024, manifest.ChunkSizeBytes);
+    }
+
+    [Fact]
+    public async Task PullSession_V3Streaming_BatchedChunks_AreNotResentIndividually()
+    {
+        const string transferId = "transfer_service_pull_v3_batched_no_duplicates";
+        const int chunkSizeBytes = 4096;
+        var payload = Enumerable.Range(0, chunkSizeBytes * 12).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_pull_v3_batched_no_duplicates")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_v3_batched_no_duplicates")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        senderTransport.Connect(receiverTransport);
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pull-v3-batch-no-duplicates.bin", payload.Length, transferId, ChunkSizeBytes: chunkSizeBytes),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() =>
+            sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+            receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 15000);
+
+        Assert.Equal(payload, destination.ToArray());
+
+        var manifest = Assert.Single(senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV3>());
+        var batches = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV3>().ToList();
+        Assert.Contains(batches, static batch => batch.DataSegments.Count > 2);
+
+        var sentChunkIndices = senderTransport.SentDataFrames
+            .Where(static frame => frame is FileTransferChunkDataFrameV3 or FileTransferChunkBatchFrameV3)
+            .SelectMany(frame => frame switch
+            {
+                FileTransferChunkDataFrameV3 chunk => [chunk.ChunkIndex],
+                FileTransferChunkBatchFrameV3 batch => Enumerable.Range(batch.StartChunkIndex, batch.DataSegments.Count),
+                _ => Enumerable.Empty<int>(),
+            })
+            .OrderBy(static chunkIndex => chunkIndex)
+            .ToList();
+
+        Assert.Equal(manifest.ChunkCount, sentChunkIndices.Count);
+        Assert.Equal(sentChunkIndices.Distinct().Count(), sentChunkIndices.Count);
+    }
+
+    [Fact]
+    public async Task PullSession_V3Streaming_ReorderBurst_ClampsExpandedWindowToHealthyLimitedProfile()
+    {
+        const string transferId = "transfer_service_pull_v3_reorder_limited";
+        var payload = Enumerable.Range(0, 9 * 1024 * 1024).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_pull_v3_reorder_limited")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_v3_reorder_limited")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        senderTransport.Connect(receiverTransport);
+
+        var delayedFrames = new ConcurrentQueue<FileTransferDataFrameV2>();
+        var releaseStarted = 0;
+        senderTransport.OutboundDataFrameDeliveryOverrideAsync = (target, frame, ct) =>
+        {
+            if (frame is FileTransferChunkDataFrameV3 chunk &&
+                chunk.TransferId == transferId &&
+                chunk.ChunkIndex is >= 90 and < 130)
+            {
+                delayedFrames.Enqueue(frame);
+                if (Interlocked.Exchange(ref releaseStarted, 1) == 0)
+                {
+                    _ = Task.Run(
+                        async () =>
+                        {
+                            try
+                            {
+                                await Task.Delay(1800, ct).ConfigureAwait(false);
+                                while (delayedFrames.TryDequeue(out var delayed))
+                                {
+                                    target.ReceiveDeliveredDataFrame(delayed);
+                                }
+                            }
+                            catch (OperationCanceledException)
+                            {
+                            }
+                        },
+                        CancellationToken.None);
+                }
+
+                return Task.FromResult(true);
+            }
+
+            return Task.FromResult(false);
+        };
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        var logStart = GetOperationalLogLength();
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pull-v3-reorder-limited.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() =>
+            sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+            receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 35000);
+
+        Assert.Equal(payload, destination.ToArray());
+        var manifest = Assert.Single(senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV3>());
+        var grantWindows = receiverTransport.SentDataFrames
+            .OfType<FileTransferGrantWindowFrameV3>()
+            .Select(frame => (frame.GrantedUntilChunkIndexExclusive - frame.NextExpectedChunkIndex) * manifest.ChunkSizeBytes)
+            .ToList();
+        var expandedIndex = grantWindows.FindIndex(windowBytes => windowBytes >= (4 * 1024 * 1024) - manifest.ChunkSizeBytes);
+
+        Assert.True(expandedIndex >= 0, "Expected the transfer to reach the healthy expanded 4 MiB window before the reorder clamp.");
+        Assert.Contains(
+            grantWindows.Skip(expandedIndex + 1),
+            windowBytes => windowBytes <= (2 * 1024 * 1024) + manifest.ChunkSizeBytes);
+
+    }
+
+    [Fact]
+    public async Task InboundCancel_IsNotBlockedBehindWindowUpdateControlChatter()
+    {
+        const string transferId = "transfer_service_inbound_cancel_priority";
+        var payload = Enumerable.Range(0, 96_000).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_inbound_cancel_priority");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_inbound_cancel_priority");
+        senderTransport.Connect(receiverTransport);
+        senderTransport.OutboundChunkDeliveryOverrideAsync = (_, _, _) => Task.FromResult(true);
+
+        var blockedControlEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseBlockedControl = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.InboundDispatchBeforeWorkAsyncForTests = (lane, operation) =>
+        {
+            if (lane == "control" && operation == "window_update" && !releaseBlockedControl.Task.IsCompleted)
+            {
+                blockedControlEntered.TrySetResult(true);
+                return releaseBlockedControl.Task;
+            }
+
+            return Task.CompletedTask;
+        };
+
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("cancel-priority.bin", payload.Length, transferId, ChunkSizeBytes: 4096),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await blockedControlEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var outbound = sender.Snapshot.Outbound!;
+        await receiverTransport.SendFileTransferCancelAsync(
+            new FileTransferCancelV1
+            {
+                SessionId = outbound.SessionId,
+                TransferId = outbound.TransferId,
+                Reason = "test_cancel",
+            },
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => sender.Snapshot.Outbound?.State == FileTransferTransferState.Canceled, timeoutMs: 3000);
+        Assert.Equal(FileTransferTransferState.Canceled, sender.Snapshot.Outbound?.State);
+
+        releaseBlockedControl.TrySetResult(true);
+    }
+
+    [Fact]
+    public async Task PullSession_HealthyTransfer_CompletesStartupPhase_WithoutRepeatedStartupResendNoise()
+    {
+        const string transferId = "transfer_service_pull_startup_resend_noise";
+        var payload = Enumerable.Range(0, 96_000).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_pull_startup_resend_noise");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_startup_resend_noise");
+        senderTransport.Connect(receiverTransport);
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        var logStart = GetOperationalLogLength();
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pull-startup-resend.bin", payload.Length, transferId, ChunkSizeBytes: 4096),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() =>
+            sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+            receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 12000);
+
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Equal(payload, destination.ToArray());
+        Assert.Contains("event=window_startup_completed", logTail, StringComparison.Ordinal);
+        Assert.True(
+            Regex.Matches(logTail, "event=window_update_sent;.*reason=startup_resend", RegexOptions.CultureInvariant).Count <= 1,
+            "Expected startup resend logging to stop after healthy pull-session progress was established.");
+    }
+
+    [Fact]
+    public async Task PullSession_SessionOpenArrivingBeforeStart_StillCompletesTransfer()
+    {
+        const string transferId = "transfer_service_session_open_before_start";
+        var payload = Enumerable.Range(0, 96_000).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_session_open_before_start");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_session_open_before_start");
+        senderTransport.Connect(receiverTransport);
+
+        FileTransferStartV2? delayedStart = null;
+        var sessionOpenDelivered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        senderTransport.OutboundStartDeliveryOverrideAsync = (_, message, _) =>
+        {
+            delayedStart = message;
+            return Task.FromResult(true);
+        };
+        senderTransport.OutboundSessionOpenDeliveryOverrideAsync = (target, message, ct) =>
+        {
+            target.ReceiveDeliveredSessionOpen(message);
+            sessionOpenDelivered.TrySetResult(true);
+            return Task.FromResult(true);
+        };
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("session-open-before-start.bin", payload.Length, transferId, ChunkSizeBytes: 4096),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await sessionOpenDelivered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(FileTransferTransferState.AwaitingMetadata, receiver.Snapshot.Inbound?.State);
+        Assert.NotNull(delayedStart);
+
+        receiverTransport.ReceiveDeliveredStart(delayedStart!);
+
+        await WaitUntilAsync(() =>
+            sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+            receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 12000);
+
+        Assert.Equal(payload, destination.ToArray());
+    }
+
+    [Fact]
     public async Task PullSession_ExplicitRetryInsideResendGate_BlocksThenAllowsSingleResend()
     {
         const string transferId = "transfer_service_pull_retry_gate";
@@ -275,13 +900,13 @@ public sealed partial class SessionFileTransferServiceTests
         using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_repeated_timeout");
         senderTransport.Connect(receiverTransport);
 
-        var heldChunkZero = new ConcurrentQueue<FileTransferChunkDataFrameV2>();
-        var holdChunkZero = 1;
+        var heldChunks = new ConcurrentQueue<FileTransferChunkDataFrameV2>();
+        var holdChunks = 1;
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = (target, frame, ct) =>
         {
-            if (frame is FileTransferChunkDataFrameV2 chunk && chunk.ChunkIndex == 0 && Volatile.Read(ref holdChunkZero) != 0)
+            if (frame is FileTransferChunkDataFrameV2 chunk && Volatile.Read(ref holdChunks) != 0)
             {
-                heldChunkZero.Enqueue(chunk);
+                heldChunks.Enqueue(chunk);
                 return Task.FromResult(true);
             }
 
@@ -311,15 +936,15 @@ public sealed partial class SessionFileTransferServiceTests
             () =>
             {
                 var logTail = ReadOperationalLogTail(logStart);
-                return logTail.Contains("event=filetransfer_session_degraded_entered", StringComparison.Ordinal) &&
-                       logTail.Contains("event=filetransfer_request_timeout_detected", StringComparison.Ordinal);
+                return logTail.Contains($"event=filetransfer_session_degraded_entered; transfer_id={transferId}", StringComparison.Ordinal) &&
+                       logTail.Contains($"event=filetransfer_request_timeout_detected; transfer_id={transferId}", StringComparison.Ordinal);
             },
             timeoutMs: 12000);
 
-        Interlocked.Exchange(ref holdChunkZero, 0);
-        while (heldChunkZero.TryDequeue(out var delayedChunkZero))
+        Interlocked.Exchange(ref holdChunks, 0);
+        while (heldChunks.TryDequeue(out var delayedChunk))
         {
-            receiverTransport.ReceiveDeliveredDataFrame(delayedChunkZero);
+            receiverTransport.ReceiveDeliveredDataFrame(delayedChunk);
         }
 
         await WaitUntilAsync(() =>
@@ -329,8 +954,8 @@ public sealed partial class SessionFileTransferServiceTests
 
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Equal(payload, destination.ToArray());
-        Assert.Contains("event=filetransfer_session_degraded_entered", logTail, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_pipeline_changed; direction=Inbound", logTail, StringComparison.Ordinal);
+        Assert.Contains($"event=filetransfer_session_degraded_entered; transfer_id={transferId}", logTail, StringComparison.Ordinal);
+        Assert.Contains($"event=filetransfer_pipeline_changed; direction=Inbound; transfer_id={transferId}", logTail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2594,7 +3219,7 @@ public sealed partial class SessionFileTransferServiceTests
         return reader.ReadToEnd();
     }
 
-    private sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport
+    private sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);
@@ -2605,7 +3230,11 @@ public sealed partial class SessionFileTransferServiceTests
             this.sessionId = sessionId;
         }
 
-        public Func<FileTransferStartV1, FileTransferStartV1>? OutboundStartTransform { get; init; }
+        public bool SupportsFileTransferV3Streaming { get; set; }
+
+        public Func<FileTransferStartV2, FileTransferStartV2>? OutboundStartTransform { get; init; }
+
+        public Func<LoopbackFileTransferTransport, FileTransferStartV2, CancellationToken, Task<bool>>? OutboundStartDeliveryOverrideAsync { get; set; }
 
         public Func<FileTransferChunkV1, FileTransferChunkV1>? OutboundChunkTransform { get; init; }
 
@@ -2622,6 +3251,8 @@ public sealed partial class SessionFileTransferServiceTests
         public Func<LoopbackFileTransferTransport, FileTransferDataFrameV2, CancellationToken, Task<bool>>? OutboundDataFrameDeliveryOverrideAsync { get; set; }
 
         public Func<LoopbackFileTransferTransport, FileTransferDataFrameV2, bool, CancellationToken, Task<bool>>? OutboundDataFrameDeliveryOverrideWithLaneAsync { get; set; }
+
+        public Func<LoopbackFileTransferTransport, FileTransferSessionOpenV2, CancellationToken, Task<bool>>? OutboundSessionOpenDeliveryOverrideAsync { get; set; }
 
         public Func<FileTransferCompleteV1, CancellationToken, Task>? BeforeCompleteDeliveredAsync { get; set; }
 
@@ -2670,7 +3301,7 @@ public sealed partial class SessionFileTransferServiceTests
             return Task.CompletedTask;
         }
 
-        public Task SendFileTransferOfferAsync(FileTransferOfferV1 message, CancellationToken ct)
+        public Task SendFileTransferOfferAsync(FileTransferOfferV2 message, CancellationToken ct)
         {
             if (OfferSendException is not null)
             {
@@ -2696,14 +3327,16 @@ public sealed partial class SessionFileTransferServiceTests
                 ct);
 
         public Task SendFileTransferSessionOpenAsync(FileTransferSessionOpenV2 message, CancellationToken ct)
-            => DeliverAsync(
+            => DeliverMaybeAsync(
                 message with { SessionId = NormalizeSessionId(message.SessionId) },
+                static (transport, payload, token) => transport.OutboundSessionOpenDeliveryOverrideAsync?.Invoke(transport.peer!, payload, token) ?? Task.FromResult(false),
                 (target, payload) => target.FileTransferSessionOpenReceived?.Invoke(target, new FileTransferSessionOpenReceivedEventArgs(payload, "loopback-peer")),
                 ct);
 
-        public Task SendFileTransferStartAsync(FileTransferStartV1 message, CancellationToken ct)
-            => DeliverAsync(
+        public Task SendFileTransferStartAsync(FileTransferStartV2 message, CancellationToken ct)
+            => DeliverMaybeAsync(
                 ApplyStartTransform(message with { SessionId = NormalizeSessionId(message.SessionId) }),
+                static (transport, payload, token) => transport.OutboundStartDeliveryOverrideAsync?.Invoke(transport.peer!, payload, token) ?? Task.FromResult(false),
                 (target, payload) => target.FileTransferStartReceived?.Invoke(target, new FileTransferStartReceivedEventArgs(payload, "loopback-peer")),
                 ct);
 
@@ -2830,6 +3463,16 @@ public sealed partial class SessionFileTransferServiceTests
             FileTransferPressureStateReceived?.Invoke(this, new FileTransferPressureStateReceivedEventArgs(payload, "loopback-peer"));
         }
 
+        public void ReceiveDeliveredSessionOpen(FileTransferSessionOpenV2 payload)
+        {
+            FileTransferSessionOpenReceived?.Invoke(this, new FileTransferSessionOpenReceivedEventArgs(payload, "loopback-peer"));
+        }
+
+        public void ReceiveDeliveredStart(FileTransferStartV2 payload)
+        {
+            FileTransferStartReceived?.Invoke(this, new FileTransferStartReceivedEventArgs(payload, "loopback-peer"));
+        }
+
         public void ReceiveDeliveredDataFrame(FileTransferDataFrameV2 payload)
         {
             if (TryGetOrCreateDataSession(NormalizeSessionId(payload.SessionId), payload.TransferId, out var session))
@@ -2872,7 +3515,7 @@ public sealed partial class SessionFileTransferServiceTests
         private string NormalizeSessionId(string? sessionId)
             => string.IsNullOrWhiteSpace(sessionId) ? this.sessionId : sessionId.Trim();
 
-        private FileTransferStartV1 ApplyStartTransform(FileTransferStartV1 message)
+        private FileTransferStartV2 ApplyStartTransform(FileTransferStartV2 message)
             => OutboundStartTransform?.Invoke(message) ?? message;
 
         private FileTransferChunkV1 ApplyChunkTransform(FileTransferChunkV1 message)

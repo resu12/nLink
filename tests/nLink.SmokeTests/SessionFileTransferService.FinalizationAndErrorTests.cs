@@ -6,7 +6,7 @@ namespace NLink.SmokeTests;
 public sealed partial class SessionFileTransferServiceTests
 {
     [Fact]
-    public async Task TryStartSendAsync_PreHashesFileBeforeSendingOffer()
+    public async Task TryStartSendAsync_SendsOfferBeforePreparingMetadata()
     {
         const string transferId = "transfer_service_prehash";
         var payload = Enumerable.Range(0, 8192).Select(static i => (byte)(i % 251)).ToArray();
@@ -33,10 +33,21 @@ public sealed partial class SessionFileTransferServiceTests
         Assert.NotNull(started);
         await WaitUntilAsync(() => receiver.Snapshot.InboundState == FileTransferTransferState.PendingDecision);
 
-        Assert.Equal(1, Volatile.Read(ref openReadCount));
+        Assert.Equal(0, Volatile.Read(ref openReadCount));
         Assert.Equal(FileTransferTransferState.AwaitingAcceptance, sender.Snapshot.OutboundState);
-        Assert.Equal(expectedHash, sender.Snapshot.Outbound!.Sha256Base64);
-        Assert.Equal(expectedHash, receiver.Snapshot.Inbound!.Sha256Base64);
+        Assert.Null(sender.Snapshot.Outbound!.Sha256Base64);
+        Assert.Null(receiver.Snapshot.Inbound!.Sha256Base64);
+
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult(FileTransferReceiveDestination.FromStream(new MemoryStream())),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => sender.Snapshot.Outbound?.Sha256Base64 == expectedHash);
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.Sha256Base64 == expectedHash);
+
+        Assert.True(Volatile.Read(ref openReadCount) >= 1);
+        Assert.NotEqual(FileTransferTransferState.AwaitingAcceptance, sender.Snapshot.OutboundState);
     }
 
     [Fact]

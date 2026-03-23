@@ -8,9 +8,9 @@ Powered by NKN. Official website: https://nkn.org/
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
-## Current Release (0.5.1)
+## Current Release (0.5.2)
 
-`0.5.1` is the current release. It is the follow-up stabilization and hardening release after the first native `0.5.0` file-transfer release.
+`0.5.2` is the current release. It rolls together the post-`0.5.1` file-transfer protocol, performance, and connect/startup hardening work into one public release.
 
 ## Quick Start (Windows)
 
@@ -55,10 +55,10 @@ Normal release UX uses a raw helper address plus a short verification code, then
 
 Notes:
 - Windows x64 only
-- Current release (`0.5.1`)
-- File transfer in `0.5.1` is single-file only. No folders, drag-and-drop, or resume after restart yet.
+- Current release (`0.5.2`)
+- File transfer in `0.5.2` is single-file only. No folders, drag-and-drop, or resume after restart yet.
 - Received files are saved into an app-owned folder under `%LOCALAPPDATA%\nLink\transfers\incoming\...`
-- Safe-by-default file size cap for `0.5.1`: `256 MiB`
+- Safe-by-default file size cap for `0.5.2`: `1 GiB`
 - Large file transfers over NKN can be noticeably slower than local or direct network copy.
 - Installer path: `%LOCALAPPDATA%\Programs\nLink`
 
@@ -96,9 +96,9 @@ License:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
 - Final release notes:
-  [`docs/releases/0.5.1.md`](docs/releases/0.5.1.md)
+  [`docs/releases/0.5.2.md`](docs/releases/0.5.2.md)
 - GitHub release body:
-  [`docs/releases/0.5.1-github.md`](docs/releases/0.5.1-github.md)
+  [`docs/releases/0.5.2-github.md`](docs/releases/0.5.2-github.md)
 - Screenshare RC/final validation checklist:
   [`docs/release/0.3.0-rc-validation-checklist.md`](docs/release/0.3.0-rc-validation-checklist.md)
 

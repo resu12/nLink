@@ -67,11 +67,6 @@ public partial class App : Application
             Services.AddSingleton<IInviteShareService>(new DefaultInviteShareService());
         }
 
-        if (!Services.TryGet<IRecentConnectTargetsStore>(out _))
-        {
-            Services.AddSingleton<IRecentConnectTargetsStore>(new LocalRecentConnectTargetsStore());
-        }
-
         if (!Services.TryGet<ShareMessageConfig>(out _))
         {
             Services.AddSingleton(ShareMessageConfig.Load());

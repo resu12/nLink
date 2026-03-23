@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using NLink.Core;
 using NLink.Core.Chat;
 using NLink.Core.FileTransfer;
 using NLink.Core.RemoteControl;
@@ -87,11 +88,11 @@ internal sealed class SessionRuntimeApprovalActions
         => owner.RejectCoreAsync(reason, ct);
 }
 
-internal sealed class SessionRuntimeFileTransferActions
+internal sealed class SessionRuntimeFileTransferHost
 {
     private readonly SessionRuntime owner;
 
-    public SessionRuntimeFileTransferActions(SessionRuntime owner) => this.owner = owner;
+    public SessionRuntimeFileTransferHost(SessionRuntime owner) => this.owner = owner;
 
     public Task<FileTransferTransferSnapshot?> StartSendAsync(
         FileTransferSendDescriptor descriptor,
@@ -107,6 +108,52 @@ internal sealed class SessionRuntimeFileTransferActions
 
     public Task<FileTransferTransferSnapshot?> CancelTransferAsync(string transferId, string? reason, CancellationToken ct)
         => owner.CancelTransferCoreAsync(transferId, reason, ct);
+
+    public void AttachTransport(ISignalingTransport nextTransport)
+    {
+        ArgumentNullException.ThrowIfNull(nextTransport);
+
+        if (nextTransport is IFileTransferSignalingTransport fileTransferTransport)
+        {
+            owner.AttachFileTransferRuntimeTransport(fileTransferTransport);
+            return;
+        }
+
+        owner.DetachFileTransferRuntimeTransport();
+    }
+
+    public void QueueDetachTransport()
+    {
+        if (owner.IsDisposedForFileTransferHost)
+        {
+            return;
+        }
+
+        owner.RunFileTransferBackgroundTask(DetachTransportAsync);
+    }
+
+    public Task DetachTransportAsync()
+    {
+        try
+        {
+            owner.DetachFileTransferRuntimeTransport();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<FileTransferReceiveDestination> OpenInboundWriteStreamAsync(FileTransferIncomingOffer offer, CancellationToken ct)
+    {
+        return owner.OpenInboundFileTransferDestinationAsync(offer, ct);
+    }
+
+    public void LogSnapshot(SessionFileTransferSnapshot snapshot)
+    {
+        owner.LogRuntimeFileTransferSnapshotCore(snapshot);
+    }
 }
 
 internal sealed class SessionRuntimeRemoteControlActions

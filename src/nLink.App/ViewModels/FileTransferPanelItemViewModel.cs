@@ -35,7 +35,9 @@ public sealed record FileTransferPanelItemViewModel(
 
         var fileSizeText = FormatByteSize(snapshot.FileSizeBytes);
         var progressText = BuildProgressText(snapshot, fileSizeText);
-        var showProgress = snapshot.State is FileTransferTransferState.AwaitingStart
+        var showProgress = snapshot.State is FileTransferTransferState.AwaitingMetadata
+            or FileTransferTransferState.PreparingMetadata
+            or FileTransferTransferState.AwaitingStart
             or FileTransferTransferState.Sending
             or FileTransferTransferState.AwaitingCompletion
             or FileTransferTransferState.Receiving
@@ -46,6 +48,8 @@ public sealed record FileTransferPanelItemViewModel(
                           snapshot.State == FileTransferTransferState.PendingDecision;
         var showCancel = snapshot.State is FileTransferTransferState.Offering
             or FileTransferTransferState.AwaitingAcceptance
+            or FileTransferTransferState.AwaitingMetadata
+            or FileTransferTransferState.PreparingMetadata
             or FileTransferTransferState.AwaitingStart
             or FileTransferTransferState.Sending
             or FileTransferTransferState.AwaitingCompletion
@@ -85,15 +89,12 @@ public sealed record FileTransferPanelItemViewModel(
             return mappedTerminalStatus;
         }
 
-        if (!string.IsNullOrWhiteSpace(snapshot.StatusMessage))
-        {
-            return snapshot.StatusMessage!;
-        }
-
-        return snapshot.State switch
+        var stateText = snapshot.State switch
         {
             FileTransferTransferState.Offering => "Preparing file offer...",
             FileTransferTransferState.AwaitingAcceptance => "Waiting for receiver...",
+            FileTransferTransferState.AwaitingMetadata => "Waiting for sender to prepare the file...",
+            FileTransferTransferState.PreparingMetadata => "Preparing file metadata...",
             FileTransferTransferState.PendingDecision => "Incoming file offer",
             FileTransferTransferState.AwaitingStart => "Preparing to receive...",
             FileTransferTransferState.Sending => "Sending...",
@@ -104,8 +105,20 @@ public sealed record FileTransferPanelItemViewModel(
             FileTransferTransferState.Declined => "Transfer declined",
             FileTransferTransferState.Canceled => "Transfer canceled",
             FileTransferTransferState.Failed => "Transfer failed",
-            _ => "Ready",
+            _ => null,
         };
+
+        if (!string.IsNullOrWhiteSpace(stateText))
+        {
+            return stateText;
+        }
+
+        if (!string.IsNullOrWhiteSpace(snapshot.StatusMessage))
+        {
+            return snapshot.StatusMessage!;
+        }
+
+        return "Ready";
     }
 
     private static string? TryMapTerminalStatusText(FileTransferTransferSnapshot snapshot)
@@ -159,10 +172,9 @@ public sealed record FileTransferPanelItemViewModel(
         if (snapshot.Direction == FileTransferDirection.Outbound)
         {
             var sent = FormatByteSize(snapshot.BytesAcceptedForTransport ?? snapshot.BytesTransferred);
-            var confirmed = FormatByteSize(snapshot.BytesAcknowledgedByReceiver ?? snapshot.BytesTransferred);
             return string.Create(
                 CultureInfo.InvariantCulture,
-                $"{sent} sent / {confirmed} confirmed / {fileSizeText}");
+                $"{sent} / {fileSizeText}");
         }
 
         var transferred = FormatByteSize(snapshot.BytesTransferred);

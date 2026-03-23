@@ -247,7 +247,9 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         }
         catch (Exception ex)
         {
-            callbacks.Log($"Bridge shutdown command failed ({ex.GetType().Name})");
+            callbacks.Log(ShouldTreatAsExpectedShutdownNoise(ex)
+                ? $"Bridge shutdown command ignored during teardown ({ex.GetType().Name})"
+                : $"Bridge shutdown command failed ({ex.GetType().Name})");
         }
 
         try
@@ -267,7 +269,9 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         }
         catch (Exception ex)
         {
-            callbacks.Log($"Bridge process stop failed ({ex.GetType().Name})");
+            callbacks.Log(ShouldTreatAsExpectedShutdownNoise(ex)
+                ? $"Bridge process stop ignored during teardown ({ex.GetType().Name})"
+                : $"Bridge process stop failed ({ex.GetType().Name})");
         }
         finally
         {
@@ -664,7 +668,10 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
 
     private bool ShouldIgnoreReaderLoopException(Process targetProcess, Exception ex)
     {
-        if (ex is not IOException && ex is not ObjectDisposedException && ex is not InvalidOperationException)
+        if (ex is not IOException &&
+            ex is not ObjectDisposedException &&
+            ex is not InvalidOperationException &&
+            ex is not OperationCanceledException)
         {
             return false;
         }
@@ -687,6 +694,16 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         {
             return true;
         }
+    }
+
+    private bool ShouldTreatAsExpectedShutdownNoise(Exception ex)
+    {
+        if (ex is OperationCanceledException or ObjectDisposedException or InvalidOperationException or IOException)
+        {
+            return isDisposed() || isShuttingDown();
+        }
+
+        return false;
     }
 
     private static long SafeGetStartTimeUtcFileTime(Process process)
