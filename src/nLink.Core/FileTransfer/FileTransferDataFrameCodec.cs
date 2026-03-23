@@ -76,6 +76,17 @@ public static class FileTransferDataFrameCodec
                 WriteInt32(buffer, request.RequestedChunkCount);
                 WriteInt32(buffer, request.PipelineDepth);
                 break;
+            case FileTransferChunkDataFrameV3 chunkV3:
+                var chunkBytesV3 = chunkV3.Data;
+                if (chunkBytesV3.Length == 0 || chunkBytesV3.Length > FileTransferProtocol.MaxChunkRawBytes)
+                {
+                    throw new InvalidOperationException($"Chunk payload exceeded {FileTransferProtocol.MaxChunkRawBytes} bytes.");
+                }
+
+                WriteInt32(buffer, chunkV3.ChunkIndex);
+                WriteInt32(buffer, chunkV3.ChunkCount);
+                WriteBytes(buffer, chunkBytesV3);
+                break;
             case FileTransferChunkDataFrameV2 chunk:
                 var chunkBytes = chunk.Data;
                 if (chunkBytes.Length == 0 || chunkBytes.Length > FileTransferProtocol.MaxChunkRawBytes)
@@ -86,6 +97,32 @@ public static class FileTransferDataFrameCodec
                 WriteInt32(buffer, chunk.ChunkIndex);
                 WriteInt32(buffer, chunk.ChunkCount);
                 WriteBytes(buffer, chunkBytes);
+                break;
+            case FileTransferChunkBatchFrameV3 chunkBatchV3:
+                if (chunkBatchV3.DataSegments.Count == 0)
+                {
+                    throw new InvalidOperationException("Chunk batch payload may not be empty.");
+                }
+
+                var totalChunkBytesV3 = 0;
+                WriteInt32(buffer, chunkBatchV3.StartChunkIndex);
+                WriteInt32(buffer, chunkBatchV3.ChunkCount);
+                WriteInt32(buffer, chunkBatchV3.DataSegments.Count);
+                foreach (var segmentBytes in chunkBatchV3.DataSegments)
+                {
+                    if (segmentBytes.Length == 0)
+                    {
+                        throw new InvalidOperationException("Chunk batch segment payload may not be empty.");
+                    }
+
+                    totalChunkBytesV3 += segmentBytes.Length;
+                    if (totalChunkBytesV3 > FileTransferProtocol.MaxChunkRawBytes)
+                    {
+                        throw new InvalidOperationException($"Chunk batch payload exceeded {FileTransferProtocol.MaxChunkRawBytes} bytes.");
+                    }
+
+                    WriteBytes(buffer, segmentBytes);
+                }
                 break;
             case FileTransferChunkBatchFrameV2 chunkBatch:
                 if (chunkBatch.DataSegments.Count == 0)
@@ -123,6 +160,26 @@ public static class FileTransferDataFrameCodec
             case FileTransferCompleteFrameV2 complete:
                 WriteInt64(buffer, complete.FileSizeBytes);
                 WriteHash(buffer, complete.Sha256Base64);
+                break;
+            case FileTransferManifestFrameV3 manifestV3:
+                WriteString(buffer, manifestV3.FileName);
+                WriteInt64(buffer, manifestV3.FileSizeBytes);
+                WriteInt32(buffer, manifestV3.ChunkSizeBytes);
+                WriteInt32(buffer, manifestV3.ChunkCount);
+                WriteHash(buffer, manifestV3.Sha256Base64);
+                break;
+            case FileTransferGrantWindowFrameV3 grantV3:
+                WriteInt32(buffer, grantV3.NextExpectedChunkIndex);
+                WriteInt32(buffer, grantV3.GrantedUntilChunkIndexExclusive);
+                WriteInt64(buffer, grantV3.BytesCommitted);
+                break;
+            case FileTransferAckProgressFrameV3 ackV3:
+                WriteInt32(buffer, ackV3.NextExpectedChunkIndex);
+                WriteInt64(buffer, ackV3.BytesCommitted);
+                break;
+            case FileTransferRepairRequestFrameV3 repairV3:
+                WriteInt32(buffer, repairV3.StartChunkIndex);
+                WriteInt32(buffer, repairV3.RequestedChunkCount);
                 break;
             default:
                 throw new InvalidOperationException($"Unsupported file-transfer data frame type '{frame.GetType().Name}'.");
@@ -286,6 +343,130 @@ public static class FileTransferDataFrameCodec
                     Sha256Base64 = completeSha256Base64,
                 };
                 break;
+            case 11:
+                if (!reader.TryReadString(out var fileNameV3) ||
+                    !reader.TryReadInt64(out var fileSizeBytesV3) ||
+                    !reader.TryReadInt32(out var chunkSizeBytesV3) ||
+                    !reader.TryReadInt32(out var chunkCountV3) ||
+                    !reader.TryReadHash(out var sha256Base64V3) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferManifestFrameV3
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = fileNameV3,
+                    FileSizeBytes = fileSizeBytesV3,
+                    ChunkSizeBytes = chunkSizeBytesV3,
+                    ChunkCount = chunkCountV3,
+                    Sha256Base64 = sha256Base64V3,
+                };
+                break;
+            case 12:
+                if (!reader.TryReadInt32(out var nextExpectedChunkIndexV3) ||
+                    !reader.TryReadInt32(out var grantedUntilExclusiveV3) ||
+                    !reader.TryReadInt64(out var bytesCommittedV3) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferGrantWindowFrameV3
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    NextExpectedChunkIndex = nextExpectedChunkIndexV3,
+                    GrantedUntilChunkIndexExclusive = grantedUntilExclusiveV3,
+                    BytesCommitted = bytesCommittedV3,
+                };
+                break;
+            case 13:
+                if (!reader.TryReadInt32(out var ackNextExpectedV3) ||
+                    !reader.TryReadInt64(out var ackBytesCommittedV3) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferAckProgressFrameV3
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    NextExpectedChunkIndex = ackNextExpectedV3,
+                    BytesCommitted = ackBytesCommittedV3,
+                };
+                break;
+            case 14:
+                if (!reader.TryReadInt32(out var chunkIndexV3) ||
+                    !reader.TryReadInt32(out var chunkCountValueV3) ||
+                    !reader.TryReadBytes(out var chunkBytesV3Data) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferChunkDataFrameV3
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ChunkIndex = chunkIndexV3,
+                    ChunkCount = chunkCountValueV3,
+                    Data = chunkBytesV3Data,
+                };
+                break;
+            case 15:
+                if (!reader.TryReadInt32(out var startChunkIndexValueV3) ||
+                    !reader.TryReadInt32(out var batchChunkCountValueV3) ||
+                    !reader.TryReadInt32(out var batchSegmentCountV3) ||
+                    batchSegmentCountV3 <= 0)
+                {
+                    return false;
+                }
+
+                var chunkSegmentsV3 = new byte[batchSegmentCountV3][];
+                for (var segmentIndex = 0; segmentIndex < batchSegmentCountV3; segmentIndex++)
+                {
+                    if (!reader.TryReadBytes(out var segmentBytes))
+                    {
+                        return false;
+                    }
+
+                    chunkSegmentsV3[segmentIndex] = segmentBytes;
+                }
+
+                if (!reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferChunkBatchFrameV3
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    StartChunkIndex = startChunkIndexValueV3,
+                    ChunkCount = batchChunkCountValueV3,
+                    DataSegments = chunkSegmentsV3,
+                };
+                break;
+            case 16:
+                if (!reader.TryReadInt32(out var repairStartChunkIndex) ||
+                    !reader.TryReadInt32(out var repairRequestedChunkCount) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferRepairRequestFrameV3
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    StartChunkIndex = repairStartChunkIndex,
+                    RequestedChunkCount = repairRequestedChunkCount,
+                };
+                break;
             default:
                 return false;
         }
@@ -315,6 +496,12 @@ public static class FileTransferDataFrameCodec
                 FileTransferProtocol.AckProgressFrameTypeV2 => JsonSerializer.Deserialize<FileTransferAckProgressFrameV2>(utf8Json, JsonOptions),
                 FileTransferProtocol.SessionCancelFrameTypeV2 => JsonSerializer.Deserialize<FileTransferCancelFrameV2>(utf8Json, JsonOptions),
                 FileTransferProtocol.SessionCompleteFrameTypeV2 => JsonSerializer.Deserialize<FileTransferCompleteFrameV2>(utf8Json, JsonOptions),
+                FileTransferProtocol.ManifestFrameTypeV3 => JsonSerializer.Deserialize<FileTransferManifestFrameV3>(utf8Json, JsonOptions),
+                FileTransferProtocol.GrantWindowFrameTypeV3 => JsonSerializer.Deserialize<FileTransferGrantWindowFrameV3>(utf8Json, JsonOptions),
+                FileTransferProtocol.AckProgressFrameTypeV3 => JsonSerializer.Deserialize<FileTransferAckProgressFrameV3>(utf8Json, JsonOptions),
+                FileTransferProtocol.ChunkDataFrameTypeV3 => JsonSerializer.Deserialize<FileTransferChunkDataFrameV3>(utf8Json, JsonOptions),
+                FileTransferProtocol.ChunkBatchFrameTypeV3 => JsonSerializer.Deserialize<FileTransferChunkBatchFrameV3>(utf8Json, JsonOptions),
+                FileTransferProtocol.RepairRequestFrameTypeV3 => JsonSerializer.Deserialize<FileTransferRepairRequestFrameV3>(utf8Json, JsonOptions),
                 _ => null,
             };
         }
@@ -372,6 +559,21 @@ public static class FileTransferDataFrameCodec
                     TransferId = transferId,
                 };
                 return true;
+            case FileTransferChunkDataFrameV3 chunkV3 when
+                chunkV3.ChunkIndex >= 0 &&
+                chunkV3.ChunkCount > 0 &&
+                chunkV3.ChunkIndex < chunkV3.ChunkCount &&
+                chunkV3.Data.Length > 0 &&
+                chunkV3.Data.Length <= FileTransferProtocol.MaxChunkRawBytes:
+                normalized = chunkV3 with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.ChunkDataFrameTypeV3,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Data = chunkV3.Data.ToArray(),
+                };
+                return true;
             case FileTransferChunkDataFrameV2 chunk when
                 chunk.ChunkIndex >= 0 &&
                 chunk.ChunkCount > 0 &&
@@ -385,6 +587,38 @@ public static class FileTransferDataFrameCodec
                     SessionId = sessionId,
                     TransferId = transferId,
                     Data = chunk.Data.ToArray(),
+                };
+                return true;
+            case FileTransferChunkBatchFrameV3 batchV3 when
+                batchV3.StartChunkIndex >= 0 &&
+                batchV3.ChunkCount > 0 &&
+                batchV3.DataSegments.Count > 0 &&
+                batchV3.StartChunkIndex + batchV3.DataSegments.Count - 1 < batchV3.ChunkCount:
+                var normalizedSegmentsV3 = new byte[batchV3.DataSegments.Count][];
+                var totalChunkBytesV3 = 0;
+                for (var segmentIndex = 0; segmentIndex < batchV3.DataSegments.Count; segmentIndex++)
+                {
+                    var segment = batchV3.DataSegments[segmentIndex];
+                    if (segment.Length == 0)
+                    {
+                        return false;
+                    }
+
+                    normalizedSegmentsV3[segmentIndex] = segment.ToArray();
+                    totalChunkBytesV3 += segment.Length;
+                    if (totalChunkBytesV3 > FileTransferProtocol.MaxChunkRawBytes)
+                    {
+                        return false;
+                    }
+                }
+
+                normalized = batchV3 with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.ChunkBatchFrameTypeV3,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    DataSegments = normalizedSegmentsV3,
                 };
                 return true;
             case FileTransferChunkBatchFrameV2 batch when
@@ -453,6 +687,57 @@ public static class FileTransferDataFrameCodec
                     Sha256Base64 = completeHash,
                 };
                 return true;
+            case FileTransferManifestFrameV3 manifestV3 when
+                FileTransferPayloadCodec.TryNormalizeFileName(manifestV3.FileName, out var fileNameV3) &&
+                manifestV3.FileSizeBytes > 0 &&
+                manifestV3.ChunkSizeBytes > 0 &&
+                manifestV3.ChunkSizeBytes <= FileTransferProtocol.MaxChunkRawBytes &&
+                manifestV3.ChunkCount > 0 &&
+                FileTransferPayloadCodec.TryNormalizeSha256(manifestV3.Sha256Base64, out var hashV3):
+                normalized = manifestV3 with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.ManifestFrameTypeV3,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = fileNameV3,
+                    Sha256Base64 = hashV3,
+                };
+                return true;
+            case FileTransferGrantWindowFrameV3 grantV3 when
+                grantV3.NextExpectedChunkIndex >= 0 &&
+                grantV3.GrantedUntilChunkIndexExclusive >= grantV3.NextExpectedChunkIndex &&
+                grantV3.BytesCommitted >= 0:
+                normalized = grantV3 with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.GrantWindowFrameTypeV3,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                };
+                return true;
+            case FileTransferAckProgressFrameV3 ackV3 when
+                ackV3.NextExpectedChunkIndex >= 0 &&
+                ackV3.BytesCommitted >= 0:
+                normalized = ackV3 with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.AckProgressFrameTypeV3,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                };
+                return true;
+            case FileTransferRepairRequestFrameV3 repairV3 when
+                repairV3.StartChunkIndex >= 0 &&
+                repairV3.RequestedChunkCount > 0:
+                normalized = repairV3 with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.RepairRequestFrameTypeV3,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                };
+                return true;
             default:
                 return false;
         }
@@ -476,11 +761,17 @@ public static class FileTransferDataFrameCodec
         {
             FileTransferManifestFrameV2 => 1,
             FileTransferRequestChunksFrameV2 => 2,
+            FileTransferChunkDataFrameV3 => 14,
             FileTransferChunkDataFrameV2 => 3,
+            FileTransferChunkBatchFrameV3 => 15,
             FileTransferChunkBatchFrameV2 => 7,
             FileTransferAckProgressFrameV2 => 4,
             FileTransferCancelFrameV2 => 5,
             FileTransferCompleteFrameV2 => 6,
+            FileTransferManifestFrameV3 => 11,
+            FileTransferGrantWindowFrameV3 => 12,
+            FileTransferAckProgressFrameV3 => 13,
+            FileTransferRepairRequestFrameV3 => 16,
             _ => throw new InvalidOperationException($"Unsupported file-transfer data frame type '{frame.GetType().Name}'."),
         };
 

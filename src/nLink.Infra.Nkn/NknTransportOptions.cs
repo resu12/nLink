@@ -274,10 +274,36 @@ internal sealed class NknTransportOptions
     {
         if (enumerateInstanceIdentityFilesOverrideForTests is not null)
         {
-            return enumerateInstanceIdentityFilesOverrideForTests(directory);
+            return NormalizeEnumeratedInstanceIdentityPaths(enumerateInstanceIdentityFilesOverrideForTests(directory));
         }
 
-        return Directory.GetFiles(directory, "identity.instance-*.json", SearchOption.TopDirectoryOnly);
+        return NormalizeEnumeratedInstanceIdentityPaths(
+            Directory.GetFiles(directory, "identity.instance-*.json", SearchOption.TopDirectoryOnly)
+                .Concat(Directory.GetFiles(directory, "identity.instance-*.json.seed", SearchOption.TopDirectoryOnly)));
+    }
+
+    private static IEnumerable<string> NormalizeEnumeratedInstanceIdentityPaths(IEnumerable<string> discoveredPaths)
+    {
+        var normalized = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var path in discoveredPaths)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                continue;
+            }
+
+            var fullPath = Path.GetFullPath(path);
+            if (fullPath.EndsWith(".json.seed", StringComparison.OrdinalIgnoreCase))
+            {
+                normalized.Add(fullPath[..^".seed".Length]);
+            }
+            else
+            {
+                normalized.Add(fullPath);
+            }
+        }
+
+        return normalized;
     }
 
     private static bool TryParseInstanceIdentityPid(string identityPath, out int pid)

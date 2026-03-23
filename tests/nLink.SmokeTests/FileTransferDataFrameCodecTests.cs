@@ -176,4 +176,49 @@ public sealed class FileTransferDataFrameCodecTests
 
         Assert.False(FileTransferDataFrameCodec.TryDeserialize(payload, out _));
     }
+
+    [Fact]
+    public void V3GrantWindowFrame_RoundTrips()
+    {
+        var payload = FileTransferDataFrameCodec.Serialize(
+            new FileTransferGrantWindowFrameV3
+            {
+                SessionId = " session_a ",
+                TransferId = " transfer_a ",
+                NextExpectedChunkIndex = 5,
+                GrantedUntilChunkIndexExclusive = 29,
+                BytesCommitted = 4096,
+            });
+
+        var parsed = FileTransferDataFrameCodec.TryDeserialize(payload, out var frame);
+
+        var grant = Assert.IsType<FileTransferGrantWindowFrameV3>(frame);
+        Assert.True(parsed);
+        Assert.Equal("session_a", grant.SessionId);
+        Assert.Equal("transfer_a", grant.TransferId);
+        Assert.Equal(29, grant.GrantedUntilChunkIndexExclusive);
+    }
+
+    [Fact]
+    public void V3ChunkDataFrame_RoundTrips()
+    {
+        var payload = FileTransferDataFrameCodec.Serialize(
+            new FileTransferChunkDataFrameV3
+            {
+                SessionId = " session_a ",
+                TransferId = " transfer_a ",
+                ChunkIndex = 2,
+                ChunkCount = 8,
+                Data = new byte[] { 1, 2, 3, 4 },
+            });
+
+        var parsed = FileTransferDataFrameCodec.TryDeserialize(payload, out var frame);
+
+        var chunk = Assert.IsType<FileTransferChunkDataFrameV3>(frame);
+        Assert.True(parsed);
+        Assert.Equal("session_a", chunk.SessionId);
+        Assert.Equal("transfer_a", chunk.TransferId);
+        Assert.Equal(2, chunk.ChunkIndex);
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, chunk.Data);
+    }
 }

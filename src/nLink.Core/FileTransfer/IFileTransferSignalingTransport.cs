@@ -3,11 +3,17 @@ namespace NLink.Core.FileTransfer;
 public sealed record FileTransferChunkBudgetRequest(
     string TransferId,
     long FileSizeBytes,
-    int RequestedChunkSizeBytes);
+    int RequestedChunkSizeBytes,
+    int NegotiatedDataProtocolVersion);
 
 public interface IFileTransferChunkBudgetProvider
 {
     int ResolveSafeOutboundChunkSize(FileTransferChunkBudgetRequest request);
+}
+
+public interface IFileTransferProtocolCapabilities
+{
+    bool SupportsFileTransferV3Streaming { get; }
 }
 
 public interface IFileTransferSignalingTransport
@@ -25,11 +31,11 @@ public interface IFileTransferSignalingTransport
     event EventHandler<FileTransferErrorReceivedEventArgs>? FileTransferErrorReceived;
     event EventHandler<FileTransferCompleteReceivedEventArgs>? FileTransferCompleteReceived;
 
-    Task SendFileTransferOfferAsync(FileTransferOfferV1 message, CancellationToken ct);
+    Task SendFileTransferOfferAsync(FileTransferOfferV2 message, CancellationToken ct);
     Task SendFileTransferAcceptAsync(FileTransferAcceptV1 message, CancellationToken ct);
     Task SendFileTransferDeclineAsync(FileTransferDeclineV1 message, CancellationToken ct);
     Task SendFileTransferSessionOpenAsync(FileTransferSessionOpenV2 message, CancellationToken ct);
-    Task SendFileTransferStartAsync(FileTransferStartV1 message, CancellationToken ct);
+    Task SendFileTransferStartAsync(FileTransferStartV2 message, CancellationToken ct);
     Task SendFileTransferChunkAsync(FileTransferChunkV1 message, CancellationToken ct);
     Task SendFileTransferWindowUpdateAsync(FileTransferWindowUpdateV1 message, CancellationToken ct);
     Task SendFileTransferMissingRangeAsync(FileTransferMissingRangeV1 message, CancellationToken ct);
@@ -73,13 +79,13 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
 
 public sealed class FileTransferOfferReceivedEventArgs : EventArgs
 {
-    public FileTransferOfferReceivedEventArgs(FileTransferOfferV1 message, string? peerId)
+    public FileTransferOfferReceivedEventArgs(FileTransferOfferV2 message, string? peerId)
     {
         Message = message ?? throw new ArgumentNullException(nameof(message));
         PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
     }
 
-    public FileTransferOfferV1 Message { get; }
+    public FileTransferOfferV2 Message { get; }
 
     public string? PeerId { get; }
 }
@@ -112,13 +118,13 @@ public sealed class FileTransferDeclineReceivedEventArgs : EventArgs
 
 public sealed class FileTransferStartReceivedEventArgs : EventArgs
 {
-    public FileTransferStartReceivedEventArgs(FileTransferStartV1 message, string? peerId)
+    public FileTransferStartReceivedEventArgs(FileTransferStartV2 message, string? peerId)
     {
         Message = message ?? throw new ArgumentNullException(nameof(message));
         PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
     }
 
-    public FileTransferStartV1 Message { get; }
+    public FileTransferStartV2 Message { get; }
 
     public string? PeerId { get; }
 }

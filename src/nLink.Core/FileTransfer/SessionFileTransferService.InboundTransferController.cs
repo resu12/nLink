@@ -18,6 +18,25 @@ public sealed partial class SessionFileTransferService
 
         public async Task SendWindowUpdateAsync(InboundTransferContext context, WindowUpdateTrigger trigger, CancellationToken ct)
         {
+            bool useV3GrantWindow = false;
+            bool forceV3Grant = false;
+            lock (owner.gate)
+            {
+                if (ReferenceEquals(owner.inboundTransfer, context) &&
+                    !context.IsTerminal &&
+                    context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV3)
+                {
+                    useV3GrantWindow = true;
+                    forceV3Grant = trigger is WindowUpdateTrigger.Startup or WindowUpdateTrigger.StartupResend or WindowUpdateTrigger.SteadyStateResend;
+                }
+            }
+
+            if (useV3GrantWindow)
+            {
+                await owner.SendInboundGrantWindowV3Async(context, forceV3Grant).ConfigureAwait(false);
+                return;
+            }
+
             try
             {
                 FileTransferWindowUpdateV1? message = null;
@@ -640,6 +659,19 @@ public sealed partial class SessionFileTransferService
                 var currentTransport = owner.GetTransportOrThrow();
                 await currentTransport.SendFileTransferPressureStateAsync(message, ct).ConfigureAwait(false);
                 SessionFileTransferService.LogPressureStateSent(message);
+                lock (owner.gate)
+                {
+                    if (ReferenceEquals(owner.inboundTransfer, context) && !context.IsTerminal)
+                    {
+                        context.LastPressureStateSentUtc = DateTimeOffset.UtcNow;
+                        context.LastPressureStateSentMode = context.LocalPressureMode;
+                        context.LastPressureStateSentReason = context.LocalPressureReason;
+                        context.LastPressureStateSentSuggestedSendAheadChunks = context.LocalPressureSuggestedSendAheadChunks;
+                        context.LastPressureStateSentReceiverNextExpectedChunkIndex = context.LocalPressureReceiverNextExpectedChunkIndex;
+                        context.LastPressureStateSentProfileName = owner.ResolveInboundV3ProfileName(context);
+                    }
+                }
+
                 if (pressureStateChanged && snapshot is not null)
                 {
                     owner.RaiseTransferChanged(snapshot);
@@ -757,6 +789,17 @@ public sealed partial class SessionFileTransferService
                 }
             }
 
+            if (ShouldSuppressV3PressureStateLocked(
+                    context,
+                    desiredMode,
+                    desiredReason,
+                    desiredSuggestedSendAheadChunks,
+                    desiredReceiverNextExpectedChunkIndex,
+                    now))
+            {
+                return false;
+            }
+
             message = new FileTransferPressureStateV1
             {
                 SessionId = context.SessionId,
@@ -768,6 +811,40 @@ public sealed partial class SessionFileTransferService
                 Reason = SessionFileTransferService.FormatPressureReason(desiredReason),
             };
             return true;
+        }
+
+        private bool ShouldSuppressV3PressureStateLocked(
+            InboundTransferContext context,
+            FileTransferPressureMode desiredMode,
+            FileTransferPressureReason desiredReason,
+            int desiredSuggestedSendAheadChunks,
+            int desiredReceiverNextExpectedChunkIndex,
+            DateTimeOffset now)
+        {
+            var currentProfileName = owner.ResolveInboundV3ProfileName(context);
+            if (context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV3 ||
+                desiredMode != FileTransferPressureMode.Normal ||
+                desiredReason != FileTransferPressureReason.BulkBacklog ||
+                context.LastPressureStateSentUtc is null ||
+                context.LastPressureStateSentMode != desiredMode ||
+                context.LastPressureStateSentReason != desiredReason ||
+                context.LastPressureStateSentSuggestedSendAheadChunks != desiredSuggestedSendAheadChunks ||
+                !string.Equals(context.LastPressureStateSentProfileName, currentProfileName, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            var recentEnough =
+                now - context.LastPressureStateSentUtc.Value < TimeSpan.FromMilliseconds(PullV3PressureStateSuppressionMs);
+            var progressDeltaChunks =
+                Math.Abs(desiredReceiverNextExpectedChunkIndex - context.LastPressureStateSentReceiverNextExpectedChunkIndex);
+            var suppressionThreshold = currentProfileName switch
+            {
+                "degraded" => PullV3PressureStateDegradedProgressDeltaChunks,
+                "balanced_screenshare" => PullV3PressureStateBalancedProgressDeltaChunks,
+                _ => PullV3PressureStateHealthyProgressDeltaChunks,
+            };
+            return recentEnough && progressDeltaChunks < suppressionThreshold;
         }
 
         public void RecordMissingRangeSentLocked(InboundTransferContext context)

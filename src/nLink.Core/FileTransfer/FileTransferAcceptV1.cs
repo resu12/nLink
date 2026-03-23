@@ -15,4 +15,7 @@ public sealed record FileTransferAcceptV1
 
     [JsonPropertyName("transferId")]
     public string TransferId { get; init; } = string.Empty;
+
+    [JsonPropertyName("acceptedDataProtocolVersion")]
+    public int? AcceptedDataProtocolVersion { get; init; }
 }

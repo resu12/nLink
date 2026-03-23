@@ -8297,7 +8297,8 @@ public class SmokeTests
             var request = new FileTransferChunkBudgetRequest(
                 TransferId: "transfer_nkn_payload_budget",
                 FileSizeBytes: 88_100_000,
-                RequestedChunkSizeBytes: FileTransferProtocol.MaxChunkRawBytes);
+                RequestedChunkSizeBytes: FileTransferProtocol.MaxChunkRawBytes,
+                NegotiatedDataProtocolVersion: FileTransferProtocol.ProtocolVersionV2);
 
             var safeChunkSize = budgetProvider.ResolveSafeOutboundChunkSize(request);
             var chunkCount = (int)((request.FileSizeBytes + safeChunkSize - 1) / safeChunkSize);
@@ -8315,6 +8316,29 @@ public class SmokeTests
 
             Assert.InRange(safeChunkSize, 1, FileTransferProtocol.MaxChunkRawBytes);
             Assert.InRange(EnvelopeCodec.Serialize(envelope).Length, 1, 64 * 1024);
+
+            var v3Request = request with
+            {
+                TransferId = "transfer_nkn_payload_budget_v3",
+                RequestedChunkSizeBytes = 40 * 1024,
+                NegotiatedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV3,
+            };
+            var safeV3ChunkSize = budgetProvider.ResolveSafeOutboundChunkSize(v3Request);
+            var v3ChunkCount = (int)((v3Request.FileSizeBytes + safeV3ChunkSize - 1) / safeV3ChunkSize);
+            var v3Envelope = BuildSecureFileTransferDataFrameEnvelope(
+                helper,
+                new FileTransferChunkDataFrameV3
+                {
+                    SessionId = sessionId,
+                    TransferId = v3Request.TransferId,
+                    ChunkIndex = v3ChunkCount - 1,
+                    ChunkCount = v3ChunkCount,
+                    Data = new byte[safeV3ChunkSize],
+                },
+                sequence: 2);
+
+            Assert.InRange(safeV3ChunkSize, 40 * 1024, FileTransferProtocol.MaxChunkRawBytes);
+            Assert.InRange(EnvelopeCodec.Serialize(v3Envelope).Length, 1, 64 * 1024);
         }
         finally
         {
@@ -8408,6 +8432,89 @@ public class SmokeTests
 
             var chunkFrames = receivedFrames.Select(frame => Assert.IsType<FileTransferChunkDataFrameV2>(frame)).ToArray();
             Assert.Equal(new[] { 0, 1, 2 }, chunkFrames.Select(frame => frame.ChunkIndex).OrderBy(index => index).ToArray());
+            Assert.All(rawBulkMessages, message => Assert.Equal(NknBridgeChannel.Bulk, message.Channel));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferDataSession_SplitsOutboundChunkBatchFramesIntoBulkChunkDataFrames_PreservingV3FrameType()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var logStartIndex = GetOperationalLogLength();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.batchlimit.v3.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.batchlimit.v3.address");
+            var hostIdentity = new NknIdentity("host-batchlimit-v3-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-batchlimit-v3-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_batchlimit_v3";
+            var outboundSession = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+
+            var rawBulkMessages = new ConcurrentQueue<NknIncomingMessage>();
+            hostClient.MessageReceived += (_, e) =>
+            {
+                if (!e.IsTopic &&
+                    e.Channel == NknBridgeChannel.Bulk &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.FileTransferDataFrame)
+                {
+                    rawBulkMessages.Enqueue(e);
+                }
+            };
+
+            var oversizedBatch = new FileTransferChunkBatchFrameV3
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                StartChunkIndex = 0,
+                ChunkCount = 3,
+                DataSegments =
+                [
+                    new byte[16 * 1024],
+                    new byte[16 * 1024],
+                    new byte[16 * 1024],
+                ],
+            };
+
+            await outboundSession.SendAsync(oversizedBatch, cts.Token);
+
+            await WaitUntilAsync(() => rawBulkMessages.Count >= 3, TimeSpan.FromSeconds(2));
+
+            Assert.Equal(3, rawBulkMessages.Count);
+
+            var decryptKey = Assert.IsType<byte[]>(GetPrivateField(host, "fileTransferSessionSharedKey")).AsSpan().ToArray();
+            var receivedFrames = rawBulkMessages
+                .Select(message =>
+                {
+                    Assert.True(EnvelopeCodec.TryDeserialize(message.Payload, out var envelope));
+                    var securePayload = SessionSecureEnvelopeCodec.Decrypt(
+                        decryptKey,
+                        envelope.Payload,
+                        new SessionSecureEnvelopeExpectation(
+                            Family: SessionSecureMessageFamily.FileTransfer,
+                            MessageType: "file_transfer_data_frame",
+                            SessionId: new SessionId(sessionId),
+                            SenderIdentity: new PeerAddress(helper.LocalPeerAddress)));
+                    Assert.True(FileTransferDataFrameCodec.TryDeserialize(securePayload.Plaintext, out var frame));
+                    return frame;
+                })
+                .ToArray();
+
+            var chunkFrames = receivedFrames.Select(frame => Assert.IsType<FileTransferChunkDataFrameV3>(frame)).ToArray();
+            Assert.Equal(new[] { 0, 1, 2 }, chunkFrames.Select(frame => frame.ChunkIndex).OrderBy(index => index).ToArray());
+            Assert.DoesNotContain(receivedFrames, static frame => frame is FileTransferChunkDataFrameV2 and not FileTransferChunkDataFrameV3);
             Assert.All(rawBulkMessages, message => Assert.Equal(NknBridgeChannel.Bulk, message.Channel));
         }
         finally
@@ -12905,6 +13012,43 @@ return;
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void NknIdentityStore_DefaultSharedIdentity_WithBlankProtectedSeedFile_QuarantinesAndRecreatesIdentity()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-protected-seed-blank-recovery", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        PersistenceDiagnostics.ClearForTests();
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            var options = LoadNknOptionsWithOverrides(keyPath, "blank-protected-seed-test");
+            using var sharedPathOverride = NknIdentityStore.OverrideDefaultSharedKeyPathForTests(keyPath);
+
+            var originalIdentity = NknIdentityStore.LoadOrCreate(options);
+            File.WriteAllText(NknSecretStore.GetSecretPath(keyPath), string.Empty);
+
+            var recoveredIdentity = NknIdentityStore.LoadOrCreate(options);
+
+            Assert.NotEqual(originalIdentity.Address, recoveredIdentity.Address);
+            Assert.True(File.Exists(keyPath));
+            Assert.True(File.Exists(NknSecretStore.GetSecretPath(keyPath)));
+
+            var snapshot = PersistenceDiagnostics.Snapshot();
+            Assert.Contains(snapshot.RecentEvents, e => string.Equals(e.Operation, "automatic_identity_recovery", StringComparison.Ordinal));
+        }
+        finally
+        {
+            PersistenceDiagnostics.ClearForTests();
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void NknTransportOptions_StartupCleanup_DeletesOnlyStalePerProcessIdentityFiles()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-instance-cleanup", Guid.NewGuid().ToString("N"));
@@ -12942,7 +13086,7 @@ return;
             Assert.True(File.Exists(NknSecretStore.GetSecretPath(runningIdentityPath)));
             Assert.True(File.Exists(malformedIdentityPath));
             Assert.True(File.Exists(NknSecretStore.GetSecretPath(malformedIdentityPath)));
-            Assert.True(File.Exists(orphanSeedPath));
+            Assert.False(File.Exists(orphanSeedPath));
 
             var snapshot = PersistenceDiagnostics.Snapshot();
             Assert.Contains(snapshot.RecentEvents, e => string.Equals(e.Operation, "cleanup_stale_instance_identities", StringComparison.Ordinal));
@@ -13464,6 +13608,20 @@ return;
         }
     }
 
+    [Fact]
+    public void NknFileTransferDispatchState_TreatsOnlyLateControlUnknownTransferAsBenign()
+    {
+        var method = typeof(NknSignalingTransport).GetMethod(
+            "IsBenignLateFileTransferControlRejection",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        Assert.True((bool)(method!.Invoke(null, [MsgType.FileTransferWindowUpdate, "unknown_transfer_id"]) ?? false));
+        Assert.True((bool)(method.Invoke(null, [MsgType.FileTransferPressureState, "unknown_transfer_id"]) ?? false));
+        Assert.False((bool)(method.Invoke(null, [MsgType.FileTransferChunk, "unknown_transfer_id"]) ?? true));
+        Assert.False((bool)(method.Invoke(null, [MsgType.FileTransferWindowUpdate, "window_update_requires_start"]) ?? true));
+    }
+
     [Trait("Category", "Smoke")]
     [Trait("Category", "BridgeStabilityPromotion")]
     [Fact]
@@ -13532,6 +13690,34 @@ return;
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
             try { CleanupDirectoryIfExists(tempDir); } catch { }
         }
+    }
+
+    [Fact]
+    public void RealNknClientAdapter_SuppressesExpectedShutdownWebSocketStderr()
+    {
+        var adapter = (RealNknClientAdapter)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(RealNknClientAdapter));
+        var gateField = typeof(RealNknClientAdapter).GetField("gate", BindingFlags.Instance | BindingFlags.NonPublic);
+        var shuttingDownField = typeof(RealNknClientAdapter).GetField("shuttingDown", BindingFlags.Instance | BindingFlags.NonPublic);
+        var disposedField = typeof(RealNknClientAdapter).GetField("disposed", BindingFlags.Instance | BindingFlags.NonPublic);
+        var method = typeof(RealNknClientAdapter).GetMethod(
+            "ShouldSuppressBridgeStderrDuringShutdown",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.NotNull(gateField);
+        Assert.NotNull(shuttingDownField);
+        Assert.NotNull(disposedField);
+        Assert.NotNull(method);
+
+        gateField!.SetValue(adapter, new object());
+        shuttingDownField!.SetValue(adapter, true);
+        disposedField!.SetValue(adapter, false);
+
+        Assert.True((bool)(method!.Invoke(adapter, ["[nkn-bridge] WebSocket error: WebSocket was closed before the connection was established"]) ?? false));
+        Assert.False((bool)(method.Invoke(adapter, ["[nkn-bridge] some other error"]) ?? true));
+
+        shuttingDownField.SetValue(adapter, false);
+        disposedField.SetValue(adapter, true);
+        Assert.True((bool)(method.Invoke(adapter, ["[nkn-bridge] WebSocket error: WebSocket was closed before the connection was established"]) ?? false));
     }
 
     [Trait("Category", "Smoke")]
@@ -14524,9 +14710,11 @@ rl.on('line', (line) => {
             : new PeerAddress(senderTransport.LocalPeerAddress);
         var plaintext = message switch
         {
+            FileTransferOfferV2 offer => FileTransferPayloadCodec.Serialize(offer),
             FileTransferOfferV1 offer => FileTransferPayloadCodec.Serialize(offer),
             FileTransferAcceptV1 accept => FileTransferPayloadCodec.Serialize(accept),
             FileTransferDeclineV1 decline => FileTransferPayloadCodec.Serialize(decline),
+            FileTransferStartV2 start => FileTransferPayloadCodec.Serialize(start),
             FileTransferStartV1 start => FileTransferPayloadCodec.Serialize(start),
             FileTransferChunkV1 chunk => FileTransferPayloadCodec.Serialize(chunk),
             FileTransferWindowUpdateV1 windowUpdate => FileTransferPayloadCodec.Serialize(windowUpdate),

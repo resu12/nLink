@@ -2,13 +2,13 @@ using System.Text.Json.Serialization;
 
 namespace NLink.Core.FileTransfer;
 
-public sealed record FileTransferOfferV1
+public sealed record FileTransferOfferV2
 {
     [JsonPropertyName("kind")]
     public string Kind { get; init; } = FileTransferProtocol.Kind;
 
     [JsonPropertyName("type")]
-    public string Type { get; init; } = FileTransferProtocol.OfferTypeV1;
+    public string Type { get; init; } = FileTransferProtocol.OfferTypeV2;
 
     [JsonPropertyName("sessionId")]
     public string SessionId { get; init; } = string.Empty;
@@ -22,17 +22,18 @@ public sealed record FileTransferOfferV1
     [JsonPropertyName("fileSizeBytes")]
     public long FileSizeBytes { get; init; }
 
-    [JsonPropertyName("sha256Base64")]
-    public string Sha256Base64 { get; init; } = string.Empty;
+    [JsonPropertyName("preferredDataProtocolVersion")]
+    public int? PreferredDataProtocolVersion { get; init; }
 
-    public static implicit operator FileTransferOfferV2(FileTransferOfferV1 value)
+    public static implicit operator FileTransferOfferV1(FileTransferOfferV2 value)
         => new()
         {
             Kind = FileTransferProtocol.Kind,
-            Type = FileTransferProtocol.OfferTypeV2,
+            Type = FileTransferProtocol.OfferTypeV1,
             SessionId = value.SessionId,
             TransferId = value.TransferId,
             FileName = value.FileName,
             FileSizeBytes = value.FileSizeBytes,
+            Sha256Base64 = string.Empty,
         };
 }

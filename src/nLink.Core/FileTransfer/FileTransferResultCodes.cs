@@ -16,6 +16,7 @@ public static class FileTransferResultCodes
     public const string TransportIncompatible = "transport_incompatible";
     public const string WindowTimeout = "window_timeout";
     public const string PullSessionStalled = "pull_session_stalled";
+    public const string MetadataNotProvided = "metadata_not_provided";
     public const string CanceledLocal = "canceled_local";
     public const string CanceledRemote = "canceled_remote";
     public const string TransportDisconnected = "transport_disconnected";

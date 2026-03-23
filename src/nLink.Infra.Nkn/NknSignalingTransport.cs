@@ -15,7 +15,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities
 {
     private const int EnvelopeVersion = 1;
     private static readonly TimeSpan AckWaitTimeout = TimeSpan.FromSeconds(2);
@@ -77,6 +77,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private const bool LocalRemoteControlSupported = true;
     private const int FileTransferInboundReplayWindowSize = 32768;
     private const long FileTransferInboundReplayMaxForwardAdvance = 131072;
+
+    public bool SupportsFileTransferV3Streaming => true;
 
     private string? currentEnvelopeCode;
     private string? remoteEndpoint;

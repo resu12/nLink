@@ -155,7 +155,8 @@ internal static class NknIdentityStore
         {
             protectedSeed = NknSecretStore.TryLoadSeed(keyPath);
         }
-        catch (CryptographicException ex) when (CanAutoRecoverCorruptedIdentity(
+        catch (Exception ex) when (ex is CryptographicException or FormatException &&
+                                   CanAutoRecoverCorruptedIdentity(
                    keyPath,
                    isGeneratedPerProcessKeyPath,
                    legacySeedBase64,
@@ -163,6 +164,19 @@ internal static class NknIdentityStore
                    identityFileUnreadable))
         {
             protectedSeed = RecoverCorruptedDefaultIdentity(keyPath, ex);
+        }
+
+        if (protectedSeed is null &&
+            CanAutoRecoverCorruptedIdentity(
+                keyPath,
+                isGeneratedPerProcessKeyPath,
+                legacySeedBase64,
+                identityFileExists,
+                identityFileUnreadable))
+        {
+            protectedSeed = RecoverCorruptedDefaultIdentity(
+                keyPath,
+                new InvalidOperationException("Protected seed data was missing or blank."));
         }
 
         if (protectedSeed is not null)
@@ -299,7 +313,7 @@ internal static class NknIdentityStore
                (IsDefaultSharedIdentityPath(keyPath) || isGeneratedPerProcessKeyPath);
     }
 
-    private static byte[] RecoverCorruptedDefaultIdentity(string keyPath, CryptographicException ex)
+    private static byte[] RecoverCorruptedDefaultIdentity(string keyPath, Exception ex)
     {
         PersistenceDiagnostics.Record(
             domain: "nkn_identity_store",

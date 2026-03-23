@@ -9,15 +9,15 @@ public sealed class FileTransferPayloadCodecTests
     public void Offer_RoundTrips_AndNormalizesFields()
     {
         var payload = FileTransferPayloadCodec.Serialize(
-            new FileTransferOfferV1
+            new FileTransferOfferV2
             {
                 Kind = "filetransfer",
-                Type = FileTransferProtocol.OfferTypeV1,
+                Type = FileTransferProtocol.OfferTypeV2,
                 SessionId = " session_a ",
                 TransferId = " transfer_a ",
                 FileName = " report.pdf ",
                 FileSizeBytes = 123,
-                Sha256Base64 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]),
+                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV3,
             });
 
         var parsed = FileTransferPayloadCodec.TryDeserializeOffer(payload, out var message);
@@ -27,23 +27,8 @@ public sealed class FileTransferPayloadCodecTests
         Assert.Equal("transfer_a", message.TransferId);
         Assert.Equal("report.pdf", message.FileName);
         Assert.Equal(FileTransferProtocol.Kind, message.Kind);
-        Assert.Equal(FileTransferProtocol.OfferTypeV1, message.Type);
-    }
-
-    [Fact]
-    public void Offer_RejectsInvalidHashLength()
-    {
-        var payload = FileTransferPayloadCodec.Serialize(
-            new FileTransferOfferV1
-            {
-                SessionId = "session_a",
-                TransferId = "transfer_a",
-                FileName = "report.pdf",
-                FileSizeBytes = 123,
-                Sha256Base64 = Convert.ToBase64String(new byte[16]),
-            });
-
-        Assert.False(FileTransferPayloadCodec.TryDeserializeOffer(payload, out _));
+        Assert.Equal(FileTransferProtocol.OfferTypeV2, message.Type);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV3, message.PreferredDataProtocolVersion);
     }
 
     [Fact]
@@ -53,12 +38,11 @@ public sealed class FileTransferPayloadCodecTests
             new
             {
                 kind = FileTransferProtocol.Kind,
-                type = FileTransferProtocol.OfferTypeV1,
+                type = FileTransferProtocol.OfferTypeV2,
                 sessionId = "session_a",
                 transferId = "",
                 fileName = "report.pdf",
                 fileSizeBytes = 123L,
-                sha256Base64 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]),
             });
 
         Assert.False(FileTransferPayloadCodec.TryDeserializeOffer(payload, out _));
@@ -72,6 +56,7 @@ public sealed class FileTransferPayloadCodecTests
             {
                 SessionId = " session_a ",
                 TransferId = " transfer_a ",
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV3,
             });
 
         var parsed = FileTransferPayloadCodec.TryDeserializeAccept(payload, out var message);
@@ -80,6 +65,7 @@ public sealed class FileTransferPayloadCodecTests
         Assert.Equal("session_a", message.SessionId);
         Assert.Equal("transfer_a", message.TransferId);
         Assert.Equal(FileTransferProtocol.AcceptTypeV1, message.Type);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV3, message.AcceptedDataProtocolVersion);
     }
 
     [Fact]
@@ -101,7 +87,7 @@ public sealed class FileTransferPayloadCodecTests
     public void Start_RoundTrips_AndPreservesNegotiatedChunkSettings()
     {
         var payload = FileTransferPayloadCodec.Serialize(
-            new FileTransferStartV1
+            new FileTransferStartV2
             {
                 SessionId = " session_a ",
                 TransferId = " transfer_a ",
@@ -130,7 +116,7 @@ public sealed class FileTransferPayloadCodecTests
             new
             {
                 kind = FileTransferProtocol.Kind,
-                type = FileTransferProtocol.StartTypeV1,
+                type = FileTransferProtocol.StartTypeV2,
                 sessionId = "",
                 transferId = "transfer_a",
                 fileName = "report.pdf",
@@ -164,6 +150,27 @@ public sealed class FileTransferPayloadCodecTests
         Assert.Equal("transfer_a", message.TransferId);
         Assert.Equal(FileTransferProtocol.SessionRoleSender, message.SessionRole);
         Assert.Equal(FileTransferProtocol.SessionOpenTypeV2, message.Type);
+    }
+
+    [Fact]
+    public void SessionOpenV3_RoundTrips_AndNormalizesEnvelope()
+    {
+        var payload = FileTransferPayloadCodec.Serialize(
+            new FileTransferSessionOpenV2
+            {
+                SessionId = " session_a ",
+                TransferId = " transfer_a ",
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV3,
+                SessionRole = " sender ",
+                ChunkSizeBytes = 4096,
+                InitialPipelineDepth = 8,
+            });
+
+        var parsed = FileTransferPayloadCodec.TryDeserializeSessionOpen(payload, out var message);
+
+        Assert.True(parsed);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV3, message.ProtocolVersion);
+        Assert.Equal(FileTransferProtocol.SessionRoleSender, message.SessionRole);
     }
 
     [Fact]

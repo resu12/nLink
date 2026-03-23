@@ -12,7 +12,7 @@ public sealed partial class SessionFileTransferService
         try
         {
             var currentTransport = GetTransportOrThrow();
-            var startMessage = new FileTransferStartV1
+            var startMessage = new FileTransferStartV2
             {
                 SessionId = context.SessionId,
                 TransferId = context.TransferId,
@@ -23,7 +23,9 @@ public sealed partial class SessionFileTransferService
                 ChunkSizeBytes = context.ChunkSizeBytes,
             };
 
-            UpdateOutboundState(context, FileTransferTransferState.Sending, 0, 0, "Sending file metadata.");
+            UpdateOutboundState(context, FileTransferTransferState.AwaitingStart, 0, 0, "Starting file transfer.");
+            await currentTransport.SendFileTransferStartAsync(startMessage, context.LifetimeCts.Token).ConfigureAwait(false);
+
             LogTransferInfo(
                 "start_sent",
                 FileTransferDirection.Outbound,
@@ -32,10 +34,11 @@ public sealed partial class SessionFileTransferService
                 fileName: context.FileName,
                 fileSizeBytes: context.FileSizeBytes,
                 reason: $"chunk_count={context.ChunkCount}; chunk_size_bytes={context.ChunkSizeBytes}");
-            await currentTransport.SendFileTransferStartAsync(startMessage, context.LifetimeCts.Token).ConfigureAwait(false);
 
             using var stream = await context.OpenReadStreamAsync(context.LifetimeCts.Token).ConfigureAwait(false);
             ValidateReadableStream(stream);
+
+            UpdateOutboundState(context, FileTransferTransferState.Sending, 0, 0, "Sending file metadata.");
 
             var buffer = ArrayPool<byte>.Shared.Rent(context.ChunkSizeBytes);
             try
@@ -1279,8 +1282,8 @@ public sealed partial class SessionFileTransferService
             throw new ArgumentOutOfRangeException(nameof(descriptor.FileSizeBytes), "File size must be positive.");
         }
 
-        var chunkSizeBytes = descriptor.ChunkSizeBytes ?? PullHealthyDefaultChunkSizeBytes;
-        if (chunkSizeBytes <= 0 || chunkSizeBytes > FileTransferProtocol.MaxChunkRawBytes)
+        if (descriptor.ChunkSizeBytes is int chunkSizeBytes &&
+            (chunkSizeBytes <= 0 || chunkSizeBytes > FileTransferProtocol.MaxChunkRawBytes))
         {
             throw new ArgumentOutOfRangeException(nameof(descriptor.ChunkSizeBytes), $"Chunk size must be between 1 and {FileTransferProtocol.MaxChunkRawBytes} bytes.");
         }
@@ -1293,7 +1296,7 @@ public sealed partial class SessionFileTransferService
         {
             FileName = normalizedFileName,
             TransferId = transferId,
-            ChunkSizeBytes = chunkSizeBytes,
+            ChunkSizeBytes = descriptor.ChunkSizeBytes,
         };
     }
 

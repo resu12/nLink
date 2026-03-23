@@ -256,7 +256,7 @@ public sealed class FileTransferPanelItemViewModelTests
     }
 
     [Fact]
-    public void OutboundTransfer_ShowsSentAndConfirmedProgressText()
+    public void OutboundTransfer_ShowsSimpleTransferredProgressText()
     {
         var item = FileTransferPanelItemViewModel.FromSnapshot(
             new FileTransferTransferSnapshot(
@@ -277,7 +277,30 @@ public sealed class FileTransferPanelItemViewModelTests
                 BytesAcknowledgedByReceiver: 11_800_000));
 
         Assert.NotNull(item);
-        Assert.Equal("12.6 MB sent / 11.3 MB confirmed / 54.7 MB", item!.ProgressText);
+        Assert.Equal("12.6 MB / 54.7 MB", item!.ProgressText);
         Assert.Equal(13_200_000d / 57_400_000d, item.ProgressFraction, 6);
+    }
+
+    [Fact]
+    public void ActiveTransfer_PrefersConciseStateText_OverVerboseRuntimeStatus()
+    {
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-a",
+                Direction: FileTransferDirection.Inbound,
+                State: FileTransferTransferState.Receiving,
+                FileName: "archive.bin",
+                FileSizeBytes: 4096,
+                Sha256Base64: null,
+                BytesTransferred: 1024,
+                ChunksTransferred: 1,
+                ChunkCount: 4,
+                ChunkSizeBytes: 1024,
+                ErrorCode: null,
+                StatusMessage: "Receiving requested chunks."));
+
+        Assert.NotNull(item);
+        Assert.Equal("Receiving...", item!.StatusText);
     }
 }

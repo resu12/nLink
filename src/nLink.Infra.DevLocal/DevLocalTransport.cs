@@ -16,7 +16,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.DevLocal;
 
 // DEV ONLY: local machine named-pipe transport for testing two app instances without real networking.
-public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IFileTransferSignalingTransport
+public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IFileTransferSignalingTransport, IFileTransferProtocolCapabilities
 {
     private const string JoinFrameType = "join";
     private const string HelloFrameType = "hello";
@@ -78,6 +78,8 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private SessionConnection? activeConnection;
     private PendingOutboundHandshakeState? pendingOutboundHandshake;
     private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
+
+    public bool SupportsFileTransferV3Streaming => true;
     private byte[]? controlSessionSharedKey;
     private long nextOutboundChatSecureSequence;
     private long nextOutboundControlSecureSequence;
@@ -442,7 +444,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             ct);
     }
 
-    public Task SendFileTransferOfferAsync(FileTransferOfferV1 message, CancellationToken ct)
+    public Task SendFileTransferOfferAsync(FileTransferOfferV2 message, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(message);
         var normalizedMessage = EnsureFileTransferSessionId(message);
@@ -470,7 +472,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         return SendFileTransferRawFrameAsync(FileTransferSessionOpenFrameType, FileTransferPayloadCodec.Serialize(normalizedMessage), normalizedMessage.TransferId, ct);
     }
 
-    public Task SendFileTransferStartAsync(FileTransferStartV1 message, CancellationToken ct)
+    public Task SendFileTransferStartAsync(FileTransferStartV2 message, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(message);
         var normalizedMessage = EnsureFileTransferSessionId(message);
@@ -1703,7 +1705,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         }
     }
 
-    private void SafeRaiseFileTransferOfferReceived(FileTransferOfferV1 message)
+    private void SafeRaiseFileTransferOfferReceived(FileTransferOfferV2 message)
     {
         LogFileTransferFrameEvent("received", FileTransferOfferFrameType, message.TransferId);
         try
@@ -1751,7 +1753,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         }
     }
 
-    private void SafeRaiseFileTransferStartReceived(FileTransferStartV1 message)
+    private void SafeRaiseFileTransferStartReceived(FileTransferStartV2 message)
     {
         LogFileTransferFrameEvent("received", FileTransferStartFrameType, message.TransferId);
         try
@@ -2903,7 +2905,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private ControlDisplayInfoMessageV1 EnsureControlSessionId(ControlDisplayInfoMessageV1 message)
         => message with { SessionId = ResolveControlSessionId(message.SessionId) };
 
-    private FileTransferOfferV1 EnsureFileTransferSessionId(FileTransferOfferV1 message)
+    private FileTransferOfferV2 EnsureFileTransferSessionId(FileTransferOfferV2 message)
         => message with
         {
             SessionId = ResolveControlSessionId(message.SessionId),
@@ -2931,7 +2933,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             TransferId = NormalizeRequiredFileTransferId(message.TransferId),
         };
 
-    private FileTransferStartV1 EnsureFileTransferSessionId(FileTransferStartV1 message)
+    private FileTransferStartV2 EnsureFileTransferSessionId(FileTransferStartV2 message)
         => message with
         {
             SessionId = ResolveControlSessionId(message.SessionId),

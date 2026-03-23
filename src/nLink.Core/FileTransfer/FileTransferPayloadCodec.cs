@@ -13,7 +13,7 @@ public static class FileTransferPayloadCodec
         WriteIndented = false,
     };
 
-    public static byte[] Serialize(FileTransferOfferV1 msg)
+    public static byte[] Serialize(FileTransferOfferV2 msg)
     {
         ArgumentNullException.ThrowIfNull(msg);
         return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
@@ -31,7 +31,7 @@ public static class FileTransferPayloadCodec
         return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
     }
 
-    public static byte[] Serialize(FileTransferStartV1 msg)
+    public static byte[] Serialize(FileTransferStartV2 msg)
     {
         ArgumentNullException.ThrowIfNull(msg);
         return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
@@ -97,34 +97,10 @@ public static class FileTransferPayloadCodec
             throw new ArgumentOutOfRangeException(nameof(chunkCount), "Chunk count must be positive.");
         }
 
-        var high = Math.Min(requestedMaxChunkSize, FileTransferProtocol.MaxChunkRawBytes);
-        if (high <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(requestedMaxChunkSize), "Requested chunk size must be positive.");
-        }
-
-        var low = 1;
-        var best = 0;
-        while (low <= high)
-        {
-            var candidate = low + ((high - low) / 2);
-            if (DoesChunkPayloadFitBudget(sessionId, transferId, chunkCount, candidate))
-            {
-                best = candidate;
-                low = candidate + 1;
-            }
-            else
-            {
-                high = candidate - 1;
-            }
-        }
-
-        if (best <= 0)
-        {
-            throw new InvalidOperationException("No valid file-transfer chunk size fits within the payload budget.");
-        }
-
-        return best;
+        return FileTransferChunkBudget.ComputeLargestFittingRawChunkSize(
+            requestedMaxChunkSize,
+            candidate => DoesChunkPayloadFitBudget(sessionId, transferId, chunkCount, candidate),
+            "No valid file-transfer chunk size fits within the payload budget.");
     }
 
     public static byte[] Serialize(FileTransferCancelV1 msg)
@@ -145,15 +121,15 @@ public static class FileTransferPayloadCodec
         return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
     }
 
-    public static bool TryDeserializeOffer(ReadOnlySpan<byte> utf8Json, out FileTransferOfferV1 msg)
+    public static bool TryDeserializeOffer(ReadOnlySpan<byte> utf8Json, out FileTransferOfferV2 msg)
     {
         msg = default!;
-        if (!TryDeserialize(utf8Json, out FileTransferOfferV1? parsed) ||
+        if (!TryDeserialize(utf8Json, out FileTransferOfferV2? parsed) ||
             parsed is null ||
-            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.OfferTypeV1, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
+            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.OfferTypeV2, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
             !TryNormalizeFileName(parsed.FileName, out var fileName) ||
             parsed.FileSizeBytes <= 0 ||
-            !TryNormalizeSha256(parsed.Sha256Base64, out var sha256Base64))
+            !TryNormalizeOptionalProtocolVersion(parsed.PreferredDataProtocolVersion, out var preferredDataProtocolVersion))
         {
             return false;
         }
@@ -161,11 +137,11 @@ public static class FileTransferPayloadCodec
         msg = parsed with
         {
             Kind = FileTransferProtocol.Kind,
-            Type = FileTransferProtocol.OfferTypeV1,
+            Type = FileTransferProtocol.OfferTypeV2,
             SessionId = sessionId,
             TransferId = transferId,
             FileName = fileName,
-            Sha256Base64 = sha256Base64,
+            PreferredDataProtocolVersion = preferredDataProtocolVersion,
         };
         return true;
     }
@@ -175,7 +151,8 @@ public static class FileTransferPayloadCodec
         msg = default!;
         if (!TryDeserialize(utf8Json, out FileTransferAcceptV1? parsed) ||
             parsed is null ||
-            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.AcceptTypeV1, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId))
+            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.AcceptTypeV1, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
+            !TryNormalizeOptionalProtocolVersion(parsed.AcceptedDataProtocolVersion, out var acceptedDataProtocolVersion))
         {
             return false;
         }
@@ -186,6 +163,7 @@ public static class FileTransferPayloadCodec
             Type = FileTransferProtocol.AcceptTypeV1,
             SessionId = sessionId,
             TransferId = transferId,
+            AcceptedDataProtocolVersion = acceptedDataProtocolVersion,
         };
         return true;
     }
@@ -212,12 +190,12 @@ public static class FileTransferPayloadCodec
         return true;
     }
 
-    public static bool TryDeserializeStart(ReadOnlySpan<byte> utf8Json, out FileTransferStartV1 msg)
+    public static bool TryDeserializeStart(ReadOnlySpan<byte> utf8Json, out FileTransferStartV2 msg)
     {
         msg = default!;
-        if (!TryDeserialize(utf8Json, out FileTransferStartV1? parsed) ||
+        if (!TryDeserialize(utf8Json, out FileTransferStartV2? parsed) ||
             parsed is null ||
-            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.StartTypeV1, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
+            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.StartTypeV2, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
             !TryNormalizeFileName(parsed.FileName, out var fileName) ||
             parsed.FileSizeBytes <= 0 ||
             !TryNormalizeSha256(parsed.Sha256Base64, out var sha256Base64) ||
@@ -231,7 +209,7 @@ public static class FileTransferPayloadCodec
         msg = parsed with
         {
             Kind = FileTransferProtocol.Kind,
-            Type = FileTransferProtocol.StartTypeV1,
+            Type = FileTransferProtocol.StartTypeV2,
             SessionId = sessionId,
             TransferId = transferId,
             FileName = fileName,
@@ -293,7 +271,7 @@ public static class FileTransferPayloadCodec
         if (!TryDeserialize(utf8Json, out FileTransferSessionOpenV2? parsed) ||
             parsed is null ||
             !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.SessionOpenTypeV2, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
-            parsed.ProtocolVersion != FileTransferProtocol.ProtocolVersionV2 ||
+            !IsSupportedDataProtocolVersion(parsed.ProtocolVersion) ||
             !TryNormalizeSessionRole(parsed.SessionRole, out var sessionRole) ||
             parsed.ChunkSizeBytes <= 0 ||
             parsed.ChunkSizeBytes > FileTransferProtocol.MaxChunkRawBytes ||
@@ -310,6 +288,26 @@ public static class FileTransferPayloadCodec
             TransferId = transferId,
             SessionRole = sessionRole,
         };
+        return true;
+    }
+
+    internal static bool IsSupportedDataProtocolVersion(int protocolVersion)
+        => protocolVersion is FileTransferProtocol.ProtocolVersionV2 or FileTransferProtocol.ProtocolVersionV3;
+
+    internal static bool TryNormalizeOptionalProtocolVersion(int? protocolVersion, out int? normalizedProtocolVersion)
+    {
+        normalizedProtocolVersion = null;
+        if (protocolVersion is null)
+        {
+            return true;
+        }
+
+        if (!IsSupportedDataProtocolVersion(protocolVersion.Value))
+        {
+            return false;
+        }
+
+        normalizedProtocolVersion = protocolVersion.Value;
         return true;
     }
 
