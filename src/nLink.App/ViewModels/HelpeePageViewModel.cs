@@ -94,7 +94,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private string shareInviteRawTokenText = string.Empty;
     private string shareAddressText = string.Empty;
     private string shareInviteStatusText = "Preparing invite…";
-    private readonly string automaticIdentityRecoveryWarning;
+    private string automaticIdentityRecoveryWarning = string.Empty;
     private Bitmap? shareInviteQrBitmap;
     private CancellationTokenSource? shareInviteQrRefreshCts;
     private int shareInviteQrRefreshVersion;
@@ -222,7 +222,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         this.clipboardService = clipboardService;
         this.inviteShareService = inviteShareService ?? new DefaultInviteShareService();
         this.qrCodeService = qrCodeService ?? new QrCodeService();
-        automaticIdentityRecoveryWarning = NknIdentityStore.GetAutomaticRecoveryUserWarning() ?? string.Empty;
+        RefreshAutomaticIdentityRecoveryWarning();
         inviteTokenFactory = ConnectInputResolverFactory.CreateInviteTokenFactory();
         this.incomingRequestTimeout = incomingRequestTimeout ?? DefaultIncomingRequestTimeout;
         this.uiStateStore = uiStateStore;
@@ -1868,6 +1868,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             await sessionRuntime.ResetAsync();
             await sessionRuntime.StartHelpeeAsync(CancellationToken.None);
+            await UiThreadDispatch.RunAsync(() =>
+            {
+                RefreshAutomaticIdentityRecoveryWarning();
+                EnsureInviteSnapshot(forceNewToken: false);
+            });
         }
         catch (OperationCanceledException)
         {
@@ -1879,6 +1884,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 await UiThreadDispatch.RunAsync(() =>
                 {
+                    RefreshAutomaticIdentityRecoveryWarning();
                     var message = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
                         ? "Could not start. Refresh invite and try again."
                         : sessionRuntime.StatusText;
@@ -2185,6 +2191,19 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         return $"{automaticIdentityRecoveryWarning} {normalized}";
+    }
+
+    private void RefreshAutomaticIdentityRecoveryWarning()
+    {
+        var warning = NknIdentityStore.GetAutomaticRecoveryUserWarning();
+        if (string.IsNullOrWhiteSpace(warning) ||
+            string.Equals(automaticIdentityRecoveryWarning, warning, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        automaticIdentityRecoveryWarning = warning;
+        OnPropertyChanged(nameof(ShowShareInviteStatus));
     }
 
     private void UpdateShareInviteExpiryText(string value)

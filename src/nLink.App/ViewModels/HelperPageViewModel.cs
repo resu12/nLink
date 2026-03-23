@@ -58,6 +58,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly IConnectInputResolver connectInputResolver;
     private readonly DispatcherTimer remoteControlStateSnapshotTimer;
     private readonly Func<CancellationToken, Task<PeerAddress?>> bootstrapHelperIdentityResolver;
+    private string automaticIdentityRecoveryWarning = string.Empty;
     private CancellationTokenSource? bootstrapHelperIdentityResolutionCts;
     private PeerAddress? bootstrapHelperIdentity;
     private PeerAddress? previewInviteBoundHelperIdentity;
@@ -168,6 +169,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         this.uiStateStore = uiStateStore;
         this.connectInputResolver = connectInputResolver ?? ConnectInputResolverFactory.CreateDefault();
         this.bootstrapHelperIdentityResolver = bootstrapHelperIdentityResolver ?? NknLocalPeerAddressResolver.ResolveAsync;
+        RefreshAutomaticIdentityRecoveryWarning();
         this.approvalTimeout = approvalTimeout ?? DefaultApprovalTimeout;
         this.connectFailureCooldown = connectFailureCooldown ?? DefaultConnectFailureCooldown;
         this.nowProvider = nowProvider ?? (() => DateTimeOffset.UtcNow);
@@ -355,8 +357,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         !string.IsNullOrWhiteSpace(helperIdentityBootstrapErrorText)
             ? helperIdentityBootstrapErrorText
             : !string.IsNullOrWhiteSpace(HelperIdentityBootstrapText) &&
-              !string.IsNullOrWhiteSpace(GetAutomaticIdentityRecoveryWarning())
-            ? $"{GetAutomaticIdentityRecoveryWarning()} Copy this helper address into the helpee's helper field before they generate the invite."
+              !string.IsNullOrWhiteSpace(automaticIdentityRecoveryWarning)
+            ? $"{automaticIdentityRecoveryWarning} Copy this helper address into the helpee's helper field before they generate the invite."
             : string.IsNullOrWhiteSpace(HelperIdentityBootstrapText)
             ? "Preparing your helper address. Share it with the helpee before they generate the invite."
             : "Copy this helper address into the helpee's helper field before they generate the invite.";
@@ -1992,6 +1994,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
             await UiThreadDispatch.RunAsync(() =>
             {
+                RefreshAutomaticIdentityRecoveryWarning();
                 // Keep the first stable helper identity visible through pre-connected UI states.
                 if (bootstrapHelperIdentity is null && resolved is not null)
                 {
@@ -2012,6 +2015,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
             await UiThreadDispatch.RunAsync(() =>
             {
+                RefreshAutomaticIdentityRecoveryWarning();
                 helperIdentityBootstrapPending = false;
                 NotifyHelperIdentityBootstrapChanged();
             });
@@ -2026,6 +2030,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
             await UiThreadDispatch.RunAsync(() =>
             {
+                RefreshAutomaticIdentityRecoveryWarning();
                 helperIdentityBootstrapErrorText = IsProtectedSeedStorageReadFailure(ex)
                     ? "Protected seed storage could not be read."
                     : "Helper address is unavailable right now.";
@@ -2064,12 +2069,16 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                ex.Message.Contains("seed storage", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string? GetAutomaticIdentityRecoveryWarning()
+    private void RefreshAutomaticIdentityRecoveryWarning()
     {
         var warning = PersistenceDiagnostics.Snapshot().LastWarning;
-        return warning.Contains("created a new local identity", StringComparison.OrdinalIgnoreCase)
-            ? warning
-            : null;
+        if (!warning.Contains("created a new local identity", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(automaticIdentityRecoveryWarning, warning, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        automaticIdentityRecoveryWarning = warning;
     }
 
     private async Task AwaitBootstrapHelperIdentityResolutionCompletionAsync()

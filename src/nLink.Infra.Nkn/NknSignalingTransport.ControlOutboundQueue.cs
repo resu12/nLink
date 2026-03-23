@@ -127,7 +127,7 @@ public sealed partial class NknSignalingTransport
                                 highLaneDroppedCount++;
                                 Interlocked.Increment(ref owner.highPriorityControlDroppedForStopCount);
                                 NknRuntimeDiagnostics.AddHighPriorityControlDroppedForStop(1);
-                                owner.highPriorityControlOutboundQueue.AddLast(queued);
+                                owner.highPriorityControlOutboundQueue.AddFirst(queued);
                             }
                             else
                             {

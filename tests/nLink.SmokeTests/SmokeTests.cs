@@ -1785,6 +1785,35 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task HelpeeViewModel_RecoveredLocalIdentity_RefreshesNotice_AfterStartupRecovery()
+    {
+        PersistenceDiagnostics.ClearForTests();
+        try
+        {
+            using var runtime = new SessionRuntime(() => new FakeSignalingTransport());
+            using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateNknTestConfig(), runtime);
+
+            PersistenceDiagnostics.Record(
+                domain: "nkn_identity_store",
+                operation: "automatic_identity_recovery",
+                severity: PersistenceDiagnosticSeverity.Warning,
+                outcome: PersistenceDiagnosticOutcome.Partial,
+                reason: "default_identity_recreated",
+                userWarning: "Local protected identity storage was unreadable. nLink created a new local identity. Previous helper address and invites are no longer valid.");
+
+            var startTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helpee, "StartHostingAsync"));
+            await startTask;
+
+            Assert.Contains("created a new local identity", helpee.ShareInviteStatusText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            PersistenceDiagnostics.ClearForTests();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void TransportFailureMapper_MapsTimeout_ToHandshakeTimeout()
     {
         var failure = TransportFailureMapper.FromException(new TimeoutException("Timed out waiting for approve."));
@@ -10732,6 +10761,49 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task HelperViewModel_RecoveredLocalIdentity_KeepsRecoveryNoticeVisible_AfterLaterPersistenceWarning()
+    {
+        PersistenceDiagnostics.ClearForTests();
+        try
+        {
+            PersistenceDiagnostics.Record(
+                domain: "nkn_identity_store",
+                operation: "automatic_identity_recovery",
+                severity: PersistenceDiagnosticSeverity.Warning,
+                outcome: PersistenceDiagnosticOutcome.Partial,
+                reason: "default_identity_recreated",
+                userWarning: "Local protected identity storage was unreadable. nLink created a new local identity. Previous helper address and invites are no longer valid.");
+
+            var transportConfig = CreateNknTestConfig();
+            using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+            using var helper = new HelperPageViewModel(
+                cancelAction: static () => { },
+                transportConfig,
+                helperRuntime,
+                bootstrapHelperIdentityResolver: _ => Task.FromResult<PeerAddress?>(new PeerAddress("nlink-helper.bootstrap.recovered")));
+
+            var pending = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helper, "ResolveBootstrapHelperIdentityAsync", CancellationToken.None));
+            await pending;
+
+            PersistenceDiagnostics.Record(
+                domain: "nkn_secret_store",
+                operation: "read_seed",
+                severity: PersistenceDiagnosticSeverity.Warning,
+                outcome: PersistenceDiagnosticOutcome.Fallback,
+                reason: "CryptographicException",
+                userWarning: "Protected seed storage could not be read.");
+
+            Assert.Contains("created a new local identity", helper.HelperIdentityBootstrapHintText, StringComparison.Ordinal);
+            Assert.Contains("Copy this helper address", helper.HelperIdentityBootstrapHintText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            PersistenceDiagnostics.ClearForTests();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void HelperViewModel_RemoteEndAfterSuccessfulSession_ReplacesBootstrapAddress_WithVerifiedHelperIdentity()
     {
         var transportConfig = CreateNknTestConfig();
@@ -12778,10 +12850,15 @@ return;
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-protected-seed-instance-recovery", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         PersistenceDiagnostics.ClearForTests();
+        var previousIdentifier = Environment.GetEnvironmentVariable("NLINK_NKN_IDENTIFIER");
         try
         {
-            var keyPath = Path.Combine(tempDir, "identity.instance-4242.json");
-            var options = LoadNknOptionsWithOverrides(keyPath, "per-process-recovery-test");
+            using var localAppDataOverride = NknTransportOptions.OverrideLocalAppDataPathForTests(tempDir);
+            using var perProcessOverride = NknTransportOptions.OverrideShouldUsePerProcessLocalIdentityForTests(true);
+            Environment.SetEnvironmentVariable("NLINK_NKN_IDENTIFIER", "per-process-recovery-test");
+
+            var options = NknTransportOptions.Load();
+            var keyPath = options.KeyPath;
             var backend = new CorruptedProtectedSeedBackend();
             using var backendOverride = NknSecretStore.OverrideBackendForTests(backend);
             var recoveryDir = Path.Combine(
@@ -12809,9 +12886,10 @@ return;
             var newRecoveryFiles = Directory.GetFiles(recoveryDir)
                 .Where(path => !beforeRecoveryFiles.Contains(path))
                 .ToArray();
-            Assert.Contains(newRecoveryFiles, path => Path.GetFileName(path).StartsWith("identity.instance-4242.", StringComparison.Ordinal) &&
+            var expectedPrefix = Path.GetFileNameWithoutExtension(keyPath);
+            Assert.Contains(newRecoveryFiles, path => Path.GetFileName(path).StartsWith(expectedPrefix + ".", StringComparison.Ordinal) &&
                                                       Path.GetFileName(path).Contains(".corrupt.json", StringComparison.Ordinal));
-            Assert.Contains(newRecoveryFiles, path => Path.GetFileName(path).StartsWith("identity.instance-4242.json.", StringComparison.Ordinal) &&
+            Assert.Contains(newRecoveryFiles, path => Path.GetFileName(path).StartsWith(Path.GetFileName(keyPath) + ".", StringComparison.Ordinal) &&
                                                       Path.GetFileName(path).Contains(".corrupt.seed", StringComparison.Ordinal));
 
             var snapshot = PersistenceDiagnostics.Snapshot();
@@ -12819,6 +12897,7 @@ return;
         }
         finally
         {
+            Environment.SetEnvironmentVariable("NLINK_NKN_IDENTIFIER", previousIdentifier);
             PersistenceDiagnostics.ClearForTests();
             try { CleanupDirectoryIfExists(tempDir); } catch { }
         }

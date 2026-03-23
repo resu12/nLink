@@ -7,6 +7,19 @@ namespace NLink.Infra.Nkn;
 
 internal sealed class NknTransportOptions
 {
+    private readonly struct ResolvedKeyPath
+    {
+        public ResolvedKeyPath(string path, bool isGeneratedPerProcessKeyPath)
+        {
+            Path = path;
+            IsGeneratedPerProcessKeyPath = isGeneratedPerProcessKeyPath;
+        }
+
+        public string Path { get; }
+
+        public bool IsGeneratedPerProcessKeyPath { get; }
+    }
+
     private static Func<bool>? shouldUsePerProcessLocalIdentityOverrideForTests;
     private static Func<string>? localAppDataPathOverrideForTests;
     private static Func<int, bool>? isProcessRunningOverrideForTests;
@@ -22,6 +35,8 @@ internal sealed class NknTransportOptions
     public string? Identifier { get; private set; }
 
     public string KeyPath { get; private set; } = string.Empty;
+
+    internal bool IsGeneratedPerProcessKeyPath { get; private set; }
 
     public bool PreflightRpcEnabled { get; private set; }
 
@@ -77,11 +92,14 @@ internal sealed class NknTransportOptions
             appSettings.Get("NLINK_NKN_FILE_TRANSFER_CHUNK_PACING_MS"),
             appSettings.Get("nLink:nkn:fileTransferChunkPacingMs"));
 
+        var resolvedKeyPath = ResolveKeyPath(configuredKeyPath);
+
         return new NknTransportOptions
         {
             SeedRpc = seedRpc,
             Identifier = identifier,
-            KeyPath = ResolveKeyPath(configuredKeyPath),
+            KeyPath = resolvedKeyPath.Path,
+            IsGeneratedPerProcessKeyPath = resolvedKeyPath.IsGeneratedPerProcessKeyPath,
             PreflightRpcEnabled = ParseBool(preflightRpcEnabled, defaultValue: false),
             PreflightTimeoutMs = ParseInt(preflightTimeoutMs, defaultValue: 700, minValue: 1, maxValue: 60_000),
             PreflightConcurrency = ParseInt(preflightConcurrency, defaultValue: 8, minValue: 1, maxValue: 256),
@@ -90,11 +108,11 @@ internal sealed class NknTransportOptions
         };
     }
 
-    private static string ResolveKeyPath(string? configuredPath)
+    private static ResolvedKeyPath ResolveKeyPath(string? configuredPath)
     {
         if (!string.IsNullOrWhiteSpace(configuredPath))
         {
-            return Path.GetFullPath(configuredPath);
+            return new ResolvedKeyPath(Path.GetFullPath(configuredPath), isGeneratedPerProcessKeyPath: false);
         }
 
         var localAppData = GetLocalAppDataPath();
@@ -103,12 +121,12 @@ internal sealed class NknTransportOptions
 
         if (!ShouldUsePerProcessLocalIdentity())
         {
-            return defaultPath;
+            return new ResolvedKeyPath(defaultPath, isGeneratedPerProcessKeyPath: false);
         }
 
         var directory = Path.GetDirectoryName(defaultPath)!;
         var fileName = $"identity.instance-{Environment.ProcessId}.json";
-        return Path.Combine(directory, fileName);
+        return new ResolvedKeyPath(Path.Combine(directory, fileName), isGeneratedPerProcessKeyPath: true);
     }
 
     private static bool ShouldUsePerProcessLocalIdentity()

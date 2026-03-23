@@ -40,7 +40,12 @@ internal static class NknIdentityStore
             }
         }
 
-        var seedBytes = ResolveSeedBytes(options.KeyPath, persisted?.SeedBase64, identityFileExists, identityFileUnreadable);
+        var seedBytes = ResolveSeedBytes(
+            options.KeyPath,
+            options.IsGeneratedPerProcessKeyPath,
+            persisted?.SeedBase64,
+            identityFileExists,
+            identityFileUnreadable);
         var identifier = ResolveIdentifier(options.Identifier, persisted?.Identifier);
         var address = DeriveAddress(identifier, seedBytes);
 
@@ -138,14 +143,24 @@ internal static class NknIdentityStore
         return $"{identifier}.{shortHash}";
     }
 
-    private static byte[] ResolveSeedBytes(string keyPath, string? legacySeedBase64, bool identityFileExists, bool identityFileUnreadable)
+    private static byte[] ResolveSeedBytes(
+        string keyPath,
+        bool isGeneratedPerProcessKeyPath,
+        string? legacySeedBase64,
+        bool identityFileExists,
+        bool identityFileUnreadable)
     {
         byte[]? protectedSeed;
         try
         {
             protectedSeed = NknSecretStore.TryLoadSeed(keyPath);
         }
-        catch (CryptographicException ex) when (CanAutoRecoverCorruptedIdentity(keyPath, legacySeedBase64, identityFileExists, identityFileUnreadable))
+        catch (CryptographicException ex) when (CanAutoRecoverCorruptedIdentity(
+                   keyPath,
+                   isGeneratedPerProcessKeyPath,
+                   legacySeedBase64,
+                   identityFileExists,
+                   identityFileUnreadable))
         {
             protectedSeed = RecoverCorruptedDefaultIdentity(keyPath, ex);
         }
@@ -269,14 +284,19 @@ internal static class NknIdentityStore
         File.WriteAllText(keyPath, serialized);
     }
 
-    private static bool CanAutoRecoverCorruptedIdentity(string keyPath, string? legacySeedBase64, bool identityFileExists, bool identityFileUnreadable)
+    private static bool CanAutoRecoverCorruptedIdentity(
+        string keyPath,
+        bool isGeneratedPerProcessKeyPath,
+        string? legacySeedBase64,
+        bool identityFileExists,
+        bool identityFileUnreadable)
     {
         return OperatingSystem.IsWindows() &&
                identityFileExists &&
                !identityFileUnreadable &&
                string.IsNullOrWhiteSpace(legacySeedBase64) &&
                File.Exists(NknSecretStore.GetSecretPath(keyPath)) &&
-               (IsDefaultSharedIdentityPath(keyPath) || IsGeneratedPerProcessIdentityPath(keyPath));
+               (IsDefaultSharedIdentityPath(keyPath) || isGeneratedPerProcessKeyPath);
     }
 
     private static byte[] RecoverCorruptedDefaultIdentity(string keyPath, CryptographicException ex)
@@ -369,34 +389,6 @@ internal static class NknIdentityStore
             "nLink",
             "identity.json");
         return string.Equals(normalized, Path.GetFullPath(expected), StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsGeneratedPerProcessIdentityPath(string keyPath)
-    {
-        var normalizedPath = Path.GetFullPath(keyPath);
-        var directory = Path.GetDirectoryName(normalizedPath);
-        var sharedDirectory = Path.GetDirectoryName(
-            defaultSharedKeyPathOverrideForTests?.Invoke() ?? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "nLink",
-                "identity.json"));
-
-        if (string.IsNullOrWhiteSpace(directory) ||
-            string.IsNullOrWhiteSpace(sharedDirectory) ||
-            !string.Equals(directory, Path.GetFullPath(sharedDirectory), StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        var fileName = Path.GetFileName(normalizedPath);
-        if (!fileName.StartsWith("identity.instance-", StringComparison.OrdinalIgnoreCase) ||
-            !fileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        var pidText = fileName["identity.instance-".Length..^".json".Length];
-        return int.TryParse(pidText, out var pid) && pid > 0;
     }
 
     private sealed class PersistedIdentityFile
