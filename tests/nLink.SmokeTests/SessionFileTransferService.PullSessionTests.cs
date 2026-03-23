@@ -325,7 +325,7 @@ public sealed partial class SessionFileTransferServiceTests
 
         Assert.Equal(payload, destination.ToArray());
         var manifest = Assert.Single(senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV3>());
-        Assert.Equal(32 * 1024, manifest.ChunkSizeBytes);
+        Assert.Equal(24 * 1024, manifest.ChunkSizeBytes);
 
         var maxGrantWindowBytes = receiverTransport.SentDataFrames
             .OfType<FileTransferGrantWindowFrameV3>()
@@ -333,9 +333,75 @@ public sealed partial class SessionFileTransferServiceTests
             .DefaultIfEmpty(0)
             .Max();
         Assert.True(
-            maxGrantWindowBytes >= (512 * 1024) - manifest.ChunkSizeBytes,
-            $"Expected balanced screenshare V3 grant window near 512 KiB, but saw {maxGrantWindowBytes} bytes.");
+            maxGrantWindowBytes >= (256 * 1024) - manifest.ChunkSizeBytes,
+            $"Expected balanced screenshare V3 grant window near 256 KiB, but saw {maxGrantWindowBytes} bytes.");
         Assert.True(maxGrantWindowBytes < 2 * 1024 * 1024, "Expected screenshare-balanced V3 window to stay below the healthy 2 MiB target.");
+    }
+
+    [Fact]
+    public async Task PullSession_V3Streaming_WhenScreenshareActivatesMidTransfer_ForcesReducedGrantWindow()
+    {
+        const string transferId = "transfer_service_pull_v3_midstream_screenshare_clamp";
+        var payload = Enumerable.Range(0, 5 * 1024 * 1024).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_pull_v3_midstream_screenshare_clamp")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_v3_midstream_screenshare_clamp")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        senderTransport.Connect(receiverTransport);
+        senderTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, ct) =>
+        {
+            if (frame is FileTransferChunkDataFrameV3 or FileTransferChunkBatchFrameV3)
+            {
+                await Task.Delay(10, ct).ConfigureAwait(false);
+            }
+
+            return false;
+        };
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pull-v3-midstream-screenshare-clamp.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() =>
+            receiverTransport.SentDataFrames
+                .OfType<FileTransferGrantWindowFrameV3>()
+                .Any(frame => (frame.GrantedUntilChunkIndexExclusive - frame.NextExpectedChunkIndex) * 40 * 1024 >= (2 * 1024 * 1024) - (40 * 1024)),
+            timeoutMs: 10000);
+
+        var grantCountBeforeScreenshare = receiverTransport.SentDataFrames.OfType<FileTransferGrantWindowFrameV3>().Count();
+        sender.SetSessionScreenShareActive(true);
+        receiver.SetSessionScreenShareActive(true);
+
+        await WaitUntilAsync(() =>
+            receiverTransport.SentDataFrames
+                .OfType<FileTransferGrantWindowFrameV3>()
+                .Skip(grantCountBeforeScreenshare)
+                .Any(frame => (frame.GrantedUntilChunkIndexExclusive - frame.NextExpectedChunkIndex) * 40 * 1024 <= 256 * 1024),
+            timeoutMs: 10000);
+
+        var reducedGrant = receiverTransport.SentDataFrames
+            .OfType<FileTransferGrantWindowFrameV3>()
+            .Skip(grantCountBeforeScreenshare)
+            .First(frame => (frame.GrantedUntilChunkIndexExclusive - frame.NextExpectedChunkIndex) * 40 * 1024 <= 256 * 1024);
+        var reducedGrantBytes = (reducedGrant.GrantedUntilChunkIndexExclusive - reducedGrant.NextExpectedChunkIndex) * 40 * 1024;
+        Assert.True(reducedGrantBytes <= 256 * 1024, $"Expected a forced reduced grant at or below 256 KiB, but saw {reducedGrantBytes} bytes.");
     }
 
     [Fact]
@@ -380,6 +446,65 @@ public sealed partial class SessionFileTransferServiceTests
         Assert.Equal(payload, destination.ToArray());
         var manifest = Assert.Single(senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV3>());
         Assert.Equal(20 * 1024, manifest.ChunkSizeBytes);
+    }
+
+    [Fact]
+    public async Task PullSession_V3Streaming_BatchedChunks_AreNotResentIndividually()
+    {
+        const string transferId = "transfer_service_pull_v3_batched_no_duplicates";
+        const int chunkSizeBytes = 4096;
+        var payload = Enumerable.Range(0, chunkSizeBytes * 12).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_pull_v3_batched_no_duplicates")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_v3_batched_no_duplicates")
+        {
+            SupportsFileTransferV3Streaming = true,
+        };
+        senderTransport.Connect(receiverTransport);
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pull-v3-batch-no-duplicates.bin", payload.Length, transferId, ChunkSizeBytes: chunkSizeBytes),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() =>
+            sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+            receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 15000);
+
+        Assert.Equal(payload, destination.ToArray());
+
+        var manifest = Assert.Single(senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV3>());
+        var batches = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV3>().ToList();
+        Assert.Contains(batches, static batch => batch.DataSegments.Count > 2);
+
+        var sentChunkIndices = senderTransport.SentDataFrames
+            .Where(static frame => frame is FileTransferChunkDataFrameV3 or FileTransferChunkBatchFrameV3)
+            .SelectMany(frame => frame switch
+            {
+                FileTransferChunkDataFrameV3 chunk => [chunk.ChunkIndex],
+                FileTransferChunkBatchFrameV3 batch => Enumerable.Range(batch.StartChunkIndex, batch.DataSegments.Count),
+                _ => Enumerable.Empty<int>(),
+            })
+            .OrderBy(static chunkIndex => chunkIndex)
+            .ToList();
+
+        Assert.Equal(manifest.ChunkCount, sentChunkIndices.Count);
+        Assert.Equal(sentChunkIndices.Distinct().Count(), sentChunkIndices.Count);
     }
 
     [Fact]

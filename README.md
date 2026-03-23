@@ -58,7 +58,7 @@ Notes:
 - Current release (`0.5.2`)
 - File transfer in `0.5.2` is single-file only. No folders, drag-and-drop, or resume after restart yet.
 - Received files are saved into an app-owned folder under `%LOCALAPPDATA%\nLink\transfers\incoming\...`
-- Safe-by-default file size cap for `0.5.2`: `256 MiB`
+- Safe-by-default file size cap for `0.5.2`: `1 GiB`
 - Large file transfers over NKN can be noticeably slower than local or direct network copy.
 - Installer path: `%LOCALAPPDATA%\Programs\nLink`
 

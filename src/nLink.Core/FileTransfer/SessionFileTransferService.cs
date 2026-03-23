@@ -97,14 +97,14 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int PullHealthyBundledRawBytesCap = FileTransferChunkBudget.MaxRawChunkBytes;
     private const int PullV3HealthyTargetInFlightBytes = 2 * 1024 * 1024;
     private const int PullV3HealthyMaximumTargetInFlightBytes = 4 * 1024 * 1024;
-    private const int PullV3ScreenshareTargetInFlightBytes = 512 * 1024;
+    private const int PullV3ScreenshareTargetInFlightBytes = 256 * 1024;
     private const int PullV3DegradedTargetInFlightBytes = 256 * 1024;
     private const int PullV3HealthyAckThresholdBytes = 256 * 1024;
     private const int PullV3HealthyAckCoalesceDelayMs = 150;
     private const int PullV3RepairRequestChunkCount = 4;
     private const int PullV3GrantLowWatermarkDivisor = 2;
     private const int PullV3HealthyDefaultChunkSizeBytes = 40 * 1024;
-    private const int PullV3ScreenshareDefaultChunkSizeBytes = 32 * 1024;
+    private const int PullV3ScreenshareDefaultChunkSizeBytes = 24 * 1024;
     private const int PullV3DegradedDefaultChunkSizeBytes = 20 * 1024;
     private const int PullV3ProfileAdjustmentCooldownMs = 1500;
     private const int PullV3StepUpProgressBytesThreshold = 2 * 1024 * 1024;
@@ -274,6 +274,11 @@ public sealed partial class SessionFileTransferService : IDisposable
                 _ = SendWindowUpdateAsync(receivingContext, WindowUpdateTrigger.StartupResend, CancellationToken.None);
             }
         }
+        else if (activeInboundPullContext is not null &&
+                 activeInboundPullContext.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV3)
+        {
+            _ = SendInboundGrantWindowV3Async(activeInboundPullContext, forceGrant: true);
+        }
 
         if (activeOutboundContext is not null)
         {
@@ -350,7 +355,15 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         if (receivingContext is not null)
         {
-            _ = MaybeSendPressureStateAsync(receivingContext, CancellationToken.None);
+            if (receivingContext.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV3 &&
+                receivingContext.PullSessionActive)
+            {
+                _ = SendInboundGrantWindowV3Async(receivingContext, forceGrant: true);
+            }
+            else
+            {
+                _ = MaybeSendPressureStateAsync(receivingContext, CancellationToken.None);
+            }
         }
 
         if (activeInboundPullContext is not null)

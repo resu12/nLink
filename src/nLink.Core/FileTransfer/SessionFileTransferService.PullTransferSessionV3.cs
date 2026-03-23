@@ -399,9 +399,10 @@ public sealed partial class SessionFileTransferService
             for (var index = 0; index < chunkIndices.Count; index++)
             {
                 context.LifetimeCts.Token.ThrowIfCancellationRequested();
-                if (await TrySendChunkBatchV3Async(context, stream, dataSession, chunkIndices, index, buffer).ConfigureAwait(false))
+                var batchedChunkCount = await TrySendChunkBatchV3Async(context, stream, dataSession, chunkIndices, index, buffer).ConfigureAwait(false);
+                if (batchedChunkCount > 0)
                 {
-                    index++;
+                    index += batchedChunkCount - 1;
                     continue;
                 }
 
@@ -446,7 +447,7 @@ public sealed partial class SessionFileTransferService
         }
     }
 
-    private async Task<bool> TrySendChunkBatchV3Async(
+    private async Task<int> TrySendChunkBatchV3Async(
         OutboundTransferContext context,
         Stream stream,
         IFileTransferDataSession dataSession,
@@ -456,7 +457,7 @@ public sealed partial class SessionFileTransferService
     {
         if (startListIndex + 1 >= chunkIndices.Count)
         {
-            return false;
+            return 0;
         }
 
         var startChunkIndex = chunkIndices[startListIndex];
@@ -484,7 +485,7 @@ public sealed partial class SessionFileTransferService
 
         if (dataSegments.Count < 2)
         {
-            return false;
+            return 0;
         }
 
         var batch = new FileTransferChunkBatchFrameV3
@@ -504,7 +505,7 @@ public sealed partial class SessionFileTransferService
         {
             if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
             {
-                return true;
+                return dataSegments.Count;
             }
 
             var sentUtc = DateTimeOffset.UtcNow;
@@ -524,7 +525,7 @@ public sealed partial class SessionFileTransferService
             context.PullUsefulPayloadBytesRecent += totalRawBytes;
         }
 
-        return true;
+        return dataSegments.Count;
     }
 
     private async Task<byte[]> ReadOrLoadChunkBytesAsync(OutboundTransferContext context, Stream stream, int chunkIndex, byte[] buffer)
@@ -578,7 +579,9 @@ public sealed partial class SessionFileTransferService
             }
 
             ApplyOutboundV3ProgressLocked(context, grant.NextExpectedChunkIndex, grant.BytesCommitted);
-            context.PullV3GrantedUntilExclusive = Math.Max(context.PullV3GrantedUntilExclusive, grant.GrantedUntilChunkIndexExclusive);
+            context.PullV3GrantedUntilExclusive = Math.Max(
+                grant.NextExpectedChunkIndex,
+                Math.Min(context.ChunkCount, grant.GrantedUntilChunkIndexExclusive));
             context.PullV3LastGrantReceivedUtc = DateTimeOffset.UtcNow;
             context.StatusMessage = "Receiver granted more transfer credit.";
             snapshot = CreateSnapshotLocked();
@@ -776,6 +779,15 @@ public sealed partial class SessionFileTransferService
 
     private string UpdateInboundV3WindowProfileLocked(InboundTransferContext context, DateTimeOffset now)
     {
+        if (sessionScreenShareActive || sessionScreenShareDegraded)
+        {
+            context.PullV3ExpandedWindowActive = false;
+            context.PullV3LimitedWindowActive = false;
+            context.PullV3CleanSinceUtc = null;
+            context.PullV3AdverseSinceUtc ??= now;
+            return ResolveInboundV3ProfileName(context);
+        }
+
         var recentRepair = context.PullV3LastRepairRequestSentUtc is not null &&
                            now - context.PullV3LastRepairRequestSentUtc.Value < TimeSpan.FromMilliseconds(PullV3AdverseStepDownHoldMs);
         var reorderLimited =
