@@ -311,6 +311,11 @@
                                                                            Text="{Binding FirstPillVerificationCodeText}"/>
                                                             </Border>
                                                         </Grid>
+                                                        <TextBlock AutomationProperties.AutomationId="Helper.HelperIdentityBootstrapHint"
+                                                                   Text="{Binding HelperIdentityBootstrapHintText}"
+                                                                   Classes="appMuted"
+                                                                   TextWrapping="Wrap"
+                                                                   HorizontalAlignment="Left"/>
                                                         <Grid ColumnDefinitions="*,*"
                                                               ColumnSpacing="10"
                                                               HorizontalAlignment="Center"

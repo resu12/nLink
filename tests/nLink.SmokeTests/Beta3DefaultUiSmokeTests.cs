@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Windows.Input;
 using Avalonia;
 using Avalonia.Automation;
@@ -415,6 +416,53 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 Assert.Null(FindFirstVisibleControlByAutomationId(window, "SessionHeader.VerificationCode"));
                 Assert.Equal("Share helper address", shareButton.Content?.ToString());
                 Assert.Equal("Copy helper address", copyButton.Content?.ToString());
+            }
+            finally
+            {
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task HelperPage_PublicInviteFlow_BootstrapFailure_ShowsExplicitHelperAddressError()
+    {
+#if DEBUG
+        await Task.CompletedTask;
+        return;
+#endif
+        await fixture.Session.Dispatch(async () =>
+        {
+            EnsureAppServices();
+            using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+            var transportConfig = CreateNknUiTestConfig();
+            using var runtime = new SessionRuntime(() => new NLink.Infra.DevLocal.DevLocalTransport());
+            using var helper = new HelperPageViewModel(
+                cancelAction: static () => { },
+                transportConfig,
+                runtime,
+                openDiagnosticsAction: static () => { },
+                clipboardService: new TestClipboardService(),
+                shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null),
+                bootstrapHelperIdentityResolver: _ => Task.FromException<PeerAddress?>(new CryptographicException("The data is invalid.")));
+
+            var view = new HelperPageView { DataContext = helper };
+            var window = new Window { Width = 1080, Height = 760, Content = view };
+            try
+            {
+                window.Show();
+                await FlushUiAsync();
+
+                var hint = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helper.HelperIdentityBootstrapHint"));
+                var shareButton = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "Helper.ShareHelperIdentity"));
+                var copyButton = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "Helper.CopyHelperIdentity"));
+
+                Assert.Equal("Protected seed storage could not be read.", hint.Text);
+                Assert.False(shareButton.IsEnabled);
+                Assert.False(copyButton.IsEnabled);
             }
             finally
             {
@@ -2153,11 +2201,6 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
             services.AddSingleton<IQrCodeService>(new QrCodeService());
         }
 
-        if (!services.TryGet<IRecentConnectTargetsStore>(out _))
-        {
-            services.AddSingleton<IRecentConnectTargetsStore>(new LocalRecentConnectTargetsStore());
-        }
-
         if (!services.TryGet<NLink.App.Configuration.ShareMessageConfig>(out _))
         {
             services.AddSingleton(new NLink.App.Configuration.ShareMessageConfig(null));
@@ -2182,7 +2225,6 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
         services.AddSingleton<IClipboardService>(new TestClipboardService());
         services.AddSingleton<IInviteShareService>(new DefaultInviteShareService());
         services.AddSingleton<IQrCodeService>(new QrCodeService());
-        services.AddSingleton<IRecentConnectTargetsStore>(new LocalRecentConnectTargetsStore());
         services.AddSingleton(new NLink.App.Configuration.ShareMessageConfig(null));
         services.AddSingleton(new MetricsRegistry());
         services.AddSingleton(new ResourceRuntimeTracker());
@@ -2494,22 +2536,6 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
         {
             LastInviteText = inviteText;
             return Task.FromResult(new InviteShareResult(true));
-        }
-    }
-
-    private sealed class FixedRecentConnectTargetsStore : IRecentConnectTargetsStore
-    {
-        private readonly IReadOnlyList<string> targets;
-
-        public FixedRecentConnectTargetsStore(params string[] targets)
-        {
-            this.targets = targets;
-        }
-
-        public IReadOnlyList<string> LoadTargets() => targets;
-
-        public void SaveTargets(IReadOnlyList<string> targets)
-        {
         }
     }
 

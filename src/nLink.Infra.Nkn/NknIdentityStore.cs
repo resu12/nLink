@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using NLink.Core.Diagnostics;
 
 namespace NLink.Infra.Nkn;
@@ -8,6 +9,8 @@ namespace NLink.Infra.Nkn;
 internal static class NknIdentityStore
 {
     private const int ProtectedSeedIdentityVersion = 3;
+    private const string AutoRecoveredIdentityUserWarning = "Local protected identity storage was unreadable. nLink created a new local identity. Previous helper address and invites are no longer valid.";
+    private static Func<string>? defaultSharedKeyPathOverrideForTests;
 
     public static NknIdentity LoadOrCreate(NknTransportOptions options)
     {
@@ -137,7 +140,16 @@ internal static class NknIdentityStore
 
     private static byte[] ResolveSeedBytes(string keyPath, string? legacySeedBase64, bool identityFileExists, bool identityFileUnreadable)
     {
-        var protectedSeed = NknSecretStore.TryLoadSeed(keyPath);
+        byte[]? protectedSeed;
+        try
+        {
+            protectedSeed = NknSecretStore.TryLoadSeed(keyPath);
+        }
+        catch (CryptographicException ex) when (CanAutoRecoverCorruptedIdentity(keyPath, legacySeedBase64, identityFileExists, identityFileUnreadable))
+        {
+            protectedSeed = RecoverCorruptedDefaultIdentity(keyPath, ex);
+        }
+
         if (protectedSeed is not null)
         {
             return protectedSeed;
@@ -174,6 +186,22 @@ internal static class NknIdentityStore
         }
 
         return RandomNumberGenerator.GetBytes(32);
+    }
+
+    internal static IDisposable OverrideDefaultSharedKeyPathForTests(string keyPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(keyPath);
+        var previous = defaultSharedKeyPathOverrideForTests;
+        defaultSharedKeyPathOverrideForTests = () => Path.GetFullPath(keyPath);
+        return new DelegateDisposable(() => defaultSharedKeyPathOverrideForTests = previous);
+    }
+
+    internal static string? GetAutomaticRecoveryUserWarning()
+    {
+        var warning = PersistenceDiagnostics.Snapshot().LastWarning;
+        return string.Equals(warning, AutoRecoveredIdentityUserWarning, StringComparison.Ordinal)
+            ? warning
+            : null;
     }
 
     private static string? ReadLegacySeedBase64(string keyPath)
@@ -241,6 +269,115 @@ internal static class NknIdentityStore
         File.WriteAllText(keyPath, serialized);
     }
 
+    private static bool CanAutoRecoverCorruptedIdentity(string keyPath, string? legacySeedBase64, bool identityFileExists, bool identityFileUnreadable)
+    {
+        return OperatingSystem.IsWindows() &&
+               identityFileExists &&
+               !identityFileUnreadable &&
+               string.IsNullOrWhiteSpace(legacySeedBase64) &&
+               File.Exists(NknSecretStore.GetSecretPath(keyPath)) &&
+               (IsDefaultSharedIdentityPath(keyPath) || IsPerProcessIdentityPath(keyPath));
+    }
+
+    private static byte[] RecoverCorruptedDefaultIdentity(string keyPath, CryptographicException ex)
+    {
+        PersistenceDiagnostics.Record(
+            domain: "nkn_identity_store",
+            operation: "detect_corrupted_protected_seed",
+            severity: PersistenceDiagnosticSeverity.Warning,
+            outcome: PersistenceDiagnosticOutcome.Partial,
+            reason: ex.GetType().Name);
+
+        try
+        {
+            QuarantineCorruptedIdentityFiles(keyPath);
+            PersistenceDiagnostics.Record(
+                domain: "nkn_identity_store",
+                operation: "quarantine_corrupted_identity",
+                severity: PersistenceDiagnosticSeverity.Info,
+                outcome: PersistenceDiagnosticOutcome.Partial,
+                reason: "default_identity");
+        }
+        catch (Exception quarantineEx)
+        {
+            PersistenceDiagnostics.Record(
+                domain: "nkn_identity_store",
+                operation: "quarantine_corrupted_identity",
+                severity: PersistenceDiagnosticSeverity.Error,
+                outcome: PersistenceDiagnosticOutcome.FailedClosed,
+                reason: quarantineEx.GetType().Name,
+                userWarning: "Protected seed storage could not be read.");
+            throw;
+        }
+
+        var seed = RandomNumberGenerator.GetBytes(32);
+        PersistenceDiagnostics.Record(
+            domain: "nkn_identity_store",
+            operation: "automatic_identity_recovery",
+            severity: PersistenceDiagnosticSeverity.Warning,
+            outcome: PersistenceDiagnosticOutcome.Partial,
+            reason: "default_identity_recreated",
+            userWarning: AutoRecoveredIdentityUserWarning);
+        return seed;
+    }
+
+    private static void QuarantineCorruptedIdentityFiles(string keyPath)
+    {
+        var identityPath = Path.GetFullPath(keyPath);
+        var secretPath = NknSecretStore.GetSecretPath(identityPath);
+        var recoveryDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "nLink",
+            "security",
+            "identity-recovery");
+        Directory.CreateDirectory(recoveryDir);
+
+        var timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'");
+        MoveIfExists(identityPath, BuildQuarantinePath(recoveryDir, identityPath, timestamp));
+        MoveIfExists(secretPath, BuildQuarantinePath(recoveryDir, secretPath, timestamp));
+    }
+
+    private static string BuildQuarantinePath(string recoveryDir, string sourcePath, string timestamp)
+    {
+        var fileName = Path.GetFileName(sourcePath);
+        var extension = Path.GetExtension(fileName);
+        var nameWithoutExtension = Path.GetFileNameWithoutExtension(fileName);
+        var candidate = Path.Combine(recoveryDir, $"{nameWithoutExtension}.{timestamp}.corrupt{extension}");
+        if (!File.Exists(candidate))
+        {
+            return candidate;
+        }
+
+        return Path.Combine(recoveryDir, $"{nameWithoutExtension}.{timestamp}.{Guid.NewGuid():N}.corrupt{extension}");
+    }
+
+    private static void MoveIfExists(string sourcePath, string destinationPath)
+    {
+        if (!File.Exists(sourcePath))
+        {
+            return;
+        }
+
+        File.Move(sourcePath, destinationPath);
+    }
+
+    private static bool IsDefaultSharedIdentityPath(string keyPath)
+    {
+        var normalized = Path.GetFullPath(keyPath);
+        var expected = defaultSharedKeyPathOverrideForTests?.Invoke() ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "nLink",
+            "identity.json");
+        return string.Equals(normalized, Path.GetFullPath(expected), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsPerProcessIdentityPath(string keyPath)
+    {
+        var fileName = Path.GetFileName(Path.GetFullPath(keyPath));
+        return fileName.StartsWith("identity.instance-", StringComparison.OrdinalIgnoreCase) &&
+               fileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
+    }
+
     private sealed class PersistedIdentityFile
     {
         public int Version { get; set; }
@@ -252,6 +389,16 @@ internal static class NknIdentityStore
         public string? SeedBase64 { get; set; }
 
         public string? Address { get; set; }
+    }
+
+    private sealed class DelegateDisposable(Action dispose) : IDisposable
+    {
+        private Action? disposeAction = dispose;
+
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref disposeAction, null)?.Invoke();
+        }
     }
 }
 

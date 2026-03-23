@@ -14,7 +14,6 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
     private readonly ShareMessageConfig shareMessageConfig;
     private readonly IClipboardService clipboardService;
     private readonly IInviteShareService inviteShareService;
-    private readonly IRecentConnectTargetsStore recentConnectTargetsStore;
     private readonly IQrCodeService qrCodeService;
     private readonly SessionRuntime sessionRuntime;
     private readonly StatusPresenter statusPresenter;
@@ -38,7 +37,6 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
         shareMessageConfig = this.services.GetRequired<ShareMessageConfig>();
         clipboardService = this.services.GetRequired<IClipboardService>();
         inviteShareService = this.services.GetRequired<IInviteShareService>();
-        recentConnectTargetsStore = this.services.GetRequired<IRecentConnectTargetsStore>();
         qrCodeService = this.services.GetRequired<IQrCodeService>();
         metricsRegistry = this.services.GetRequired<MetricsRegistry>();
         resourceRuntimeTracker = this.services.GetRequired<ResourceRuntimeTracker>();
@@ -108,7 +106,6 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
             nowProvider: null,
             uiStateStore: sessionUiStateStore,
             backAction: ShowHomePage,
-            recentConnectTargetsStore: recentConnectTargetsStore,
             inviteShareService: inviteShareService));
     }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.2] - 2026-03-23
+
+### Changed
+
+- Release version sources and packaging defaults now resolve to `0.5.2`.
+
 ## [0.5.1] - 2026-03-13
 
 ### Added

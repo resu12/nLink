@@ -1,10 +1,18 @@
 using System.Diagnostics;
 using System.Text.Json;
+using NLink.Core.Diagnostics;
+using NLink.Core.Logging;
 
 namespace NLink.Infra.Nkn;
 
 internal sealed class NknTransportOptions
 {
+    private static Func<bool>? shouldUsePerProcessLocalIdentityOverrideForTests;
+    private static Func<string>? localAppDataPathOverrideForTests;
+    private static Func<int, bool>? isProcessRunningOverrideForTests;
+    private static Func<string, string[]>? enumerateInstanceIdentityFilesOverrideForTests;
+    private static Action<string>? deleteFileOverrideForTests;
+
     private NknTransportOptions()
     {
     }
@@ -89,8 +97,9 @@ internal sealed class NknTransportOptions
             return Path.GetFullPath(configuredPath);
         }
 
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var localAppData = GetLocalAppDataPath();
         var defaultPath = Path.Combine(localAppData, "nLink", "identity.json");
+        CleanupStalePerProcessIdentityFiles(defaultPath);
 
         if (!ShouldUsePerProcessLocalIdentity())
         {
@@ -104,6 +113,11 @@ internal sealed class NknTransportOptions
 
     private static bool ShouldUsePerProcessLocalIdentity()
     {
+        if (shouldUsePerProcessLocalIdentityOverrideForTests is not null)
+        {
+            return shouldUsePerProcessLocalIdentityOverrideForTests();
+        }
+
         try
         {
             using var current = Process.GetCurrentProcess();
@@ -142,6 +156,194 @@ internal sealed class NknTransportOptions
         {
             return false;
         }
+    }
+
+    private static string GetLocalAppDataPath()
+    {
+        return localAppDataPathOverrideForTests?.Invoke()
+               ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+    }
+
+    private static void CleanupStalePerProcessIdentityFiles(string defaultKeyPath)
+    {
+        var directory = Path.GetDirectoryName(defaultKeyPath);
+        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
+        {
+            return;
+        }
+
+        var scanned = 0;
+        var staleFound = 0;
+        var deleted = 0;
+        var failed = 0;
+
+        foreach (var identityPath in EnumerateInstanceIdentityFiles(directory))
+        {
+            scanned++;
+            if (!TryParseInstanceIdentityPid(identityPath, out var pid))
+            {
+                continue;
+            }
+
+            if (IsProcessRunning(pid))
+            {
+                continue;
+            }
+
+            staleFound++;
+            deleted += TryDeleteFile(identityPath, ref failed);
+            deleted += TryDeleteFile(NknSecretStore.GetSecretPath(identityPath), ref failed);
+        }
+
+        if (scanned == 0 && staleFound == 0 && deleted == 0 && failed == 0)
+        {
+            return;
+        }
+
+        var reason = failed > 0
+            ? "stale_instance_cleanup_partial"
+            : deleted > 0
+                ? "stale_instance_cleanup_completed"
+                : "stale_instance_cleanup_noop";
+        var outcome = failed > 0
+            ? PersistenceDiagnosticOutcome.Partial
+            : deleted > 0
+                ? PersistenceDiagnosticOutcome.Partial
+                : PersistenceDiagnosticOutcome.None;
+        var severity = failed > 0
+            ? PersistenceDiagnosticSeverity.Warning
+            : PersistenceDiagnosticSeverity.Info;
+        var message =
+            $"event=stale_instance_identity_cleanup; scanned={scanned}; stale_found={staleFound}; deleted={deleted}; failed={failed}; directory={directory}";
+
+        if (failed > 0)
+        {
+            LocalOperationalLog.Warn("NKN.IdentityCleanup", message);
+        }
+        else
+        {
+            LocalOperationalLog.Info("NKN.IdentityCleanup", message);
+        }
+
+        PersistenceDiagnostics.Record(
+            domain: "nkn_identity_store",
+            operation: "cleanup_stale_instance_identities",
+            severity: severity,
+            outcome: outcome,
+            reason: reason);
+    }
+
+    private static IEnumerable<string> EnumerateInstanceIdentityFiles(string directory)
+    {
+        if (enumerateInstanceIdentityFilesOverrideForTests is not null)
+        {
+            return enumerateInstanceIdentityFilesOverrideForTests(directory);
+        }
+
+        return Directory.GetFiles(directory, "identity.instance-*.json", SearchOption.TopDirectoryOnly);
+    }
+
+    private static bool TryParseInstanceIdentityPid(string identityPath, out int pid)
+    {
+        pid = 0;
+        var fileName = Path.GetFileName(identityPath);
+        const string prefix = "identity.instance-";
+        const string suffix = ".json";
+        if (!fileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+            !fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var pidSpan = fileName.AsSpan(prefix.Length, fileName.Length - prefix.Length - suffix.Length);
+        return int.TryParse(pidSpan, out pid) && pid > 0;
+    }
+
+    private static bool IsProcessRunning(int pid)
+    {
+        if (isProcessRunningOverrideForTests is not null)
+        {
+            return isProcessRunningOverrideForTests(pid);
+        }
+
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            return !process.HasExited;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static int TryDeleteFile(string path, ref int failed)
+    {
+        if (!File.Exists(path))
+        {
+            return 0;
+        }
+
+        try
+        {
+            if (deleteFileOverrideForTests is not null)
+            {
+                deleteFileOverrideForTests(path);
+            }
+            else
+            {
+                File.Delete(path);
+            }
+
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            failed++;
+            LocalOperationalLog.Warn(
+                "NKN.IdentityCleanup",
+                $"event=stale_instance_identity_cleanup_delete_failed; path={path}; reason={ex.GetType().Name}");
+            return 0;
+        }
+    }
+
+    internal static IDisposable OverrideShouldUsePerProcessLocalIdentityForTests(bool value)
+    {
+        var previous = shouldUsePerProcessLocalIdentityOverrideForTests;
+        shouldUsePerProcessLocalIdentityOverrideForTests = () => value;
+        return new DelegateDisposable(() => shouldUsePerProcessLocalIdentityOverrideForTests = previous);
+    }
+
+    internal static IDisposable OverrideLocalAppDataPathForTests(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        var previous = localAppDataPathOverrideForTests;
+        localAppDataPathOverrideForTests = () => Path.GetFullPath(path);
+        return new DelegateDisposable(() => localAppDataPathOverrideForTests = previous);
+    }
+
+    internal static IDisposable OverrideIsProcessRunningForTests(Func<int, bool> isProcessRunning)
+    {
+        ArgumentNullException.ThrowIfNull(isProcessRunning);
+        var previous = isProcessRunningOverrideForTests;
+        isProcessRunningOverrideForTests = isProcessRunning;
+        return new DelegateDisposable(() => isProcessRunningOverrideForTests = previous);
+    }
+
+    internal static IDisposable OverrideDeleteFileForTests(Action<string> deleteFile)
+    {
+        ArgumentNullException.ThrowIfNull(deleteFile);
+        var previous = deleteFileOverrideForTests;
+        deleteFileOverrideForTests = deleteFile;
+        return new DelegateDisposable(() => deleteFileOverrideForTests = previous);
+    }
+
+    internal static IDisposable OverrideEnumerateInstanceIdentityFilesForTests(Func<string, string[]> enumerateFiles)
+    {
+        ArgumentNullException.ThrowIfNull(enumerateFiles);
+        var previous = enumerateInstanceIdentityFilesOverrideForTests;
+        enumerateInstanceIdentityFilesOverrideForTests = enumerateFiles;
+        return new DelegateDisposable(() => enumerateInstanceIdentityFilesOverrideForTests = previous);
     }
 
     private static string? FirstNonEmpty(params string?[] values)
@@ -274,6 +476,16 @@ internal sealed class NknTransportOptions
             }
 
             return current.ValueKind == JsonValueKind.String ? current.GetString() : null;
+        }
+    }
+
+    private sealed class DelegateDisposable(Action dispose) : IDisposable
+    {
+        private Action? disposeAction = dispose;
+
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref disposeAction, null)?.Invoke();
         }
     }
 }
