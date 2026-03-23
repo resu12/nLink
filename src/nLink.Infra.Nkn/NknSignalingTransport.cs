@@ -1122,7 +1122,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         Envelope env,
         out SessionSecureEnvelopePayload securePayload)
     {
-        securePayload = default;
+        securePayload = default!;
 
         if (currentSessionSecurityState.SessionId is not SessionId sessionId)
         {

@@ -72,7 +72,7 @@ public static class ChatAesGcmCrypto
         var ciphertext = new byte[plaintext.Length];
         var tag = new byte[TagSize];
 
-        using var aes = new AesGcm(key);
+        using var aes = new AesGcm(key, TagSize);
         aes.Encrypt(nonce, plaintext, ciphertext, tag);
 
         return new ChatEncryptedData(nonce.ToArray(), tag, ciphertext);
@@ -83,7 +83,7 @@ public static class ChatAesGcmCrypto
         ArgumentNullException.ThrowIfNull(key);
 
         var plaintext = new byte[ciphertext.Length];
-        using var aes = new AesGcm(key);
+        using var aes = new AesGcm(key, TagSize);
         aes.Decrypt(nonce, ciphertext, tag, plaintext);
         return plaintext;
     }
