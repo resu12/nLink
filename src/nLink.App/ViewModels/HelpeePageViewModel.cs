@@ -94,6 +94,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private string shareInviteRawTokenText = string.Empty;
     private string shareAddressText = string.Empty;
     private string shareInviteStatusText = "Preparing invite…";
+    private readonly string automaticIdentityRecoveryWarning;
     private Bitmap? shareInviteQrBitmap;
     private CancellationTokenSource? shareInviteQrRefreshCts;
     private int shareInviteQrRefreshVersion;
@@ -221,6 +222,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         this.clipboardService = clipboardService;
         this.inviteShareService = inviteShareService ?? new DefaultInviteShareService();
         this.qrCodeService = qrCodeService ?? new QrCodeService();
+        automaticIdentityRecoveryWarning = NknIdentityStore.GetAutomaticRecoveryUserWarning() ?? string.Empty;
         inviteTokenFactory = ConnectInputResolverFactory.CreateInviteTokenFactory();
         this.incomingRequestTimeout = incomingRequestTimeout ?? DefaultIncomingRequestTimeout;
         this.uiStateStore = uiStateStore;
@@ -333,8 +335,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         !string.IsNullOrWhiteSpace(IncomingRequestTimeoutText);
     public bool HasShareInvite => !string.IsNullOrWhiteSpace(ShareInvite);
     private bool HasAutomaticIdentityRecoveryNotice =>
-        !string.IsNullOrWhiteSpace(GetAutomaticIdentityRecoveryWarning()) &&
-        shareInviteStatusText.Contains(GetAutomaticIdentityRecoveryWarning()!, StringComparison.Ordinal);
+        !string.IsNullOrWhiteSpace(automaticIdentityRecoveryWarning) &&
+        shareInviteStatusText.Contains(automaticIdentityRecoveryWarning, StringComparison.Ordinal);
     public bool HasShareInviteRawToken =>
         !string.IsNullOrWhiteSpace(ShareInviteRawToken) &&
         !string.Equals(ShareInviteRawToken, ShareInvite, StringComparison.Ordinal);
@@ -2171,27 +2173,18 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
     }
 
-    private static string ComposeShareInviteStatusText(string? value)
+    private string ComposeShareInviteStatusText(string? value)
     {
         var normalized = value ?? string.Empty;
-        var recoveryWarning = GetAutomaticIdentityRecoveryWarning();
-        if (string.IsNullOrWhiteSpace(recoveryWarning) ||
+        if (string.IsNullOrWhiteSpace(automaticIdentityRecoveryWarning) ||
             string.IsNullOrWhiteSpace(normalized) ||
             IsProtectedSeedStorageReadFailure(normalized) ||
-            normalized.Contains(recoveryWarning, StringComparison.Ordinal))
+            normalized.Contains(automaticIdentityRecoveryWarning, StringComparison.Ordinal))
         {
             return normalized;
         }
 
-        return $"{recoveryWarning} {normalized}";
-    }
-
-    private static string? GetAutomaticIdentityRecoveryWarning()
-    {
-        var warning = PersistenceDiagnostics.Snapshot().LastWarning;
-        return warning.Contains("created a new local identity", StringComparison.OrdinalIgnoreCase)
-            ? warning
-            : null;
+        return $"{automaticIdentityRecoveryWarning} {normalized}";
     }
 
     private void UpdateShareInviteExpiryText(string value)

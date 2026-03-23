@@ -1746,6 +1746,45 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void HelpeeViewModel_RecoveredLocalIdentity_KeepsRecoveryNoticeVisible_AfterLaterPersistenceWarning()
+    {
+        PersistenceDiagnostics.ClearForTests();
+        try
+        {
+            PersistenceDiagnostics.Record(
+                domain: "nkn_identity_store",
+                operation: "automatic_identity_recovery",
+                severity: PersistenceDiagnosticSeverity.Warning,
+                outcome: PersistenceDiagnosticOutcome.Partial,
+                reason: "default_identity_recreated",
+                userWarning: "Local protected identity storage was unreadable. nLink created a new local identity. Previous helper address and invites are no longer valid.");
+
+            using var runtime = new SessionRuntime(() => new DevLocalTransport());
+            using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateNknTestConfig(), runtime);
+
+            PersistenceDiagnostics.Record(
+                domain: "nkn_secret_store",
+                operation: "read_seed",
+                severity: PersistenceDiagnosticSeverity.Warning,
+                outcome: PersistenceDiagnosticOutcome.Fallback,
+                reason: "CryptographicException",
+                userWarning: "Protected seed storage could not be read.");
+
+            SetPrivateField(helpee, "shareInviteText", "invite-token");
+            InvokePrivateMethod(helpee, "UpdateShareInviteStatusText", "Invite ready");
+
+            Assert.True(helpee.ShowShareInviteStatus);
+            Assert.Contains("created a new local identity", helpee.ShareInviteStatusText, StringComparison.Ordinal);
+            Assert.Contains("Invite ready", helpee.ShareInviteStatusText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            PersistenceDiagnostics.ClearForTests();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void TransportFailureMapper_MapsTimeout_ToHandshakeTimeout()
     {
         var failure = TransportFailureMapper.FromException(new TimeoutException("Timed out waiting for approve."));
@@ -12677,6 +12716,39 @@ return;
         {
             var keyPath = Path.Combine(tempDir, "custom-identity.json");
             var options = LoadNknOptionsWithOverrides(keyPath, "custom-seed-corruption-test");
+            var backend = new CorruptedProtectedSeedBackend();
+            using var backendOverride = NknSecretStore.OverrideBackendForTests(backend);
+
+            var originalIdentity = NknIdentityStore.LoadOrCreate(options);
+            backend.ThrowOnLoad = true;
+
+            var ex = Assert.Throws<CryptographicException>(() => NknIdentityStore.LoadOrCreate(options));
+            Assert.Contains("data", ex.Message, StringComparison.OrdinalIgnoreCase);
+
+            using var identityDoc = JsonDocument.Parse(File.ReadAllText(keyPath));
+            Assert.Equal(originalIdentity.Address, identityDoc.RootElement.GetProperty("Address").GetString());
+
+            var snapshot = PersistenceDiagnostics.Snapshot();
+            Assert.DoesNotContain(snapshot.RecentEvents, e => string.Equals(e.Operation, "automatic_identity_recovery", StringComparison.Ordinal));
+        }
+        finally
+        {
+            PersistenceDiagnostics.ClearForTests();
+            try { CleanupDirectoryIfExists(tempDir); } catch { }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void NknIdentityStore_CustomInstanceLikeKeyPath_WithCorruptedProtectedSeed_DoesNotAutoRotate()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-protected-seed-custom-instance-like", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        PersistenceDiagnostics.ClearForTests();
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.instance-4242.json");
+            var options = LoadNknOptionsWithOverrides(keyPath, "custom-instance-like-corruption-test");
             var backend = new CorruptedProtectedSeedBackend();
             using var backendOverride = NknSecretStore.OverrideBackendForTests(backend);
 
