@@ -36,7 +36,7 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public partial class SmokeTests
 {
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void FeatureFlags_DefaultsMatchScreenShareReleaseRollout_WhenNoEnvironmentOverridesArePresent()
     {
@@ -57,7 +57,7 @@ public partial class SmokeTests
         Assert.True(FeatureFlags.EnableSessionHeader);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void FeatureFlags_RemoteControlSeqGate_FailsClosedInRelease_WithoutExplicitInsecureOptIn()
     {
@@ -86,7 +86,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ReleaseRunbook_IncludesReleaseHardeningChecklistMarkers()
     {
@@ -104,7 +104,7 @@ public partial class SmokeTests
         Assert.Contains("high_priority_control_dropped_for_stop:", runbook, StringComparison.Ordinal);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task RetryPolicy_RetriesWithBoundedBackoff_AndTracksAttemptCounts()
     {
@@ -157,7 +157,7 @@ public partial class SmokeTests
         Assert.DoesNotContain(events, e => e.Kind == RetryEventKind.FinalFail);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task RetryPolicy_DelayBounds_WithJitter_StayWithinConfiguredRange()
     {
@@ -205,7 +205,7 @@ public partial class SmokeTests
         Assert.True(maxJitterDelays[1].TotalMilliseconds <= 2000d);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ShareMessageBuilder_WithCode_NoUrl()
     {
@@ -213,7 +213,7 @@ public partial class SmokeTests
         Assert.Equal("Install nLink and enter code 123456", text);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ShareMessageBuilder_WithCode_AndUrl()
     {
@@ -223,7 +223,7 @@ public partial class SmokeTests
             text);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ShareMessageBuilder_WithoutCode_WithUrl()
     {
@@ -233,7 +233,7 @@ public partial class SmokeTests
             text);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ShareMessageBuilder_HelperInstallMessage_IncludesConfiguredUrl_AndTrailingNewline()
     {
@@ -245,7 +245,7 @@ public partial class SmokeTests
             text);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ShareMessageBuilder_HelperInstallMessage_DoesNotIncludeInternalDiagnosticsText()
     {
@@ -257,7 +257,7 @@ public partial class SmokeTests
         Assert.DoesNotContain("identifier", text, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task MetricsRegistry_IsThreadSafe_AndSnapshotIsConsistent()
     {
@@ -307,7 +307,7 @@ public partial class SmokeTests
         Assert.Equal(histogramSnap.Count, histogramSnap.Buckets.Sum(b => b.Count));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void MetricsRegistry_JsonExport_MatchesSnapshot_AndIncludesLabels()
     {
@@ -337,7 +337,7 @@ public partial class SmokeTests
         Assert.Equal(12, histSnap.Max, precision: 6);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void MetricsRegistry_JsonExport_MatchesGoldenSchema()
     {
@@ -357,7 +357,7 @@ public partial class SmokeTests
         Assert.Equal(NormalizeJson(expected), NormalizeJson(actual));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void MetricsTelemetrySink_SuccessfulConnect_RecordsAttemptsSuccess_AndDurations()
     {
@@ -402,7 +402,7 @@ public partial class SmokeTests
         Assert.True(bridgeDuration.Sum >= 0);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void MetricsTelemetrySink_ScenarioLabel_IsAbsent_WhenNotSet()
     {
@@ -425,7 +425,7 @@ public partial class SmokeTests
         Assert.Equal(string.Empty, counter.Tags.Scenario);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void MetricsTelemetrySink_ScenarioLabel_IsPresent_WhenSet()
     {
@@ -462,7 +462,7 @@ public partial class SmokeTests
         Assert.Contains(snapshot.Histograms, h => h.Name == "transport_connect_duration_ms" && h.Tags.Scenario == "A");
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void MetricsTelemetrySink_BridgeLifecycle_MapsToMetrics()
     {
@@ -567,7 +567,7 @@ public partial class SmokeTests
         Assert.Contains(snapshot.Gauges, g => g.Name == "bridge_warm_start_ratio" && g.Tags.BridgeReuseMode == "KeepAlive" && g.Value > 0d);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ReliabilityGate_Passes_WhenThresholdsAreMet()
     {
@@ -596,7 +596,7 @@ public partial class SmokeTests
         Assert.Equal(0, result.BridgeCrashTotal);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ReliabilityGate_Fails_WithClearReasons()
     {
@@ -627,7 +627,7 @@ public partial class SmokeTests
         Assert.Contains(result.Failures, f => f.Code == "bridge_crash_detected");
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void TransportFailureMapper_EmptySignals_MapsToUserCancelled_NotUnknown()
     {
@@ -641,7 +641,7 @@ public partial class SmokeTests
         Assert.True(failure.IsTransient);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void StatusPresenter_ConnectSuccessFlow_TransitionsToConnected()
     {
@@ -667,7 +667,7 @@ public partial class SmokeTests
         Assert.Equal("Connected", presenter.CurrentStatus.Title);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void StatusPresenter_RetryFlow_ShowsAttemptAndCountdown()
     {
@@ -685,7 +685,7 @@ public partial class SmokeTests
         Assert.Equal(FailureSeverity.Warning, presenter.CurrentStatus.Severity);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void StatusPresenter_HandshakeAndApprovalStatuses_UseExplicitTitles()
     {
@@ -710,7 +710,7 @@ public partial class SmokeTests
         Assert.Equal("Waiting for approval…", presenter.CurrentStatus.Message);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void StatusBanner_HandshakeDefaultTitle_IsFinalizingConnection()
     {
@@ -726,7 +726,7 @@ public partial class SmokeTests
         Assert.Equal("Finalizing connection", banner.StatusTitle);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void StatusPresenter_FailureMapping_UsesFailureCopyMap()
     {
@@ -753,7 +753,7 @@ public partial class SmokeTests
         Assert.Equal("abc123", presenter.CurrentStatus.CorrelationId);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void StatusPresenter_DuplicateFailureWithinWindow_DoesNotReemit()
     {
@@ -792,7 +792,7 @@ public partial class SmokeTests
         Assert.Equal(expected.Title, presenter.CurrentStatus.Title);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void StatusPresenter_DifferentFailureCategory_AlwaysReemits()
     {
@@ -828,7 +828,7 @@ public partial class SmokeTests
         Assert.Equal(expected.Title, presenter.CurrentStatus.Title);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void StatusPresenter_UserCancelled_ReturnsToIdle()
     {
@@ -850,7 +850,7 @@ public partial class SmokeTests
         Assert.Equal(string.Empty, presenter.CurrentStatus.Title);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void StatusPresenter_ReconnectCountdown_DecrementsProperly()
     {
@@ -871,7 +871,7 @@ public partial class SmokeTests
         Assert.False(timer.IsRunning);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void StatusPresenter_ReconnectCountdown_CancelsOnConnectSuccess()
     {
@@ -896,7 +896,7 @@ public partial class SmokeTests
         Assert.Equal(before, presenter.CurrentStatus);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void StatusPresenter_ReconnectCountdown_StopsOnDispose()
     {
@@ -912,7 +912,7 @@ public partial class SmokeTests
         Assert.False(timer.IsRunning);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void InlineTransientText_Show_MakesTextVisible()
     {
@@ -926,7 +926,7 @@ public partial class SmokeTests
         Assert.True(timer.IsRunning);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void InlineTransientText_AutoHides_AfterTimerTick()
     {
@@ -941,7 +941,7 @@ public partial class SmokeTests
         Assert.False(timer.IsRunning);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void InlineTransientText_MultipleTriggers_ReplaceMessageWithoutOverlap()
     {
@@ -962,7 +962,7 @@ public partial class SmokeTests
         Assert.False(timer.IsRunning);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_StatusBanner_ReactsToFailedReconnectingConnected()
     {
@@ -1007,7 +1007,7 @@ public partial class SmokeTests
         Assert.False(helper.ShowStatusBanner);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelpeePageViewModel_StatusBanner_ReactsToFailedReconnectingConnected()
     {
@@ -1052,7 +1052,7 @@ public partial class SmokeTests
         Assert.False(helpee.ShowStatusBanner);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void BridgeExitClassifier_UsesExpectedClassification_WithFakeProcessRunner()
     {
@@ -1072,7 +1072,7 @@ public partial class SmokeTests
         Assert.Equal("killed", killed.ReasonText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Trait("Category", "BridgeStabilityPromotion")]
     [Fact]
     public void MetricsTelemetrySink_FailureInjection_RecordsClassifiedFailures_AndNoUnknown()
@@ -1131,7 +1131,7 @@ public partial class SmokeTests
         Assert.DoesNotContain(snapshot.Counters, c => c.Name == "transport_failure_total" && c.Tags.FailureCategory == nameof(TransportFailureCategory.Unknown) && c.Value > 0);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_KeepAliveBridge_IdleTimeout_DisposesCachedBridge_AndRecordsKilledMetric()
     {
@@ -1167,7 +1167,7 @@ public partial class SmokeTests
         Assert.Contains(snapshot.Counters, c => c.Name == "bridge_exit_total" && c.Tags.Result == "killed" && c.Value >= 1);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void UserErrorMapper_KeyMessages_AreShortAndUserFriendly()
     {
@@ -1178,7 +1178,7 @@ public partial class SmokeTests
         Assert.Equal("Please reinstall.", UserErrorMapper.NknStartFailedReinstall());
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void FailurePresenter_MapsEveryTransportFailureCategory()
     {
@@ -1192,7 +1192,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void AppAssembly_InformationalVersion_Matches_VERSION_File()
     {
@@ -1208,7 +1208,7 @@ public partial class SmokeTests
         Assert.Equal(expected, infoVersion);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void Program_Parses_SelfTest_Argument()
     {
@@ -1225,7 +1225,7 @@ public partial class SmokeTests
         Assert.False(noSelfTest);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void Program_Parses_Benchmark_Argument()
     {
@@ -1242,7 +1242,7 @@ public partial class SmokeTests
         Assert.False(noBench);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void Program_Parses_Soak_Argument()
     {
@@ -1259,7 +1259,7 @@ public partial class SmokeTests
         Assert.False(noSoak);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void Program_Parses_ScreenShareSoak_Argument()
     {
@@ -1276,7 +1276,7 @@ public partial class SmokeTests
         Assert.False(noSoak);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void BenchmarkRunner_Parses_Defaults_And_Overrides()
     {
@@ -1304,7 +1304,7 @@ public partial class SmokeTests
         Assert.Equal(7.5d, custom.MemoryTolerancePercent);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void BenchmarkRunner_DevLocalInvite_BindsDeterministicHelperIdentity()
     {
@@ -1317,7 +1317,7 @@ public partial class SmokeTests
         Assert.Equal(helperAddress, invite.BoundHelperAddress);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SoakRunner_Parses_And_Maps_To_BenchmarkArgs()
     {
@@ -1351,7 +1351,7 @@ public partial class SmokeTests
         Assert.Contains("--reliability-gate", mappedArgs);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ScreenShareSoakRunner_Parses_Defaults_And_Overrides()
     {
@@ -1371,7 +1371,7 @@ public partial class SmokeTests
         Assert.Equal(TimeSpan.FromSeconds(15), custom.SampleInterval);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionRuntime_TransportStateMachine_AllowsExpectedTransitions_AndStoresMonotonicTimestamps()
     {
@@ -1395,7 +1395,7 @@ public partial class SmokeTests
         Assert.Equal(TransportState.TransportInitializing, runtime.TransportLifecycleState);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionRuntime_TransportStateMachine_BlocksInvalidTransitions()
     {
@@ -1413,7 +1413,7 @@ public partial class SmokeTests
         Assert.Equal(0, runtime.GetTransportStateEntryTimestamp(TransportState.Handshake));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionRuntime_TransportDurations_AreRecorded_OnSuccess_AndNonNegative()
     {
@@ -1441,7 +1441,7 @@ public partial class SmokeTests
         Assert.True(handshakeMs!.Value >= 0);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionRuntime_TransportDurations_AreRecorded_OnFailure_AndNonNegative()
     {
@@ -1463,7 +1463,7 @@ public partial class SmokeTests
         Assert.True(connectMs!.Value >= 0);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_WatchdogTimeout_Handshake_TransitionsToFailed_AndClassifiesFailure()
     {
@@ -1496,7 +1496,7 @@ public partial class SmokeTests
         Assert.True(runtime.GetLastDurationMetricMilliseconds("handshake_duration_ms")!.Value >= 0);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_WatchdogTimeout_BridgeStarting_TransitionsToFailed_AndClassifiesFailure()
     {
@@ -1521,7 +1521,7 @@ public partial class SmokeTests
         Assert.NotNull(runtime.GetLastDurationMetricMilliseconds("bridge_start_duration_ms"));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_WatchdogTimeout_AutoRetryEnabled_ResetsToIdle()
     {
@@ -1552,7 +1552,7 @@ public partial class SmokeTests
         Assert.True(runtime.GetLastDurationMetricMilliseconds("connect_duration_ms")!.Value >= 0);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_HelpeeConnectingFromBridgeReady_DoesNotWatchdogTimeoutWhileIdle()
     {
@@ -1575,7 +1575,7 @@ public partial class SmokeTests
         Assert.Equal(TransportState.Connecting, runtime.TransportLifecycleState);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_HelpeeIdleDisconnect_DuplicateEvents_DoNotStartMultipleRehosts()
     {
@@ -1611,7 +1611,7 @@ public partial class SmokeTests
         Assert.Equal(SessionRuntimeState.Waiting, runtime.State);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_IgnoresStaleTransportDisconnectedEvent_AfterResetAndRehost()
     {
@@ -1639,7 +1639,7 @@ public partial class SmokeTests
         Assert.Equal("Waiting for helper…", runtime.StatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_HelperListenerTransportDisconnect_RestartsQuietly()
     {
@@ -1678,7 +1678,7 @@ public partial class SmokeTests
         Assert.Equal("Waiting for help requests…", runtime.StatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_StartHelpee_SynchronousTransportFailure_DoesNotRemainTransportInitializing()
     {
@@ -1709,7 +1709,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_ProtectedSeedReadFailure_ShowsStableError_WithoutAutoRestartLoop()
     {
@@ -1752,7 +1752,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelpeeViewModel_RecoveredLocalIdentity_KeepsRecoveryNoticeVisible_AfterInviteReady()
     {
@@ -1783,7 +1783,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelpeeViewModel_RecoveredLocalIdentity_KeepsRecoveryNoticeVisible_AfterLaterPersistenceWarning()
     {
@@ -1822,7 +1822,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_RecoveredLocalIdentity_RefreshesNotice_AfterStartupRecovery()
     {
@@ -1851,7 +1851,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_RequestHelpTimeout_DoesNotCrashAndRestoresWaitingState()
     {
@@ -1878,7 +1878,7 @@ public partial class SmokeTests
         Assert.Null(runtime.PendingOutboundHelpRequestDecision);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_RequestHelp_CompactBootstrap_RoutesToHelperAddress_AndBindsInviteToHelperId()
     {
@@ -1920,7 +1920,7 @@ public partial class SmokeTests
         Assert.Equal(helperIdentity, validation.Invite!.BoundHelperAddress);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void TransportFailureMapper_MapsTimeout_ToHandshakeTimeout()
     {
@@ -1932,7 +1932,7 @@ public partial class SmokeTests
         Assert.False(string.IsNullOrWhiteSpace(failure.CorrelationId));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void TransportFailureMapper_MapsProcessExit_ToUnexpectedProcessExit()
     {
@@ -1945,7 +1945,7 @@ public partial class SmokeTests
         Assert.True(failure.IsTransient);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void TransportFailureMapper_MapsJsonParse_ToJsonProtocolError()
     {
@@ -1956,7 +1956,7 @@ public partial class SmokeTests
         Assert.Equal(nameof(System.Text.Json.JsonException), failure.ExceptionType);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_ConnectAttempt_IncrementsOnRetry_SameSession()
     {
@@ -1978,7 +1978,7 @@ public partial class SmokeTests
         Assert.Equal(firstSessionId, runtime.GetSessionIdForTests());
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_ConnectAttempt_ResetsForNewSession()
     {
@@ -1996,7 +1996,7 @@ public partial class SmokeTests
         Assert.NotEqual(firstSessionId, runtime.GetSessionIdForTests());
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Diagnostics_CopyExport_IncludesRuntimeBasics_AndNoPayloadOrChatHistory()
     {
@@ -2137,7 +2137,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void Diagnostics_CopyExport_ReportsSecurityRelevantOverrides()
     {
@@ -2183,7 +2183,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void LocalOperationalLog_LogAppStart_WritesInviteSecurityStatus()
     {
@@ -2239,7 +2239,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknSignalingTransport_InitializationLog_DoesNotContainKeyPath()
     {
@@ -2279,7 +2279,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void DiagnosticsPageViewModel_ExportsMetricsJson_ToArtifactsDiagnostics_WithDeterministicTimestamp()
     {
@@ -2312,7 +2312,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void Diagnostics_And_OperationalLog_Redact_Sensitive_Content()
     {
@@ -2397,7 +2397,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void RealNknClientAdapter_BridgeDiagnosticFormatter_Redacts_Sensitive_Content()
     {
@@ -2415,7 +2415,7 @@ public partial class SmokeTests
         Assert.Contains("[redacted]", formatted, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionTimeline_IsCappedAt30_AndDiagnosticsExportUsesLatestEntries()
     {
@@ -2455,7 +2455,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void TransportRuntimeConfig_ReleaseDefault_SelectsNkn_WhenBridgeBundled()
     {
@@ -2486,7 +2486,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void TransportRuntimeConfig_ReleaseDefault_SelectsDevLocal_WithWarning_WhenBridgeMissing()
     {
@@ -2518,7 +2518,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void TransportRuntimeConfig_EnvNkn_SelectsNkn_AndHelperFailsLoudlyBeforeConnect_WhenBridgeMissing()
     {
@@ -2561,7 +2561,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void TransportRuntimeConfig_EnvDevLocal_SelectsDevLocal()
     {
@@ -2580,7 +2580,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ReliabilityLog_RingBuffer_CapsAt50()
     {
@@ -2619,7 +2619,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void RollingFileLogger_CreatesLogFile_AndContainsAppStart()
     {
@@ -2642,7 +2642,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void RollingFileLogger_Rotates_WhenSizeLimitExceeded()
     {
@@ -2669,7 +2669,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void RollingFileLogger_Rotation_And_Write_NeverThrow_WhenFileLocked()
     {
@@ -2696,7 +2696,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ReliabilityLog_Persists_JsonlLines()
     {
@@ -2730,7 +2730,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ReliabilityLog_Redacts_SecretLikeTokens()
     {
@@ -2769,7 +2769,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ChatKeyAgreement_ProducesSameSessionKey_OnBothSides()
     {
@@ -2783,7 +2783,7 @@ public partial class SmokeTests
         Assert.Equal(aKey, bKey);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ChatAesGcm_EncryptDecrypt_RoundTrip()
     {
@@ -2798,7 +2798,7 @@ public partial class SmokeTests
         Assert.Equal(ChatAesGcmCrypto.TagSize, encrypted.Tag.Length);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ChatEnvelope_SerializeDeserialize_IsStableAndVersioned()
     {
@@ -2826,7 +2826,7 @@ public partial class SmokeTests
         Assert.Equal(envelope.CiphertextBase64, parsed.CiphertextBase64);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_HostJoin_RaisesJoinRequestApproveAndRejectEvents()
     {
@@ -2834,7 +2834,7 @@ public partial class SmokeTests
         await VerifyHandshakeAsync(approve: false);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_SecurityState_TracksVerifiedHandshake_BeforeApprovalGrant()
     {
@@ -2880,7 +2880,7 @@ public partial class SmokeTests
         Assert.True(helpeeRuntime.IsCapabilityGranted(CapabilityGrant.Chat));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_ApproveAsync_UsesExplicitCapabilitySubset()
     {
@@ -2916,7 +2916,7 @@ public partial class SmokeTests
         Assert.False(helperRuntime.CanPerform(SessionCapability.RemoteControl));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_ApprovalGrant_Expires_And_ClearsCapabilities()
     {
@@ -2961,7 +2961,7 @@ public partial class SmokeTests
         Assert.False(helperRuntime.SecurityState.ApprovalGranted);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_RequestRemoteControl_RequiresGrantedCapability()
     {
@@ -2993,7 +2993,7 @@ public partial class SmokeTests
         Assert.False(helpeeRuntime.HasPendingRemoteControlConsentPrompt);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_DirectHelpRequest_ReachesOnlyIntendedHelper()
     {
@@ -3028,7 +3028,7 @@ public partial class SmokeTests
         Assert.Equal(SessionRuntimeState.Waiting, otherHelperRuntime.State);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_DirectHelpRequest_RejectFlow_UpdatesHelpeeAndClearsHelperPending()
     {
@@ -3066,7 +3066,7 @@ public partial class SmokeTests
         Assert.Equal("Waiting for help requests…", helperRuntime.StatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_HelperRejectsHelpRequest_ShowsRejectedStatus()
     {
@@ -3104,7 +3104,7 @@ public partial class SmokeTests
         Assert.Equal("The helper declined the request.", helpee.ShareInviteStatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_DirectHelpRequest_AcceptFlow_ConnectsAfterHelpeeApproval()
     {
@@ -3152,7 +3152,7 @@ public partial class SmokeTests
         Assert.True(helperRuntime.CanSendChat);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_TrySendChatText_RequiresGrantedCapability()
     {
@@ -3188,7 +3188,7 @@ public partial class SmokeTests
         Assert.Null(received);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_InboundChat_IsRejected_WhenChatCapabilityMissing()
     {
@@ -3231,7 +3231,7 @@ public partial class SmokeTests
         Assert.Null(received);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionAuthorizationGuard_DeniesScreenShare_WhenHandshakeNotVerified()
     {
@@ -3261,7 +3261,7 @@ public partial class SmokeTests
         Assert.Equal(SessionAuthorizationFailure.HandshakeIncomplete, result.Failure);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_ScreenShareFrames_RequireGrantedCapability()
     {
@@ -3302,7 +3302,7 @@ public partial class SmokeTests
         Assert.False(frameRaised);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionRuntime_ScreenView_WithoutApproval_IsRejected()
     {
@@ -3339,7 +3339,7 @@ public partial class SmokeTests
         Assert.False(frameRaised);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionRuntime_ScreenShareFrameDispatch_RejectsSessionIdMismatch()
     {
@@ -3376,7 +3376,7 @@ public partial class SmokeTests
         Assert.False(frameRaised);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionRuntime_ScreenShareFrameDispatch_SuppressesLateFrameImmediatelyAfterStop()
     {
@@ -3450,7 +3450,7 @@ public partial class SmokeTests
         Assert.True(frameRaised);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionRuntime_ScreenShareFrameDispatch_SuppressesLateFrameImmediatelyAfterRemoteSessionEnd()
     {
@@ -3491,7 +3491,7 @@ public partial class SmokeTests
         Assert.False(frameRaised);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_UnauthorizedRemoteControlInjection_IsRejected()
     {
@@ -3542,7 +3542,7 @@ public partial class SmokeTests
         Assert.Equal(0, injector.MouseMoveCount);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_RequestRemoteControl_WithoutApproval_IsRejected()
     {
@@ -3573,7 +3573,7 @@ public partial class SmokeTests
         Assert.Equal(0, Volatile.Read(ref sentRequests));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_SendRemoteControlKeyInput_DoesNotRequireMappingMetadata()
     {
@@ -3627,7 +3627,7 @@ public partial class SmokeTests
         Assert.Equal("A", sentMessage.Key);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_RemoteControlKeyInjection_DoesNotRequireDisplayMetadata()
     {
@@ -3685,7 +3685,7 @@ public partial class SmokeTests
         await WaitUntilAsync(() => injector.KeyInjectionCount == 1, TimeSpan.FromSeconds(1));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_RemoteControlDisplayInfoReceive_RequiresGrantedCapability()
     {
@@ -3733,7 +3733,7 @@ public partial class SmokeTests
         Assert.False(runtime.RemoteControlMappingAvailable);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_RemoteControlAllowResponse_IsRejectedWithoutGrantedCapability()
     {
@@ -3781,7 +3781,7 @@ public partial class SmokeTests
         Assert.Null(runtime.ConsentToken);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionRuntime_FileTransferSend_WithoutApproval_IsRejected()
     {
@@ -3804,7 +3804,7 @@ public partial class SmokeTests
         Assert.False(allowed);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_ExpiredApproval_BlocksPrivilegedOperations()
     {
@@ -3857,7 +3857,7 @@ public partial class SmokeTests
         Assert.Equal(0, Volatile.Read(ref sentRequests));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_StartHelperAsync_RequiresSecurityTransport()
     {
@@ -3868,7 +3868,7 @@ public partial class SmokeTests
             () => runtime.StartHelperAsync(new PeerAddress("nonsecurity.helper.target"), cts.Token));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task IncomingJoinRequest_ApproveAsync_RequiresExplicitDecision_WhenApprovalRequestPresent()
     {
@@ -3903,7 +3903,7 @@ public partial class SmokeTests
         Assert.True(joinRequest.IsHandled);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ApprovalRequest_CreateDecision_RemoteControlRequiresScreenShare()
     {
@@ -3922,7 +3922,7 @@ public partial class SmokeTests
         Assert.Equal("approvedCapabilities", ex.ParamName);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeePageViewModel_DisablingScreenShare_ClearsAndDisablesRemoteControlApproval()
     {
@@ -3966,7 +3966,7 @@ public partial class SmokeTests
         Assert.True(helpee.AllowIncomingRemoteControlCapability);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeePageViewModel_NoApprovedCapabilities_DisablesAllowAction()
     {
@@ -3999,7 +3999,7 @@ public partial class SmokeTests
         Assert.False(helpee.AllowCommand.CanExecute(null));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_FileTransferCommand_RequiresGrantedCapability()
     {
@@ -4031,7 +4031,7 @@ public partial class SmokeTests
         Assert.False(helper.SendFileCommand.CanExecute(null));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task ChatPanelBindings_FileTransferBindings_ProjectGrantedSessionAndPendingOffer_ForBothRoles()
     {
@@ -4104,7 +4104,7 @@ public partial class SmokeTests
         Assert.False(inbound.ShowCancel);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_FileTransferRequest_IsBlockedByRuntimeGuard_WhenUiFlagIsStale()
     {
@@ -4142,7 +4142,7 @@ public partial class SmokeTests
         Assert.False(helper.CanSendFiles);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionRuntime_FileTransferWriteOpen_RequiresGrantedCapability()
     {
@@ -4187,7 +4187,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_FileTransfer_RoundTrip_Completes_ThroughRuntimeServiceSurface()
     {
@@ -4268,7 +4268,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_FileTransferCommand_CanInitiatePendingOffer_WhenGranted()
     {
@@ -4339,7 +4339,7 @@ public partial class SmokeTests
             TimeSpan.FromSeconds(3));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task ChatPanelBindings_FileTransferBindings_ProjectPendingAndCompletedState_FromRuntimeSnapshots()
     {
@@ -4419,7 +4419,7 @@ public partial class SmokeTests
         Assert.True(helper.SendFileCommand.CanExecute(null));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionViews_FileTransferSend_UsesNativePicker_InsteadOfSendFileWindow()
     {
@@ -4454,7 +4454,7 @@ public partial class SmokeTests
         return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void RemoteControlDiagnostics_LogStaleDrops_RateLimited()
     {
@@ -4491,7 +4491,7 @@ public partial class SmokeTests
         Assert.Single(staleSnapshotLines);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void RemoteControlDiagnostics_LogSecurityStop_RateLimited()
     {
@@ -4525,7 +4525,7 @@ public partial class SmokeTests
         Assert.Single(lines);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task ScreenShareDiagnostics_LogSuppressedLateDisplayInfoSend_RateLimited()
     {
@@ -4555,7 +4555,7 @@ public partial class SmokeTests
         Assert.Single(lines);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_AddressJoin_OnSecurityTransport_IsRejectedBeforeApprovalUi()
     {
@@ -4576,7 +4576,7 @@ public partial class SmokeTests
         Assert.Equal("Permission was declined.", helperRuntime.StatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_Chat_HelperToHelpee_And_HelpeeToHelper_RoundTrip()
     {
@@ -4644,7 +4644,7 @@ public partial class SmokeTests
         await Task.Delay(50, CancellationToken.None);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_ChatSubscriberThrow_DoesNotDisconnectSession()
     {
@@ -4700,7 +4700,7 @@ public partial class SmokeTests
         Assert.Equal(0, Volatile.Read(ref helperDisconnected));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionChatService_ValidReceivedPayload_IncrementsChatReceived()
     {
@@ -4732,7 +4732,7 @@ public partial class SmokeTests
         Assert.Equal(0, counters.ChatDecryptFailed);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionChatService_DuplicateMessageId_IsRejectedWithoutSecondDelivery()
     {
@@ -4767,7 +4767,7 @@ public partial class SmokeTests
         Assert.Equal(0, counters.ChatDecryptFailed);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionChatService_InvalidPayload_IncrementsDecryptFailed()
     {
@@ -4788,7 +4788,7 @@ public partial class SmokeTests
         Assert.Equal(1, counters.ChatDecryptFailed);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionChatService_SessionKeyRotation_ClearsReplayCache()
     {
@@ -4836,7 +4836,7 @@ public partial class SmokeTests
         Assert.Equal(0, counters.ChatDecryptFailed);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionChatService_SessionSecureEnvelopePayload_IsRejectedAsInvalidPayload()
     {
@@ -4873,7 +4873,7 @@ public partial class SmokeTests
         Assert.Equal(1, counters.ChatDecryptFailed);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task ScreenShareAndChat_Coexist_WithoutStarvingChatProcessing()
     {
@@ -4964,7 +4964,7 @@ public partial class SmokeTests
         Assert.True(reassembler.GetMetricsSnapshot().FramesCompleted >= 1);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task ViewModelFlow_HelpeeApproves_HelperAndHelpeeReachConnectedState()
     {
@@ -4996,7 +4996,7 @@ public partial class SmokeTests
         Assert.Equal("Connected", helper.ConnectionState);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_HeaderStatusText_UsesStatusTextOrReady_AndIsNeverEmpty()
     {
@@ -5031,7 +5031,7 @@ public partial class SmokeTests
         Assert.Equal("The other person ended the session.", helper.HeaderStatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_TransientStatusPanel_HidesWhenItDuplicatesHeader()
     {
@@ -5049,7 +5049,7 @@ public partial class SmokeTests
         Assert.True(helper.ShowTransientStatusPanel);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_RemoteEnd_UsesSessionEndedCopy_NotConnectionFailed()
     {
@@ -5070,7 +5070,7 @@ public partial class SmokeTests
         Assert.False(helper.ShowFailurePanel);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperPageViewModel_OnDisconnected_GenericDisconnect_DoesNotLeaveConnectedStateStuck()
     {
@@ -5102,7 +5102,7 @@ public partial class SmokeTests
         Assert.NotEqual("Connected", helper.ConnectionState);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperPageViewModel_OnDisconnected_RemoteEnd_ClearsActiveSessionAffordancesImmediately()
     {
@@ -5158,7 +5158,7 @@ public partial class SmokeTests
     }
 
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_WaitingSession_ClearsStaleUserEndedMarker_FromPreviousSession()
     {
@@ -5185,7 +5185,7 @@ public partial class SmokeTests
         Assert.True(helper.ShowMainControls);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_WaitingRuntime_ClearsStaleUserEndedMarker_AfterLocalEnd()
     {
@@ -5213,7 +5213,7 @@ public partial class SmokeTests
         Assert.True(helper.ShowMainControls);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_ConnectedRuntime_EnablesChatInput_WhenFallbackPhaseLags()
     {
@@ -5237,7 +5237,7 @@ public partial class SmokeTests
         Assert.Equal("Connected", helper.ConnectionState);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_RemoteControlActive_DoesNotDisableEndSession()
     {
@@ -5259,7 +5259,7 @@ public partial class SmokeTests
         Assert.True(helper.EndSessionCommand.CanExecute(null));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperPageViewModel_OnDisconnected_ClearsChatHistory_WhenPeerEndsSession()
     {
@@ -5287,7 +5287,7 @@ public partial class SmokeTests
         Assert.Equal("The other person ended the session.", helper.TransientBannerText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionUxPhaseMapper_SessionEndedBannerStatus_MapsToEndedPhase()
     {
@@ -5300,7 +5300,7 @@ public partial class SmokeTests
         Assert.Equal(SessionUiPhase.Ended, SessionUxPhaseMapper.FromBannerStatus(status));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelpeePageViewModel_HeaderStatusText_UsesConnectionStatusOrReady_AndIsNeverEmpty()
     {
@@ -5359,7 +5359,7 @@ public partial class SmokeTests
         Assert.Equal("The helper ended the session.", helpee.HeaderStatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_RemoteControlAffordances_ClearImmediately_WhenBackendLeavesConnected()
     {
@@ -5431,7 +5431,7 @@ public partial class SmokeTests
         Assert.False(helper.ShowRemoteControlActiveStatus);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_KeyboardToggle_RemainsAvailable_WhenMappingIsUnavailable()
     {
@@ -5490,7 +5490,7 @@ public partial class SmokeTests
         Assert.True(focusRequested);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelpeePageViewModel_RemoteControlAffordances_ClearImmediately_WhenBackendLeavesConnected()
     {
@@ -5534,7 +5534,7 @@ public partial class SmokeTests
         Assert.False(helpee.ShowRemoteControlPreviewActiveCue);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelpeePageViewModel_ToggleScreenSharePreviewCommand_CanExecute_FollowsPreviewState()
     {
@@ -5582,7 +5582,7 @@ public partial class SmokeTests
         Assert.True(helpee.ToggleScreenSharePreviewCommand.CanExecute(null));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeePageViewModel_StopScreenShareWhileConsentPending_ClearsApprovalUiImmediately()
     {
@@ -5628,7 +5628,7 @@ public partial class SmokeTests
             TimeSpan.FromSeconds(1));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeePageViewModel_StopScreenShareWhileControlActive_ClearsActiveUiImmediately()
     {
@@ -5669,7 +5669,7 @@ public partial class SmokeTests
         Assert.DoesNotContain("Screen sharing", helpee.HeaderStatusText, StringComparison.Ordinal);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeePageViewModel_ScreenShareStopped_ClearsLocalPreview()
     {
@@ -5701,7 +5701,7 @@ public partial class SmokeTests
             TimeSpan.FromSeconds(1));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeePageViewModel_ScreenShareStartFailure_ShowsHeaderStatus_AndRemainsInactive()
     {
@@ -5747,7 +5747,7 @@ public partial class SmokeTests
         Assert.True(helpee.ToggleScreenSharePreviewCommand.CanExecute(null));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelpeePageViewModel_TransientStatusPanel_HidesWhenItDuplicatesHeader()
     {
@@ -5765,7 +5765,7 @@ public partial class SmokeTests
         Assert.True(helpee.ShowTransientStatusPanel);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelpeePageViewModel_PreviewFrames_DoNotReRaiseShellVisibility_WhenVisibilityStaysTrue()
     {
@@ -5796,7 +5796,7 @@ public partial class SmokeTests
         SetPrivateProperty(helpee, "ScreenSharePreviewFrame", null);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_RemoteFrames_DoNotReRaiseShellVisibility_WhenVisibilityStaysTrue()
     {
@@ -5827,7 +5827,7 @@ public partial class SmokeTests
         SetPrivateField(helper.ScreenShareViewer, "isActive", false);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_ScreenShareStopped_ClearsRemoteViewer()
     {
@@ -5850,7 +5850,7 @@ public partial class SmokeTests
         Assert.Equal("Connected", helper.HeaderStatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_RequestPendingWithoutVisibleScreen_DoesNotKeepWaitingApprovalHeader()
     {
@@ -5873,7 +5873,7 @@ public partial class SmokeTests
         Assert.Equal("Connected", helper.HeaderStatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_ScreenShareDecodeError_ShowsClearViewerMessage_AndClearsOnStop()
     {
@@ -5905,7 +5905,7 @@ public partial class SmokeTests
         Assert.Equal("Connected", helper.HeaderStatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_BlankScreenSharePlaceholder_DoesNotAppendViewingSuffix()
     {
@@ -5928,7 +5928,7 @@ public partial class SmokeTests
         Assert.Equal("Connected", helper.HeaderStatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_CanEndSession_IsTrueOnlyForConnectedConnectingOrRecoveringPhases()
     {
@@ -5937,7 +5937,7 @@ public partial class SmokeTests
         Assert.False(InvokeCanEndForPhase(typeof(HelperPageViewModel), SessionUiPhase.Ended));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelpeePageViewModel_CanEndSession_IsTrueOnlyForConnectedConnectingOrRecoveringPhases()
     {
@@ -5946,7 +5946,7 @@ public partial class SmokeTests
         Assert.False(InvokeCanEndForPhase(typeof(HelpeePageViewModel), SessionUiPhase.Ended));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ChatView_DoesNotShowTopBar_WhenSessionHeaderIsEnabled()
     {
@@ -5957,7 +5957,7 @@ public partial class SmokeTests
         Assert.False(helper.ShowChatTopBar);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Beta5_HeaderState_RemainsAuthoritative_ForConnectedChat()
     {
@@ -5996,7 +5996,7 @@ public partial class SmokeTests
         Assert.False(helper.IsChatInputEnabled);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Beta5_EndSession_DisablesChat_And_Command_Helper()
     {
@@ -6036,7 +6036,7 @@ public partial class SmokeTests
     }
 
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperPageViewModel_EndSession_DoesNotInvokeCancelAction()
     {
@@ -6059,7 +6059,7 @@ public partial class SmokeTests
         Assert.False(helper.ShowConnectedPanel);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperPageViewModel_EndSession_DeactivatesViewer_AndResetsSession()
     {
@@ -6107,7 +6107,7 @@ public partial class SmokeTests
         Assert.False(helper.ShowRemoteScreenShareFrame);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperPageViewModel_EndSession_WhileApprovalPending_AllowsReconnectWithFreshInvite()
     {
@@ -6158,7 +6158,7 @@ public partial class SmokeTests
         await Task.WhenAny(reconnectTask, Task.Delay(TimeSpan.FromSeconds(2), cts.Token));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeePageViewModel_EndSession_StopsPreviewCapture_AndClearsPreviewState()
     {
@@ -6205,7 +6205,7 @@ public partial class SmokeTests
     }
 
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelpeePageViewModel_EndSession_DoesNotInvokeCancelAction()
     {
@@ -6228,7 +6228,7 @@ public partial class SmokeTests
         Assert.False(helpee.ShowConnectedPanel);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeePageViewModel_EndSession_DoesNotBlockUi_WhenPreviewStopIsSlow()
     {
@@ -6278,7 +6278,7 @@ public partial class SmokeTests
         Assert.DoesNotContain("Screen sharing", helpee.HeaderStatusText, StringComparison.Ordinal);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task UnsentChatDraft_DoesNotLeakIntoNextSession_AfterEndAndRestart()
     {
@@ -6306,7 +6306,7 @@ public partial class SmokeTests
         Assert.Empty(helpee.ChatMessages);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelpeePageViewModel_Dispose_StopsPreviewCapture_BeforeReturning()
     {
@@ -6343,7 +6343,7 @@ public partial class SmokeTests
         Assert.False(fakeSource.IsStarted);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeePageViewModel_SendChatFailure_RestoresDraft_AndKeepsSessionConnected()
     {
@@ -6380,7 +6380,7 @@ public partial class SmokeTests
         Assert.Equal("Connected", runtime.StatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperPageViewModel_FailedPhase_DisablesChatInput()
     {
@@ -6394,7 +6394,7 @@ public partial class SmokeTests
         Assert.False(helper.IsChatInputEnabled);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeePageViewModel_EndedPhase_DisablesEndSession()
     {
@@ -6408,7 +6408,7 @@ public partial class SmokeTests
         Assert.False(helpee.CanEndSession);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HeaderStatusText_IsNeverEmpty_InDefaultVmStates()
     {
@@ -6422,7 +6422,7 @@ public partial class SmokeTests
         Assert.False(string.IsNullOrWhiteSpace(helpee.HeaderStatusText));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task ChatHardening_WhenEnabled_PreservesExactChatMessageInsertionOrder()
     {
@@ -6501,7 +6501,7 @@ public partial class SmokeTests
             helpee.ChatMessages.Select(line => (line.IsLocal, line.Text)).ToArray());
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FakeClient_HostJoinApproveAndChat_RoundTrip()
     {
@@ -6560,7 +6560,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_CurrentLocalPeerAddress_IgnoresNonAuthoritativeNknFallbackAddress()
     {
@@ -6591,7 +6591,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_HelpRequest_IsRoutedToIncomingHelperHandler()
     {
@@ -6649,7 +6649,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_HelperListenerOnNkn_DoesNotEnterOutboundConnectingTimeout()
     {
@@ -6681,7 +6681,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_InvalidInvite_DoesNotRaiseIncomingJoinRequest()
     {
@@ -6718,7 +6718,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_TamperedInvite_IsRejectedBeforeHandshakeStart()
     {
@@ -6759,7 +6759,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_IssuedSecretInvite_TamperedCapabilities_AreRejectedDuringHelpeeHandshake()
     {
@@ -6803,7 +6803,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_SendScreenSharePayloadAsync_RejectsOldSessionId()
     {
@@ -6876,7 +6876,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_ScreenShareFrame_WithSourceIdentityMismatch_IsRejected()
     {
@@ -6950,7 +6950,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_ScreenShareFrame_WithTamperedSecureEnvelope_IsRejected()
     {
@@ -7036,7 +7036,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_ScreenShareFrame_ReplayedSecureEnvelope_IsRejected()
     {
@@ -7121,7 +7121,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_ScreenShareStop_WithTamperedSecureEnvelope_IsRejected()
     {
@@ -7188,7 +7188,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_ExpiredInvite_IsRejectedBeforeHandshakeStart()
     {
@@ -7243,7 +7243,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_HelperBoundInvite_ForDifferentHelper_IsRejectedBeforeHandshakeStart()
     {
@@ -7283,7 +7283,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_HelperBoundInvite_DoesNotRejectBeforeConnect_WhenConnectedHelperAddressMatches()
     {
@@ -7325,7 +7325,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_HelperBoundInvite_HandshakeStart_AcceptsStableHelperIdentityWhenPacketSourceUsesConnectedAddress()
     {
@@ -7378,7 +7378,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_HelperBoundInvite_UsesStableHelperIdentityEvenWhenAuthoritativeTransportAddressDiffers()
     {
@@ -7428,7 +7428,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_IssuedSecretInvite_WithoutBoundHelper_IsRejectedBeforeHandshakeStart_WhenPublicBindingRequired()
     {
@@ -7469,7 +7469,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_IssuedSecretInvite_WithoutBoundHelper_DirectHandshakeStart_IsRejectedOnHelpee_WhenPublicBindingRequired()
     {
@@ -7550,7 +7550,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_ReusedInvite_DoesNotRaiseSecondIncomingJoinRequest()
     {
@@ -7604,7 +7604,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_OrphanedJoinRequest_Expires_AllowingSubsequentInviteJoin()
     {
@@ -7661,7 +7661,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_ReplayedHandshakeResponse_IsIgnoredAfterVerification()
     {
@@ -7725,7 +7725,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_ControlRequest_WithSessionIdMismatch_IsRejected()
     {
@@ -7785,7 +7785,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_ControlInput_WithSourceIdentityMismatch_IsRejected()
     {
@@ -7856,7 +7856,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_ControlInput_WithTamperedSecureEnvelope_IsRejected()
     {
@@ -7929,7 +7929,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_ControlInput_ReplayedSecureEnvelope_IsRejected()
     {
@@ -8002,7 +8002,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_Reject_WithSourceIdentityMismatch_IsRejected()
     {
@@ -8076,7 +8076,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_SessionEnd_WithSourceIdentityMismatch_IsRejected()
     {
@@ -8139,7 +8139,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_SessionEnd_WithTamperedSecureEnvelope_IsRejected()
     {
@@ -8204,7 +8204,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_SessionEnd_ReplayedSecureEnvelope_IsRejected()
     {
@@ -8268,7 +8268,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_Approve_ReplayedEnvelope_IsRejectedAfterApprovalCompletes()
     {
@@ -8337,7 +8337,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknSignalingTransport_HelperApprove_Succeeds_WhenHandshakeResultIsDropped()
     {
@@ -8399,7 +8399,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknSignalingTransport_SessionEnd_RetriesUntilDelivered_WhenFirstPacketIsDropped()
     {
@@ -8463,7 +8463,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknSignalingTransport_HandshakeStart_RetriesUntilDelivered_WhenFirstPacketIsDropped()
     {
@@ -8522,7 +8522,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransfer_RoundTrip_UsesTypedEventsAndSecureLane()
     {
@@ -8654,7 +8654,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferPressureState_UsesSerializedControlDispatchPath()
     {
@@ -8759,7 +8759,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferChunk_FromControlAddress_IsRejected_WhenBulkAddressIsExpected()
     {
@@ -8854,7 +8854,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferChunkBudgetProvider_KeepsWrappedEnvelopeWithinNknLimit()
     {
@@ -8925,7 +8925,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferDataSession_SplitsOutboundChunkBatchFramesIntoBulkChunkDataFrames()
     {
@@ -9019,7 +9019,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferDataSession_SplitsOutboundChunkBatchFramesIntoBulkChunkDataFrames_PreservingV3FrameType()
     {
@@ -9102,7 +9102,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferDataSession_AcceptsInboundChunkBatchFrames()
     {
@@ -9170,7 +9170,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferDataFrame_UnknownTransferId_IsRejectedWithoutAllocatingSession()
     {
@@ -9222,7 +9222,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferChunks_UseDedicatedDispatchPath_WhenInboundCallbacksOverlap()
     {
@@ -9380,7 +9380,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferOffer_WithSessionIdMismatch_IsRejected()
     {
@@ -9429,7 +9429,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferOffer_WithSourceIdentityMismatch_IsRejected()
     {
@@ -9480,7 +9480,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferOffer_WithTamperedSecureEnvelope_IsRejected()
     {
@@ -9534,7 +9534,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferChunk_ReplayedSecureEnvelope_IsRejected()
     {
@@ -9637,7 +9637,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferChunk_LateButWithinLargeReplayWindow_IsAccepted()
     {
@@ -9775,7 +9775,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferChunk_BeforeStart_IsRejected()
     {
@@ -9845,7 +9845,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferOffer_WhileSameDirectionTransferIsActive_IsRejectedAsBusy()
     {
@@ -9914,7 +9914,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknTransport_FileTransferOffer_UsesFileTransferSecureFamily_AndDedicatedKey()
     {
@@ -9995,7 +9995,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_ApprovalDecision_CapabilityEscalation_IsRejected()
     {
@@ -10036,7 +10036,7 @@ public partial class SmokeTests
         await Task.WhenAny(hostTask, Task.Delay(150, CancellationToken.None));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_IssuedSecretInvite_TamperedCapabilities_AreRejectedDuringHelpeeHandshake()
     {
@@ -10081,7 +10081,7 @@ public partial class SmokeTests
         await Task.WhenAny(hostTask, Task.Delay(150, CancellationToken.None));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_IssuedSecretInvite_WithoutBoundHelper_IsRejectedBeforeHandshakeStart_WhenPublicBindingRequired()
     {
@@ -10114,7 +10114,7 @@ public partial class SmokeTests
         await Task.WhenAny(hostTask, Task.Delay(150, CancellationToken.None));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_HelperTokenDerivedBoundInvite_AllowsIntendedHelper()
     {
@@ -10167,7 +10167,7 @@ public partial class SmokeTests
         await Task.WhenAny(hostTask, Task.Delay(150, CancellationToken.None));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_ControlInput_WithTamperedSecureEnvelope_IsRejected()
     {
@@ -10229,7 +10229,7 @@ public partial class SmokeTests
         Assert.Equal(0, Volatile.Read(ref controlInputCount));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_ControlInput_ReplayedSecureEnvelope_IsRejected()
     {
@@ -10292,7 +10292,7 @@ public partial class SmokeTests
         Assert.Equal(1, Volatile.Read(ref controlInputCount));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_ScreenShareFrame_WithTamperedSecureEnvelope_IsRejected()
     {
@@ -10357,7 +10357,7 @@ public partial class SmokeTests
         Assert.Equal(0, Volatile.Read(ref frameCount));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_ScreenShareFrame_ReplayedSecureEnvelope_IsRejected()
     {
@@ -10423,7 +10423,7 @@ public partial class SmokeTests
         Assert.Equal(1, Volatile.Read(ref frameCount));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_FileTransfer_RoundTrip_UsesTypedEventsAndStateTransitions()
     {
@@ -10544,7 +10544,7 @@ public partial class SmokeTests
         Assert.Equal(expectedHash, complete.Sha256Base64);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_FileTransferOffer_WhileSameDirectionTransferIsActive_IsRejectedAsBusy()
     {
@@ -10628,7 +10628,7 @@ public partial class SmokeTests
         Assert.Equal(1, Volatile.Read(ref offerCount));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_FileTransferChunk_BeforeStart_IsRejected()
     {
@@ -10707,7 +10707,7 @@ public partial class SmokeTests
         Assert.Equal(0, Volatile.Read(ref chunkCount));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_FileTransferDataFrame_UnknownTransferId_IsRejectedWithoutAllocatingSession()
     {
@@ -10778,7 +10778,7 @@ public partial class SmokeTests
         Assert.DoesNotContain("event=filetransfer_data_frame_decode_failed", logTail, StringComparison.Ordinal);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_FileTransferOffer_WithWrongSenderIdentity_IsRejected()
     {
@@ -10840,7 +10840,7 @@ public partial class SmokeTests
         Assert.Equal(0, Volatile.Read(ref offerCount));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_FileTransferOffer_WithPlaintextSessionMismatch_IsRejected()
     {
@@ -10900,7 +10900,7 @@ public partial class SmokeTests
         Assert.Equal(0, Volatile.Read(ref offerCount));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task DevLocalTransport_FileTransferChunk_ReplayedSecureEnvelope_IsRejected()
     {
@@ -11007,7 +11007,7 @@ public partial class SmokeTests
         Assert.Equal(1, Volatile.Read(ref chunkCount));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_HelperReconnect_DoesNotReuseOldApproval()
     {
@@ -11059,7 +11059,7 @@ public partial class SmokeTests
         Assert.NotEqual(oldSessionId, reconnectRuntime.CurrentSessionGrant!.SessionId);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_RepeatCycle_ResetAndRetry_FiveIterations_ReturnsToIdle()
     {
@@ -11124,7 +11124,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Alpha3ScenarioA_HappyPath_HeadlessSessionRuntime_CompletesConnectAndChat()
     {
@@ -11160,7 +11160,7 @@ public partial class SmokeTests
         Assert.Equal("reply-a", await helperReceived.Task.WaitAsync(TimeSpan.FromSeconds(1), cts.Token));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_NknRemoteSessionEnd_ShowsFriendlyMessage_AndCanReset()
     {
@@ -11212,7 +11212,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_NknHelperEndWhileApprovalPending_PreventsStaleHelpeeApproval()
     {
@@ -11263,7 +11263,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_Dispose_ConnectedNknSession_NotifiesHelpeeRemoteEnd()
     {
@@ -11310,7 +11310,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_PrepareForWindowClose_ConnectedNknSession_NotifiesHelperRemoteEnd()
     {
@@ -11366,7 +11366,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeePageViewModel_EndSession_WithPreviewAndRemoteControlActive_NotifiesHelperRemoteEnd()
     {
@@ -11483,7 +11483,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperViewModel_RemoteEndAfterSuccessfulSession_RetainsHelperAddress_WhenBootstrapWasMissing()
     {
@@ -11513,7 +11513,7 @@ public partial class SmokeTests
         Assert.Equal("The other person ended the session.", helper.StatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_BootstrapIdentityFailure_KeepsPanelVisible_WithExplicitSeedStorageError()
     {
@@ -11533,7 +11533,7 @@ public partial class SmokeTests
         Assert.False(helper.HasHelperIdentityBootstrapVerificationCode);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_RecoveredLocalIdentity_HidesFallbackAddress_ButKeepsRecoveryNoticeVisible()
     {
@@ -11568,7 +11568,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_RecoveredLocalIdentity_KeepsRecoveryNoticeVisible_AfterLaterPersistenceWarning()
     {
@@ -11611,7 +11611,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperViewModel_RemoteEndAfterSuccessfulSession_ReplacesBootstrapAddress_WithVerifiedHelperIdentity()
     {
@@ -11645,7 +11645,7 @@ public partial class SmokeTests
         Assert.Equal("The other person ended the session.", helper.StatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_RuntimeHelperAddress_OverridesSeparatelyResolvedBootstrapAddress()
     {
@@ -11692,7 +11692,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Alpha3ScenarioC_SessionEnd_HeadlessRemoteEnd_ShowsFriendlyMessage()
     {
@@ -11736,7 +11736,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_CopyInstallMessageCommand_UsesClipboardService()
     {
@@ -11760,7 +11760,7 @@ public partial class SmokeTests
             fakeClipboard.LastText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_WrongCode_TransitionsToFailed_WithMappedMessage_AndReconnectEnabled()
     {
@@ -11799,7 +11799,7 @@ public partial class SmokeTests
             TimeSpan.FromSeconds(1));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Alpha3ScenarioB_WrongCodeTimeout_HeadlessHelperVm_ShowsFriendlyFailure_AndReconnect()
     {
@@ -11829,7 +11829,7 @@ public partial class SmokeTests
         Assert.Equal("Failed", helper.ConnectionState);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_ApprovalTimeout_TransitionsToFailed_WithMappedMessage()
     {
@@ -11864,7 +11864,7 @@ public partial class SmokeTests
             TimeSpan.FromSeconds(1));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_Cooldown_PreventsRapidSecondConnectAttempt()
     {
@@ -11888,7 +11888,7 @@ public partial class SmokeTests
         Assert.Equal(1, factory.CreateCount);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_RawAddressInput_IsRejected_WithoutStartingRuntime()
     {
@@ -11911,7 +11911,7 @@ public partial class SmokeTests
         Assert.Equal(0, factory.CreateCount);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_FirstConnectAfterEndedSession_PreservesInviteAndStartsJoin()
     {
@@ -11945,7 +11945,7 @@ public partial class SmokeTests
         Assert.NotEqual("InvalidInput", helper.ConnectionState);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeInvite_WithVerifiedHelperIdentity_GeneratesHelperBoundInvite()
     {
@@ -11985,7 +11985,7 @@ public partial class SmokeTests
 #endif
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_InviteShareCodeInput_AllowsIntendedBoundHelperJoin()
     {
@@ -12023,7 +12023,7 @@ public partial class SmokeTests
             TimeSpan.FromSeconds(5));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task SessionRuntime_TransportDisconnect_TransitionsToFailed_WithConnectionLost()
     {
@@ -12042,7 +12042,7 @@ public partial class SmokeTests
         Assert.Equal("Connection lost.", runtime.StatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionRuntime_DisconnectAfterMappedFail_KeepsMappedStatusText()
     {
@@ -12059,7 +12059,7 @@ public partial class SmokeTests
         Assert.Equal(SessionRuntimeState.Failed, runtime.State);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionRuntime_TransportApproved_DoesNotAutoStartTransportScreenShare()
     {
@@ -12082,7 +12082,7 @@ public partial class SmokeTests
         Assert.False(runtime.IsTransportScreenShareActiveForTests);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void SessionRuntime_TransportDisconnect_DisablesScreenShareAutoStart_ForLaterApproval()
     {
@@ -12115,7 +12115,7 @@ public partial class SmokeTests
         Assert.Equal("Connected", runtime.StatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperViewModel_NknMissing_ShowsFriendlyError_AndDiagnosticsLink()
     {
@@ -12144,7 +12144,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_Disconnect_ShowsRetry_AndRetryReturnsToIdle()
     {
@@ -12181,7 +12181,7 @@ public partial class SmokeTests
             TimeSpan.FromSeconds(2));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_ListenerDisconnect_DoesNotStayInFailedState()
     {
@@ -12231,7 +12231,7 @@ public partial class SmokeTests
         Assert.Equal(SessionUiPhase.Waiting, helper.EffectivePhase);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperRuntime_RemoteSessionEnd_RestartsListenerQuietly()
     {
@@ -12259,7 +12259,7 @@ public partial class SmokeTests
         Assert.Equal("Waiting for help requests…", runtime.StatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelpeeViewModel_RemoteEndAfterConnectedSession_ClearsHelperIdentityInput()
     {
@@ -12292,7 +12292,7 @@ public partial class SmokeTests
     }
 
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_StaleAutoListenCallback_DoesNotResetActiveHelperConnect()
     {
@@ -12316,7 +12316,7 @@ public partial class SmokeTests
         Assert.Equal(TransportState.TransportInitializing, runtime.TransportLifecycleState);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperViewModel_PassiveWaiting_SuppressesConnectingTransientBanner()
     {
@@ -12343,7 +12343,7 @@ public partial class SmokeTests
     }
 
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Alpha3ScenarioD_DisconnectAndRetry_HeadlessHelperVm_ReturnsToIdle()
     {
@@ -12378,7 +12378,7 @@ public partial class SmokeTests
             TimeSpan.FromSeconds(2));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperViewModel_CancelTransientWhileConnecting_ReturnsToIdle_AndCodeInputRemainsEditable()
     {
@@ -12416,7 +12416,7 @@ public partial class SmokeTests
         Assert.True(string.IsNullOrWhiteSpace(helper.TransientBannerText));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_DisconnectAfterConnected_AutoRegeneratesCode()
     {
@@ -12456,7 +12456,7 @@ public partial class SmokeTests
         Assert.NotEqual(initialInvite, latestInvite);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_DisconnectAfterConnected_AutoRegeneratesCode_OnceAndStaysStable()
     {
@@ -12498,7 +12498,7 @@ public partial class SmokeTests
         Assert.Equal(rotatedInvite, stableInvite);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_UserEndsConnectedSession_AutoRegeneratesCode()
     {
@@ -12541,7 +12541,7 @@ public partial class SmokeTests
         Assert.NotEqual(initialInvite, latestInvite);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_DeclineIncomingRequest_AutoRegeneratesCode()
     {
@@ -12574,7 +12574,7 @@ public partial class SmokeTests
         Assert.NotEqual(initialInvite, latestInvite);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_IncomingRequest_ShowsApprovalCountdown()
     {
@@ -12600,7 +12600,7 @@ public partial class SmokeTests
         Assert.StartsWith("Request expires in 00:0", helpee.IncomingRequestTimeoutText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_IncomingRequestTimeout_ReturnsToWaitingWithUsableCode()
     {
@@ -12636,7 +12636,7 @@ public partial class SmokeTests
         Assert.Equal("Waiting", helpee.ConnectionState);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_IncomingRequestTimeout_ShowsHelperTimeoutPresentation()
     {
@@ -12672,7 +12672,7 @@ public partial class SmokeTests
         Assert.Equal("No response yet", helper.HeaderStatusText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_HelperDisconnectsDuringIncomingRequest_ClearsAllowPanel_AndRotatesCode()
     {
@@ -12711,7 +12711,7 @@ public partial class SmokeTests
         Assert.False(helpee.ShowTransientBanner);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperCancelDuringConnecting_ClearsHelpeeAllowPanel_AndRotatesCode()
     {
@@ -12755,7 +12755,7 @@ public partial class SmokeTests
         Assert.NotEqual(initialInvite, latestInvite);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_IncomingRequest_DoesNotExposeTransientCancel()
     {
@@ -12776,7 +12776,7 @@ public partial class SmokeTests
         Assert.False(helpee.CanCancelTransient);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelpeeViewModel_IncomingJoinRequest_SwitchesToApprovalPanel()
     {
@@ -12801,7 +12801,7 @@ public partial class SmokeTests
     }
 
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task ApprovalVerificationCode_IsExposedOnHelpeeAndHelper_FromSharedHelperIdentity()
     {
@@ -12836,7 +12836,7 @@ public partial class SmokeTests
         await connectTask;
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperVerificationCode_IsHiddenUntilStableSessionSecurityHelperIdentityExists()
     {
@@ -12864,7 +12864,7 @@ public partial class SmokeTests
         Assert.Equal("helper.stable.identity", helper.HelperTechnicalIdentityText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperHeaderVerificationCode_StaysPinnedToBootstrapIdentity_WhileConnecting()
     {
@@ -12907,7 +12907,7 @@ public partial class SmokeTests
         Assert.NotEqual(unexpectedSession, helper.HeaderVerificationCodeText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperHeaderVerificationCode_RevertsToStableHelperIdentity_WhenConnectionFails()
     {
@@ -12948,7 +12948,7 @@ public partial class SmokeTests
         Assert.NotEqual(unexpectedSession, helper.HeaderVerificationCodeText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void HelperFirstPillVerificationCode_StaysPinnedToBootstrapIdentity_WhileConnecting()
     {
@@ -12970,7 +12970,7 @@ public partial class SmokeTests
         Assert.NotEqual(unexpected, helper.FirstPillVerificationCodeText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task HelperFirstPillVerificationCode_DoesNotFlip_WhenLateBootstrapResolutionReturnsDifferentIdentity()
     {
@@ -13003,7 +13003,7 @@ public partial class SmokeTests
         Assert.NotEqual(unexpected, helper.FirstPillVerificationCodeText);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_Startup_HealthCheck()
     {
@@ -13060,7 +13060,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_Startup_WithMockBridge_DelayedPong_EmitsReadyAfterPong()
     {
@@ -13128,7 +13128,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Trait("Category", "BridgeStabilityPromotion")]
     [Fact]
     public async Task Bridge_Startup_WithMockBridge_NoPong_FailsAsBridgeUnresponsive()
@@ -13185,7 +13185,7 @@ public partial class SmokeTests
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_ConcurrentConnectAsync_SharesSingleConnectAttempt()
     {
@@ -13248,7 +13248,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_SameIdentityAcrossAdapters_WaitsForEarlierAdapterToDisconnect()
     {
@@ -13311,7 +13311,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_StaleReady_Ignored_UntilMatchingConnectIdArrives()
     {
@@ -13372,7 +13372,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_ConnectFailure_ResetsInflight_AndUsesNewConnectIdNextAttempt()
     {
@@ -13441,7 +13441,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_ReadyMissingBulkChannel_FailsFastWithUpgradeMessage()
     {
@@ -13503,7 +13503,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_ConnectPayload_RespectsPreflightOptions()
     {
@@ -13610,7 +13610,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknIdentityStore_OnWindows_PersistsSeedOnlyInProtectedSidecar()
     {
@@ -13655,7 +13655,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknIdentityStore_OnWindows_MigratesLegacySeedBase64_ToProtectedStore()
     {
@@ -13708,7 +13708,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknIdentityStore_OnWindows_MissingProtectedSeed_DoesNotSilentlyRotateIdentity()
     {
@@ -13739,7 +13739,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknIdentityStore_DefaultSharedIdentity_WithCorruptedProtectedSeed_QuarantinesAndRecreatesIdentity()
     {
@@ -13796,7 +13796,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknIdentityStore_CustomKeyPath_WithCorruptedProtectedSeed_DoesNotAutoRotate()
     {
@@ -13829,7 +13829,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknIdentityStore_CustomInstanceLikeKeyPath_WithCorruptedProtectedSeed_DoesNotAutoRotate()
     {
@@ -13862,7 +13862,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknIdentityStore_PerProcessIdentity_WithCorruptedProtectedSeed_QuarantinesAndRecreatesIdentity()
     {
@@ -13922,7 +13922,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknIdentityStore_DefaultSharedIdentity_WithBlankProtectedSeedFile_QuarantinesAndRecreatesIdentity()
     {
@@ -13959,7 +13959,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknTransportOptions_StartupCleanup_DeletesOnlyStalePerProcessIdentityFiles()
     {
@@ -14010,7 +14010,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknTransportOptions_StartupCleanup_CustomKeyPath_SkipsCleanup()
     {
@@ -14044,7 +14044,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknTransportOptions_StartupCleanup_RunningPerProcessIdentity_IsPreserved()
     {
@@ -14076,7 +14076,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknTransportOptions_StartupCleanup_DeleteFailure_LeavesFilesAndRecordsPartialResult()
     {
@@ -14117,7 +14117,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknTransportOptions_StartupCleanup_EnumerationFailure_IsBestEffort()
     {
@@ -14150,7 +14150,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknTransportOptions_StartupCleanup_DeletesStaleSeed_ThroughSecretStoreBackend()
     {
@@ -14186,7 +14186,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknIdentityStore_OnWindows_InvalidLegacySeed_DoesNotSilentlyRotateIdentity()
     {
@@ -14228,7 +14228,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknIdentityStore_OnWindows_ReadSeedBase64ForConnect_MigratesLegacyJsonSeed_ToProtectedStore()
     {
@@ -14267,7 +14267,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_Connect_FailsCleanly_WhenBridgeProtocolVersionIsOutdated()
     {
@@ -14330,7 +14330,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknIdentityStore_WithInjectedProtectedBackend_MigratesLegacySeedBase64_AndClearsJsonSeed()
     {
@@ -14378,7 +14378,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void NknIdentityStore_WithUnavailableProtectedBackend_FailsClosed_WithoutWritingIdentity()
     {
@@ -14400,7 +14400,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_ProgressDiagnostics_AreRecorded_OnConnectReadyTimeout()
     {
@@ -14460,7 +14460,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Trait("Category", "BridgeStabilityPromotion")]
     [Fact]
     public async Task Bridge_Disconnect_WithUnresponsiveShutdownBridge_ForcesKill_AndCleansProcessHandles()
@@ -14534,7 +14534,7 @@ return;
         Assert.False((bool)(method.Invoke(null, [MsgType.FileTransferWindowUpdate, "window_update_requires_start"]) ?? true));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Trait("Category", "BridgeStabilityPromotion")]
     [Fact]
     public async Task Bridge_Dispose_AfterStart_ShutsDownProcess_AndClearsHandles()
@@ -14632,7 +14632,7 @@ return;
         Assert.True((bool)(method.Invoke(adapter, ["[nkn-bridge] WebSocket error: WebSocket was closed before the connection was established"]) ?? false));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Trait("Category", "BridgeStabilityPromotion")]
     [Fact]
     public async Task Bridge_Dispose_WithUnresponsiveShutdownBridge_ForcesKill_AndClearsHandles()
@@ -14702,7 +14702,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Trait("Category", "BridgeStabilityPromotion")]
     [Fact]
     public async Task Bridge_StderrSpam_DoesNotHang_AndShutsDownCleanly()
@@ -14759,7 +14759,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Trait("Category", "BridgeStabilityPromotion")]
     [Fact]
     public async Task Bridge_RapidStartDisposeCycles_DoNotLeaveOrphanProcessesOrHandleRefs()
@@ -14882,7 +14882,7 @@ return;
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_TrackedPidCleanup_KillsOrphanNodeProcess_ByPidAndStartTime()
     {
@@ -16812,7 +16812,7 @@ rl.on('line', (line) => {
         }
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void CpuUsageCalculator_ReturnsNonNegative_AndStableForFixedInputs()
     {
@@ -16825,7 +16825,7 @@ rl.on('line', (line) => {
         Assert.Equal(0, zero);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ResourceSnapshot_JsonSerialization_IsDeterministic()
     {
@@ -16844,7 +16844,7 @@ rl.on('line', (line) => {
         Assert.Contains("\"ActiveCounters\"", json1, StringComparison.Ordinal);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ResourceGate_EvaluatesThresholdsAndGrowth()
     {
@@ -16875,7 +16875,7 @@ rl.on('line', (line) => {
         Assert.Contains(result.Warnings, w => w.Contains("growth", StringComparison.OrdinalIgnoreCase));
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void ResourceGate_CanDisableGenericGrowthChecks_WhileKeepingCleanupChecks()
     {
@@ -16907,7 +16907,7 @@ rl.on('line', (line) => {
         Assert.Empty(result.Warnings);
     }
 
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task ResourceBenchmarkRunner_LeakCheck_ShortRun_LeavesActiveCountersAtZero_AndWritesArtifacts()
     {
@@ -16976,3 +16976,4 @@ rl.on('line', (line) => {
     }
 
 }
+

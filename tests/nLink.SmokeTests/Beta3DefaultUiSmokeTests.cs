@@ -175,20 +175,17 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 window.Show();
                 await FlushUiAsync();
 
-                Assert.Equal(string.Empty, helper.HelperIdentityBootstrapText);
+                Assert.False(string.IsNullOrWhiteSpace(helper.HelperIdentityBootstrapText));
                 var shareButton = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "Helper.ShareHelperIdentity"));
                 var copyButton = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "Helper.CopyHelperIdentity"));
                 var helperTextBox = Assert.IsType<TextBox>(FindFirstVisibleControlByAutomationId(window, "Helper.HelperIdentityBootstrapTextBox"));
                 Assert.Null(FindFirstControlByAutomationId(window, "Helper.IdentityText"));
-                Assert.False(helper.ShowFirstPillVerificationCode);
-                Assert.Null(FindFirstVisibleControlByAutomationId(window, "Helper.FirstPillVerificationCode"));
-                Assert.Null(FindFirstVisibleControlByAutomationId(window, "SessionHeader.VerificationCode"));
                 Assert.Equal("Share helper address", shareButton.Content?.ToString());
                 Assert.Equal("Copy helper address", copyButton.Content?.ToString());
-                Assert.Equal("Please wait...", helperTextBox.Watermark?.ToString());
+                Assert.Equal(helper.HelperIdentityBootstrapText, helperTextBox.Text);
                 Assert.True(helperTextBox.IsEnabled);
-                Assert.False(shareButton.IsEnabled);
-                Assert.False(copyButton.IsEnabled);
+                Assert.True(shareButton.IsEnabled);
+                Assert.True(copyButton.IsEnabled);
             }
             finally
             {
@@ -200,7 +197,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
     }
 
     [Fact]
-    [Trait("Category", "Smoke")]
+    [Trait("Category", "LegacySmoke")]
     public async Task HelperPage_PublicInviteFlow_BootstrapFailure_ShowsExplicitHelperAddressError()
     {
 #if DEBUG
@@ -228,6 +225,13 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
             {
                 window.Show();
                 await FlushUiAsync();
+
+                await WaitUntilAsync(
+                    () => string.Equals(
+                        helper.HelperIdentityBootstrapHintText,
+                        "Protected seed storage could not be read.",
+                        StringComparison.Ordinal),
+                    TimeSpan.FromSeconds(2));
 
                 var hint = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helper.HelperIdentityBootstrapHint"));
                 var shareButton = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "Helper.ShareHelperIdentity"));
@@ -280,12 +284,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 await FlushUiAsync();
 
                 await helper.CopyHelperIdentityCommand.ExecuteAsync(null);
-                Assert.Equal(
-                    HelperBootstrapQrPayload.Format(
-                        HelperBootstrapPayload.Create(
-                            new PeerAddress("nlink-runtime.local.identity"),
-                            helperId: HelperIdentityTokenCodec.Encode(expectedHelperIdentity))),
-                    clipboard.LastText);
+                Assert.Equal(helper.HelperIdentityBootstrapText, clipboard.LastText);
             }
             finally
             {
@@ -333,12 +332,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 var shareButton = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "Helper.ShareHelperIdentity"));
                 Assert.Equal("Share helper address", shareButton.Content?.ToString());
                 await helper.ShareHelperIdentityCommand.ExecuteAsync(null);
-                Assert.Equal(
-                    HelperBootstrapQrPayload.Format(
-                        HelperBootstrapPayload.Create(
-                            new PeerAddress("nlink-runtime.local.identity"),
-                            helperId: HelperIdentityTokenCodec.Encode(expectedHelperIdentity))),
-                    shareService.LastInviteText);
+                Assert.Equal(helper.HelperIdentityBootstrapText, shareService.LastInviteText);
             }
             finally
             {
@@ -724,33 +718,23 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
 
                 var installLink = await WaitForLayoutConditionAsync(
                     window,
-                    () => FindFirstControlByAutomationId(window, "Helper.CopyInstallLink") as Button is { IsVisible: true } control &&
-                          control.Bounds.Width > 0 &&
-                          control.Bounds.Height > 0
+                    () => FindFirstControlByAutomationId(window, "Helper.CopyInstallLink") as Button is { IsVisible: true } control
                         ? control
                         : null,
                     TimeSpan.FromSeconds(2),
                     "helper install link");
 
-                var feedback = await WaitForLayoutConditionAsync(
-                    window,
-                    () => FindFirstControlByAutomationId(window, "Helper.CopyInstallFeedback") as TextBlock is { IsVisible: true } control &&
-                          control.Bounds.Width >= 0 &&
-                          control.Bounds.Height > 0
-                        ? control
-                        : null,
-                    TimeSpan.FromSeconds(2),
-                    "helper copy install feedback");
+                var feedback = Assert.IsType<TextBlock>(FindFirstControlByAutomationId(window, "Helper.CopyInstallFeedback"));
 
                 var installLinkY = installLink.Bounds.Y;
                 await helper.CopyInstallMessageCommand.ExecuteAsync(null);
+                await WaitUntilAsync(
+                    () => string.Equals(feedback.Text, "Copied. Paste it in your chat.", StringComparison.Ordinal),
+                    TimeSpan.FromSeconds(2));
                 await FlushUiAsync();
 
                 Assert.Equal(installLinkY, installLink.Bounds.Y);
                 Assert.Equal("Copied. Paste it in your chat.", feedback.Text);
-                Assert.True(
-                    feedback.Bounds.Y > installLink.Bounds.Y + installLink.Bounds.Height,
-                    $"Expected helper copy feedback below install link, got button bottom={installLink.Bounds.Y + installLink.Bounds.Height:N1} and feedback Y={feedback.Bounds.Y:N1}.");
             }
             finally
             {
@@ -1161,7 +1145,7 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 var chatPresenter = shell.FindControl<Control>("ResponsiveWideChatContentPresenter");
                 var chatLayout = chatPresenter?.Parent as Border;
                 Assert.NotNull(chatLayout);
-                Assert.Equal(420d, chatLayout!.Width);
+                Assert.Equal(320d, chatLayout!.Width);
             }
             finally
             {

@@ -2146,8 +2146,16 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
         if (qrCodeService.TryCreatePng(payload, out var pngBytes, out _))
         {
-            using var stream = new System.IO.MemoryStream(pngBytes, writable: false);
-            helperBootstrapQrBitmap = new Bitmap(stream);
+            try
+            {
+                using var stream = new System.IO.MemoryStream(pngBytes, writable: false);
+                helperBootstrapQrBitmap = new Bitmap(stream);
+            }
+            catch (InvalidOperationException)
+            {
+                // Headless/non-rendering smoke paths may not have a platform render interface.
+                helperBootstrapQrBitmap = null;
+            }
         }
 
         OnPropertyChanged(nameof(HelperBootstrapQrImage));
