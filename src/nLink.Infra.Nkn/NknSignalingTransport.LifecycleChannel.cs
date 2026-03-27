@@ -54,6 +54,50 @@ public sealed partial class NknSignalingTransport
         return Task.FromException(new NotSupportedException("Raw address helper connect is disabled for NKN. Use invite-targeted connect."));
     }
 
+    public async Task SendHelpRequestAsync(HelpRequestMessage request, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ThrowIfDisposed();
+
+        await client.ConnectAsync(ct).ConfigureAwait(false);
+        var sourceAddress = string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address;
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new HelpRequestPayload
+        {
+            requestId = request.RequestId,
+            helpeeAddress = request.HelpeeAddress.Value,
+            helperAddress = request.HelperAddress.Value,
+            inviteToken = request.InviteToken,
+        });
+        var envelope = CreateEnvelope(CreateAddressSessionContextCode(), MsgType.HelpRequest, payload, replyTo: null);
+        await SendEnvelopeWithAckRetryAsync(request.HelperAddress.Value, envelope, ct).ConfigureAwait(false);
+        LocalOperationalLog.Info(
+            "DirectHelpRequest",
+            $"event=help_request_sent; request_id={request.RequestId}; helper_address={request.HelperAddress.Value}; helpee_address={request.HelpeeAddress.Value}");
+        Log($"SendHelpRequestAsync sent HelpRequest with Ack (msg_id={envelope.MessageId}, source={sourceAddress})");
+    }
+
+    public async Task SendHelpRequestDecisionAsync(HelpRequestDecisionMessage decision, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(decision);
+        ThrowIfDisposed();
+
+        await client.ConnectAsync(ct).ConfigureAwait(false);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new HelpRequestDecisionPayload
+        {
+            requestId = decision.RequestId,
+            helpeeAddress = decision.HelpeeAddress.Value,
+            helperAddress = decision.HelperAddress.Value,
+            accepted = decision.Accepted,
+            reason = decision.Reason,
+        });
+        var envelope = CreateEnvelope(CreateAddressSessionContextCode(), MsgType.HelpRequestDecision, payload, replyTo: null);
+        await SendEnvelopeWithAckRetryAsync(decision.HelpeeAddress.Value, envelope, ct).ConfigureAwait(false);
+        LocalOperationalLog.Info(
+            "DirectHelpRequest",
+            $"event=help_request_decision_sent; request_id={decision.RequestId}; accepted={decision.Accepted}; helper_address={decision.HelperAddress.Value}; helpee_address={decision.HelpeeAddress.Value}; reason={decision.Reason ?? "(none)"}");
+        Log($"SendHelpRequestDecisionAsync sent HelpRequestDecision with Ack (msg_id={envelope.MessageId}, accepted={decision.Accepted})");
+    }
+
     public Task JoinByInviteAsync(string inviteToken, ValidatedInviteV1 invite, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(inviteToken))
@@ -80,11 +124,8 @@ public sealed partial class NknSignalingTransport
             throw new InvalidOperationException("Invite token does not match the provided invite context.");
         }
 
-        var hasConnectedHelperAddress =
-            client is IAuthoritativeConnectedAddressSource authoritativeConnectedAddressSource
-                ? authoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress
-                : !string.IsNullOrWhiteSpace(client.Address);
-        var helperAddress = new PeerAddress(hasConnectedHelperAddress ? client.Address : identity.Address);
+        var helperAddress = validation.Invite.BoundHelperAddress ??
+                            new PeerAddress(identity.Address);
         if (InviteSecurityDiagnostics.RequiresBoundHelperForIssuedSecretInvites() &&
             validation.Invite.BoundHelperAddress is null)
         {
@@ -94,7 +135,6 @@ public sealed partial class NknSignalingTransport
         }
 
         if (validation.Invite.BoundHelperAddress is not null &&
-            hasConnectedHelperAddress &&
             !AddressesLikelySamePeer(validation.Invite.BoundHelperAddress.Value.Value, helperAddress.Value))
         {
             UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeFailure(SessionHandshakeState.Failed, "invite_helper_mismatch"));
@@ -141,7 +181,9 @@ public sealed partial class NknSignalingTransport
                 identifier: identity.Identifier,
                 keyPath: options.KeyPath,
                 seedRpc: options.SeedRpc);
-            var effectiveHelperAddress = new PeerAddress(string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address);
+            var effectiveHelperAddress = outboundHandshake.InviteValidated
+                ? outboundHandshake.HelperAddress
+                : new PeerAddress(string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address);
             pendingOutboundHandshake = outboundHandshake with { HelperAddress = effectiveHelperAddress };
             UpdateSessionSecurityState(SessionSecurityState.CreateHelperPending(
                 outboundHandshake.SessionId,
@@ -362,9 +404,108 @@ public sealed partial class NknSignalingTransport
             case MsgType.SessionHandshakeResult:
                 HandleSessionHandshakeResult(source, env);
                 break;
+            case MsgType.HelpRequest:
+                HandleHelpRequest(source, env);
+                break;
+            case MsgType.HelpRequestDecision:
+                HandleHelpRequestDecision(source, env);
+                break;
             default:
                 throw new InvalidOperationException($"Lifecycle channel cannot route {env.Type}.");
         }
+    }
+
+    private void HandleHelpRequest(string source, Envelope env)
+    {
+        if (!TryParseHelpRequestPayload(env.Payload, out var request) ||
+            string.IsNullOrWhiteSpace(request.requestId) ||
+            string.IsNullOrWhiteSpace(request.helpeeAddress) ||
+            string.IsNullOrWhiteSpace(request.helperAddress) ||
+            string.IsNullOrWhiteSpace(request.inviteToken) ||
+            !PeerAddress.TryParse(request.helpeeAddress, out var helpeeAddress) ||
+            !PeerAddress.TryParse(request.helperAddress, out var helperAddress))
+        {
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("help_request_invalid");
+            LocalOperationalLog.Warn(
+                "DirectHelpRequest",
+                $"event=help_request_rejected; reason=invalid_payload; msg_id={env.MessageId}; source={source ?? "(none)"}");
+            return;
+        }
+
+        var validation = inviteTokenValidator.Validate(request.inviteToken, DateTimeOffset.UtcNow, InviteValidationMode.InspectOnly);
+        if (!validation.IsSuccess || validation.Invite is null)
+        {
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("help_request_invite_invalid");
+            LocalOperationalLog.Warn(
+                "DirectHelpRequest",
+                $"event=help_request_rejected; reason=invite_invalid; msg_id={env.MessageId}; request_id={request.requestId}; source={source ?? "(none)"}; helper_address={request.helperAddress}; helpee_address={request.helpeeAddress}");
+            return;
+        }
+
+        var localHelper = new PeerAddress(LocalPeerAddress);
+        if (validation.Invite.BoundHelperAddress is not null &&
+            !AddressesLikelySamePeer(validation.Invite.BoundHelperAddress.Value.Value, localHelper.Value))
+        {
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("help_request_helper_mismatch");
+            LocalOperationalLog.Warn(
+                "DirectHelpRequest",
+                $"event=help_request_rejected; reason=helper_mismatch; msg_id={env.MessageId}; request_id={request.requestId}; source={source ?? "(none)"}; bound_helper={validation.Invite.BoundHelperAddress.Value.Value}; local_helper={localHelper.Value}; request_helper={request.helperAddress}");
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(source))
+        {
+            SendAckFireAndForget(source, env.Code, env.MessageId);
+        }
+
+        LocalOperationalLog.Info(
+            "DirectHelpRequest",
+            $"event=help_request_received; request_id={request.requestId}; source={source ?? "(none)"}; helper_address={request.helperAddress}; helpee_address={request.helpeeAddress}");
+
+        IncomingHelpRequest?.Invoke(
+            this,
+            new IncomingHelpRequestEventArgs(
+                new HelpRequestMessage(
+                    request.requestId!,
+                    helpeeAddress,
+                    helperAddress,
+                    request.inviteToken!)));
+    }
+
+    private void HandleHelpRequestDecision(string source, Envelope env)
+    {
+        if (!TryParseHelpRequestDecisionPayload(env.Payload, out var decision) ||
+            string.IsNullOrWhiteSpace(decision.requestId) ||
+            string.IsNullOrWhiteSpace(decision.helpeeAddress) ||
+            string.IsNullOrWhiteSpace(decision.helperAddress) ||
+            !PeerAddress.TryParse(decision.helpeeAddress, out var helpeeAddress) ||
+            !PeerAddress.TryParse(decision.helperAddress, out var helperAddress))
+        {
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("help_request_decision_invalid");
+            LocalOperationalLog.Warn(
+                "DirectHelpRequest",
+                $"event=help_request_decision_rejected; reason=invalid_payload; msg_id={env.MessageId}; source={source ?? "(none)"}");
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(source))
+        {
+            SendAckFireAndForget(source, env.Code, env.MessageId);
+        }
+
+        LocalOperationalLog.Info(
+            "DirectHelpRequest",
+            $"event=help_request_decision_received; request_id={decision.requestId}; accepted={decision.accepted == true}; source={source ?? "(none)"}; helper_address={decision.helperAddress}; helpee_address={decision.helpeeAddress}; reason={decision.reason ?? "(none)"}");
+
+        HelpRequestDecisionReceived?.Invoke(
+            this,
+            new HelpRequestDecisionEventArgs(
+                new HelpRequestDecisionMessage(
+                    decision.requestId!,
+                    helpeeAddress,
+                    helperAddress,
+                    decision.accepted == true,
+                    decision.reason)));
     }
 
     private void HandleJoinRequest(string source, Envelope env)
@@ -416,7 +557,9 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        remoteEndpoint = join.helperEndpoint;
+        remoteEndpoint = string.IsNullOrWhiteSpace(source)
+            ? join.helperEndpoint
+            : source;
         remoteMediaEndpoint = string.IsNullOrWhiteSpace(join.helperMediaEndpoint)
             ? join.helperEndpoint
             : join.helperMediaEndpoint;
@@ -443,9 +586,12 @@ public sealed partial class NknSignalingTransport
         var joinEnvelopeCode = ResolveInboundEnvelopeCode(env.Code);
         currentEnvelopeCode = joinEnvelopeCode;
 
+        var handshakeRemoteEndpoint = !string.IsNullOrWhiteSpace(source)
+            ? source
+            : join.helperEndpoint;
         ReplacePendingInboundHandshake(new PendingInboundHandshakeState(
             joinRequestMessageId: env.MessageId,
-            remoteEndpoint: join.helperEndpoint,
+            remoteEndpoint: handshakeRemoteEndpoint,
             helperAddress: new PeerAddress(join.helperEndpoint),
             helperEcdhPublicKey: helperPubKey,
             envelopeCode: joinEnvelopeCode));
@@ -1486,6 +1632,9 @@ public sealed partial class NknSignalingTransport
         if (!pendingAcks.TryGetValue(env.ReplyTo, out var pending))
         {
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("ack_no_pending_wait");
+            LocalOperationalLog.Info(
+                "DirectHelpRequest",
+                $"event=ack_ignored; reason=no_pending_wait; msg_id={env.MessageId}; reply_to={env.ReplyTo}; source={source ?? "(none)"}");
             Log($"Ack ignored (no pending wait, msg_id={env.MessageId}, reply_to={env.ReplyTo})");
             return;
         }
@@ -1494,6 +1643,9 @@ public sealed partial class NknSignalingTransport
         {
             NknRuntimeDiagnostics.IncrementAcksIgnoredSourceMismatch();
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("ack_source_mismatch");
+            LocalOperationalLog.Warn(
+                "DirectHelpRequest",
+                $"event=ack_ignored; reason=source_mismatch; msg_id={env.MessageId}; reply_to={env.ReplyTo}; source={source ?? "(none)"}; expected_destination={pending.Destination}; pending_type={pending.Type}");
             Log($"Ack ignored (source mismatch, msg_id={env.MessageId}, reply_to={env.ReplyTo}, source_len={source?.Length ?? 0})");
             return;
         }
@@ -1754,7 +1906,7 @@ public sealed partial class NknSignalingTransport
     private async Task SendEnvelopeWithAckRetryAsync(string destination, Envelope envelope, CancellationToken ct)
     {
         var ackWait = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var pendingAck = new PendingAckWait(destination, ackWait);
+        var pendingAck = new PendingAckWait(destination, envelope.Type, ackWait);
         if (!pendingAcks.TryAdd(envelope.MessageId, pendingAck))
         {
             throw new InvalidOperationException("pending_ack_exists");
@@ -1779,6 +1931,9 @@ public sealed partial class NknSignalingTransport
                     if (attempt == AckRetryDelays.Length)
                     {
                         NknRuntimeDiagnostics.SetLastError("ack_timeout");
+                        LocalOperationalLog.Warn(
+                            "DirectHelpRequest",
+                            $"event=ack_timeout; type={envelope.Type}; destination={destination}; msg_id={envelope.MessageId}; attempts={attempt + 1}");
                         Log($"Ack timeout (msg_id={envelope.MessageId}, type={envelope.Type}, attempts={attempt + 1})");
                         if (envelope.Type != MsgType.Chat)
                         {
@@ -2164,6 +2319,8 @@ public sealed partial class NknSignalingTransport
             throw new ArgumentNullException(nameof(nextState));
         }
 
+        nextState = PreserveActiveApprovedSessionIfStale(nextState);
+
         if (Equals(currentSessionSecurityState, nextState))
         {
             return;
@@ -2175,8 +2332,90 @@ public sealed partial class NknSignalingTransport
         }
 
         currentSessionSecurityState = nextState;
+        UpdateActiveApprovedSessionTracking(nextState);
         SyncInboundScreenSharePolicyToBridge(nextState);
         SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(nextState));
+    }
+
+    private SessionSecurityState PreserveActiveApprovedSessionIfStale(SessionSecurityState nextState)
+    {
+        if (activeApprovedSessionId is not SessionId activeSessionId ||
+            activeApprovedHelperAddress is not PeerAddress activeHelperAddress)
+        {
+            return nextState;
+        }
+
+        if (!ShouldRetainCapabilitySecureState(currentSessionSecurityState))
+        {
+            return nextState;
+        }
+
+        var nextMatchesActive =
+            nextState.SessionId == activeSessionId &&
+            nextState.HelperAddress == activeHelperAddress;
+
+        if (nextMatchesActive)
+        {
+            if (ShouldIgnoreLateHandshakeFailureForActiveApprovedSession(nextState))
+            {
+                LocalOperationalLog.Info(
+                    "SessionSecurity",
+                    $"event=late_handshake_failure_ignored; session_id={nextState.SessionId?.Value ?? "(none)"}; helper_identity={nextState.HelperAddress?.Value ?? "(none)"}; reason={nextState.HandshakeFailureReason ?? "(none)"}; active_session_id={activeSessionId.Value}; active_helper_identity={activeHelperAddress.Value}");
+                return currentSessionSecurityState;
+            }
+
+            return nextState;
+        }
+
+        if (ShouldRetainCapabilitySecureState(nextState))
+        {
+            return nextState;
+        }
+
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=stale_security_state_ignored; session_id={nextState.SessionId?.Value ?? "(none)"}; helper_identity={nextState.HelperAddress?.Value ?? "(none)"}; active_session_id={activeSessionId.Value}; active_helper_identity={activeHelperAddress.Value}");
+        return currentSessionSecurityState;
+    }
+
+    private static bool ShouldIgnoreLateHandshakeFailureForActiveApprovedSession(SessionSecurityState nextState)
+    {
+        if (nextState.ApprovalGranted ||
+            nextState.HandshakeState is not (SessionHandshakeState.Failed or SessionHandshakeState.Expired))
+        {
+            return false;
+        }
+
+        return string.Equals(nextState.HandshakeFailureReason, "invite_revoked", StringComparison.Ordinal) ||
+               string.Equals(nextState.HandshakeFailureReason, "invite_binding_mismatch", StringComparison.Ordinal) ||
+               string.Equals(nextState.HandshakeFailureReason, "invite_helper_required", StringComparison.Ordinal) ||
+               string.Equals(nextState.HandshakeFailureReason, "invite_helper_mismatch", StringComparison.Ordinal) ||
+               string.Equals(nextState.HandshakeFailureReason, "handshake_start_timeout", StringComparison.Ordinal);
+    }
+
+    private void UpdateActiveApprovedSessionTracking(SessionSecurityState nextState)
+    {
+        if (ShouldRetainCapabilitySecureState(nextState) &&
+            nextState.SessionId is SessionId sessionId &&
+            nextState.HelperAddress is PeerAddress helperAddress)
+        {
+            activeApprovedSessionId = sessionId;
+            activeApprovedHelperAddress = helperAddress;
+            return;
+        }
+
+        if (activeApprovedSessionId is SessionId activeSessionId &&
+            nextState.SessionId == activeSessionId)
+        {
+            activeApprovedSessionId = null;
+            activeApprovedHelperAddress = null;
+        }
+
+        if (nextState == SessionSecurityState.Empty)
+        {
+            activeApprovedSessionId = null;
+            activeApprovedHelperAddress = null;
+        }
     }
 
     private static bool ShouldRetainCapabilitySecureState(SessionSecurityState state)
@@ -2344,6 +2583,46 @@ public sealed partial class NknSignalingTransport
             return true;
         }
         catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryParseHelpRequestPayload(byte[] payload, out HelpRequestPayload parsed)
+    {
+        parsed = new HelpRequestPayload();
+        try
+        {
+            var dto = JsonSerializer.Deserialize<HelpRequestPayload>(payload);
+            if (dto is null)
+            {
+                return false;
+            }
+
+            parsed = dto;
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryParseHelpRequestDecisionPayload(byte[] payload, out HelpRequestDecisionPayload parsed)
+    {
+        parsed = new HelpRequestDecisionPayload();
+        try
+        {
+            var dto = JsonSerializer.Deserialize<HelpRequestDecisionPayload>(payload);
+            if (dto is null)
+            {
+                return false;
+            }
+
+            parsed = dto;
+            return true;
+        }
+        catch (JsonException)
         {
             return false;
         }
@@ -2826,6 +3105,23 @@ public sealed partial class NknSignalingTransport
         public bool? remoteControlSupported { get; set; }
     }
 
+    private sealed class HelpRequestPayload
+    {
+        public string? requestId { get; set; }
+        public string? helpeeAddress { get; set; }
+        public string? helperAddress { get; set; }
+        public string? inviteToken { get; set; }
+    }
+
+    private sealed class HelpRequestDecisionPayload
+    {
+        public string? requestId { get; set; }
+        public string? helpeeAddress { get; set; }
+        public string? helperAddress { get; set; }
+        public bool? accepted { get; set; }
+        public string? reason { get; set; }
+    }
+
     private sealed class ApprovePayload
     {
         public string? sessionId { get; set; }
@@ -2964,13 +3260,15 @@ public sealed partial class NknSignalingTransport
 
     private sealed class PendingAckWait
     {
-        public PendingAckWait(string destination, TaskCompletionSource<bool> completion)
+        public PendingAckWait(string destination, MsgType type, TaskCompletionSource<bool> completion)
         {
             Destination = destination ?? throw new ArgumentNullException(nameof(destination));
+            Type = type;
             Completion = completion ?? throw new ArgumentNullException(nameof(completion));
         }
 
         public string Destination { get; }
+        public MsgType Type { get; }
         public TaskCompletionSource<bool> Completion { get; }
     }
 

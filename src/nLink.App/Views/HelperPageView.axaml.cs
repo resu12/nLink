@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using NLink.App.Services;
@@ -237,7 +238,7 @@ public partial class HelperPageView : UserControl
                 return;
             }
 
-            var text = await topLevel.Clipboard.GetTextAsync();
+            var text = await topLevel.Clipboard.TryGetTextAsync();
             if (string.IsNullOrWhiteSpace(text))
             {
                 vm.NotifyExternalInputError("There's no text in the clipboard.");

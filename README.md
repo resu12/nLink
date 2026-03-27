@@ -8,16 +8,16 @@ Powered by NKN. Official website: https://nkn.org/
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
-## Current Release (0.5.2)
+## Current Release (0.5.3)
 
-`0.5.2` is the current release. It rolls together the post-`0.5.1` file-transfer protocol, performance, and connect/startup hardening work into one public release.
+`0.5.3` is the current release. It keeps the `0.5.x` authenticated session model, simplifies the helper/helpee connection flow around a helper address plus direct `Request help`, and rolls forward the latest session-lifecycle, invite-generation, and NKN/file-transfer hardening.
 
 ## Quick Start (Windows)
 
 1. Go to the GitHub Releases page and download the Installer (recommended) or Portable ZIP.
 2. Helper opens nLink, clicks `I want to help`, and copies the helper address.
-3. Helpee opens nLink, clicks `I need help`, enters the provided helper address, checks the verification code, and shares the invite with the built-in share/copy actions.
-4. Helper pastes the invite or scans the QR code, and clicks `Connect`.
+3. Helpee opens nLink, clicks `I need help`, enters the provided helper address, checks the verification code, and clicks `Request help`.
+4. Helper receives the incoming help request and clicks `Accept`.
 5. Helpee clicks `Allow`.
 6. Chat opens on both sides.
 7. If `Transfer files` is allowed for the session, either side can click `Send file`.
@@ -51,15 +51,17 @@ For release-safe builds, Diagnostics should show:
 - `invite_security_release_ready: Yes`
 - `invite_security_warning: none`
 
-Normal release UX uses a raw helper address plus a short verification code, then a helper-bound invite with QR/share/copy actions on the helpee side.
+Normal release UX uses a raw helper address plus a short verification code, then a direct helpee-side `Request help` flow with QR/share/copy support where needed.
 
 Notes:
 - Windows x64 only
-- Current release (`0.5.2`)
-- File transfer in `0.5.2` is single-file only. No folders, drag-and-drop, or resume after restart yet.
+- Current release (`0.5.3`)
+- `0.5.3` includes repeated-session hardening for reject/timeout/end flows, safer invite regeneration, and improved session reset behavior after reconnects
+- Chat UX in `0.5.3` now includes `Enter` to send, `Shift+Enter` for a new line, and more stable pane sizing in chat-only and screen-sharing layouts
+- File transfer in `0.5.3` is single-file only. No folders, drag-and-drop, or resume after restart yet.
 - Received files are saved into an app-owned folder under `%LOCALAPPDATA%\nLink\transfers\incoming\...`
-- Safe-by-default file size cap for `0.5.2`: `1 GiB`
-- Large file transfers over NKN can be noticeably slower than local or direct network copy.
+- Safe-by-default file size cap for `0.5.3`: `1 GiB`
+- Large file transfers over NKN can still be noticeably slower than local or direct network copy, though `0.5.3` includes a more conservative NKN startup profile to reduce repair churn.
 - Installer path: `%LOCALAPPDATA%\Programs\nLink`
 
 License:
@@ -96,9 +98,9 @@ License:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
 - Final release notes:
-  [`docs/releases/0.5.2.md`](docs/releases/0.5.2.md)
+  [`docs/releases/0.5.3.md`](docs/releases/0.5.3.md)
 - GitHub release body:
-  [`docs/releases/0.5.2-github.md`](docs/releases/0.5.2-github.md)
+  [`docs/releases/0.5.3-github.md`](docs/releases/0.5.3-github.md)
 - Screenshare RC/final validation checklist:
   [`docs/release/0.3.0-rc-validation-checklist.md`](docs/release/0.3.0-rc-validation-checklist.md)
 

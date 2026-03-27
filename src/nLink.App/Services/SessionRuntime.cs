@@ -143,7 +143,7 @@ internal sealed record SessionRuntimeWatchdogOptions(
         AutoRetryEnabled: false,
         BridgeStartingTimeout: TimeSpan.FromSeconds(8),
         ConnectingTimeout: TimeSpan.FromSeconds(20),
-        HandshakeTimeout: TimeSpan.FromSeconds(20),
+        HandshakeTimeout: TimeSpan.FromSeconds(30),
         ReconnectingTimeout: TimeSpan.FromSeconds(8));
 }
 
@@ -232,6 +232,8 @@ public sealed partial class SessionRuntime : IDisposable
     private volatile SessionRuntimeState state = SessionRuntimeState.Idle;
     private volatile TransportState transportState = TransportState.Idle;
     private PeerAddress? currentHelperTargetAddress;
+    private HelperConnectOrigin helperConnectOrigin;
+    private bool helperShouldReturnToListenerWaiting;
     private volatile string statusText = string.Empty;
     private volatile bool hostReady;
     private volatile bool resetInProgress;
@@ -257,6 +259,7 @@ public sealed partial class SessionRuntime : IDisposable
     private bool transientStatusCanCancel;
     private string remoteControlStatusHintText = string.Empty;
     private int quietHelpeeRehostInProgress;
+    private int quietHelperListenerRestartInProgress;
     private bool activeSessionCounted;
     private bool activeConnectAttemptCounted;
     private bool lastDisconnectWasRemoteEnd;
@@ -335,6 +338,33 @@ public sealed partial class SessionRuntime : IDisposable
     private long remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs;
     private long lastScreenShareStopSuppressedLogTick;
     private bool remoteScreenShareActive;
+    private readonly object sessionFlowGate = new();
+    private SessionFlowState sessionFlowState = SessionFlowState.Initial;
+    private SessionFlowSnapshot currentFlowSnapshot = new(
+        SessionFlowPhase.NoSession,
+        SessionUiPhase.Idle,
+        SessionRuntimeRole.None,
+        SessionRuntimeState.Idle,
+        TransportState.Idle,
+        SessionFlowEndOrigin.None,
+        LocalEndInProgress: false,
+        HasPendingRequest: false,
+        HasPendingApproval: false,
+        ApprovalActive: false,
+        ApprovedCapabilities: CapabilityGrant.None,
+        ShouldSuppressConnectedControls: false,
+        TerminalKind: SessionTerminalKind.None,
+        TerminalStatusText: string.Empty,
+        FailureTitle: string.Empty,
+        FailureMessage: string.Empty,
+        FailureActionText: string.Empty,
+        ShouldShowPeerEndedNotice: false,
+        ShouldClearConversationUi: false,
+        StatusText: string.Empty,
+        FailureReason: string.Empty,
+        SessionId: null,
+        HelperIdentity: null,
+        RemoteEndpoint: null);
 
     public SessionRuntime(Func<ISignalingTransport> createTransport)
         : this(createTransport, SessionRuntimeWatchdogOptions.Default, DefaultWatchdogDelayAsync, TransportTelemetry.Noop, BridgeReusePolicy.Default, null, null, null)
@@ -406,6 +436,8 @@ public sealed partial class SessionRuntime : IDisposable
 
     private void ClearActiveSession()
     {
+        fileTransferService.ResetSessionState();
+
         if (!activeSessionCounted)
         {
             return;
@@ -456,8 +488,61 @@ public sealed partial class SessionRuntime : IDisposable
                 $"role={role}; session_state={state}; transport_state={transportState}; disposed={disposed}; resetting={resetInProgress}");
     }
 
+    private void PublishSessionFlowEvent(SessionFlowEvent flowEvent)
+    {
+        SessionFlowSnapshot? nextSnapshot = null;
+        lock (sessionFlowGate)
+        {
+            sessionFlowState = SessionFlowReducer.Reduce(sessionFlowState, flowEvent);
+            var activeGrant = currentSessionGrant;
+            var projectedSnapshot = SessionFlowProjector.Project(new SessionFlowProjectionInput(
+                sessionFlowState,
+                role,
+                state,
+                transportState,
+                statusText,
+                disposed,
+                transientStatusVisible,
+                IsPassiveHelperListenerState(),
+                helperShouldReturnToListenerWaiting,
+                HasPendingHelpRequest || HasPendingOutboundHelpRequest,
+                pendingApprovalRequest is not null || state == SessionRuntimeState.IncomingJoinRequest,
+                EvaluateApprovalActive(),
+                activeGrant?.Capabilities ?? sessionSecurityState.ApprovedCapabilities,
+                activeGrant?.SessionId.Value ?? sessionSecurityState.SessionId?.Value,
+                activeGrant?.HelperIdentity.Value ?? sessionSecurityState.HelperAddress?.Value,
+                ResolveCurrentRemoteEndpoint(),
+                helperConnectOrigin,
+                lastTransportFailure));
+            if (Equals(currentFlowSnapshot, projectedSnapshot))
+            {
+                return;
+            }
+
+            currentFlowSnapshot = projectedSnapshot;
+            nextSnapshot = projectedSnapshot;
+        }
+
+        if (nextSnapshot is not null)
+        {
+            FlowSnapshotChanged?.Invoke(this, new SessionFlowSnapshotChangedEventArgs(nextSnapshot));
+        }
+    }
+
+    private bool EvaluateApprovalActive()
+    {
+        EnsureApprovalGrantActive();
+        return sessionSecurityState.IsApprovalActive(nowProvider());
+    }
+
+    private string? ResolveCurrentRemoteEndpoint()
+    {
+        return currentHelperTargetAddress?.Value;
+    }
+
     public event EventHandler<SessionRuntimeStateChangedEventArgs>? StateChanged;
     public event EventHandler<SessionRuntimeTransientStatusChangedEventArgs>? TransientStatusChanged;
+    public event EventHandler<SessionFlowSnapshotChangedEventArgs>? FlowSnapshotChanged;
     public event EventHandler? RemoteControlStateChanged;
     public event EventHandler<SessionRuntimeRemoteControlInputReceivedEventArgs>? RemoteControlInputReceived;
 
@@ -487,6 +572,16 @@ public sealed partial class SessionRuntime : IDisposable
     public SessionRuntimeRole Role => role;
 
     public string StatusText => statusText;
+    public SessionFlowSnapshot FlowSnapshot
+    {
+        get
+        {
+            lock (sessionFlowGate)
+            {
+                return currentFlowSnapshot;
+            }
+        }
+    }
     public bool IsTransientStatusVisible => transientStatusVisible;
     public string TransientStatusText => transientStatusText;
     public bool CanCancelTransientStatus => transientStatusCanCancel;
@@ -494,6 +589,9 @@ public sealed partial class SessionRuntime : IDisposable
     public PeerAddress? CurrentLocalPeerAddress =>
         role == SessionRuntimeRole.Helpee && !hostReady
             ? null
+            : transport is IAuthoritativeConnectedAddressSource authoritativeConnectedAddressSource &&
+              !authoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress
+                ? null
             : transport is ILocalPeerAddressSignalingTransport localAddressTransport &&
               PeerAddress.TryParse(localAddressTransport.LocalPeerAddress, out var peerAddress)
                 ? peerAddress
@@ -554,6 +652,13 @@ public sealed partial class SessionRuntime : IDisposable
         }
     }
 
+    private bool IsPassiveHelperListenerState()
+    {
+        return role == SessionRuntimeRole.Helper &&
+               state == SessionRuntimeState.Waiting &&
+               currentHelperTargetAddress is null;
+    }
+
     public long RemoteControlDebugMappingClampCount => Interlocked.Read(ref remoteControlDebugMappingClampCount);
     public long RemoteControlDebugQueueDropCount => Interlocked.Read(ref remoteControlDebugQueueDropCount);
     public long RemoteControlDebugInjectionSuppressedCount => Interlocked.Read(ref remoteControlDebugInjectionSuppressedCount);
@@ -571,6 +676,7 @@ public sealed partial class SessionRuntime : IDisposable
     public bool IsCapabilityGranted(CapabilityGrant capability)
     {
         EnsureApprovalGrantActive();
+        var effectiveSecurityState = BuildEffectiveSecurityStateForAuthorization();
         if (transport is not ISessionSecuritySignalingTransport)
         {
             return false;
@@ -579,8 +685,8 @@ public sealed partial class SessionRuntime : IDisposable
         if (capability == CapabilityGrant.None)
         {
             return currentSessionGrant is not null &&
-                   sessionSecurityState.SessionId is not null &&
-                   sessionSecurityState.HelperAddress is not null;
+                   effectiveSecurityState.SessionId is not null &&
+                   effectiveSecurityState.HelperAddress is not null;
         }
 
         var remaining = capability;
@@ -644,11 +750,40 @@ public sealed partial class SessionRuntime : IDisposable
     private SessionAuthorizationResult EvaluateCapabilityAuthorization(SessionCapability capability)
     {
         EnsureApprovalGrantActive();
+        var effectiveSecurityState = BuildEffectiveSecurityStateForAuthorization();
         return authorizationGuard.Evaluate(
             hasSecurityTransport: transport is ISessionSecuritySignalingTransport,
-            securityState: sessionSecurityState,
+            securityState: effectiveSecurityState,
             grant: currentSessionGrant,
             capability: capability);
+    }
+
+    private SessionSecurityState BuildEffectiveSecurityStateForAuthorization()
+    {
+        if (currentSessionGrant is null)
+        {
+            return sessionSecurityState;
+        }
+
+        if (sessionSecurityState.SessionId == currentSessionGrant.SessionId &&
+            sessionSecurityState.HelperAddress == currentSessionGrant.HelperIdentity &&
+            sessionSecurityState.InviteValidated &&
+            sessionSecurityState.HandshakeCompleted &&
+            sessionSecurityState.HandshakeState == SessionHandshakeState.Verified &&
+            sessionSecurityState.ApprovalGranted)
+        {
+            return sessionSecurityState;
+        }
+
+        return (SessionSecurityState.Empty with
+        {
+            SessionId = currentSessionGrant.SessionId,
+            HelpeeAddress = sessionSecurityState.HelpeeAddress ?? CurrentLocalPeerAddress,
+            HelperAddress = currentSessionGrant.HelperIdentity,
+            InviteValidated = true,
+            HandshakeCompleted = true,
+            HandshakeState = SessionHandshakeState.Verified,
+        }).WithApproval(currentSessionGrant);
     }
 
     private void LogAuthorizationDenied(
@@ -748,9 +883,10 @@ public sealed partial class SessionRuntime : IDisposable
     internal bool TryAuthorizeClipboardSync()
     {
         EnsureApprovalGrantActive();
+        var effectiveSecurityState = BuildEffectiveSecurityStateForAuthorization();
         var result = clipboardGuard.AuthorizeSync(
             hasSecurityTransport: transport is ISessionSecuritySignalingTransport,
-            securityState: sessionSecurityState,
+            securityState: effectiveSecurityState,
             grant: currentSessionGrant);
         if (result.IsAllowed)
         {
@@ -766,9 +902,10 @@ public sealed partial class SessionRuntime : IDisposable
         int maxTextLength = ClipboardTransferDefaults.DefaultMaxTextLength)
     {
         EnsureApprovalGrantActive();
+        var effectiveSecurityState = BuildEffectiveSecurityStateForAuthorization();
         var result = clipboardGuard.ValidateTransfer(
             hasSecurityTransport: transport is ISessionSecuritySignalingTransport,
-            securityState: sessionSecurityState,
+            securityState: effectiveSecurityState,
             grant: currentSessionGrant,
             descriptor,
             maxTextLength);
@@ -783,9 +920,10 @@ public sealed partial class SessionRuntime : IDisposable
     internal bool TryAuthorizeFileTransferSend()
     {
         EnsureApprovalGrantActive();
+        var effectiveSecurityState = BuildEffectiveSecurityStateForAuthorization();
         var result = fileTransferGuard.AuthorizeSend(
             hasSecurityTransport: transport is ISessionSecuritySignalingTransport,
-            securityState: sessionSecurityState,
+            securityState: effectiveSecurityState,
             grant: currentSessionGrant);
         if (result.IsAllowed)
         {
@@ -801,9 +939,10 @@ public sealed partial class SessionRuntime : IDisposable
         FileTransferStoragePolicy storagePolicy)
     {
         EnsureApprovalGrantActive();
+        var effectiveSecurityState = BuildEffectiveSecurityStateForAuthorization();
         var result = fileTransferGuard.ValidateReceiveMetadata(
             hasSecurityTransport: transport is ISessionSecuritySignalingTransport,
-            securityState: sessionSecurityState,
+            securityState: effectiveSecurityState,
             grant: currentSessionGrant,
             descriptor,
             storagePolicy);
@@ -820,9 +959,10 @@ public sealed partial class SessionRuntime : IDisposable
         FileTransferStoragePolicy storagePolicy)
     {
         EnsureApprovalGrantActive();
+        var effectiveSecurityState = BuildEffectiveSecurityStateForAuthorization();
         var result = fileTransferGuard.ValidateChunk(
             hasSecurityTransport: transport is ISessionSecuritySignalingTransport,
-            securityState: sessionSecurityState,
+            securityState: effectiveSecurityState,
             grant: currentSessionGrant,
             descriptor,
             storagePolicy);
@@ -846,9 +986,10 @@ public sealed partial class SessionRuntime : IDisposable
         FileTransferStoragePolicy storagePolicy)
     {
         EnsureApprovalGrantActive();
+        var effectiveSecurityState = BuildEffectiveSecurityStateForAuthorization();
         var result = fileTransferGuard.OpenReceiveWriteStream(
             hasSecurityTransport: transport is ISessionSecuritySignalingTransport,
-            securityState: sessionSecurityState,
+            securityState: effectiveSecurityState,
             grant: currentSessionGrant,
             descriptor,
             storagePolicy);
@@ -1030,6 +1171,26 @@ public sealed partial class SessionRuntime : IDisposable
             LastFileTransferSavedPath: NormalizeDiagnosticsText(GetLastFileTransferSavedPath(fileTransferSnapshot)),
             PersistenceSummary: persistenceSnapshot.Summary,
             PersistenceWarning: persistenceSnapshot.LastWarning);
+    }
+
+    public void NotifyLocalEndRequested()
+    {
+        PublishSessionFlowEvent(new SessionFlowEvent(
+            SessionFlowEventKind.LocalEndRequested,
+            Role,
+            State,
+            TransportLifecycleState,
+            "local_end_requested"));
+    }
+
+    internal void RefreshSessionFlowProjection()
+    {
+        PublishSessionFlowEvent(new SessionFlowEvent(
+            SessionFlowEventKind.None,
+            Role,
+            State,
+            TransportLifecycleState,
+            statusText));
     }
 
     private string BuildAuthorizationSummary()
@@ -1291,6 +1452,12 @@ public sealed partial class SessionRuntime : IDisposable
                 currentHelperTargetAddress = null;
                 pendingJoinRequest = null;
                 RefreshRemoteControlCapabilitiesFromTransport();
+                PublishSessionFlowEvent(new SessionFlowEvent(
+                    SessionFlowEventKind.StartHelpee,
+                    role,
+                    state,
+                    transportState,
+                    "start_helpee"));
                 SessionTimeline.Record("Started");
                 SessionTimeline.Record("Hosting");
 
@@ -1340,7 +1507,12 @@ public sealed partial class SessionRuntime : IDisposable
 
     internal Task StartHelperAsync(PeerAddress targetAddress, CancellationToken uiCt)
     {
-        return StartHelperCoreAsync(targetAddress, invite: null, inviteToken: null, uiCt);
+        return StartHelperCoreAsync(
+            targetAddress,
+            invite: null,
+            inviteToken: null,
+            HelperConnectOrigin.DirectInvite,
+            uiCt);
     }
 
     public Task StartHelperAsync(string inviteToken, ValidatedInviteV1 invite, CancellationToken uiCt)
@@ -1351,13 +1523,19 @@ public sealed partial class SessionRuntime : IDisposable
         }
 
         ArgumentNullException.ThrowIfNull(invite);
-        return StartHelperCoreAsync(invite.TargetAddress, invite, inviteToken.Trim(), uiCt);
+        return StartHelperCoreAsync(
+            invite.TargetAddress,
+            invite,
+            inviteToken.Trim(),
+            HelperConnectOrigin.DirectInvite,
+            uiCt);
     }
 
     private async Task StartHelperCoreAsync(
         PeerAddress targetAddress,
         ValidatedInviteV1? invite,
         string? inviteToken,
+        HelperConnectOrigin connectOrigin,
         CancellationToken uiCt)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
@@ -1379,6 +1557,13 @@ public sealed partial class SessionRuntime : IDisposable
                 TransportState.TransportInitializing,
                 invite is null ? "start_helper_address" : "start_helper_invite");
 
+            // Reusing the passive helper-listener bridge for an outbound invite join can race
+            // with stale disconnect/shutdown events from the just-reset listener transport.
+            if (invite is not null)
+            {
+                DiscardCachedBridgeTransport();
+            }
+
             linkedCts = CancellationTokenSource.CreateLinkedTokenSource(uiCt);
             nextTransport = AcquireTransportForNewSession(out var reusedCachedBridge);
             if (invite is null && nextTransport is NknSignalingTransport)
@@ -1393,12 +1578,21 @@ public sealed partial class SessionRuntime : IDisposable
             sessionCts = linkedCts;
             transport = nextTransport;
             role = SessionRuntimeRole.Helper;
+            helperConnectOrigin = connectOrigin;
+            helperShouldReturnToListenerWaiting =
+                connectOrigin is HelperConnectOrigin.Listener or HelperConnectOrigin.IncomingHelpRequest;
             hostReady = false;
             currentHelperTargetAddress = targetAddress;
             currentHelperInviteToken = inviteToken;
             currentHelperInvite = invite;
             pendingJoinRequest = null;
             RefreshRemoteControlCapabilitiesFromTransport();
+            PublishSessionFlowEvent(new SessionFlowEvent(
+                SessionFlowEventKind.StartHelperConnect,
+                role,
+                state,
+                transportState,
+                invite is null ? "start_helper_address" : "start_helper_invite"));
             SessionTimeline.Record("Started");
             SessionTimeline.Record("Joining");
 
@@ -1543,6 +1737,12 @@ public sealed partial class SessionRuntime : IDisposable
                 nowProvider());
             pendingApprovalRequest = null;
             LogApprovalGranted(decision);
+            PublishSessionFlowEvent(new SessionFlowEvent(
+                SessionFlowEventKind.LocalApprovalStarted,
+                role,
+                state,
+                transportState,
+                "local_approve"));
             TransitionTo(TransportState.Handshake, "local_approve");
             SetState(SessionRuntimeState.Connecting, "Connecting…");
         }

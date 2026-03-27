@@ -1599,7 +1599,8 @@ public sealed partial class NknSignalingTransport
         }
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_data_frame", securePayload.Metadata, frame.TransferId, env.MessageId) ||
-            !TryValidateFileTransferMessageSession("file_transfer_data_frame", frame.SessionId, frame.TransferId, env.MessageId, source))
+            !TryValidateFileTransferMessageSession("file_transfer_data_frame", frame.SessionId, frame.TransferId, env.MessageId, source) ||
+            !TryValidateKnownInboundFileTransferDataPath("file_transfer_data_frame", frame.TransferId, env.MessageId, source))
         {
             return false;
         }
@@ -1668,6 +1669,30 @@ public sealed partial class NknSignalingTransport
             "SessionSecurity",
             $"event=filetransfer_message_rejected; message_type={messageType}; reason={failureReason}; transfer_id={transferId}; source={source ?? "(none)"}; msg_id={messageId}");
         Log($"FileTransfer message rejected (type={messageType}, msg_id={messageId}, reason={failureReason}, transfer_id={transferId})");
+        return false;
+    }
+
+    private bool TryValidateKnownInboundFileTransferDataPath(
+        string messageType,
+        string transferId,
+        string messageId,
+        string? source)
+    {
+        var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
+
+        lock (controlSecureStateGate)
+        {
+            if (fileTransferStates.TryGetValue(normalizedTransferId, out var currentState) &&
+                !currentState.IsTerminal)
+            {
+                return true;
+            }
+        }
+
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=filetransfer_message_rejected; message_type={messageType}; reason=unknown_transfer_id; session_id={CurrentSessionSecurityState.SessionId?.Value ?? "(none)"}; transfer_id={normalizedTransferId}; source={source ?? "(none)"}");
+        Log($"FileTransfer message rejected (type={messageType}, msg_id={messageId}, reason=unknown_transfer_id, transfer_id={normalizedTransferId})");
         return false;
     }
 

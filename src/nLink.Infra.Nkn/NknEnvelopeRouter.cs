@@ -33,6 +33,8 @@ internal sealed class NknEnvelopeRouter
             case MsgType.SessionHandshakeChallenge:
             case MsgType.SessionHandshakeResponse:
             case MsgType.SessionHandshakeResult:
+            case MsgType.HelpRequest:
+            case MsgType.HelpRequestDecision:
                 lifecycleChannel.Handle(source, env);
                 break;
             case MsgType.ControlRequest:

@@ -16,8 +16,10 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.DevLocal;
 
 // DEV ONLY: local machine named-pipe transport for testing two app instances without real networking.
-public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IFileTransferSignalingTransport, IFileTransferProtocolCapabilities
+public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IFileTransferSignalingTransport, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider
 {
+    private const string HelpRequestFrameType = "help_request";
+    private const string HelpRequestDecisionFrameType = "help_request_decision";
     private const string JoinFrameType = "join";
     private const string HelloFrameType = "hello";
     private const string SessionHandshakeStartFrameType = "session_handshake_start";
@@ -78,8 +80,11 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private SessionConnection? activeConnection;
     private PendingOutboundHandshakeState? pendingOutboundHandshake;
     private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
+    private SessionId? activeApprovedSessionId;
+    private PeerAddress? activeApprovedHelperAddress;
 
     public bool SupportsFileTransferV3Streaming => true;
+    public FileTransferTransportProfileKind FileTransferTransportProfileKind => FileTransferTransportProfileKind.Default;
     private byte[]? controlSessionSharedKey;
     private long nextOutboundChatSecureSequence;
     private long nextOutboundControlSecureSequence;
@@ -100,6 +105,8 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     }
 
     public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
+    public event EventHandler<IncomingHelpRequestEventArgs>? IncomingHelpRequest;
+    public event EventHandler<HelpRequestDecisionEventArgs>? HelpRequestDecisionReceived;
 
     public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
 
@@ -220,6 +227,45 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             RequestedCapabilities: CapabilityGrant.None,
             InviteToken: null);
         await JoinCoreAsync(peerAddress, pendingHandshake, ct).ConfigureAwait(false);
+    }
+
+    public async Task SendHelpRequestAsync(HelpRequestMessage request, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        using var client = new NamedPipeClientStream(".", BuildPipeName(request.HelperAddress.Value), PipeDirection.InOut, PipeOptions.Asynchronous);
+        await client.ConnectAsync(ConnectTimeoutMs, ct).ConfigureAwait(false);
+        var connection = new SessionConnection(client);
+        await connection.WriteFrameAsync(
+            new TransportFrame
+            {
+                Type = HelpRequestFrameType,
+                RequestId = request.RequestId,
+                HelpeeAddress = request.HelpeeAddress.Value,
+                HelperAddress = request.HelperAddress.Value,
+                InviteToken = request.InviteToken,
+            },
+            ct).ConfigureAwait(false);
+    }
+
+    public async Task SendHelpRequestDecisionAsync(HelpRequestDecisionMessage decision, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(decision);
+
+        using var client = new NamedPipeClientStream(".", BuildPipeName(decision.HelpeeAddress.Value), PipeDirection.InOut, PipeOptions.Asynchronous);
+        await client.ConnectAsync(ConnectTimeoutMs, ct).ConfigureAwait(false);
+        var connection = new SessionConnection(client);
+        await connection.WriteFrameAsync(
+            new TransportFrame
+            {
+                Type = HelpRequestDecisionFrameType,
+                RequestId = decision.RequestId,
+                HelpeeAddress = decision.HelpeeAddress.Value,
+                HelperAddress = decision.HelperAddress.Value,
+                Accepted = decision.Accepted,
+                Reason = decision.Reason,
+            },
+            ct).ConfigureAwait(false);
     }
 
     public Task JoinByInviteAsync(string inviteToken, ValidatedInviteV1 invite, CancellationToken ct)
@@ -644,7 +690,25 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             try
             {
                 var joinFrame = await connection.ReadFrameAsync(ct);
-                if (joinFrame is null || !string.Equals(joinFrame.Type, JoinFrameType, StringComparison.Ordinal))
+                if (joinFrame is null)
+                {
+                    await connection.WriteFrameAsync(new TransportFrame { Type = RejectFrameType }, ct);
+                    return;
+                }
+
+                if (string.Equals(joinFrame.Type, HelpRequestFrameType, StringComparison.Ordinal))
+                {
+                    HandleIncomingHelpRequestFrame(joinFrame);
+                    return;
+                }
+
+                if (string.Equals(joinFrame.Type, HelpRequestDecisionFrameType, StringComparison.Ordinal))
+                {
+                    HandleIncomingHelpRequestDecisionFrame(joinFrame);
+                    return;
+                }
+
+                if (!string.Equals(joinFrame.Type, JoinFrameType, StringComparison.Ordinal))
                 {
                     await connection.WriteFrameAsync(new TransportFrame { Type = RejectFrameType }, ct);
                     return;
@@ -740,6 +804,62 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 try { server.Dispose(); } catch { }
             }
         }
+    }
+
+    private void HandleIncomingHelpRequestFrame(TransportFrame frame)
+    {
+        if (string.IsNullOrWhiteSpace(frame.RequestId) ||
+            string.IsNullOrWhiteSpace(frame.HelpeeAddress) ||
+            string.IsNullOrWhiteSpace(frame.HelperAddress) ||
+            string.IsNullOrWhiteSpace(frame.InviteToken) ||
+            !PeerAddress.TryParse(frame.HelpeeAddress, out var helpeeAddress) ||
+            !PeerAddress.TryParse(frame.HelperAddress, out var helperAddress))
+        {
+            return;
+        }
+
+        var validation = inviteTokenValidator.Validate(frame.InviteToken, DateTimeOffset.UtcNow, InviteValidationMode.InspectOnly);
+        if (!validation.IsSuccess || validation.Invite is null)
+        {
+            return;
+        }
+
+        if (validation.Invite.BoundHelperAddress is not null &&
+            validation.Invite.BoundHelperAddress != helperAddress)
+        {
+            return;
+        }
+
+        IncomingHelpRequest?.Invoke(
+            this,
+            new IncomingHelpRequestEventArgs(
+                new HelpRequestMessage(
+                    frame.RequestId,
+                    helpeeAddress,
+                    helperAddress,
+                    frame.InviteToken)));
+    }
+
+    private void HandleIncomingHelpRequestDecisionFrame(TransportFrame frame)
+    {
+        if (string.IsNullOrWhiteSpace(frame.RequestId) ||
+            string.IsNullOrWhiteSpace(frame.HelpeeAddress) ||
+            string.IsNullOrWhiteSpace(frame.HelperAddress) ||
+            !PeerAddress.TryParse(frame.HelpeeAddress, out var helpeeAddress) ||
+            !PeerAddress.TryParse(frame.HelperAddress, out var helperAddress))
+        {
+            return;
+        }
+
+        HelpRequestDecisionReceived?.Invoke(
+            this,
+            new HelpRequestDecisionEventArgs(
+                new HelpRequestDecisionMessage(
+                    frame.RequestId,
+                    helpeeAddress,
+                    helperAddress,
+                    frame.Accepted == true,
+                    frame.Reason)));
     }
 
     private async Task RunJoinReadLoopAsync(
@@ -2030,19 +2150,24 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
         if (string.Equals(frame.Type, FileTransferDataFrameType, StringComparison.Ordinal))
         {
-            if (TryDecryptFileTransferPayload(payloadBytes, FileTransferDataFrameType, expectedSender, out var securePayload) &&
-                FileTransferDataFrameCodec.TryDeserialize(securePayload.Plaintext, out var message) &&
-                message is not null &&
-                TryValidateFileTransferSecureMetadata(FileTransferDataFrameType, securePayload.Metadata, message.TransferId) &&
-                TryValidateFileTransferMessageSession("data_frame", message.SessionId, message.TransferId))
+            if (!TryDecryptFileTransferPayload(payloadBytes, FileTransferDataFrameType, expectedSender, out var securePayload))
             {
-                DeliverFileTransferDataFrame(message);
+                return true;
             }
-            else
+
+            if (!FileTransferDataFrameCodec.TryDeserialize(securePayload.Plaintext, out var message) || message is null)
             {
                 LocalOperationalLog.Warn(
                     "SessionSecurity",
                     $"event=filetransfer_data_frame_decode_failed; transport=devlocal; transfer_id={(currentSessionSecurityState.SessionId?.Value ?? "(unknown)")}; session_id={(currentSessionSecurityState.SessionId?.Value ?? "(unknown)")}");
+                return true;
+            }
+
+            if (TryValidateFileTransferSecureMetadata(FileTransferDataFrameType, securePayload.Metadata, message.TransferId) &&
+                TryValidateFileTransferMessageSession("data_frame", message.SessionId, message.TransferId) &&
+                TryValidateKnownInboundFileTransferDataPath(FileTransferDataFrameType, message.TransferId))
+            {
+                DeliverFileTransferDataFrame(message);
             }
 
             return true;
@@ -2525,6 +2650,25 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
             return true;
         }
+    }
+
+    private bool TryValidateKnownInboundFileTransferDataPath(string frameType, string transferId)
+    {
+        var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
+
+        lock (secureStateGate)
+        {
+            if (fileTransferStates.TryGetValue(normalizedTransferId, out var currentState) &&
+                !currentState.IsTerminal)
+            {
+                return true;
+            }
+        }
+
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=filetransfer_message_rejected; message_type={frameType}; reason=unknown_transfer_id; session_id={currentSessionSecurityState.SessionId?.Value ?? "(none)"}; transfer_id={normalizedTransferId}; direction=inbound; source=devlocal-peer");
+        return false;
     }
 
     private bool TryGetNextFileTransferState(
@@ -3262,6 +3406,8 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             throw new ArgumentNullException(nameof(nextState));
         }
 
+        nextState = PreserveActiveApprovedSessionIfStale(nextState);
+
         if (Equals(currentSessionSecurityState, nextState))
         {
             return;
@@ -3278,7 +3424,72 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         }
 
         currentSessionSecurityState = nextState;
+        UpdateActiveApprovedSessionTracking(nextState);
         SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(nextState));
+    }
+
+    private SessionSecurityState PreserveActiveApprovedSessionIfStale(SessionSecurityState nextState)
+    {
+        if (activeApprovedSessionId is not SessionId activeSessionId ||
+            activeApprovedHelperAddress is not PeerAddress activeHelperAddress)
+        {
+            return nextState;
+        }
+
+        if (!ShouldRetainCapabilitySecureState(currentSessionSecurityState))
+        {
+            return nextState;
+        }
+
+        var nextMatchesActive =
+            nextState.SessionId == activeSessionId &&
+            nextState.HelperAddress == activeHelperAddress;
+        if (nextMatchesActive || ShouldRetainCapabilitySecureState(nextState))
+        {
+            return nextState;
+        }
+
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=stale_security_state_ignored; session_id={nextState.SessionId?.Value ?? "(none)"}; helper_identity={nextState.HelperAddress?.Value ?? "(none)"}; active_session_id={activeSessionId.Value}; active_helper_identity={activeHelperAddress.Value}");
+        return currentSessionSecurityState;
+    }
+
+    private void UpdateActiveApprovedSessionTracking(SessionSecurityState nextState)
+    {
+        if (ShouldRetainCapabilitySecureState(nextState) &&
+            nextState.SessionId is SessionId sessionId &&
+            nextState.HelperAddress is PeerAddress helperAddress)
+        {
+            activeApprovedSessionId = sessionId;
+            activeApprovedHelperAddress = helperAddress;
+            return;
+        }
+
+        if (activeApprovedSessionId is SessionId activeSessionId &&
+            nextState.SessionId == activeSessionId)
+        {
+            activeApprovedSessionId = null;
+            activeApprovedHelperAddress = null;
+        }
+
+        if (nextState == SessionSecurityState.Empty)
+        {
+            activeApprovedSessionId = null;
+            activeApprovedHelperAddress = null;
+        }
+    }
+
+    private static bool ShouldRetainCapabilitySecureState(SessionSecurityState state)
+    {
+        var nowUtc = DateTimeOffset.UtcNow;
+        return state.InviteValidated &&
+               state.HandshakeCompleted &&
+               state.HandshakeState == SessionHandshakeState.Verified &&
+               state.ApprovalGranted &&
+               state.IsApprovalActive(nowUtc) &&
+               state.SessionId is not null &&
+               state.HelperAddress is not null;
     }
 
     private void AbortOutboundHandshake(string reason, SessionHandshakeState failureState = SessionHandshakeState.Failed)
@@ -3474,6 +3685,21 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
         [JsonPropertyName("helperAddress")]
         public string? HelperAddress { get; init; }
+
+        [JsonPropertyName("helpeeAddress")]
+        public string? HelpeeAddress { get; init; }
+
+        [JsonPropertyName("inviteToken")]
+        public string? InviteToken { get; init; }
+
+        [JsonPropertyName("requestId")]
+        public string? RequestId { get; init; }
+
+        [JsonPropertyName("accepted")]
+        public bool? Accepted { get; init; }
+
+        [JsonPropertyName("reason")]
+        public string? Reason { get; init; }
 
         [JsonPropertyName("remoteControlSupported")]
         public bool? RemoteControlSupported { get; init; }

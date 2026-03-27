@@ -3,6 +3,7 @@ using System.Threading.Tasks;
 using NLink.App.Configuration;
 using NLink.App.Services;
 using NLink.Core.Metrics;
+using NLink.Infra.Nkn;
 
 namespace NLink.App.ViewModels;
 
@@ -106,6 +107,9 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
             nowProvider: null,
             uiStateStore: sessionUiStateStore,
             backAction: ShowHomePage,
+            bootstrapHelperIdentityResolver: string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase)
+                ? NknLocalPeerAddressResolver.ResolvePersistedIdentityAsync
+                : null,
             inviteShareService: inviteShareService));
     }
 

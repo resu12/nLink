@@ -1634,10 +1634,13 @@ public sealed partial class SessionRuntime
             transport = null;
             pendingJoinRequest = null;
             role = SessionRuntimeRole.None;
+            helperConnectOrigin = HelperConnectOrigin.None;
+            helperShouldReturnToListenerWaiting = false;
             hostReady = false;
             currentHelperTargetAddress = null;
             currentHelperInviteToken = null;
             currentHelperInvite = null;
+            ClearHelpRequestState();
             ResetSessionSecurityState();
             ClearRemoteControlDisplayInfo("reset_core", notifyStateChanged: false);
             if (remoteControlSessionState.ControlState != ControlState.Off)
@@ -1657,6 +1660,7 @@ public sealed partial class SessionRuntime
 
             chatService.DetachTransport();
             fileTransferService.DetachTransport();
+            fileTransferService.ResetSessionState();
             ClearActiveConnectAttempt();
             ClearActiveSession();
 
@@ -1718,6 +1722,12 @@ public sealed partial class SessionRuntime
             }
 
             SetState(SessionRuntimeState.Idle, string.Empty);
+            PublishSessionFlowEvent(new SessionFlowEvent(
+                SessionFlowEventKind.ResetCompleted,
+                oldRole,
+                state,
+                transportState,
+                notifyRemoteSessionEnd ? "disconnect_complete" : "reset_complete"));
             if (!disposed)
             {
                 TransitionTo(TransportState.Idle, "reset_complete");
@@ -1747,6 +1757,11 @@ public sealed partial class SessionRuntime
     private void CacheTransportForKeepAlive(ISignalingTransport transportToCache)
     {
         transportLifecycle.CacheTransportForKeepAlive(transportToCache);
+    }
+
+    private void DiscardCachedBridgeTransport()
+    {
+        transportLifecycle.DiscardCachedBridgeTransport();
     }
 
     private void WireTransport(ISignalingTransport nextTransport)
@@ -1784,6 +1799,11 @@ public sealed partial class SessionRuntime
         ArgumentNullException.ThrowIfNull(transportState);
         EnsureApprovalGrantActive();
 
+        if (ShouldIgnoreStaleTransportSecurityDowngrade(transportState))
+        {
+            return;
+        }
+
         var nextState = transportState;
         var previousGrant = currentSessionGrant;
         if (TryCreateGrantFromTransportState(transportState, out var grant))
@@ -1818,6 +1838,68 @@ public sealed partial class SessionRuntime
         RefreshRemoteControlCapabilitiesFromTransport();
     }
 
+    private bool ShouldIgnoreStaleTransportSecurityDowngrade(SessionSecurityState transportState)
+    {
+        if (currentSessionGrant is not SessionGrant currentGrant)
+        {
+            return false;
+        }
+
+        var downgradeCandidate =
+            !transportState.InviteValidated ||
+            transportState.HandshakeState != SessionHandshakeState.Verified ||
+            !transportState.ApprovalGranted ||
+            transportState.ApprovedCapabilities == CapabilityGrant.None ||
+            transportState.SessionId is null ||
+            transportState.HelperAddress is null;
+        if (!downgradeCandidate)
+        {
+            return false;
+        }
+
+        if (transportState.SessionId == currentGrant.SessionId &&
+            transportState.HelperAddress == currentGrant.HelperIdentity &&
+            ShouldIgnoreLateHandshakeFailureForActiveGrant(transportState))
+        {
+            LocalOperationalLog.Info(
+                "SessionSecurity",
+                $"event=late_transport_security_downgrade_ignored; session_id={transportState.SessionId?.Value ?? "(none)"}; helper_identity={transportState.HelperAddress?.Value ?? "(none)"}; reason={transportState.HandshakeFailureReason ?? "(none)"}; active_session_id={currentGrant.SessionId.Value}; active_helper_identity={currentGrant.HelperIdentity.Value}");
+            return true;
+        }
+
+        var mismatchedSession =
+            transportState.SessionId is not SessionId transportSessionId ||
+            transportSessionId != currentGrant.SessionId;
+        var mismatchedHelper =
+            transportState.HelperAddress is not PeerAddress transportHelperAddress ||
+            transportHelperAddress != currentGrant.HelperIdentity;
+
+        if (!mismatchedSession && !mismatchedHelper)
+        {
+            return false;
+        }
+
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=stale_transport_security_downgrade_ignored; session_id={transportState.SessionId?.Value ?? "(none)"}; helper_identity={transportState.HelperAddress?.Value ?? "(none)"}; active_session_id={currentGrant.SessionId.Value}; active_helper_identity={currentGrant.HelperIdentity.Value}");
+        return true;
+    }
+
+    private static bool ShouldIgnoreLateHandshakeFailureForActiveGrant(SessionSecurityState transportState)
+    {
+        if (transportState.ApprovalGranted ||
+            transportState.HandshakeState is not (SessionHandshakeState.Failed or SessionHandshakeState.Expired))
+        {
+            return false;
+        }
+
+        return string.Equals(transportState.HandshakeFailureReason, "invite_revoked", StringComparison.Ordinal) ||
+               string.Equals(transportState.HandshakeFailureReason, "invite_binding_mismatch", StringComparison.Ordinal) ||
+               string.Equals(transportState.HandshakeFailureReason, "invite_helper_required", StringComparison.Ordinal) ||
+               string.Equals(transportState.HandshakeFailureReason, "invite_helper_mismatch", StringComparison.Ordinal) ||
+               string.Equals(transportState.HandshakeFailureReason, "handshake_start_timeout", StringComparison.Ordinal);
+    }
+
     private void SetSessionSecurityState(SessionSecurityState nextState)
     {
         ArgumentNullException.ThrowIfNull(nextState);
@@ -1829,6 +1911,7 @@ public sealed partial class SessionRuntime
 
         sessionSecurityState = nextState;
         SessionSecurityStateChanged?.Invoke(this, EventArgs.Empty);
+        RefreshSessionFlowProjection();
     }
 
     private void EnsureApprovalGrantActive()
@@ -2052,6 +2135,12 @@ public sealed partial class SessionRuntime
         SessionTimeline.Record("IncomingJoinRequest");
         TransitionTo(TransportState.Handshake, "incoming_join_request");
         SetState(SessionRuntimeState.IncomingJoinRequest, "Helper on this PC wants to connect. Click Allow.");
+        PublishSessionFlowEvent(new SessionFlowEvent(
+            SessionFlowEventKind.InboundJoinRequestReceived,
+            role,
+            state,
+            transportState,
+            "incoming_join_request"));
         IncomingJoinRequestAvailable?.Invoke(this, EventArgs.Empty);
     }
 
@@ -2093,6 +2182,12 @@ public sealed partial class SessionRuntime
 
         RefreshRemoteControlCapabilitiesFromTransport();
         SessionTimeline.Record("Approved");
+        PublishSessionFlowEvent(new SessionFlowEvent(
+            SessionFlowEventKind.TransportApproved,
+            role,
+            state,
+            transportState,
+            "transport_approved"));
         TransitionTo(TransportState.Connected, "transport_approved");
         SetState(SessionRuntimeState.Connected, "Connected");
         Approved?.Invoke(this, EventArgs.Empty);
@@ -2144,19 +2239,56 @@ public sealed partial class SessionRuntime
         {
             const string approvalTimeoutReason = "approval_timeout";
             var failure = TransportFailureMapper.CreateTimeout(approvalTimeoutReason);
+            var shouldReturnToListenerWaiting = ShouldReturnHelperListenerToWaitingForCurrentAttempt();
             SessionTimeline.Record("Rejected", approvalTimeoutReason);
-            TransitionTo(TransportState.Failed, approvalTimeoutReason);
-            SetState(SessionRuntimeState.Failed, UserErrorMapper.HelperApprovalTimeout());
-            LogTransportFailure(failure, "transport_rejected");
-            QueueDetachFileTransferTransport();
+            if (shouldReturnToListenerWaiting)
+            {
+                BeginHelperListenerWaitingRecovery(
+                    "transport_rejected",
+                    UserErrorMapper.HelperApprovalTimeout(),
+                    failure);
+                TryScheduleQuietHelperListenerRestart("helper_transport_rejected_approval_timeout");
+            }
+            else
+            {
+                TransitionTo(TransportState.Failed, approvalTimeoutReason);
+                SetState(SessionRuntimeState.Failed, UserErrorMapper.HelperApprovalTimeout());
+                LogTransportFailure(failure, "transport_rejected");
+                PublishSessionFlowEvent(new SessionFlowEvent(
+                    SessionFlowEventKind.TransportRejected,
+                    role,
+                    state,
+                    transportState,
+                    approvalTimeoutReason));
+                QueueDetachFileTransferTransport();
+            }
             Rejected?.Invoke(this, EventArgs.Empty);
             return;
         }
 
         SessionTimeline.Record("Rejected");
-        TransitionTo(TransportState.Failed, "transport_rejected");
-        SetState(SessionRuntimeState.Rejected, "Permission was declined.");
-        QueueDetachFileTransferTransport();
+        var shouldReturnHelperListenerToWaiting =
+            role == SessionRuntimeRole.Helper &&
+            ShouldReturnHelperListenerToWaitingForCurrentAttempt();
+        if (shouldReturnHelperListenerToWaiting)
+        {
+            BeginHelperListenerWaitingRecovery(
+                "transport_rejected",
+                UserErrorMapper.HelperRejected());
+            TryScheduleQuietHelperListenerRestart("helper_transport_rejected");
+        }
+        else
+        {
+            PublishSessionFlowEvent(new SessionFlowEvent(
+                SessionFlowEventKind.TransportRejected,
+                role,
+                state,
+                transportState,
+                rejectionReason ?? "transport_rejected"));
+            TransitionTo(TransportState.Failed, "transport_rejected");
+            SetState(SessionRuntimeState.Rejected, "Permission was declined.");
+            QueueDetachFileTransferTransport();
+        }
         Rejected?.Invoke(this, EventArgs.Empty);
     }
 
@@ -2198,6 +2330,12 @@ public sealed partial class SessionRuntime
         {
             InvalidateSessionSecurity("remote_session_end");
             QueueDetachFileTransferTransport();
+            PublishSessionFlowEvent(new SessionFlowEvent(
+                SessionFlowEventKind.RemoteEndReceived,
+                role,
+                state,
+                transportState,
+                "remote_session_end"));
             Disconnected?.Invoke(this, EventArgs.Empty);
             return;
         }
@@ -2209,6 +2347,17 @@ public sealed partial class SessionRuntime
         {
             QueueDetachFileTransferTransport();
             TryScheduleQuietHelpeeRehost("transport_disconnected_rehost");
+            return;
+        }
+
+        // Helper idle-listening should recover quietly too. A dropped listener transport/bridge
+        // is not a user-visible session failure when no help request is being handled yet.
+        if (role == SessionRuntimeRole.Helper &&
+            state == SessionRuntimeState.Waiting &&
+            pendingIncomingHelpRequest is null)
+        {
+            QueueDetachFileTransferTransport();
+            TryScheduleQuietHelperListenerRestart("transport_disconnected_relisten");
             return;
         }
 
@@ -2248,6 +2397,12 @@ public sealed partial class SessionRuntime
             var message = ShouldPreserveMappedFailureStatusText(StatusText)
                 ? StatusText
                 : "Connection lost.";
+            PublishSessionFlowEvent(new SessionFlowEvent(
+                SessionFlowEventKind.TransportDisconnected,
+                role,
+                state,
+                transportState,
+                "transport_disconnected"));
             TransitionTo(TransportState.Failed, "transport_disconnected");
             SetState(SessionRuntimeState.Failed, message);
             LogTransportFailure(failure, "transport_disconnected");
@@ -2285,6 +2440,12 @@ public sealed partial class SessionRuntime
         allowTransportScreenShareAutoStart = false;
         remoteSessionEndHandling = true;
         lastDisconnectWasRemoteEnd = true;
+        PublishSessionFlowEvent(new SessionFlowEvent(
+            SessionFlowEventKind.RemoteEndReceived,
+            role,
+            state,
+            transportState,
+            "remote_session_end"));
         QueueDetachFileTransferTransport();
         RemoteSessionEnded?.Invoke(this, EventArgs.Empty);
         RunCountedBackgroundTask(
@@ -2298,6 +2459,32 @@ public sealed partial class SessionRuntime
             SessionRuntimeRole.Helper => "The other person ended the session.",
             _ => "The session ended."
         };
+
+        if (role == SessionRuntimeRole.Helper)
+        {
+            RunCountedBackgroundTask(async () =>
+            {
+                try
+                {
+                    SessionTimeline.Record("SessionEndReceived", "remote_end");
+                    SessionTimeline.Record("Disconnected", "remote_end");
+                    await ResetAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
+                    // A just-closed helper session can leave the old NKN bridge in a stale state
+                    // for passive hosting. Force a fresh listener transport before relistening.
+                    DiscardCachedBridgeTransport();
+                    await StartHelperListeningAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Best-effort. If quiet relisten fails, later transport failures can still surface UI state.
+                }
+                finally
+                {
+                    remoteSessionEndHandling = false;
+                }
+            });
+            return;
+        }
 
         RunCountedBackgroundTask(async () =>
         {
@@ -4751,7 +4938,8 @@ public sealed partial class SessionRuntime
             transportState == TransportState.BridgeStarting)
         {
             TransitionTo(TransportState.BridgeReady, "bridge_ready");
-            if (role is SessionRuntimeRole.Helper or SessionRuntimeRole.Helpee &&
+            if (!IsPassiveHelperListenerState() &&
+                role is SessionRuntimeRole.Helper or SessionRuntimeRole.Helpee &&
                 transport is NknSignalingTransport &&
                 transportState == TransportState.BridgeReady)
             {
@@ -5321,6 +5509,9 @@ public sealed partial class SessionRuntime
         TimeSpan timeout)
     {
         bool shouldAutoRetry = false;
+        bool shouldReturnHelperListenerToWaiting = false;
+        TransportFailure? watchdogFailure = null;
+        string? watchdogTimeoutMessage = null;
 
         await lifecycleGate.WaitAsync().ConfigureAwait(false);
         try
@@ -5350,17 +5541,41 @@ public sealed partial class SessionRuntime
                 return;
             }
 
+            if (expectedState == TransportState.Connecting &&
+                IsPassiveHelperListenerState())
+            {
+                return;
+            }
+
             var failure = CreateWatchdogFailure(expectedState, timeout);
+            watchdogFailure = failure;
+            watchdogTimeoutMessage = GetWatchdogUserMessage(expectedState);
             LocalOperationalLog.Error(
                 "Session",
                 $"event=transport_watchdog_timeout; state={expectedState}; timeout_ms={timeout.TotalMilliseconds:F0}; attempt={connectAttempt}; transport={GetCurrentTransportKind()}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
 
             pendingJoinRequest = null;
-            TransitionTo(TransportState.Failed, "watchdog_timeout");
-            SetState(SessionRuntimeState.Failed, GetWatchdogUserMessage(expectedState));
-            LogTransportFailure(failure, "watchdog_timeout");
+            shouldReturnHelperListenerToWaiting =
+                expectedState == TransportState.Handshake &&
+                role == SessionRuntimeRole.Helper &&
+                ShouldReturnHelperListenerToWaitingForCurrentAttempt();
 
-            if (watchdogOptions.AutoRetryEnabled &&
+            if (shouldReturnHelperListenerToWaiting)
+            {
+                BeginHelperListenerWaitingRecovery(
+                    "watchdog_timeout",
+                    watchdogTimeoutMessage ?? UserErrorMapper.HelperApprovalTimeout(),
+                    failure);
+            }
+            else
+            {
+                TransitionTo(TransportState.Failed, "watchdog_timeout");
+                SetState(SessionRuntimeState.Failed, watchdogTimeoutMessage ?? GetWatchdogUserMessage(expectedState));
+                LogTransportFailure(failure, "watchdog_timeout");
+            }
+
+            if (!shouldReturnHelperListenerToWaiting &&
+                watchdogOptions.AutoRetryEnabled &&
                 role != SessionRuntimeRole.None &&
                 (role == SessionRuntimeRole.Helpee || currentHelperTargetAddress is not null))
             {
@@ -5370,6 +5585,12 @@ public sealed partial class SessionRuntime
         finally
         {
             lifecycleGate.Release();
+        }
+
+        if (shouldReturnHelperListenerToWaiting)
+        {
+            TryScheduleQuietHelperListenerRestart("helper_watchdog_timeout_return_to_listener_waiting");
+            return;
         }
 
         if (shouldAutoRetry)
@@ -7046,6 +7267,7 @@ public sealed partial class SessionRuntime
         StateChanged?.Invoke(
             this,
             new SessionRuntimeStateChangedEventArgs(state, role, statusText));
+        RefreshSessionFlowProjection();
     }
 
     private void ThrowIfStartInProgress()

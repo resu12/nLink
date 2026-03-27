@@ -226,6 +226,144 @@ public sealed partial class SessionFileTransferServiceTests
     }
 
     [Fact]
+    public async Task PullSession_V3Streaming_OnConservativeNknStartup_UsesReducedStartupChunkAndGrantWindow()
+    {
+        const string transferId = "transfer_service_pull_v3_nkn_conservative_startup";
+        var payload = Enumerable.Range(0, 3_500_000).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_pull_v3_nkn_conservative_startup")
+        {
+            SupportsFileTransferV3Streaming = true,
+            FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_v3_nkn_conservative_startup")
+        {
+            SupportsFileTransferV3Streaming = true,
+            FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup,
+        };
+        senderTransport.Connect(receiverTransport);
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        var logStart = GetOperationalLogLength();
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pull-v3-nkn-conservative-startup.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() =>
+            sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+            receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 25000);
+
+        Assert.Equal(payload, destination.ToArray());
+        var manifest = Assert.Single(senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV3>());
+        Assert.Equal(24 * 1024, manifest.ChunkSizeBytes);
+
+        var firstGrantWindow = receiverTransport.SentDataFrames.OfType<FileTransferGrantWindowFrameV3>().FirstOrDefault();
+        Assert.NotNull(firstGrantWindow);
+        var firstGrantWindowBytes =
+            (firstGrantWindow!.GrantedUntilChunkIndexExclusive - firstGrantWindow.NextExpectedChunkIndex) * manifest.ChunkSizeBytes;
+        Assert.True(
+            firstGrantWindowBytes <= (512 * 1024) + (manifest.ChunkSizeBytes * 2),
+            $"Expected conservative NKN startup to keep the initial grant window near 512 KiB, but saw {firstGrantWindowBytes} bytes.");
+
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("profile=nkn_conservative_startup", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PullSession_V3Streaming_OnConservativeNknStartup_DegradesEarlierUnderRepairChurn()
+    {
+        const string transferId = "transfer_service_pull_v3_nkn_conservative_repair";
+        var payload = Enumerable.Range(0, 2_500_000).Select(static i => (byte)(i % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_service_pull_v3_nkn_conservative_repair")
+        {
+            SupportsFileTransferV3Streaming = true,
+            FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_v3_nkn_conservative_repair")
+        {
+            SupportsFileTransferV3Streaming = true,
+            FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup,
+        };
+        senderTransport.Connect(receiverTransport);
+
+        var delayedChunkGate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var delayedFrames = new ConcurrentQueue<(LoopbackFileTransferTransport Target, FileTransferDataFrameV2 Frame)>();
+        senderTransport.OutboundDataFrameDeliveryOverrideAsync = (target, frame, ct) =>
+        {
+            if (!delayedChunkGate.Task.IsCompleted &&
+                frame is FileTransferChunkDataFrameV3 or FileTransferChunkBatchFrameV3)
+            {
+                delayedFrames.Enqueue((target, frame));
+                return Task.FromResult(true);
+            }
+
+            return Task.FromResult(false);
+        };
+
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        var logStart = GetOperationalLogLength();
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pull-v3-nkn-conservative-repair.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        using var destination = new NonDisposingMemoryStream();
+        await receiver.AcceptIncomingTransferAsync(
+            transferId,
+            (_, _) => Task.FromResult<Stream>(destination),
+            CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => receiverTransport.SentDataFrames.OfType<FileTransferRepairRequestFrameV3>().Any(),
+            timeoutMs: 15000);
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains("profile=nkn_conservative_startup_degraded", StringComparison.Ordinal),
+            timeoutMs: 8000);
+
+        var manifest = Assert.Single(senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV3>());
+        var maxGrantWindowBytesBeforeRelease = receiverTransport.SentDataFrames
+            .OfType<FileTransferGrantWindowFrameV3>()
+            .Select(frame => (frame.GrantedUntilChunkIndexExclusive - frame.NextExpectedChunkIndex) * manifest.ChunkSizeBytes)
+            .DefaultIfEmpty(0)
+            .Max();
+        Assert.True(
+            maxGrantWindowBytesBeforeRelease < 2 * 1024 * 1024,
+            $"Expected conservative NKN startup under repair churn to stay below the old 2 MiB healthy window, but saw {maxGrantWindowBytesBeforeRelease} bytes.");
+
+        delayedChunkGate.TrySetResult(true);
+        while (delayedFrames.TryDequeue(out var delayed))
+        {
+            delayed.Target.ReceiveDeliveredDataFrame(delayed.Frame);
+        }
+
+        await WaitUntilAsync(() =>
+            sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+            receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 25000);
+
+        Assert.Equal(payload, destination.ToArray());
+    }
+
+    [Fact]
     public async Task PullSession_V3Streaming_ExpandsHealthyGrantWindow_AfterSustainedProgress()
     {
         const string transferId = "transfer_service_pull_v3_tuned_expand";
@@ -3219,7 +3357,7 @@ public sealed partial class SessionFileTransferServiceTests
         return reader.ReadToEnd();
     }
 
-    private sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities
+    private sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);
@@ -3231,6 +3369,8 @@ public sealed partial class SessionFileTransferServiceTests
         }
 
         public bool SupportsFileTransferV3Streaming { get; set; }
+
+        public FileTransferTransportProfileKind FileTransferTransportProfileKind { get; set; } = FileTransferTransportProfileKind.Default;
 
         public Func<FileTransferStartV2, FileTransferStartV2>? OutboundStartTransform { get; init; }
 

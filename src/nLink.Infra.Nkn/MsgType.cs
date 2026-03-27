@@ -36,4 +36,6 @@ internal enum MsgType
     FileTransferPressureState = 31,
     FileTransferSessionOpen = 32,
     FileTransferDataFrame = 33,
+    HelpRequest = 34,
+    HelpRequestDecision = 35,
 }

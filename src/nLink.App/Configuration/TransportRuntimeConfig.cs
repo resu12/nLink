@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using NLink.App.Services;
@@ -95,6 +97,15 @@ public sealed class TransportRuntimeConfig
         var (transportSetting, settingSource) = ReadTransportSetting();
         var normalizedSetting = string.IsNullOrWhiteSpace(transportSetting) ? "(not set)" : transportSetting.Trim();
         var bridgeBundled = IsBridgeBundledForCurrentRid(out var bridgeProbeReason);
+        var bridgeRuntimeAvailable = bridgeBundled;
+#if DEBUG
+        if (!bridgeRuntimeAvailable &&
+            HasDebugBridgeRuntimeForCurrentRid(out var debugBridgeReason))
+        {
+            bridgeRuntimeAvailable = true;
+            bridgeProbeReason = debugBridgeReason;
+        }
+#endif
         var hasExplicitSetting = !string.IsNullOrWhiteSpace(transportSetting);
         var envForcesNkn = string.Equals(transportSetting, "NKN", StringComparison.OrdinalIgnoreCase);
         var envForcesDevLocal = string.Equals(transportSetting, "DEVLOCAL", StringComparison.OrdinalIgnoreCase);
@@ -134,7 +145,7 @@ public sealed class TransportRuntimeConfig
             }
 #endif
         }
-        else if (envForcesNkn && !bridgeBundled)
+        else if (envForcesNkn && !bridgeRuntimeAvailable)
         {
             startupWarningText = "Couldn't start the connection. Please reinstall.";
             NknRuntimeDiagnostics.SetLastError($"NKN_START_FAILED: bridge_missing ({bridgeProbeReason})");
@@ -282,6 +293,75 @@ public sealed class TransportRuntimeConfig
             return false;
         }
     }
+
+#if DEBUG
+    private static bool HasDebugBridgeRuntimeForCurrentRid(out string reason)
+    {
+        try
+        {
+            var rid = GetBridgeRid();
+            var baseDir = AppContext.BaseDirectory;
+            var nodeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "node.exe" : "node";
+
+            var bridgeScript = EnumerateDebugBridgeScriptCandidates(baseDir, rid).FirstOrDefault(File.Exists);
+            var nodeRuntime = EnumerateDebugNodeCandidates(baseDir, rid, nodeName).FirstOrDefault(File.Exists);
+            if (!string.IsNullOrWhiteSpace(bridgeScript) &&
+                !string.IsNullOrWhiteSpace(nodeRuntime))
+            {
+                reason = "debug_local_bridge_runtime";
+                return true;
+            }
+
+            reason = string.IsNullOrWhiteSpace(bridgeScript)
+                ? "debug_bridge_script_missing"
+                : "debug_node_runtime_missing";
+            return false;
+        }
+        catch (Exception ex)
+        {
+            reason = $"debug_probe_error:{ex.GetType().Name}";
+            return false;
+        }
+    }
+
+    private static IEnumerable<string> EnumerateDebugBridgeScriptCandidates(string baseDir, string rid)
+    {
+        yield return Path.Combine(baseDir, "bridge", rid, "index.js");
+        yield return Path.Combine(baseDir, "bridge", "index.js");
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            yield return Path.GetFullPath(Path.Combine(baseDir, "..", "Resources", "bridge", rid, "index.js"));
+        }
+
+        yield return Path.Combine(baseDir, "tools", "nkn-bridge", "index.js");
+
+        var current = new DirectoryInfo(baseDir);
+        for (var i = 0; i < 8 && current is not null; i++, current = current.Parent)
+        {
+            yield return Path.Combine(current.FullName, "tools", "nkn-bridge", "index.js");
+            yield return Path.Combine(current.FullName, "artifacts", "bridge", rid, "index.js");
+        }
+    }
+
+    private static IEnumerable<string> EnumerateDebugNodeCandidates(string baseDir, string rid, string nodeName)
+    {
+        yield return Path.Combine(baseDir, "bridge", rid, nodeName);
+        yield return Path.Combine(baseDir, "bridge", nodeName);
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            yield return Path.GetFullPath(Path.Combine(baseDir, "..", "Resources", "bridge", rid, nodeName));
+        }
+
+        var current = new DirectoryInfo(baseDir);
+        for (var i = 0; i < 8 && current is not null; i++, current = current.Parent)
+        {
+            yield return Path.Combine(current.FullName, "artifacts", "bridge", rid, nodeName);
+            yield return Path.Combine(current.FullName, "tools", "node", rid, nodeName);
+        }
+    }
+#endif
 
     private static (string? Value, string Source) ReadTransportSetting()
     {

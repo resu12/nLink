@@ -71,4 +71,10 @@ public sealed class BetaUxGuiSmokeTests
     [Trait("Category", "GuiSmoke")]
     public Task Windows_GuiSmoke_BetaUx_StatusTextGuardrails()
         => GuiSmokeHarness.RunScenariosAsync(output, "status_text_guardrails");
+
+    [GuiSmokeFact]
+    [Trait("Category", "GuiSmoke")]
+    [Trait("Transport", "NKN")]
+    public Task Windows_GuiSmoke_BetaUx_DirectHelpRequest_ConnectsViaNkn()
+        => GuiSmokeHarness.RunScenariosWithTransportAsync(output, "NKN", "nkn_direct_connect");
 }

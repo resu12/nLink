@@ -77,6 +77,12 @@ public sealed class ConnectInputResolver : IConnectInputResolver
         }
 
         var normalized = InviteQrPayload.ExtractTokenOrOriginal(input);
+        if (HelperBootstrapQrPayload.TryParse(normalized, out var bootstrapPayload) &&
+            bootstrapPayload is not null)
+        {
+            return ConnectInputResolution.ForPeerAddress(bootstrapPayload.HelperAddress);
+        }
+
         if (LooksLikeInviteShareCode(normalized))
         {
             var shareCode = InviteShareCodeCodec.Decode(normalized);

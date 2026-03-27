@@ -308,6 +308,21 @@ public sealed partial class SessionFileTransferService
                 ChunkCount = manifest.ChunkCount,
                 Sha256Base64 = manifest.Sha256Base64,
             }).ConfigureAwait(false);
+
+        lock (gate)
+        {
+            if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
+            {
+                return;
+            }
+
+            context.TransportProfileKind = ResolveTransportProfileKind(transport);
+            context.PullV3ConservativeStartupActive =
+                !sessionScreenShareActive &&
+                !sessionScreenShareDegraded &&
+                context.TransportProfileKind == FileTransferTransportProfileKind.ConservativeNknStartup;
+            context.PullV3ConservativeStartupDegradedActive = false;
+        }
     }
 
     private static FileTransferChunkDataFrameV2 CreatePullChunkDataFrame(
@@ -690,6 +705,7 @@ public sealed partial class SessionFileTransferService
             };
             context.PullLastProgressUtc = DateTimeOffset.UtcNow;
             context.PullV3LastRepairRequestSentUtc = context.PullLastProgressUtc;
+            context.RecentPullRepairRequestSentUtc.Enqueue(context.PullV3LastRepairRequestSentUtc.Value);
         }
 
         await context.DataSession!.SendAsync(repair, context.LifetimeCts.Token).ConfigureAwait(false);
@@ -766,7 +782,11 @@ public sealed partial class SessionFileTransferService
 
     private int ResolveInboundV3TargetWindowChunksLocked(InboundTransferContext context)
     {
-        var targetBytes = sessionScreenShareDegraded || context.PullSessionDegraded
+        var targetBytes = context.PullV3ConservativeStartupActive
+            ? context.PullV3ConservativeStartupDegradedActive
+                ? PullV3ConservativeStartupDegradedTargetInFlightBytes
+                : PullV3ConservativeStartupTargetInFlightBytes
+            : sessionScreenShareDegraded || context.PullSessionDegraded
             ? PullV3DegradedTargetInFlightBytes
             : sessionScreenShareActive
                 ? PullV3ScreenshareTargetInFlightBytes
@@ -779,8 +799,12 @@ public sealed partial class SessionFileTransferService
 
     private string UpdateInboundV3WindowProfileLocked(InboundTransferContext context, DateTimeOffset now)
     {
+        TrimRecentEvents(context.RecentPullRepairRequestSentUtc, now);
+
         if (sessionScreenShareActive || sessionScreenShareDegraded)
         {
+            context.PullV3ConservativeStartupActive = false;
+            context.PullV3ConservativeStartupDegradedActive = false;
             context.PullV3ExpandedWindowActive = false;
             context.PullV3LimitedWindowActive = false;
             context.PullV3CleanSinceUtc = null;
@@ -790,6 +814,56 @@ public sealed partial class SessionFileTransferService
 
         var recentRepair = context.PullV3LastRepairRequestSentUtc is not null &&
                            now - context.PullV3LastRepairRequestSentUtc.Value < TimeSpan.FromMilliseconds(PullV3AdverseStepDownHoldMs);
+        var repeatedRecentRepair = context.RecentPullRepairRequestSentUtc.Count >= 2;
+        var lowUsefulPayload = context.PullUsefulPayloadBytesRecent <= 0;
+        var startupAdverse =
+            recentRepair &&
+            (repeatedRecentRepair ||
+             lowUsefulPayload ||
+             context.PullTimeoutStreak > 0 ||
+             context.PullLateArrivalDistance >= PullLateArrivalDistanceThreshold);
+        var startupHealthyEligible =
+            context.PullV3ConservativeStartupActive &&
+            !context.PullSessionDegraded &&
+            !recentRepair &&
+            context.PullTimeoutStreak == 0 &&
+            context.PullLateArrivalDistance < PullLateArrivalDistanceThreshold &&
+            context.BytesTransferred >= PullV3ConservativeStartupStepUpProgressBytesThreshold;
+
+        if (context.PullV3ConservativeStartupActive)
+        {
+            if (startupAdverse)
+            {
+                context.PullV3ConservativeStartupDegradedActive = true;
+                context.PullV3AdverseSinceUtc ??= now;
+                context.PullV3CleanSinceUtc = null;
+            }
+            else
+            {
+                context.PullV3AdverseSinceUtc = null;
+                if (startupHealthyEligible)
+                {
+                    context.PullV3CleanSinceUtc ??= now;
+                    if (now - context.PullV3CleanSinceUtc.Value >= TimeSpan.FromMilliseconds(PullV3ConservativeStartupStepUpHoldMs))
+                    {
+                        context.PullV3ConservativeStartupActive = false;
+                        context.PullV3ConservativeStartupDegradedActive = false;
+                        context.PullV3CleanSinceUtc = now;
+                        context.PullLastProfileAdjustmentUtc = now;
+                    }
+                }
+                else
+                {
+                    context.PullV3CleanSinceUtc = null;
+                }
+            }
+
+            if (context.PullV3ConservativeStartupActive)
+            {
+                return ResolveInboundV3ProfileName(context);
+            }
+        }
+
         var reorderLimited =
             !sessionScreenShareActive &&
             !sessionScreenShareDegraded &&
@@ -890,6 +964,13 @@ public sealed partial class SessionFileTransferService
 
     private string ResolveInboundV3ProfileName(InboundTransferContext context)
     {
+        if (context.PullV3ConservativeStartupActive)
+        {
+            return context.PullV3ConservativeStartupDegradedActive
+                ? "nkn_conservative_startup_degraded"
+                : "nkn_conservative_startup";
+        }
+
         if (sessionScreenShareDegraded || context.PullSessionDegraded)
         {
             return "degraded";

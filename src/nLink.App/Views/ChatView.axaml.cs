@@ -184,6 +184,10 @@ public partial class ChatView : UserControl
             return;
         }
 
+        // Plain Enter is always reserved for sending. If send is currently unavailable,
+        // suppress newline insertion rather than treating Enter like Shift+Enter.
+        e.Handled = true;
+
         var command = (DataContext as IChatPanelBindings)?.SendChatCommand;
         if (command is null || !command.CanExecute(null))
         {
@@ -191,7 +195,6 @@ public partial class ChatView : UserControl
         }
 
         command.Execute(null);
-        e.Handled = true;
     }
 
     private INotifyCollectionChanged? TryGetChatMessagesCollection()

@@ -99,9 +99,34 @@ public sealed partial class SessionRuntime
             StartCachedBridgeIdleTimeout();
         }
 
+        public void DiscardCachedBridgeTransport()
+        {
+            CancelCachedBridgeIdleTimeout();
+
+            if (owner.cachedBridgeTransport is not { } cached)
+            {
+                return;
+            }
+
+            owner.cachedBridgeTransport = null;
+            try
+            {
+                cached.Dispose();
+            }
+            catch
+            {
+                // Best-effort cleanup only.
+            }
+        }
+
         public void WireTransport(ISignalingTransport nextTransport)
         {
             nextTransport.IncomingJoinRequest += owner.OnIncomingJoinRequest;
+            if (nextTransport is IHelpRequestSignalingTransport helpRequestTransport)
+            {
+                helpRequestTransport.IncomingHelpRequest += owner.OnIncomingHelpRequest;
+                helpRequestTransport.HelpRequestDecisionReceived += owner.OnHelpRequestDecisionReceived;
+            }
             nextTransport.Approved += owner.OnTransportApproved;
             nextTransport.Rejected += owner.OnTransportRejected;
             nextTransport.Disconnected += owner.OnTransportDisconnected;
@@ -139,6 +164,11 @@ public sealed partial class SessionRuntime
         public void UnwireTransport(ISignalingTransport nextTransport)
         {
             nextTransport.IncomingJoinRequest -= owner.OnIncomingJoinRequest;
+            if (nextTransport is IHelpRequestSignalingTransport helpRequestTransport)
+            {
+                helpRequestTransport.IncomingHelpRequest -= owner.OnIncomingHelpRequest;
+                helpRequestTransport.HelpRequestDecisionReceived -= owner.OnHelpRequestDecisionReceived;
+            }
             nextTransport.Approved -= owner.OnTransportApproved;
             nextTransport.Rejected -= owner.OnTransportRejected;
             nextTransport.Disconnected -= owner.OnTransportDisconnected;
@@ -217,6 +247,7 @@ public sealed partial class SessionRuntime
                 owner.connectAttempt,
                 GetCurrentTransportKind(),
                 owner.GetSessionIdForLog()));
+            owner.RefreshSessionFlowProjection();
         }
 
         public void UpdateTransientStatusForTransportState(TransportState stateValue)
@@ -345,6 +376,15 @@ public sealed partial class SessionRuntime
                 }
                 finally
                 {
+                    try
+                    {
+                        cts.Dispose();
+                    }
+                    catch
+                    {
+                        // Best-effort cleanup only.
+                    }
+
                     ActiveRuntimeCounters.DecWatchdogs();
                 }
             });
@@ -353,7 +393,7 @@ public sealed partial class SessionRuntime
         public TimeSpan? GetWatchdogTimeout(TransportState state, string reason)
         {
             if (state == TransportState.Connecting &&
-                owner.role == SessionRuntimeRole.Helpee)
+                (owner.role == SessionRuntimeRole.Helpee || owner.IsPassiveHelperListenerState()))
             {
                 return null;
             }
@@ -392,10 +432,6 @@ public sealed partial class SessionRuntime
             catch
             {
                 // Best-effort.
-            }
-            finally
-            {
-                toCancel.Dispose();
             }
         }
 

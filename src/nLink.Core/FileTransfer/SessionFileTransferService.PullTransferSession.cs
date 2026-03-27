@@ -335,6 +335,12 @@ public sealed partial class SessionFileTransferService
 
     private int ResolveOutboundPipelineDepth(OutboundTransferContext? context = null)
     {
+        if (context is not null &&
+            UsesConservativeNknStartup(transport, context.NegotiatedDataProtocolVersion))
+        {
+            return PullV3ConservativeStartupInitialPipelineDepth;
+        }
+
         if (sessionScreenShareDegraded)
         {
             return PullDegradedScreensharePipelineDepth;

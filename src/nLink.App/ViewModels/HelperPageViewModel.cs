@@ -31,11 +31,12 @@ namespace NLink.App.ViewModels;
 public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanelBindings, IWindowCloseAware
 {
     private static readonly TimeSpan DefaultConnectFailureCooldown = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan DefaultApprovalTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan DefaultApprovalTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan DisposeOperationTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan EndSessionAfterControlStopGuard = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan RemoteControlSnapshotKeepAliveInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan PeerEndedNoticeDuration = TimeSpan.FromSeconds(4);
     private static readonly Regex AttemptLabelRegex = new(@"\s*\(?attempt\s+\d+(?:,\s*next retry in \d+s)?\)?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly bool RemoteControlDebugPanelEnabled =
 #if DEBUG
@@ -53,17 +54,21 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly bool ownsStatusPresenter;
     private readonly IClipboardService? clipboardService;
     private readonly IInviteShareService inviteShareService;
+    private readonly IQrCodeService qrCodeService;
     private readonly ShareMessageConfig shareMessageConfig;
     private readonly SessionUiStateStore? uiStateStore;
     private readonly IConnectInputResolver connectInputResolver;
     private readonly DispatcherTimer remoteControlStateSnapshotTimer;
-    private readonly Func<CancellationToken, Task<PeerAddress?>> bootstrapHelperIdentityResolver;
+    private readonly DispatcherTimer peerEndedNoticeTimer;
+    private readonly Func<CancellationToken, Task<PeerAddress?>>? bootstrapHelperIdentityResolver;
     private string automaticIdentityRecoveryWarning = string.Empty;
     private CancellationTokenSource? bootstrapHelperIdentityResolutionCts;
     private PeerAddress? bootstrapHelperIdentity;
+    private bool bootstrapHelperIdentityIsAuthoritative;
     private PeerAddress? previewInviteBoundHelperIdentity;
     private bool helperIdentityBootstrapPending;
     private string helperIdentityBootstrapErrorText = string.Empty;
+    private Bitmap? helperBootstrapQrBitmap;
     private string lastChatPanelStateLog = string.Empty;
     private long chatSendAttemptCounter;
 
@@ -99,11 +104,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool isChatInputEnabled;
     private bool controlModeEnabled;
     private SessionUiPhase effectivePhase;
-    private bool endInvoked;
     private bool wasConnected;
-    private SessionEndReason? endReason;
-    private bool endSessionRequested;
-    private bool endSessionCancelInvoked;
+    private bool localEndCommandInFlight;
     private DateTimeOffset endSessionGuardUntilUtc = DateTimeOffset.MinValue;
     private CancellationTokenSource? connectCts;
     private Task? bootstrapHelperIdentityResolutionTask;
@@ -115,7 +117,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private TaskCompletionSource<HelperConnectOutcome>? connectOutcome;
     private SessionReliabilityAttempt? reliabilityAttempt;
     private SessionUiPhase lastObservedUiPhase;
-    private SessionUiPhase fallbackUiPhase;
     private bool lastKnownShowRemoteScreenShareFrame;
     private bool lastKnownShowHelperMainContent = true;
     private string lastKnownHeaderStatusText = "Ready";
@@ -138,6 +139,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool remoteControlDebugPanelExpanded;
     private bool disposed;
     private int windowCloseDisconnectStarted;
+    private bool showPeerEndedNotice;
+    private string peerEndedNoticeText = string.Empty;
+    private string lastPeerEndedNoticeKey = string.Empty;
+    private string lastConversationSessionId = string.Empty;
+    private bool suppressRetryActionForReturnToWaiting;
+    private bool helperListenerReturnToWaitingRequested;
 
     public HelperPageViewModel(
         Action cancelAction,
@@ -154,7 +161,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         Action? backAction = null,
         IConnectInputResolver? connectInputResolver = null,
         Func<CancellationToken, Task<PeerAddress?>>? bootstrapHelperIdentityResolver = null,
-        IInviteShareService? inviteShareService = null)
+        IInviteShareService? inviteShareService = null,
+        IQrCodeService? qrCodeService = null)
     {
         this.cancelAction = cancelAction;
         this.backAction = backAction ?? cancelAction;
@@ -165,29 +173,34 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         ownsStatusPresenter = statusPresenter is null;
         this.clipboardService = clipboardService;
         this.inviteShareService = inviteShareService ?? new DefaultInviteShareService();
+        this.qrCodeService = qrCodeService ?? new QrCodeService();
         this.shareMessageConfig = shareMessageConfig ?? new ShareMessageConfig(null);
         this.uiStateStore = uiStateStore;
         this.connectInputResolver = connectInputResolver ?? ConnectInputResolverFactory.CreateDefault();
-        this.bootstrapHelperIdentityResolver = bootstrapHelperIdentityResolver ?? NknLocalPeerAddressResolver.ResolveAsync;
+        this.bootstrapHelperIdentityResolver = bootstrapHelperIdentityResolver;
         RefreshAutomaticIdentityRecoveryWarning();
         this.approvalTimeout = approvalTimeout ?? DefaultApprovalTimeout;
         this.connectFailureCooldown = connectFailureCooldown ?? DefaultConnectFailureCooldown;
         this.nowProvider = nowProvider ?? (() => DateTimeOffset.UtcNow);
         lastObservedUiPhase = uiStateStore?.Phase ?? SessionUiPhase.Idle;
-        fallbackUiPhase = lastObservedUiPhase;
         ScreenShareViewer = new ScreenShareViewerViewModel();
         remoteControlStateSnapshotTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(FeatureFlags.RemoteControlStateSnapshotIntervalMs),
         };
         remoteControlStateSnapshotTimer.Tick += OnRemoteControlStateSnapshotTimerTick;
+        peerEndedNoticeTimer = new DispatcherTimer
+        {
+            Interval = PeerEndedNoticeDuration,
+        };
+        peerEndedNoticeTimer.Tick += OnPeerEndedNoticeTimerTick;
         lastKnownShowRemoteScreenShareFrame = ShowRemoteScreenShareFrame;
         lastKnownShowHelperMainContent = ShowHelperMainContent;
         lastKnownHeaderStatusText = HeaderStatusText;
 
         ChatMessages = new ObservableCollection<ChatLineViewModel>();
 
-        sessionRuntime.StateChanged += OnSessionRuntimeStateChanged;
+        sessionRuntime.FlowSnapshotChanged += OnFlowSnapshotChanged;
         sessionRuntime.SessionSecurityStateChanged += OnSessionSecurityStateChanged;
         sessionRuntime.TransientStatusChanged += OnTransientStatusChanged;
         sessionRuntime.Approved += OnApproved;
@@ -201,6 +214,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.ChatStateChanged += OnChatStateChanged;
         sessionRuntime.FileTransferChanged += OnFileTransferChanged;
         sessionRuntime.RemoteControlStateChanged += OnRemoteControlStateChanged;
+        sessionRuntime.IncomingHelpRequestAvailable += OnIncomingHelpRequestAvailable;
         this.statusPresenter.StatusChanged += OnStatusPresenterChanged;
         copyFeedback.PropertyChanged += OnCopyFeedbackPropertyChanged;
         ScreenShareViewer.PropertyChanged += OnScreenShareViewerPropertyChanged;
@@ -228,6 +242,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         EndSessionCommand = new RelayCommand(EndSession, CanTriggerEndSession);
         ScanQrFromFileCommand = new RelayCommand(RequestScanQrFromFile, () => ShowMainControls);
         ScanQrFromCameraCommand = new RelayCommand(RequestScanQrFromCamera, () => ShowMainControls);
+        AcceptHelpRequestCommand = new AsyncRelayCommand(AcceptHelpRequestAsync, CanRespondToHelpRequest);
+        RejectHelpRequestCommand = new AsyncRelayCommand(RejectHelpRequestAsync, CanRespondToHelpRequest);
         RequestControlCommand = new RelayCommand(RequestRemoteControl, CanRequestRemoteControlAction);
         StopControlCommand = new RelayCommand(StopRemoteControl, CanStopRemoteControlAction);
         ToggleControlModeCommand = new RelayCommand(ToggleControlMode, CanToggleControlModeAction);
@@ -244,6 +260,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         ApplySessionBannerPolicy();
         UpdateUiFromSnapshot();
         BeginBootstrapHelperIdentityResolution();
+        if (!IsStartupBlocked)
+        {
+            _ = StartListeningAsync();
+        }
     }
 
     public string CodeInput
@@ -343,25 +363,39 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public string ConnectionMethodHint => transportConfig.HelperHintText;
 
     private PeerAddress? HelperVerificationIdentity => sessionRuntime.SecurityState.HelperAddress;
-    private PeerAddress? HelperIdentityForInviteBinding => bootstrapHelperIdentity ?? sessionRuntime.CurrentLocalPeerAddress;
+    private PeerAddress? HelperRequestTargetAddress => sessionRuntime.CurrentLocalPeerAddress;
+    private PeerAddress? HelperIdentityForInviteBinding => bootstrapHelperIdentity ?? HelperRequestTargetAddress;
+    private PeerAddress? HelperIdentityForDisplay =>
+        HelperRequestTargetAddress ??
+        (bootstrapHelperIdentityIsAuthoritative ? bootstrapHelperIdentity : null);
     private bool RequiresHelperIdentityBootstrap =>
         string.Equals(transportConfig.Key, "NKN", StringComparison.OrdinalIgnoreCase) &&
         InviteSecurityDiagnostics.RequiresBoundHelperForIssuedSecretInvites();
 
-    public string HelperIdentityBootstrapText =>
-        HelperIdentityForInviteBinding is { } helperIdentity
-            ? helperIdentity.Value
-            : string.Empty;
+    public string HelperIdentityBootstrapText => BuildHelperBootstrapDisplayValue();
+
+    public string HelperIdentityBootstrapWatermarkText =>
+        string.IsNullOrWhiteSpace(HelperIdentityBootstrapText)
+            ? "Please wait..."
+            : "Helper address unavailable";
 
     public string HelperIdentityBootstrapHintText =>
-        !string.IsNullOrWhiteSpace(helperIdentityBootstrapErrorText)
-            ? helperIdentityBootstrapErrorText
-            : !string.IsNullOrWhiteSpace(HelperIdentityBootstrapText) &&
-              !string.IsNullOrWhiteSpace(automaticIdentityRecoveryWarning)
-            ? $"{automaticIdentityRecoveryWarning} Copy this helper address into the helpee's helper field before they generate the invite."
+        (helperIdentityBootstrapPending ||
+         (string.IsNullOrWhiteSpace(HelperIdentityBootstrapText) &&
+          string.Equals(helperIdentityBootstrapErrorText, "Helper address is unavailable right now.", StringComparison.Ordinal)))
+            ? "Please wait..."
+            : !string.IsNullOrWhiteSpace(helperIdentityBootstrapErrorText)
+            ? !string.IsNullOrWhiteSpace(automaticIdentityRecoveryWarning) &&
+              string.Equals(helperIdentityBootstrapErrorText, "Helper address is unavailable right now.", StringComparison.Ordinal)
+                ? $"{automaticIdentityRecoveryWarning} Preparing your helper address."
+                : helperIdentityBootstrapErrorText
+            : !string.IsNullOrWhiteSpace(automaticIdentityRecoveryWarning)
+            ? string.IsNullOrWhiteSpace(HelperIdentityBootstrapText)
+                ? $"{automaticIdentityRecoveryWarning} Preparing your helper address."
+                : $"{automaticIdentityRecoveryWarning} The helpee enters this helper address to request help."
             : string.IsNullOrWhiteSpace(HelperIdentityBootstrapText)
-            ? "Preparing your helper address. Share it with the helpee before they generate the invite."
-            : "Copy this helper address into the helpee's helper field before they generate the invite.";
+            ? "Preparing your helper address."
+            : "The helpee enters this helper address to request help.";
 
     public string HelperIdentityBootstrapVerificationCode =>
         HelperVerificationCodeFormatter.FormatOrNull(HelperIdentityForInviteBinding) ?? string.Empty;
@@ -369,12 +403,21 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool HasHelperIdentityBootstrapVerificationCode =>
         !string.IsNullOrWhiteSpace(HelperIdentityBootstrapVerificationCode);
 
+    public bool HasReadyHelperIdentityBootstrapText =>
+        !string.IsNullOrWhiteSpace(HelperIdentityBootstrapText);
+
     public bool ShowHelperIdentityBootstrapPanel =>
         ShowMainControls &&
-        RequiresHelperIdentityBootstrap &&
-        (helperIdentityBootstrapPending ||
-         !string.IsNullOrWhiteSpace(HelperIdentityBootstrapText) ||
-         !string.IsNullOrWhiteSpace(helperIdentityBootstrapErrorText));
+        RequiresHelperIdentityBootstrap;
+
+    public Bitmap? HelperBootstrapQrImage => helperBootstrapQrBitmap;
+    public bool ShowHelperBootstrapQr => HelperBootstrapQrImage is not null;
+    public bool ShowHelperBootstrapQrPlaceholder => !ShowHelperBootstrapQr;
+    public bool HasPendingHelpRequest => sessionRuntime.HasPendingHelpRequest;
+    public string IncomingHelpRequestText =>
+        sessionRuntime.PendingHelpRequest is { } request
+            ? $"Incoming request from {request.HelpeeAddress.Value}"
+            : string.Empty;
 
     public string HelperVerificationCode =>
         HelperVerificationCodeFormatter.FormatOrNull(HelperVerificationIdentity) ?? string.Empty;
@@ -405,6 +448,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public bool ShowFirstPillVerificationCode =>
         ShowHelperIdentityBootstrapPanel &&
+        HasReadyHelperIdentityBootstrapText &&
         !string.IsNullOrWhiteSpace(FirstPillVerificationCodeText);
 
     public string HelperTechnicalIdentityText => HelperVerificationIdentity?.Value ?? string.Empty;
@@ -423,8 +467,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool IsConnectedView => ConnectionState == "Connected";
 
     private bool IsRemoteControlUiConnected =>
-        EffectivePhase == SessionUiPhase.Connected &&
-        sessionRuntime.State == SessionRuntimeState.Connected;
+        SessionFlowViewProjection.IsConnectedShell(sessionRuntime.FlowSnapshot);
 
     public bool ShowConnectedPanel => IsConnectedView;
 
@@ -559,23 +602,25 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public string HeaderStatusText => AppendScreenShareSuffix(
         TryGetRemoteControlHeaderHint(out var remoteControlHint)
             ? remoteControlHint
-            : EffectivePhase switch
-            {
-                SessionUiPhase.Connecting => "Connecting…",
-                SessionUiPhase.Recovering => "Reconnecting…",
-                SessionUiPhase.Connected when sessionRuntime.ControlState == ControlState.Active && !sessionRuntime.RemoteControlMappingAvailable
-                    => "Remote control mapping unavailable",
-                SessionUiPhase.Connected => sessionRuntime.ControlState == ControlState.Requesting && ShowRemoteScreenShareFrame
-                    ? "Waiting for approval…"
-                    : "Connected",
-                SessionUiPhase.Failed => string.IsNullOrWhiteSpace(FailureTitle) ? "Connection failed" : FailureTitle,
-                SessionUiPhase.Ended => !string.IsNullOrWhiteSpace(StatusText)
-                    ? StatusText
-                    : !string.IsNullOrWhiteSpace(FailureTitle)
-                        ? FailureTitle
-                        : "Session ended",
-                _ => !string.IsNullOrWhiteSpace(StatusText) ? StatusText : "Ready",
-            });
+            : showPeerEndedNotice && !string.IsNullOrWhiteSpace(peerEndedNoticeText)
+                ? peerEndedNoticeText
+                : EffectivePhase switch
+                {
+                    SessionUiPhase.Connecting => "Connecting…",
+                    SessionUiPhase.Recovering => "Reconnecting…",
+                    SessionUiPhase.Connected when sessionRuntime.ControlState == ControlState.Active && !sessionRuntime.RemoteControlMappingAvailable
+                        => "Remote control mapping unavailable",
+                    SessionUiPhase.Connected => sessionRuntime.ControlState == ControlState.Requesting && ShowRemoteScreenShareFrame
+                        ? "Waiting for approval…"
+                        : "Connected",
+                    SessionUiPhase.Failed => string.IsNullOrWhiteSpace(FailureTitle) ? "Connection failed" : FailureTitle,
+                    SessionUiPhase.Ended => !string.IsNullOrWhiteSpace(StatusText)
+                        ? StatusText
+                        : !string.IsNullOrWhiteSpace(FailureTitle)
+                            ? FailureTitle
+                            : "Session ended",
+                    _ => !string.IsNullOrWhiteSpace(StatusText) ? StatusText : "Ready",
+                });
 
     public SessionUiPhase EffectivePhase
     {
@@ -634,7 +679,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public bool CanEndSession
     {
-        get => canEndSession && sessionRuntime.ControlState != ControlState.Active;
+        get => canEndSession;
         private set => SetProperty(ref canEndSession, value);
     }
 
@@ -784,6 +829,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public IRelayCommand EndSessionCommand { get; }
     public IRelayCommand ScanQrFromFileCommand { get; }
     public IRelayCommand ScanQrFromCameraCommand { get; }
+    public IAsyncRelayCommand AcceptHelpRequestCommand { get; }
+    public IAsyncRelayCommand RejectHelpRequestCommand { get; }
     public IRelayCommand RequestControlCommand { get; }
     public IRelayCommand StopControlCommand { get; }
     public IRelayCommand ToggleControlModeCommand { get; }
@@ -797,8 +844,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public event EventHandler? ScanQrFromCameraRequested;
 
     public bool ShowRetryAction => !IsStartupBlocked &&
-                                   string.Equals(ConnectionState, "Failed", StringComparison.Ordinal) &&
-                                   string.Equals(StatusText, "Connection lost.", StringComparison.Ordinal);
+                                   !suppressRetryActionForReturnToWaiting &&
+                                   !sessionRuntime.IsHelperListenerRestartInProgress &&
+                                   sessionRuntime.FlowSnapshot.ShowRetryAction;
 
     public bool ShowOpenDiagnosticsLink => CanOpenDiagnostics;
 
@@ -856,8 +904,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         remoteControlStateSnapshotTimer.Stop();
         remoteControlStateSnapshotTimer.Tick -= OnRemoteControlStateSnapshotTimerTick;
+        peerEndedNoticeTimer.Stop();
+        peerEndedNoticeTimer.Tick -= OnPeerEndedNoticeTimerTick;
 
-        sessionRuntime.StateChanged -= OnSessionRuntimeStateChanged;
+        sessionRuntime.FlowSnapshotChanged -= OnFlowSnapshotChanged;
         sessionRuntime.SessionSecurityStateChanged -= OnSessionSecurityStateChanged;
         sessionRuntime.TransientStatusChanged -= OnTransientStatusChanged;
         sessionRuntime.Approved -= OnApproved;
@@ -871,6 +921,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.ChatStateChanged -= OnChatStateChanged;
         sessionRuntime.FileTransferChanged -= OnFileTransferChanged;
         sessionRuntime.RemoteControlStateChanged -= OnRemoteControlStateChanged;
+        sessionRuntime.IncomingHelpRequestAvailable -= OnIncomingHelpRequestAvailable;
         statusPresenter.StatusChanged -= OnStatusPresenterChanged;
         copyFeedback.PropertyChanged -= OnCopyFeedbackPropertyChanged;
         ScreenShareViewer.PropertyChanged -= OnScreenShareViewerPropertyChanged;
@@ -883,11 +934,19 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             statusPresenter.Dispose();
         }
         sessionRuntime.SetReliabilityAttempt(null);
-        RunBoundedSynchronousCleanup(() => sessionRuntime.DisconnectAsync(), DisposeOperationTimeout);
+        var skipDisconnectForListenerRecovery =
+            helperListenerReturnToWaitingRequested &&
+            Interlocked.CompareExchange(ref windowCloseDisconnectStarted, 0, 0) == 0;
+        if (!skipDisconnectForListenerRecovery)
+        {
+            RunBoundedSynchronousCleanup(() => sessionRuntime.DisconnectAsync(), DisposeOperationTimeout);
+        }
 
         connectCts?.Cancel();
         connectCts?.Dispose();
         connectCts = null;
+        helperBootstrapQrBitmap?.Dispose();
+        helperBootstrapQrBitmap = null;
         ScreenShareViewer.Dispose();
         copyFeedback.Dispose();
     }
@@ -917,6 +976,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool CanConnect()
     {
         return CanStartOrConnect && !IsStartupBlocked && !IsConnecting && ResolveConnectInput(CodeInput).IsValid;
+    }
+
+    private bool CanRespondToHelpRequest()
+    {
+        return sessionRuntime.HasPendingHelpRequest && !IsConnecting && !IsStartupBlocked;
     }
 
     private ConnectInputResolution ResolveConnectInput()
@@ -971,6 +1035,15 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         ScanQrFromCameraRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OnIncomingHelpRequestAvailable(object? sender, EventArgs e)
+    {
+        localEndCommandInFlight = false;
+        OnPropertyChanged(nameof(HasPendingHelpRequest));
+        OnPropertyChanged(nameof(IncomingHelpRequestText));
+        AcceptHelpRequestCommand.NotifyCanExecuteChanged();
+        RejectHelpRequestCommand.NotifyCanExecuteChanged();
     }
 
     public void ApplyExternalConnectInput(string input, string sourceLabel)
@@ -1094,7 +1167,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private bool CanTriggerEndSession()
     {
-        return CanEndSession && !endInvoked;
+        return CanEndSession && !localEndCommandInFlight;
     }
 
     private bool CanOpenDiagnosticsCommand()
@@ -1182,10 +1255,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             var outcome = await WaitForConnectOutcomeAsync(connectCts.Token);
             if (outcome == HelperConnectOutcome.PendingTimeout)
             {
-                LogReliability(SessionReliabilityStage.Disconnected, "approval_timeout", "No response yet.");
-                var failure = TransportFailureMapper.CreateTimeout("approval_timeout");
-                await sessionRuntime.FailAsync(failure, UserErrorMapper.HelperApprovalTimeout());
-                OnPropertyChanged(nameof(ShowChatConnectionHint));
+                await HandlePendingApprovalTimeoutAsync().ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -1249,6 +1319,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             ScanQrFromFileCommand.NotifyCanExecuteChanged();
             ScanQrFromCameraCommand.NotifyCanExecuteChanged();
         });
+
+        if (!disposed && !IsStartupBlocked)
+        {
+            await StartListeningAsync().ConfigureAwait(false);
+        }
     }
 
     private async Task SendChatAsync()
@@ -1312,21 +1387,14 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        if (sessionRuntime.ControlState == ControlState.Active)
-        {
-            AppLog.Info("Helper end session ignored while remote control is active.");
-            return;
-        }
-
-        if (endInvoked)
+        if (localEndCommandInFlight)
         {
             return;
         }
 
-        endInvoked = true;
+        localEndCommandInFlight = true;
         EndSessionCommand.NotifyCanExecuteChanged();
-        endSessionRequested = true;
-        endReason = SessionEndReason.UserEnded;
+        sessionRuntime.NotifyLocalEndRequested();
         connectCts?.Cancel();
         connectOutcome?.TrySetCanceled();
         IsConnecting = false;
@@ -1335,24 +1403,39 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         ShowTransientBanner = false;
         TransientBannerText = string.Empty;
         CanCancelTransient = false;
-        uiStateStore?.SetPhase(SessionUiPhase.Ended, "UserEndSession");
-        EffectivePhase = SessionUiPhase.Ended;
-        IsChatInputEnabled = false;
-        CanSendFiles = false;
-        CanEndSession = false;
-        CodeInput = string.Empty;
+        ApplyTerminalPresentationFromFlow(sessionRuntime.FlowSnapshot);
+        uiStateStore?.SetPhase(SessionUiPhase.Waiting, "UserEndSession:ReturnToWaiting");
+        EffectivePhase = SessionUiPhase.Waiting;
         SendChatCommand.NotifyCanExecuteChanged();
         EndSessionCommand.NotifyCanExecuteChanged();
         AssertUiConsistency();
         ClearRemoteScreenShareFrame();
 
-        if (endSessionCancelInvoked)
-        {
-            return;
-        }
+        _ = DisconnectAfterLocalEndAsync();
+    }
 
-        endSessionCancelInvoked = true;
-        cancelAction();
+    private async Task HandlePendingApprovalTimeoutAsync()
+    {
+        LogReliability(SessionReliabilityStage.Disconnected, "approval_timeout", "No response yet.");
+
+        await sessionRuntime.HandleHelperApprovalTimeoutAsync().ConfigureAwait(false);
+        await UiThreadDispatch.RunAsync(() => OnPropertyChanged(nameof(ShowChatConnectionHint)));
+    }
+
+    private async Task DisconnectAfterLocalEndAsync()
+    {
+        try
+        {
+            await sessionRuntime.DisconnectAsync().ConfigureAwait(false);
+            if (!disposed && !IsStartupBlocked)
+            {
+                await sessionRuntime.StartHelperListeningAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warn($"Helper local end-session disconnect failed: {ex.Message}");
+        }
     }
 
     private void RequestRemoteControl()
@@ -1855,7 +1938,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         try
         {
-            await clipboardService.SetTextAsync(HelperIdentityBootstrapText);
+            await clipboardService.SetTextAsync(GetHelperBootstrapShareValue());
             copyFeedback.Show("Helper address copied.");
         }
         catch
@@ -1874,7 +1957,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         try
         {
-            var shared = await inviteShareService.ShareInviteAsync(HelperIdentityBootstrapText, CancellationToken.None);
+            var shared = await inviteShareService.ShareInviteAsync(GetHelperBootstrapShareValue(), CancellationToken.None);
             copyFeedback.Show(shared.IsSuccess
                 ? "Helper address shared."
                 : shared.Message ?? "Could not share. Please try again.");
@@ -1883,6 +1966,64 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             copyFeedback.Show("Could not share. Please try again.");
         }
+    }
+
+    private async Task StartListeningAsync()
+    {
+        if (disposed || IsStartupBlocked)
+        {
+            return;
+        }
+
+        // State changes are marshalled onto the UI thread, so a queued auto-listen refresh can
+        // run after the runtime has already pivoted from idle listener mode into an active helper
+        // connect flow. Do not let that stale callback reset an in-flight accepted request.
+        if (sessionRuntime.Role != SessionRuntimeRole.None ||
+            sessionRuntime.State != SessionRuntimeState.Idle ||
+            sessionRuntime.TransportLifecycleState != TransportState.Idle)
+        {
+            return;
+        }
+
+        try
+        {
+            await sessionRuntime.StartHelperListeningAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            await UiThreadDispatch.RunAsync(() =>
+            {
+                StatusText = "Could not start helper listening.";
+                ConnectionState = "Failed";
+            });
+        }
+    }
+
+    private async Task AcceptHelpRequestAsync()
+    {
+        if (!CanRespondToHelpRequest())
+        {
+            return;
+        }
+
+        try
+        {
+            await sessionRuntime.AcceptIncomingHelpRequestAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            throw;
+        }
+    }
+
+    private async Task RejectHelpRequestAsync()
+    {
+        if (!CanRespondToHelpRequest())
+        {
+            return;
+        }
+
+        await sessionRuntime.RejectIncomingHelpRequestAsync("request_rejected", CancellationToken.None).ConfigureAwait(false);
     }
 
     private string BuildHelperInstallMessage()
@@ -1903,14 +2044,22 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         CancelBootstrapHelperIdentityResolution();
         helperIdentityBootstrapErrorText = string.Empty;
-        bootstrapHelperIdentityResolutionCts = new CancellationTokenSource();
         helperIdentityBootstrapPending = true;
+        if (bootstrapHelperIdentityResolver is null)
+        {
+            bootstrapHelperIdentityResolutionTask = null;
+            NotifyHelperIdentityBootstrapChanged();
+            return;
+        }
+
+        bootstrapHelperIdentityResolutionCts = new CancellationTokenSource();
         bootstrapHelperIdentityResolutionTask = ResolveBootstrapHelperIdentityAsync(bootstrapHelperIdentityResolutionCts.Token);
     }
 
     private void NotifyHelperIdentityBootstrapChanged()
     {
         OnPropertyChanged(nameof(HelperIdentityBootstrapText));
+        OnPropertyChanged(nameof(HelperIdentityBootstrapWatermarkText));
         OnPropertyChanged(nameof(HelperIdentityBootstrapHintText));
         OnPropertyChanged(nameof(HelperIdentityBootstrapVerificationCode));
         OnPropertyChanged(nameof(HasHelperIdentityBootstrapVerificationCode));
@@ -1919,6 +2068,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowHeaderVerificationCode));
         OnPropertyChanged(nameof(FirstPillVerificationCodeText));
         OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+        RefreshHelperBootstrapQrBitmap();
     }
 
     private void PromoteBootstrapHelperIdentityFromConnectedSessionIfAvailable()
@@ -1931,9 +2081,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         var changed =
             bootstrapHelperIdentity is null ||
-            bootstrapHelperIdentity.Value != verifiedIdentity;
+            bootstrapHelperIdentity.Value != verifiedIdentity ||
+            !bootstrapHelperIdentityIsAuthoritative;
 
         bootstrapHelperIdentity = verifiedIdentity;
+        bootstrapHelperIdentityIsAuthoritative = true;
         helperIdentityBootstrapErrorText = string.Empty;
         helperIdentityBootstrapPending = false;
         CancelBootstrapHelperIdentityResolution();
@@ -1947,23 +2099,81 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void CacheBootstrapHelperIdentityFromRuntimeIfAvailable()
     {
-        if (bootstrapHelperIdentity is not null)
-        {
-            return;
-        }
-
         var resolvedIdentity = sessionRuntime.CurrentLocalPeerAddress;
         if (resolvedIdentity is null)
         {
             return;
         }
 
+        var changed =
+            bootstrapHelperIdentity is null ||
+            bootstrapHelperIdentity.Value != resolvedIdentity.Value ||
+            !bootstrapHelperIdentityIsAuthoritative;
         bootstrapHelperIdentity = resolvedIdentity;
+        bootstrapHelperIdentityIsAuthoritative = true;
         helperIdentityBootstrapErrorText = string.Empty;
         helperIdentityBootstrapPending = false;
         CancelBootstrapHelperIdentityResolution();
         bootstrapHelperIdentityResolutionTask = null;
-        NotifyHelperIdentityBootstrapChanged();
+        if (changed)
+        {
+            NotifyHelperIdentityBootstrapChanged();
+        }
+        else
+        {
+            OnPropertyChanged(nameof(HelperIdentityBootstrapHintText));
+            OnPropertyChanged(nameof(ShowHelperIdentityBootstrapPanel));
+        }
+    }
+
+    private void RefreshHelperBootstrapQrBitmap()
+    {
+        helperBootstrapQrBitmap?.Dispose();
+        helperBootstrapQrBitmap = null;
+
+        if (HelperRequestTargetAddress is not { } helperTargetAddress ||
+            HelperIdentityForInviteBinding is not { } helperIdentity)
+        {
+            OnPropertyChanged(nameof(HelperBootstrapQrImage));
+            OnPropertyChanged(nameof(ShowHelperBootstrapQr));
+            OnPropertyChanged(nameof(ShowHelperBootstrapQrPlaceholder));
+            return;
+        }
+
+        var payload = HelperBootstrapQrPayload.Format(
+            HelperBootstrapPayload.Create(
+                helperTargetAddress,
+                helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
+        if (qrCodeService.TryCreatePng(payload, out var pngBytes, out _))
+        {
+            using var stream = new System.IO.MemoryStream(pngBytes, writable: false);
+            helperBootstrapQrBitmap = new Bitmap(stream);
+        }
+
+        OnPropertyChanged(nameof(HelperBootstrapQrImage));
+        OnPropertyChanged(nameof(ShowHelperBootstrapQr));
+        OnPropertyChanged(nameof(ShowHelperBootstrapQrPlaceholder));
+    }
+
+    private string BuildHelperBootstrapDisplayValue()
+    {
+        if (HelperRequestTargetAddress is { } helperTargetAddress &&
+            HelperIdentityForInviteBinding is { } helperIdentity)
+        {
+            return HelperBootstrapQrPayload.Format(
+                HelperBootstrapPayload.Create(
+                    helperTargetAddress,
+                    helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
+        }
+
+        return HelperIdentityForDisplay is { } helperIdentityForDisplay
+            ? helperIdentityForDisplay.Value
+            : string.Empty;
+    }
+
+    private string GetHelperBootstrapShareValue()
+    {
+        return BuildHelperBootstrapDisplayValue();
     }
 
     private void EnsureBootstrapHelperIdentityResolutionForReadyState()
@@ -1984,9 +2194,15 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private async Task ResolveBootstrapHelperIdentityAsync(CancellationToken ct)
     {
+        var resolver = bootstrapHelperIdentityResolver;
+        if (resolver is null)
+        {
+            return;
+        }
+
         try
         {
-            var resolved = await bootstrapHelperIdentityResolver(ct).ConfigureAwait(false);
+            var resolved = await resolver(ct).ConfigureAwait(false);
             if (disposed || ct.IsCancellationRequested)
             {
                 return;
@@ -1999,6 +2215,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 if (bootstrapHelperIdentity is null && resolved is not null)
                 {
                     bootstrapHelperIdentity = resolved;
+                    bootstrapHelperIdentityIsAuthoritative = false;
                 }
 
                 helperIdentityBootstrapErrorText = string.Empty;
@@ -2109,7 +2326,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private void OnApproved(object? sender, EventArgs e)
     {
         wasConnected = true;
-        endReason = null;
         connectOutcome?.TrySetResult(HelperConnectOutcome.Approved);
         _ = UiThreadDispatch.RunAsync(() =>
         {
@@ -2129,10 +2345,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         _ = UiThreadDispatch.RunAsync(() =>
         {
             IsConnecting = false;
-            StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
-                ? approvalTimedOut ? UserErrorMapper.HelperApprovalTimeout() : UserErrorMapper.HelperRejected()
-                : sessionRuntime.StatusText;
-            ConnectionState = approvalTimedOut ? "Failed" : "Rejected";
             if (approvalTimedOut)
             {
                 LogReliability(SessionReliabilityStage.Disconnected, "approval_timeout", "No response yet.");
@@ -2141,6 +2353,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 LogReliability(SessionReliabilityStage.Rejected, "rejected", "They did not allow the connection.");
             }
+            SyncFromRuntime();
             OnPropertyChanged(nameof(ShowChatConnectionHint));
         });
     }
@@ -2158,57 +2371,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             ClearRemoteScreenShareFrame();
             IsConnecting = false;
-            var nknSnapshot = NknRuntimeDiagnostics.Snapshot();
-            var remoteSessionEndSeenInDiagnostics =
-                string.Equals(nknSnapshot.LastEnvelopeType, "SessionEnd", StringComparison.OrdinalIgnoreCase);
-            var runtimeStatus = sessionRuntime.StatusText;
-            if (string.IsNullOrWhiteSpace(runtimeStatus))
-            {
-                // Remote session-end can race with runtime reset back to Idle, clearing StatusText
-                // before the helper VM handles the disconnect callback. If we were connected and
-                // there is no classified failure, prefer the friendly session-ended message.
-                var disconnectedAfterConnectedNoFailure =
-                    string.Equals(ConnectionState, "Connected", StringComparison.Ordinal) &&
-                    sessionRuntime.LastTransportFailure is null;
-
-                StatusText = sessionRuntime.LastTransportFailure is null &&
-                             (sessionRuntime.LastDisconnectWasRemoteEnd ||
-                              disconnectedAfterConnectedNoFailure ||
-                              remoteSessionEndSeenInDiagnostics)
-                    ? "The other person ended the session."
-                    : transportConfig.HelperDisconnectedText;
-            }
-            else
-            {
-                StatusText = runtimeStatus;
-            }
-
-            var peerEnded =
-                sessionRuntime.LastTransportFailure is null &&
-                (sessionRuntime.LastDisconnectWasRemoteEnd || remoteSessionEndSeenInDiagnostics);
-            if (peerEnded)
-            {
-                ApplyPeerEndedDisconnectUiState();
-            }
-
             var (errorCode, errorHint) = GetReliabilityError();
             LogReliability(SessionReliabilityStage.Disconnected, errorCode, errorHint);
-            if (peerEnded)
-            {
-                // Remote-end cleanup above already moved the helper UI out of the active session shell state.
-            }
-            else if (string.Equals(sessionRuntime.StatusText, "Connection lost.", StringComparison.Ordinal))
-            {
-                ConnectionState = "Failed";
-            }
-            else if (sessionRuntime.State != SessionRuntimeState.Connected)
-            {
-                ConnectionState = "Disconnected";
-            }
-            else if (ConnectionState != "Connected")
-            {
-                ConnectionState = "Disconnected";
-            }
+            SyncFromRuntime();
             NotifyDisconnectedUiAffordancesChanged();
         });
     }
@@ -2222,7 +2387,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         _ = UiThreadDispatch.RunAsync(() =>
         {
-            ApplyPeerEndedDisconnectUiState();
+            SyncFromRuntime();
             NotifyDisconnectedUiAffordancesChanged();
         });
     }
@@ -2252,6 +2417,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             OnPropertyChanged(nameof(IsChatReady));
             SendChatCommand.NotifyCanExecuteChanged();
+            UpdateUiFromSnapshot("chat_state_changed");
             LogCurrentChatPanelState("chat_state_changed");
         });
     }
@@ -2303,17 +2469,14 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         });
     }
 
-    private void OnSessionRuntimeStateChanged(object? sender, SessionRuntimeStateChangedEventArgs e)
+    private void OnFlowSnapshotChanged(object? sender, SessionFlowSnapshotChangedEventArgs e)
     {
         if (disposed)
         {
             return;
         }
 
-        _ = UiThreadDispatch.RunAsync(() =>
-        {
-            SyncFromRuntime();
-        });
+        _ = UiThreadDispatch.RunAsync(SyncFromRuntime);
     }
 
     private void OnSessionSecurityStateChanged(object? sender, EventArgs e)
@@ -2480,7 +2643,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             }
             else if (e.Status.Kind == UserStatusKind.Failed &&
                      p != SessionUiPhase.Ended &&
-                     sessionRuntime.State is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected)
+                     sessionRuntime.FlowSnapshot.UiPhase == SessionUiPhase.Failed)
             {
                 TryShowUiRecoveryTransient(
                     "status:failed",
@@ -2581,163 +2744,75 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         PromoteBootstrapHelperIdentityFromConnectedSessionIfAvailable();
         CacheBootstrapHelperIdentityFromRuntimeIfAvailable();
-
-        var runtimeTerminalFailure = false;
-        if (endSessionRequested)
+        var flow = sessionRuntime.FlowSnapshot;
+        if (suppressRetryActionForReturnToWaiting &&
+            (flow.TerminalKind == SessionTerminalKind.None ||
+             flow.Phase is SessionFlowPhase.ListenerWaiting or SessionFlowPhase.NoSession or SessionFlowPhase.ActiveSession))
         {
-            ApplyEndReasonPresentation(SessionEndReason.UserEnded);
+            suppressRetryActionForReturnToWaiting = false;
+            helperListenerReturnToWaitingRequested = false;
+        }
+        SyncConversationBoundaryFromFlow(flow);
+
+        if (localEndCommandInFlight &&
+            !flow.LocalEndInProgress &&
+            flow.Phase is SessionFlowPhase.ListenerWaiting or SessionFlowPhase.NoSession)
+        {
+            PrepareForNewSession(clearConnectInput: false);
+        }
+
+        if (flow.PostTerminalAction == SessionFlowPostTerminalAction.ReturnToListenerWaiting)
+        {
+            if (flow.TerminalKind is SessionTerminalKind.Failed or SessionTerminalKind.Rejected)
+            {
+                var transientText = !string.IsNullOrWhiteSpace(flow.TerminalStatusText)
+                    ? flow.TerminalStatusText
+                    : BuildRecoveryTransientText(isRecovering: false);
+                TryShowUiRecoveryTransient(
+                    $"post-terminal:{flow.TerminalKind}:{flow.FailureReason}",
+                    transientText,
+                    canCancel: false);
+            }
+
+            ReturnToListenerWaiting(clearConnectInput: false);
+            SyncTransientStatusFromRuntime();
+            NotifyDisconnectedUiAffordancesChanged();
+            return;
+        }
+
+        if (ShouldReturnHelperApprovalTimeoutToWaiting(flow))
+        {
+            TryShowUiRecoveryTransient(
+                $"approval-timeout:{flow.SessionId ?? "(none)"}",
+                !string.IsNullOrWhiteSpace(flow.TerminalStatusText)
+                    ? flow.TerminalStatusText
+                    : UserErrorMapper.HelperApprovalTimeout(),
+                canCancel: false);
+            ReturnToListenerWaiting(clearConnectInput: false);
+            SyncTransientStatusFromRuntime();
+            NotifyDisconnectedUiAffordancesChanged();
+            return;
+        }
+
+        if (flow.TerminalKind != SessionTerminalKind.None)
+        {
+            ApplyTerminalPresentationFromFlow(flow);
         }
         else
         {
-            switch (sessionRuntime.State)
+            ClearFailurePresentation();
+            StatusText = SessionFlowViewProjection.ResolveStatusText(flow, transportConfig.ApprovedStatusText);
+            ConnectionState = flow.DisplayConnectionState;
+            IsConnecting = string.Equals(flow.DisplayConnectionState, "Connecting", StringComparison.Ordinal);
+
+            if (string.Equals(flow.DisplayConnectionState, "Connected", StringComparison.Ordinal))
             {
-                case SessionRuntimeState.Connecting:
-                    endReason = null;
-                    ClearFailurePresentation();
-                    StatusText = "Connecting…";
-                    ConnectionState = "Connecting";
-                    break;
-                case SessionRuntimeState.Connected:
-                    wasConnected = true;
-                    endReason = null;
-                    ClearFailurePresentation();
-                    StatusText = transportConfig.ApprovedStatusText;
-                    ConnectionState = "Connected";
-                    ShowChatNotice = false;
-                    break;
-                case SessionRuntimeState.Idle:
-                    IsConnecting = false;
-                    if (endInvoked)
-                    {
-                        break;
-                    }
-
-                    if (wasConnected && endReason is null)
-                    {
-                        var inferredReason = sessionRuntime.LastDisconnectWasRemoteEnd || sessionRuntime.LastTransportFailure is null
-                            ? SessionEndReason.PeerEnded
-                            : SessionEndReason.Failed;
-                        endReason = inferredReason;
-                        ApplyEndReasonPresentation(inferredReason);
-                    }
-                    else if (!wasConnected)
-                    {
-                        ClearFailurePresentation();
-                        StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
-                            ? string.Empty
-                            : sessionRuntime.StatusText;
-                        ConnectionState = "Idle";
-                    }
-                    break;
-                case SessionRuntimeState.Rejected:
-                    IsConnecting = false;
-                    if (endInvoked)
-                    {
-                        break;
-                    }
-
-                    endReason = SessionEndReason.Failed;
-                    EnsureFailurePresentation(
-                        "Request rejected",
-                        "The other side declined the session.",
-                        "Start new session");
-                    StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
-                        ? UserErrorMapper.HelperRejected()
-                        : sessionRuntime.StatusText;
-                    ConnectionState = "Rejected";
-                    runtimeTerminalFailure = true;
-                    break;
-                case SessionRuntimeState.Failed:
-                    IsConnecting = false;
-                    if (endInvoked)
-                    {
-                        break;
-                    }
-
-                    endReason = ClassifyEndReasonForRuntimeState(SessionRuntimeState.Failed);
-                    if (endReason == SessionEndReason.PeerEnded)
-                    {
-                        ApplyEndReasonPresentation(SessionEndReason.PeerEnded);
-                    }
-                    else
-                    {
-                        EnsureFailurePresentationForTerminalFailure();
-                        StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
-                            ? UserErrorMapper.HelperDisconnected()
-                            : sessionRuntime.StatusText;
-                        ConnectionState = "Failed";
-                        runtimeTerminalFailure = true;
-                    }
-                    break;
-                case SessionRuntimeState.Disconnected:
-                    IsConnecting = false;
-                    if (endInvoked)
-                    {
-                        break;
-                    }
-
-                    endReason = ClassifyEndReasonForRuntimeState(SessionRuntimeState.Disconnected);
-                    if (endReason == SessionEndReason.PeerEnded)
-                    {
-                        ApplyEndReasonPresentation(SessionEndReason.PeerEnded);
-                    }
-                    else
-                    {
-                        EnsureFailurePresentationForTerminalFailure();
-                        StatusText = string.IsNullOrWhiteSpace(sessionRuntime.StatusText)
-                            ? UserErrorMapper.HelperDisconnected()
-                            : sessionRuntime.StatusText;
-                        ConnectionState = "Failed";
-                        runtimeTerminalFailure = true;
-                    }
-                    break;
+                wasConnected = true;
+                ShowChatNotice = false;
             }
         }
 
-        var phaseReason = $"SyncFromRuntime:{sessionRuntime.State}";
-        var phase = endSessionRequested
-            ? SessionUiPhase.Ended
-            : SessionUxPhaseMapper.FromRuntimeState(sessionRuntime.State, isHelper: true);
-        if (runtimeTerminalFailure)
-        {
-            phase = SessionUiPhase.Failed;
-            phaseReason = $"RuntimeTerminal:{sessionRuntime.State}";
-        }
-        else if (!endSessionRequested && endReason == SessionEndReason.PeerEnded)
-        {
-            phase = SessionUiPhase.Ended;
-            phaseReason += ":PeerEnded";
-        }
-        else if (!endSessionRequested &&
-                 endReason == SessionEndReason.Failed &&
-                 sessionRuntime.State is (SessionRuntimeState.Failed or SessionRuntimeState.Disconnected))
-        {
-            var shouldRecover = sessionRuntime.IsTransientStatusVisible || BannerStatus.Kind == UserStatusKind.Reconnecting;
-            phase = shouldRecover ? SessionUiPhase.Recovering : SessionUiPhase.Failed;
-            phaseReason += shouldRecover ? ":Recovering" : ":Failed";
-            TryShowUiRecoveryTransient(
-                $"runtime:{sessionRuntime.State}:{phase}",
-                BuildRecoveryTransientText(shouldRecover),
-                canCancel: shouldRecover || sessionRuntime.CanCancelTransientStatus);
-        }
-        else if (!endSessionRequested &&
-                 sessionRuntime.State is (SessionRuntimeState.Failed or SessionRuntimeState.Disconnected))
-        {
-            var shouldRecover = sessionRuntime.IsTransientStatusVisible || BannerStatus.Kind == UserStatusKind.Reconnecting;
-            phase = shouldRecover ? SessionUiPhase.Recovering : SessionUiPhase.Failed;
-            TryShowUiRecoveryTransient(
-                $"runtime:{sessionRuntime.State}:{phase}",
-                BuildRecoveryTransientText(shouldRecover),
-                canCancel: shouldRecover || sessionRuntime.CanCancelTransientStatus);
-        }
-        else if (!endSessionRequested &&
-                 phase is (SessionUiPhase.Idle or SessionUiPhase.Waiting) &&
-                 (string.Equals(ConnectionState, "Failed", StringComparison.Ordinal) ||
-                  string.Equals(ConnectionState, "Rejected", StringComparison.Ordinal)))
-        {
-            phase = SessionUiPhase.Failed;
-        }
-        else if (phase is SessionUiPhase.Connected or SessionUiPhase.Waiting or SessionUiPhase.Idle)
+        if (flow.UiPhase is SessionUiPhase.Connected or SessionUiPhase.Waiting or SessionUiPhase.Idle)
         {
             if (!sessionRuntime.IsTransientStatusVisible)
             {
@@ -2746,27 +2821,21 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             ClearUiRecoveryTransient();
         }
 
-        if (endSessionRequested ||
-            sessionRuntime.State is SessionRuntimeState.Rejected or SessionRuntimeState.Failed or SessionRuntimeState.Disconnected)
+        if (flow.ShouldClearConversationUi)
         {
             ClearRemoteScreenShareFrame();
         }
 
         SessionUxContext? phaseContext = null;
-        if (runtimeTerminalFailure)
+        if (flow.UiPhase == SessionUiPhase.Failed &&
+            (!string.IsNullOrWhiteSpace(flow.FailureTitle) ||
+             !string.IsNullOrWhiteSpace(flow.FailureMessage) ||
+             !string.IsNullOrWhiteSpace(flow.FailureActionText)))
         {
-            phaseContext = new SessionUxContext(FailureTitle, FailureMessage, FailureActionText);
-        }
-        else if (phase == SessionUiPhase.Failed &&
-            (!string.IsNullOrWhiteSpace(FailureTitle) ||
-             !string.IsNullOrWhiteSpace(FailureMessage) ||
-             !string.IsNullOrWhiteSpace(FailureActionText)))
-        {
-            phaseContext = new SessionUxContext(FailureTitle, FailureMessage, FailureActionText);
+            phaseContext = new SessionUxContext(flow.FailureTitle, flow.FailureMessage, flow.FailureActionText);
         }
 
-        uiStateStore?.SetPhase(phase, phaseReason, phaseContext);
-        fallbackUiPhase = phase;
+        uiStateStore?.SetPhase(flow.UiPhase, $"SyncFromRuntime:Flow:{flow.Phase}", phaseContext);
         ApplySessionBannerPolicy();
         UpdateUiFromSnapshot();
 
@@ -2830,12 +2899,28 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
+        if (showPeerEndedNotice)
+        {
+            ShowTransientBanner = true;
+            TransientBannerText = peerEndedNoticeText;
+            CanCancelTransient = false;
+            return;
+        }
+
         if (sessionRuntime.IsTransientStatusVisible)
         {
+            if (ShouldSuppressPassiveListeningTransient(sessionRuntime.TransientStatusText))
+            {
+                ShowTransientBanner = false;
+                TransientBannerText = string.Empty;
+                CanCancelTransient = false;
+                return;
+            }
+
             var suppressAfterUserCancel =
                 uiRecoveryTransientDismissed &&
                 !IsConnecting &&
-                sessionRuntime.State != SessionRuntimeState.Connecting;
+                sessionRuntime.FlowSnapshot.UiPhase != SessionUiPhase.Connecting;
             if (suppressAfterUserCancel)
             {
                 ShowTransientBanner = false;
@@ -2852,6 +2937,14 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         if (hasUiRecoveryTransient && !uiRecoveryTransientDismissed)
         {
+            if (ShouldSuppressPassiveListeningTransient(uiRecoveryTransientText))
+            {
+                ShowTransientBanner = false;
+                TransientBannerText = string.Empty;
+                CanCancelTransient = false;
+                return;
+            }
+
             ShowTransientBanner = true;
             TransientBannerText = SanitizeTransientText(uiRecoveryTransientText);
             CanCancelTransient = uiRecoveryTransientCanCancel;
@@ -2861,35 +2954,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         ShowTransientBanner = false;
         TransientBannerText = string.Empty;
         CanCancelTransient = false;
-    }
-
-    private void ApplyFailurePresentation(SessionRuntimeState runtimeState)
-    {
-        var presentation = FailurePresentationPolicy.Resolve(runtimeState, ConnectionState, BannerStatus);
-        if (presentation is null)
-        {
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(FailureTitle))
-        {
-            FailureTitle = presentation.Title;
-        }
-
-        if (string.IsNullOrWhiteSpace(FailureMessage))
-        {
-            FailureMessage = presentation.Message;
-        }
-
-        if (string.IsNullOrWhiteSpace(FailureActionText))
-        {
-            FailureActionText = presentation.ActionText;
-        }
-
-        uiStateStore?.SetPhase(
-            SessionUiPhase.Failed,
-            $"SyncFromRuntime:{runtimeState}",
-            new SessionUxContext(FailureTitle, FailureMessage, FailureActionText));
     }
 
     private void ClearFailurePresentation()
@@ -3116,7 +3180,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void ApplySessionBannerPolicy()
     {
-        var phase = uiStateStore?.Phase ?? SessionUxPhaseMapper.FromRuntimeState(sessionRuntime.State, isHelper: true);
+        var phase = sessionRuntime.FlowSnapshot.UiPhase;
         var context = uiStateStore?.Context;
         var overrideStatus = SessionBannerPolicy.BuildPhaseStatusOverride(
             phase,
@@ -3163,57 +3227,62 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         bool nextCanSendFiles;
         bool nextCanEndSession;
         bool nextCanOpenDiagnostics;
+        var flow = sessionRuntime.FlowSnapshot;
         var fileTransferSnapshot = sessionRuntime.FileTransferSnapshot;
         InboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(fileTransferSnapshot.Inbound);
         OutboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(fileTransferSnapshot.Outbound);
         var hasActiveOutboundTransfer = fileTransferSnapshot.Outbound is { IsTerminal: false };
         var phase = GetEffectivePhase();
+        var suppressConnectedControlsDuringLocalEnd = flow.SuppressConnectedControls;
+        var connectedForChat = flow.CanUseChatControls;
         EffectivePhase = phase;
-        nextCanEndSession = CanEndForPhase(phase);
+        nextCanEndSession = !suppressConnectedControlsDuringLocalEnd && CanEndForPhase(phase);
 
         if (!FeatureFlags.UsePhaseDrivenGating || uiStateStore is null)
         {
-            nextCanOpenDiagnostics = openDiagnosticsAction is not null &&
-                phase is SessionUiPhase.Connecting
-                    or SessionUiPhase.Connected
-                    or SessionUiPhase.Recovering
-                    or SessionUiPhase.Failed
-                    or SessionUiPhase.Ended;
-            nextCanSendFiles = phase == SessionUiPhase.Connected &&
+            nextCanOpenDiagnostics = openDiagnosticsAction is not null && flow.ShowDiagnosticsAction;
+            nextCanSendFiles = flow.IsConnectedShellVisible &&
                                sessionRuntime.CanPerform(SessionCapability.FileTransfer) &&
                                !hasActiveOutboundTransfer;
-            nextChatEnabled = phase == SessionUiPhase.Connected;
+            nextChatEnabled = connectedForChat;
         }
         else
         {
             switch (phase)
             {
                 case SessionUiPhase.Connected:
-                    nextChatEnabled = true;
+                    nextChatEnabled = connectedForChat;
                     nextCanSendFiles = sessionRuntime.CanPerform(SessionCapability.FileTransfer) &&
                                        !hasActiveOutboundTransfer;
-                    nextCanOpenDiagnostics = openDiagnosticsAction is not null;
+                    nextCanOpenDiagnostics = openDiagnosticsAction is not null && flow.ShowDiagnosticsAction;
                     break;
 
                 case SessionUiPhase.Connecting:
-                    nextChatEnabled = false;
+                    nextChatEnabled = connectedForChat;
                     nextCanSendFiles = false;
-                    nextCanOpenDiagnostics = openDiagnosticsAction is not null;
+                    nextCanOpenDiagnostics = openDiagnosticsAction is not null && flow.ShowDiagnosticsAction;
                     break;
 
                 case SessionUiPhase.Failed:
                 case SessionUiPhase.Ended:
                     nextChatEnabled = false;
                     nextCanSendFiles = false;
-                    nextCanOpenDiagnostics = openDiagnosticsAction is not null;
+                    nextCanOpenDiagnostics = openDiagnosticsAction is not null && flow.ShowDiagnosticsAction;
                     break;
 
                 default:
                     nextChatEnabled = false;
                     nextCanSendFiles = false;
-                    nextCanOpenDiagnostics = openDiagnosticsAction is not null;
+                    nextCanOpenDiagnostics = openDiagnosticsAction is not null && flow.ShowDiagnosticsAction;
                     break;
             }
+        }
+
+        if (suppressConnectedControlsDuringLocalEnd)
+        {
+            nextChatEnabled = false;
+            nextCanSendFiles = false;
+            nextCanEndSession = false;
         }
 
         IsChatInputEnabled = nextChatEnabled;
@@ -3261,14 +3330,17 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             or SessionUiPhase.Connected
             or SessionUiPhase.Recovering;
 
+    private bool ShouldReturnHelperApprovalTimeoutToWaiting(SessionFlowSnapshot flow)
+    {
+        return flow.Role == SessionRuntimeRole.Helper &&
+               flow.TerminalKind == SessionTerminalKind.Failed &&
+               !flow.IsConnectedShellVisible &&
+               IsApprovalTimeoutFailure();
+    }
+
     private SessionUiPhase GetEffectivePhase()
     {
-        if (FeatureFlags.UsePhaseDrivenGating && uiStateStore is not null)
-        {
-            return uiStateStore.Phase;
-        }
-
-        return fallbackUiPhase;
+        return sessionRuntime.FlowSnapshot.UiPhase;
     }
 
     private string? BuildBannerBridgeState()
@@ -3431,12 +3503,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         if (IsChatInputEnabled &&
             uiStateStore?.Phase != SessionUiPhase.Connected &&
-            sessionRuntime.State != SessionRuntimeState.Connected)
+            !sessionRuntime.FlowSnapshot.IsConnectedShellVisible)
         {
             throw new InvalidOperationException("Helper UI invariant failed: chat input requires connected phase or runtime state.");
         }
 
-        if (endInvoked && ShowTransientBanner)
+        if (localEndCommandInFlight && ShowTransientBanner)
         {
             throw new InvalidOperationException("Helper UI invariant failed: end-invoked state must not show transient banner.");
         }
@@ -3455,9 +3527,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             throw new InvalidOperationException("Helper UI invariant failed: Ended/Failed phase requires disabled chat input.");
         }
 
-        if (!endInvoked &&
+        if (!localEndCommandInFlight &&
             HeaderStatusText.StartsWith("Connected", StringComparison.Ordinal) &&
-            sessionRuntime.State == SessionRuntimeState.Connected &&
+            sessionRuntime.FlowSnapshot.IsConnectedShellVisible &&
+            sessionRuntime.CanPerform(SessionCapability.Chat) &&
             (IsConnectedView || uiStateStore?.Phase == SessionUiPhase.Connected) &&
             !IsChatInputEnabled)
         {
@@ -3472,111 +3545,74 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void PrepareForNewSession(bool clearConnectInput = true)
     {
-        if (!endSessionRequested && !endSessionCancelInvoked && endReason is null)
+        if (!localEndCommandInFlight)
         {
             return;
         }
 
+        ResetToWaitingScreen(clearConnectInput);
+    }
+
+    private void ResetToWaitingScreen(bool clearConnectInput = true)
+    {
         wasConnected = false;
-        endInvoked = false;
-        endReason = null;
-        endSessionRequested = false;
-        endSessionCancelInvoked = false;
+        localEndCommandInFlight = false;
+        lastPeerEndedNoticeKey = string.Empty;
+        ClearFailurePresentation();
+        StatusText = "Waiting for help requests…";
+        ConnectionState = "Waiting";
+        IsConnecting = false;
+        ShowChatNotice = false;
         if (clearConnectInput)
         {
             CodeInput = string.Empty;
         }
-        ChatDraft = string.Empty;
-        ChatMessages.Clear();
-        OnPropertyChanged(nameof(HasChatMessages));
-        OnPropertyChanged(nameof(ShowNoMessagesPlaceholder));
+        ClearSessionConversationUi();
         ClearRemoteScreenShareFrame();
-        if (uiStateStore?.Phase == SessionUiPhase.Ended)
+        presenterBannerStatus = UserFacingStatus.IdleStatus;
+        BannerStatus = presenterBannerStatus;
+        if (uiStateStore is not null)
         {
             uiStateStore.SetPhase(SessionUiPhase.Waiting, "StartNewSession:Helper");
             ApplySessionBannerPolicy();
         }
+        EffectivePhase = SessionUiPhase.Waiting;
     }
 
-    private SessionEndReason ClassifyEndReasonForRuntimeState(SessionRuntimeState state)
+    private void ReturnToListenerWaiting(bool clearConnectInput)
     {
-        if (state is not (SessionRuntimeState.Failed or SessionRuntimeState.Disconnected))
-        {
-            return SessionEndReason.Failed;
-        }
-
-        if (!wasConnected)
-        {
-            return SessionEndReason.Failed;
-        }
-
-        var inferredPeerEnded =
-            sessionRuntime.LastDisconnectWasRemoteEnd ||
-            (state == SessionRuntimeState.Disconnected && sessionRuntime.LastTransportFailure is null);
-        return inferredPeerEnded ? SessionEndReason.PeerEnded : SessionEndReason.Failed;
+        suppressRetryActionForReturnToWaiting = true;
+        helperListenerReturnToWaitingRequested = true;
+        ResetToWaitingScreen(clearConnectInput);
     }
 
-    private void ApplyEndReasonPresentation(SessionEndReason reason)
+    private void ClearSessionConversationUi()
     {
-        ClearRemoteScreenShareFrame();
-        ClearUiRecoveryTransient();
-        ShowTransientBanner = false;
-        TransientBannerText = string.Empty;
-        CanCancelTransient = false;
-
-        switch (reason)
-        {
-            case SessionEndReason.UserEnded:
-                uiRecoveryTransientDismissed = true;
-                ClearFailurePresentation();
-                ShowChatNotice = false;
-                CodeInput = string.Empty;
-                StatusText = "You ended the session.";
-                ConnectionState = "Idle";
-                break;
-            case SessionEndReason.PeerEnded:
-                uiRecoveryTransientDismissed = true;
-                ClearFailurePresentation();
-                ShowChatNotice = false;
-                CodeInput = string.Empty;
-                StatusText = "The other person ended the session.";
-                ConnectionState = "Idle";
-                break;
-            case SessionEndReason.Failed:
-                uiRecoveryTransientDismissed = false;
-                if (wasConnected)
-                {
-                    CodeInput = string.Empty;
-                }
-                if (string.IsNullOrWhiteSpace(FailureTitle))
-                {
-                    FailureTitle = "Session ended";
-                }
-
-                if (string.IsNullOrWhiteSpace(FailureMessage))
-                {
-                    FailureMessage = "The session ended due to a connection problem.";
-                }
-
-                if (string.IsNullOrWhiteSpace(FailureActionText))
-                {
-                    FailureActionText = "Retry";
-                }
-
-                StatusText = "The session ended due to a connection problem.";
-                ConnectionState = "Failed";
-                break;
-        }
+        lastConversationSessionId = string.Empty;
+        ChatDraft = string.Empty;
+        ChatMessages.Clear();
+        InboundFileTransfer = null;
+        OutboundFileTransfer = null;
+        OnPropertyChanged(nameof(HasChatMessages));
+        OnPropertyChanged(nameof(ShowNoMessagesPlaceholder));
     }
 
-    private void ApplyPeerEndedDisconnectUiState()
+    private void SyncConversationBoundaryFromFlow(SessionFlowSnapshot flow)
     {
-        endReason = SessionEndReason.PeerEnded;
-        ApplyEndReasonPresentation(SessionEndReason.PeerEnded);
-        uiStateStore?.SetPhase(SessionUiPhase.Ended, "OnDisconnected:PeerEnded");
-        fallbackUiPhase = SessionUiPhase.Ended;
-        ApplySessionBannerPolicy();
-        UpdateUiFromSnapshot();
+        if (!flow.IsConnectedShellVisible)
+        {
+            return;
+        }
+
+        var sessionId = flow.SessionId;
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            string.Equals(lastConversationSessionId, sessionId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        ClearSessionConversationUi();
+        lastConversationSessionId = sessionId;
     }
 
     private void NotifyDisconnectedUiAffordancesChanged()
@@ -3590,6 +3626,109 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(HeaderStatusText));
         ScanQrFromFileCommand.NotifyCanExecuteChanged();
         ScanQrFromCameraCommand.NotifyCanExecuteChanged();
+    }
+
+    private void ShowPeerEndedNotice(string text)
+    {
+        peerEndedNoticeText = text;
+        showPeerEndedNotice = !string.IsNullOrWhiteSpace(text);
+        peerEndedNoticeTimer.Stop();
+        if (showPeerEndedNotice)
+        {
+            peerEndedNoticeTimer.Start();
+        }
+
+        SyncTransientStatusFromRuntime();
+    }
+
+    private void ApplyTerminalPresentationFromFlow(SessionFlowSnapshot flow)
+    {
+        if (flow.ShouldClearConversationUi)
+        {
+            ClearSessionConversationUi();
+            ClearRemoteScreenShareFrame();
+        }
+
+        ShowTransientBanner = false;
+        TransientBannerText = string.Empty;
+        CanCancelTransient = false;
+        uiRecoveryTransientDismissed = flow.TerminalKind == SessionTerminalKind.PeerEnded || flow.TerminalKind == SessionTerminalKind.LocalEnded;
+        IsChatInputEnabled = false;
+        CanEndSession = false;
+        CanSendFiles = false;
+        ShowChatNotice = false;
+        IsConnecting = false;
+
+        FailureTitle = flow.FailureTitle;
+        FailureMessage = flow.FailureMessage;
+        FailureActionText = flow.FailureActionText;
+
+        switch (flow.TerminalKind)
+        {
+            case SessionTerminalKind.LocalEnded:
+                ClearPeerEndedNotice();
+                StatusText = SessionFlowViewProjection.ResolveStatusText(flow, transportConfig.ApprovedStatusText);
+                ConnectionState = flow.DisplayConnectionState;
+                CodeInput = string.Empty;
+                break;
+            case SessionTerminalKind.PeerEnded:
+                StatusText = SessionFlowViewProjection.ResolveStatusText(flow, transportConfig.ApprovedStatusText);
+                ConnectionState = flow.DisplayConnectionState;
+                CodeInput = string.Empty;
+                TryShowPeerEndedNotice(flow);
+                break;
+            case SessionTerminalKind.Rejected:
+                ClearPeerEndedNotice();
+                StatusText = string.IsNullOrWhiteSpace(flow.TerminalStatusText)
+                    ? UserErrorMapper.HelperRejected()
+                    : flow.TerminalStatusText;
+                ConnectionState = "Rejected";
+                break;
+            case SessionTerminalKind.Failed:
+                ClearPeerEndedNotice();
+                StatusText = string.IsNullOrWhiteSpace(flow.TerminalStatusText)
+                    ? UserErrorMapper.HelperDisconnected()
+                    : flow.TerminalStatusText;
+                ConnectionState = "Failed";
+                break;
+            default:
+                ClearPeerEndedNotice();
+                break;
+        }
+    }
+
+    private void TryShowPeerEndedNotice(SessionFlowSnapshot flow)
+    {
+        if (!flow.ShouldShowPeerEndedNotice || string.IsNullOrWhiteSpace(flow.TerminalStatusText))
+        {
+            ClearPeerEndedNotice();
+            return;
+        }
+
+        var terminalKey = $"{flow.SessionId ?? "(none)"}|{flow.TerminalKind}|{flow.TerminalStatusText}";
+        if (string.Equals(lastPeerEndedNoticeKey, terminalKey, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        lastPeerEndedNoticeKey = terminalKey;
+        ShowPeerEndedNotice(flow.TerminalStatusText);
+    }
+
+    private void ClearPeerEndedNotice()
+    {
+        peerEndedNoticeTimer.Stop();
+        showPeerEndedNotice = false;
+        peerEndedNoticeText = string.Empty;
+    }
+
+    private void OnPeerEndedNoticeTimerTick(object? sender, EventArgs e)
+    {
+        peerEndedNoticeTimer.Stop();
+        showPeerEndedNotice = false;
+        peerEndedNoticeText = string.Empty;
+        SyncTransientStatusFromRuntime();
+        OnPropertyChanged(nameof(HeaderStatusText));
     }
 
     private void ClearRemoteScreenShareFrame()
@@ -3632,6 +3771,28 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         return HeaderStatusText.StartsWith(TransientBannerText, StringComparison.Ordinal) ||
                TransientBannerText.StartsWith(HeaderStatusText, StringComparison.Ordinal);
+    }
+
+    private bool ShouldSuppressPassiveListeningTransient(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        if (HasPendingHelpRequest)
+        {
+            return true;
+        }
+
+        if (EffectivePhase != SessionUiPhase.Waiting &&
+            !string.Equals(ConnectionState, "Waiting", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return text.StartsWith("Connecting", StringComparison.OrdinalIgnoreCase) ||
+               text.StartsWith("Reconnecting", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void RunBoundedSynchronousCleanup(Func<Task> cleanup, TimeSpan timeout)

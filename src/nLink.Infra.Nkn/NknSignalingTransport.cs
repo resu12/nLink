@@ -15,7 +15,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IAuthoritativeConnectedAddressSource
 {
     private const int EnvelopeVersion = 1;
     private static readonly TimeSpan AckWaitTimeout = TimeSpan.FromSeconds(2);
@@ -80,6 +80,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
     public bool SupportsFileTransferV3Streaming => true;
 
+    public FileTransferTransportProfileKind FileTransferTransportProfileKind => FileTransferTransportProfileKind.ConservativeNknStartup;
+
     private string? currentEnvelopeCode;
     private string? remoteEndpoint;
     private string? remoteMediaEndpoint;
@@ -96,6 +98,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private bool remoteSupportsRemoteControl;
     private RemoteControlSessionState transportRemoteControlState = RemoteControlSessionState.Default;
     private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
+    private SessionId? activeApprovedSessionId;
+    private PeerAddress? activeApprovedHelperAddress;
     private LinkedListNode<QueuedControlEnvelope>? queuedLowPriorityMouseMoveNode;
     private bool controlOutboundDrainerActive;
     private long lowLaneDroppedMoves;
@@ -171,6 +175,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     }
 
     public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
+    public event EventHandler<IncomingHelpRequestEventArgs>? IncomingHelpRequest;
+    public event EventHandler<HelpRequestDecisionEventArgs>? HelpRequestDecisionReceived;
 
     public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
 
@@ -210,6 +216,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     public event EventHandler? ScreenShareStopped;
 
     public string LocalPeerAddress => string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address;
+    bool IAuthoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress =>
+        client is IAuthoritativeConnectedAddressSource authoritativeConnectedAddressSource &&
+        authoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress;
     public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
     public bool CanSendSessionEnd => !disposed && !string.IsNullOrWhiteSpace(currentEnvelopeCode) && !string.IsNullOrWhiteSpace(remoteEndpoint);
     public bool CanSendPendingJoinCancel
@@ -949,6 +958,12 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     {
         var localAddress = LocalPeerAddress;
 
+        if (!string.IsNullOrWhiteSpace(remoteEndpoint) &&
+            !AddressesLikelySamePeer(remoteEndpoint, localAddress))
+        {
+            return remoteEndpoint;
+        }
+
         if (currentSessionSecurityState.HelperAddress is PeerAddress helperAddress &&
             !AddressesLikelySamePeer(helperAddress.Value, localAddress))
         {
@@ -961,7 +976,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             return helpeeAddress.Value;
         }
 
-        return string.IsNullOrWhiteSpace(remoteEndpoint) ? null : remoteEndpoint;
+        return null;
     }
 
     private string? ResolveExpectedRemoteMediaPeerAddressForCurrentSession()

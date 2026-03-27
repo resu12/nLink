@@ -646,6 +646,14 @@ function Copy-AppLogsIfPresent {
     Copy-Item -Path (Join-Path $logsDir '*') -Destination $dest -Force -ErrorAction SilentlyContinue
 }
 
+function Clear-AppLogsIfPresent {
+    $logsDir = Join-Path $env:LOCALAPPDATA 'nLink\logs'
+    if (-not (Test-Path $logsDir)) { return }
+
+    Get-ChildItem -Path $logsDir -File -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
 function Cleanup-Processes {
     param([array]$Processes)
     if ($null -eq $Processes -or $Processes.Count -eq 0) { return }
@@ -1041,6 +1049,198 @@ function Ensure-HelperReadyForInviteEntry {
     }
 
     throw 'Unreachable helper invite-entry recovery failure.'
+}
+
+function Assert-ProcessStillRunning {
+    param(
+        [Parameter(Mandatory = $true)]$Process,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    try {
+        if ($Process.HasExited) {
+            $exitCode = '(unknown)'
+            try { $exitCode = [string]$Process.ExitCode } catch {}
+            throw "$Label process exited unexpectedly (pid=$($Process.Id), exitCode=$exitCode)."
+        }
+    }
+    catch [System.InvalidOperationException] {
+        return
+    }
+}
+
+function Copy-HelperIdentityAndReadClipboard {
+    param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$HelperWindow)
+
+    try { Set-Clipboard -Value '' } catch {}
+
+    $copyBtn = Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 45000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helper.CopyHelperIdentity.' -Condition {
+        $btn = Find-VisibleByAutomationId -Root $HelperWindow -AutomationId 'Helper.CopyHelperIdentity'
+        if ($btn -and $btn.Current.IsEnabled) { return $btn }
+        return $null
+    }
+
+    Click-Element $copyBtn
+
+    $raw = Wait-Until -TimeoutMs 5000 -PollMs 150 -OnTimeoutMessage 'Timed out waiting for helper identity on clipboard.' -Condition {
+        $text = [string](Get-ClipboardTextSafe)
+        if (-not [string]::IsNullOrWhiteSpace($text)) { return $text.Trim() }
+        return $null
+    }
+
+    return [string]$raw
+}
+
+function Copy-HelperIdentityWithRecovery {
+    param([Parameter(Mandatory = $true)]$Context)
+
+    $attempts = if (Get-IsNknTransport) { 3 } else { 1 }
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        try {
+            return Copy-HelperIdentityAndReadClipboard -HelperWindow $Context.HelperWindow
+        }
+        catch {
+            if ($attempt -ge $attempts) {
+                throw
+            }
+
+            if (-not (Reenter-RoleFlowAfterConnectionFailure -Window $Context.HelperWindow -HomeButtonText 'I want to help someone')) {
+                Restart-HelperFlow -Context $Context
+            }
+        }
+    }
+
+    throw 'Unreachable helper identity recovery failure.'
+}
+
+function Enter-HelpeeHelperIdentityAndRequestHelp {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$HelpeeWindow,
+        [Parameter(Mandatory = $true)][string]$HelperIdentity
+    )
+
+    $input = Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 30000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helpee.HelperIdentityInput.' -Condition {
+        $el = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.HelperIdentityInput'
+        if ($el -and $el.Current.IsEnabled) { return $el }
+        return $null
+    }
+
+    Set-Text -Element $input -Text $HelperIdentity
+
+    $request = Wait-Until -TimeoutMs (Get-TransportAwareTimeoutMs -DefaultMs 10000 -NknMs 45000) -PollMs 200 -OnTimeoutMessage 'Timed out waiting for Helpee.RequestHelp to become enabled.' -Condition {
+        $btn = Find-VisibleByAutomationId -Root $HelpeeWindow -AutomationId 'Helpee.RequestHelp'
+        if ($btn -and $btn.Current.IsEnabled) { return $btn }
+        return $null
+    }
+
+    Click-Element $request
+    return $request
+}
+
+function Wait-HelperAcceptRequestOrExit {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [int]$TimeoutMs = 60000
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        Assert-ProcessStillRunning -Process $Context.HelperProc -Label 'Helper'
+        Assert-ProcessStillRunning -Process $Context.HelpeeProc -Label 'Helpee'
+
+        if (Test-ConnectionFailedSurface -Window $Context.HelperWindow) {
+            throw "Helper reached Connection failed before showing an incoming request."
+        }
+
+        $accept = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'Helper.AcceptHelpRequest'
+        if (-not $accept) {
+            $accept = Find-ByNameAndType -Root $Context.HelperWindow -Name 'Accept' -ControlType ([System.Windows.Automation.ControlType]::Button)
+            if ($accept -and $accept.Current.IsOffscreen) {
+                $accept = $null
+            }
+        }
+
+        if ($accept -and $accept.Current.IsEnabled) {
+            return $accept
+        }
+
+        Start-Sleep -Milliseconds 250
+    }
+
+    throw "Timed out waiting for helper incoming request acceptance UI."
+}
+
+function Wait-HelpeeAllowOrExit {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [int]$TimeoutMs = 60000
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        Assert-ProcessStillRunning -Process $Context.HelperProc -Label 'Helper'
+        Assert-ProcessStillRunning -Process $Context.HelpeeProc -Label 'Helpee'
+
+        if (Test-ConnectionFailedSurface -Window $Context.HelperWindow) {
+            throw "Helper reached Connection failed before helpee approval."
+        }
+
+        if (Test-ConnectionFailedSurface -Window $Context.HelpeeWindow) {
+            throw "Helpee reached Connection failed before approval."
+        }
+
+        $allow = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'Helpee.Allow'
+        if (-not $allow) {
+            $allow = Find-ByNameAndType -Root $Context.HelpeeWindow -Name 'Allow' -ControlType ([System.Windows.Automation.ControlType]::Button)
+            if ($allow -and $allow.Current.IsOffscreen) {
+                $allow = $null
+            }
+        }
+
+        if ($allow -and $allow.Current.IsEnabled) {
+            return $allow
+        }
+
+        Start-Sleep -Milliseconds 250
+    }
+
+    throw "Timed out waiting for helpee Allow approval UI."
+}
+
+function Wait-ConnectedChatVisibleProcessAware {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [int]$TimeoutMs = 90000
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        Assert-ProcessStillRunning -Process $Context.HelperProc -Label 'Helper'
+        Assert-ProcessStillRunning -Process $Context.HelpeeProc -Label 'Helpee'
+
+        if (Test-ConnectionFailedSurface -Window $Context.HelperWindow) {
+            throw "Helper reached Connection failed before connected chat became visible."
+        }
+
+        if (Test-ConnectionFailedSurface -Window $Context.HelpeeWindow) {
+            throw "Helpee reached Connection failed before connected chat became visible."
+        }
+
+        $helpeeSend = Find-VisibleByAutomationIdOrName -Root $Context.HelpeeWindow -AutomationId 'Chat.Send' -FallbackName 'Send' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
+        $helperSend = Find-VisibleByAutomationIdOrName -Root $Context.HelperWindow -AutomationId 'Chat.Send' -FallbackName 'Send' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
+        $helpeeStatus = Get-SessionHeaderStatusValue -Window $Context.HelpeeWindow
+        $helperStatus = Get-SessionHeaderStatusValue -Window $Context.HelperWindow
+
+        if ($helpeeSend -and $helperSend -and
+            $helpeeStatus -match 'Connected' -and
+            $helperStatus -match 'Connected') {
+            return $true
+        }
+
+        Start-Sleep -Milliseconds 250
+    }
+
+    throw "Timed out waiting for connected chat on both helper and helpee."
 }
 
 function Helper-SendChatMessage {
@@ -1737,6 +1937,37 @@ function Run-ScenarioM {
     })
 }
 
+function Run-ScenarioNknDirectConnect {
+    param([Parameter(Mandatory = $true)]$Context)
+    Reset-ScenarioContext -Context $Context
+
+    if (-not (Get-IsNknTransport)) {
+        Write-Host '[GUI Smoke][NKN_DIRECT_CONNECT] SKIP: scenario requires NLINK_TRANSPORT=NKN.' -ForegroundColor Yellow
+        return
+    }
+
+    Start-HelperFlow -Context $Context
+    $helperIdentity = Copy-HelperIdentityWithRecovery -Context $Context
+    if ([string]::IsNullOrWhiteSpace($helperIdentity)) {
+        throw 'Helper identity copy returned empty text.'
+    }
+
+    Start-HelpeeFlow -Context $Context
+    [void](Enter-HelpeeHelperIdentityAndRequestHelp -HelpeeWindow $Context.HelpeeWindow -HelperIdentity $helperIdentity)
+
+    $accept = Wait-HelperAcceptRequestOrExit -Context $Context -TimeoutMs 90000
+    Click-Element $accept
+
+    $allow = Wait-HelpeeAllowOrExit -Context $Context -TimeoutMs 90000
+    Click-Element $allow
+
+    [void](Wait-ConnectedChatVisibleProcessAware -Context $Context -TimeoutMs 120000)
+
+    $msg = "gui smoke nkn direct connect"
+    Send-ChatMessage -Window $Context.HelperWindow -Text $msg
+    Wait-MessageVisible -Window $Context.HelpeeWindow -MessageText $msg -TimeoutMs 30000
+}
+
 function Run-ScenarioHeaderChatCoherence {
     param([Parameter(Mandatory = $true)]$Context)
     Reset-ScenarioContext -Context $Context
@@ -2117,6 +2348,8 @@ if (-not (Test-Path $resolvedExe)) {
     exit 2
 }
 
+Write-Host "[GUI Smoke] Using executable: $resolvedExe" -ForegroundColor DarkGray
+
 $oldTransport = $env:NLINK_TRANSPORT
 $requestedScenarios = [string]$env:NLINK_GUI_SMOKE_SCENARIOS
 if ([string]::IsNullOrWhiteSpace($requestedScenarios)) { $requestedScenarios = 'A,B,C,E,F,G,H,I,J,K,L,M' }
@@ -2137,6 +2370,8 @@ try {
         $env:NLINK_TRANSPORT = 'DEVLOCAL'
     }
 
+    Clear-AppLogsIfPresent
+
     foreach ($scenario in @($scenarioList)) {
         switch ($scenario) {
             'A' { Invoke-Scenario -Name 'A' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioA -Context $ctx } }
@@ -2152,6 +2387,7 @@ try {
             'K' { Invoke-Scenario -Name 'K' -TimeoutSec ([Math]::Min($TimeoutSeconds, 60)) -Action { Run-ScenarioK -Context $ctx } }
             'L' { Invoke-Scenario -Name 'L' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioL -Context $ctx } }
             'M' { Invoke-Scenario -Name 'M' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioM -Context $ctx } }
+            'NKN_DIRECT_CONNECT' { Invoke-Scenario -Name 'nkn_direct_connect' -TimeoutSec ([Math]::Min($TimeoutSeconds, 180)) -Action { Run-ScenarioNknDirectConnect -Context $ctx } }
             'END_SESSION_DISABLES_CHAT' { Invoke-Scenario -Name 'end_session_disables_chat' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioEndSessionDisablesChat -Context $ctx } }
             'HEADER_CHAT_COHERENCE' { Invoke-Scenario -Name 'header_chat_coherence' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioHeaderChatCoherence -Context $ctx } }
             'SCREENSHARE_BUTTON_VISIBILITY' { Invoke-Scenario -Name 'screenshare_button_visibility' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioScreenShareButtonVisibility -Context $ctx } }
@@ -2159,7 +2395,7 @@ try {
             'SCREENSHARE_CHAT_COEXISTENCE' { Invoke-Scenario -Name 'screenshare_chat_coexistence' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioScreenShareChatCoexistence -Context $ctx } }
             'SCREENSHARE_STOP_PENDING_APPROVAL' { Invoke-Scenario -Name 'screenshare_stop_pending_approval' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioScreenShareStopWhileControlApprovalPending -Context $ctx } }
             'STATUS_TEXT_GUARDRAILS' { Invoke-Scenario -Name 'status_text_guardrails' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioStatusTextGuardrails -Context $ctx } }
-            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M,HEADER_CHAT_COHERENCE,END_SESSION_DISABLES_CHAT,SCREENSHARE_BUTTON_VISIBILITY,SCREENSHARE_VIEWER_TOGGLE,SCREENSHARE_CHAT_COEXISTENCE,STATUS_TEXT_GUARDRAILS." }
+            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M,NKN_DIRECT_CONNECT,HEADER_CHAT_COHERENCE,END_SESSION_DISABLES_CHAT,SCREENSHARE_BUTTON_VISIBILITY,SCREENSHARE_VIEWER_TOGGLE,SCREENSHARE_CHAT_COEXISTENCE,STATUS_TEXT_GUARDRAILS." }
         }
     }
 

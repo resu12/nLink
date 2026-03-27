@@ -99,13 +99,19 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int PullV3HealthyMaximumTargetInFlightBytes = 4 * 1024 * 1024;
     private const int PullV3ScreenshareTargetInFlightBytes = 256 * 1024;
     private const int PullV3DegradedTargetInFlightBytes = 256 * 1024;
+    private const int PullV3ConservativeStartupTargetInFlightBytes = 512 * 1024;
+    private const int PullV3ConservativeStartupDegradedTargetInFlightBytes = 256 * 1024;
     private const int PullV3HealthyAckThresholdBytes = 256 * 1024;
     private const int PullV3HealthyAckCoalesceDelayMs = 150;
     private const int PullV3RepairRequestChunkCount = 4;
     private const int PullV3GrantLowWatermarkDivisor = 2;
     private const int PullV3HealthyDefaultChunkSizeBytes = 40 * 1024;
+    private const int PullV3ConservativeStartupChunkSizeBytes = 24 * 1024;
     private const int PullV3ScreenshareDefaultChunkSizeBytes = 24 * 1024;
     private const int PullV3DegradedDefaultChunkSizeBytes = 20 * 1024;
+    private const int PullV3ConservativeStartupInitialPipelineDepth = 4;
+    private const int PullV3ConservativeStartupStepUpProgressBytesThreshold = 1024 * 1024;
+    private const int PullV3ConservativeStartupStepUpHoldMs = 1500;
     private const int PullV3ProfileAdjustmentCooldownMs = 1500;
     private const int PullV3StepUpProgressBytesThreshold = 2 * 1024 * 1024;
     private const int PullV3HealthyStepUpHoldMs = 1000;
@@ -440,6 +446,27 @@ public sealed partial class SessionFileTransferService : IDisposable
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         DetachTransportCore(markActiveTransfersFailed: true, failureCode: DetachedErrorCode, failureMessage: "Transport was detached.");
+    }
+
+    public void ResetSessionState()
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+
+        InboundTransferContext? inbound;
+        OutboundTransferContext? outbound;
+        lock (gate)
+        {
+            inbound = inboundTransfer;
+            outbound = outboundTransfer;
+            inboundTransfer = null;
+            outboundTransfer = null;
+        }
+
+        inbound?.CancelLifetime();
+        outbound?.CancelLifetime();
+        inbound?.DisposeResources();
+        outbound?.DisposeResources();
+        RaiseTransferChanged(CreateSnapshot());
     }
 
     public async Task<FileTransferTransferSnapshot?> TryStartSendAsync(
@@ -798,7 +825,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 context.TransferId,
                 context.SessionId,
                 context.ChunkSizeBytes,
-                pipelineDepth: ResolveOutboundInitialPipelineDepth(),
+                pipelineDepth: ResolveOutboundInitialPipelineDepth(context),
                 screenshareActive: sessionScreenShareActive,
                 screenshareDegraded: sessionScreenShareDegraded);
             RaiseTransferChanged(snapshot);
@@ -2527,7 +2554,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         OutboundTransferContext context,
         IFileTransferSignalingTransport? currentTransport)
     {
-        var requestedChunkSize = ResolvePreferredOutboundChunkSize(context);
+        var requestedChunkSize = ResolvePreferredOutboundChunkSize(context, currentTransport);
         if (currentTransport is IFileTransferChunkBudgetProvider chunkBudgetProvider)
         {
             return chunkBudgetProvider.ResolveSafeOutboundChunkSize(
@@ -2571,6 +2598,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         => currentTransport is IFileTransferProtocolCapabilities { SupportsFileTransferV3Streaming: true }
             ? FileTransferProtocol.ProtocolVersionV3
             : FileTransferProtocol.ProtocolVersionV2;
+
+    private static FileTransferTransportProfileKind ResolveTransportProfileKind(IFileTransferSignalingTransport? currentTransport)
+        => currentTransport is IFileTransferTransportProfileProvider transportProfileProvider
+            ? transportProfileProvider.FileTransferTransportProfileKind
+            : FileTransferTransportProfileKind.Default;
+
+    private static bool UsesConservativeNknStartup(
+        IFileTransferSignalingTransport? currentTransport,
+        int negotiatedDataProtocolVersion)
+        => negotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV3 &&
+           ResolveTransportProfileKind(currentTransport) == FileTransferTransportProfileKind.ConservativeNknStartup;
 
     private int ResolveAcceptedInboundDataProtocolVersion(InboundTransferContext context)
         => Math.Min(context.OfferedDataProtocolVersion, ResolvePreferredDataProtocolVersion(transport));
@@ -3411,6 +3449,14 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public DateTimeOffset? PullV3LastRepairRequestSentUtc { get; set; }
 
+        public Queue<DateTimeOffset> RecentPullRepairRequestSentUtc { get; } = new();
+
+        public FileTransferTransportProfileKind TransportProfileKind { get; set; } = FileTransferTransportProfileKind.Default;
+
+        public bool PullV3ConservativeStartupActive { get; set; }
+
+        public bool PullV3ConservativeStartupDegradedActive { get; set; }
+
         public bool PullV3ExpandedWindowActive { get; set; }
 
         public bool PullV3LimitedWindowActive { get; set; }
@@ -3518,10 +3564,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
     }
 
-    private int ResolvePreferredOutboundChunkSize(OutboundTransferContext context)
+    private int ResolvePreferredOutboundChunkSize(
+        OutboundTransferContext context,
+        IFileTransferSignalingTransport? currentTransport = null)
     {
         var isV3 = context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV3;
-        var preferredChunkSize = context.Descriptor.ChunkSizeBytes ?? (isV3 ? PullV3HealthyDefaultChunkSizeBytes : PullHealthyDefaultChunkSizeBytes);
+        var defaultChunkSize = isV3
+            ? UsesConservativeNknStartup(currentTransport, context.NegotiatedDataProtocolVersion)
+                ? PullV3ConservativeStartupChunkSizeBytes
+                : PullV3HealthyDefaultChunkSizeBytes
+            : PullHealthyDefaultChunkSizeBytes;
+        var preferredChunkSize = context.Descriptor.ChunkSizeBytes ?? defaultChunkSize;
         if (sessionScreenShareDegraded)
         {
             preferredChunkSize = Math.Min(preferredChunkSize, isV3 ? PullV3DegradedDefaultChunkSizeBytes : PullDegradedScreenshareDefaultChunkSizeBytes);

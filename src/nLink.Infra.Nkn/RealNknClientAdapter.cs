@@ -1737,6 +1737,14 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
 
 #if DEBUG
+        foreach (var candidate in EnumerateNodeCandidates())
+        {
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
         return "node";
 #else
         throw new FileNotFoundException(
@@ -1761,6 +1769,28 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         for (var i = 0; i < 8 && current is not null; i++, current = current.Parent)
         {
             yield return Path.Combine(current.FullName, "tools", "nkn-bridge", "index.js");
+            yield return Path.Combine(current.FullName, "artifacts", "bridge", rid, "index.js");
+        }
+    }
+
+    private static IEnumerable<string> EnumerateNodeCandidates()
+    {
+        var rid = GetBridgeRid();
+        var exeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "node.exe" : "node";
+
+        yield return Path.Combine(AppContext.BaseDirectory, "bridge", rid, exeName);
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            yield return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Resources", "bridge", rid, exeName));
+        }
+
+        yield return Path.Combine(AppContext.BaseDirectory, "bridge", exeName);
+
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 8 && current is not null; i++, current = current.Parent)
+        {
+            yield return Path.Combine(current.FullName, "artifacts", "bridge", rid, exeName);
+            yield return Path.Combine(current.FullName, "tools", "node", rid, exeName);
         }
     }
 

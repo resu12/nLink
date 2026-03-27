@@ -11,6 +11,17 @@ public interface IFileTransferChunkBudgetProvider
     int ResolveSafeOutboundChunkSize(FileTransferChunkBudgetRequest request);
 }
 
+public enum FileTransferTransportProfileKind
+{
+    Default = 0,
+    ConservativeNknStartup = 1,
+}
+
+public interface IFileTransferTransportProfileProvider
+{
+    FileTransferTransportProfileKind FileTransferTransportProfileKind { get; }
+}
+
 public interface IFileTransferProtocolCapabilities
 {
     bool SupportsFileTransferV3Streaming { get; }

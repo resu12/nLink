@@ -34,7 +34,7 @@ using NLink.SmokeTests.Fakes;
 namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
-public class SmokeTests
+public partial class SmokeTests
 {
     [Trait("Category", "Smoke")]
     [Fact]
@@ -1641,6 +1641,45 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task SessionRuntime_HelperListenerTransportDisconnect_RestartsQuietly()
+    {
+        var created = new List<ScriptedSignalingTransport>();
+        var factory = new CountingTransportFactory(() =>
+        {
+            var transport = new ScriptedSignalingTransport();
+            lock (created)
+            {
+                created.Add(transport);
+            }
+
+            return transport;
+        });
+
+        using var runtime = new SessionRuntime(factory.Create);
+        await runtime.StartHelperListeningAsync(CancellationToken.None);
+
+        ScriptedSignalingTransport first;
+        lock (created)
+        {
+            Assert.NotEmpty(created);
+            first = Assert.IsType<ScriptedSignalingTransport>(created[0]);
+        }
+
+        first.RaiseDisconnected();
+
+        await WaitUntilAsync(() => factory.CreateCount >= 2, TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Waiting &&
+                  string.Equals(runtime.StatusText, "Waiting for help requests…", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(2));
+
+        Assert.Equal(2, factory.CreateCount);
+        Assert.Equal(SessionRuntimeState.Waiting, runtime.State);
+        Assert.Equal("Waiting for help requests…", runtime.StatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task SessionRuntime_StartHelpee_SynchronousTransportFailure_DoesNotRemainTransportInitializing()
     {
         PersistenceDiagnostics.ClearForTests();
@@ -1810,6 +1849,75 @@ public class SmokeTests
         {
             PersistenceDiagnostics.ClearForTests();
         }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeeViewModel_RequestHelpTimeout_DoesNotCrashAndRestoresWaitingState()
+    {
+        using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+        var scriptedTransport = new ScriptedSignalingTransport(
+            onHostByAddressAsync: _ => Task.CompletedTask,
+            localPeerAddress: "helpee.request.timeout",
+            onSendHelpRequestAsync: static (_, _) => throw new TimeoutException("Ack was not received."));
+
+        using var runtime = new SessionRuntime(() => scriptedTransport);
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateNknTestConfig(), runtime);
+
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
+
+        helpee.InviteHelperIdentityInput = "helper.request.target";
+        await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
+
+        var requestTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helpee, "RequestHelpAsync"));
+        await requestTask;
+
+        Assert.Equal(SessionRuntimeState.Waiting, runtime.State);
+        Assert.Equal("Waiting for helper…", helpee.ConnectionStatus);
+        Assert.Contains("Couldn't reach the helper", helpee.ShareInviteStatusText, StringComparison.Ordinal);
+        Assert.Null(runtime.PendingOutboundHelpRequestDecision);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeeViewModel_RequestHelp_CompactBootstrap_RoutesToHelperAddress_AndBindsInviteToHelperId()
+    {
+        using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+        HelpRequestMessage? sentRequest = null;
+        var scriptedTransport = new ScriptedSignalingTransport(
+            onHostByAddressAsync: _ => Task.CompletedTask,
+            localPeerAddress: "helpee.compact.bootstrap",
+            onSendHelpRequestAsync: (request, _) =>
+            {
+                sentRequest = request;
+                return Task.CompletedTask;
+            });
+
+        using var runtime = new SessionRuntime(() => scriptedTransport);
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateNknTestConfig(), runtime);
+
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
+
+        var helperAddress = new PeerAddress("nlink-helper.request.target.compact.1234567890");
+        var helperIdentity = new PeerAddress("nlink-helper.identity.compact.0987654321");
+        helpee.InviteHelperIdentityInput = HelperBootstrapQrPayload.Format(
+            HelperBootstrapPayload.Create(
+                helperAddress,
+                helperId: HelperIdentityTokenCodec.Encode(helperIdentity),
+                fingerprintHint: "ignored"));
+        await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
+
+        var requestTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helpee, "RequestHelpAsync"));
+        await requestTask;
+
+        Assert.NotNull(sentRequest);
+        Assert.Equal(helperAddress, sentRequest!.HelperAddress);
+
+        var validator = InviteTokenServiceFactory.CreateInviteTokenValidator();
+        var validation = validator.Validate(sentRequest.InviteToken, DateTimeOffset.UtcNow);
+        Assert.True(validation.IsSuccess, validation.Message);
+        Assert.NotNull(validation.Invite);
+        Assert.Equal(helperIdentity, validation.Invite!.BoundHelperAddress);
     }
 
     [Trait("Category", "Smoke")]
@@ -2883,6 +2991,165 @@ public class SmokeTests
         Assert.False(helperRuntime.IsCapabilityGranted(CapabilityGrant.RemoteControl));
         Assert.False(requested);
         Assert.False(helpeeRuntime.HasPendingRemoteControlConsentPrompt);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_DirectHelpRequest_ReachesOnlyIntendedHelper()
+    {
+        var helpeeAddress = CreateTestPeerAddress();
+        var intendedHelperAddress = CreateTestPeerAddress();
+        var otherHelperAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(helpeeAddress));
+        using var intendedHelperRuntime = new SessionRuntime(() => new DevLocalTransport(intendedHelperAddress));
+        using var otherHelperRuntime = new SessionRuntime(() => new DevLocalTransport(otherHelperAddress));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        await intendedHelperRuntime.StartHelperListeningAsync(cts.Token);
+        await otherHelperRuntime.StartHelperListeningAsync(cts.Token);
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+
+        var invite = CreateValidatedInviteForTarget(
+            GetHostedAddressOrThrow(helpeeRuntime),
+            out var rawToken,
+            InviteCapabilities.Chat,
+            boundHelperAddress: GetHostedAddressOrThrow(intendedHelperRuntime));
+
+        await helpeeRuntime.RequestHelpAsync(GetHostedAddressOrThrow(intendedHelperRuntime), rawToken, cts.Token);
+
+        await WaitUntilAsync(() => intendedHelperRuntime.HasPendingHelpRequest, TimeSpan.FromSeconds(3));
+        await Task.Delay(200, cts.Token);
+
+        Assert.True(intendedHelperRuntime.HasPendingHelpRequest);
+        Assert.NotNull(intendedHelperRuntime.PendingHelpRequest);
+        Assert.False(otherHelperRuntime.HasPendingHelpRequest);
+        Assert.Equal(GetHostedAddressOrThrow(helpeeRuntime), intendedHelperRuntime.PendingHelpRequest!.HelpeeAddress);
+        Assert.Equal(GetHostedAddressOrThrow(intendedHelperRuntime), intendedHelperRuntime.PendingHelpRequest.HelperAddress);
+        Assert.Equal(SessionRuntimeState.Waiting, otherHelperRuntime.State);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_DirectHelpRequest_RejectFlow_UpdatesHelpeeAndClearsHelperPending()
+    {
+        var helpeeAddress = CreateTestPeerAddress();
+        var helperAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(helpeeAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        await helperRuntime.StartHelperListeningAsync(cts.Token);
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+
+        var invite = CreateValidatedInviteForTarget(
+            GetHostedAddressOrThrow(helpeeRuntime),
+            out var rawToken,
+            InviteCapabilities.Chat,
+            boundHelperAddress: GetHostedAddressOrThrow(helperRuntime));
+
+        await helpeeRuntime.RequestHelpAsync(GetHostedAddressOrThrow(helperRuntime), rawToken, cts.Token);
+        await WaitUntilAsync(() => helperRuntime.HasPendingHelpRequest, TimeSpan.FromSeconds(3));
+
+        await helperRuntime.RejectIncomingHelpRequestAsync("request_rejected", cts.Token);
+
+        await WaitUntilAsync(
+            () => helpeeRuntime.PendingOutboundHelpRequestDecision is not null &&
+                  helpeeRuntime.State == SessionRuntimeState.Rejected &&
+                  !helperRuntime.HasPendingHelpRequest,
+            TimeSpan.FromSeconds(3));
+
+        Assert.NotNull(helpeeRuntime.PendingOutboundHelpRequestDecision);
+        Assert.False(helpeeRuntime.PendingOutboundHelpRequestDecision!.Accepted);
+        Assert.Equal("request_rejected", helpeeRuntime.PendingOutboundHelpRequestDecision.Reason);
+        Assert.Equal("The helper declined the request.", helpeeRuntime.StatusText);
+        Assert.Equal(SessionRuntimeState.Waiting, helperRuntime.State);
+        Assert.Equal("Waiting for help requests…", helperRuntime.StatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeeViewModel_HelperRejectsHelpRequest_ShowsRejectedStatus()
+    {
+        using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+        var transportConfig = CreateDevLocalTestConfig();
+        var helpeeAddress = CreateTestPeerAddress();
+        var helperAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(helpeeAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        await helperRuntime.StartHelperListeningAsync(cts.Token);
+        await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(3));
+
+        helpee.SetVerifiedInviteHelperIdentity(GetHostedAddressOrThrow(helperRuntime));
+        await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(3));
+
+        var requestTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helpee, "RequestHelpAsync"));
+        await requestTask;
+
+        await WaitUntilAsync(() => helperRuntime.HasPendingHelpRequest, TimeSpan.FromSeconds(3));
+        await helperRuntime.RejectIncomingHelpRequestAsync("request_rejected", cts.Token);
+
+        await WaitUntilAsync(
+            () => helpeeRuntime.PendingOutboundHelpRequestDecision is { Accepted: false },
+            TimeSpan.FromSeconds(3));
+        InvokePrivateMethod(helpee, "UpdateUiFromSnapshot");
+
+        Assert.Equal("Failed", helpee.ConnectionState);
+        Assert.Equal("Request rejected", helpee.HeaderStatusText);
+        Assert.Equal("Request was rejected.", helpee.ConnectionStatus);
+        Assert.Equal("The helper declined the request.", helpee.FailureMessage);
+        Assert.True(helpee.ShowFailurePanel);
+        Assert.Equal("The helper declined the request.", helpee.ShareInviteStatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_DirectHelpRequest_AcceptFlow_ConnectsAfterHelpeeApproval()
+    {
+        var helpeeAddress = CreateTestPeerAddress();
+        var helperAddress = CreateTestPeerAddress();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(helpeeAddress));
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        await helperRuntime.StartHelperListeningAsync(cts.Token);
+        await helpeeRuntime.StartHelpeeAsync(cts.Token);
+
+        var invite = CreateValidatedInviteForTarget(
+            GetHostedAddressOrThrow(helpeeRuntime),
+            out var rawToken,
+            InviteCapabilities.Chat,
+            boundHelperAddress: GetHostedAddressOrThrow(helperRuntime));
+
+        await helpeeRuntime.RequestHelpAsync(GetHostedAddressOrThrow(helperRuntime), rawToken, cts.Token);
+        await WaitUntilAsync(() => helperRuntime.HasPendingHelpRequest, TimeSpan.FromSeconds(3));
+
+        var acceptTask = helperRuntime.AcceptIncomingHelpRequestAsync(cts.Token);
+        await WaitUntilAsync(
+            () => helpeeRuntime.PendingOutboundHelpRequestDecision is not null &&
+                  helpeeRuntime.PendingApprovalRequest is not null,
+            TimeSpan.FromSeconds(5));
+
+        Assert.NotNull(helpeeRuntime.PendingOutboundHelpRequestDecision);
+        Assert.True(helpeeRuntime.PendingOutboundHelpRequestDecision!.Accepted);
+        Assert.Equal(SessionRuntimeState.IncomingJoinRequest, helpeeRuntime.State);
+        Assert.NotNull(helpeeRuntime.PendingApprovalRequest);
+        Assert.Equal(GetHostedAddressOrThrow(helperRuntime), helpeeRuntime.PendingApprovalRequest!.HelperIdentity);
+
+        await helpeeRuntime.ApproveAsync(cts.Token);
+        await acceptTask;
+
+        await WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected,
+            TimeSpan.FromSeconds(3));
+
+        Assert.Equal("Connected", helpeeRuntime.StatusText);
+        Assert.Equal("Connected", helperRuntime.StatusText);
+        Assert.True(helpeeRuntime.CanSendChat);
+        Assert.True(helperRuntime.CanSendChat);
     }
 
     [Trait("Category", "Smoke")]
@@ -4874,66 +5141,150 @@ public class SmokeTests
         InvokePrivateMethod(helper, "OnDisconnected", helperRuntime, EventArgs.Empty);
 
         await WaitUntilAsync(
-            () => helper.EffectivePhase == SessionUiPhase.Ended &&
-                  string.Equals(helper.ConnectionState, "Idle", StringComparison.Ordinal) &&
+            () => helper.EffectivePhase == SessionUiPhase.Waiting &&
+                  string.Equals(helper.ConnectionState, "Waiting", StringComparison.Ordinal) &&
+                  helper.ShowTransientBanner &&
+                  string.Equals(helper.TransientBannerText, "The other person ended the session.", StringComparison.Ordinal) &&
                   !helper.ShowRemoteScreenShareFrame &&
                   !helper.ShowStopControlAction &&
                   !helper.ShowRemoteControlActiveStatus,
             TimeSpan.FromSeconds(5));
 
         Assert.Equal("The other person ended the session.", helper.HeaderStatusText);
+        Assert.True(helper.ShowTransientBanner);
+        Assert.Equal("The other person ended the session.", helper.TransientBannerText);
         Assert.False(helper.IsChatInputEnabled);
         Assert.False(helper.ShowFailurePanel);
     }
 
+
     [Trait("Category", "Smoke")]
     [Fact]
-    public async Task HelperPageViewModel_OnRemoteSessionEnded_ClearsActiveSessionAffordancesImmediately()
+    public void HelperPageViewModel_WaitingSession_ClearsStaleUserEndedMarker_FromPreviousSession()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            helperRuntime,
+            qrCodeService: new NoOpQrCodeService());
+
+        SetPrivateField(helper, "connectionState", "Connected");
+        SetPrivateField(helper, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateField(helper, "wasConnected", true);
+        SetPrivateField(helper, "endSessionRequested", true);
+        SetPrivateField(helper, "endReason", SessionEndReason.UserEnded);
+        SetPrivateField(helperRuntime, "state", SessionRuntimeState.Waiting);
+        SetPrivateField(helperRuntime, "statusText", "Waiting for help requests…");
+
+        InvokePrivateMethod(helper, "SyncFromRuntime");
+
+        Assert.False(Assert.IsType<bool>(GetPrivateField(helper, "endSessionRequested")));
+        Assert.Equal(SessionUiPhase.Waiting, helper.EffectivePhase);
+        Assert.True(helper.ShowMainControls);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperPageViewModel_WaitingRuntime_ClearsStaleUserEndedMarker_AfterLocalEnd()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            helperRuntime,
+            qrCodeService: new NoOpQrCodeService());
+
+        SetPrivateField(helper, "connectionState", "Idle");
+        SetPrivateField(helper, "effectivePhase", SessionUiPhase.Ended);
+        SetPrivateField(helper, "wasConnected", true);
+        SetPrivateField(helper, "endSessionRequested", true);
+        SetPrivateField(helper, "endReason", SessionEndReason.UserEnded);
+        SetPrivateField(helperRuntime, "state", SessionRuntimeState.Waiting);
+        SetPrivateField(helperRuntime, "statusText", "Waiting for help requests…");
+
+        InvokePrivateMethod(helper, "SyncFromRuntime");
+
+        Assert.False(Assert.IsType<bool>(GetPrivateField(helper, "endSessionRequested")));
+        Assert.Equal(SessionUiPhase.Waiting, helper.EffectivePhase);
+        Assert.Equal("Waiting", helper.ConnectionState);
+        Assert.True(helper.ShowMainControls);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperPageViewModel_ConnectedRuntime_EnablesChatInput_WhenFallbackPhaseLags()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            helperRuntime,
+            qrCodeService: new NoOpQrCodeService());
+
+        SetPrivateField(helperRuntime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(helperRuntime, "statusText", "Connected");
+        SetPrivateField(helper, "connectionState", "Connected");
+        SetPrivateField(helper, "statusText", "Connected");
+        SetPrivateField(helper, "fallbackUiPhase", SessionUiPhase.Connecting);
+
+        InvokePrivateMethod(helper, "UpdateUiFromSnapshot");
+
+        Assert.True(helper.IsChatInputEnabled);
+        Assert.Equal("Connected", helper.ConnectionState);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperPageViewModel_RemoteControlActive_DoesNotDisableEndSession()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            helperRuntime,
+            qrCodeService: new NoOpQrCodeService());
+
+        SetPrivateField(
+            helperRuntime,
+            "remoteControlSessionState",
+            RemoteControlSessionState.Default with { ControlState = ControlState.Active });
+        SetPrivateField(helper, "canEndSession", true);
+
+        Assert.True(helper.CanEndSession);
+        Assert.True(helper.EndSessionCommand.CanExecute(null));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperPageViewModel_OnDisconnected_ClearsChatHistory_WhenPeerEndsSession()
     {
         var transportConfig = CreateDevLocalTestConfig();
         using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
         using var helper = new HelperPageViewModel(cancelAction: static () => { }, transportConfig, helperRuntime);
 
+        helper.ChatMessages.Add(new ChatLineViewModel { Text = "old", IsLocal = true });
         SetPrivateField(helper, "connectionState", "Connected");
         SetPrivateField(helper, "effectivePhase", SessionUiPhase.Connected);
         SetPrivateField(helper, "wasConnected", true);
         SetPrivateField(helperRuntime, "state", SessionRuntimeState.Connected);
-        SetPrivateField(
-            helperRuntime,
-            "remoteControlSessionState",
-            new RemoteControlSessionState(
-                ControlState.Active,
-                "peer",
-                "req-1",
-                null,
-                SupportsRemoteControl: true,
-                PeerSupportsRemoteControl: true));
-        SetPrivateField(helper.ScreenShareViewer, "isActive", true);
-        SetPrivateField(helper.ScreenShareViewer, "currentFrame", CreateTestBitmap(1, 1));
-        InvokePrivateMethod(
-            helper,
-            "OnScreenShareViewerPropertyChanged",
-            helper.ScreenShareViewer,
-            new PropertyChangedEventArgs(nameof(ScreenShareViewerViewModel.CurrentFrame)));
-        InvokePrivateMethod(helper, "OnRemoteControlStateChanged", helperRuntime, EventArgs.Empty);
+        SetPrivateField(helperRuntime, "statusText", "Connected");
+        SetPrivateField(helperRuntime, "lastDisconnectWasRemoteEnd", true);
 
-        Assert.True(helper.ShowRemoteScreenShareFrame);
-        Assert.True(helper.ShowStopControlAction);
-        Assert.True(helper.ShowRemoteControlActiveStatus);
-
-        InvokePrivateMethod(helper, "OnRemoteSessionEnded", helperRuntime, EventArgs.Empty);
+        InvokePrivateMethod(helper, "OnDisconnected", helperRuntime, EventArgs.Empty);
 
         await WaitUntilAsync(
             () => helper.EffectivePhase == SessionUiPhase.Ended &&
                   string.Equals(helper.ConnectionState, "Idle", StringComparison.Ordinal) &&
-                  !helper.ShowRemoteScreenShareFrame &&
-                  !helper.ShowStopControlAction &&
-                  !helper.ShowRemoteControlActiveStatus,
+                  !helper.HasChatMessages,
             TimeSpan.FromSeconds(5));
 
-        Assert.Equal("The other person ended the session.", helper.HeaderStatusText);
-        Assert.False(helper.IsChatInputEnabled);
-        Assert.False(helper.ShowFailurePanel);
+        Assert.True(helper.ShowNoMessagesPlaceholder);
+        Assert.Equal("The other person ended the session.", helper.TransientBannerText);
     }
 
     [Trait("Category", "Smoke")]
@@ -5684,6 +6035,30 @@ public class SmokeTests
         Assert.False(string.IsNullOrWhiteSpace(helper.HeaderStatusText));
     }
 
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperPageViewModel_EndSession_DoesNotInvokeCancelAction()
+    {
+        var cancelInvoked = false;
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(
+            cancelAction: () => cancelInvoked = true,
+            CreateDevLocalTestConfig(),
+            helperRuntime);
+
+        SetPrivateField(helper, "connectionState", "Connected");
+        SetPrivateField(helper, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateField(helper, "wasConnected", true);
+        SetPrivateField(helper, "canEndSession", true);
+
+        helper.EndSessionCommand.Execute(null);
+
+        Assert.False(cancelInvoked);
+        Assert.True(helper.ShowMainControls);
+        Assert.False(helper.ShowConnectedPanel);
+    }
+
     [Trait("Category", "Smoke")]
     [Fact]
     public async Task HelperPageViewModel_EndSession_DeactivatesViewer_AndResetsSession()
@@ -5827,6 +6202,30 @@ public class SmokeTests
         Assert.False(fakeSource.IsStarted);
         Assert.False(helpee.CanEndSession);
         Assert.DoesNotContain("Screen sharing", helpee.HeaderStatusText, StringComparison.Ordinal);
+    }
+
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeePageViewModel_EndSession_DoesNotInvokeCancelAction()
+    {
+        var cancelInvoked = false;
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: () => cancelInvoked = true,
+            CreateDevLocalTestConfig(),
+            helpeeRuntime);
+
+        SetPrivateField(helpee, "connectionState", "Connected");
+        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateField(helpee, "wasConnected", true);
+        SetPrivateField(helpee, "canEndSession", true);
+
+        helpee.EndSessionCommand.Execute(null);
+
+        Assert.False(cancelInvoked);
+        Assert.True(helpee.ShowWaitingPanel);
+        Assert.False(helpee.ShowConnectedPanel);
     }
 
     [Trait("Category", "Smoke")]
@@ -6154,6 +6553,127 @@ public class SmokeTests
             var received = await hostChatReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
 
             Assert.Equal(chatPayload, received);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_CurrentLocalPeerAddress_IgnoresNonAuthoritativeNknFallbackAddress()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var fallbackAddress = "nlink-bb427ded.a65f0bc0394645f125e4";
+            var authoritativeAddress = "helper.authoritative.connected.address";
+            var fakeClient = new FakeNknClient(fallbackAddress, authoritativeAddress);
+            var identity = new NknIdentity("helper-id", fallbackAddress);
+
+            using var transport = new NknSignalingTransport(fakeClient, options, identity);
+            using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+
+            SetPrivateField(runtime, "role", SessionRuntimeRole.Helper);
+            SetPrivateField(runtime, "transport", transport);
+
+            Assert.Null(runtime.CurrentLocalPeerAddress);
+
+            await transport.HostByAddressAsync(CancellationToken.None);
+
+            Assert.Equal(authoritativeAddress, runtime.CurrentLocalPeerAddress?.Value);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_HelpRequest_IsRoutedToIncomingHelperHandler()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            using var helpeeTransport = new NknSignalingTransport(
+                new FakeNknClient("helpee.helprequest.addr." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helpee-helprequest-test", "helpee.helprequest.test.fake"));
+            using var helperTransport = new NknSignalingTransport(
+                new FakeNknClient("helper.helprequest.addr." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helper-helprequest-test", "helper.helprequest.test.fake"));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var incomingRequest = new TaskCompletionSource<HelpRequestMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            helperTransport.IncomingHelpRequest += (_, e) => incomingRequest.TrySetResult(e.Request);
+
+            await helperTransport.HostByAddressAsync(cts.Token);
+            await helpeeTransport.HostByAddressAsync(cts.Token);
+
+            var helpeeAddress = new PeerAddress(helpeeTransport.LocalPeerAddress);
+            var helperAddress = new PeerAddress(helperTransport.LocalPeerAddress);
+            Assert.True(SessionId.TryParse("sess_" + Guid.NewGuid().ToString("N"), out var sessionId));
+            var createResult = InviteTokenServiceFactory.CreateInviteTokenFactory().Create(
+                new InviteTokenCreateRequest(
+                    IssuerAddress: helpeeAddress,
+                    TargetAddress: helpeeAddress,
+                    SessionId: sessionId!,
+                    Capabilities: InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl | InviteCapabilities.FileTransfer,
+                    Lifetime: TimeSpan.FromMinutes(5),
+                    BoundHelperAddress: helperAddress),
+                DateTimeOffset.UtcNow);
+
+            Assert.True(createResult.IsSuccess);
+            Assert.NotNull(createResult.Token);
+
+            await helpeeTransport.SendHelpRequestAsync(
+                new HelpRequestMessage(
+                    "hr_test_" + Guid.NewGuid().ToString("N"),
+                    helpeeAddress,
+                    helperAddress,
+                    createResult.Token!),
+                cts.Token);
+
+            var received = await incomingRequest.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.Equal(helperAddress.Value, received.HelperAddress.Value);
+            Assert.Equal(helpeeAddress.Value, received.HelpeeAddress.Value);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task SessionRuntime_HelperListenerOnNkn_DoesNotEnterOutboundConnectingTimeout()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            using var helperTransport = new NknSignalingTransport(
+                new FakeNknClient(
+                    "nlink-helper-listener-fallback.1234567890",
+                    "helper.listener.authoritative.connected.address"),
+                options,
+                new NknIdentity("helper-listener-test", "nlink-helper-listener-fallback.1234567890"));
+            using var runtime = new SessionRuntime(
+                () => helperTransport,
+                SessionRuntimeWatchdogOptions.Default with { ConnectingTimeout = TimeSpan.FromMilliseconds(250) });
+
+            await runtime.StartHelperListeningAsync(CancellationToken.None);
+            await Task.Delay(500);
+
+            Assert.Equal(SessionRuntimeState.Waiting, runtime.State);
+            Assert.NotEqual(TransportState.Connecting, runtime.TransportLifecycleState);
+            Assert.NotEqual(TransportState.Failed, runtime.TransportLifecycleState);
+            Assert.Equal("Waiting for help requests…", runtime.StatusText);
         }
         finally
         {
@@ -6807,7 +7327,60 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
-    public async Task NknTransport_HelperBoundInvite_PlaceholderIdentity_IsRejectedAfterConnect_WhenAuthoritativeAddressDiffers()
+    public async Task NknTransport_HelperBoundInvite_HandshakeStart_AcceptsStableHelperIdentityWhenPacketSourceUsesConnectedAddress()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.boundinvite.handshakestart.address");
+            var helperClient = new FakeNknClient(
+                "helper.boundinvite.stable.identity",
+                connectedAddress: "helper.boundinvite.connected.transport");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.InitialAddress);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(
+                new PeerAddress(host.LocalPeerAddress),
+                out var rawToken,
+                boundHelperAddress: new PeerAddress(helperClient.InitialAddress));
+
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token).WaitAsync(TimeSpan.FromSeconds(3));
+
+            var joinRequest = await joinRequestRaised.Task.WaitAsync(cts.Token);
+            Assert.NotNull(joinRequest.ApprovalRequest);
+            Assert.Equal(helperClient.InitialAddress, joinRequest.ApprovalRequest!.HelperIdentity.Value);
+
+            await joinRequest.ApproveAsync(joinRequest.CreateApprovalDecision(), CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
+
+            await WaitUntilAsync(
+                () => helper.CurrentSessionSecurityState.HandshakeState == SessionHandshakeState.Verified &&
+                      host.CurrentSessionSecurityState.HandshakeState == SessionHandshakeState.Verified,
+                TimeSpan.FromSeconds(3));
+
+            Assert.NotEqual(SessionHandshakeState.Failed, helper.CurrentSessionSecurityState.HandshakeState);
+            Assert.NotEqual(SessionHandshakeState.Failed, host.CurrentSessionSecurityState.HandshakeState);
+            Assert.Null(helper.CurrentSessionSecurityState.HandshakeFailureReason);
+            Assert.Null(host.CurrentSessionSecurityState.HandshakeFailureReason);
+            Assert.Equal(helperClient.InitialAddress, host.CurrentSessionSecurityState.HelperAddress?.Value);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_HelperBoundInvite_UsesStableHelperIdentityEvenWhenAuthoritativeTransportAddressDiffers()
     {
         FakeNknClient.ResetNetwork();
         try
@@ -6834,14 +7407,20 @@ public class SmokeTests
                 boundHelperAddress: new PeerAddress(helperClient.InitialAddress));
 
             await helper.JoinByInviteAsync(rawToken, invite, cts.Token).WaitAsync(TimeSpan.FromSeconds(3));
+            var joinRequest = await joinRequestRaised.Task.WaitAsync(cts.Token);
+            Assert.NotNull(joinRequest.ApprovalRequest);
+            Assert.Equal(helperClient.InitialAddress, joinRequest.ApprovalRequest!.HelperIdentity.Value);
+
+            await joinRequest.ApproveAsync(joinRequest.CreateApprovalDecision(), CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
+
             await WaitUntilAsync(
-                () => host.CurrentSessionSecurityState.HandshakeState == SessionHandshakeState.Failed &&
-                      string.Equals(host.CurrentSessionSecurityState.HandshakeFailureReason, "invite_helper_mismatch", StringComparison.Ordinal),
+                () => helper.CurrentSessionSecurityState.HandshakeState == SessionHandshakeState.Verified &&
+                      host.CurrentSessionSecurityState.HandshakeState == SessionHandshakeState.Verified,
                 TimeSpan.FromSeconds(3));
 
-            Assert.False(joinRequestRaised.Task.IsCompleted);
-            Assert.Equal(SessionHandshakeState.Failed, host.CurrentSessionSecurityState.HandshakeState);
-            Assert.Equal("invite_helper_mismatch", host.CurrentSessionSecurityState.HandshakeFailureReason);
+            Assert.Null(helper.CurrentSessionSecurityState.HandshakeFailureReason);
+            Assert.Null(host.CurrentSessionSecurityState.HandshakeFailureReason);
+            Assert.Equal(helperClient.InitialAddress, host.CurrentSessionSecurityState.HelperAddress?.Value);
         }
         finally
         {
@@ -8593,6 +9172,58 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task NknTransport_FileTransferDataFrame_UnknownTransferId_IsRejectedWithoutAllocatingSession()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var logStartIndex = GetOperationalLogLength();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.unknown-dataframe.address");
+            var helperClient = new FakeNknClient("helper.filetransfer.unknown-dataframe.address");
+            var hostIdentity = new NknIdentity("host-unknown-dataframe-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-unknown-dataframe-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var sessionId = await ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_unknown_data_frame";
+            var frame = new FileTransferManifestFrameV2
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                FileName = "unknown.bin",
+                FileSizeBytes = 16,
+                ChunkSizeBytes = 16,
+                ChunkCount = 1,
+                Sha256Base64 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]),
+            };
+
+            var envelope = BuildSecureFileTransferDataFrameEnvelope(helper, frame, sequence: 1);
+            InvokeNknIncomingMessage(
+                host,
+                helperClient,
+                new NknIncomingMessage(helper.LocalPeerAddress, EnvelopeCodec.Serialize(envelope), isTopic: false, topic: null, channel: NknBridgeChannel.Bulk));
+
+            await Task.Delay(200, cts.Token);
+
+            var dataSessions = Assert.IsAssignableFrom<System.Collections.IDictionary>(GetPrivateField(host, "fileTransferDataSessions"));
+            var logTail = ReadOperationalLogTail(logStartIndex);
+
+            Assert.Equal(0, dataSessions.Count);
+            Assert.DoesNotContain("event=filetransfer_data_frame_dispatched", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_data_frame_ignored", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task NknTransport_FileTransferChunks_UseDedicatedDispatchPath_WhenInboundCallbacksOverlap()
     {
         FakeNknClient.ResetNetwork();
@@ -10078,6 +10709,77 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task DevLocalTransport_FileTransferDataFrame_UnknownTransferId_IsRejectedWithoutAllocatingSession()
+    {
+        var logStartIndex = GetOperationalLogLength();
+        var hostAddress = CreateTestPeerAddress();
+        using var host = new DevLocalTransport(hostAddress);
+        using var helper = new DevLocalTransport();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+        IncomingJoinRequestEventArgs? pendingJoin = null;
+        var joinRaised = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        host.IncomingJoinRequest += (_, e) =>
+        {
+            pendingJoin = e;
+            joinRaised.TrySetResult();
+        };
+        host.Approved += (_, _) => hostApproved.TrySetResult();
+        helper.Approved += (_, _) => helperApproved.TrySetResult();
+
+        _ = host.HostByAddressAsync(cts.Token);
+        await host.WaitUntilHostReadyAsync(cts.Token);
+
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+        await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+        await joinRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        await pendingJoin!.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+        await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+        await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+        var sessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value;
+        const string transferId = "transfer_devlocal_unknown_data_frame";
+        var securePayload = BuildSecureDevLocalPayload(
+            helper,
+            SessionSecureMessageFamily.FileTransfer,
+            "file_transfer_data_frame",
+            FileTransferDataFrameCodec.Serialize(
+                new FileTransferManifestFrameV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "unknown.bin",
+                    FileSizeBytes = 16,
+                    ChunkSizeBytes = 16,
+                    ChunkCount = 1,
+                    Sha256Base64 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]),
+                }),
+            requestId: transferId,
+            sequence: 1);
+
+        await SendRawDevLocalFrameAsync(helper, "file_transfer_data_frame", securePayload, cts.Token);
+        await Task.Delay(200, cts.Token);
+
+        var dataSessions = Assert.IsAssignableFrom<System.Collections.IDictionary>(GetPrivateField(host, "fileTransferDataSessions"));
+        var logTail = ReadOperationalLogTail(logStartIndex);
+
+        Assert.Equal(0, dataSessions.Count);
+        Assert.Contains(
+            "event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=unknown_transfer_id;",
+            logTail,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_data_frame_decode_failed", logTail, StringComparison.Ordinal);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task DevLocalTransport_FileTransferOffer_WithWrongSenderIdentity_IsRejected()
     {
         var hostAddress = CreateTestPeerAddress();
@@ -10833,7 +11535,7 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
-    public async Task HelperViewModel_RecoveredLocalIdentity_ShowsRecoveryNotice_WithHelperAddressStillAvailable()
+    public async Task HelperViewModel_RecoveredLocalIdentity_HidesFallbackAddress_ButKeepsRecoveryNoticeVisible()
     {
         PersistenceDiagnostics.ClearForTests();
         try
@@ -10847,17 +11549,17 @@ public class SmokeTests
                 userWarning: "Local protected identity storage was unreadable. nLink created a new local identity. Previous helper address and invites are no longer valid.");
 
             var transportConfig = CreateNknTestConfig();
-            using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+            using var helperRuntime = new SessionRuntime(() => new ScriptedSignalingTransport());
             using var helper = new HelperPageViewModel(
                 cancelAction: static () => { },
                 transportConfig,
                 helperRuntime,
-                bootstrapHelperIdentityResolver: _ => Task.FromResult<PeerAddress?>(new PeerAddress("nlink-helper.bootstrap.recovered")));
+                bootstrapHelperIdentityResolver: _ => Task.FromResult<PeerAddress?>(new PeerAddress("nlink-helper.bootstrap.recovered")),
+                qrCodeService: new NoOpQrCodeService());
 
             var pending = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helper, "ResolveBootstrapHelperIdentityAsync", CancellationToken.None));
             await pending;
 
-            Assert.Equal("nlink-helper.bootstrap.recovered", helper.HelperIdentityBootstrapText);
             Assert.Contains("created a new local identity", helper.HelperIdentityBootstrapHintText, StringComparison.Ordinal);
         }
         finally
@@ -10882,12 +11584,13 @@ public class SmokeTests
                 userWarning: "Local protected identity storage was unreadable. nLink created a new local identity. Previous helper address and invites are no longer valid.");
 
             var transportConfig = CreateNknTestConfig();
-            using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+            using var helperRuntime = new SessionRuntime(() => new ScriptedSignalingTransport());
             using var helper = new HelperPageViewModel(
                 cancelAction: static () => { },
                 transportConfig,
                 helperRuntime,
-                bootstrapHelperIdentityResolver: _ => Task.FromResult<PeerAddress?>(new PeerAddress("nlink-helper.bootstrap.recovered")));
+                bootstrapHelperIdentityResolver: _ => Task.FromResult<PeerAddress?>(new PeerAddress("nlink-helper.bootstrap.recovered")),
+                qrCodeService: new NoOpQrCodeService());
 
             var pending = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helper, "ResolveBootstrapHelperIdentityAsync", CancellationToken.None));
             await pending;
@@ -10901,7 +11604,6 @@ public class SmokeTests
                 userWarning: "Protected seed storage could not be read.");
 
             Assert.Contains("created a new local identity", helper.HelperIdentityBootstrapHintText, StringComparison.Ordinal);
-            Assert.Contains("Copy this helper address", helper.HelperIdentityBootstrapHintText, StringComparison.Ordinal);
         }
         finally
         {
@@ -10941,6 +11643,53 @@ public class SmokeTests
         Assert.NotEqual(bootstrapHelperIdentity.Value, helper.HelperIdentityBootstrapText);
         Assert.True(helper.HasHelperIdentityBootstrapVerificationCode);
         Assert.Equal("The other person ended the session.", helper.StatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperViewModel_RuntimeHelperAddress_OverridesSeparatelyResolvedBootstrapAddress()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var transportConfig = CreateNknTestConfig();
+            var fallbackAddress = "nlink-helper.bootstrap.fallback.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+            var authoritativeAddress = "helper.listener.authoritative.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+            var separatelyResolvedAddress = new PeerAddress("helper.bootstrap.separate.cccccccccccccccccccccccccccccccc");
+            var options = NknTransportOptions.Load();
+            var fakeClient = new FakeNknClient(fallbackAddress, authoritativeAddress);
+            var identity = new NknIdentity("helper-id", fallbackAddress);
+
+            using var transport = new NknSignalingTransport(fakeClient, options, identity);
+            using var helperRuntime = new SessionRuntime(() => new ScriptedSignalingTransport());
+            SetPrivateField(helperRuntime, "role", SessionRuntimeRole.Helper);
+            SetPrivateField(helperRuntime, "transport", transport);
+
+            using var helper = new HelperPageViewModel(
+                cancelAction: static () => { },
+                transportConfig,
+                helperRuntime,
+                bootstrapHelperIdentityResolver: _ => Task.FromResult<PeerAddress?>(separatelyResolvedAddress),
+                qrCodeService: new NoOpQrCodeService());
+
+            var pending = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helper, "ResolveBootstrapHelperIdentityAsync", CancellationToken.None));
+            await pending;
+            Assert.Equal(string.Empty, helper.HelperIdentityBootstrapText);
+
+            await transport.HostByAddressAsync(CancellationToken.None);
+
+            InvokePrivateMethod(helper, "CacheBootstrapHelperIdentityFromRuntimeIfAvailable");
+
+            Assert.StartsWith("nlinkh1.", helper.HelperIdentityBootstrapText, StringComparison.Ordinal);
+            Assert.NotEqual(separatelyResolvedAddress.Value, helper.HelperIdentityBootstrapText);
+            Assert.True(HelperBootstrapQrPayload.TryParse(helper.HelperIdentityBootstrapText, out var parsedBootstrap));
+            Assert.NotNull(parsedBootstrap);
+            Assert.Equal(authoritativeAddress, parsedBootstrap!.HelperAddress.Value);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
     }
 
     [Trait("Category", "Smoke")]
@@ -11434,6 +12183,168 @@ public class SmokeTests
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task HelperViewModel_ListenerDisconnect_DoesNotStayInFailedState()
+    {
+        var created = new List<ScriptedSignalingTransport>();
+        var factory = new CountingTransportFactory(() =>
+        {
+            var transport = new ScriptedSignalingTransport();
+            lock (created)
+            {
+                created.Add(transport);
+            }
+
+            return transport;
+        });
+
+        var transportConfig = CreateDevLocalTestConfig();
+        using var runtime = new SessionRuntime(factory.Create);
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            connectFailureCooldown: TimeSpan.Zero);
+
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Waiting &&
+                  string.Equals(helper.ConnectionState, "Waiting", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(2));
+
+        ScriptedSignalingTransport first;
+        lock (created)
+        {
+            Assert.NotEmpty(created);
+            first = Assert.IsType<ScriptedSignalingTransport>(created[0]);
+        }
+
+        first.RaiseDisconnected();
+
+        await WaitUntilAsync(
+            () => factory.CreateCount >= 2 &&
+                  runtime.State == SessionRuntimeState.Waiting &&
+                  string.Equals(helper.ConnectionState, "Waiting", StringComparison.Ordinal) &&
+                  helper.EffectivePhase == SessionUiPhase.Waiting,
+            TimeSpan.FromSeconds(3));
+
+        Assert.False(string.Equals(helper.ConnectionState, "Failed", StringComparison.Ordinal));
+        Assert.Equal("Waiting for help requests…", helper.StatusText);
+        Assert.Equal(SessionUiPhase.Waiting, helper.EffectivePhase);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperRuntime_RemoteSessionEnd_RestartsListenerQuietly()
+    {
+        var nextTransport = new ScriptedSignalingTransport();
+        var factory = new CountingTransportFactory(() => nextTransport);
+        var connectedTransport = new ScriptedSignalingTransport();
+
+        using var runtime = new SessionRuntime(factory.Create);
+        SetPrivateField(runtime, "transport", connectedTransport);
+        SetPrivateField(runtime, "role", SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "transportState", TransportState.Connected);
+        SetPrivateField(runtime, "sessionCts", new CancellationTokenSource());
+
+        InvokePrivateMethod(runtime, "OnRemoteSessionEnded", connectedTransport, EventArgs.Empty);
+
+        await WaitUntilAsync(
+            () => factory.CreateCount >= 1 &&
+                  runtime.State == SessionRuntimeState.Waiting &&
+                  runtime.TransportLifecycleState is TransportState.Connecting or TransportState.BridgeStarting &&
+                  string.Equals(runtime.StatusText, "Waiting for help requests…", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(3));
+
+        Assert.Equal(SessionRuntimeState.Waiting, runtime.State);
+        Assert.Equal("Waiting for help requests…", runtime.StatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeeViewModel_RemoteEndAfterConnectedSession_ClearsHelperIdentityInput()
+    {
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateNknTestConfig(), runtime);
+
+        var helperIdentity = new PeerAddress("nlink-helper.connected.identity.clear");
+        var helperTarget = new PeerAddress("nlink-helper.connected.target.clear");
+        helpee.SetVerifiedInviteHelperIdentity(
+            helperIdentity,
+            helperTargetAddress: helperTarget,
+            refreshInvite: false,
+            normalizedInputOverride: HelperBootstrapQrPayload.Format(
+                HelperBootstrapPayload.Create(
+                    helperTarget,
+                    helperId: HelperIdentityTokenCodec.Encode(helperIdentity))));
+
+        SetPrivateField(helpee, "wasConnected", true);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Waiting);
+
+        Assert.False(string.IsNullOrWhiteSpace(helpee.InviteHelperIdentityInput));
+        Assert.True(helpee.HasVerifiedInviteHelperIdentity);
+
+        InvokePrivateMethod(helpee, "RestartWaitingSession");
+
+        Assert.Equal(string.Empty, helpee.InviteHelperIdentityInput);
+        Assert.False(helpee.HasVerifiedInviteHelperIdentity);
+        Assert.Equal("Waiting for helper…", helpee.ConnectionStatus);
+        Assert.Equal("Waiting", helpee.ConnectionState);
+    }
+
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelperViewModel_StaleAutoListenCallback_DoesNotResetActiveHelperConnect()
+    {
+        var factory = new CountingTransportFactory(static () => new ScriptedSignalingTransport());
+        var transportConfig = CreateDevLocalTestConfig();
+        using var runtime = new SessionRuntime(factory.Create);
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            connectFailureCooldown: TimeSpan.Zero);
+
+        var initialCreateCount = factory.CreateCount;
+        SetPrivateField(runtime, "state", SessionRuntimeState.Idle);
+        SetPrivateField(runtime, "transportState", TransportState.TransportInitializing);
+
+        var staleAutoListenTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helper, "StartListeningAsync"));
+        await staleAutoListenTask;
+
+        Assert.Equal(initialCreateCount, factory.CreateCount);
+        Assert.Equal(TransportState.TransportInitializing, runtime.TransportLifecycleState);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperViewModel_PassiveWaiting_SuppressesConnectingTransientBanner()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            connectFailureCooldown: TimeSpan.Zero);
+
+        SetPrivateField(runtime, "state", SessionRuntimeState.Waiting);
+        SetPrivateField(runtime, "transientStatusVisible", true);
+        SetPrivateField(runtime, "transientStatusText", "Connecting... (attempt 1)");
+        SetPrivateField(runtime, "transientStatusCanCancel", true);
+        SetPrivateField(helper, "connectionState", "Waiting");
+        SetPrivateField(helper, "effectivePhase", SessionUiPhase.Waiting);
+
+        InvokePrivateMethod(helper, "SyncTransientStatusFromRuntime");
+
+        Assert.False(helper.ShowTransientBanner);
+        Assert.True(string.IsNullOrWhiteSpace(helper.TransientBannerText));
+        Assert.False(helper.CanCancelTransient);
+    }
+
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task Alpha3ScenarioD_DisconnectAndRetry_HeadlessHelperVm_ReturnsToIdle()
     {
         var scripted = new ScriptedSignalingTransport(onJoinByAddressAsync: static (_, __) => Task.CompletedTask);
@@ -11888,6 +12799,7 @@ public class SmokeTests
                   !helpee.ShowWaitingPanel,
             TimeSpan.FromSeconds(2));
     }
+
 
     [Trait("Category", "Smoke")]
     [Fact]
@@ -15360,11 +16272,13 @@ rl.on('line', (line) => {
         }
     }
 
-    private sealed class ScriptedSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport
+    private sealed class ScriptedSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IHelpRequestSignalingTransport
     {
         private readonly Func<string, CancellationToken, Task> onJoinByAddressAsync;
         private readonly Func<string, ValidatedInviteV1, CancellationToken, Task> onJoinByInviteAsync;
         private readonly Func<CancellationToken, Task> onHostByAddressAsync;
+        private readonly Func<HelpRequestMessage, CancellationToken, Task> onSendHelpRequestAsync;
+        private readonly Func<HelpRequestDecisionMessage, CancellationToken, Task> onSendHelpRequestDecisionAsync;
         private readonly Func<ReadOnlyMemory<byte>, CancellationToken, Task> onSendChatAsync;
         private readonly Func<ControlRequestMessageV1, CancellationToken, Task> onSendControlRequestAsync;
         private readonly Func<ControlResponseMessageV1, CancellationToken, Task> onSendControlResponseAsync;
@@ -15381,6 +16295,8 @@ rl.on('line', (line) => {
             Func<string, ValidatedInviteV1, CancellationToken, Task>? onJoinByInviteAsync = null,
             Func<CancellationToken, Task>? onHostByAddressAsync = null,
             string? localPeerAddress = null,
+            Func<HelpRequestMessage, CancellationToken, Task>? onSendHelpRequestAsync = null,
+            Func<HelpRequestDecisionMessage, CancellationToken, Task>? onSendHelpRequestDecisionAsync = null,
             Func<ReadOnlyMemory<byte>, CancellationToken, Task>? onSendChatAsync = null,
             Func<ControlRequestMessageV1, CancellationToken, Task>? onSendControlRequestAsync = null,
             Func<ControlResponseMessageV1, CancellationToken, Task>? onSendControlResponseAsync = null,
@@ -15397,6 +16313,8 @@ rl.on('line', (line) => {
             this.onJoinByInviteAsync = onJoinByInviteAsync ?? ((_, invite, ct) => this.onJoinByAddressAsync(invite.TargetAddress.Value, ct));
             this.onHostByAddressAsync = onHostByAddressAsync ?? (ct => Task.Delay(Timeout.Infinite, ct));
             LocalPeerAddress = string.IsNullOrWhiteSpace(localPeerAddress) ? "scripted.local.peer" : localPeerAddress.Trim();
+            this.onSendHelpRequestAsync = onSendHelpRequestAsync ?? ((_, _) => Task.CompletedTask);
+            this.onSendHelpRequestDecisionAsync = onSendHelpRequestDecisionAsync ?? ((_, _) => Task.CompletedTask);
             this.onSendChatAsync = onSendChatAsync ?? ((_, _) => Task.CompletedTask);
             this.onSendControlRequestAsync = onSendControlRequestAsync ?? ((_, _) => Task.CompletedTask);
             this.onSendControlResponseAsync = onSendControlResponseAsync ?? ((_, _) => Task.CompletedTask);
@@ -15416,6 +16334,8 @@ rl.on('line', (line) => {
         public bool SessionSupportsRemoteControl => LocalSupportsRemoteControl && RemoteSupportsRemoteControl;
 
         public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
+        public event EventHandler<IncomingHelpRequestEventArgs>? IncomingHelpRequest;
+        public event EventHandler<HelpRequestDecisionEventArgs>? HelpRequestDecisionReceived;
         public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
         public event EventHandler<TransportChatMessageEventArgs>? ChatMessageReceived;
         public event EventHandler? Approved;
@@ -15443,6 +16363,8 @@ rl.on('line', (line) => {
         public Task JoinByInviteAsync(string inviteToken, ValidatedInviteV1 invite, CancellationToken ct)
             => onJoinByInviteAsync(inviteToken, invite, ct);
 
+        public Task SendHelpRequestAsync(HelpRequestMessage request, CancellationToken ct) => onSendHelpRequestAsync(request, ct);
+        public Task SendHelpRequestDecisionAsync(HelpRequestDecisionMessage decision, CancellationToken ct) => onSendHelpRequestDecisionAsync(decision, ct);
         public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => onSendChatAsync(payload, ct);
         public Task SendControlRequestAsync(ControlRequestMessageV1 message, CancellationToken ct) => onSendControlRequestAsync(message, ct);
         public Task SendControlResponseAsync(ControlResponseMessageV1 message, CancellationToken ct) => onSendControlResponseAsync(message, ct);
@@ -15467,6 +16389,23 @@ rl.on('line', (line) => {
 
             currentSessionSecurityState = nextState;
             SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(nextState));
+        }
+    }
+
+    private sealed class NoOpQrCodeService : IQrCodeService
+    {
+        public bool TryCreatePng(string text, out byte[] pngBytes, out string? errorMessage)
+        {
+            pngBytes = [];
+            errorMessage = "not_used_in_test";
+            return false;
+        }
+
+        public bool TryDecode(Stream imageStream, out string? decodedText, out string? errorMessage)
+        {
+            decodedText = null;
+            errorMessage = "not_used_in_test";
+            return false;
         }
     }
 

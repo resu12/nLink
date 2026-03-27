@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.RegularExpressions;
+using NLink.Core.SessionConnect;
 using Xunit.Abstractions;
 
 namespace NLink.SmokeTests;
@@ -27,17 +28,26 @@ internal static class GuiSmokeHarness
         var scriptPath = Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1");
         Assert.True(File.Exists(scriptPath), $"GUI smoke script not found: {scriptPath}");
 
-        var exePath = ResolveGuiSmokeExe(repoRoot);
+        var exePath = ResolveGuiSmokeExe(repoRoot, transportOverride);
         Assert.True(File.Exists(exePath), $"nLink executable not found for GUI smoke: {exePath}");
         var wrapperTimeout = TimeSpan.FromSeconds(CalculateWrapperTimeoutSeconds(selectedScenarios, transportOverride));
 
         var previousScenarioEnv = Environment.GetEnvironmentVariable("NLINK_GUI_SMOKE_SCENARIOS");
         var previousTransportEnv = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
+        var previousUnboundInviteEnv = Environment.GetEnvironmentVariable(InviteSecurityDiagnostics.AllowInsecureUnboundPublicInvitesEnvVar);
+        var previousLegacyInviteModeEnv = Environment.GetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar);
+        var previousLegacyInviteSigningEnv = Environment.GetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteSigningEnvVar);
         Environment.SetEnvironmentVariable("NLINK_GUI_SMOKE_SCENARIOS", string.Join(",", selectedScenarios));
         if (transportOverride is not null)
         {
             Environment.SetEnvironmentVariable("NLINK_TRANSPORT", transportOverride);
         }
+
+        // GUI smoke should exercise the production invite policy, not the permissive
+        // test-process defaults installed by module initializers.
+        Environment.SetEnvironmentVariable(InviteSecurityDiagnostics.AllowInsecureUnboundPublicInvitesEnvVar, null);
+        Environment.SetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, null);
+        Environment.SetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteSigningEnvVar, null);
 
         try
         {
@@ -108,6 +118,9 @@ internal static class GuiSmokeHarness
         {
             Environment.SetEnvironmentVariable("NLINK_GUI_SMOKE_SCENARIOS", previousScenarioEnv);
             Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransportEnv);
+            Environment.SetEnvironmentVariable(InviteSecurityDiagnostics.AllowInsecureUnboundPublicInvitesEnvVar, previousUnboundInviteEnv);
+            Environment.SetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, previousLegacyInviteModeEnv);
+            Environment.SetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteSigningEnvVar, previousLegacyInviteSigningEnv);
         }
     }
 
@@ -123,7 +136,7 @@ internal static class GuiSmokeHarness
     {
         var parsed = (scenarios ?? Array.Empty<string>())
             .Select(x => x?.Trim().ToUpperInvariant())
-            .Where(x => x is "A" or "B" or "C" or "D" or "E" or "F" or "G" or "H" or "I" or "J" or "K" or "L" or "M" or "HEADER_CHAT_COHERENCE" or "END_SESSION_DISABLES_CHAT" or "SCREENSHARE_BUTTON_VISIBILITY" or "SCREENSHARE_VIEWER_TOGGLE" or "SCREENSHARE_CHAT_COEXISTENCE" or "SCREENSHARE_STOP_PENDING_APPROVAL" or "STATUS_TEXT_GUARDRAILS")
+            .Where(x => x is "A" or "B" or "C" or "D" or "E" or "F" or "G" or "H" or "I" or "J" or "K" or "L" or "M" or "NKN_DIRECT_CONNECT" or "HEADER_CHAT_COHERENCE" or "END_SESSION_DISABLES_CHAT" or "SCREENSHARE_BUTTON_VISIBILITY" or "SCREENSHARE_VIEWER_TOGGLE" or "SCREENSHARE_CHAT_COEXISTENCE" or "SCREENSHARE_STOP_PENDING_APPROVAL" or "STATUS_TEXT_GUARDRAILS")
             .Cast<string>()
             .Distinct()
             .ToArray();
@@ -147,6 +160,7 @@ internal static class GuiSmokeHarness
                 "K" => 60,
                 "L" => 90,
                 "M" => 90,
+                "NKN_DIRECT_CONNECT" => 180,
                 "HEADER_CHAT_COHERENCE" => 90,
                 "END_SESSION_DISABLES_CHAT" => 90,
                 "SCREENSHARE_BUTTON_VISIBILITY" => 90,
@@ -182,14 +196,24 @@ internal static class GuiSmokeHarness
         return match.Success ? match.Groups["path"].Value.Trim() : null;
     }
 
-    private static string ResolveGuiSmokeExe(string repoRoot)
+    private static string ResolveGuiSmokeExe(string repoRoot, string? transportOverride)
     {
-        var candidates = new[]
+        var debugCandidates = new[]
         {
+            Path.Combine(repoRoot, "src", "nLink.App", "bin", "Debug", "net8.0", "nLink.exe"),
+            Path.Combine(repoRoot, "src", "nLink.App", "bin", "Debug", "net8.0", "win-x64", "nLink.exe"),
+        };
+
+        var releaseCandidates = new[]
+        {
+            Path.Combine(repoRoot, "artifacts", "portable", "nLink", "win-x64", "nLink.exe"),
             Path.Combine(repoRoot, "src", "nLink.App", "bin", "Release", "net8.0", "nLink.exe"),
             Path.Combine(repoRoot, "src", "nLink.App", "bin", "Release", "net8.0", "win-x64", "nLink.exe"),
-            Path.Combine(repoRoot, "artifacts", "portable", "nLink", "win-x64", "nLink.exe")
         };
+
+        var candidates = string.Equals(transportOverride, "NKN", StringComparison.OrdinalIgnoreCase)
+            ? releaseCandidates.Concat(debugCandidates).ToArray()
+            : debugCandidates.Concat(releaseCandidates).ToArray();
 
         return candidates.FirstOrDefault(File.Exists) ?? candidates[0];
     }

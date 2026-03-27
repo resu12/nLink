@@ -103,7 +103,21 @@ public partial class SessionShellView : UserControl
             nameof(MainPaneMaxWidth),
             o => o.MainPaneMaxWidth);
 
+    public static readonly DirectProperty<SessionShellView, double> MainPaneMinHeightProperty =
+        AvaloniaProperty.RegisterDirect<SessionShellView, double>(
+            nameof(MainPaneMinHeight),
+            o => o.MainPaneMinHeight);
+
+    public static readonly DirectProperty<SessionShellView, double> SideBySideChatPaneWidthProperty =
+        AvaloniaProperty.RegisterDirect<SessionShellView, double>(
+            nameof(SideBySideChatPaneWidth),
+            o => o.SideBySideChatPaneWidth);
+
     private const double MainPaneContentMaxWidth = 1120d;
+    private const double MainPaneCompactMinHeight = 0d;
+    private const double MainPaneExpandedMinHeight = 420d;
+    private const double DefaultSideBySideChatPaneWidth = 420d;
+    private const double ScreenShareSideBySideChatPaneWidth = 320d;
 
     private bool showFixedShellLayout;
     private bool showFixedChatOnlyLayout;
@@ -123,6 +137,8 @@ public partial class SessionShellView : UserControl
     private bool screenSharePaneAutoActivated;
     private HorizontalAlignment mainPaneHorizontalAlignment = HorizontalAlignment.Center;
     private double mainPaneMaxWidth = MainPaneContentMaxWidth;
+    private double mainPaneMinHeight = MainPaneCompactMinHeight;
+    private double sideBySideChatPaneWidth = DefaultSideBySideChatPaneWidth;
     private readonly RelayCommand toggleScreenSharePaneCommand;
 
     public SessionShellView()
@@ -288,6 +304,18 @@ public partial class SessionShellView : UserControl
     {
         get => mainPaneMaxWidth;
         private set => SetAndRaise(MainPaneMaxWidthProperty, ref mainPaneMaxWidth, value);
+    }
+
+    public double MainPaneMinHeight
+    {
+        get => mainPaneMinHeight;
+        private set => SetAndRaise(MainPaneMinHeightProperty, ref mainPaneMinHeight, value);
+    }
+
+    public double SideBySideChatPaneWidth
+    {
+        get => sideBySideChatPaneWidth;
+        private set => SetAndRaise(SideBySideChatPaneWidthProperty, ref sideBySideChatPaneWidth, value);
     }
 
     private bool ShowMainPane
@@ -652,6 +680,12 @@ public partial class SessionShellView : UserControl
         MainPaneMaxWidth = stretchForScreenShare
             ? double.PositiveInfinity
             : MainPaneContentMaxWidth;
+        MainPaneMinHeight = stretchForScreenShare || ShowChatPane
+            ? MainPaneExpandedMinHeight
+            : MainPaneCompactMinHeight;
+        SideBySideChatPaneWidth = stretchForScreenShare
+            ? ScreenShareSideBySideChatPaneWidth
+            : DefaultSideBySideChatPaneWidth;
     }
 
     private bool HasVisibleScreenShareFrame()

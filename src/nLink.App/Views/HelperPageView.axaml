@@ -121,7 +121,7 @@
                                         VerticalAlignment="Stretch"
                                         ShowChatPaneRequested="{Binding ShowConnectedPanel}">
                     <views:SessionShellView.MainContent>
-                        <Grid>
+                        <Grid VerticalAlignment="Top">
                             <views:ScreenShareSurfaceView x:Name="RemoteScreenShareSurface"
                                                           Frame="{Binding RemoteScreenShareFrame}"
                                                           CaptureEnabled="{Binding IsRemoteControlInputCaptureEnabled}"
@@ -206,12 +206,12 @@
                                     Background="Transparent"
                                     BorderThickness="0"
                                     IsVisible="{Binding ShowHelperMainContent}"
-                                    Margin="0,8,0,0"
+                                    Margin="0,4,0,0"
                                     HorizontalAlignment="Center"
-                                    VerticalAlignment="Center"
+                                    VerticalAlignment="Top"
                                     MaxWidth="620"
                                     MinWidth="420">
-                                <StackPanel Spacing="16">
+                                <StackPanel Spacing="12">
                                     <views:StatusBanner Status="{Binding BannerStatus}"
                                                         ForceVisible="{Binding ShowStatusBanner}"
                                                         DetailsText="{Binding StatusBannerDetailsText}"
@@ -285,18 +285,49 @@
 
                                         <Border Background="{StaticResource AppMutedPanelBrush}"
                                                 CornerRadius="18"
-                                                Padding="24"
+                                                Padding="20"
+                                                VerticalAlignment="Top"
                                                 IsVisible="{Binding ShowMainControls}">
-                                            <StackPanel Spacing="20">
+                                            <StackPanel Spacing="14">
                                                 <Border Background="{StaticResource AppSurfaceBrush}"
                                                         CornerRadius="18"
-                                                        Padding="20"
+                                                        Padding="16"
+                                                        HorizontalAlignment="Stretch"
+                                                        IsVisible="{Binding HasPendingHelpRequest}">
+                                                    <StackPanel Spacing="12">
+                                                        <TextBlock Text="Incoming request"
+                                                                   AutomationProperties.AutomationId="Helper.IncomingRequestTitle"
+                                                                   FontSize="16"
+                                                                   FontWeight="SemiBold"/>
+                                                        <TextBlock AutomationProperties.AutomationId="Helper.IncomingRequestText"
+                                                                   Text="{Binding IncomingHelpRequestText}"
+                                                                   Classes="appMuted"
+                                                                   TextWrapping="Wrap"/>
+                                                        <Grid ColumnDefinitions="*,*"
+                                                              ColumnSpacing="10">
+                                                            <Button Grid.Column="0"
+                                                                    Classes="appButton positiveButton compactSecondaryAction"
+                                                                    AutomationProperties.AutomationId="Helper.AcceptHelpRequest"
+                                                                    Content="Accept"
+                                                                    Command="{Binding AcceptHelpRequestCommand}"/>
+                                                            <Button Grid.Column="1"
+                                                                    Classes="appButton secondaryButton compactSecondaryAction"
+                                                                    AutomationProperties.AutomationId="Helper.RejectHelpRequest"
+                                                                    Content="Reject"
+                                                                    Command="{Binding RejectHelpRequestCommand}"/>
+                                                        </Grid>
+                                                    </StackPanel>
+                                                </Border>
+
+                                                <Border Background="{StaticResource AppSurfaceBrush}"
+                                                        CornerRadius="18"
+                                                        Padding="18"
                                                         HorizontalAlignment="Stretch"
                                                         IsVisible="{Binding ShowHelperIdentityBootstrapPanel}">
-                                                    <StackPanel Spacing="8">
+                                                    <StackPanel Spacing="12">
                                                         <Grid ColumnDefinitions="*,Auto"
                                                               ColumnSpacing="10">
-                                                            <TextBlock Text="1. Share your helper address"
+                                                            <TextBlock Text="Share your helper address"
                                                                        Foreground="{StaticResource AppTextBrush}"
                                                                        FontSize="17"
                                                                        FontWeight="SemiBold"
@@ -311,11 +342,22 @@
                                                                            Text="{Binding FirstPillVerificationCodeText}"/>
                                                             </Border>
                                                         </Grid>
+
                                                         <TextBlock AutomationProperties.AutomationId="Helper.HelperIdentityBootstrapHint"
                                                                    Text="{Binding HelperIdentityBootstrapHintText}"
                                                                    Classes="appMuted"
                                                                    TextWrapping="Wrap"
                                                                    HorizontalAlignment="Left"/>
+
+                                                        <TextBox Classes="highContrastInput helperConnectInput"
+                                                                 AutomationProperties.AutomationId="Helper.HelperIdentityBootstrapTextBox"
+                                                                 Text="{Binding HelperIdentityBootstrapText}"
+                                                                 Watermark="{Binding HelperIdentityBootstrapWatermarkText}"
+                                                                 IsReadOnly="True"
+                                                                 HorizontalAlignment="Center"
+                                                                 Width="460"
+                                                                 MaxWidth="460"/>
+
                                                         <Grid ColumnDefinitions="*,*"
                                                               ColumnSpacing="10"
                                                               HorizontalAlignment="Center"
@@ -337,93 +379,57 @@
                                                                     HorizontalAlignment="Stretch"
                                                                     MinWidth="0"/>
                                                         </Grid>
-                                                    </StackPanel>
-                                                </Border>
 
-                                                <Border Background="{StaticResource AppSurfaceBrush}"
-                                                        CornerRadius="18"
-                                                        Padding="20"
-                                                        HorizontalAlignment="Stretch"
-                                                        IsVisible="{Binding ShowMainControls}">
-                                                    <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto"
-                                                          RowSpacing="16">
-                                                        <TextBlock Text="2. Paste invite"
-                                                                   Foreground="{StaticResource AppTextBrush}"
-                                                                   FontSize="17"
-                                                                   FontWeight="SemiBold"
-                                                                   HorizontalAlignment="Left"/>
+                                                        <Border Background="{StaticResource AppSurfaceBrush}"
+                                                                CornerRadius="20"
+                                                                Padding="16"
+                                                                HorizontalAlignment="Center">
+                                                            <Grid Width="248"
+                                                                  Height="248">
+                                                                <Border Background="{StaticResource AppMutedPanelBrush}"
+                                                                        CornerRadius="14"
+                                                                        IsVisible="{Binding ShowHelperBootstrapQrPlaceholder}">
+                                                                    <TextBlock Text="QR code appears here"
+                                                                               Classes="appMuted"
+                                                                               FontSize="14"
+                                                                               TextAlignment="Center"
+                                                                               HorizontalAlignment="Center"
+                                                                               VerticalAlignment="Center"/>
+                                                                </Border>
+                                                               <Image Source="{Binding HelperBootstrapQrImage}"
+                                                                       Width="248"
+                                                                       Height="248"
+                                                                       Stretch="Uniform"
+                                                                       HorizontalAlignment="Center"
+                                                                       IsVisible="{Binding ShowHelperBootstrapQr}"/>
+                                                            </Grid>
+                                                        </Border>
 
-                                                        <TextBox Grid.Row="1"
-                                                                 Classes="appInput highContrastInput helperConnectInput"
-                                                                 x:Name="HelperCodeInputBox"
-                                                                 AutomationProperties.AutomationId="Helper.CodeInput"
-                                                                 Text="{Binding CodeInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                                                 KeyDown="HelperCodeInput_KeyDown"
-                                                                 Watermark="Paste invite"
-                                                                 TabIndex="0"
-                                                                 Width="532"
-                                                                 HorizontalAlignment="Center"
-                                                                 IsEnabled="{Binding CanStartOrConnect}"/>
+                                                        <StackPanel HorizontalAlignment="Center"
+                                                                    Margin="0,-2,0,0">
+                                                            <Button Classes="linkButton linkAction"
+                                                                    AutomationProperties.AutomationId="Helper.CopyInstallLink"
+                                                                    Content="Copy install link"
+                                                                    TabIndex="2"
+                                                                    Command="{Binding CopyInstallMessageCommand}"/>
+                                                            <TextBlock AutomationProperties.AutomationId="Helper.CopyInstallFeedback"
+                                                                       Classes="appMuted"
+                                                                       Text="{Binding CopyFeedback.Text}"
+                                                                       FontSize="14"
+                                                                       TextAlignment="Center"
+                                                                       HorizontalAlignment="Center"
+                                                                       VerticalAlignment="Top"
+                                                                       MinHeight="20"
+                                                                       Margin="0,6,0,0"
+                                                                       MaxWidth="380"/>
+                                                        </StackPanel>
 
-                                                        <Button Grid.Row="2"
-                                                                Classes="appButton primaryButton action primaryAction"
-                                                                AutomationProperties.AutomationId="Helper.Connect"
-                                                                Content="Connect"
-                                                                TabIndex="1"
-                                                                Command="{Binding ConnectCommand}"
-                                                                IsEnabled="{Binding CanStartOrConnect}"
-                                                                IsVisible="{Binding ShowConnectAction}"/>
-
-                                                        <Button Grid.Row="2"
-                                                                Classes="appButton secondaryButton action secondaryAction"
+                                                        <Button Classes="appButton secondaryButton action secondaryAction"
                                                                 Content="Retry"
                                                                 Command="{Binding RetryCommand}"
                                                                 IsVisible="{Binding ShowRetryAction}"/>
-
-                                                        <StackPanel Grid.Row="3"
-                                                                    Orientation="Horizontal"
-                                                                    HorizontalAlignment="Center"
-                                                                    Spacing="10">
-                                                            <Button Classes="appButton secondaryButton compactSecondaryAction"
-                                                                    AutomationProperties.AutomationId="Helper.PasteFromClipboard"
-                                                                    Content="Paste invite"
-                                                                    Width="160"
-                                                                    Click="PasteFromClipboard_Click"/>
-                                                            <Button Classes="appButton secondaryButton compactSecondaryAction"
-                                                                    AutomationProperties.AutomationId="Helper.ScanQr"
-                                                                    Content="Scan QR"
-                                                                    Width="160">
-                                                                <Button.Flyout>
-                                                                    <MenuFlyout Placement="Bottom">
-                                                                        <MenuItem Header="Scan from file"
-                                                                                  Command="{Binding #Root.DataContext.ScanQrFromFileCommand}"/>
-                                                                        <MenuItem Header="Scan with camera"
-                                                                                  Command="{Binding #Root.DataContext.ScanQrFromCameraCommand}"/>
-                                                                    </MenuFlyout>
-                                                                </Button.Flyout>
-                                                            </Button>
-                                                        </StackPanel>
-                                                    </Grid>
+                                                    </StackPanel>
                                                 </Border>
-
-                                                <StackPanel HorizontalAlignment="Center"
-                                                            IsVisible="{Binding ShowMainControls}">
-                                                    <Button Classes="linkButton linkAction"
-                                                            AutomationProperties.AutomationId="Helper.CopyInstallLink"
-                                                            Content="Copy install link"
-                                                            TabIndex="2"
-                                                            Command="{Binding CopyInstallMessageCommand}"/>
-                                                    <TextBlock AutomationProperties.AutomationId="Helper.CopyInstallFeedback"
-                                                               Classes="appMuted"
-                                                               Text="{Binding CopyFeedback.Text}"
-                                                               FontSize="14"
-                                                               TextAlignment="Center"
-                                                               HorizontalAlignment="Center"
-                                                               VerticalAlignment="Top"
-                                                               MinHeight="20"
-                                                               Margin="0,6,0,0"
-                                                               MaxWidth="380"/>
-                                                </StackPanel>
 
                                             </StackPanel>
                                         </Border>

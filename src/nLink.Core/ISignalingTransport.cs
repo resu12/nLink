@@ -35,6 +35,17 @@ public interface IAddressHostSignalingTransport
     Task HostByAddressAsync(CancellationToken ct);
 }
 
+public interface IHelpRequestSignalingTransport
+{
+    event EventHandler<IncomingHelpRequestEventArgs>? IncomingHelpRequest;
+
+    event EventHandler<HelpRequestDecisionEventArgs>? HelpRequestDecisionReceived;
+
+    Task SendHelpRequestAsync(HelpRequestMessage request, CancellationToken ct);
+
+    Task SendHelpRequestDecisionAsync(HelpRequestDecisionMessage decision, CancellationToken ct);
+}
+
 public interface IHostReadySignalingTransport
 {
     Task WaitUntilHostReadyAsync(CancellationToken ct);
@@ -127,6 +138,39 @@ public sealed class IncomingJoinRequestEventArgs : EventArgs
 
         return rejectAsync(reason, ct);
     }
+}
+
+public sealed record HelpRequestMessage(
+    string RequestId,
+    PeerAddress HelpeeAddress,
+    PeerAddress HelperAddress,
+    string InviteToken);
+
+public sealed record HelpRequestDecisionMessage(
+    string RequestId,
+    PeerAddress HelpeeAddress,
+    PeerAddress HelperAddress,
+    bool Accepted,
+    string? Reason = null);
+
+public sealed class IncomingHelpRequestEventArgs : EventArgs
+{
+    public IncomingHelpRequestEventArgs(HelpRequestMessage request)
+    {
+        Request = request ?? throw new ArgumentNullException(nameof(request));
+    }
+
+    public HelpRequestMessage Request { get; }
+}
+
+public sealed class HelpRequestDecisionEventArgs : EventArgs
+{
+    public HelpRequestDecisionEventArgs(HelpRequestDecisionMessage decision)
+    {
+        Decision = decision ?? throw new ArgumentNullException(nameof(decision));
+    }
+
+    public HelpRequestDecisionMessage Decision { get; }
 }
 
 public sealed class TransportSessionKeyReadyEventArgs : EventArgs

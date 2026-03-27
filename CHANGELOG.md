@@ -1,10 +1,48 @@
 # Changelog
 
+## [0.5.3] - 2026-03-25
+
+### Added
+
+- Final `0.5.3` release notes under `docs/releases/`.
+- Helper-ID-first direct request flow with helper-side incoming help request acceptance.
+- Helpee QR import menu with both file import and camera scan actions.
+
+### Changed
+
+- Release version sources and packaging defaults now resolve to `0.5.3`.
+- README and release-facing documentation now reflect `0.5.3` as the current release.
+- Helper and helpee connection flow now centers on sharing a helper address and sending a direct help request instead of a manual invite-return handoff.
+- Chat input now sends on `Enter` and inserts a new line with `Shift+Enter`.
+- Chat shell sizing was stabilized for chat-only and screen-sharing layouts, and the side-by-side screen-sharing chat pane was narrowed to leave more room for the shared screen.
+- Helper waiting/share layout was tightened so the helper address card no longer grows wider or leaves unnecessary footer space as content loads.
+- NKN file transfer now starts with a more conservative V3 startup profile to reduce repair churn on slower links.
+
+### Fixed
+
+- Repeated-session helper and helpee lifecycle handling after reject, timeout, remote end, and local end now returns to the correct waiting screens more reliably.
+- Helpee `Request help` recovery was fixed after reject/end flows and when the authoritative local NKN address is temporarily suppressed during invite preparation.
+- Stale chat text, peer-ended notices, and other previous-session presentation state no longer persist into new sessions as often.
+- Late duplicate NKN handshake failures no longer invalidate the active approved helpee session and disable chat/share controls after several sessions.
+- Helper passive approval-timeout recovery was hardened to return to `Waiting for help requests…` instead of leaving the helper on a blank `Connection failed` shell.
+
+### Packaging
+
+- Windows installer and portable release assets for `0.5.3` are prepared together with `SHA256SUMS.txt`.
+
 ## [0.5.2] - 2026-03-23
 
 ### Changed
 
 - Release version sources and packaging defaults now resolve to `0.5.2`.
+- Improved native file transfer with metadata-first startup and newer V3 streaming for updated peers
+- Better transfer throughput with larger chunks, larger healthy in-flight windows, and reduced control chatter
+- Reduced inbound file-transfer head-of-line blocking
+- Fixed helper identity bootstrap so helper-bound invites match the real connected helper again
+- Added safer recovery for unreadable protected per-process seed storage
+- Added startup cleanup for stale identity.instance-* identity files from dead processes
+- Removed helper recent-address history
+- File size cap is 1 GiB
 
 ## [0.5.1] - 2026-03-13
 

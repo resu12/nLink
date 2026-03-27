@@ -227,12 +227,11 @@
                                             <Border Background="{StaticResource AppSurfaceBrush}"
                                                     CornerRadius="16"
                                                     Padding="16"
-                                                    HorizontalAlignment="Stretch"
-                                                    IsVisible="{Binding ShowInviteHelperIdentityPanel}">
+                                                    HorizontalAlignment="Stretch">
                                                 <StackPanel Spacing="10">
                                                     <Grid ColumnDefinitions="*,Auto"
                                                           ColumnSpacing="10">
-                                                        <TextBlock Text="1. Bind this invite to one helper"
+                                                        <TextBlock Text="Enter helper ID"
                                                                    Foreground="{StaticResource AppTextBrush}"
                                                                    FontSize="16"
                                                                    FontWeight="SemiBold"
@@ -249,59 +248,31 @@
                                                              AutomationProperties.AutomationId="Helpee.HelperIdentityInput"
                                                              Text="{Binding InviteHelperIdentityInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                                              KeyDown="InviteHelperIdentityInput_KeyDown"
-                                                             Watermark="Paste the provided helper address"
+                                                             Watermark="Enter helper ID or import helper QR"
                                                              IsEnabled="{Binding CanStartOrConnect}"/>
-                                                    <Button Classes="appButton secondaryButton"
-                                                            AutomationProperties.AutomationId="Helpee.ClearHelperIdentity"
-                                                            Content="Clear"
-                                                            Command="{Binding ClearInviteHelperIdentityCommand}"
-                                                            IsEnabled="{Binding CanClearInviteHelperIdentityAction}"
-                                                            IsVisible="{Binding ShowVerifiedInviteHelperIdentity}"
-                                                            HorizontalAlignment="Right"
-                                                            MinWidth="92"
-                                                            Height="40"/>
-                                                    <StackPanel Spacing="4"
-                                                                IsVisible="{Binding ShowVerifiedInviteHelperIdentity}">
-                                                    </StackPanel>
-                                                </StackPanel>
-                                            </Border>
-
-                                            <Border Background="{StaticResource AppSurfaceBrush}"
-                                                    CornerRadius="16"
-                                                    Padding="16">
-                                                <StackPanel Spacing="16">
-                                                    <TextBlock Text="2. Share invite with your helper"
-                                                               Foreground="{StaticResource AppTextBrush}"
-                                                               FontSize="16"
-                                                               FontWeight="SemiBold"/>
-
-                                                    <Border Background="{StaticResource AppSurfaceBrush}"
-                                                            CornerRadius="20"
-                                                            Padding="24"
-                                                            HorizontalAlignment="Center">
-                                                        <Grid Width="248"
-                                                              Height="248">
-                                                            <Border Background="{StaticResource AppMutedPanelBrush}"
-                                                                    CornerRadius="14"
-                                                                    IsVisible="{Binding ShowShareInviteQrPlaceholder}">
-                                                                <TextBlock Text="QR code appears here"
-                                                                           Classes="appMuted"
-                                                                           FontSize="14"
-                                                                           TextAlignment="Center"
-                                                                           HorizontalAlignment="Center"
-                                                                           VerticalAlignment="Center"/>
-                                                            </Border>
-
-                                                            <Image AutomationProperties.AutomationId="Helpee.InviteQr"
-                                                                   Source="{Binding ShareInviteQrImage}"
-                                                                   Width="248"
-                                                                   Height="248"
-                                                                   Stretch="Uniform"
-                                                                   HorizontalAlignment="Center"
-                                                                   IsVisible="{Binding ShowShareInviteQr}"/>
-                                                        </Grid>
-                                                    </Border>
-
+                                                    <Grid ColumnDefinitions="*,*"
+                                                          ColumnSpacing="10">
+                                                        <Button Grid.Column="0"
+                                                                Classes="appButton secondaryButton inviteAction"
+                                                                Content="Paste helper ID"
+                                                                Click="PasteHelperId_Click"/>
+                                                        <Button Grid.Column="1"
+                                                                x:Name="ImportQrMenuButton"
+                                                                Classes="appButton secondaryButton inviteAction"
+                                                                Content="Import QR"
+                                                                Click="OpenImportQrMenu_Click">
+                                                            <Button.ContextMenu>
+                                                                <ContextMenu x:Name="ImportQrContextMenu"
+                                                                             Placement="Bottom">
+                                                                    <MenuItem Header="Import from file"
+                                                                              Click="ImportHelperQr_Click"/>
+                                                                    <MenuItem x:Name="ScanHelperQrMenuItem"
+                                                                              Header="Scan with camera"
+                                                                              Click="ScanHelperQr_Click"/>
+                                                                </ContextMenu>
+                                                            </Button.ContextMenu>
+                                                        </Button>
+                                                    </Grid>
                                                     <StackPanel Spacing="10"
                                                                 HorizontalAlignment="Center"
                                                                 MaxWidth="380">
@@ -318,11 +289,11 @@
                                                             <Button Grid.Column="1"
                                                                     AutomationProperties.AutomationId="Helpee.RefreshInvite"
                                                                     Classes="linkButton linkAction"
-                                                                    Content="Refresh invite"
+                                                                    Content="Refresh"
                                                                     Command="{Binding RefreshInviteCommand}"
                                                                     IsEnabled="{Binding CanStartOrConnect}"
                                                                      VerticalAlignment="Center"
-                                                                     IsVisible="{Binding ShowWaitingInviteActions}"/>
+                                                                     IsVisible="{Binding HasVerifiedInviteHelperIdentity}"/>
                                                         </Grid>
                                                     </StackPanel>
 
@@ -335,27 +306,11 @@
                                                                MaxWidth="380"
                                                                IsVisible="{Binding ShowShareInviteStatus}"/>
 
-                                                    <StackPanel Spacing="4"
-                                                                HorizontalAlignment="Center"
-                                                                MaxWidth="380"
-                                                                IsVisible="{Binding ShowWaitingInviteActions}">
-                                                        <Grid ColumnDefinitions="*,*"
-                                                              ColumnSpacing="10">
-                                                            <Button Grid.Column="0"
-                                                                    AutomationProperties.AutomationId="Helpee.ShareInvite"
-                                                                    Classes="appButton primaryButton inviteAction"
-                                                                    Content="Share invite"
-                                                                    Command="{Binding ShareInviteCommand}"
-                                                                    IsEnabled="{Binding CanStartOrConnect}"/>
-
-                                                            <Button Grid.Column="1"
-                                                                    AutomationProperties.AutomationId="Helpee.CopyInvite"
-                                                                    Classes="appButton primaryButton inviteAction"
-                                                                    Content="Copy invite"
-                                                                    Command="{Binding CopyInviteCommand}"
-                                                                    IsEnabled="{Binding CanStartOrConnect}"/>
-                                                        </Grid>
-                                                    </StackPanel>
+                                                    <Button AutomationProperties.AutomationId="Helpee.RequestHelp"
+                                                            Classes="appButton positiveButton action"
+                                                            Content="Request help"
+                                                            Command="{Binding RequestHelpCommand}"
+                                                            IsEnabled="{Binding CanStartOrConnect}"/>
 
                                                     <TextBlock Classes="appMuted"
                                                                Text="{Binding CopyFeedback.Text}"
