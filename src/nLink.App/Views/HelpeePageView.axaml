@@ -231,7 +231,7 @@
                                                 <StackPanel Spacing="10">
                                                     <Grid ColumnDefinitions="*,Auto"
                                                           ColumnSpacing="10">
-                                                        <TextBlock Text="Enter helper ID"
+                                                        <TextBlock Text="Enter helper address"
                                                                    Foreground="{StaticResource AppTextBrush}"
                                                                    FontSize="16"
                                                                    FontWeight="SemiBold"
@@ -248,13 +248,13 @@
                                                              AutomationProperties.AutomationId="Helpee.HelperIdentityInput"
                                                              Text="{Binding InviteHelperIdentityInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                                              KeyDown="InviteHelperIdentityInput_KeyDown"
-                                                             Watermark="Enter helper ID or import helper QR"
+                                                             Watermark="Enter helper address or import helper QR"
                                                              IsEnabled="{Binding CanStartOrConnect}"/>
                                                     <Grid ColumnDefinitions="*,*"
                                                           ColumnSpacing="10">
                                                         <Button Grid.Column="0"
                                                                 Classes="appButton secondaryButton inviteAction"
-                                                                Content="Paste helper ID"
+                                                                Content="Paste helper address"
                                                                 Click="PasteHelperId_Click"/>
                                                         <Button Grid.Column="1"
                                                                 x:Name="ImportQrMenuButton"

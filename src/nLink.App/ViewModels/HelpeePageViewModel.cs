@@ -398,7 +398,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             {
                 return HasVerifiedInviteHelperIdentity
                     ? "Paste a different helper address to refresh the invite binding."
-                    : "Paste or import the helper ID your helper shared with you.";
+                    : "Paste or import the helper address your helper shared with you.";
             }
 
             if (!TryResolveInviteHelperIdentityInput(out _, out _, out _))
@@ -2210,7 +2210,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         if (ResolveVerifiedHelpRequestTargetAddress() is not { } helperAddress ||
             string.IsNullOrWhiteSpace(ShareInvite))
         {
-            UpdateShareInviteStatusText("Enter a valid helper ID first.");
+            UpdateShareInviteStatusText("Enter a valid helper address first.");
             return;
         }
 
@@ -2234,7 +2234,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 ConnectionStatus = "Waiting for helper…";
                 UpdateShareInviteStatusText(
                     ex is TimeoutException
-                        ? "Couldn't reach the helper. Check the helper ID and try again."
+                        ? "Couldn't reach the helper. Check the helper address and try again."
                         : "Couldn't send the help request right now. Please try again.");
             });
             return;
