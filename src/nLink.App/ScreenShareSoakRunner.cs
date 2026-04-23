@@ -8,6 +8,7 @@ using Avalonia.Logging;
 using Avalonia.Threading;
 using NLink.App.Services.ScreenCapture;
 using NLink.App.ViewModels;
+using NLink.Core.Logging;
 using NLink.Core.ScreenShare;
 using NLink.Infra.Nkn;
 
@@ -40,22 +41,32 @@ internal static class ScreenShareSoakRunner
         linkedCts.CancelAfter(options!.Duration + TimeSpan.FromSeconds(30));
         EnsureViewerDecodePlatformInitialized();
 
-        var reassembler = new ScreenShareFrameReassembler();
+        var reassembler = new ScreenShareVideoFrameReassembler();
         long framesSent = 0;
         long enqueueFailures = 0;
         await using var coordinator = new TransportScreenShareCoordinator(
-            captureSourceFactory: static () => new WindowsScreenCaptureSource(),
-            sendPayloadAsync: (payload, _) =>
+            captureSourceFactory: ScreenCaptureFactory.CreateForTransport,
+            sendPayloadAsync: (payload, sendCt) =>
             {
-                if (ScreenSharePayloadCodec.TryDeserialize(payload.Span, out var chunk))
+                _ = sendCt;
+                if (ScreenShareVideoPayloadCodec.TryDeserializeFragmentEnvelope(payload.Span, out var fragments, out var isBatch))
                 {
-                    reassembler.OnChunk(chunk);
-                    if (chunk.ChunkIndex == chunk.ChunkCount - 1)
+                    _ = isBatch;
+                    foreach (var fragment in fragments)
                     {
-                        Interlocked.Increment(ref framesSent);
+                        reassembler.OnFragment(fragment);
+                        if (fragment.FragmentIndex == fragment.FragmentCount - 1)
+                        {
+                            Interlocked.Increment(ref framesSent);
+                        }
                     }
                 }
 
+                return Task.CompletedTask;
+            },
+            sendVideoStreamConfigAsync: (config, _) =>
+            {
+                reassembler.OnStreamConfig(config);
                 return Task.CompletedTask;
             },
             sendDisplayInfoAsync: (_, _, _) => Task.CompletedTask,
@@ -69,9 +80,17 @@ internal static class ScreenShareSoakRunner
                 return Task.CompletedTask;
             });
 
-        reassembler.FrameReady += (_, frame) => viewer.OnJpegFrame(
+        reassembler.FrameReady += (_, frame) => viewer.OnOwnedEncodedFrame(
+            frame.Encoding,
             frame.EncodedFrameBytes,
-            frame.TimestampUnixMilliseconds);
+            frame.CapturedTsUtcMs,
+            frame.IsKeyFrame,
+            frame.StreamEpoch,
+            frame.StreamConfig,
+            frameId: frame.FrameId,
+            sessionId: frame.SessionId,
+            recoveryDeliveryClass: frame.RecoveryDeliveryClass,
+            frameReadyObservedUtcMs: frame.FrameReadyObservedUtcMs);
 
         try
         {
@@ -91,12 +110,16 @@ internal static class ScreenShareSoakRunner
                 var now = DateTimeOffset.UtcNow;
                 if (now >= nextSampleAt)
                 {
+                    var senderMetrics = coordinator.GetMetricsSnapshot();
+                    var viewerMetrics = viewer.GetMetricsSnapshot();
+                    var healthSnapshot = BuildHealthSnapshot(senderMetrics, viewerMetrics);
+                    LocalOperationalLog.Info("ScreenShare", healthSnapshot.ToLogMessage());
                     await output.WriteLineAsync(BuildMetricsLine(
                         elapsed: now - startedAt,
                         framesSent: Interlocked.Read(ref framesSent),
-                        senderMetrics: coordinator.GetMetricsSnapshot(),
+                        senderMetrics: senderMetrics,
                         receiverMetrics: reassembler.GetMetricsSnapshot(),
-                        viewerMetrics: viewer.GetMetricsSnapshot(),
+                        viewerMetrics: viewerMetrics,
                         enqueueFailures: Interlocked.Read(ref enqueueFailures)));
                     nextSampleAt = now + options.SampleInterval;
                 }
@@ -123,6 +146,7 @@ internal static class ScreenShareSoakRunner
             viewer.Clear();
 
             await output.WriteLineAsync("Final metrics");
+            LocalOperationalLog.Info("ScreenShare", BuildHealthSnapshot(stableSnapshot.SenderMetrics, stableSnapshot.ViewerMetrics).ToLogMessage());
             await output.WriteLineAsync(BuildMetricsLine(
                 elapsed: options.Duration,
                 framesSent: stableSnapshot.FramesSent,
@@ -130,6 +154,7 @@ internal static class ScreenShareSoakRunner
                 receiverMetrics: stableSnapshot.ReceiverMetrics,
                 viewerMetrics: stableSnapshot.ViewerMetrics,
                 enqueueFailures: stableSnapshot.EnqueueFailures));
+            await output.WriteLineAsync(BuildFrameLossReport("screenshare-soak"));
             await output.WriteLineAsync("Screenshare soak completed cleanly.");
             return 0;
         }
@@ -245,33 +270,91 @@ internal static class ScreenShareSoakRunner
         ScreenShareMetrics viewerMetrics,
         long enqueueFailures)
     {
+        var healthSnapshot = BuildHealthSnapshot(senderMetrics, viewerMetrics);
         return string.Format(
             CultureInfo.InvariantCulture,
             "[{0:mm\\:ss}] FramesCaptured={1} FramesSent={2} FramesDropped={3} FramesDroppedByRateGate={4} " +
-            "FramesDroppedByQueueEvict={5} FramesCompleted={6} DecodeErrors={7} EnqueueFailures={8} " +
-            "DisplayInfoSends={9} AvgCaptureToEnqueueMs={10:F1} AvgEnqueueToSendMs={11:F1} AvgCaptureToSendMs={12:F1} LastCaptureToSendAgeMs={13} " +
-            "AvgRawFrameBytes={14:F1} AvgSerializedChunkBytes={15:F1} AvgBridgeBytes={16:F1} " +
-            "AvgRenderIntervalMs={17:F1} AvgCaptureToRenderMs={18:F1} StaleFrameRenders={19}",
+            "FramesDroppedByQueueEvict={5} FramesDeferredToSendSlot={6} FramesReplacedBeforeSendSlot={7} SendSlotEmptyCount={8} SlotCoalescingActive={9} FramesCompleted={10} FramesSuperseded={11} FramesEnqueuedForDecode={12} FramesDroppedBeforeDecode={13} FramesDecoded={14} FramesDroppedAfterDecode={15} FramesApplied={16} DecodeErrors={17} EnqueueFailures={18} " +
+            "NeedMoreInputCount={19} CompletedWithoutPictureCount={20} EmittedDisplayableFrames={21} EmittedNonDisplayableUnits={22} DisplayableFrameRatio={23:F2} IdrFrameRatio={24:F2} AvgEncodedFrameBytes={25:F1} TransportIpOnlyMode={26} LastAccessUnitKind={27} LowDelayConfigApplied={28} " +
+            "EmittedPFrames={29} DroppedBFrames={30} DroppedMultiPictureUnits={31} DisplayInfoSends={32} AvgCaptureToEnqueueMs={33:F1} AvgEnqueueToSendMs={34:F1} AvgCaptureToSendMs={35:F1} LastCaptureToSendAgeMs={36} " +
+            "AvgFragmentsPerFrame={37:F2} AvgTransportPayloadsPerFrame={38:F2} BatchedPayloads={39} LegacyFragmentPayloads={40} " +
+            "AvgRawFrameBytes={41:F1} AvgSerializedChunkBytes={42:F1} AvgBridgeBytes={43:F1} " +
+            "AvgReceiveIntervalMs={44:F1} AvgDecodeDurationMs={45:F1} AvgDecodeToApplyWaitMs={46:F1} AvgApplyDurationMs={47:F1} AvgApplyIntervalMs={48:F1} " +
+            "AvgDecodeIntervalMs={49:F1} AvgRenderIntervalMs={50:F1} AvgCaptureToRenderMs={51:F1} StaleFrameRenders={52} " +
+            "ReassemblerLossCount={53} EnqueueRejectCount={54} DecodeWorkerDropCount={55} PostDecodeDropCount={56} UnattributedLossCount={57} " +
+            "SenderOperatingState={58} SenderGuardState={59} HelperSessionPhase={60} HelperRecoveryMechanism={61} DominantLossClass={62} DominantPressureBlocker={63} DominantTroubleDomain={64}",
             elapsed,
             senderMetrics.FramesCaptured,
             framesSent,
             senderMetrics.FramesDropped,
             senderMetrics.FramesDroppedByRateGate,
             senderMetrics.FramesDroppedByQueueEvict,
+            senderMetrics.FramesDeferredToSendSlot,
+            senderMetrics.FramesReplacedBeforeSendSlot,
+            senderMetrics.SendSlotEmptyCount,
+            senderMetrics.SlotCoalescingActive ? 1 : 0,
             receiverMetrics.FramesCompleted,
+            receiverMetrics.FramesSuperseded,
+            viewerMetrics.FramesEnqueuedForDecode,
+            viewerMetrics.FramesDroppedBeforeDecode,
+            viewerMetrics.FramesDecoded,
+            viewerMetrics.FramesDroppedAfterDecode,
+            viewerMetrics.FramesApplied,
             viewerMetrics.DecodeErrors,
             enqueueFailures,
+            viewerMetrics.NeedMoreInputCount,
+            viewerMetrics.CompletedWithoutPictureCount,
+            senderMetrics.EmittedDisplayableFrames,
+            senderMetrics.EmittedNonDisplayableUnits,
+            senderMetrics.DisplayableFrameRatio,
+            senderMetrics.IdrFrameRatio,
+            senderMetrics.AverageEncodedFrameBytes,
+            senderMetrics.TransportIpOnlyMode ? 1 : 0,
+            senderMetrics.LastAccessUnitKind,
+            senderMetrics.LowDelayConfigApplied,
+            senderMetrics.PFramesEmitted,
+            senderMetrics.DroppedBFrames,
+            senderMetrics.DroppedMultiPictureUnits,
             senderMetrics.DisplayInfoSendCount,
             senderMetrics.AverageCaptureToEnqueueMs,
             senderMetrics.AverageEnqueueToSendMs,
             senderMetrics.AverageCaptureToSendMs,
             senderMetrics.LastCaptureToSendAgeMs,
+            senderMetrics.AverageFragmentsPerFrame,
+            senderMetrics.AverageTransportPayloadsPerFrame,
+            senderMetrics.BatchedPayloadsSent,
+            senderMetrics.LegacyFragmentPayloadsSent,
             framesSent > 0 ? senderMetrics.RawFrameBytesSent / (double)framesSent : 0d,
             framesSent > 0 ? senderMetrics.SerializedChunkBytesSent / (double)framesSent : 0d,
             framesSent > 0 ? senderMetrics.BridgeBytesSent / (double)framesSent : 0d,
+            viewerMetrics.AverageReceiveIntervalMs,
+            viewerMetrics.AverageDecodeDurationMs,
+            viewerMetrics.AverageDecodeToApplyWaitMs,
+            viewerMetrics.AverageApplyDurationMs,
+            viewerMetrics.AverageApplyIntervalMs,
+            viewerMetrics.AverageDecodeIntervalMs,
             viewerMetrics.AverageRenderIntervalMs,
             viewerMetrics.AverageCaptureToRenderMs,
-            viewerMetrics.StaleFrameRenders);
+            viewerMetrics.StaleFrameRenders,
+            viewerMetrics.ReassemblerLossCount,
+            viewerMetrics.EnqueueRejectCount,
+            viewerMetrics.DecodeWorkerDropCount,
+            viewerMetrics.PostDecodeDropCount,
+            viewerMetrics.UnattributedLossCount,
+            ScreenShareConceptualModelFormatter.FormatSenderOperatingState(healthSnapshot.SenderOperatingState),
+            ScreenShareConceptualModelFormatter.FormatSenderGuardState(healthSnapshot.SenderGuardState),
+            ScreenShareConceptualModelFormatter.FormatHelperSessionPhase(healthSnapshot.HelperSessionPhase),
+            ScreenShareConceptualModelFormatter.FormatHelperRecoveryMechanism(healthSnapshot.HelperRecoveryMechanism),
+            ScreenShareConceptualModelFormatter.FormatLossClass(healthSnapshot.DominantLossClass),
+            healthSnapshot.DominantPressureBlocker,
+            ScreenShareConceptualModelFormatter.FormatTroubleDomain(healthSnapshot.DominantTroubleDomain));
+    }
+
+    private static ScreenShareOperationalHealthSnapshot BuildHealthSnapshot(
+        ScreenShareMetrics senderMetrics,
+        ScreenShareMetrics viewerMetrics)
+    {
+        return ScreenShareOperationalHealthSnapshotBuilder.Build(senderMetrics, viewerMetrics);
     }
 
     private static async Task WaitUntilAsync(
@@ -359,9 +442,38 @@ internal static class ScreenShareSoakRunner
         return Task.CompletedTask;
     }
 
+    private static string BuildFrameLossReport(string sessionId)
+    {
+        var snapshot = ScreenShareFrameLossAttributionRegistry.GetSnapshot(sessionId);
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            "HelperFrameLossReport SessionId={0} FragmentSeen={1} Assembled={2} Ready={3} Emitted={4} ViewerAccepted={5} DecodeEnqueued={6} Decoded={7} Applied={8} ReassemblerLossCount={9} EnqueueRejectCount={10} DecodeWorkerDropCount={11} PostDecodeDropCount={12} GapNonKeyPrunedCount={13} RecoveryKeyframeResyncCount={14} GapActive={15} GapExpectedFrameId={16} BufferedRecoveryKeyframeFrameId={17} FutureNonKeyBufferedCount={18} UnattributedLossCount={19} RecentLosses={20}",
+            string.IsNullOrWhiteSpace(snapshot.SessionId) ? "(none)" : snapshot.SessionId,
+            snapshot.FragmentSeenFrames,
+            snapshot.FramesAssembled,
+            snapshot.FramesReady,
+            snapshot.FramesEmitted,
+            snapshot.ViewerAcceptedFrames,
+            snapshot.DecodeEnqueuedFrames,
+            snapshot.FramesDecoded,
+            snapshot.FramesApplied,
+            snapshot.ReassemblerLossCount,
+            snapshot.EnqueueRejectCount,
+            snapshot.DecodeWorkerDropCount,
+            snapshot.PostDecodeDropCount,
+            snapshot.GapNonKeyPrunedCount,
+            snapshot.RecoveryKeyframeResyncCount,
+            snapshot.GapActive ? 1 : 0,
+            snapshot.GapExpectedFrameId,
+            snapshot.BufferedRecoveryKeyframeFrameId,
+            snapshot.FutureNonKeyBufferedCount,
+            snapshot.UnattributedLossCount,
+            ScreenShareFrameLossAttributionRegistry.FormatRecentLosses(snapshot.RecentLosses));
+    }
+
     private static StopSnapshot CreateStopSnapshot(
         TransportScreenShareCoordinator coordinator,
-        ScreenShareFrameReassembler reassembler,
+        ScreenShareVideoFrameReassembler reassembler,
         ScreenShareViewerViewModel viewer,
         long framesSent,
         long enqueueFailures)

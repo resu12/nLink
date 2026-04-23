@@ -1,0 +1,22 @@
+{
+  "Role": "helper_remote",
+  "DecoderId": 1,
+  "StreamEpoch": 1,
+  "Reason": "extended_replay_fixture",
+  "ConfigByteCount": 48,
+  "FirstFrameByteCount": 33513,
+  "FrameCountCaptured": 7,
+  "FramesSubmitted": 7,
+  "NeedMoreInputCount": 7,
+  "SawOutputSample": false,
+  "CreatedBitmap": false,
+  "ExpectedWidth": 1280,
+  "ExpectedHeight": 720,
+  "ChosenWidth": 1280,
+  "ChosenHeight": 720,
+  "OutputSubtype": "NV12",
+  "OutputSampleProvider": "aligned_contiguous_buffer",
+  "OutputBufferSize": 1843200,
+  "OutputBufferAlignment": 16,
+  "CapturedUtc": "2026-04-10T20:26:08.5142471+00:00"
+}

@@ -10,6 +10,7 @@ using NLink.App.Views;
 using NLink.Core;
 using NLink.Core.RemoteControl;
 using NLink.Core.Resources;
+using NLink.Core.ScreenShare;
 using NLink.Core.SessionConnect;
 using NLink.Core.SessionSecurity;
 using NLink.SmokeTests.Fakes;
@@ -361,15 +362,31 @@ public sealed class RemoteControlP6RuntimeTests
 
         for (var cycle = 1; cycle <= cycleCount; cycle++)
         {
+            var sessionId = $"session-cycle-{cycle}";
+
             AttachConnectedRuntime(runtime, transport, SessionRuntimeRole.Helpee);
             SetRemoteControlState(runtime, SessionRuntimeRole.Helpee, $"req-p6-cycle-{cycle}", "controller-peer");
             SetDisplayInfo(runtime, "primary", revision: cycle);
 
-            await coordinator.StartAsync($"session-cycle-{cycle}", CancellationToken.None);
+            await coordinator.StartAsync(sessionId, CancellationToken.None);
             Assert.True(coordinator.IsActive, $"Expected screen-share coordinator to be active in cycle {cycle}.");
             Assert.True(fakeSource.IsStarted, $"Expected capture source to be started in cycle {cycle}.");
 
-            fakeSource.RaiseFrame(640, 360, new byte[] { (byte)cycle, 1, 2 }, "jpeg");
+            fakeSource.RaiseFrame(
+                640,
+                360,
+                new byte[] { (byte)cycle, 1, 2 },
+                "h264",
+                isKeyFrame: true,
+                streamEpoch: cycle,
+                streamConfig: new ScreenShareVideoStreamConfigV1
+                {
+                    SessionId = sessionId,
+                    StreamEpoch = cycle,
+                    Encoding = "h264",
+                    CodecProfile = "baseline",
+                    DecoderConfigData = new byte[] { 1, 2, 3 },
+                });
             await WaitUntilAsync(() => probe.CurrentInFlight > 0, TimeSpan.FromSeconds(1));
 
             for (var i = 0; i < 64; i++)
@@ -424,7 +441,21 @@ public sealed class RemoteControlP6RuntimeTests
                 TimeSpan.FromSeconds(2));
 
             var payloadsAfterStop = probe.PayloadsSent;
-            fakeSource.RaiseFrame(640, 360, new byte[] { (byte)(cycle + 100), 9, 9 }, "jpeg");
+            fakeSource.RaiseFrame(
+                640,
+                360,
+                new byte[] { (byte)(cycle + 100), 9, 9 },
+                "h264",
+                isKeyFrame: true,
+                streamEpoch: cycle,
+                streamConfig: new ScreenShareVideoStreamConfigV1
+                {
+                    SessionId = sessionId,
+                    StreamEpoch = cycle,
+                    Encoding = "h264",
+                    CodecProfile = "baseline",
+                    DecoderConfigData = new byte[] { 1, 2, 3 },
+                });
             await Task.Delay(50);
             Assert.Equal(payloadsAfterStop, probe.PayloadsSent);
             Assert.True(

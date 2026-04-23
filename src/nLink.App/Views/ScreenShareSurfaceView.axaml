@@ -4,7 +4,8 @@
              x:Class="NLink.App.Views.ScreenShareSurfaceView"
              x:Name="Root">
     <Grid Background="Transparent">
-        <Image Source="{Binding Frame, ElementName=Root}"
+        <Image x:Name="FrameImage"
+               Source="{Binding Frame, ElementName=Root}"
                Stretch="Uniform"
                IsHitTestVisible="False"/>
     </Grid>

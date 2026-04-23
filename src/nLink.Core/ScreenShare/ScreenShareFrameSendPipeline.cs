@@ -8,36 +8,41 @@ using NLink.Core.Diagnostics;
 namespace NLink.Core.ScreenShare;
 
 /// <summary>
-/// Bounded frame sender that drops the oldest queued frame when capacity is exceeded.
+/// Bounded frame sender where ordinary freshness loss happens before transport send.
 /// Frames already being sent are not interrupted.
 /// </summary>
 // 0.3.0 RC: protocol freeze - additive changes only.
 public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
 {
     public const int MaxFramesPerSecond = 8;
-    public const int MaxBufferedFrames = 2;
+    public const int MaxBufferedFrames = 1;
+    private const int MaxBufferedFramesWithRecoveryReserve = 4;
 #if DEBUG
     private static readonly TimeSpan SnapshotInterval = TimeSpan.FromSeconds(10);
 #endif
 
-    private readonly Func<ScreenShareFrameChunkV1, CancellationToken, Task> sendChunkAsync;
+    private readonly Func<ScreenShareEncodedFramePacket, CancellationToken, Task<int>> sendFrameAsync;
     private readonly Func<TimeSpan, CancellationToken, Task> delayAsync;
     private readonly IScreenShareClock clock;
-    private readonly ConcurrentDictionary<string, long> nextFrameIds = new(StringComparer.Ordinal);
-    private readonly Queue<PendingFrame> pendingFrames = new();
+    private readonly ConcurrentDictionary<FrameSequenceKey, long> nextFrameIds = new();
+    private readonly Queue<PendingFrame> protectedRecoveryFrames = new();
     private readonly Channel<bool> pendingSignals;
     private readonly CancellationTokenSource disposeCts = new();
     private readonly object gate = new();
     private readonly Task sendLoopTask;
     private readonly int capacity;
     private long minimumFrameIntervalTicks;
-    private DateTimeOffset lastQueuedFrameAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset lastSendStartedAtUtc = DateTimeOffset.MinValue;
     private long framesCaptured;
     private long framesQueued;
     private long framesDropped;
     private long framesDroppedByRateGate;
     private long framesDroppedByQueueEvict;
+    private long framesDeferredToSendSlot;
+    private long framesReplacedBeforeSendSlot;
+    private long protectedRecoveryFramesDispatched;
+    private long recoveryProtectedFrameBlockedByOrdinary;
+    private long sendSlotEmptyCount;
     private long chunksSent;
     private long rawFrameBytesSent;
     private long lastCaptureToSendAgeMs = -1;
@@ -50,6 +55,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
     private long signalWriteAttempts;
     private long signalReadCount;
     private bool disposed;
+    private PendingFrame? ordinaryPendingFrame;
 #if DEBUG
     private readonly DebugLatencyWindow captureToEnqueueLatency = new();
     private readonly DebugLatencyWindow enqueueToSendLatency = new();
@@ -60,32 +66,22 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
 #endif
 
     public ScreenShareFrameSendPipeline(
-        Func<ScreenShareFrameChunkV1, CancellationToken, Task> sendChunkAsync,
-        int capacity = 2,
+        Func<ScreenShareEncodedFramePacket, CancellationToken, Task<int>> sendFrameAsync,
+        int capacity = MaxBufferedFrames,
         IScreenShareClock? clock = null,
         int maxFramesPerSecond = MaxFramesPerSecond)
-        : this(sendChunkAsync, capacity, clock, maxFramesPerSecond, delayAsync: null)
+        : this(sendFrameAsync, capacity, clock, maxFramesPerSecond, delayAsync: null)
     {
-    }
-
-    internal static ScreenShareFrameSendPipeline CreateForTesting(
-        Func<ScreenShareFrameChunkV1, CancellationToken, Task> sendChunkAsync,
-        int capacity = 2,
-        IScreenShareClock? clock = null,
-        int maxFramesPerSecond = MaxFramesPerSecond,
-        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
-    {
-        return new ScreenShareFrameSendPipeline(sendChunkAsync, capacity, clock, maxFramesPerSecond, delayAsync);
     }
 
     private ScreenShareFrameSendPipeline(
-        Func<ScreenShareFrameChunkV1, CancellationToken, Task> sendChunkAsync,
-        int capacity = 2,
+        Func<ScreenShareEncodedFramePacket, CancellationToken, Task<int>> sendFrameAsync,
+        int capacity = MaxBufferedFrames,
         IScreenShareClock? clock = null,
         int maxFramesPerSecond = MaxFramesPerSecond,
         Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
-        this.sendChunkAsync = sendChunkAsync ?? throw new ArgumentNullException(nameof(sendChunkAsync));
+        this.sendFrameAsync = sendFrameAsync ?? throw new ArgumentNullException(nameof(sendFrameAsync));
         if (capacity <= 0 || capacity > MaxBufferedFrames)
         {
             throw new ArgumentOutOfRangeException(nameof(capacity));
@@ -121,6 +117,11 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
             FramesDropped: Interlocked.Read(ref framesDropped),
             FramesDroppedByRateGate: Interlocked.Read(ref framesDroppedByRateGate),
             FramesDroppedByQueueEvict: Interlocked.Read(ref framesDroppedByQueueEvict),
+            FramesDeferredToSendSlot: Interlocked.Read(ref framesDeferredToSendSlot),
+            FramesReplacedBeforeSendSlot: Interlocked.Read(ref framesReplacedBeforeSendSlot),
+            ProtectedRecoveryFramesDispatched: Interlocked.Read(ref protectedRecoveryFramesDispatched),
+            RecoveryProtectedFrameBlockedByOrdinaryCount: Interlocked.Read(ref recoveryProtectedFrameBlockedByOrdinary),
+            SendSlotEmptyCount: Interlocked.Read(ref sendSlotEmptyCount),
             ChunksSent: Interlocked.Read(ref chunksSent),
             RawFrameBytesSent: Interlocked.Read(ref rawFrameBytesSent),
             LastCaptureToSendAgeMs: Interlocked.Read(ref lastCaptureToSendAgeMs),
@@ -132,7 +133,8 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
                 Interlocked.Read(ref enqueueToSendSampleCount)),
             AverageCaptureToSendMs: ComputeAverageMillisecondsFromMilliseconds(
                 Interlocked.Read(ref captureToSendTotalMilliseconds),
-                Interlocked.Read(ref captureToSendSampleCount)));
+                Interlocked.Read(ref captureToSendSampleCount)),
+            SlotCoalescingActive: true);
     }
 
     internal int PendingSignalCount => pendingSignals.Reader.CanCount ? pendingSignals.Reader.Count : 0;
@@ -155,7 +157,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
         {
             lock (gate)
             {
-                return pendingFrames.Count;
+                return protectedRecoveryFrames.Count + (ordinaryPendingFrame is null ? 0 : 1);
             }
         }
     }
@@ -166,13 +168,14 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
         {
             ObjectDisposedException.ThrowIf(disposed, this);
 
-            var droppedCount = pendingFrames.Count;
+            var droppedCount = protectedRecoveryFrames.Count + (ordinaryPendingFrame is null ? 0 : 1);
             if (droppedCount <= 0)
             {
                 return 0;
             }
 
-            pendingFrames.Clear();
+            protectedRecoveryFrames.Clear();
+            ordinaryPendingFrame = null;
             Interlocked.Add(ref framesDropped, droppedCount);
             return droppedCount;
         }
@@ -184,22 +187,25 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
         {
             ObjectDisposedException.ThrowIf(disposed, this);
 
-            if (pendingFrames.Count <= 1)
+            var pendingCount = protectedRecoveryFrames.Count + (ordinaryPendingFrame is null ? 0 : 1);
+            if (pendingCount <= 1)
             {
                 return 0;
             }
 
-            PendingFrame newestFrame = default!;
-            foreach (var frame in pendingFrames)
+            if (protectedRecoveryFrames.Count > 0)
             {
-                newestFrame = frame;
+                var droppedCount = ordinaryPendingFrame is null ? 0 : 1;
+                ordinaryPendingFrame = null;
+                if (droppedCount > 0)
+                {
+                    Interlocked.Add(ref framesDropped, droppedCount);
+                }
+
+                return droppedCount;
             }
 
-            var droppedCount = pendingFrames.Count - 1;
-            pendingFrames.Clear();
-            pendingFrames.Enqueue(newestFrame);
-            Interlocked.Add(ref framesDropped, droppedCount);
-            return droppedCount;
+            return 0;
         }
     }
 
@@ -219,7 +225,6 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
     {
         lock (gate)
         {
-            lastQueuedFrameAtUtc = DateTimeOffset.MinValue;
             lastSendStartedAtUtc = DateTimeOffset.MinValue;
         }
     }
@@ -247,6 +252,31 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
         byte[] encodedFrameBytes,
         long timestampUnixMilliseconds,
         CancellationToken cancellationToken)
+        => EnqueueFrameAsync(
+            sessionId,
+            width,
+            height,
+            encoding,
+            encodedFrameBytes,
+            timestampUnixMilliseconds,
+            isKeyFrame: false,
+            streamEpoch: 0,
+            streamConfig: null,
+            cancellationToken,
+            preserveOrdering: false);
+
+    public Task EnqueueFrameAsync(
+        string sessionId,
+        int width,
+        int height,
+        string encoding,
+        byte[] encodedFrameBytes,
+        long timestampUnixMilliseconds,
+        bool isKeyFrame,
+        long streamEpoch,
+        ScreenShareVideoStreamConfigV1? streamConfig,
+        CancellationToken cancellationToken,
+        bool preserveOrdering = false)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         cancellationToken.ThrowIfCancellationRequested();
@@ -282,40 +312,70 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
             ObjectDisposedException.ThrowIf(disposed, this);
 
             var now = clock.UtcNow;
-            if (lastQueuedFrameAtUtc != DateTimeOffset.MinValue &&
-                now - lastQueuedFrameAtUtc < GetMinimumFrameInterval())
-            {
-                Interlocked.Increment(ref framesDropped);
-                Interlocked.Increment(ref framesDroppedByRateGate);
-                return Task.CompletedTask;
-            }
-
-            var frameId = nextFrameIds.AddOrUpdate(
-                normalizedSessionId,
-                addValueFactory: static _ => 0,
-                updateValueFactory: static (_, current) => checked(current + 1));
-
             var frame = new PendingFrame(
                 normalizedSessionId,
-                frameId,
                 width,
                 height,
                 encoding.Trim(),
                 timestampUnixMilliseconds,
                 encodedFrameBytes,
-                now.UtcTicks);
+                now.UtcTicks,
+                isKeyFrame,
+                streamEpoch,
+                streamConfig,
+                preserveOrdering);
 
-            if (pendingFrames.Count >= capacity)
+            if (ShouldDeferToNextSendSlot_NoLock(now))
             {
-                pendingFrames.Dequeue();
+                if (TryAppendProtectedRecoveryFrame_NoLock(frame))
+                {
+                    Interlocked.Increment(ref framesDeferredToSendSlot);
+                    Interlocked.Increment(ref framesQueued);
+                    Interlocked.Increment(ref signalWriteAttempts);
+                    pendingSignals.Writer.TryWrite(true);
+                    return Task.CompletedTask;
+                }
+
+                if (ShouldDropIncomingToProtectRecoverySequence_NoLock(frame))
+                {
+                    Interlocked.Increment(ref framesDropped);
+                    return Task.CompletedTask;
+                }
+
+                if (TryCoalescePendingSendSlotCandidate_NoLock(frame))
+                {
+                    Interlocked.Increment(ref framesDeferredToSendSlot);
+                    Interlocked.Increment(ref framesQueued);
+                    Interlocked.Increment(ref signalWriteAttempts);
+                    pendingSignals.Writer.TryWrite(true);
+                    return Task.CompletedTask;
+                }
+
                 Interlocked.Increment(ref framesDropped);
-                Interlocked.Increment(ref framesDroppedByQueueEvict);
+                return Task.CompletedTask;
             }
 
-            pendingFrames.Enqueue(frame);
-            RecordCaptureToEnqueue(now.UtcTicks, timestampUnixMilliseconds);
+            if (TryAppendProtectedRecoveryFrame_NoLock(frame))
+            {
+                Interlocked.Increment(ref framesQueued);
+                Interlocked.Increment(ref signalWriteAttempts);
+                pendingSignals.Writer.TryWrite(true);
+                return Task.CompletedTask;
+            }
+
+            if (ShouldDropIncomingToProtectRecoverySequence_NoLock(frame))
+            {
+                Interlocked.Increment(ref framesDropped);
+                return Task.CompletedTask;
+            }
+
+            if (!TryCoalescePendingSendSlotCandidate_NoLock(frame))
+            {
+                Interlocked.Increment(ref framesDropped);
+                return Task.CompletedTask;
+            }
+
             AssertBufferBounds();
-            lastQueuedFrameAtUtc = now;
             Interlocked.Increment(ref framesQueued);
             Interlocked.Increment(ref signalWriteAttempts);
             pendingSignals.Writer.TryWrite(true);
@@ -374,42 +434,63 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
 
                 while (true)
                 {
+                    await WaitForNextSendSlotAsync().ConfigureAwait(false);
+
                     PendingFrame? frame = null;
                     lock (gate)
                     {
-                        if (pendingFrames.Count > 0)
+                        if (protectedRecoveryFrames.Count > 0)
                         {
-                            frame = pendingFrames.Dequeue();
+                            frame = protectedRecoveryFrames.Dequeue();
+                            Interlocked.Increment(ref protectedRecoveryFramesDispatched);
+                            AssertBufferBounds();
+                        }
+                        else if (ordinaryPendingFrame is { } pendingOrdinaryFrame)
+                        {
+                            frame = pendingOrdinaryFrame;
+                            ordinaryPendingFrame = null;
                             AssertBufferBounds();
                         }
                     }
 
                     if (frame is null)
                     {
+                        Interlocked.Increment(ref sendSlotEmptyCount);
                         break;
                     }
 
-                    await WaitForNextSendSlotAsync().ConfigureAwait(false);
-
-                    var chunks = ScreenShareFrameChunker.ChunkFrame(
-                        frame.SessionId,
-                        frame.FrameId,
-                        frame.Width,
-                        frame.Height,
-                        frame.Encoding,
-                        frame.TimestampUnixMilliseconds,
-                        frame.EncodedFrameBytes);
+                    var frameId = nextFrameIds.AddOrUpdate(
+                        new FrameSequenceKey(frame.SessionId, frame.StreamEpoch),
+                        addValueFactory: static _ => 0,
+                        updateValueFactory: static (_, current) => checked(current + 1));
 
 #if DEBUG
                     var sendStartUtcTicks = clock.UtcNow.UtcTicks;
                     var sendStartTimestamp = Stopwatch.GetTimestamp();
 #endif
                     RecordEnqueueToSend(frame.EnqueuedAtUtcTicks);
-                    foreach (var chunk in chunks)
+                    try
                     {
-                        disposeCts.Token.ThrowIfCancellationRequested();
-                        await sendChunkAsync(chunk, disposeCts.Token).ConfigureAwait(false);
-                        Interlocked.Increment(ref chunksSent);
+                        var sentChunkCount = await sendFrameAsync(
+                                new ScreenShareEncodedFramePacket(
+                                    frame.SessionId,
+                                    frameId,
+                                    frame.Width,
+                                    frame.Height,
+                                    frame.Encoding,
+                                    frame.TimestampUnixMilliseconds,
+                                    frame.EncodedFrameBytes,
+                                    frame.IsKeyFrame,
+                                    frame.StreamEpoch,
+                                    frame.StreamConfig),
+                                disposeCts.Token)
+                            .ConfigureAwait(false);
+                        Interlocked.Add(ref chunksSent, Math.Max(0, sentChunkCount));
+                    }
+                    catch (ScreenShareSendSupersededException ex)
+                    {
+                        LogDebug($"Frame send superseded: {ex.Message}");
+                        continue;
                     }
                     Interlocked.Add(ref rawFrameBytesSent, frame.EncodedFrameBytes.Length);
                     if (frame.TimestampUnixMilliseconds > 0)
@@ -444,15 +525,158 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
         }
     }
 
+    private readonly record struct FrameSequenceKey(string SessionId, long StreamEpoch);
+
     private sealed record PendingFrame(
         string SessionId,
-        long FrameId,
         int Width,
         int Height,
         string Encoding,
         long TimestampUnixMilliseconds,
         byte[] EncodedFrameBytes,
-        long EnqueuedAtUtcTicks);
+        long EnqueuedAtUtcTicks,
+        bool IsKeyFrame,
+        long StreamEpoch,
+        ScreenShareVideoStreamConfigV1? StreamConfig,
+        bool PreserveOrdering);
+
+    private bool TryAppendProtectedRecoveryFrame_NoLock(PendingFrame incomingFrame)
+    {
+        if (!CanUseProtectedRecoveryReserve_NoLock(incomingFrame))
+        {
+            return false;
+        }
+
+        if (ordinaryPendingFrame is not null)
+        {
+            Interlocked.Increment(ref recoveryProtectedFrameBlockedByOrdinary);
+        }
+
+        protectedRecoveryFrames.Enqueue(incomingFrame);
+        RecordCaptureToEnqueue(incomingFrame.EnqueuedAtUtcTicks, incomingFrame.TimestampUnixMilliseconds);
+        AssertBufferBounds();
+        return true;
+    }
+
+    private bool CanUseProtectedRecoveryReserve_NoLock(PendingFrame incomingFrame)
+    {
+        if (!incomingFrame.PreserveOrdering ||
+            incomingFrame.StreamEpoch <= 0 ||
+            protectedRecoveryFrames.Count >= MaxBufferedFramesWithRecoveryReserve)
+        {
+            return false;
+        }
+
+        if (protectedRecoveryFrames.Count == 0)
+        {
+            return true;
+        }
+
+        foreach (var queuedFrame in protectedRecoveryFrames)
+        {
+            if (!string.Equals(queuedFrame.SessionId, incomingFrame.SessionId, StringComparison.Ordinal) ||
+                queuedFrame.StreamEpoch != incomingFrame.StreamEpoch)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private bool ShouldDropIncomingToProtectRecoverySequence_NoLock(PendingFrame incomingFrame)
+    {
+        if (incomingFrame.StreamEpoch <= 0 ||
+            incomingFrame.PreserveOrdering ||
+            protectedRecoveryFrames.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var queuedFrame in protectedRecoveryFrames)
+        {
+            if (!string.Equals(queuedFrame.SessionId, incomingFrame.SessionId, StringComparison.Ordinal) ||
+                queuedFrame.StreamEpoch != incomingFrame.StreamEpoch)
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool ShouldDeferToNextSendSlot_NoLock(DateTimeOffset now)
+    {
+        if (lastSendStartedAtUtc == DateTimeOffset.MinValue)
+        {
+            return false;
+        }
+
+        return now - lastSendStartedAtUtc < GetMinimumFrameInterval();
+    }
+
+    private bool TryCoalescePendingSendSlotCandidate_NoLock(PendingFrame incomingFrame)
+    {
+        if (incomingFrame.PreserveOrdering)
+        {
+            return false;
+        }
+
+        if (ordinaryPendingFrame is null)
+        {
+            ordinaryPendingFrame = incomingFrame;
+            RecordCaptureToEnqueue(incomingFrame.EnqueuedAtUtcTicks, incomingFrame.TimestampUnixMilliseconds);
+            AssertBufferBounds();
+            return true;
+        }
+
+        var existingCandidate = ordinaryPendingFrame;
+        if (incomingFrame.PreserveOrdering || existingCandidate.PreserveOrdering)
+        {
+            return false;
+        }
+
+        if (!ShouldPreferIncomingForSendSlot(incomingFrame, existingCandidate))
+        {
+            return false;
+        }
+
+        ordinaryPendingFrame = incomingFrame;
+        RecordCaptureToEnqueue(incomingFrame.EnqueuedAtUtcTicks, incomingFrame.TimestampUnixMilliseconds);
+        Interlocked.Increment(ref framesDropped);
+        Interlocked.Increment(ref framesReplacedBeforeSendSlot);
+        AssertBufferBounds();
+        return true;
+    }
+
+    private static bool ShouldPreferIncomingForSendSlot(PendingFrame incomingFrame, PendingFrame existingCandidate)
+    {
+        if (incomingFrame.StreamEpoch != existingCandidate.StreamEpoch)
+        {
+            return incomingFrame.StreamEpoch > existingCandidate.StreamEpoch;
+        }
+
+        var incomingHasStreamConfig = incomingFrame.StreamConfig is not null;
+        var existingHasStreamConfig = existingCandidate.StreamConfig is not null;
+        if (incomingHasStreamConfig != existingHasStreamConfig)
+        {
+            return incomingHasStreamConfig;
+        }
+
+        if (incomingFrame.IsKeyFrame != existingCandidate.IsKeyFrame)
+        {
+            return incomingFrame.IsKeyFrame;
+        }
+
+        if (incomingFrame.TimestampUnixMilliseconds != existingCandidate.TimestampUnixMilliseconds)
+        {
+            return incomingFrame.TimestampUnixMilliseconds >= existingCandidate.TimestampUnixMilliseconds;
+        }
+
+        return incomingFrame.EnqueuedAtUtcTicks >= existingCandidate.EnqueuedAtUtcTicks;
+    }
 
     private void RecordCaptureToEnqueue(long enqueueUtcTicks, long timestampUnixMilliseconds)
     {
@@ -540,9 +764,10 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
     [Conditional("DEBUG")]
     private void AssertBufferBounds()
     {
-        if (pendingFrames.Count > MaxBufferedFrames)
+        var totalPendingFrameCount = protectedRecoveryFrames.Count + (ordinaryPendingFrame is null ? 0 : 1);
+        if (totalPendingFrameCount > MaxBufferedFramesWithRecoveryReserve)
         {
-            throw new InvalidOperationException($"Screenshare sender buffer exceeded max of {MaxBufferedFrames} frames.");
+            throw new InvalidOperationException($"Screenshare sender buffer exceeded max of {MaxBufferedFramesWithRecoveryReserve} frames.");
         }
     }
 
@@ -598,6 +823,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
             LogDebug(
                 $"Latency queued={metrics.FramesQueued} dropped={metrics.FramesDropped} " +
                 $"drop_rate={metrics.FramesDroppedByRateGate} drop_evict={metrics.FramesDroppedByQueueEvict} " +
+                $"deferred={metrics.FramesDeferredToSendSlot} replaced={metrics.FramesReplacedBeforeSendSlot} slot_empty={metrics.SendSlotEmptyCount} " +
                 $"sent={metrics.ChunksSent} raw_bytes={metrics.RawFrameBytesSent} avg_c2e={metrics.AverageCaptureToEnqueueMs:F1}ms " +
                 $"avg_q2s={metrics.AverageEnqueueToSendMs:F1}ms avg_c2s={metrics.AverageCaptureToSendMs:F1}ms " +
                 $"c2e={FormatLatency(latency.CaptureToEnqueue)} q2s={FormatLatency(latency.EnqueueToSend)} " +

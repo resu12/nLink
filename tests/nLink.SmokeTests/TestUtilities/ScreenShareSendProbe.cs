@@ -15,7 +15,6 @@ internal sealed class ScreenShareSendProbe
     private int nextPayloadIndex;
     private int payloadHistoryCount;
     private long payloadsSent;
-    private long chunksSent;
     private long bytesSent;
     private long canceledSendCount;
     private int currentInFlight;
@@ -49,8 +48,6 @@ internal sealed class ScreenShareSendProbe
 
     public long PayloadsSent => Interlocked.Read(ref payloadsSent);
 
-    public long ChunksSent => Interlocked.Read(ref chunksSent);
-
     public long BytesSent => Interlocked.Read(ref bytesSent);
 
     public long CanceledSendCount => Interlocked.Read(ref canceledSendCount);
@@ -70,12 +67,6 @@ internal sealed class ScreenShareSendProbe
     public async Task SendReadOnlyPayloadAsync(ReadOnlyMemory<byte> payload, CancellationToken cancellationToken)
     {
         await SendPayloadCoreAsync(payload.ToArray(), countChunk: false, cancellationToken).ConfigureAwait(false);
-    }
-
-    public async Task SendChunkAsync(ScreenShareFrameChunkV1 chunk, CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(chunk);
-        await SendPayloadCoreAsync(ScreenSharePayloadCodec.Serialize(chunk), countChunk: true, cancellationToken).ConfigureAwait(false);
     }
 
     public void BlockSends()
@@ -192,11 +183,6 @@ internal sealed class ScreenShareSendProbe
 
             var payloadCount = Interlocked.Increment(ref payloadsSent);
             Interlocked.Add(ref bytesSent, payload.Length);
-            if (countChunk)
-            {
-                Interlocked.Increment(ref chunksSent);
-            }
-
             RecordPayload(payload);
             CompletePayloadWaiters(payloadCount);
         }

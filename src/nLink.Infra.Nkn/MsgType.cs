@@ -38,4 +38,8 @@ internal enum MsgType
     FileTransferDataFrame = 33,
     HelpRequest = 34,
     HelpRequestDecision = 35,
+    ScreenSharePressureState = 36,
+    ScreenShareVideoStreamConfig = 37,
+    ScreenShareVideoKeyframeRequest = 38,
+    ScreenShareRecoveryReceipt = 39,
 }

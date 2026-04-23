@@ -28,6 +28,10 @@ coverage/
 packages/
 *.nupkg
 
+# Generated bridge build outputs
+tools/nkn-bridge/node_modules/
+tools/nkn-bridge/.nlink-bundle/
+
 # OS files
 .DS_Store
 Thumbs.db

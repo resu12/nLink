@@ -26,10 +26,12 @@ public static partial class SensitiveDataRedactor
             return string.Empty;
         }
 
-        var redacted = text;
+        var protectedEventValues = new List<string>();
+        var redacted = ProtectStructuredEventValues(text, protectedEventValues);
         redacted = SecretKeyValueRegex().Replace(redacted, "[redacted]");
         redacted = ChatPlaintextKeyValueRegex().Replace(redacted, "[redacted]");
         redacted = LongSecretTokenRegex().Replace(redacted, "[redacted]");
+        redacted = RestoreStructuredEventValues(redacted, protectedEventValues);
         return redacted;
     }
 
@@ -69,4 +71,33 @@ public static partial class SensitiveDataRedactor
 
     [GeneratedRegex(@"(?<![A-Za-z0-9])(?:[A-Fa-f0-9]{32,}|(?=[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9]))(?=[A-Za-z0-9+/_-]*[0-9+/_-])[A-Za-z0-9+/_-]{40,}={0,2})(?![A-Za-z0-9])", RegexOptions.CultureInvariant)]
     private static partial Regex LongSecretTokenRegex();
+
+    [GeneratedRegex(@"\bevent=(?<value>[A-Za-z0-9._/-]+)", RegexOptions.CultureInvariant)]
+    private static partial Regex EventKeyValueRegex();
+
+    private static string ProtectStructuredEventValues(string text, List<string> protectedEventValues)
+    {
+        return EventKeyValueRegex().Replace(text, match =>
+        {
+            var placeholder = $"EVP{protectedEventValues.Count}";
+            protectedEventValues.Add(match.Groups["value"].Value);
+            return $"event={placeholder}";
+        });
+    }
+
+    private static string RestoreStructuredEventValues(string text, List<string> protectedEventValues)
+    {
+        if (protectedEventValues.Count == 0)
+        {
+            return text;
+        }
+
+        var restored = text;
+        for (var i = 0; i < protectedEventValues.Count; i++)
+        {
+            restored = restored.Replace($"event=EVP{i}", $"event={protectedEventValues[i]}", StringComparison.Ordinal);
+        }
+
+        return restored;
+    }
 }

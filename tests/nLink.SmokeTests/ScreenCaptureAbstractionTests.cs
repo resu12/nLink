@@ -2,8 +2,11 @@ using NLink.App.Services.ScreenCapture;
 using NLink.Core;
 using NLink.Core.ScreenShare;
 using NLink.Core.SessionConnect;
+using NLink.Core.SessionSecurity;
 using NLink.Infra.DevLocal;
 using NLink.Infra.Nkn;
+using System.Collections.Concurrent;
+using System.Reflection;
 
 namespace NLink.SmokeTests;
 
@@ -27,9 +30,12 @@ public sealed class ScreenCaptureAbstractionTests
 
         if (OperatingSystem.IsWindows())
         {
-            Assert.Equal("WindowsScreenCaptureSource", source.GetType().Name);
-            Assert.True(source.IsSupported);
-            return;
+            if (WindowsH264ScreenCaptureSource.IsPreviewRuntimeSupported())
+            {
+                Assert.Equal("WindowsH264ScreenCaptureSource", source.GetType().Name);
+                Assert.True(source.IsSupported);
+                return;
+            }
         }
 
         Assert.False(source.IsSupported);
@@ -88,27 +94,20 @@ public sealed class ScreenCaptureAbstractionTests
 
         var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
         var frameBytes = new byte[] { 5, 4, 3, 2, 1 };
-        var framePayload = ScreenSharePayloadCodec.Serialize(new ScreenShareFrameChunkV1
-        {
-            SessionId = authorizedSessionId,
-            FrameId = 17,
-            Width = 800,
-            Height = 600,
-            Encoding = "jpeg",
-            ChunkIndex = 0,
-            ChunkCount = 1,
-            DataBase64 = Convert.ToBase64String(frameBytes),
-        });
+        var streamConfig = CreateVideoStreamConfig(authorizedSessionId, streamEpoch: 1);
+        var framePayload = CreateVideoFragmentPayload(authorizedSessionId, frameId: 17, width: 800, height: 600, frameBytes, streamEpoch: 1);
 
+        await helper.SendScreenShareVideoStreamConfigAsync(streamConfig, cts.Token);
         await helper.SendScreenSharePayloadAsync(framePayload, cts.Token);
         var frame = await frameReceived.Task.WaitAsync(cts.Token);
 
         Assert.Equal(17, frame.FrameId);
         Assert.Equal(800, frame.Width);
         Assert.Equal(600, frame.Height);
-        Assert.Equal("jpeg", frame.Encoding);
+        Assert.Equal("h264", frame.Encoding);
         Assert.Equal(frameBytes, frame.EncodedFrameBytes);
         Assert.Equal(authorizedSessionId, frame.SessionId);
+        Assert.Equal(1, frame.StreamEpoch);
 
         var stopPayload = ScreenSharePayloadCodec.SerializeStop(new ScreenShareStopMessageV1
         {
@@ -122,60 +121,13 @@ public sealed class ScreenCaptureAbstractionTests
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public void RealNknClientAdapter_BridgeMessage_WithScreenShareChunk_RoutesToAssembler()
-    {
-        var options = NknTransportOptions.Load();
-        var identity = new NknIdentity("screenshare-route", "screenshare-route.fake");
-        using var adapter = new RealNknClientAdapter(identity, options);
-        EnableInboundScreenShare(adapter, "session-1", "peer.test");
-
-        ScreenShareFrameChunkV1? receivedChunk = null;
-        NknIncomingMessage? receivedRawMessage = null;
-        adapter.ScreenShareFrameChunkReceived += (_, chunk) => receivedChunk = chunk;
-        adapter.MessageReceived += (_, message) => receivedRawMessage = message;
-
-        var chunk = new ScreenShareFrameChunkV1
-        {
-            SessionId = "session-1",
-            FrameId = 42,
-            Width = 1280,
-            Height = 720,
-            Encoding = "jpeg",
-            ChunkIndex = 0,
-            ChunkCount = 1,
-            DataBase64 = Convert.ToBase64String(new byte[] { 1, 2, 3, 4 }),
-        };
-
-        var payloadBase64 = Convert.ToBase64String(ScreenSharePayloadCodec.Serialize(chunk));
-        var line = $"{{\"event\":\"message\",\"source\":\"peer.test\",\"payloadBase64\":\"{payloadBase64}\",\"isTopic\":false,\"ts\":1731000000000}}";
-
-        adapter.HandleStdoutJsonLineForTests(line);
-
-        Assert.NotNull(receivedChunk);
-        Assert.Null(receivedRawMessage);
-        Assert.Equal(chunk.SessionId, receivedChunk!.SessionId);
-        Assert.Equal(chunk.FrameId, receivedChunk.FrameId);
-        Assert.Equal(chunk.Width, receivedChunk.Width);
-        Assert.Equal(chunk.Height, receivedChunk.Height);
-        Assert.Equal(chunk.Encoding, receivedChunk.Encoding);
-        Assert.Equal(chunk.ChunkIndex, receivedChunk.ChunkIndex);
-        Assert.Equal(chunk.ChunkCount, receivedChunk.ChunkCount);
-        Assert.Equal(chunk.DataBase64, receivedChunk.DataBase64);
-    }
-
-    [Fact]
-    [Trait("Category", "Smoke")]
-    public void RealNknClientAdapter_BridgeMessage_WithUnknownKind_DoesNotRouteToScreenShare()
+    public void RealNknClientAdapter_BridgeMessage_WithUnknownPayload_RemainsRawMessage()
     {
         var options = NknTransportOptions.Load();
         var identity = new NknIdentity("screenshare-unknown", "screenshare-unknown.fake");
         using var adapter = new RealNknClientAdapter(identity, options);
 
-        ScreenShareFrameChunkV1? receivedChunk = null;
-        ScreenShareFrameCompletedEventArgs? completed = null;
         NknIncomingMessage? receivedRawMessage = null;
-        adapter.ScreenShareFrameChunkReceived += (_, chunk) => receivedChunk = chunk;
-        adapter.ScreenShareFrameCompleted += (_, frame) => completed = frame;
         adapter.MessageReceived += (_, message) => receivedRawMessage = message;
 
         var payloadJson = "{\"kind\":\"other\",\"type\":\"other.frame.v1\",\"value\":1}";
@@ -184,8 +136,6 @@ public sealed class ScreenCaptureAbstractionTests
 
         adapter.HandleStdoutJsonLineForTests(line);
 
-        Assert.Null(receivedChunk);
-        Assert.Null(completed);
         Assert.NotNull(receivedRawMessage);
     }
 
@@ -212,198 +162,29 @@ public sealed class ScreenCaptureAbstractionTests
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public void RealNknClientAdapter_BridgeMessages_WithCompleteScreenShareFrame_RaisesCompletedFrame()
+    public void RealNknClientAdapter_ScreenShareQueueStateEvent_UpdatesBridgeQueueSnapshot()
     {
         var options = NknTransportOptions.Load();
-        var identity = new NknIdentity("screenshare-complete", "screenshare-complete.fake");
+        var identity = new NknIdentity("screenshare-queue-state", "screenshare-queue-state.fake");
         using var adapter = new RealNknClientAdapter(identity, options);
-        EnableInboundScreenShare(adapter, "session-2", "peer.test");
 
-        ScreenShareFrameCompletedEventArgs? completed = null;
-        adapter.ScreenShareFrameCompleted += (_, frame) => completed = frame;
+        var capability = Assert.IsAssignableFrom<IBridgeScreenShareQueueCapability>(adapter);
+        BridgeScreenShareQueueStateChangedEventArgs? received = null;
+        capability.ScreenShareQueueStateChanged += (_, e) => received = e;
 
-        var frameBytes = new byte[] { 11, 22, 33, 44, 55, 66 };
-        var firstChunk = new ScreenShareFrameChunkV1
-        {
-            SessionId = "session-2",
-            FrameId = 77,
-            Width = 1024,
-            Height = 768,
-            Encoding = "jpeg",
-            ChunkIndex = 0,
-            ChunkCount = 2,
-            DataBase64 = Convert.ToBase64String(frameBytes[..3]),
-        };
+        adapter.HandleStdoutJsonLineForTests(
+            "{\"event\":\"screen_share_queue_state\",\"queueDepth\":9,\"queuedBytes\":131072,\"oldestQueuedAgeMs\":275,\"inFlight\":true,\"droppedSinceLast\":2,\"congested\":true,\"severe\":false,\"mode\":\"catch_up_only\"}");
 
-        var secondChunk = firstChunk with
-        {
-            ChunkIndex = 1,
-            DataBase64 = Convert.ToBase64String(frameBytes[3..]),
-        };
-
-        adapter.HandleStdoutJsonLineForTests(BuildBridgeMessageLine(firstChunk));
-        Assert.Null(completed);
-
-        adapter.HandleStdoutJsonLineForTests(BuildBridgeMessageLine(secondChunk));
-
-        Assert.NotNull(completed);
-        Assert.Equal(77, completed!.FrameId);
-        Assert.Equal(1024, completed.Width);
-        Assert.Equal(768, completed.Height);
-        Assert.Equal("jpeg", completed.Encoding);
-        Assert.Equal(frameBytes, completed.EncodedFrameBytes);
-    }
-
-    [Fact]
-    [Trait("Category", "Smoke")]
-    public void RealNknClientAdapter_ScreenShareSubscriberThrow_DoesNotBreakLaterFrames()
-    {
-        var options = NknTransportOptions.Load();
-        var identity = new NknIdentity("screenshare-throwing-subscriber", "screenshare-throwing-subscriber.fake");
-        using var adapter = new RealNknClientAdapter(identity, options);
-        EnableInboundScreenShare(adapter, "session-throwing", "peer.test");
-
-        var throwingCalls = 0;
-        ScreenShareFrameCompletedEventArgs? completed = null;
-        adapter.ScreenShareFrameCompleted += (_, _) =>
-        {
-            if (Interlocked.Increment(ref throwingCalls) == 1)
-            {
-                throw new InvalidOperationException("test screenshare subscriber failure");
-            }
-        };
-        adapter.ScreenShareFrameCompleted += (_, frame) => completed = frame;
-
-        var firstFrameBytes = new byte[] { 11, 22, 33, 44 };
-        var secondFrameBytes = new byte[] { 55, 66, 77, 88 };
-
-        adapter.HandleStdoutJsonLineForTests(BuildBridgeMessageLine(new ScreenShareFrameChunkV1
-        {
-            SessionId = "session-throwing",
-            FrameId = 100,
-            Width = 320,
-            Height = 240,
-            Encoding = "jpeg",
-            ChunkIndex = 0,
-            ChunkCount = 1,
-            DataBase64 = Convert.ToBase64String(firstFrameBytes),
-        }));
-
-        adapter.HandleStdoutJsonLineForTests(BuildBridgeMessageLine(new ScreenShareFrameChunkV1
-        {
-            SessionId = "session-throwing",
-            FrameId = 101,
-            Width = 640,
-            Height = 360,
-            Encoding = "jpeg",
-            ChunkIndex = 0,
-            ChunkCount = 1,
-            DataBase64 = Convert.ToBase64String(secondFrameBytes),
-        }));
-
-        Assert.Equal(2, throwingCalls);
-        Assert.NotNull(completed);
-        Assert.Equal(101, completed!.FrameId);
-        Assert.Equal(640, completed.Width);
-        Assert.Equal(360, completed.Height);
-        Assert.Equal(secondFrameBytes, completed.EncodedFrameBytes);
-    }
-
-    [Fact]
-    [Trait("Category", "Smoke")]
-    public void RealNknClientAdapter_Disconnected_ClearsIncompleteScreenShareAssemblies()
-    {
-        var options = NknTransportOptions.Load();
-        var identity = new NknIdentity("screenshare-disconnect", "screenshare-disconnect.fake");
-        using var adapter = new RealNknClientAdapter(identity, options);
-        EnableInboundScreenShare(adapter, "session-disconnect", "peer.test");
-
-        ScreenShareFrameCompletedEventArgs? completed = null;
-        adapter.ScreenShareFrameCompleted += (_, frame) => completed = frame;
-
-        var frameBytes = new byte[] { 11, 22, 33, 44, 55, 66 };
-        var firstChunk = new ScreenShareFrameChunkV1
-        {
-            SessionId = "session-disconnect",
-            FrameId = 88,
-            Width = 800,
-            Height = 600,
-            Encoding = "jpeg",
-            ChunkIndex = 0,
-            ChunkCount = 2,
-            DataBase64 = Convert.ToBase64String(frameBytes[..3]),
-        };
-
-        var secondChunk = firstChunk with
-        {
-            ChunkIndex = 1,
-            DataBase64 = Convert.ToBase64String(frameBytes[3..]),
-        };
-
-        adapter.HandleStdoutJsonLineForTests(BuildBridgeMessageLine(firstChunk));
-        adapter.HandleStdoutJsonLineForTests("{\"event\":\"disconnected\",\"reason\":\"test\"}");
-        adapter.HandleStdoutJsonLineForTests(BuildBridgeMessageLine(secondChunk));
-
-        Assert.Null(completed);
-    }
-
-    [Fact]
-    [Trait("Category", "Smoke")]
-    public void RealNknClientAdapter_ScreenShareStop_RaisesStoppedEvent()
-    {
-        var options = NknTransportOptions.Load();
-        var identity = new NknIdentity("screenshare-stop", "screenshare-stop.fake");
-        using var adapter = new RealNknClientAdapter(identity, options);
-        EnableInboundScreenShare(adapter, "session-stop", "peer.test");
-
-        var stoppedSessionId = string.Empty;
-        adapter.ScreenShareStopped += (_, sessionId) => stoppedSessionId = sessionId;
-
-        var stop = new ScreenShareStopMessageV1
-        {
-            SessionId = "session-stop",
-            Reason = "user_stop",
-        };
-
-        var payloadBase64 = Convert.ToBase64String(ScreenSharePayloadCodec.SerializeStop(stop));
-        var line = $"{{\"event\":\"message\",\"source\":\"peer.test\",\"payloadBase64\":\"{payloadBase64}\",\"isTopic\":false,\"ts\":1731000000000}}";
-
-        adapter.HandleStdoutJsonLineForTests(line);
-
-        Assert.Equal("session-stop", stoppedSessionId);
-    }
-
-    [Fact]
-    [Trait("Category", "Smoke")]
-    public void RealNknClientAdapter_BridgeMessage_WithUnauthorizedScreenShareChunk_DropsBeforeRouting()
-    {
-        var options = NknTransportOptions.Load();
-        var identity = new NknIdentity("screenshare-unauthorized", "screenshare-unauthorized.fake");
-        using var adapter = new RealNknClientAdapter(identity, options);
-        EnableInboundScreenShare(adapter, "authorized-session", "peer.allowed");
-
-        ScreenShareFrameChunkV1? receivedChunk = null;
-        ScreenShareFrameCompletedEventArgs? completed = null;
-        NknIncomingMessage? receivedRawMessage = null;
-        adapter.ScreenShareFrameChunkReceived += (_, chunk) => receivedChunk = chunk;
-        adapter.ScreenShareFrameCompleted += (_, frame) => completed = frame;
-        adapter.MessageReceived += (_, message) => receivedRawMessage = message;
-
-        adapter.HandleStdoutJsonLineForTests(BuildBridgeMessageLine(new ScreenShareFrameChunkV1
-        {
-            SessionId = "stale-session",
-            FrameId = 9,
-            Width = 640,
-            Height = 360,
-            Encoding = "jpeg",
-            ChunkIndex = 0,
-            ChunkCount = 1,
-            DataBase64 = Convert.ToBase64String(new byte[] { 9, 9, 9, 9 }),
-        }));
-
-        Assert.Null(receivedChunk);
-        Assert.Null(completed);
-        Assert.Null(receivedRawMessage);
+        Assert.NotNull(received);
+        Assert.Equal(9, received!.State.QueueDepth);
+        Assert.Equal(131072, received.State.QueuedBytes);
+        Assert.Equal(275, received.State.OldestQueuedAgeMs);
+        Assert.True(received.State.InFlight);
+        Assert.Equal(2, received.State.DroppedSinceLast);
+        Assert.True(received.State.IsCongested);
+        Assert.False(received.State.IsSevere);
+        Assert.Equal(BridgeScreenShareQueueMode.CatchUpOnly, received.State.Mode);
+        Assert.Equal(received.State, capability.CurrentScreenShareQueueState);
     }
 
     [Fact]
@@ -426,9 +207,11 @@ public sealed class ScreenCaptureAbstractionTests
             var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
             var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
             host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
             host.Approved += (_, _) => hostApproved.TrySetResult();
             helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
 
             await host.HostByAddressAsync(cts.Token);
             var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
@@ -443,38 +226,37 @@ public sealed class ScreenCaptureAbstractionTests
             var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
 
             var frameBytes = new byte[] { 21, 22, 23, 24 };
-            var chunk = new ScreenShareFrameChunkV1
-            {
-                SessionId = authorizedSessionId,
-                FrameId = 12,
-                Width = 640,
-                Height = 360,
-                TimestampUnixMilliseconds = 999,
-                Encoding = "jpeg",
-                ChunkIndex = 0,
-                ChunkCount = 1,
-                DataBase64 = Convert.ToBase64String(frameBytes),
-            };
-
+            var streamConfig = CreateVideoStreamConfig(authorizedSessionId, streamEpoch: 1);
             var rawPayloadReceived = new TaskCompletionSource<NknIncomingMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
             var frameReceived = new TaskCompletionSource<ScreenShareFrameCompletedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var payload = ScreenSharePayloadCodec.Serialize(chunk);
+            var payload = CreateVideoFragmentPayload(authorizedSessionId, frameId: 0, width: 640, height: 360, frameBytes, streamEpoch: 1, capturedTsUtcMs: 999);
+            var controlFrameCount = 0;
             host.ScreenShareFrameCompleted += (_, e) => frameReceived.TrySetResult(e);
             hostClient.MessageReceived += (_, e) =>
             {
                 if (EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
                     env.Type == MsgType.ScreenShareFrame)
                 {
+                    if (e.Channel == NknBridgeChannel.Control)
+                    {
+                        Interlocked.Increment(ref controlFrameCount);
+                    }
+
                     rawPayloadReceived.TrySetResult(e);
                 }
             };
             var diagnosticsBeforeSend = NknRuntimeDiagnostics.Snapshot();
 
+            await helper.SendScreenShareVideoStreamConfigAsync(streamConfig, cts.Token);
+            var receivedConfig = await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             await helper.SendScreenSharePayloadAsync(payload, cts.Token);
             var received = await rawPayloadReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             var deliveredFrame = await frameReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await Task.Delay(100, cts.Token);
             var diagnosticsAfterSend = NknRuntimeDiagnostics.Snapshot();
 
+            Assert.Equal(authorizedSessionId, receivedConfig.SessionId);
+            Assert.Equal(1, receivedConfig.StreamEpoch);
             Assert.Equal(helperClient.ConnectedMediaAddress, received.Source);
             Assert.False(received.IsTopic);
             Assert.Null(received.Topic);
@@ -482,9 +264,10 @@ public sealed class ScreenCaptureAbstractionTests
             Assert.True(EnvelopeCodec.TryDeserialize(received.Payload, out var env));
             Assert.Equal(MsgType.ScreenShareFrame, env.Type);
             Assert.Equal(frameBytes, deliveredFrame.EncodedFrameBytes);
-            Assert.Equal(chunk.FrameId, deliveredFrame.FrameId);
-            Assert.Equal(chunk.Width, deliveredFrame.Width);
-            Assert.Equal(chunk.Height, deliveredFrame.Height);
+            Assert.Equal(0, deliveredFrame.FrameId);
+            Assert.Equal(640, deliveredFrame.Width);
+            Assert.Equal(360, deliveredFrame.Height);
+            Assert.Equal("h264", deliveredFrame.Encoding);
             Assert.Equal(0, helper.ScreenShareOutboundBusyDrops);
             Assert.Equal(1, helper.ScreenShareMessagesSent);
             Assert.Equal(received.Payload.Length, helper.ScreenSharePayloadBytesSent);
@@ -497,6 +280,769 @@ public sealed class ScreenCaptureAbstractionTests
             Assert.Equal(
                 diagnosticsBeforeSend.ScreenShareOutboundBusyDrops,
                 diagnosticsAfterSend.ScreenShareOutboundBusyDrops);
+            Assert.Equal(0, Volatile.Read(ref controlFrameCount));
+            Assert.Equal(
+                diagnosticsBeforeSend.MediaPlane.FramesSent + 1,
+                diagnosticsAfterSend.MediaPlane.FramesSent);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknSignalingTransport_RecoveryOwnerAndFollowers_FallBackToControlWhenMediaDeliveryIsDropped()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.screenshare-control-fallback.address");
+            var helperClient = new FakeNknClient("helper.screenshare-control-fallback.address");
+            var hostIdentity = new NknIdentity("host-screenshare-control-fallback-id", "host.screenshare-control-fallback.address");
+            var helperIdentity = new NknIdentity("helper-screenshare-control-fallback-id", "helper.screenshare-control-fallback.address");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var threeFramesReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var deliveredFrameIds = new List<long>();
+            var deliveredChannels = new List<NknBridgeChannel>();
+            var deliveredSources = new List<string>();
+            var gate = new object();
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
+            host.ScreenShareFrameCompleted += (_, e) =>
+            {
+                lock (gate)
+                {
+                    deliveredFrameIds.Add(e.FrameId);
+                    if (deliveredFrameIds.Count >= 3)
+                    {
+                        threeFramesReceived.TrySetResult();
+                    }
+                }
+            };
+
+            hostClient.MessageReceived += (_, e) =>
+            {
+                if (!e.IsTopic &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.ScreenShareFrame)
+                {
+                    lock (gate)
+                    {
+                        deliveredChannels.Add(e.Channel);
+                        deliveredSources.Add(e.Source);
+                    }
+                }
+            };
+
+            await host.HostByAddressAsync(cts.Token);
+            var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
+            const long recoveryBurstToken = 41;
+
+            helper.ArmRecoveryBurstControlFallback(authorizedSessionId, streamEpoch: 1, burstToken: recoveryBurstToken, ownerFrameId: 0);
+
+            helperClient.ShouldDeliverSendAsync = (destination, _, _) =>
+                Task.FromResult(!string.Equals(destination, hostClient.ConnectedMediaAddress, StringComparison.Ordinal));
+
+            await helper.SendScreenShareVideoStreamConfigAsync(CreateVideoStreamConfig(authorizedSessionId, streamEpoch: 1), cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await helper.SendScreenSharePayloadAsync(
+                    CreateVideoFragmentPayload(authorizedSessionId, frameId: 0, width: 640, height: 360, new byte[] { 0x01 }, streamEpoch: 1, capturedTsUtcMs: 1000, isKeyFrame: true),
+                    recoverySendRole: "owner",
+                    recoveryBurstToken: recoveryBurstToken,
+                    cts.Token)
+                .WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            await helper.SendScreenSharePayloadAsync(
+                    CreateVideoFragmentPayload(authorizedSessionId, frameId: 1, width: 640, height: 360, new byte[] { 0x02 }, streamEpoch: 1, capturedTsUtcMs: 1010, isKeyFrame: false),
+                    recoverySendRole: "protected_follower",
+                    recoveryBurstToken: recoveryBurstToken,
+                    cts.Token)
+                .WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            await helper.SendScreenSharePayloadAsync(
+                    CreateVideoFragmentPayload(authorizedSessionId, frameId: 2, width: 640, height: 360, new byte[] { 0x03 }, streamEpoch: 1, capturedTsUtcMs: 1020, isKeyFrame: false),
+                    recoverySendRole: "protected_follower",
+                    recoveryBurstToken: recoveryBurstToken,
+                    cts.Token)
+                .WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 3, width: 640, height: 360, new byte[] { 0x04 }, streamEpoch: 1, capturedTsUtcMs: 1030, isKeyFrame: false),
+                recoverySendRole: null,
+                recoveryBurstToken: 0,
+                cts.Token);
+
+            await threeFramesReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await Task.Delay(300, cts.Token);
+
+            lock (gate)
+            {
+                Assert.Equal(new long[] { 0, 1, 2 }, deliveredFrameIds);
+                Assert.All(deliveredChannels, channel => Assert.Equal(NknBridgeChannel.Control, channel));
+                Assert.All(deliveredSources, source => Assert.Equal(helperClient.ConnectedAddress, source));
+                Assert.DoesNotContain(3L, deliveredFrameIds);
+            }
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknSignalingTransport_RecoveryOwnerControlFallback_RetriesDroppedOwnerKeyframe()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.screenshare-control-bootstrap.address");
+            var helperClient = new FakeNknClient("helper.screenshare-control-bootstrap.address");
+            var hostIdentity = new NknIdentity("host-screenshare-control-bootstrap-id", "host.screenshare-control-bootstrap.address");
+            var helperIdentity = new NknIdentity("helper-screenshare-control-bootstrap-id", "helper.screenshare-control-bootstrap.address");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var threeFramesReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var gate = new object();
+            var deliveredFrameIds = new List<long>();
+            var deliveredChannels = new List<NknBridgeChannel>();
+            var droppedBootstrapKeyframe = 0;
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
+            host.ScreenShareFrameCompleted += (_, e) =>
+            {
+                lock (gate)
+                {
+                    deliveredFrameIds.Add(e.FrameId);
+                    if (deliveredFrameIds.Count >= 3)
+                    {
+                        threeFramesReceived.TrySetResult();
+                    }
+                }
+            };
+
+            hostClient.MessageReceived += (_, e) =>
+            {
+                if (!e.IsTopic &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.ScreenShareFrame)
+                {
+                    lock (gate)
+                    {
+                        deliveredChannels.Add(e.Channel);
+                    }
+                }
+            };
+
+            await host.HostByAddressAsync(cts.Token);
+            var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
+            const long recoveryBurstToken = 99;
+
+            helper.ArmRecoveryBurstControlFallback(authorizedSessionId, streamEpoch: 1, burstToken: recoveryBurstToken, ownerFrameId: 0);
+
+            helperClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (string.Equals(destination, hostClient.ConnectedMediaAddress, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(false);
+                }
+
+                if (!string.Equals(destination, hostClient.ConnectedAddress, StringComparison.Ordinal) ||
+                    !EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.ScreenShareFrame)
+                {
+                    return Task.FromResult(true);
+                }
+
+                if (Interlocked.Exchange(ref droppedBootstrapKeyframe, 1) == 0)
+                {
+                    return Task.FromResult(false);
+                }
+
+                return Task.FromResult(true);
+            };
+
+            await helper.SendScreenShareVideoStreamConfigAsync(CreateVideoStreamConfig(authorizedSessionId, streamEpoch: 1), cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 0, width: 640, height: 360, new byte[] { 0x01 }, streamEpoch: 1, capturedTsUtcMs: 1000, isKeyFrame: true),
+                recoverySendRole: "owner",
+                recoveryBurstToken: recoveryBurstToken,
+                cts.Token);
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 1, width: 640, height: 360, new byte[] { 0x02 }, streamEpoch: 1, capturedTsUtcMs: 1010, isKeyFrame: false),
+                recoverySendRole: "protected_follower",
+                recoveryBurstToken: recoveryBurstToken,
+                cts.Token);
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 2, width: 640, height: 360, new byte[] { 0x03 }, streamEpoch: 1, capturedTsUtcMs: 1020, isKeyFrame: false),
+                recoverySendRole: "protected_follower",
+                recoveryBurstToken: recoveryBurstToken,
+                cts.Token);
+
+            await threeFramesReceived.Task.WaitAsync(TimeSpan.FromSeconds(4), cts.Token);
+
+            lock (gate)
+            {
+                Assert.Equal(new long[] { 0, 1, 2 }, deliveredFrameIds);
+                Assert.All(deliveredChannels, channel => Assert.Equal(NknBridgeChannel.Control, channel));
+            }
+
+            Assert.Equal(1, Volatile.Read(ref droppedBootstrapKeyframe));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknSignalingTransport_ScreenShareRecoveryControlFallback_RetriesDroppedRecoveryKeyframeBeyondStartupWindow()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.screenshare-control-recovery.address");
+            var helperClient = new FakeNknClient("helper.screenshare-control-recovery.address");
+            var hostIdentity = new NknIdentity("host-screenshare-control-recovery-id", "host.screenshare-control-recovery.address");
+            var helperIdentity = new NknIdentity("helper-screenshare-control-recovery-id", "helper.screenshare-control-recovery.address");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var threeFramesReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var gate = new object();
+            var deliveredFrameIds = new List<long>();
+            var deliveredChannels = new List<NknBridgeChannel>();
+            var droppedRecoveryKeyframe = 0;
+            byte[]? decryptKey = null;
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
+
+            hostClient.MessageReceived += (_, e) =>
+            {
+                if (!e.IsTopic &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.ScreenShareFrame &&
+                    decryptKey is not null)
+                {
+                    var securePayload = SessionSecureEnvelopeCodec.Decrypt(
+                        decryptKey,
+                        env.Payload,
+                        new SessionSecureEnvelopeExpectation(
+                            Family: SessionSecureMessageFamily.ScreenShare,
+                            MessageType: "screenshare_frame"));
+                    if (!ScreenShareVideoPayloadCodec.TryDeserializeFragmentEnvelope(securePayload.Plaintext, out var fragments, out var isBatch) ||
+                        isBatch ||
+                        fragments.Length == 0)
+                    {
+                        return;
+                    }
+
+                    lock (gate)
+                    {
+                        foreach (var fragment in fragments)
+                        {
+                            deliveredFrameIds.Add(fragment.FrameId);
+                            deliveredChannels.Add(e.Channel);
+                        }
+
+                        if (deliveredFrameIds.Distinct().Count() >= 3)
+                        {
+                            threeFramesReceived.TrySetResult();
+                        }
+                    }
+                }
+            };
+
+            await host.HostByAddressAsync(cts.Token);
+            var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
+            decryptKey = Assert.IsType<byte[]>(GetPrivateField(host, "controlSessionSharedKey"));
+
+            helperClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (string.Equals(destination, hostClient.ConnectedMediaAddress, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(false);
+                }
+
+                if (!string.Equals(destination, hostClient.ConnectedAddress, StringComparison.Ordinal) ||
+                    !EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.ScreenShareFrame)
+                {
+                    return Task.FromResult(true);
+                }
+
+                if (Interlocked.Exchange(ref droppedRecoveryKeyframe, 1) == 0)
+                {
+                    return Task.FromResult(false);
+                }
+
+                return Task.FromResult(true);
+            };
+
+            await helper.SendScreenShareVideoStreamConfigAsync(CreateVideoStreamConfig(authorizedSessionId, streamEpoch: 1), cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            helper.ArmRecoveryBurstControlFallback(authorizedSessionId, 1, 123, 10);
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 10, width: 640, height: 360, new byte[] { 0x01 }, streamEpoch: 1, capturedTsUtcMs: 3000, isKeyFrame: true),
+                recoverySendRole: "owner",
+                recoveryBurstToken: 123,
+                ct: cts.Token);
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 11, width: 640, height: 360, new byte[] { 0x02 }, streamEpoch: 1, capturedTsUtcMs: 3010, isKeyFrame: false),
+                recoverySendRole: "protected_follower",
+                recoveryBurstToken: 123,
+                ct: cts.Token);
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 12, width: 640, height: 360, new byte[] { 0x03 }, streamEpoch: 1, capturedTsUtcMs: 3020, isKeyFrame: false),
+                recoverySendRole: "protected_follower",
+                recoveryBurstToken: 123,
+                ct: cts.Token);
+
+            await threeFramesReceived.Task.WaitAsync(TimeSpan.FromSeconds(4), cts.Token);
+
+            lock (gate)
+            {
+                Assert.Equal(new long[] { 10, 11, 12 }, deliveredFrameIds.Distinct().OrderBy(frameId => frameId).ToArray());
+                Assert.All(deliveredChannels, channel => Assert.Equal(NknBridgeChannel.Control, channel));
+            }
+
+            Assert.Equal(1, Volatile.Read(ref droppedRecoveryKeyframe));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknSignalingTransport_ScreenShareGenericControlFallback_DoesNotArmBeyondStartupWindow()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.screenshare-control-startup-window.address");
+            var helperClient = new FakeNknClient("helper.screenshare-control-startup-window.address");
+            var hostIdentity = new NknIdentity("host-screenshare-control-startup-window-id", "host.screenshare-control-startup-window.address");
+            var helperIdentity = new NknIdentity("helper-screenshare-control-startup-window-id", "helper.screenshare-control-startup-window.address");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var deliveredFrameIds = new ConcurrentQueue<long>();
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
+            host.ScreenShareFrameCompleted += (_, e) => deliveredFrameIds.Enqueue(e.FrameId);
+
+            await host.HostByAddressAsync(cts.Token);
+            var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
+
+            helperClient.ShouldDeliverSendAsync = (destination, _, _) =>
+                Task.FromResult(!string.Equals(destination, hostClient.ConnectedMediaAddress, StringComparison.Ordinal));
+
+            await helper.SendScreenShareVideoStreamConfigAsync(CreateVideoStreamConfig(authorizedSessionId, streamEpoch: 1), cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 8, width: 640, height: 360, new byte[] { 0x01 }, streamEpoch: 1, capturedTsUtcMs: 4000, isKeyFrame: true),
+                cts.Token);
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 9, width: 640, height: 360, new byte[] { 0x02 }, streamEpoch: 1, capturedTsUtcMs: 4010, isKeyFrame: false),
+                cts.Token);
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 10, width: 640, height: 360, new byte[] { 0x03 }, streamEpoch: 1, capturedTsUtcMs: 4020, isKeyFrame: false),
+                cts.Token);
+
+            await Task.Delay(400, cts.Token);
+
+            Assert.Empty(deliveredFrameIds);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknSignalingTransport_ActiveRecoveryBurst_SuppressesOrdinaryControlFallbackForSameEpochFrames()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.screenshare-control-burst-owner.address");
+            var helperClient = new FakeNknClient("helper.screenshare-control-burst-owner.address");
+            var hostIdentity = new NknIdentity("host-screenshare-control-burst-owner-id", "host.screenshare-control-burst-owner.address");
+            var helperIdentity = new NknIdentity("helper-screenshare-control-burst-owner-id", "helper.screenshare-control-burst-owner.address");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var threeFramesReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var gate = new object();
+            var deliveredFrameIds = new List<long>();
+            var deliveredChannels = new List<NknBridgeChannel>();
+            byte[]? decryptKey = null;
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
+
+            hostClient.MessageReceived += (_, e) =>
+            {
+                if (!e.IsTopic &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.ScreenShareFrame &&
+                    decryptKey is not null)
+                {
+                    var securePayload = SessionSecureEnvelopeCodec.Decrypt(
+                        decryptKey,
+                        env.Payload,
+                        new SessionSecureEnvelopeExpectation(
+                            Family: SessionSecureMessageFamily.ScreenShare,
+                            MessageType: "screenshare_frame"));
+                    if (!ScreenShareVideoPayloadCodec.TryDeserializeFragmentEnvelope(securePayload.Plaintext, out var fragments, out var isBatch) ||
+                        isBatch ||
+                        fragments.Length == 0)
+                    {
+                        return;
+                    }
+
+                    lock (gate)
+                    {
+                        foreach (var fragment in fragments)
+                        {
+                            deliveredFrameIds.Add(fragment.FrameId);
+                            deliveredChannels.Add(e.Channel);
+                        }
+
+                        if (deliveredFrameIds.Distinct().Count() >= 3)
+                        {
+                            threeFramesReceived.TrySetResult();
+                        }
+                    }
+                }
+            };
+
+            await host.HostByAddressAsync(cts.Token);
+            var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
+            decryptKey = Assert.IsType<byte[]>(GetPrivateField(host, "controlSessionSharedKey"));
+
+            helperClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (string.Equals(destination, hostClient.ConnectedMediaAddress, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(false);
+                }
+
+                if (!string.Equals(destination, hostClient.ConnectedAddress, StringComparison.Ordinal) ||
+                    !EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.ScreenShareFrame)
+                {
+                    return Task.FromResult(true);
+                }
+
+                return Task.FromResult(true);
+            };
+
+            await helper.SendScreenShareVideoStreamConfigAsync(CreateVideoStreamConfig(authorizedSessionId, streamEpoch: 1), cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            helper.ArmRecoveryBurstControlFallback(authorizedSessionId, 1, 123, 10);
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 8, width: 640, height: 360, new byte[] { 0x01 }, streamEpoch: 1, capturedTsUtcMs: 5000, isKeyFrame: true),
+                cts.Token);
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 9, width: 640, height: 360, new byte[] { 0x02 }, streamEpoch: 1, capturedTsUtcMs: 5010, isKeyFrame: false),
+                cts.Token);
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 10, width: 640, height: 360, new byte[] { 0x03 }, streamEpoch: 1, capturedTsUtcMs: 5020, isKeyFrame: true),
+                recoverySendRole: "owner",
+                recoveryBurstToken: 123,
+                ct: cts.Token);
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 11, width: 640, height: 360, new byte[] { 0x04 }, streamEpoch: 1, capturedTsUtcMs: 5030, isKeyFrame: false),
+                recoverySendRole: "protected_follower",
+                recoveryBurstToken: 123,
+                ct: cts.Token);
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 12, width: 640, height: 360, new byte[] { 0x05 }, streamEpoch: 1, capturedTsUtcMs: 5040, isKeyFrame: false),
+                recoverySendRole: "protected_follower",
+                recoveryBurstToken: 123,
+                ct: cts.Token);
+
+            await threeFramesReceived.Task.WaitAsync(TimeSpan.FromSeconds(4), cts.Token);
+
+            lock (gate)
+            {
+                Assert.Equal(new long[] { 10, 11, 12 }, deliveredFrameIds.Distinct().OrderBy(frameId => frameId).ToArray());
+                Assert.All(deliveredChannels, channel => Assert.Equal(NknBridgeChannel.Control, channel));
+            }
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknSignalingTransport_RecoveryBurstControlRetry_SkipsAfterBurstResolution()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.screenshare-control-recovery-resolve.address");
+            var helperClient = new FakeNknClient("helper.screenshare-control-recovery-resolve.address");
+            var hostIdentity = new NknIdentity("host-screenshare-control-recovery-resolve-id", "host.screenshare-control-recovery-resolve.address");
+            var helperIdentity = new NknIdentity("helper-screenshare-control-recovery-resolve-id", "helper.screenshare-control-recovery-resolve.address");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
+
+            await host.HostByAddressAsync(cts.Token);
+            var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
+
+            helperClient.ShouldDeliverSendAsync = (destination, payload, _) =>
+            {
+                if (!EnvelopeCodec.TryDeserialize(payload, out var env) ||
+                    env.Type != MsgType.ScreenShareFrame)
+                {
+                    return Task.FromResult(true);
+                }
+
+                if (string.Equals(destination, hostClient.ConnectedAddress, StringComparison.Ordinal) ||
+                    string.Equals(destination, hostClient.ConnectedMediaAddress, StringComparison.Ordinal))
+                {
+                    return Task.FromResult(false);
+                }
+
+                return Task.FromResult(true);
+            };
+
+            await helper.SendScreenShareVideoStreamConfigAsync(CreateVideoStreamConfig(authorizedSessionId, streamEpoch: 1), cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            helper.ArmRecoveryBurstControlFallback(authorizedSessionId, 1, 123, 10);
+            await helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 10, width: 640, height: 360, new byte[] { 0x01 }, streamEpoch: 1, capturedTsUtcMs: 3000, isKeyFrame: true),
+                recoverySendRole: "owner",
+                recoveryBurstToken: 123,
+                ct: cts.Token);
+            helper.ResolveRecoveryBurstControlFallback(123);
+
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(1L, Assert.IsType<long>(GetPrivateField(helper, "screenShareRecoveryControlBootstrapRetrySkippedDueToBurstResolvedCount")));
+            Assert.Equal(0L, Assert.IsType<long>(GetPrivateField(helper, "screenShareRecoveryControlBootstrapRetryQueuedAfterBurstResolutionCount")));
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknSignalingTransport_ScreenShareFollowerFragments_FallBackToControlForAllFollowerPayloads()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.screenshare-fallback-fragments.address");
+            var helperClient = new FakeNknClient("helper.screenshare-fallback-fragments.address");
+            var hostIdentity = new NknIdentity("host-screenshare-fallback-fragments-id", "host.screenshare-fallback-fragments.address");
+            var helperIdentity = new NknIdentity("helper-screenshare-fallback-fragments-id", "helper.screenshare-fallback-fragments.address");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var threeFramesReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var gate = new object();
+            var deliveredFrameIds = new List<long>();
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
+            host.ScreenShareFrameCompleted += (_, e) =>
+            {
+                lock (gate)
+                {
+                    deliveredFrameIds.Add(e.FrameId);
+                    if (deliveredFrameIds.Count >= 3)
+                    {
+                        threeFramesReceived.TrySetResult();
+                    }
+                }
+            };
+
+            await host.HostByAddressAsync(cts.Token);
+            var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
+
+            helperClient.ShouldDeliverSendAsync = (destination, _, _) =>
+                Task.FromResult(!string.Equals(destination, hostClient.ConnectedMediaAddress, StringComparison.Ordinal));
+
+            await helper.SendScreenShareVideoStreamConfigAsync(CreateVideoStreamConfig(authorizedSessionId, streamEpoch: 1), cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var payloads = new[]
+            {
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 0, width: 640, height: 360, new byte[] { 0x01 }, streamEpoch: 1, capturedTsUtcMs: 2000, isKeyFrame: true),
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 1, width: 640, height: 360, new byte[] { 0x02 }, streamEpoch: 1, capturedTsUtcMs: 2010, isKeyFrame: false, fragmentIndex: 0, fragmentCount: 2),
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 1, width: 640, height: 360, new byte[] { 0x03 }, streamEpoch: 1, capturedTsUtcMs: 2010, isKeyFrame: false, fragmentIndex: 1, fragmentCount: 2),
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 2, width: 640, height: 360, new byte[] { 0x04 }, streamEpoch: 1, capturedTsUtcMs: 2020, isKeyFrame: false, fragmentIndex: 0, fragmentCount: 2),
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 2, width: 640, height: 360, new byte[] { 0x05 }, streamEpoch: 1, capturedTsUtcMs: 2020, isKeyFrame: false, fragmentIndex: 1, fragmentCount: 2),
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 3, width: 640, height: 360, new byte[] { 0x06 }, streamEpoch: 1, capturedTsUtcMs: 2030, isKeyFrame: false),
+            };
+
+            foreach (var payload in payloads)
+            {
+                await helper.SendScreenSharePayloadAsync(payload, cts.Token);
+            }
+
+            await threeFramesReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await Task.Delay(300, cts.Token);
+
+            lock (gate)
+            {
+                Assert.Equal(new long[] { 0, 1, 2 }, deliveredFrameIds);
+                Assert.DoesNotContain(3L, deliveredFrameIds);
+            }
         }
         finally
         {
@@ -525,6 +1071,7 @@ public sealed class ScreenCaptureAbstractionTests
             var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var hostChatReceived = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
             var firstSendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var releaseFirstSend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var sendInvocationCount = 0;
@@ -538,6 +1085,7 @@ public sealed class ScreenCaptureAbstractionTests
             host.Approved += (_, _) => hostApproved.TrySetResult();
             helper.Approved += (_, _) => helperApproved.TrySetResult();
             host.ChatMessageReceived += (_, e) => hostChatReceived.TrySetResult(e.Payload);
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
             host.ScreenShareFrameCompleted += (_, e) => screenFrameReceived.TrySetResult(e);
             hostClient.MessageReceived += (_, e) =>
             {
@@ -561,18 +1109,11 @@ public sealed class ScreenCaptureAbstractionTests
             await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
-            screenPayload = ScreenSharePayloadCodec.Serialize(new ScreenShareFrameChunkV1
-            {
-                SessionId = authorizedSessionId,
-                FrameId = 1,
-                Width = 640,
-                Height = 360,
-                TimestampUnixMilliseconds = 1234,
-                Encoding = "jpeg",
-                ChunkIndex = 0,
-                ChunkCount = 1,
-                DataBase64 = Convert.ToBase64String(new byte[] { 1, 2, 3, 4 }),
-            });
+            var streamConfig = CreateVideoStreamConfig(authorizedSessionId, streamEpoch: 1);
+            screenPayload = CreateVideoFragmentPayload(authorizedSessionId, frameId: 1, width: 640, height: 360, new byte[] { 1, 2, 3, 4 }, streamEpoch: 1, capturedTsUtcMs: 1234);
+
+            await helper.SendScreenShareVideoStreamConfigAsync(streamConfig, cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
 
             helperClient.BeforeSendAsync = async (_, _, sendCt) =>
             {
@@ -627,6 +1168,126 @@ public sealed class ScreenCaptureAbstractionTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task NknSignalingTransport_ScreenSharePayloadAsync_DoesNotRetainLocalMediaQueue_WhenSendIsBlocked()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.screenshare-freshness.address");
+            var helperClient = new FakeNknClient("helper.screenshare-freshness.address");
+            var hostIdentity = new NknIdentity("host-screenshare-freshness-id", "host.screenshare-freshness.address");
+            var helperIdentity = new NknIdentity("helper-screenshare-freshness-id", "helper.screenshare-freshness.address");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var firstSendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseFirstSend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var secondSendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var frameIds = new List<long>();
+            var sendInvocationCount = 0;
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
+            host.ScreenShareFrameCompleted += (_, e) =>
+            {
+                lock (frameIds)
+                {
+                    frameIds.Add(e.FrameId);
+                }
+            };
+
+            await host.HostByAddressAsync(cts.Token);
+            var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
+            var streamConfig = CreateVideoStreamConfig(authorizedSessionId, streamEpoch: 1);
+            await helper.SendScreenShareVideoStreamConfigAsync(streamConfig, cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            helperClient.BeforeSendAsync = async (_, payload, sendCt) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var env) &&
+                    env.Type == MsgType.ScreenShareFrame &&
+                    Interlocked.Increment(ref sendInvocationCount) == 1)
+                {
+                    firstSendStarted.TrySetResult();
+                    await releaseFirstSend.Task.WaitAsync(sendCt);
+                }
+            };
+
+            var firstSendTask = helper.SendScreenSharePayloadAsync(
+                CreateVideoFragmentPayload(authorizedSessionId, frameId: 0, width: 640, height: 360, new byte[] { 1 }, streamEpoch: 1, isKeyFrame: true),
+                cts.Token);
+            await firstSendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            var secondSendTask = Task.Run(
+                async () =>
+                {
+                    secondSendStarted.TrySetResult();
+                    await helper.SendScreenSharePayloadAsync(
+                        CreateVideoFragmentPayload(authorizedSessionId, frameId: 1, width: 640, height: 360, new byte[] { 2 }, streamEpoch: 1),
+                        cts.Token);
+                },
+                cts.Token);
+
+            await secondSendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            await Task.Delay(100, cts.Token);
+
+            Assert.Equal(0, helper.ScreenShareTransportQueueDepth);
+            Assert.Equal(0, helper.ScreenShareTransportQueuedBytes);
+
+            releaseFirstSend.TrySetResult();
+            await firstSendTask.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await secondSendTask.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var deadline = DateTime.UtcNow.AddSeconds(3);
+            while (DateTime.UtcNow < deadline)
+            {
+                lock (frameIds)
+                {
+                    if (frameIds.Count >= 2)
+                    {
+                        break;
+                    }
+                }
+
+                await Task.Delay(25, cts.Token);
+            }
+
+            List<long> deliveredFrameIds;
+            lock (frameIds)
+            {
+                deliveredFrameIds = frameIds.ToList();
+            }
+
+            Assert.Contains(0L, deliveredFrameIds);
+            Assert.Contains(1L, deliveredFrameIds);
+            Assert.Equal(2, deliveredFrameIds.Count);
+            Assert.Equal(0, helper.ScreenShareTransportRecentDropCount);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task NknSignalingTransport_ScreenSharePayload_BypassesBusyControlGate()
     {
         FakeNknClient.ResetNetwork();
@@ -646,8 +1307,10 @@ public sealed class ScreenCaptureAbstractionTests
             var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var hostChatReceived = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
             var firstSendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var releaseFirstSend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var screenPayloadDelivered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var sendInvocationCount = 0;
             var rawScreenPayloadReceived = 0;
             var chatPayload = System.Text.Encoding.UTF8.GetBytes("chat-budget-drop-payload");
@@ -657,6 +1320,7 @@ public sealed class ScreenCaptureAbstractionTests
             host.Approved += (_, _) => hostApproved.TrySetResult();
             helper.Approved += (_, _) => helperApproved.TrySetResult();
             host.ChatMessageReceived += (_, e) => hostChatReceived.TrySetResult(e.Payload);
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
             hostClient.MessageReceived += (_, e) =>
             {
                 if (!e.IsTopic &&
@@ -664,6 +1328,7 @@ public sealed class ScreenCaptureAbstractionTests
                     env.Type == MsgType.ScreenShareFrame)
                 {
                     Interlocked.Increment(ref rawScreenPayloadReceived);
+                    screenPayloadDelivered.TrySetResult();
                 }
             };
 
@@ -678,22 +1343,17 @@ public sealed class ScreenCaptureAbstractionTests
             await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
-            screenPayload = ScreenSharePayloadCodec.Serialize(new ScreenShareFrameChunkV1
-            {
-                SessionId = authorizedSessionId,
-                FrameId = 1,
-                Width = 640,
-                Height = 360,
-                TimestampUnixMilliseconds = 1234,
-                Encoding = "jpeg",
-                ChunkIndex = 0,
-                ChunkCount = 1,
-                DataBase64 = Convert.ToBase64String(new byte[] { 1, 2, 3, 4 }),
-            });
+            var streamConfig = CreateVideoStreamConfig(authorizedSessionId, streamEpoch: 1);
+            screenPayload = CreateVideoFragmentPayload(authorizedSessionId, frameId: 1, width: 640, height: 360, new byte[] { 1, 2, 3, 4 }, streamEpoch: 1, capturedTsUtcMs: 1234);
 
-            helperClient.BeforeSendAsync = async (_, _, sendCt) =>
+            await helper.SendScreenShareVideoStreamConfigAsync(streamConfig, cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            helperClient.BeforeSendAsync = async (_, payloadBytes, sendCt) =>
             {
-                if (Interlocked.Increment(ref sendInvocationCount) == 1)
+                if (EnvelopeCodec.TryDeserialize(payloadBytes, out var env) &&
+                    env.Type != MsgType.ScreenShareFrame &&
+                    Interlocked.Increment(ref sendInvocationCount) == 1)
                 {
                     firstSendStarted.TrySetResult();
                     await releaseFirstSend.Task.WaitAsync(sendCt);
@@ -704,7 +1364,8 @@ public sealed class ScreenCaptureAbstractionTests
             await firstSendStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
             var diagnosticsBeforeDrop = NknRuntimeDiagnostics.Snapshot();
 
-            await helper.SendScreenSharePayloadAsync(screenPayload, cts.Token).WaitAsync(TimeSpan.FromMilliseconds(300), cts.Token);
+            var screenSendTask = helper.SendScreenSharePayloadAsync(screenPayload, cts.Token);
+            await screenPayloadDelivered.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
 
             var diagnosticsAfterSend = NknRuntimeDiagnostics.Snapshot();
             Assert.Equal(1, Volatile.Read(ref rawScreenPayloadReceived));
@@ -722,6 +1383,7 @@ public sealed class ScreenCaptureAbstractionTests
                 diagnosticsBeforeDrop.ScreenSharePayloadBytesSent);
 
             releaseFirstSend.TrySetResult();
+            await screenSendTask.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
             await chatTask;
             var receivedChat = await hostChatReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             Assert.Equal(chatPayload, receivedChat);
@@ -752,6 +1414,7 @@ public sealed class ScreenCaptureAbstractionTests
             var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
             var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
             var firstSendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var releaseFirstSend = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             byte[] stopPayload = Array.Empty<byte>();
@@ -759,6 +1422,7 @@ public sealed class ScreenCaptureAbstractionTests
             host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
             host.Approved += (_, _) => hostApproved.TrySetResult();
             helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
 
             await host.HostByAddressAsync(cts.Token);
             var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
@@ -772,18 +1436,8 @@ public sealed class ScreenCaptureAbstractionTests
             await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
 
-            var framePayload = ScreenSharePayloadCodec.Serialize(new ScreenShareFrameChunkV1
-            {
-                SessionId = authorizedSessionId,
-                FrameId = 1,
-                Width = 640,
-                Height = 360,
-                TimestampUnixMilliseconds = 1234,
-                Encoding = "jpeg",
-                ChunkIndex = 0,
-                ChunkCount = 1,
-                DataBase64 = Convert.ToBase64String(new byte[] { 1, 2, 3, 4 }),
-            });
+            var framePayload = CreateVideoFragmentPayload(authorizedSessionId, frameId: 1, width: 640, height: 360, new byte[] { 1, 2, 3, 4 }, streamEpoch: 1, capturedTsUtcMs: 1234);
+            var streamConfig = CreateVideoStreamConfig(authorizedSessionId, streamEpoch: 1);
 
             stopPayload = ScreenSharePayloadCodec.SerializeStop(new ScreenShareStopMessageV1
             {
@@ -803,6 +1457,9 @@ public sealed class ScreenCaptureAbstractionTests
                     stopPayloadReceived.TrySetResult(e);
                 }
             };
+
+            await helper.SendScreenShareVideoStreamConfigAsync(streamConfig, cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
 
             var sendInvocationCount = 0;
             helperClient.BeforeSendAsync = async (_, _, sendCt) =>
@@ -989,21 +1646,163 @@ public sealed class ScreenCaptureAbstractionTests
         }
     }
 
-    private static string BuildBridgeMessageLine(ScreenShareFrameChunkV1 chunk)
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknSignalingTransport_RawScreenShareFramePayload_OnMediaChannel_DoesNotDispatchFrame()
     {
-        var payloadBase64 = Convert.ToBase64String(ScreenSharePayloadCodec.Serialize(chunk));
-        return $"{{\"event\":\"message\",\"source\":\"peer.test\",\"payloadBase64\":\"{payloadBase64}\",\"isTopic\":false,\"ts\":1}}";
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.raw-screenshare-frame.address");
+            var helperClient = new FakeNknClient("helper.raw-screenshare-frame.address");
+            var hostIdentity = new NknIdentity("host-raw-screenshare-frame-id", "host.raw-screenshare-frame.address");
+            var helperIdentity = new NknIdentity("helper-raw-screenshare-frame-id", "helper.raw-screenshare-frame.address");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var frameCount = 0;
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareFrameCompleted += (_, _) => Interlocked.Increment(ref frameCount);
+
+            await host.HostByAddressAsync(cts.Token);
+            var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
+
+            var rawFramePayload = CreateVideoFragmentPayload(authorizedSessionId, frameId: 1, width: 640, height: 360, new byte[] { 1, 2, 3, 4 }, streamEpoch: 1, capturedTsUtcMs: 1234);
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            await helperClient.SendMediaAsync(hostClient.ConnectedMediaAddress, rawFramePayload, cts.Token);
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(0, Volatile.Read(ref frameCount));
+            Assert.Equal("parse_failed", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
     }
 
-    private static void EnableInboundScreenShare(RealNknClientAdapter adapter, string sessionId, string sourceAddress)
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task NknSignalingTransport_RawScreenShareStopPayload_OnMediaChannel_DoesNotDispatchStop()
     {
-        adapter.UpdateInboundScreenSharePolicyAsync(
-                enabled: true,
-                sessionId: sessionId,
-                sourceAddress: sourceAddress,
-                expiresAtUtc: DateTimeOffset.UtcNow.AddMinutes(5),
-                ct: CancellationToken.None)
-            .GetAwaiter()
-            .GetResult();
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.raw-screenshare-stop.address");
+            var helperClient = new FakeNknClient("helper.raw-screenshare-stop.address");
+            var hostIdentity = new NknIdentity("host-raw-screenshare-stop-id", "host.raw-screenshare-stop.address");
+            var helperIdentity = new NknIdentity("helper-raw-screenshare-stop-id", "helper.raw-screenshare-stop.address");
+
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var stopCount = 0;
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareStopped += (_, _) => Interlocked.Increment(ref stopCount);
+
+            await host.HostByAddressAsync(cts.Token);
+            var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var authorizedSessionId = Assert.IsType<SessionId>(helper.CurrentSessionSecurityState.SessionId).Value;
+
+            var rawStopPayload = ScreenSharePayloadCodec.SerializeStop(new ScreenShareStopMessageV1
+            {
+                SessionId = authorizedSessionId,
+                Reason = "preview_stopped",
+            });
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            await helperClient.SendMediaAsync(hostClient.ConnectedMediaAddress, rawStopPayload, cts.Token);
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(0, Volatile.Read(ref stopCount));
+            Assert.Equal("parse_failed", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    private static ScreenShareVideoStreamConfigV1 CreateVideoStreamConfig(string sessionId, long streamEpoch)
+    {
+        return new ScreenShareVideoStreamConfigV1
+        {
+            SessionId = sessionId,
+            StreamEpoch = streamEpoch,
+            Encoding = "h264",
+            CodecProfile = "baseline",
+            DecoderConfigData = new byte[] { 1, 2, 3 },
+        };
+    }
+
+    private static byte[] CreateVideoFragmentPayload(
+        string sessionId,
+        long frameId,
+        int width,
+        int height,
+        byte[] frameBytes,
+        long streamEpoch,
+        long capturedTsUtcMs = 0,
+        bool isKeyFrame = true,
+        int fragmentIndex = 0,
+        int fragmentCount = 1)
+    {
+        return ScreenShareVideoPayloadCodec.SerializeFragment(
+            new ScreenShareVideoFragmentV1
+            {
+                SessionId = sessionId,
+                StreamEpoch = streamEpoch,
+                FrameId = frameId,
+                Width = width,
+                Height = height,
+                CapturedTsUtcMs = capturedTsUtcMs <= 0 ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() : capturedTsUtcMs,
+                Encoding = "h264",
+                IsKeyFrame = isKeyFrame,
+                FragmentIndex = fragmentIndex,
+                FragmentCount = fragmentCount,
+                Data = frameBytes,
+            });
+    }
+
+    private static object? GetPrivateField(object target, string fieldName)
+    {
+        var field = target.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return field!.GetValue(target);
     }
 }

@@ -180,4 +180,14 @@ internal sealed class SessionRuntimeScreenShareActions
     public SessionRuntimeScreenShareActions(SessionRuntime owner) => this.owner = owner;
 
     public Task SendPayloadAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => owner.SendScreenSharePayloadCoreAsync(payload, ct);
+
+    public Task SendPayloadWithRecoveryMetadataAsync(
+        ReadOnlyMemory<byte> payload,
+        string? recoverySendRole,
+        long recoveryBurstToken,
+        CancellationToken ct)
+        => owner.SendScreenSharePayloadCoreAsync(payload, recoverySendRole, recoveryBurstToken, ct);
+
+    public Task SendVideoStreamConfigAsync(ScreenShareVideoStreamConfigV1 message, CancellationToken ct)
+        => owner.SendScreenShareVideoStreamConfigCoreAsync(message, ct);
 }

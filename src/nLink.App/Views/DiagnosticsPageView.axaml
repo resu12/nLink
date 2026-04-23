@@ -293,7 +293,7 @@
                                    FontWeight="SemiBold"/>
 
                         <Grid ColumnDefinitions="220,*"
-                              RowDefinitions="Auto,Auto,Auto,Auto"
+                              RowDefinitions="Auto,Auto,Auto,Auto,Auto"
                               RowSpacing="8"
                               ColumnSpacing="12">
                             <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Current max FPS"/>
@@ -305,8 +305,11 @@
                             <TextBlock Grid.Row="2" Grid.Column="0" Classes="appLabel" Text="Current scale"/>
                             <TextBlock Grid.Row="2" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareCaptureScale}" FontSize="16"/>
 
-                            <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="Current JPEG quality"/>
-                            <TextBlock Grid.Row="3" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareCaptureJpegQuality}" FontSize="16"/>
+                            <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="Effective preset"/>
+                            <TextBlock Grid.Row="3" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEffectivePresetName}" FontSize="16"/>
+
+                            <TextBlock Grid.Row="4" Grid.Column="0" Classes="appLabel" Text="Legacy preset migrated"/>
+                            <TextBlock Grid.Row="4" Grid.Column="1" Classes="appBody" Text="{Binding ScreenSharePresetMigrationStatus}" FontSize="16"/>
                         </Grid>
 
                         <Border Classes="appPanel"
@@ -321,7 +324,7 @@
                                            Text="{Binding ScreenSharePresetLowEnd, StringFormat='Low-end CPU/network: {0}'}"
                                            FontSize="14"/>
                                 <TextBlock Classes="appBody"
-                                           Text="{Binding ScreenSharePresetHigherClarity, StringFormat='Higher clarity: {0}'}"
+                                           Text="{Binding ScreenSharePresetSharperText, StringFormat='Sharper text: {0}'}"
                                            FontSize="14"/>
                                 <Grid ColumnDefinitions="*,*,*"
                                       ColumnSpacing="8"
@@ -340,8 +343,8 @@
                                             FontSize="14"/>
                                     <Button Grid.Column="2"
                                             Classes="appButton secondaryButton"
-                                            Content="Apply clarity"
-                                            Command="{Binding ApplyHigherClarityScreenSharePresetCommand}"
+                                            Content="Apply sharper text"
+                                            Command="{Binding ApplySharperTextScreenSharePresetCommand}"
                                             Height="40"
                                             FontSize="14"/>
                                 </Grid>

@@ -37,6 +37,17 @@ public sealed class SessionReplayWindowTests
     }
 
     [Fact]
+    public void ReplayWindow_Accepts_Large_OutOfOrder_Gap_When_Within_Configured_Window()
+    {
+        var window = new SessionReplayWindow(windowSize: 4096, maxForwardAdvance: 32768);
+
+        Assert.Equal(SessionReplaySequenceResult.Accepted, window.EvaluateAndTrack(300));
+        Assert.Equal(SessionReplaySequenceResult.Accepted, window.EvaluateAndTrack(100));
+        Assert.Equal(300, window.HighestAcceptedSequence);
+        Assert.Equal(1, window.LowestAcceptedSequence);
+    }
+
+    [Fact]
     public void ReplayWindow_Rejects_Stale_Sequence_Outside_Window()
     {
         var window = new SessionReplayWindow(windowSize: 4, maxForwardAdvance: 32);
@@ -71,6 +82,7 @@ public sealed class SessionReplayWindowTests
         }
 
         Assert.Equal(10, window.HighestAcceptedSequence);
+        Assert.Equal(7, window.LowestAcceptedSequence);
         Assert.InRange(window.TrackedSequenceCount, 1, 4);
     }
 

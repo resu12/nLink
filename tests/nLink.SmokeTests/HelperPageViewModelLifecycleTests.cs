@@ -11,6 +11,19 @@ public partial class SmokeTests
 {
     [Trait("Category", "Smoke")]
     [Fact]
+    public void HelperPageViewModel_UsesHelperRemoteViewerRole()
+    {
+        using var runtime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            CreateDevLocalTestConfig(),
+            runtime);
+
+        Assert.Equal("helper_remote", helper.ScreenShareViewer.ViewerRoleForDiagnostics);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void HelperPageViewModel_EndSession_ReturnsToWaitingScreenImmediately()
     {
         var transportConfig = CreateDevLocalTestConfig();
@@ -377,5 +390,39 @@ public partial class SmokeTests
         Assert.False(helper.ShowTransientBanner);
         Assert.True(string.IsNullOrWhiteSpace(helper.TransientBannerText));
         Assert.False(helper.CanCancelTransient);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelperPageViewModel_RuntimeBootstrapSnapshot_PopulatesVerificationCode_AndQr()
+    {
+        var transportConfig = CreateNknTestConfig();
+        var localAddress = new PeerAddress("nlink-helper.bootstrap.actual.1234567890");
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport(localPeerAddress: localAddress.Value));
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime);
+
+        SetPrivateField(runtime, "role", SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Waiting);
+        SetPrivateField(runtime, "transport", new ScriptedSignalingTransport(localPeerAddress: localAddress.Value));
+        SetPrivateField(
+            runtime,
+            "helperListenerBootstrapSnapshot",
+            new HelperListenerBootstrapSnapshot(
+                localAddress,
+                RunId: "test-run",
+                ListenerGeneration: 1,
+                PublishedUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                HostReady: true));
+
+        InvokePrivateMethod(helper, "SyncFromRuntime");
+
+        Assert.True(helper.HasReadyHelperIdentityBootstrapText);
+        Assert.True(helper.HasHelperIdentityBootstrapVerificationCode);
+        Assert.StartsWith("nlinkh1.", helper.HelperIdentityBootstrapText, StringComparison.Ordinal);
+        Assert.True(helper.ShowHelperBootstrapQr);
+        Assert.False(helper.ShowHelperBootstrapQrPlaceholder);
     }
 }

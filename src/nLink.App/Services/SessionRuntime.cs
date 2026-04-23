@@ -147,7 +147,14 @@ internal sealed record SessionRuntimeWatchdogOptions(
         ReconnectingTimeout: TimeSpan.FromSeconds(8));
 }
 
-public sealed partial class SessionRuntime : IDisposable
+internal sealed record HelperListenerBootstrapSnapshot(
+    PeerAddress Address,
+    string RunId,
+    long ListenerGeneration,
+    long PublishedUtcMs,
+    bool HostReady);
+
+public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenShareControlContext, IHelperRemoteScreenSharePressurePublishTarget
 {
     private static readonly TimeSpan DisposeOperationTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan RemoteControlRequestTimeout = TimeSpan.FromSeconds(30);
@@ -210,6 +217,7 @@ public sealed partial class SessionRuntime : IDisposable
     private readonly SessionRuntimeRemoteControlActions remoteControlActions;
     private readonly SessionRuntimeScreenShareActions screenShareActions;
     private readonly SessionTransportLifecycle transportLifecycle;
+    private readonly SessionRuntimeScreenShareControlHost screenShareControlHost;
     private readonly RetryPolicy watchdogRetryPolicy;
     private readonly TransportScreenShareCoordinator transportScreenShareCoordinator;
     private readonly IRemoteInputInjector remoteInputInjector;
@@ -224,6 +232,7 @@ public sealed partial class SessionRuntime : IDisposable
     private LinkedListNode<RemoteControlInjectionWorkItem>? queuedRemoteControlInjectionSnapshotNode;
     private bool remoteControlInjectionExecutorActive;
     private readonly object remoteControlMouseMoveQueueGate = new();
+    private string? preservedDevLocalPeerAddress;
 
     private CancellationTokenSource? sessionCts;
     private ISignalingTransport? transport;
@@ -252,8 +261,11 @@ public sealed partial class SessionRuntime : IDisposable
     private CancellationTokenSource? watchdogCts;
     private long watchdogGeneration;
     private ISignalingTransport? cachedBridgeTransport;
+    private bool forceBridgeReuseOnce;
     private CancellationTokenSource? cachedBridgeIdleCts;
     private long cachedBridgeIdleGeneration;
+    private long helperListenerGeneration;
+    private HelperListenerBootstrapSnapshot? helperListenerBootstrapSnapshot;
     private bool transientStatusVisible;
     private string transientStatusText = string.Empty;
     private bool transientStatusCanCancel;
@@ -337,7 +349,143 @@ public sealed partial class SessionRuntime : IDisposable
     private DateTimeOffset remoteScreenShareFramesSuppressedUntilUtc;
     private long remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs;
     private long lastScreenShareStopSuppressedLogTick;
-    private bool remoteScreenShareActive;
+    private long helperRemoteScreenShareAcceptedFrames;
+    private long helperRemoteScreenShareLastAcceptedEpoch;
+    private int helperRemoteScreenShareSawConfig;
+    private readonly object helperRemoteScreenSharePressureGate = new();
+    private readonly long[] helperRemoteRecentAppliedFrameAgesMs = new long[3];
+    private int helperRemoteRecentAppliedFrameCount;
+    private int helperRemoteRecentAppliedFrameIndex;
+    private long helperRemoteLastAppliedFrameAgeMs = -1;
+    private DateTimeOffset helperRemoteLastAppliedFrameUtc;
+    private long helperRemoteLastApplyCadenceMs = -1;
+    private long helperRemoteApplyCadenceObserved;
+    private long helperRemoteTotalApplyCadenceMs;
+    private long helperRemoteViewerStaleDropCount;
+    private int helperRemoteConsecutiveVeryHighAppliedFrames;
+    private int helperRemoteConsecutiveStaleDropWindows;
+    private long helperRemoteCurrentPressureEpoch;
+    private DateTimeOffset helperRemoteCurrentPressureEpochStartedUtc;
+    private DateTimeOffset helperRemoteCurrentPressureEpochFirstAcceptedFrameUtc;
+    private bool helperRemoteCurrentPressureEpochFirstApplySeen;
+    private DateTimeOffset helperRemoteCurrentPressureEpochFirstVisibleApplyUtc;
+    private int helperRemoteCurrentPressureEpochApplyCount;
+    private long helperRemoteCurrentPressureEpochRecoveryKeyframeApplyCountLocal;
+    private long helperRemoteCurrentPressureEpochNeedMoreInputCount;
+    private long helperRemoteCurrentPressureEpochStaleDropCount;
+    private long helperRemoteCurrentPressureEpochLastVisibleApplyFrameId = -1;
+    private long helperRemoteCurrentPressureEpochContinuityLossTicks;
+    private long helperRemoteCurrentPressureEpochWarmupTicks;
+    private long helperRemoteCurrentPressureEpochBeforeFirstVisibleApplyTicks;
+    private long helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameTicks;
+    private long helperRemoteCurrentPressureEpochSlowApplyCadenceTicks;
+    private long helperRemoteCurrentPressureEpochHighFrameAgeTicks;
+    private long helperRemoteCurrentPressureEpochHighFrameAgeSuppressedDueToVisibleProgressCount;
+    private long helperRemoteCurrentPressureEpochHighFrameAgeSuppressedDueToHeadAdvanceCount;
+    private long helperRemoteCurrentPressureEpochActionableHighFrameAgeCount;
+    private long helperRemoteCurrentPressureEpochPostRecoveryAgeGraceSuppressedCount;
+    private long helperRemoteCurrentPressureEpochPostRecoveryHighFrameAgeSuppressedTicks;
+    private long helperRemoteCurrentPressureEpochRepeatedStaleDropsTicks;
+    private long helperRemoteCurrentPressureEpochBridgeHealthTicks;
+    private long helperRemoteCurrentPressureEpochBridgeHealthAdvisoryCount;
+    private long helperRemoteCurrentPressureEpochBridgeHealthActionableCount;
+    private long helperRemoteCurrentPressureEpochBridgeHealthQuarantineSuppressedCount;
+    private int helperRemoteCurrentPressureEpochBridgeHealthCorrelationConsecutiveCount;
+    private long helperRemoteCurrentPressureEpochBridgeHealthActionableWithoutQueueOrDropCount;
+    private long helperRemoteCurrentPressureEpochVisibleAppliesBeforePressureReenabled = -1;
+    private long helperRemoteCurrentPressureEpochVisibleAppliesDuringSettleCount;
+    private bool helperRemoteCurrentPressureEpochBaselineEstablished;
+    private double helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs;
+    private long helperRemoteCurrentPressureEpochBaselineSampleCount;
+    private bool helperRemoteCurrentPressureEpochBaselineFreezeUntilNextApply;
+    private long helperRemoteCurrentPressureEpochBaselineFrozenDueToStallCount;
+    private long helperRemoteCurrentPressureEpochBaselineReseedAfterRecoveryCount;
+    private bool helperRemoteCurrentPressureEpochBaselineReseedAfterStallPending;
+    private int helperRemoteCurrentPressureEpochBaselineReseedRemainingVisibleApplies;
+    private long helperRemoteCurrentPressureEpochBaselineReseedAccumulatedAgeMs;
+    private DateTimeOffset helperRemoteCurrentPressureEpochBaselineReseedStartedUtc;
+    private long helperRemoteCurrentPressureEpochBaselineReseedMinimumFrameId = -1;
+    private long helperRemoteCurrentPressureEpochLastEvaluatedAppliedHeadFrameId = -1;
+    private long helperRemoteCurrentPressureEpochLastEvaluatedStableVisibleHeadFrameId = -1;
+    private int helperRemoteCurrentPressureEpochAgePressureConsecutiveCount;
+    private int helperRemoteCurrentPressureEpochCadencePressureConsecutiveCount;
+    private long helperRemoteCurrentPressureEpochCatchUpSuppressedDueToProgressCount;
+    private DateTimeOffset helperRemoteCurrentPressureEpochCadenceStallStartedUtc;
+    private bool helperRemoteCurrentPressureEpochCadenceStallTriggered;
+    private long helperRemoteCurrentPressureEpochCadenceStallWindowCount;
+    private long helperRemoteCurrentPressureEpochCadenceStallTriggerCount;
+    private DateTimeOffset helperRemoteCurrentPressureEpochWarmupStartedUtc;
+    private DateTimeOffset helperRemoteCurrentPressureEpochWarmupEndedUtc;
+    private bool helperRemoteContinuityRecoveryActive;
+    private long helperRemoteContinuityRecoveryEpoch;
+    private DateTimeOffset helperRemoteContinuityRecoveryStartedUtc;
+    private bool helperRemoteContinuityRecoveryTimeoutSent;
+    private bool helperRemotePostRecoveryStabilizationActive;
+    private DateTimeOffset helperRemotePostRecoveryStabilizationStartedUtc;
+    private long helperRemotePostRecoveryAgeGraceEpoch;
+    private DateTimeOffset helperRemotePostRecoveryAgeGraceUntilUtc;
+    private bool helperRemotePostRecoveryHealthySignalSent;
+    private bool helperRemotePostRecoverySettleWindowTimedOut;
+    private bool helperRemotePostRecoverySettleWindowSucceeded;
+    private long helperRemotePostRecoverySettleWindowCount;
+    private long helperRemotePostRecoverySettleWindowSuccessCount;
+    private long helperRemotePostRecoverySettleWindowTimeoutCount;
+    private bool helperRemoteRecoveryWindowActive;
+    private bool helperRemoteRecoveryWindowProgressed;
+    private bool helperRemoteRecoveryWindowSucceeded;
+    private long helperRemoteRecoveryWindowProgressedCount;
+    private long helperRemoteRecoveryWindowSuccessCount;
+    private long helperRemoteRecoveryWindowEpoch;
+    private long helperRemoteRecoveryWindowRecoveryFrameId = -1;
+    private long helperRemoteRecoveryWindowLastContiguousFrameId = -1;
+    private int helperRemoteRecoveryWindowContiguousFollowerApplyCount;
+    private string helperRemoteRecoveryWindowAbortReason = string.Empty;
+    private long helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameSuppressedDueToSuccessCount;
+    private long helperRemoteSteadyProgressEpoch;
+    private bool helperRemoteSteadyVisibleProgressActive;
+    private long helperRemoteSteadyProgressActivationFrameId = -1;
+    private long helperRemoteSteadyProgressVisibleHeadFrameId = -1;
+    private long helperRemoteSteadyProgressStableVisibleHeadFrameId = -1;
+    private long helperRemoteSteadyProgressFramesAppliedSinceLastGap;
+    private long helperRemoteSteadyVisibleProgressClearedCount;
+    private string helperRemoteSteadyVisibleProgressClearedReason = string.Empty;
+    private long helperRemotePostRecoveryHealthyLatchCount;
+    private long helperRemotePostRecoveryHealthyLatchClearCount;
+    private string helperRemotePostRecoveryHealthyLatchClearReason = string.Empty;
+    private DateTimeOffset helperRemotePostRecoveryHealthyLastHeadAdvanceUtc;
+    private long helperRemoteLastSentSteadyProgressEpoch;
+    private bool helperRemoteLastSentSteadyVisibleProgressActive;
+    private long helperRemoteLastSentStableVisibleHeadFrameId = -1;
+    private long helperRemoteLastSentVisibleHeadFrameId = -1;
+    private long helperRemoteLastSentFramesAppliedSinceLastGap;
+    private long helperRemoteLastSentVisibleApplyFrameId = -1;
+    private long helperRemoteLastSentAppliedHeadFrameId = -1;
+    private long helperRemotePressureSendBypassedForVisibleProgressCount;
+    private long helperRemoteProofKeepaliveSendCount;
+    private long helperRemoteProofKeepaliveTimerDrivenSendCount;
+    private long helperRemoteLastProofKeepaliveHeadFrameId = -1;
+    private DateTimeOffset helperRemoteLastProofKeepaliveSentUtc;
+    private long helperRemoteActiveRecoveryReceiptOwnerEpoch;
+    private long helperRemoteActiveRecoveryReceiptOwnerFrameId = -1;
+    private long helperRemotePublishedRecoveryReceiptEpoch;
+    private long helperRemotePublishedRecoveryReceiptOwnerFrameId = -1;
+    private long helperRemotePublishedRecoveryReceiptVisibleRecoveryFrameId = -1;
+    private long helperRemotePublishedRecoveryReceiptVisibleHeadFrameId = -1;
+    private string helperRemotePublishedRecoveryReceiptKind = string.Empty;
+    private DateTimeOffset helperRemotePublishedRecoveryReceiptUtc;
+    private bool helperRemotePublishedRecoveryReceiptRetrySent;
+    private long helperRemoteRecoveryReceiptRetryGeneration;
+    private long helperRemoteLastFirstVisibleApplyToPressureSendMs = -1;
+    private DateTimeOffset helperRemoteLastRecoveryKeyframeRequestUtc;
+    private long helperRemoteLastRecoveryKeyframeRequestEpoch;
+    private ScreenSharePressureMode lastSentScreenSharePressureMode = ScreenSharePressureMode.Normal;
+    private string lastSentScreenSharePressureReason = ScreenSharePressureProtocol.PressureReasonHealthy;
+    private long lastSentScreenSharePressureAgeMs;
+    private long lastSentScreenSharePressureStaleDrops;
+    private DateTimeOffset lastSentScreenSharePressureUtc;
+    private DateTimeOffset lastSentScreenSharePressureModeEnteredUtc;
+    private long lastObservedRemoteScreenShareStaleDrops;
+    private int healthyScreenSharePressureIntervals;
     private readonly object sessionFlowGate = new();
     private SessionFlowState sessionFlowState = SessionFlowState.Initial;
     private SessionFlowSnapshot currentFlowSnapshot = new(
@@ -398,6 +546,9 @@ public sealed partial class SessionRuntime : IDisposable
         remoteControlActions = new SessionRuntimeRemoteControlActions(this);
         screenShareActions = new SessionRuntimeScreenShareActions(this);
         transportLifecycle = new SessionTransportLifecycle(this);
+        screenShareControlHost = new SessionRuntimeScreenShareControlHost(
+            this,
+            new HelperRemoteScreenSharePressurePublisher(this));
         this.remoteInputInjector = remoteInputInjector ?? RemoteInputInjectorFactory.CreateDefault();
         this.remoteCoordinateMapper = remoteCoordinateMapper ?? new DefaultRemoteCoordinateMapper();
         remoteControlProcessElevated = WindowsInputIntegrityProbe.IsCurrentProcessElevated();
@@ -410,9 +561,33 @@ public sealed partial class SessionRuntime : IDisposable
         watchdogRetryPolicy.EventEmitted += OnWatchdogRetryPolicyEvent;
         transportStateEntryTimestamps[transportState] = Stopwatch.GetTimestamp();
         transportScreenShareCoordinator = new TransportScreenShareCoordinator(
-            ScreenCaptureFactory.CreateDefault,
+            ScreenCaptureFactory.CreateForTransport,
             screenShareActions.SendPayloadAsync,
-            sendDisplayInfoAsync: SendRemoteControlDisplayInfoAsync);
+            sendPayloadWithRecoveryMetadataAsync: screenShareActions.SendPayloadWithRecoveryMetadataAsync,
+            sendDisplayInfoAsync: SendRemoteControlDisplayInfoAsync,
+            transportBackpressureProbeResolver: () => transport as IScreenShareTransportBackpressureProbe,
+            sendVideoStreamConfigAsync: screenShareActions.SendVideoStreamConfigAsync,
+            flushTransportQueue: reason =>
+            {
+                if (transport is IScreenShareTransportPolicyController policyController)
+                {
+                    policyController.FlushScreenShareTransportQueue(reason);
+                }
+            },
+            armRecoveryBurstTransportFallback: (sessionId, streamEpoch, burstToken, ownerFrameId) =>
+            {
+                if (transport is NknSignalingTransport nknTransport)
+                {
+                    nknTransport.ArmRecoveryBurstControlFallback(sessionId, streamEpoch, burstToken, ownerFrameId);
+                }
+            },
+            clearRecoveryBurstTransportFallback: burstToken =>
+            {
+                if (transport is NknSignalingTransport nknTransport)
+                {
+                    nknTransport.ResolveRecoveryBurstControlFallback(burstToken);
+                }
+            });
         transportScreenShareCoordinator.SenderDegradedModeChanged += OnScreenShareSenderDegradedModeChanged;
 
         chatService.MessageReceived += OnChatMessageReceived;
@@ -565,6 +740,7 @@ public sealed partial class SessionRuntime : IDisposable
     public event EventHandler? ChatStateChanged;
     public event EventHandler? SessionSecurityStateChanged;
     public event EventHandler<SessionFileTransferSnapshotChangedEventArgs>? FileTransferChanged;
+    public event EventHandler? HelperListenerBootstrapSnapshotChanged;
 
     public SessionRuntimeState State => state;
     public TransportState TransportLifecycleState => transportState;
@@ -597,6 +773,7 @@ public sealed partial class SessionRuntime : IDisposable
                 ? peerAddress
                 : null;
     public PeerAddress? CurrentInvitePeerAddress => CurrentLocalPeerAddress;
+    internal HelperListenerBootstrapSnapshot? CurrentHelperListenerBootstrapSnapshot => helperListenerBootstrapSnapshot;
 
     public bool HasPendingJoinRequest => pendingJoinRequest is not null;
     public ApprovalRequest? PendingApprovalRequest => pendingApprovalRequest;
@@ -1060,6 +1237,7 @@ public sealed partial class SessionRuntime : IDisposable
     internal TransportFailureCategory? GetLastFailureCategoryForTests() => lastTransportFailure?.Category;
 
     internal bool CanAutoStartTransportScreenShareForTests => allowTransportScreenShareAutoStart;
+    internal bool IsTransportScreenShareActive => transportScreenShareCoordinator.IsActive;
     internal bool IsTransportScreenShareActiveForTests => transportScreenShareCoordinator.IsActive;
     internal bool IsRemoteInputInjectionSupportedForTests => remoteInputInjector.IsSupported;
     internal bool HasCachedBridgeTransportForTests() => cachedBridgeTransport is not null;
@@ -1230,7 +1408,7 @@ public sealed partial class SessionRuntime : IDisposable
     }
 
     private bool IsSessionScreenShareActive()
-        => transportScreenShareCoordinator.IsActive || remoteScreenShareActive;
+        => transportScreenShareCoordinator.IsActive || screenShareControlHost.RemoteScreenShareActive;
 
     private FileTransferFlowControlMode ResolveFileTransferFlowControlMode()
     {
@@ -1252,7 +1430,7 @@ public sealed partial class SessionRuntime : IDisposable
         fileTransferService.SetSessionScreenShareActive(IsSessionScreenShareActive());
         fileTransferService.SetSessionScreenShareDegraded(
             IsSessionScreenShareActive() &&
-            string.Equals(transportScreenShareCoordinator.GetMetricsSnapshot().FreshnessMode, "degraded", StringComparison.Ordinal));
+            !string.Equals(transportScreenShareCoordinator.GetMetricsSnapshot().FreshnessMode, "normal", StringComparison.Ordinal));
         fileTransferService.SetFlowControlMode(ResolveFileTransferFlowControlMode());
         transportScreenShareCoordinator.SetFileTransferDegradedHint(
             IsSessionScreenShareActive() && fileTransferService.IsTransferDegraded);
@@ -1531,6 +1709,17 @@ public sealed partial class SessionRuntime : IDisposable
             uiCt);
     }
 
+    private sealed class HelperListenerHandoffFallbackException : Exception
+    {
+        public HelperListenerHandoffFallbackException(string reason, Exception innerException)
+            : base(reason, innerException)
+        {
+            Reason = reason;
+        }
+
+        public string Reason { get; }
+    }
+
     private async Task StartHelperCoreAsync(
         PeerAddress targetAddress,
         ValidatedInviteV1? invite,
@@ -1540,14 +1729,81 @@ public sealed partial class SessionRuntime : IDisposable
     {
         ObjectDisposedException.ThrowIf(disposed, this);
 
+        if (invite is not null && connectOrigin == HelperConnectOrigin.IncomingHelpRequest)
+        {
+            LocalOperationalLog.Info(
+                "Session",
+                $"event=helper_listener_handoff_started; mode=warm; target={targetAddress.Value}; attempt={connectAttempt}; transport={GetCurrentTransportKind()}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+
+            try
+            {
+                await StartHelperCoreAttemptAsync(
+                        targetAddress,
+                        invite,
+                        inviteToken,
+                        connectOrigin,
+                        uiCt,
+                        discardCachedBridgeTransportBeforeInviteJoin: false,
+                        handoffMode: "warm")
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (HelperListenerHandoffFallbackException ex)
+            {
+                LocalOperationalLog.Warn(
+                    "Session",
+                    $"event=helper_listener_handoff_fallback; reason={ex.Reason}; ex={ex.InnerException?.GetType().Name ?? ex.GetType().Name}; attempt={connectAttempt}; transport={GetCurrentTransportKind()}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+
+                await StartHelperCoreAttemptAsync(
+                        targetAddress,
+                        invite,
+                        inviteToken,
+                        connectOrigin,
+                        uiCt,
+                        discardCachedBridgeTransportBeforeInviteJoin: true,
+                        handoffMode: "cold")
+                    .ConfigureAwait(false);
+                return;
+            }
+        }
+
+        await StartHelperCoreAttemptAsync(
+                targetAddress,
+                invite,
+                inviteToken,
+                connectOrigin,
+                uiCt,
+                discardCachedBridgeTransportBeforeInviteJoin: invite is not null,
+                handoffMode: null)
+            .ConfigureAwait(false);
+    }
+
+    private async Task StartHelperCoreAttemptAsync(
+        PeerAddress targetAddress,
+        ValidatedInviteV1? invite,
+        string? inviteToken,
+        HelperConnectOrigin connectOrigin,
+        CancellationToken uiCt,
+        bool discardCachedBridgeTransportBeforeInviteJoin,
+        string? handoffMode)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+
         CancellationTokenSource? linkedCts = null;
         ISignalingTransport? nextTransport = null;
+        var joinRequestSent = false;
+        var reusedCachedBridge = false;
 
         await lifecycleGate.WaitAsync(uiCt);
         try
         {
             ThrowIfStartInProgress();
             startInProgress = true;
+
+            forceBridgeReuseOnce =
+                invite is not null &&
+                connectOrigin == HelperConnectOrigin.IncomingHelpRequest &&
+                string.Equals(handoffMode, "warm", StringComparison.Ordinal);
 
             await ResetCoreAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
             BeginConnectAttempt(
@@ -1557,15 +1813,13 @@ public sealed partial class SessionRuntime : IDisposable
                 TransportState.TransportInitializing,
                 invite is null ? "start_helper_address" : "start_helper_invite");
 
-            // Reusing the passive helper-listener bridge for an outbound invite join can race
-            // with stale disconnect/shutdown events from the just-reset listener transport.
-            if (invite is not null)
+            if (discardCachedBridgeTransportBeforeInviteJoin)
             {
                 DiscardCachedBridgeTransport();
             }
 
             linkedCts = CancellationTokenSource.CreateLinkedTokenSource(uiCt);
-            nextTransport = AcquireTransportForNewSession(out var reusedCachedBridge);
+            nextTransport = AcquireTransportForNewSession(out reusedCachedBridge);
             if (invite is null && nextTransport is NknSignalingTransport)
             {
                 linkedCts.Dispose();
@@ -1616,26 +1870,58 @@ public sealed partial class SessionRuntime : IDisposable
         }
         finally
         {
+            if (nextTransport is null)
+            {
+                forceBridgeReuseOnce = false;
+            }
+
             startInProgress = false;
             lifecycleGate.Release();
         }
 
-        if (invite is not null)
+        try
         {
-            if (nextTransport is not IInviteTargetSignalingTransport inviteTargetTransport)
+            if (invite is not null)
             {
-                throw new NotSupportedException("This transport does not support invite-targeted helper connect.");
+                if (nextTransport is not IInviteTargetSignalingTransport inviteTargetTransport)
+                {
+                    throw new NotSupportedException("This transport does not support invite-targeted helper connect.");
+                }
+
+                await inviteTargetTransport.JoinByInviteAsync(inviteToken!, invite, linkedCts.Token).ConfigureAwait(false);
+            }
+            else if (nextTransport is IAddressTargetSignalingTransport addressTargetTransport)
+            {
+                await addressTargetTransport.JoinByAddressAsync(targetAddress.Value, linkedCts.Token).ConfigureAwait(false);
+            }
+            else
+            {
+                throw new NotSupportedException("This transport does not support address-targeted helper connect.");
             }
 
-            await inviteTargetTransport.JoinByInviteAsync(inviteToken!, invite, linkedCts.Token).ConfigureAwait(false);
+            joinRequestSent = true;
+            if (!string.IsNullOrWhiteSpace(handoffMode))
+            {
+                var helperAddress =
+                    (CurrentLocalPeerAddress?.Value ??
+                     (nextTransport as ILocalPeerAddressSignalingTransport)?.LocalPeerAddress ??
+                     string.Empty).Trim();
+                LocalOperationalLog.Info(
+                    "Session",
+                    $"event=helper_listener_handoff_completed; mode={handoffMode}; reused_cached_bridge={(reusedCachedBridge ? 1 : 0)}; helper_address={(string.IsNullOrWhiteSpace(helperAddress) ? "(none)" : helperAddress)}; target={targetAddress.Value}; attempt={connectAttempt}; transport={GetCurrentTransportKind()}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+            }
         }
-        else if (nextTransport is IAddressTargetSignalingTransport addressTargetTransport)
+        catch (OperationCanceledException) when (uiCt.IsCancellationRequested || linkedCts.IsCancellationRequested)
         {
-            await addressTargetTransport.JoinByAddressAsync(targetAddress.Value, linkedCts.Token).ConfigureAwait(false);
+            throw;
         }
-        else
+        catch (Exception ex) when (
+            invite is not null &&
+            connectOrigin == HelperConnectOrigin.IncomingHelpRequest &&
+            string.Equals(handoffMode, "warm", StringComparison.Ordinal) &&
+            !joinRequestSent)
         {
-            throw new NotSupportedException("This transport does not support address-targeted helper connect.");
+            throw new HelperListenerHandoffFallbackException("pre_join_handshake_failure", ex);
         }
 
         await lifecycleGate.WaitAsync(uiCt).ConfigureAwait(false);
@@ -1953,7 +2239,42 @@ public sealed partial class SessionRuntime : IDisposable
             ct);
     }
 
+    internal Task SendScreenSharePayloadCoreAsync(
+        ReadOnlyMemory<byte> payload,
+        string? recoverySendRole,
+        long recoveryBurstToken,
+        CancellationToken ct)
+    {
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.ScreenShareDispatch, "screen_share_stream"),
+            token => SendScreenSharePayloadAuthorizedCoreAsync(payload, recoverySendRole, recoveryBurstToken, token),
+            ct);
+    }
+
+    internal Task SendScreenShareVideoStreamConfigCoreAsync(ScreenShareVideoStreamConfigV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.ScreenShareDispatch, "screen_share_stream_config"),
+            token => SendScreenShareVideoStreamConfigAuthorizedCoreAsync(message, token),
+            ct);
+    }
+
     private async Task SendScreenSharePayloadAuthorizedCoreAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
+    {
+        await SendScreenSharePayloadAuthorizedCoreAsync(
+                payload,
+                recoverySendRole: null,
+                recoveryBurstToken: 0,
+                ct)
+            .ConfigureAwait(false);
+    }
+
+    private async Task SendScreenSharePayloadAuthorizedCoreAsync(
+        ReadOnlyMemory<byte> payload,
+        string? recoverySendRole,
+        long recoveryBurstToken,
+        CancellationToken ct)
     {
         if (!TryValidateScreenSharePayload(payload.Span, "screen_share_stream"))
         {
@@ -1970,7 +2291,33 @@ public sealed partial class SessionRuntime : IDisposable
             return;
         }
 
+        if (transport is NknSignalingTransport nknTransport)
+        {
+            await nknTransport.SendScreenSharePayloadAsync(payload, recoverySendRole, recoveryBurstToken, ct).ConfigureAwait(false);
+            return;
+        }
+
         await screenShareTransport.SendScreenSharePayloadAsync(payload, ct).ConfigureAwait(false);
+    }
+
+    private async Task SendScreenShareVideoStreamConfigAuthorizedCoreAsync(ScreenShareVideoStreamConfigV1 message, CancellationToken ct)
+    {
+        if (!TryValidateScreenShareSession(message.SessionId, "screen_share_stream_config", "stream_config"))
+        {
+            return;
+        }
+
+        if (!FeatureFlags.EnableScreenShareTransport)
+        {
+            return;
+        }
+
+        if (transport is not IScreenShareSignalingTransport screenShareTransport)
+        {
+            return;
+        }
+
+        await screenShareTransport.SendScreenShareVideoStreamConfigAsync(message, ct).ConfigureAwait(false);
     }
 
     private Task StopTransportScreenShareAsync(bool notifyRemoteStop, string reason, CancellationToken ct)

@@ -21,11 +21,10 @@ namespace NLink.App.ViewModels;
 
 public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 {
-    private const string ScreenShareMaxFpsVariable = "NLINK_FEATURE_SCREENCAP_MAX_FPS";
-    private const string ScreenShareTransportMaxFpsVariable = "NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS";
+    private const string ScreenShareMaxFpsVariable = ScreenShareQualitySettings.ScreenShareMaxFpsVariable;
+    private const string ScreenShareTransportMaxFpsVariable = ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable;
     private const string ScreenShareTransportAutotuneVariable = "NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE";
-    private const string ScreenShareScaleVariable = "NLINK_FEATURE_SCREENCAP_SCALE";
-    private const string ScreenShareJpegQualityVariable = "NLINK_FEATURE_SCREENCAP_JPEG_QUALITY";
+    private const string ScreenShareScaleVariable = ScreenShareQualitySettings.ScreenShareScaleVariable;
 
     private readonly InlineTransientText copyFeedback = new();
     private readonly string bugReportUrl;
@@ -143,7 +142,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         ReportBugCommand = new RelayCommand(RequestOpenBugReport);
         ApplyBalancedScreenSharePresetCommand = new RelayCommand(ApplyBalancedScreenSharePreset);
         ApplyLowEndScreenSharePresetCommand = new RelayCommand(ApplyLowEndScreenSharePreset);
-        ApplyHigherClarityScreenSharePresetCommand = new RelayCommand(ApplyHigherClarityScreenSharePreset);
+        ApplySharperTextScreenSharePresetCommand = new RelayCommand(ApplySharperTextScreenSharePreset);
     }
 
     public string PageTitle => "App info";
@@ -183,12 +182,13 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string SessionHeader { get; }
     public int ScreenShareCaptureMaxFps => FeatureFlags.ScreenShareMaxFps;
     public int ScreenShareTransportMaxFps => FeatureFlags.ScreenShareTransportMaxFps;
-    public string ScreenShareCaptureScale => FeatureFlags.ScreenShareScale.ToString("0.###", CultureInfo.InvariantCulture);
-    public long ScreenShareCaptureJpegQuality => FeatureFlags.ScreenShareJpegQuality;
-    public string ScreenSharePresetBalanced => "fps=15, scale=1.00, jpeg=75";
-    public string ScreenSharePresetLowEnd => "fps=10, scale=0.60, jpeg=50";
-    public string ScreenSharePresetHigherClarity => "fps=20, scale=0.85, jpeg=75";
-    public string ScreenShareCaptureEnvHint => "Apply preset, then restart screen sharing. Settings apply instantly and are persisted in background via env vars: NLINK_FEATURE_SCREENCAP_MAX_FPS, NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS, NLINK_FEATURE_SCREENCAP_SCALE, NLINK_FEATURE_SCREENCAP_JPEG_QUALITY.";
+    public string ScreenShareCaptureScale => ScreenShareQualitySettings.FormatScale(FeatureFlags.ScreenShareScale);
+    public string ScreenShareEffectivePresetName => ScreenShareQualitySettings.GetCurrentEnvironmentState().EffectivePresetName;
+    public string ScreenSharePresetMigrationStatus => ScreenShareQualitySettings.WasLegacyHigherClarityPresetMigrated ? "Yes" : "No";
+    public string ScreenSharePresetBalanced => ScreenShareQualitySettings.BalancedPreset.Describe();
+    public string ScreenSharePresetLowEnd => ScreenShareQualitySettings.LowEndPreset.Describe();
+    public string ScreenSharePresetSharperText => ScreenShareQualitySettings.SharperTextPreset.Describe();
+    public string ScreenShareCaptureEnvHint => "Apply preset, then restart screen sharing. Settings apply instantly and are persisted in background via env vars: NLINK_FEATURE_SCREENCAP_MAX_FPS, NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS, NLINK_FEATURE_SCREENCAP_SCALE.";
 
     public string AppVersion { get; }
 
@@ -300,7 +300,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public IRelayCommand ReportBugCommand { get; }
     public IRelayCommand ApplyBalancedScreenSharePresetCommand { get; }
     public IRelayCommand ApplyLowEndScreenSharePresetCommand { get; }
-    public IRelayCommand ApplyHigherClarityScreenSharePresetCommand { get; }
+    public IRelayCommand ApplySharperTextScreenSharePresetCommand { get; }
 
     public IRelayCommand BackCommand { get; }
 
@@ -351,39 +351,40 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         OpenBugReportRequested?.Invoke(this, bugReportUrl);
     }
 
-    private void ApplyBalancedScreenSharePreset() => ApplyScreenSharePreset(15, 1d, 75, "Balanced");
+    private void ApplyBalancedScreenSharePreset()
+        => ApplyScreenSharePreset(ScreenShareQualitySettings.BalancedPreset);
 
-    private void ApplyLowEndScreenSharePreset() => ApplyScreenSharePreset(10, 0.60d, 50, "Low-end");
+    private void ApplyLowEndScreenSharePreset()
+        => ApplyScreenSharePreset(ScreenShareQualitySettings.LowEndPreset);
 
-    private void ApplyHigherClarityScreenSharePreset() => ApplyScreenSharePreset(20, 0.85d, 75, "Higher clarity");
+    private void ApplySharperTextScreenSharePreset()
+        => ApplyScreenSharePreset(ScreenShareQualitySettings.SharperTextPreset);
 
-    private void ApplyScreenSharePreset(int fps, double scale, int jpegQuality, string presetName)
+    private void ApplyScreenSharePreset(ScreenSharePresetDefinition preset)
     {
-        var fpsText = fps.ToString(CultureInfo.InvariantCulture);
-        var transportFpsText = Math.Clamp(Math.Min(fps, 8), 1, 8).ToString(CultureInfo.InvariantCulture);
-        var scaleText = scale.ToString("0.##", CultureInfo.InvariantCulture);
-        var jpegText = jpegQuality.ToString(CultureInfo.InvariantCulture);
+        var fpsText = preset.CaptureFramesPerSecond.ToString(CultureInfo.InvariantCulture);
+        var transportFpsText = preset.TransportFramesPerSecond.ToString(CultureInfo.InvariantCulture);
+        var scaleText = preset.CaptureScale.ToString("0.##", CultureInfo.InvariantCulture);
 
         Environment.SetEnvironmentVariable(ScreenShareMaxFpsVariable, fpsText);
         Environment.SetEnvironmentVariable(ScreenShareTransportMaxFpsVariable, transportFpsText);
         Environment.SetEnvironmentVariable(ScreenShareScaleVariable, scaleText);
-        Environment.SetEnvironmentVariable(ScreenShareJpegQualityVariable, jpegText);
 
         OnPropertyChanged(nameof(ScreenShareCaptureMaxFps));
         OnPropertyChanged(nameof(ScreenShareTransportMaxFps));
         OnPropertyChanged(nameof(ScreenShareCaptureScale));
-        OnPropertyChanged(nameof(ScreenShareCaptureJpegQuality));
+        OnPropertyChanged(nameof(ScreenShareEffectivePresetName));
+        OnPropertyChanged(nameof(ScreenSharePresetMigrationStatus));
 
-        copyFeedback.Show($"{presetName} preset applied");
-        PersistScreenSharePresetInBackground(presetName, fpsText, transportFpsText, scaleText, jpegText);
+        copyFeedback.Show($"{preset.DisplayName} preset applied");
+        PersistScreenSharePresetInBackground(preset.DisplayName, fpsText, transportFpsText, scaleText);
     }
 
     private static void PersistScreenSharePresetInBackground(
         string presetName,
         string fpsText,
         string transportFpsText,
-        string scaleText,
-        string jpegText)
+        string scaleText)
     {
         _ = Task.Run(() =>
         {
@@ -391,8 +392,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             {
                 var persisted = TrySetUserEnvironmentVariable(ScreenShareMaxFpsVariable, fpsText) &&
                                 TrySetUserEnvironmentVariable(ScreenShareTransportMaxFpsVariable, transportFpsText) &&
-                                TrySetUserEnvironmentVariable(ScreenShareScaleVariable, scaleText) &&
-                                TrySetUserEnvironmentVariable(ScreenShareJpegQualityVariable, jpegText);
+                                TrySetUserEnvironmentVariable(ScreenShareScaleVariable, scaleText);
                 if (!persisted)
                 {
                     LocalOperationalLog.Warn("Diagnostics", $"Could not persist ScreenShare preset '{presetName}' to user environment.");
@@ -532,12 +532,13 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"screenshare_transport_max_fps: {FeatureFlags.ScreenShareTransportMaxFps}",
             $"screenshare_transport_autotune: {FormatFeatureFlag(FeatureFlags.ScreenShareTransportAutoTuneEnabled)}",
             $"screenshare_capture_scale: {FeatureFlags.ScreenShareScale:0.###}",
-            $"screenshare_capture_jpeg_quality: {FeatureFlags.ScreenShareJpegQuality}",
+            $"screenshare_effective_preset: {ScreenShareEffectivePresetName}",
+            $"screenshare_legacy_preset_migrated: {ScreenSharePresetMigrationStatus}",
             string.Empty,
             "screenshare_capture_presets:",
             $"  balanced_default: {ScreenSharePresetBalanced}",
             $"  low_end_cpu_network: {ScreenSharePresetLowEnd}",
-            $"  higher_clarity: {ScreenSharePresetHigherClarity}",
+            $"  sharper_text: {ScreenSharePresetSharperText}",
             $"  apply_hint: {ScreenShareCaptureEnvHint}",
             string.Empty,
             "Bridge / NKN",
@@ -742,13 +743,6 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             FeatureFlags.ScreenShareScale.ToString("0.###", CultureInfo.InvariantCulture),
             1d.ToString("0.###", CultureInfo.InvariantCulture),
             ScreenShareScaleVariable);
-        AddIfNonDefault(
-            riskyOverrides,
-            "screenshare_capture_jpeg_quality",
-            FeatureFlags.ScreenShareJpegQuality,
-            75L,
-            ScreenShareJpegQualityVariable);
-
         if (!FeatureFlags.ScreenShareTransportAutoTuneEnabled &&
             !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(ScreenShareTransportAutotuneVariable)))
         {

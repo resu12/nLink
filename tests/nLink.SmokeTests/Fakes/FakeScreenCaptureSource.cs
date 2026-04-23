@@ -1,10 +1,12 @@
 using NLink.App.Services.ScreenCapture;
+using NLink.Core.ScreenShare;
 
 namespace NLink.SmokeTests.Fakes;
 
-internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IScreenCaptureMetadataSource, IAsyncDisposable
+internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IScreenCaptureMetadataSource, IScreenCaptureKeyFrameRequestSource, IAsyncDisposable
 {
     private EventHandler<ScreenCaptureFrameEventArgs>? frameArrived;
+    private readonly List<string> keyFrameRequestReasons = new();
 
     public bool IsSupported => true;
 
@@ -17,6 +19,10 @@ internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IScreenCap
     public int DisposeCallCount { get; private set; }
 
     public int FrameSubscriberCount { get; private set; }
+
+    public int KeyFrameRequestCount => keyFrameRequestReasons.Count;
+
+    public IReadOnlyList<string> KeyFrameRequestReasons => keyFrameRequestReasons;
 
     public Exception? StartException { get; set; }
     public TaskCompletionSource<bool>? StopBlocker { get; set; }
@@ -59,14 +65,37 @@ internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IScreenCap
         return StopBlocker?.Task ?? Task.CompletedTask;
     }
 
+    public void RequestKeyFrame(string reason)
+    {
+        keyFrameRequestReasons.Add(string.IsNullOrWhiteSpace(reason) ? "(none)" : reason.Trim());
+    }
+
     public void RaiseFrame(ScreenCaptureFrameEventArgs frame)
     {
         frameArrived?.Invoke(this, frame);
     }
 
-    public void RaiseFrame(int width, int height, byte[] encodedFrameData, string encoding)
+    public void RaiseFrame(
+        int width,
+        int height,
+        byte[] encodedFrameData,
+        string encoding,
+        long capturedTsUtcMs = 0,
+        bool isKeyFrame = false,
+        long streamEpoch = 0,
+        ScreenShareVideoStreamConfigV1? streamConfig = null)
     {
-        frameArrived?.Invoke(this, new ScreenCaptureFrameEventArgs(width, height, encodedFrameData, encoding));
+        frameArrived?.Invoke(
+            this,
+            new ScreenCaptureFrameEventArgs(
+                width,
+                height,
+                encodedFrameData,
+                encoding,
+                capturedTsUtcMs,
+                isKeyFrame,
+                streamEpoch,
+                streamConfig));
     }
 
     public ValueTask DisposeAsync()
@@ -75,6 +104,7 @@ internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IScreenCap
         IsStarted = false;
         frameArrived = null;
         FrameSubscriberCount = 0;
+        keyFrameRequestReasons.Clear();
         return ValueTask.CompletedTask;
     }
 

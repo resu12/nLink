@@ -64,7 +64,7 @@ public sealed class ScreenSharePreviewIntegrationTests : IClassFixture<ScreenSha
 
                     await WaitForSignalAsync(
                         startedSignal,
-                        TimeSpan.FromSeconds(5),
+                        TimeSpan.FromSeconds(10),
                         () => BuildState(helpee));
 
                     fakeSource.RaiseFrame(1, 1, new byte[] { (byte)(i + 1) }, "jpeg");

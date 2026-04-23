@@ -26,6 +26,7 @@
                                      CanScreenShare="{Binding #Root.CanScreenShareAction}"
                                      ScreenShareCommand="{Binding #Root.ScreenShareCommand}"
                                      ScreenShareButtonText="{Binding #Root.ScreenShareButtonText}"
+                                     ScreenShareAccessory="{Binding #Root.HeaderAccessory}"
                                      ShowStopControl="{ReflectionBinding ShowStopControlAction}"
                                      StopControlCommand="{ReflectionBinding StopControlCommand}"
                                      StopControlButtonText="{ReflectionBinding StopControlButtonText}"
@@ -251,5 +252,12 @@
                 IsVisible="{Binding #Root.ShowResponsiveNarrowChatOnlyLayout}">
             <ContentPresenter x:Name="ResponsiveNarrowChatOnlyContentPresenter"/>
         </Border>
+
+        <ContentPresenter Grid.Row="0"
+                          Grid.RowSpan="2"
+                          ZIndex="100"
+                          Content="{Binding #Root.OverlayContent}"
+                          HorizontalAlignment="Stretch"
+                          VerticalAlignment="Stretch"/>
     </Grid>
 </UserControl>

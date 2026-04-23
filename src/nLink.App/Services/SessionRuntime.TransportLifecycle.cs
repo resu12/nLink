@@ -10,6 +10,7 @@ using NLink.Core.Resources;
 using NLink.Core.SessionConnect;
 using NLink.Core.SessionSecurity;
 using NLink.Core.ScreenShare;
+using NLink.Infra.DevLocal;
 using NLink.Infra.Nkn;
 
 namespace NLink.App.Services;
@@ -30,14 +31,35 @@ public sealed partial class SessionRuntime
             reusedCachedBridge = false;
             CancelCachedBridgeIdleTimeout();
 
-            if (owner.bridgeReusePolicy.IsKeepAlive && owner.cachedBridgeTransport is { } cached)
+            if ((owner.bridgeReusePolicy.IsKeepAlive || owner.forceBridgeReuseOnce) &&
+                owner.cachedBridgeTransport is { } cached)
             {
                 owner.cachedBridgeTransport = null;
+                owner.forceBridgeReuseOnce = false;
                 reusedCachedBridge = true;
                 return cached;
             }
 
-            return owner.createTransport();
+            owner.forceBridgeReuseOnce = false;
+
+            var transport = owner.createTransport();
+            if (!string.IsNullOrWhiteSpace(owner.preservedDevLocalPeerAddress) &&
+                transport is DevLocalTransport devLocalTransport &&
+                !string.Equals(devLocalTransport.LocalPeerAddress, owner.preservedDevLocalPeerAddress, StringComparison.Ordinal))
+            {
+                try
+                {
+                    devLocalTransport.Dispose();
+                }
+                catch
+                {
+                    // Best-effort cleanup only.
+                }
+
+                transport = new DevLocalTransport(owner.preservedDevLocalPeerAddress);
+            }
+
+            return transport;
         }
 
         public void EmitSyntheticWarmBridgeLifecycle()
@@ -73,7 +95,7 @@ public sealed partial class SessionRuntime
         public bool ShouldKeepBridgeAlive(ISignalingTransport transportToRelease)
         {
             return !owner.disposed &&
-                   owner.bridgeReusePolicy.IsKeepAlive &&
+                   (owner.bridgeReusePolicy.IsKeepAlive || owner.forceBridgeReuseOnce) &&
                    transportToRelease is NknSignalingTransport;
         }
 
@@ -102,6 +124,7 @@ public sealed partial class SessionRuntime
         public void DiscardCachedBridgeTransport()
         {
             CancelCachedBridgeIdleTimeout();
+            owner.forceBridgeReuseOnce = false;
 
             if (owner.cachedBridgeTransport is not { } cached)
             {
@@ -152,6 +175,9 @@ public sealed partial class SessionRuntime
             {
                 screenShareTransport.ScreenShareFrameCompleted += owner.OnTransportScreenShareFrameCompleted;
                 screenShareTransport.ScreenShareStopped += owner.OnTransportScreenShareStopped;
+                screenShareTransport.ScreenSharePressureStateReceived += owner.OnTransportScreenSharePressureStateReceived;
+                screenShareTransport.ScreenShareRecoveryReceiptReceived += owner.OnTransportScreenShareRecoveryReceiptReceived;
+                screenShareTransport.ScreenShareVideoKeyframeRequestReceived += owner.OnTransportScreenShareVideoKeyframeRequestReceived;
             }
 
             if (nextTransport is NknSignalingTransport nknTransport)
@@ -193,6 +219,9 @@ public sealed partial class SessionRuntime
             {
                 screenShareTransport.ScreenShareFrameCompleted -= owner.OnTransportScreenShareFrameCompleted;
                 screenShareTransport.ScreenShareStopped -= owner.OnTransportScreenShareStopped;
+                screenShareTransport.ScreenSharePressureStateReceived -= owner.OnTransportScreenSharePressureStateReceived;
+                screenShareTransport.ScreenShareRecoveryReceiptReceived -= owner.OnTransportScreenShareRecoveryReceiptReceived;
+                screenShareTransport.ScreenShareVideoKeyframeRequestReceived -= owner.OnTransportScreenShareVideoKeyframeRequestReceived;
             }
 
             if (nextTransport is NknSignalingTransport nknTransport)

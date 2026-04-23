@@ -18,6 +18,9 @@ public partial class SessionShellView : UserControl
     public static readonly StyledProperty<Control?> ChatContentProperty =
         AvaloniaProperty.Register<SessionShellView, Control?>(nameof(ChatContent));
 
+    public static readonly StyledProperty<Control?> OverlayContentProperty =
+        AvaloniaProperty.Register<SessionShellView, Control?>(nameof(OverlayContent));
+
     public static readonly StyledProperty<string?> RoleTextProperty =
         AvaloniaProperty.Register<SessionShellView, string?>(nameof(RoleText));
 
@@ -36,6 +39,9 @@ public partial class SessionShellView : UserControl
 
     public static readonly StyledProperty<ICommand?> ScreenShareCommandProperty =
         AvaloniaProperty.Register<SessionShellView, ICommand?>(nameof(ScreenShareCommand));
+
+    public static readonly StyledProperty<Control?> HeaderAccessoryProperty =
+        AvaloniaProperty.Register<SessionShellView, Control?>(nameof(HeaderAccessory));
 
     public static readonly StyledProperty<bool> ShowChatPaneRequestedProperty =
         AvaloniaProperty.Register<SessionShellView, bool>(nameof(ShowChatPaneRequested), false);
@@ -182,6 +188,12 @@ public partial class SessionShellView : UserControl
         set => SetValue(ChatContentProperty, value);
     }
 
+    public Control? OverlayContent
+    {
+        get => GetValue(OverlayContentProperty);
+        set => SetValue(OverlayContentProperty, value);
+    }
+
     public string? RoleText
     {
         get => GetValue(RoleTextProperty);
@@ -210,6 +222,12 @@ public partial class SessionShellView : UserControl
     {
         get => GetValue(ScreenShareCommandProperty);
         private set => SetValue(ScreenShareCommandProperty, value);
+    }
+
+    public Control? HeaderAccessory
+    {
+        get => GetValue(HeaderAccessoryProperty);
+        set => SetValue(HeaderAccessoryProperty, value);
     }
 
     public bool ShowChatPaneRequested

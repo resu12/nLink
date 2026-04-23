@@ -79,6 +79,10 @@ public sealed class JsonlSmokeTests
             onDisconnected: static _ => { },
             onHelloOk: static _ => { },
             onPong: static _ => { },
+            onScreenShareQueueState: static _ => { },
+            onBridgeEventLoopSummary: static _ => { },
+            onBridgeMediaSendSummary: static _ => { },
+            onBridgeTransportHealthSummary: static _ => { },
             onUnmatchedBridgeError: static _ => { });
 
         var sendTask = client.SendCommandAndWaitAckAsync(
@@ -127,6 +131,58 @@ public sealed class JsonlSmokeTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void BridgeProtocolClient_RoutesBridgeMediaSendSummary()
+    {
+        var receivedQueueDepth = -1;
+
+        var client = new BridgeProtocolClient(
+            getWriter: static () => throw new NotSupportedException(),
+            log: static _ => { },
+            onReady: static _ => { },
+            onRpcProgress: static (_, _) => { },
+            onMessage: static _ => { },
+            onDisconnected: static _ => { },
+            onHelloOk: static _ => { },
+            onPong: static _ => { },
+            onScreenShareQueueState: static _ => { },
+            onBridgeEventLoopSummary: static _ => { },
+            onBridgeMediaSendSummary: root => receivedQueueDepth = root.GetProperty("queue_depth").GetInt32(),
+            onBridgeTransportHealthSummary: static _ => { },
+            onUnmatchedBridgeError: static _ => { });
+
+        client.HandleStdoutJsonLine("{\"event\":\"bridge_media_send_summary\",\"queue_depth\":3}");
+
+        Assert.Equal(3, receivedQueueDepth);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void BridgeProtocolClient_RoutesBridgeTransportHealthSummary()
+    {
+        var receivedFramesSentSinceLast = -1;
+
+        var client = new BridgeProtocolClient(
+            getWriter: static () => throw new NotSupportedException(),
+            log: static _ => { },
+            onReady: static _ => { },
+            onRpcProgress: static (_, _) => { },
+            onMessage: static _ => { },
+            onDisconnected: static _ => { },
+            onHelloOk: static _ => { },
+            onPong: static _ => { },
+            onScreenShareQueueState: static _ => { },
+            onBridgeEventLoopSummary: static _ => { },
+            onBridgeMediaSendSummary: static _ => { },
+            onBridgeTransportHealthSummary: root => receivedFramesSentSinceLast = root.GetProperty("frames_sent_since_last").GetInt32(),
+            onUnmatchedBridgeError: static _ => { });
+
+        client.HandleStdoutJsonLine("{\"event\":\"bridge_transport_health_summary\",\"frames_sent_since_last\":5}");
+
+        Assert.Equal(5, receivedFramesSentSinceLast);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task BridgeMixedStreamReader_ReadsJsonLines_AndBinaryFrames_FromSameStream()
     {
         var json = Encoding.UTF8.GetBytes("{\"event\":\"ready\",\"protocol\":2}\n");
@@ -165,6 +221,7 @@ public sealed class JsonlSmokeTests
         Assert.Equal(NknBridgeChannel.Media, binaryFrame.Channel);
         Assert.Equal("peer.test", binaryFrame.PrimaryText);
         Assert.Equal(new byte[] { 9, 8, 7 }, binaryFrame.Payload);
+        Assert.True(binaryFrame.BinaryFrameDecodedUtcMs > 0);
     }
 
     private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)

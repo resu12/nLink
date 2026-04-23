@@ -138,9 +138,66 @@ function Assert-BridgeBundleOutput {
 
     $indexJs = Join-Path $OutDir "index.js"
     $nodeExe = Join-Path $OutDir "node.exe"
-    if (-not (Test-Path $indexJs) -or -not (Test-Path $nodeExe)) {
-        throw "Bridge bundle validation failed: missing node.exe or index.js in $OutDir"
+    $manifestPath = Join-Path $OutDir "bridge-manifest.json"
+    if (-not (Test-Path $indexJs) -or -not (Test-Path $nodeExe) -or -not (Test-Path $manifestPath)) {
+        throw "Bridge bundle validation failed: missing node.exe, index.js, or bridge-manifest.json in $OutDir"
     }
+}
+
+function Get-NLinkAppVersion {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot
+    )
+
+    $versionPath = Join-Path $RepoRoot "VERSION"
+    if (-not (Test-Path $versionPath)) {
+        throw "VERSION file not found at repo root: $versionPath"
+    }
+
+    $version = (Get-Content -Path $versionPath -Raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($version)) {
+        throw "VERSION file is empty: $versionPath"
+    }
+
+    return $version
+}
+
+function Write-BridgeBundleManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$Runtime,
+        [Parameter(Mandatory = $true)][string]$OutDir,
+        [Parameter(Mandatory = $true)][string]$NodePath
+    )
+
+    $scriptPath = Join-Path $OutDir "index.js"
+    if (-not (Test-Path $scriptPath)) {
+        throw "Bridge manifest generation failed: missing bundled script at $scriptPath"
+    }
+
+    $appVersion = Get-NLinkAppVersion -RepoRoot $RepoRoot
+    $scriptSha256 = (Get-FileHash -Path $scriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $nodeVersion = (& $NodePath --version | Select-Object -First 1).Trim()
+    if ([string]::IsNullOrWhiteSpace($nodeVersion)) {
+        throw "Bridge manifest generation failed: could not resolve node version from $NodePath"
+    }
+
+    $manifest = [ordered]@{
+        manifestVersion = 1
+        appVersion = $appVersion
+        runtime = $Runtime
+        buildTimestampUtc = [DateTimeOffset]::UtcNow.ToString("O")
+        bridgeScriptSha256 = $scriptSha256
+        nodeVersion = $nodeVersion
+        capabilities = [ordered]@{
+            ownerPidWatchdog = $true
+            killOnCloseJob = $true
+        }
+    }
+
+    $manifestPath = Join-Path $OutDir "bridge-manifest.json"
+    $manifestJson = $manifest | ConvertTo-Json -Depth 6
+    [System.IO.File]::WriteAllText($manifestPath, $manifestJson, [System.Text.UTF8Encoding]::new($false))
 }
 
 function Assert-BridgeBundleSupportsBulkChannel {
@@ -196,41 +253,43 @@ function Format-Bytes {
     return ("{0} bytes" -f $Bytes)
 }
 
-function Remove-BridgeBundleJunk {
+function Resolve-BridgeBundlerCliPath {
     param(
-        [Parameter(Mandatory = $true)][string]$BridgeOutDir
+        [Parameter(Mandatory = $true)][string]$BridgeSourceDir
     )
 
-    $nodeModulesDir = Join-Path $BridgeOutDir "node_modules"
-    if (-not (Test-Path $nodeModulesDir)) {
-        return
+    $nccCli = Join-Path $BridgeSourceDir "node_modules\@vercel\ncc\dist\ncc\cli.js"
+    if (-not (Test-Path $nccCli)) {
+        throw "Bridge bundler CLI not found after install: $nccCli"
     }
 
-    $filePatterns = @("*.md", "*.markdown", "*.mkd", "*.map")
-    foreach ($pattern in $filePatterns) {
-        $files = Get-ChildItem -Path $nodeModulesDir -Recurse -File -Filter $pattern -ErrorAction SilentlyContinue
-        foreach ($file in @($files)) {
-            try {
-                Remove-Item -Force $file.FullName -ErrorAction Stop
-            }
-            catch {
-                # Best-effort cleanup only.
-            }
-        }
+    return $nccCli
+}
+
+function Bundle-BridgeScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$BridgeSourceDir,
+        [Parameter(Mandatory = $true)][string]$NodePath
+    )
+
+    $bundleDir = Join-Path $BridgeSourceDir ".nlink-bundle"
+    if (Test-Path $bundleDir) {
+        Remove-Item -Recurse -Force $bundleDir
     }
 
-    $dirNames = @("test", "tests", "__tests__", "docs", "doc", "example", "examples", "coverage")
-    foreach ($dirName in $dirNames) {
-        $dirs = Get-ChildItem -Path $nodeModulesDir -Recurse -Directory -Filter $dirName -ErrorAction SilentlyContinue
-        foreach ($dir in @($dirs)) {
-            try {
-                Remove-Item -Recurse -Force $dir.FullName -ErrorAction Stop
-            }
-            catch {
-                # Best-effort cleanup only.
-            }
-        }
+    $nccCli = Resolve-BridgeBundlerCliPath -BridgeSourceDir $BridgeSourceDir
+    $entrySource = Join-Path $BridgeSourceDir "index.js"
+    & $NodePath $nccCli build $entrySource "--out" $bundleDir | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "ncc bundle failed for tools/nkn-bridge"
     }
+
+    $entryScript = Join-Path $bundleDir "index.js"
+    if (-not (Test-Path $entryScript)) {
+        throw "ncc bundle did not produce index.js at $entryScript"
+    }
+
+    return $bundleDir
 }
 
 function Test-BridgeBundleHealth {
@@ -352,14 +411,14 @@ try {
 
     if ($lockExistedBefore) {
         Write-Host "[nLink] Installing NKN bridge dependencies with npm ci..." -ForegroundColor Cyan
-        & $toolchain.NpmPath ci --omit=dev --no-audit --no-fund --silent
+        & $toolchain.NpmPath ci --no-audit --no-fund
         if ($LASTEXITCODE -ne 0) {
             throw "npm ci failed for tools/nkn-bridge"
         }
     }
     else {
         Write-Host "[nLink] Installing NKN bridge dependencies with npm install (no lockfile present)..." -ForegroundColor Cyan
-        & $toolchain.NpmPath install --omit=dev --no-audit --no-fund --silent
+        & $toolchain.NpmPath install --no-audit --no-fund
         if ($LASTEXITCODE -ne 0) {
             throw "npm install failed for tools/nkn-bridge"
         }
@@ -385,32 +444,24 @@ if (Test-Path $outAbs) {
 }
 New-Item -ItemType Directory -Force -Path $outAbs | Out-Null
 
-Copy-Item -Force $toolchain.NodePath (Join-Path $outAbs "node.exe")
-Copy-Item -Force (Join-Path $bridgeSource "index.js") (Join-Path $outAbs "index.js")
-Copy-Item -Force (Join-Path $bridgeSource "package.json") (Join-Path $outAbs "package.json")
-Copy-Item -Force $lockPath (Join-Path $outAbs "package-lock.json")
+$bundleOutDir = Bundle-BridgeScript -BridgeSourceDir $bridgeSource -NodePath $toolchain.NodePath
+$bundleEntryScript = Join-Path $bundleOutDir "index.js"
 
-$nodeModulesSource = Join-Path $bridgeSource "node_modules"
-if (-not (Test-Path $nodeModulesSource)) {
-    throw "tools/nkn-bridge/node_modules was not created."
-}
-Copy-Item -Recurse -Force $nodeModulesSource (Join-Path $outAbs "node_modules")
+Copy-Item -Force $toolchain.NodePath (Join-Path $outAbs "node.exe")
+Copy-Item -Force $bundleEntryScript (Join-Path $outAbs "index.js")
+Copy-Item -Force (Join-Path $bridgeSource "package.json") (Join-Path $outAbs "package.json")
+Write-BridgeBundleManifest -RepoRoot $repoRoot -Runtime $Runtime -OutDir $outAbs -NodePath (Join-Path $outAbs "node.exe")
 
 Assert-BridgeBundleOutput -OutDir $outAbs
 
-$sizeBeforeTotal = Get-DirectorySizeBytes -Path $outAbs
-$sizeBeforeNodeModules = Get-DirectorySizeBytes -Path (Join-Path $outAbs "node_modules")
-Remove-BridgeBundleJunk -BridgeOutDir $outAbs
-$sizeAfterTotal = Get-DirectorySizeBytes -Path $outAbs
-$sizeAfterNodeModules = Get-DirectorySizeBytes -Path (Join-Path $outAbs "node_modules")
+$bundleEntrySize = (Get-Item (Join-Path $outAbs "index.js")).Length
+$totalSize = Get-DirectorySizeBytes -Path $outAbs
 
 Assert-BridgeBundleOutput -OutDir $outAbs
 Assert-BridgeBundleSupportsBulkChannel -BridgeScriptPath (Join-Path $outAbs "index.js")
 Test-BridgeBundleHealth -NodePath (Join-Path $outAbs "node.exe") -BridgeScriptPath (Join-Path $outAbs "index.js")
 
 Write-Host "[nLink] Bridge bundle output: $outAbs" -ForegroundColor Green
-Write-Host "[nLink] Bridge bundle size (before cleanup): $(Format-Bytes -Bytes $sizeBeforeTotal)" -ForegroundColor Cyan
-Write-Host "[nLink] node_modules size (before cleanup): $(Format-Bytes -Bytes $sizeBeforeNodeModules)" -ForegroundColor Cyan
-Write-Host "[nLink] Bridge bundle size (after cleanup):  $(Format-Bytes -Bytes $sizeAfterTotal)" -ForegroundColor Cyan
-Write-Host "[nLink] node_modules size (after cleanup):  $(Format-Bytes -Bytes $sizeAfterNodeModules)" -ForegroundColor Cyan
+Write-Host "[nLink] Bundled bridge entry size: $(Format-Bytes -Bytes $bundleEntrySize)" -ForegroundColor Cyan
+Write-Host "[nLink] Bridge bundle total size: $(Format-Bytes -Bytes $totalSize)" -ForegroundColor Cyan
 Write-Host "[nLink] Bridge hello/ping health check: PASS" -ForegroundColor Green

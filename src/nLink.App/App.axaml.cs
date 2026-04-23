@@ -19,24 +19,36 @@ public partial class App : Application
 
     public override void Initialize()
     {
+        AppStartupTelemetry.Mark("app_startup_app_initialize_started");
         AvaloniaXamlLoader.Load(this);
+        AppStartupTelemetry.Mark("app_startup_app_initialize_completed");
     }
 
     public override void OnFrameworkInitializationCompleted()
     {
+        AppStartupTelemetry.Mark("app_startup_framework_initialization_entered");
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             // Avoid duplicate validations from both Avalonia and the CommunityToolkit. 
             // More info: https://docs.avaloniaui.net/docs/guides/development-guides/data-validation#manage-validationplugins
             DisableAvaloniaDataAnnotationValidation();
+            AppStartupTelemetry.Mark("app_startup_quality_migration_check_started");
+            ScreenShareQualitySettings.ApplyStartupMigrationIfNeeded(persistUserEnvironment: false);
+            AppStartupTelemetry.Mark("app_startup_quality_migration_check_completed");
+            AppStartupTelemetry.Mark("app_startup_configure_services_started");
             ConfigureAppServices();
+            AppStartupTelemetry.Mark("app_startup_configure_services_completed");
             LocalOperationalLog.LogAppStart();
+            AppStartupTelemetry.Mark("app_startup_main_window_vm_ctor_started");
             var mainWindowViewModel = new MainWindowViewModel(Services);
+            AppStartupTelemetry.Mark("app_startup_main_window_vm_ctor_completed");
             desktop.ShutdownMode = ShutdownMode.OnMainWindowClose;
-            desktop.MainWindow = new MainWindow
-            {
-                DataContext = mainWindowViewModel,
-            };
+            var mainWindow = new MainWindow();
+            AppStartupTelemetry.Mark("app_startup_main_window_created");
+            mainWindow.DataContext = mainWindowViewModel;
+            desktop.MainWindow = mainWindow;
+            AppStartupTelemetry.Mark("app_startup_main_window_assigned");
+            ScreenShareQualitySettings.PersistPendingUserEnvironmentMigrationInBackground();
             desktop.Exit += (_, _) => mainWindowViewModel.Dispose();
         }
 

@@ -15,8 +15,20 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IAuthoritativeConnectedAddressSource
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IAuthoritativeConnectedAddressSource
 {
+    private sealed class RecoveryBurstLease
+    {
+        public string SessionId { get; init; } = string.Empty;
+
+        public long StreamEpoch { get; init; }
+
+        public long BurstToken { get; init; }
+
+        public long OwnerFrameId { get; init; }
+    }
+
+    private static readonly TimeSpan DisposeDisconnectTimeout = TimeSpan.FromSeconds(5);
     private const int EnvelopeVersion = 1;
     private static readonly TimeSpan AckWaitTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan PendingJoinTimeout = TimeSpan.FromSeconds(6);
@@ -39,6 +51,15 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     };
     private static readonly TimeSpan ScreenShareOutboundGateWaitBudget = TimeSpan.FromMilliseconds(25);
     private const int FileTransferMaxBridgePayloadBytes = 64 * 1024;
+    private const int ScreenShareLaneMaxMessages = 32;
+    private const int ScreenShareLaneMaxBytes = 768 * 1024;
+    private const int ScreenShareLaneCongestionDepthThreshold = 12;
+    private const int ScreenShareLaneCongestionBytesThreshold = 256 * 1024;
+    private const int ScreenShareLaneSevereDepthThreshold = 20;
+    private const long ScreenShareControlBootstrapMaxFrameId = 7;
+    private static readonly TimeSpan ScreenShareControlBootstrapKeyframeRetryDelay = TimeSpan.FromMilliseconds(80);
+    private static readonly TimeSpan ScreenShareControlBootstrapFollowerRetryDelay = TimeSpan.FromMilliseconds(140);
+    private static readonly TimeSpan ScreenShareLaneRecentDropWindow = TimeSpan.FromSeconds(3);
 
     private readonly NknTransportOptions options;
     private readonly NknIdentity identity;
@@ -49,19 +70,27 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly LruMessageIdCache seenMessageIds = new(500);
     private readonly ConcurrentDictionary<string, PendingAckWait> pendingAcks = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim outboundSendGate = new(1, 1);
+    private readonly SemaphoreSlim screenShareMediaSendGate = new(1, 1);
+    private string? outboundSendGateOwnerForDiagnostics;
     private readonly object controlOutboundQueueGate = new();
+    private readonly object screenShareOutboundQueueGate = new();
+    private readonly object screenShareControlFallbackGate = new();
     private readonly object controlInputReceiveLogGate = new();
     private readonly object hostReadyGate = new();
     private readonly object inboundFileTransferDispatchGate = new();
     private readonly LinkedList<QueuedControlEnvelope> highPriorityControlOutboundQueue = new();
     private readonly LinkedList<QueuedControlEnvelope> lowPriorityControlOutboundQueue = new();
+    private readonly LinkedList<QueuedScreenShareEnvelope> screenShareOutboundQueue = new();
+    private readonly Queue<(long UtcTicks, int DroppedFrames)> screenShareLaneRecentDropWindow = new();
     private readonly object gate = new();
     private readonly object controlSecureStateGate = new();
-    private readonly ScreenShareFrameReassembler secureScreenShareFrameReassembler = new();
+    private readonly ScreenShareVideoFrameReassembler secureScreenShareFrameReassembler = new();
     private readonly SessionReplayWindow inboundChatReplayWindow = new();
     private readonly SessionReplayWindow inboundControlReplayWindow = new();
     private readonly SessionReplayWindow inboundLifecycleReplayWindow = new();
-    private readonly SessionReplayWindow inboundScreenShareReplayWindow = new();
+    private readonly SessionReplayWindow inboundScreenShareReplayWindow = new(
+        windowSize: ScreenShareInboundReplayWindowSize,
+        maxForwardAdvance: ScreenShareInboundReplayMaxForwardAdvance);
     private readonly SessionReplayWindow inboundFileTransferReplayWindow = new(
         windowSize: FileTransferInboundReplayWindowSize,
         maxForwardAdvance: FileTransferInboundReplayMaxForwardAdvance);
@@ -75,6 +104,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly NknEnvelopeRouter envelopeRouter;
     private readonly ControlOutboundQueue controlOutboundQueue;
     private const bool LocalRemoteControlSupported = true;
+    private const int ScreenShareInboundReplayWindowSize = 4096;
+    private const long ScreenShareInboundReplayMaxForwardAdvance = 32768;
     private const int FileTransferInboundReplayWindowSize = 32768;
     private const long FileTransferInboundReplayMaxForwardAdvance = 131072;
 
@@ -102,6 +133,15 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private PeerAddress? activeApprovedHelperAddress;
     private LinkedListNode<QueuedControlEnvelope>? queuedLowPriorityMouseMoveNode;
     private bool controlOutboundDrainerActive;
+    private bool screenShareOutboundDrainerActive;
+    private int screenShareOutboundQueuedBytes;
+    private int screenShareOutboundPeakDepthSeen;
+    private long screenShareOutboundGeneration;
+    private bool screenShareLaneCongestionActive;
+    private bool screenShareLaneSevereCongestionActive;
+    private RecoveryBurstLease? screenShareRecoveryBurstLease;
+    private long screenShareRecoveryControlBootstrapRetrySkippedDueToBurstResolvedCount;
+    private long screenShareRecoveryControlBootstrapRetryQueuedAfterBurstResolutionCount;
     private long lowLaneDroppedMoves;
     private long lowLaneEnqueuedMoves;
     private int lowLaneMaxDepthSeen;
@@ -128,7 +168,12 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private bool inboundFileTransferControlDispatchActive;
     private Task inboundFileTransferLifecycleDispatchTail = Task.CompletedTask;
     private TaskCompletionSource<bool> hostReadyTcs = CreateHostReadyTcs();
+    private readonly IBridgeScreenShareQueueCapability? bridgeScreenShareQueueCapability;
+    private long screenShareBridgePolicyGeneration;
+    private long screenShareBridgePolicyNextGeneration;
+    private bool screenShareBridgeCatchUpOnlyActive;
     private bool disposed;
+    internal static TimeSpan? DisposeDisconnectTimeoutOverrideForTests;
 
     public NknSignalingTransport()
     {
@@ -145,6 +190,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         envelopeRouter = new NknEnvelopeRouter(lifecycleChannel, controlChannel, screenShareChannel, fileTransferChannel);
         controlOutboundQueue = new ControlOutboundQueue(this);
         secureScreenShareFrameReassembler.FrameReady += OnSecureScreenShareFrameReady;
+        secureScreenShareFrameReassembler.KeyframeRequested += OnSecureScreenShareKeyframeRequested;
+        bridgeScreenShareQueueCapability = client as IBridgeScreenShareQueueCapability;
         SubscribeClientEvents();
 
         NknRuntimeDiagnostics.SetIdentity(
@@ -171,6 +218,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         envelopeRouter = new NknEnvelopeRouter(lifecycleChannel, controlChannel, screenShareChannel, fileTransferChannel);
         controlOutboundQueue = new ControlOutboundQueue(this);
         secureScreenShareFrameReassembler.FrameReady += OnSecureScreenShareFrameReady;
+        secureScreenShareFrameReassembler.KeyframeRequested += OnSecureScreenShareKeyframeRequested;
+        bridgeScreenShareQueueCapability = client as IBridgeScreenShareQueueCapability;
         SubscribeClientEvents();
     }
 
@@ -214,6 +263,10 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     internal event EventHandler<BridgeLifecycleEvent>? BridgeLifecycle;
     public event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
     public event EventHandler? ScreenShareStopped;
+    public event EventHandler<ScreenSharePressureStateReceivedEventArgs>? ScreenSharePressureStateReceived;
+    public event EventHandler<ScreenShareRecoveryReceiptReceivedEventArgs>? ScreenShareRecoveryReceiptReceived;
+    public event EventHandler<ScreenShareVideoStreamConfigReceivedEventArgs>? ScreenShareVideoStreamConfigReceived;
+    public event EventHandler<ScreenShareVideoKeyframeRequestReceivedEventArgs>? ScreenShareVideoKeyframeRequestReceived;
 
     public string LocalPeerAddress => string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address;
     bool IAuthoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress =>
@@ -250,6 +303,93 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     internal long HighPriorityControlRejectedCount => Interlocked.Read(ref highPriorityControlRejectedCount);
     internal long HighPriorityControlCoalescedCount => Interlocked.Read(ref highPriorityControlCoalescedCount);
     internal long HighPriorityControlDroppedForStopCount => Interlocked.Read(ref highPriorityControlDroppedForStopCount);
+    public bool IsScreenShareTransportCongested
+    {
+        get
+        {
+            lock (screenShareOutboundQueueGate)
+            {
+                return ComputeEffectiveScreenShareLaneStateUnsafe().IsCongested;
+            }
+        }
+    }
+
+    public bool IsScreenShareTransportSeverelyCongested
+    {
+        get
+        {
+            lock (screenShareOutboundQueueGate)
+            {
+                return ComputeEffectiveScreenShareLaneStateUnsafe().IsSevere;
+            }
+        }
+    }
+
+    public int ScreenShareTransportQueueDepth
+    {
+        get
+        {
+            lock (screenShareOutboundQueueGate)
+            {
+                return ComputeEffectiveScreenShareLaneStateUnsafe().QueueDepth;
+            }
+        }
+    }
+
+    public int ScreenShareTransportQueuedBytes
+    {
+        get
+        {
+            lock (screenShareOutboundQueueGate)
+            {
+                return ComputeEffectiveScreenShareLaneStateUnsafe().QueuedBytes;
+            }
+        }
+    }
+
+    public long ScreenShareTransportOldestQueuedAgeMs
+    {
+        get
+        {
+            lock (screenShareOutboundQueueGate)
+            {
+                return ComputeEffectiveScreenShareLaneStateUnsafe().OldestQueuedAgeMs;
+            }
+        }
+    }
+
+    public long ScreenShareTransportRecentDropCount
+    {
+        get
+        {
+            lock (screenShareOutboundQueueGate)
+            {
+                return ComputeEffectiveScreenShareLaneStateUnsafe().RecentDropCount;
+            }
+        }
+    }
+
+    public long ScreenShareTransportRecentHealthIssueCount
+    {
+        get
+        {
+            lock (screenShareOutboundQueueGate)
+            {
+                return ComputeEffectiveScreenShareLaneStateUnsafe().RecentHealthIssueCount;
+            }
+        }
+    }
+
+    public bool IsScreenShareTransportHealthSeverelyDegraded
+    {
+        get
+        {
+            lock (screenShareOutboundQueueGate)
+            {
+                return ComputeEffectiveScreenShareLaneStateUnsafe().IsHealthSevere;
+            }
+        }
+    }
 
     public Task WaitUntilHostReadyAsync(CancellationToken ct)
     {
@@ -362,17 +502,40 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         if (client is RealNknClientAdapter realClient)
         {
             realClient.BridgeLifecycle -= OnBridgeLifecycle;
-            realClient.ScreenShareFrameCompleted -= OnScreenShareFrameCompleted;
-            realClient.ScreenShareStopped -= OnScreenShareStopped;
         }
 
-        CleanupAsync().GetAwaiter().GetResult();
+        try
+        {
+            CleanupAsync()
+                .WaitAsync(DisposeDisconnectTimeoutOverrideForTests ?? DisposeDisconnectTimeout)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (TimeoutException)
+        {
+            Log(
+                $"event=transport_dispose_disconnect_timeout; timeout_ms={(DisposeDisconnectTimeoutOverrideForTests ?? DisposeDisconnectTimeout).TotalMilliseconds:F0}; forcing_client_dispose=1");
+        }
+        catch (Exception ex)
+        {
+            Log($"event=transport_dispose_disconnect_failed; ex={ex.GetType().Name}; forcing_client_dispose=1");
+        }
+
         DisposeEphemeralKeyState();
         client.Dispose();
         Log("Disposed");
     }
 
     public async Task SendScreenSharePayloadAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
+    {
+        await SendScreenSharePayloadAsync(payload, recoverySendRole: null, recoveryBurstToken: 0, ct).ConfigureAwait(false);
+    }
+
+    internal async Task SendScreenSharePayloadAsync(
+        ReadOnlyMemory<byte> payload,
+        string? recoverySendRole,
+        long recoveryBurstToken,
+        CancellationToken ct)
     {
         ThrowIfDisposed();
 
@@ -412,6 +575,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
         if (isStopPayload)
         {
+            ResetScreenShareControlFallbackState();
             var securePayload = CreateSecureScreenSharePayload(MsgType.ScreenShareStop, payload.ToArray());
             var envelope = CreateEnvelope(envelopeCode, MsgType.ScreenShareStop, securePayload, replyTo: null);
             LocalOperationalLog.Info(
@@ -422,17 +586,1106 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         }
         else
         {
+            if (!screenShareBridgeCatchUpOnlyActive)
+            {
+                await EnsureScreenShareBridgeSessionStartedAsync(ct).ConfigureAwait(false);
+            }
+
             var securePayload = CreateSecureScreenSharePayload(MsgType.ScreenShareFrame, payload.ToArray());
             var envelope = CreateEnvelope(envelopeCode, MsgType.ScreenShareFrame, securePayload, replyTo: null);
             var transportPayload = EnvelopeCodec.Serialize(envelope);
-            await client.SendMediaAsync(destination, transportPayload, ct).ConfigureAwait(false);
-            Interlocked.Increment(ref screenShareMessagesSent);
-            Interlocked.Add(ref screenSharePayloadBytesSent, transportPayload.Length);
-            NknRuntimeDiagnostics.IncrementScreenShareMessagesSent();
-            NknRuntimeDiagnostics.AddScreenSharePayloadBytesSent(transportPayload.Length);
+            var redundancyMetadata = TryCreateQueuedScreenShareEnvelopeMetadata(
+                transportPayload,
+                recoverySendRole,
+                recoveryBurstToken);
+
+            if (!string.IsNullOrWhiteSpace(remoteEndpoint) &&
+                TrySelectScreenShareControlFallback(reasonMetadata: redundancyMetadata, out var fallbackReason, out var selectedRecoveryBurstToken))
+            {
+                var controlFallbackQueued = await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+                LocalOperationalLog.Info(
+                    "ScreenShareTransport",
+                    $"event=screenshare_control_fallback_{(controlFallbackQueued ? "queued" : "rejected")}; session_id={redundancyMetadata!.SessionId}; stream_epoch={redundancyMetadata.StreamEpoch}; frame_id={redundancyMetadata.FrameId}; is_keyframe={(redundancyMetadata.IsKeyFrame ? 1 : 0)}; reason={fallbackReason}; transport_payload_bytes={transportPayload.Length}");
+
+                if (controlFallbackQueued &&
+                    ShouldScheduleScreenShareControlBootstrapRetry(redundancyMetadata, fallbackReason, out var retryDelay))
+                {
+                    ScheduleScreenShareControlBootstrapRetry(
+                        payload.ToArray(),
+                        redundancyMetadata,
+                        fallbackReason,
+                        retryDelay,
+                        selectedRecoveryBurstToken);
+                }
+            }
+
+            await SendScreenShareMediaEnvelopeDirectAsync(destination, transportPayload, ct).ConfigureAwait(false);
         }
 
         Log($"SendScreenSharePayloadAsync sent screenshare payload (payload_len={payload.Length})");
+    }
+
+    public async Task SendScreenSharePressureStateAsync(ScreenSharePressureStateV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+
+        var normalizedMessage = EnsureScreenSharePressureStateSessionId(message);
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_pressure_state_no_remote_endpoint");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_pressure_state_session_context_unavailable");
+            throw new InvalidOperationException("Session context is not known yet.");
+        }
+
+        var payload = CreateSecureControlPayload(
+            MsgType.ScreenSharePressureState,
+            requestId: null,
+            ScreenSharePressureStateCodec.Serialize(normalizedMessage));
+        var envelope = CreateEnvelope(envelopeCode, MsgType.ScreenSharePressureState, payload, replyTo: null);
+        await QueueControlEnvelopeAsync(
+            remoteEndpoint,
+            envelope,
+            ResolveControlOutboundLane(MsgType.ScreenSharePressureState),
+            ct).ConfigureAwait(false);
+    }
+
+    public async Task SendScreenShareVideoStreamConfigAsync(ScreenShareVideoStreamConfigV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+
+        var normalizedMessage = EnsureScreenShareVideoStreamConfigSessionId(message);
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_video_stream_config_no_remote_endpoint");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_video_stream_config_session_context_unavailable");
+            throw new InvalidOperationException("Session context is not known yet.");
+        }
+
+        var payload = CreateSecureControlPayload(
+            MsgType.ScreenShareVideoStreamConfig,
+            requestId: null,
+            ScreenShareVideoPayloadCodec.SerializeStreamConfig(normalizedMessage));
+        var envelope = CreateEnvelope(envelopeCode, MsgType.ScreenShareVideoStreamConfig, payload, replyTo: null);
+        await QueueControlEnvelopeAsync(
+            remoteEndpoint,
+            envelope,
+            ResolveControlOutboundLane(MsgType.ScreenShareVideoStreamConfig),
+            ct).ConfigureAwait(false);
+    }
+
+    public async Task SendScreenShareVideoKeyframeRequestAsync(ScreenShareVideoKeyframeRequestV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+
+        var normalizedMessage = EnsureScreenShareVideoKeyframeRequestSessionId(message);
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_video_keyframe_request_no_remote_endpoint");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_video_keyframe_request_session_context_unavailable");
+            throw new InvalidOperationException("Session context is not known yet.");
+        }
+
+        var payload = CreateSecureControlPayload(
+            MsgType.ScreenShareVideoKeyframeRequest,
+            requestId: null,
+            ScreenShareVideoKeyframeRequestCodec.Serialize(normalizedMessage));
+        var envelope = CreateEnvelope(envelopeCode, MsgType.ScreenShareVideoKeyframeRequest, payload, replyTo: null);
+        await QueueControlEnvelopeAsync(
+            remoteEndpoint,
+            envelope,
+            ResolveControlOutboundLane(MsgType.ScreenShareVideoKeyframeRequest),
+            ct).ConfigureAwait(false);
+    }
+
+    public async Task SendScreenShareRecoveryReceiptAsync(ScreenShareRecoveryReceiptV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+
+        var normalizedMessage = EnsureScreenShareRecoveryReceiptSessionId(message);
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_recovery_receipt_no_remote_endpoint");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_recovery_receipt_session_context_unavailable");
+            throw new InvalidOperationException("Session context is not known yet.");
+        }
+
+        var payload = CreateSecureControlPayload(
+            MsgType.ScreenShareRecoveryReceipt,
+            requestId: null,
+            ScreenShareRecoveryReceiptCodec.Serialize(normalizedMessage));
+        var envelope = CreateEnvelope(envelopeCode, MsgType.ScreenShareRecoveryReceipt, payload, replyTo: null);
+        await QueueControlEnvelopeAsync(
+            remoteEndpoint,
+            envelope,
+            ResolveControlOutboundLane(MsgType.ScreenShareRecoveryReceipt),
+            ct).ConfigureAwait(false);
+    }
+
+    public Task SetScreenShareTransportCatchUpOnlyAsync(bool active, CancellationToken ct)
+    {
+        return ApplyScreenShareBridgePolicyAsync(
+            active ? BridgeScreenShareQueueMode.CatchUpOnly : BridgeScreenShareQueueMode.Normal,
+            flushQueued: true,
+            reason: active ? "sender_degraded_entered" : "sender_degraded_exited",
+            ct);
+    }
+
+    public void FlushScreenShareTransportQueue(string reason)
+    {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "transport_queue_flush" : reason.Trim();
+        ResetScreenShareControlFallbackState();
+        RequestBridgeScreenShareQueueFlush(normalizedReason);
+    }
+
+    private async Task SendScreenShareMediaEnvelopeDirectAsync(string destination, byte[] payload, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(destination);
+        ArgumentNullException.ThrowIfNull(payload);
+
+        NknRuntimeDiagnostics.SetOutboundLaneQueueDepth("screenshare", 0, 0);
+        if (!await screenShareMediaSendGate.WaitAsync(0, ct).ConfigureAwait(false))
+        {
+            NknRuntimeDiagnostics.IncrementOutboundLaneWaitCount("screenshare");
+            await screenShareMediaSendGate.WaitAsync(ct).ConfigureAwait(false);
+        }
+
+        try
+        {
+            NknRuntimeDiagnostics.SetOutboundLaneInFlight("screenshare", 1);
+            await client.SendMediaAsync(destination, payload, ct).ConfigureAwait(false);
+            Interlocked.Increment(ref screenShareMessagesSent);
+            Interlocked.Add(ref screenSharePayloadBytesSent, payload.Length);
+            NknRuntimeDiagnostics.IncrementScreenShareMessagesSent();
+            NknRuntimeDiagnostics.AddScreenSharePayloadBytesSent(payload.Length);
+            NknRuntimeDiagnostics.AddOutboundLaneSent("screenshare", payload.Length);
+            NknRuntimeDiagnostics.IncrementMediaPlaneFramesSent();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            NknRuntimeDiagnostics.SetLastError(ex);
+            NknRuntimeDiagnostics.IncrementMediaPlaneSendFailures();
+            throw;
+        }
+        finally
+        {
+            NknRuntimeDiagnostics.SetOutboundLaneInFlight("screenshare", 0);
+            NknRuntimeDiagnostics.SetOutboundLaneQueueDepth("screenshare", 0, 0);
+            screenShareMediaSendGate.Release();
+        }
+    }
+
+    private Task QueueScreenShareEnvelopeAsync(
+        string destination,
+        byte[] payload,
+        string? sessionId,
+        QueuedScreenShareEnvelopeMetadata? metadata,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        var shouldStartDrainer = false;
+        var laneRejected = 0;
+        var freshnessPrunedEnvelopes = 0;
+        var freshnessPrunedFrames = 0;
+        long? retainedStreamEpoch = null;
+        long? retainedFrameId = null;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        List<TaskCompletionSource>? supersededCompletions = null;
+        lock (screenShareOutboundQueueGate)
+        {
+            var generation = Volatile.Read(ref screenShareOutboundGeneration);
+            screenShareOutboundQueue.AddLast(new QueuedScreenShareEnvelope(
+                destination,
+                payload,
+                string.IsNullOrWhiteSpace(sessionId) ? null : sessionId.Trim(),
+                generation,
+                completion,
+                metadata));
+            screenShareOutboundQueuedBytes += payload.Length;
+
+            if (metadata is not null &&
+                (screenShareBridgeCatchUpOnlyActive ||
+                 ComputeScreenShareLaneCongestionUnsafe() ||
+                 ComputeScreenShareLaneSevereCongestionUnsafe()))
+            {
+                PruneQueuedScreenShareVideoUnsafe(
+                    metadata,
+                    out freshnessPrunedEnvelopes,
+                    out freshnessPrunedFrames,
+                    out retainedStreamEpoch,
+                    out retainedFrameId,
+                    ref supersededCompletions);
+            }
+
+            while (screenShareOutboundQueue.Count > ScreenShareLaneMaxMessages ||
+                   screenShareOutboundQueuedBytes > ScreenShareLaneMaxBytes)
+            {
+                var dropped = screenShareOutboundQueue.First;
+                if (dropped is null)
+                {
+                    break;
+                }
+
+                screenShareOutboundQueue.RemoveFirst();
+                screenShareOutboundQueuedBytes = Math.Max(0, screenShareOutboundQueuedBytes - dropped.Value.Payload.Length);
+                dropped.Value.Completion.TrySetException(new ScreenShareSendSupersededException("Queued media envelope dropped due to lane overflow."));
+                laneRejected++;
+            }
+
+            if (laneRejected > 0)
+            {
+                RecordScreenShareLaneFrameDropsUnsafe(laneRejected);
+            }
+
+            if (screenShareOutboundQueue.Count > screenShareOutboundPeakDepthSeen)
+            {
+                screenShareOutboundPeakDepthSeen = screenShareOutboundQueue.Count;
+            }
+
+            NknRuntimeDiagnostics.SetOutboundLaneQueueDepth("screenshare", screenShareOutboundQueue.Count, screenShareOutboundPeakDepthSeen);
+            UpdateScreenShareLaneCongestionStateUnsafe();
+            if (!screenShareOutboundDrainerActive)
+            {
+                screenShareOutboundDrainerActive = true;
+                shouldStartDrainer = true;
+            }
+        }
+
+        if (supersededCompletions is not null)
+        {
+            foreach (var supersededCompletion in supersededCompletions)
+            {
+                supersededCompletion.TrySetException(new ScreenShareSendSupersededException("Queued media envelope was superseded by a newer video frame."));
+            }
+        }
+
+        for (var i = 0; i < laneRejected; i++)
+        {
+            NknRuntimeDiagnostics.IncrementOutboundLaneRejected("screenshare");
+            NknRuntimeDiagnostics.IncrementScreenShareLaneCongestionHit();
+        }
+
+        for (var i = 0; i < freshnessPrunedEnvelopes; i++)
+        {
+            NknRuntimeDiagnostics.IncrementOutboundLaneRejected("screenshare");
+            NknRuntimeDiagnostics.IncrementScreenShareLaneCongestionHit();
+        }
+
+        if (laneRejected > 0)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_lane_drop; reason=lane_overflow_oldest_frame; dropped_count={laneRejected}; queued_bytes={Volatile.Read(ref screenShareOutboundQueuedBytes)}; queue_depth={ScreenShareTransportQueueDepth}");
+        }
+
+        if (freshnessPrunedEnvelopes > 0)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_transport_stale_video_purged; dropped_envelopes={freshnessPrunedEnvelopes}; dropped_frames={freshnessPrunedFrames}; retained_stream_epoch={retainedStreamEpoch?.ToString() ?? "(none)"}; retained_frame_id={retainedFrameId?.ToString() ?? "(none)"}; queue_depth={ScreenShareTransportQueueDepth}; queued_bytes={Volatile.Read(ref screenShareOutboundQueuedBytes)}; mode={(screenShareBridgeCatchUpOnlyActive ? "catch_up_only" : "lane_behind")}");
+        }
+
+        if (shouldStartDrainer)
+        {
+            _ = Task.Run(ProcessScreenShareOutboundQueueAsync, CancellationToken.None);
+        }
+
+        return completion.Task.WaitAsync(ct);
+    }
+
+    private async Task ProcessScreenShareOutboundQueueAsync()
+    {
+        while (true)
+        {
+            QueuedScreenShareEnvelope? next = null;
+            lock (screenShareOutboundQueueGate)
+            {
+                if (screenShareOutboundQueue.First is not null)
+                {
+                    next = screenShareOutboundQueue.First.Value;
+                    screenShareOutboundQueue.RemoveFirst();
+                    screenShareOutboundQueuedBytes = Math.Max(0, screenShareOutboundQueuedBytes - next.Payload.Length);
+                    NknRuntimeDiagnostics.SetOutboundLaneQueueDepth("screenshare", screenShareOutboundQueue.Count, screenShareOutboundPeakDepthSeen);
+                    UpdateScreenShareLaneCongestionStateUnsafe();
+                }
+                else
+                {
+                    screenShareOutboundDrainerActive = false;
+                    NknRuntimeDiagnostics.SetOutboundLaneInFlight("screenshare", 0);
+                    UpdateScreenShareLaneCongestionStateUnsafe();
+                    return;
+                }
+            }
+
+            try
+            {
+                var currentGeneration = Volatile.Read(ref screenShareOutboundGeneration);
+                if (next.Generation != currentGeneration ||
+                    string.IsNullOrWhiteSpace(next.SessionId) ||
+                    !string.Equals(currentSessionSecurityState.SessionId?.Value, next.SessionId, StringComparison.Ordinal) ||
+                    string.IsNullOrWhiteSpace(remoteMediaEndpoint) ||
+                    !string.Equals(remoteMediaEndpoint, next.Destination, StringComparison.Ordinal))
+                {
+                    next.Completion.TrySetException(new ScreenShareSendSupersededException("Queued media envelope was superseded by a newer screenshare state."));
+                    continue;
+                }
+
+                NknRuntimeDiagnostics.SetOutboundLaneInFlight("screenshare", 1);
+                await client.SendMediaAsync(next.Destination, next.Payload, CancellationToken.None).ConfigureAwait(false);
+                Interlocked.Increment(ref screenShareMessagesSent);
+                Interlocked.Add(ref screenSharePayloadBytesSent, next.Payload.Length);
+                NknRuntimeDiagnostics.IncrementScreenShareMessagesSent();
+                NknRuntimeDiagnostics.AddScreenSharePayloadBytesSent(next.Payload.Length);
+                NknRuntimeDiagnostics.AddOutboundLaneSent("screenshare", next.Payload.Length);
+                next.Completion.TrySetResult();
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
+            {
+                NknRuntimeDiagnostics.SetLastError(ex);
+                Log($"ProcessScreenShareOutboundQueueAsync send failed ({ex.GetType().Name})");
+                next?.Completion.TrySetException(ex);
+            }
+            finally
+            {
+                NknRuntimeDiagnostics.SetOutboundLaneInFlight("screenshare", 0);
+            }
+        }
+    }
+
+    private bool ComputeScreenShareLaneCongestionUnsafe()
+    {
+        return screenShareOutboundQueue.Count >= ScreenShareLaneCongestionDepthThreshold ||
+               screenShareOutboundQueuedBytes >= ScreenShareLaneCongestionBytesThreshold;
+    }
+
+    private bool ComputeScreenShareLaneSevereCongestionUnsafe()
+    {
+        return screenShareOutboundQueue.Count >= ScreenShareLaneSevereDepthThreshold ||
+               HasRecentScreenShareLaneDropUnsafe();
+    }
+
+    private bool HasRecentScreenShareLaneDropUnsafe()
+    {
+        return GetRecentScreenShareLaneDropCountUnsafe() > 0;
+    }
+
+    private void UpdateScreenShareLaneCongestionStateUnsafe()
+    {
+        var isCongested = ComputeScreenShareLaneCongestionUnsafe();
+        var isSeverelyCongested = ComputeScreenShareLaneSevereCongestionUnsafe();
+        if (isCongested != screenShareLaneCongestionActive)
+        {
+            screenShareLaneCongestionActive = isCongested;
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_lane_congestion_{(isCongested ? "entered" : "exited")}; queue_depth={screenShareOutboundQueue.Count}; queued_bytes={screenShareOutboundQueuedBytes}; severe={isSeverelyCongested}");
+        }
+
+        if (isSeverelyCongested != screenShareLaneSevereCongestionActive)
+        {
+            screenShareLaneSevereCongestionActive = isSeverelyCongested;
+            if (isSeverelyCongested)
+            {
+                LocalOperationalLog.Info(
+                    "ScreenShareTransport",
+                    $"event=screenshare_lane_state; state=severe_congestion; queue_depth={screenShareOutboundQueue.Count}; queued_bytes={screenShareOutboundQueuedBytes}; recent_drop={(HasRecentScreenShareLaneDropUnsafe() ? 1 : 0)}");
+            }
+        }
+    }
+
+    private EffectiveScreenShareLaneState ComputeEffectiveScreenShareLaneStateUnsafe()
+    {
+        var bridgeState = bridgeScreenShareQueueCapability?.CurrentScreenShareQueueState;
+        var bridgeHealthState = bridgeScreenShareQueueCapability?.CurrentScreenShareHealthState;
+        if (bridgeState is null)
+        {
+            return new EffectiveScreenShareLaneState(
+                false,
+                false,
+                0,
+                0,
+                0,
+                0,
+                bridgeHealthState?.RecentIssueCount ?? 0,
+                bridgeHealthState?.IsSevere == true);
+        }
+
+        return new EffectiveScreenShareLaneState(
+            IsCongested: bridgeState.Value.IsCongested,
+            IsSevere: bridgeState.Value.IsSevere,
+            QueueDepth: bridgeState.Value.QueueDepth,
+            QueuedBytes: bridgeState.Value.QueuedBytes,
+            OldestQueuedAgeMs: Math.Max(0, bridgeState.Value.OldestQueuedAgeMs),
+            RecentDropCount: Math.Max(0, bridgeState.Value.DroppedSinceLast),
+            RecentHealthIssueCount: bridgeHealthState?.RecentIssueCount ?? 0,
+            IsHealthSevere: bridgeHealthState?.IsSevere == true);
+    }
+
+    private void PruneQueuedScreenShareVideoUnsafe(
+        QueuedScreenShareEnvelopeMetadata newestMetadata,
+        out int droppedEnvelopes,
+        out int droppedFrames,
+        out long? retainedStreamEpoch,
+        out long? retainedFrameId,
+        ref List<TaskCompletionSource>? supersededCompletions)
+    {
+        droppedEnvelopes = 0;
+        droppedFrames = 0;
+        retainedStreamEpoch = newestMetadata.StreamEpoch;
+        retainedFrameId = newestMetadata.FrameId;
+
+        if (screenShareOutboundQueue.Count <= 1)
+        {
+            return;
+        }
+
+        HashSet<(long StreamEpoch, long FrameId)>? droppedFrameKeys = null;
+        var node = screenShareOutboundQueue.First;
+        while (node is not null)
+        {
+            var next = node.Next;
+            var queued = node.Value;
+            var metadata = queued.Metadata;
+            if (metadata is not null &&
+                IsScreenShareVideoFrameSuperseded(metadata, newestMetadata))
+            {
+                screenShareOutboundQueue.Remove(node);
+                screenShareOutboundQueuedBytes = Math.Max(0, screenShareOutboundQueuedBytes - queued.Payload.Length);
+                supersededCompletions ??= new List<TaskCompletionSource>();
+                supersededCompletions.Add(queued.Completion);
+                droppedEnvelopes++;
+                droppedFrameKeys ??= new HashSet<(long StreamEpoch, long FrameId)>();
+                droppedFrameKeys.Add((metadata.StreamEpoch, metadata.FrameId));
+            }
+
+            node = next;
+        }
+
+        if (droppedFrameKeys is not null && droppedFrameKeys.Count > 0)
+        {
+            droppedFrames = droppedFrameKeys.Count;
+            RecordScreenShareLaneFrameDropsUnsafe(droppedFrames);
+        }
+    }
+
+    private QueuedScreenShareEnvelopeMetadata? TryCreateQueuedScreenShareEnvelopeMetadata(
+        byte[] payload,
+        string? recoverySendRole,
+        long recoveryBurstToken)
+    {
+        if (!EnvelopeCodec.TryDeserialize(payload, out var envelope) ||
+            envelope.Type != MsgType.ScreenShareFrame)
+        {
+            return null;
+        }
+
+        byte[] key;
+        try
+        {
+            key = GetControlSessionSharedKeyOrThrow();
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+
+        SessionSecureEnvelopePayload securePayload;
+        try
+        {
+            securePayload = SessionSecureEnvelopeCodec.Decrypt(
+                key,
+                envelope.Payload,
+                new SessionSecureEnvelopeExpectation(
+                    Family: SessionSecureMessageFamily.ScreenShare,
+                    MessageType: "screenshare_frame"));
+        }
+        catch
+        {
+            return null;
+        }
+
+        if (ScreenShareVideoPayloadCodec.TryDeserializeFragmentEnvelope(securePayload.Plaintext, out var fragments, out _)
+            && fragments.Length > 0)
+        {
+            var fragment = fragments[0];
+            return new QueuedScreenShareEnvelopeMetadata(
+                fragment.SessionId,
+                fragment.StreamEpoch,
+                fragment.FrameId,
+                fragment.CapturedTsUtcMs,
+                fragment.IsKeyFrame,
+                string.IsNullOrWhiteSpace(recoverySendRole) ? null : recoverySendRole.Trim(),
+                recoveryBurstToken > 0 ? recoveryBurstToken : 0);
+        }
+
+        return null;
+    }
+
+    internal void ArmRecoveryBurstControlFallback(string sessionId, long streamEpoch, long burstToken, long ownerFrameId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            streamEpoch <= 0 ||
+            burstToken <= 0 ||
+            ownerFrameId < 0)
+        {
+            return;
+        }
+
+        lock (screenShareControlFallbackGate)
+        {
+            // An unresolved recovery burst becomes the sole control-fallback owner for its epoch.
+            screenShareRecoveryBurstLease = new RecoveryBurstLease
+            {
+                SessionId = sessionId.Trim(),
+                StreamEpoch = streamEpoch,
+                BurstToken = burstToken,
+                OwnerFrameId = ownerFrameId,
+            };
+        }
+    }
+
+    internal void ResolveRecoveryBurstControlFallback(long burstToken)
+    {
+        lock (screenShareControlFallbackGate)
+        {
+            if (burstToken > 0 &&
+                screenShareRecoveryBurstLease is { BurstToken: var activeBurstToken } &&
+                activeBurstToken > 0 &&
+                activeBurstToken != burstToken)
+            {
+                return;
+            }
+
+            ClearScreenShareRecoveryControlFallbackStateUnsafe();
+        }
+    }
+
+    private bool TrySelectScreenShareControlFallback(
+        QueuedScreenShareEnvelopeMetadata? reasonMetadata,
+        out string reason,
+        out long recoveryBurstToken)
+    {
+        reason = "none";
+        recoveryBurstToken = 0;
+        if (reasonMetadata is null)
+        {
+            return false;
+        }
+
+        lock (screenShareControlFallbackGate)
+        {
+            return TrySelectRecoveryBurstControlFallbackUnsafe(reasonMetadata, out reason, out recoveryBurstToken);
+        }
+    }
+
+    private bool TrySelectRecoveryBurstControlFallbackUnsafe(
+        QueuedScreenShareEnvelopeMetadata reasonMetadata,
+        out string reason,
+        out long recoveryBurstToken)
+    {
+        reason = "none";
+        recoveryBurstToken = 0;
+
+        if (screenShareRecoveryBurstLease is not { } recoveryBurstLease)
+        {
+            return false;
+        }
+
+        if (!string.Equals(recoveryBurstLease.SessionId, reasonMetadata.SessionId, StringComparison.Ordinal) ||
+            recoveryBurstLease.StreamEpoch != reasonMetadata.StreamEpoch)
+        {
+            if (!string.Equals(recoveryBurstLease.SessionId, reasonMetadata.SessionId, StringComparison.Ordinal) ||
+                (recoveryBurstLease.StreamEpoch >= 0 &&
+                 reasonMetadata.StreamEpoch > recoveryBurstLease.StreamEpoch))
+            {
+                ClearScreenShareRecoveryControlFallbackStateUnsafe();
+            }
+
+            return false;
+        }
+
+        if (reasonMetadata.RecoveryBurstToken <= 0 ||
+            reasonMetadata.RecoveryBurstToken != recoveryBurstLease.BurstToken)
+        {
+            return false;
+        }
+
+        recoveryBurstToken = recoveryBurstLease.BurstToken;
+        if (reasonMetadata.IsKeyFrame &&
+            reasonMetadata.FrameId == recoveryBurstLease.OwnerFrameId &&
+            string.Equals(reasonMetadata.RecoverySendRole, "owner", StringComparison.Ordinal))
+        {
+            reason = "recovery_burst_owner";
+            return true;
+        }
+
+        if (!reasonMetadata.IsKeyFrame &&
+            reasonMetadata.FrameId > recoveryBurstLease.OwnerFrameId &&
+            string.Equals(reasonMetadata.RecoverySendRole, "protected_follower", StringComparison.Ordinal))
+        {
+            reason = "recovery_burst_follower";
+            return true;
+        }
+
+        return false;
+    }
+
+    private void ResetScreenShareControlFallbackState()
+    {
+        lock (screenShareControlFallbackGate)
+        {
+            ClearScreenShareRecoveryControlFallbackStateUnsafe();
+        }
+    }
+
+    private void ClearScreenShareRecoveryControlFallbackStateUnsafe()
+    {
+        screenShareRecoveryBurstLease = null;
+    }
+
+    private bool ShouldScheduleScreenShareControlBootstrapRetry(
+        QueuedScreenShareEnvelopeMetadata? reasonMetadata,
+        string fallbackReason,
+        out TimeSpan retryDelay)
+    {
+        retryDelay = TimeSpan.Zero;
+        if (reasonMetadata is null)
+        {
+            return false;
+        }
+
+        if (reasonMetadata.IsKeyFrame)
+        {
+            retryDelay = ScreenShareControlBootstrapKeyframeRetryDelay;
+            return string.Equals(fallbackReason, "recovery_burst_owner", StringComparison.Ordinal);
+        }
+
+        if (string.Equals(fallbackReason, "recovery_burst_follower", StringComparison.Ordinal))
+        {
+            retryDelay = ScreenShareControlBootstrapFollowerRetryDelay;
+            return true;
+        }
+
+        return false;
+    }
+
+    private void ScheduleScreenShareControlBootstrapRetry(
+        byte[] rawPayload,
+        QueuedScreenShareEnvelopeMetadata reasonMetadata,
+        string fallbackReason,
+        TimeSpan retryDelay,
+        long recoveryBurstToken)
+    {
+        _ = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await Task.Delay(retryDelay, CancellationToken.None).ConfigureAwait(false);
+                    await QueueScreenShareControlBootstrapRetryAsync(rawPayload, reasonMetadata, fallbackReason, retryDelay, recoveryBurstToken).ConfigureAwait(false);
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+                catch (InvalidOperationException)
+                {
+                }
+                catch (Exception ex)
+                {
+                    Log($"ScreenShare control bootstrap retry failed (frame_id={reasonMetadata.FrameId}, reason={fallbackReason}, ex={ex.GetType().Name})");
+                }
+            });
+    }
+
+    private async Task QueueScreenShareControlBootstrapRetryAsync(
+        byte[] rawPayload,
+        QueuedScreenShareEnvelopeMetadata reasonMetadata,
+        string fallbackReason,
+        TimeSpan retryDelay,
+        long recoveryBurstToken)
+    {
+        if (disposed || rawPayload.Length == 0)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_control_bootstrap_retry_skipped; session_id={reasonMetadata.SessionId}; stream_epoch={reasonMetadata.StreamEpoch}; frame_id={reasonMetadata.FrameId}; is_keyframe={(reasonMetadata.IsKeyFrame ? 1 : 0)}; reason={fallbackReason}; skip_reason={(disposed ? "transport_disposed" : "empty_payload")}");
+            return;
+        }
+
+        if (!ValidateRecoveryBurstControlRetry(reasonMetadata, fallbackReason, recoveryBurstToken, out var recoveryRetrySkipReason))
+        {
+            if (string.Equals(recoveryRetrySkipReason, "recovery_burst_resolved", StringComparison.Ordinal))
+            {
+                Interlocked.Increment(ref screenShareRecoveryControlBootstrapRetrySkippedDueToBurstResolvedCount);
+            }
+
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_control_bootstrap_retry_skipped; session_id={reasonMetadata.SessionId}; stream_epoch={reasonMetadata.StreamEpoch}; frame_id={reasonMetadata.FrameId}; is_keyframe={(reasonMetadata.IsKeyFrame ? 1 : 0)}; reason={fallbackReason}; skip_reason={recoveryRetrySkipReason}");
+            return;
+        }
+
+        if (!TryParseScreenSharePayload(rawPayload, out var messageType, out var messageSessionId) ||
+            !string.Equals(messageType, "frame", StringComparison.Ordinal) ||
+            !string.Equals(messageSessionId, reasonMetadata.SessionId, StringComparison.Ordinal))
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_control_bootstrap_retry_skipped; session_id={reasonMetadata.SessionId}; stream_epoch={reasonMetadata.StreamEpoch}; frame_id={reasonMetadata.FrameId}; is_keyframe={(reasonMetadata.IsKeyFrame ? 1 : 0)}; reason={fallbackReason}; skip_reason=payload_parse_or_session_mismatch");
+            return;
+        }
+
+        if (!TryValidateScreenShareSession(messageType, messageSessionId))
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_control_bootstrap_retry_skipped; session_id={reasonMetadata.SessionId}; stream_epoch={reasonMetadata.StreamEpoch}; frame_id={reasonMetadata.FrameId}; is_keyframe={(reasonMetadata.IsKeyFrame ? 1 : 0)}; reason={fallbackReason}; skip_reason=session_validation_failed");
+            return;
+        }
+
+        if (!IsScreenShareAuthorizedForDispatch(messageType, messageSessionId))
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_control_bootstrap_retry_skipped; session_id={reasonMetadata.SessionId}; stream_epoch={reasonMetadata.StreamEpoch}; frame_id={reasonMetadata.FrameId}; is_keyframe={(reasonMetadata.IsKeyFrame ? 1 : 0)}; reason={fallbackReason}; skip_reason=authorization_failed");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_control_bootstrap_retry_skipped; session_id={reasonMetadata.SessionId}; stream_epoch={reasonMetadata.StreamEpoch}; frame_id={reasonMetadata.FrameId}; is_keyframe={(reasonMetadata.IsKeyFrame ? 1 : 0)}; reason={fallbackReason}; skip_reason=remote_endpoint_unavailable");
+            return;
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_control_bootstrap_retry_skipped; session_id={reasonMetadata.SessionId}; stream_epoch={reasonMetadata.StreamEpoch}; frame_id={reasonMetadata.FrameId}; is_keyframe={(reasonMetadata.IsKeyFrame ? 1 : 0)}; reason={fallbackReason}; skip_reason=session_context_unavailable");
+            return;
+        }
+
+        var securePayload = CreateSecureScreenSharePayload(MsgType.ScreenShareFrame, rawPayload);
+        var retryEnvelope = CreateEnvelope(envelopeCode, MsgType.ScreenShareFrame, securePayload, replyTo: null);
+        var retryTransportPayload = EnvelopeCodec.Serialize(retryEnvelope);
+        if (!ValidateRecoveryBurstControlRetry(reasonMetadata, fallbackReason, recoveryBurstToken, out recoveryRetrySkipReason))
+        {
+            if (string.Equals(recoveryRetrySkipReason, "recovery_burst_resolved", StringComparison.Ordinal))
+            {
+                Interlocked.Increment(ref screenShareRecoveryControlBootstrapRetrySkippedDueToBurstResolvedCount);
+            }
+
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_control_bootstrap_retry_skipped; session_id={reasonMetadata.SessionId}; stream_epoch={reasonMetadata.StreamEpoch}; frame_id={reasonMetadata.FrameId}; is_keyframe={(reasonMetadata.IsKeyFrame ? 1 : 0)}; reason={fallbackReason}; skip_reason={recoveryRetrySkipReason}");
+            return;
+        }
+
+        var queued = await QueueControlEnvelopeAsync(remoteEndpoint, retryEnvelope, ControlOutboundLane.High, CancellationToken.None).ConfigureAwait(false);
+        if (queued &&
+            !ValidateRecoveryBurstControlRetry(reasonMetadata, fallbackReason, recoveryBurstToken, out recoveryRetrySkipReason))
+        {
+            if (string.Equals(recoveryRetrySkipReason, "recovery_burst_resolved", StringComparison.Ordinal))
+            {
+                Interlocked.Increment(ref screenShareRecoveryControlBootstrapRetryQueuedAfterBurstResolutionCount);
+                LocalOperationalLog.Info(
+                    "ScreenShareTransport",
+                    $"event=screenshare_control_bootstrap_retry_queued_after_burst_resolution; session_id={reasonMetadata.SessionId}; stream_epoch={reasonMetadata.StreamEpoch}; frame_id={reasonMetadata.FrameId}; is_keyframe={(reasonMetadata.IsKeyFrame ? 1 : 0)}; reason={fallbackReason}; retry_delay_ms={retryDelay.TotalMilliseconds:F0}; transport_payload_bytes={retryTransportPayload.Length}");
+            }
+        }
+
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_control_bootstrap_retry_{(queued ? "queued" : "rejected")}; session_id={reasonMetadata.SessionId}; stream_epoch={reasonMetadata.StreamEpoch}; frame_id={reasonMetadata.FrameId}; is_keyframe={(reasonMetadata.IsKeyFrame ? 1 : 0)}; reason={fallbackReason}; retry_delay_ms={retryDelay.TotalMilliseconds:F0}; transport_payload_bytes={retryTransportPayload.Length}");
+    }
+
+    private bool ValidateRecoveryBurstControlRetry(
+        QueuedScreenShareEnvelopeMetadata reasonMetadata,
+        string fallbackReason,
+        long recoveryBurstToken,
+        out string skipReason)
+    {
+        skipReason = "none";
+        if (recoveryBurstToken <= 0 ||
+            (!string.Equals(fallbackReason, "recovery_burst_owner", StringComparison.Ordinal) &&
+             !string.Equals(fallbackReason, "recovery_burst_follower", StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        lock (screenShareControlFallbackGate)
+        {
+            if (screenShareRecoveryBurstLease is not { } recoveryBurstLease ||
+                recoveryBurstLease.BurstToken != recoveryBurstToken ||
+                !string.Equals(recoveryBurstLease.SessionId, reasonMetadata.SessionId, StringComparison.Ordinal) ||
+                recoveryBurstLease.StreamEpoch != reasonMetadata.StreamEpoch ||
+                recoveryBurstLease.OwnerFrameId < 0 ||
+                reasonMetadata.RecoveryBurstToken != recoveryBurstToken)
+            {
+                skipReason = "recovery_burst_resolved";
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsScreenShareVideoFrameSuperseded(
+        QueuedScreenShareEnvelopeMetadata queued,
+        QueuedScreenShareEnvelopeMetadata newest)
+    {
+        if (!string.Equals(queued.SessionId, newest.SessionId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (queued.StreamEpoch != newest.StreamEpoch)
+        {
+            return queued.StreamEpoch < newest.StreamEpoch;
+        }
+
+        return queued.FrameId < newest.FrameId;
+    }
+
+    private void RecordScreenShareLaneFrameDropsUnsafe(int droppedFrames)
+    {
+        if (droppedFrames <= 0)
+        {
+            return;
+        }
+
+        var utcNowTicks = DateTimeOffset.UtcNow.UtcDateTime.Ticks;
+        screenShareLaneRecentDropWindow.Enqueue((utcNowTicks, droppedFrames));
+        PruneScreenShareLaneRecentDropWindowUnsafe(utcNowTicks);
+    }
+
+    private long GetRecentScreenShareLaneDropCountUnsafe()
+    {
+        var utcNowTicks = DateTimeOffset.UtcNow.UtcDateTime.Ticks;
+        PruneScreenShareLaneRecentDropWindowUnsafe(utcNowTicks);
+        long total = 0;
+        foreach (var sample in screenShareLaneRecentDropWindow)
+        {
+            total += sample.DroppedFrames;
+        }
+
+        return total;
+    }
+
+    private void PruneScreenShareLaneRecentDropWindowUnsafe(long utcNowTicks)
+    {
+        while (screenShareLaneRecentDropWindow.Count > 0)
+        {
+            var next = screenShareLaneRecentDropWindow.Peek();
+            var elapsedTicks = utcNowTicks - next.UtcTicks;
+            if (elapsedTicks >= 0 && elapsedTicks < ScreenShareLaneRecentDropWindow.Ticks)
+            {
+                break;
+            }
+
+            screenShareLaneRecentDropWindow.Dequeue();
+        }
+    }
+
+    private async Task EnsureScreenShareBridgeSessionStartedAsync(CancellationToken ct)
+    {
+        var capability = bridgeScreenShareQueueCapability;
+        if (screenShareBridgePolicyGeneration != 0 || capability is null)
+        {
+            return;
+        }
+
+        if (!capability.IsBridgeProcessRunning)
+        {
+            return;
+        }
+
+        await ApplyScreenShareBridgePolicyAsync(
+            BridgeScreenShareQueueMode.Normal,
+            flushQueued: false,
+            reason: "screenshare_started",
+            ct).ConfigureAwait(false);
+    }
+
+    private async Task ApplyScreenShareBridgePolicyAsync(
+        BridgeScreenShareQueueMode mode,
+        bool flushQueued,
+        string reason,
+        CancellationToken ct)
+    {
+        var capability = bridgeScreenShareQueueCapability;
+        if (capability is null)
+        {
+            return;
+        }
+
+        if (!capability.IsBridgeProcessRunning)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_bridge_policy_skipped; mode={(mode == BridgeScreenShareQueueMode.CatchUpOnly ? "catch_up_only" : "normal")}; flush_queued={(flushQueued ? 1 : 0)}; reason={reason}; bridge_running=0");
+            return;
+        }
+
+        var generation = Interlocked.Increment(ref screenShareBridgePolicyNextGeneration);
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_bridge_policy_apply_requested; mode={(mode == BridgeScreenShareQueueMode.CatchUpOnly ? "catch_up_only" : "normal")}; generation={generation}; flush_queued={(flushQueued ? 1 : 0)}; reason={reason}");
+        await capability.SetScreenSharePolicyAsync(mode, generation, flushQueued, ct).ConfigureAwait(false);
+        Interlocked.Exchange(ref screenShareBridgePolicyGeneration, generation);
+        screenShareBridgeCatchUpOnlyActive = mode == BridgeScreenShareQueueMode.CatchUpOnly;
+    }
+
+    private void ResetScreenShareBridgePolicyState()
+    {
+        screenShareBridgeCatchUpOnlyActive = false;
+        Interlocked.Exchange(ref screenShareBridgePolicyGeneration, 0);
+        Interlocked.Exchange(ref screenShareBridgePolicyNextGeneration, 0);
+    }
+
+    private readonly record struct EffectiveScreenShareLaneState(
+        bool IsCongested,
+        bool IsSevere,
+        int QueueDepth,
+        int QueuedBytes,
+        long OldestQueuedAgeMs,
+        long RecentDropCount,
+        long RecentHealthIssueCount,
+        bool IsHealthSevere);
+
+    private void ClearScreenShareOutboundQueue(string reason)
+    {
+        int dropped = 0;
+        List<TaskCompletionSource>? canceledCompletions = null;
+        lock (screenShareOutboundQueueGate)
+        {
+            dropped = screenShareOutboundQueue.Count;
+            if (dropped > 0)
+            {
+                canceledCompletions = new List<TaskCompletionSource>(dropped);
+                foreach (var queued in screenShareOutboundQueue)
+                {
+                    canceledCompletions.Add(queued.Completion);
+                }
+
+                screenShareOutboundQueue.Clear();
+            }
+
+            screenShareOutboundQueuedBytes = 0;
+            screenShareOutboundDrainerActive = false;
+            screenShareOutboundPeakDepthSeen = 0;
+            Interlocked.Increment(ref screenShareOutboundGeneration);
+            NknRuntimeDiagnostics.SetOutboundLaneQueueDepth("screenshare", 0, 0);
+            NknRuntimeDiagnostics.SetOutboundLaneInFlight("screenshare", 0);
+            UpdateScreenShareLaneCongestionStateUnsafe();
+        }
+
+        ResetScreenShareControlFallbackState();
+        RequestBridgeScreenShareQueueFlush(reason);
+
+        if (canceledCompletions is not null)
+        {
+            foreach (var completion in canceledCompletions)
+            {
+                completion.TrySetException(new ScreenShareSendSupersededException("Queued media envelope was cleared before send."));
+            }
+        }
+
+        for (var i = 0; i < dropped; i++)
+        {
+            NknRuntimeDiagnostics.IncrementOutboundLaneRejected("screenshare");
+        }
+
+        if (dropped > 0)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_lane_cleared; reason={reason}; dropped_count={dropped}");
+        }
+
+        if (!disposed && bridgeScreenShareQueueCapability is not null)
+        {
+            _ = Task.Run(
+                async () =>
+                {
+                    try
+                    {
+                        await ApplyScreenShareBridgePolicyAsync(
+                            BridgeScreenShareQueueMode.Normal,
+                            flushQueued: true,
+                            reason,
+                            CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
+                    {
+                        NknRuntimeDiagnostics.SetLastError(ex);
+                    }
+                },
+                CancellationToken.None);
+        }
+        else
+        {
+            ResetScreenShareBridgePolicyState();
+        }
+    }
+
+    private void RequestBridgeScreenShareQueueFlush(string reason)
+    {
+        var capability = bridgeScreenShareQueueCapability;
+        if (capability is null || !capability.IsBridgeProcessRunning || disposed)
+        {
+            return;
+        }
+
+        var mode = screenShareBridgeCatchUpOnlyActive
+            ? BridgeScreenShareQueueMode.CatchUpOnly
+            : BridgeScreenShareQueueMode.Normal;
+
+        _ = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await ApplyScreenShareBridgePolicyAsync(mode, flushQueued: true, reason, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+                catch (InvalidOperationException)
+                {
+                }
+                catch (Exception ex)
+                {
+                    Log($"FlushScreenShareTransportQueue bridge flush failed (reason={reason}, ex={ex.GetType().Name})");
+                }
+            },
+            CancellationToken.None);
     }
 
     private async Task<bool> SendScreenShareTransportPayloadAsync(
@@ -832,7 +2085,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     }
 
 
-    private Task QueueControlEnvelopeAsync(
+    private Task<bool> QueueControlEnvelopeAsync(
         string destination,
         Envelope envelope,
         ControlOutboundLane lane,
@@ -865,8 +2118,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         if (client is RealNknClientAdapter realClient)
         {
             realClient.BridgeLifecycle += OnBridgeLifecycle;
-            realClient.ScreenShareFrameCompleted += OnScreenShareFrameCompleted;
-            realClient.ScreenShareStopped += OnScreenShareStopped;
         }
     }
 
@@ -883,31 +2134,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         BridgeLifecycle?.Invoke(this, e);
     }
 
-    private void OnScreenShareFrameCompleted(object? sender, ScreenShareFrameCompletedEventArgs e)
-    {
-        if (!TryValidateScreenShareSession("frame", e.SessionId) ||
-            !IsScreenShareAuthorizedForDispatch("frame", e.SessionId))
-        {
-            return;
-        }
-
-        ScreenShareFrameCompleted?.Invoke(this, e);
-    }
-
-    private void OnScreenShareStopped(object? sender, string sessionId)
-    {
-        if (!TryValidateScreenShareSession("stop", sessionId))
-        {
-            return;
-        }
-
-        LocalOperationalLog.Info(
-            "ScreenShareTransport",
-            $"event=screenshare_stop_received_transport; session_id={sessionId}");
-        ScreenShareStopped?.Invoke(this, EventArgs.Empty);
-    }
-
-    private void OnSecureScreenShareFrameReady(object? sender, ScreenShareFrameReadyEventArgs e)
+    private void OnSecureScreenShareFrameReady(object? sender, ScreenShareVideoFrameReadyEventArgs e)
     {
         if (!TryValidateScreenShareSession("frame", e.SessionId) ||
             !IsScreenShareAuthorizedForDispatch("frame", e.SessionId))
@@ -918,6 +2145,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         try
         {
             var metrics = secureScreenShareFrameReassembler.GetMetricsSnapshot();
+            NknRuntimeDiagnostics.SetMediaPlaneFramesDroppedForFreshness(metrics.FramesDropped);
             ScreenShareFrameCompleted?.Invoke(
                 this,
                 new ScreenShareFrameCompletedEventArgs(
@@ -926,15 +2154,36 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                     e.Height,
                     e.Encoding,
                     e.EncodedFrameBytes,
-                    e.TimestampUnixMilliseconds,
+                    e.CapturedTsUtcMs,
                     ChunksDroppedOlderFrame: metrics.FramesDropped,
-                    AssembliesExpired: 0,
-                    SessionId: e.SessionId));
+                    AssembliesExpired: secureScreenShareFrameReassembler.AssembliesExpired,
+                    SessionId: e.SessionId,
+                    IsKeyFrame: e.IsKeyFrame,
+                    StreamEpoch: e.StreamEpoch,
+                    StreamConfig: e.StreamConfig,
+                    RecoveryDeliveryClass: e.RecoveryDeliveryClass,
+                    FrameReadyObservedUtcMs: e.FrameReadyObservedUtcMs));
         }
         catch (Exception ex)
         {
             Log($"ScreenShareFrameCompleted dispatch failed (source=secure_envelope, ex={ex.GetType().Name})");
         }
+    }
+
+    private void OnSecureScreenShareKeyframeRequested(object? sender, ScreenShareVideoKeyframeRequestV1 e)
+    {
+        _ = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await SendScreenShareVideoKeyframeRequestAsync(e, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Log($"ScreenShare keyframe request send failed (reason={e.Reason}, ex={ex.GetType().Name})");
+                }
+            });
     }
 
     private void OnClientDisconnected(object? sender, EventArgs e)
@@ -944,6 +2193,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             return;
         }
 
+        ResetScreenShareBridgePolicyState();
         SetFileTransferDataSessionsAvailability(
             isAvailable: false,
             reason: "transport_disconnected",
@@ -1057,6 +2307,12 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     {
         NknRuntimeDiagnostics.SetLastError($"screenshare_{reason}");
         NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"screenshare_{reason}");
+        if (string.Equals(messageType, "frame", StringComparison.Ordinal))
+        {
+            NknRuntimeDiagnostics.IncrementMediaPlanePolicyRejectCount();
+            NknRuntimeDiagnostics.SetLastMediaPlaneRejectReason(reason);
+        }
+
         LocalOperationalLog.Warn(
             "SessionSecurity",
             $"event=screen_share_message_rejected; message_type={messageType}; reason={reason}; session_id={sessionId ?? "(none)"}; expected_session_id={currentSessionSecurityState.SessionId?.Value ?? "(none)"}; helper_identity={currentSessionSecurityState.HelperAddress?.Value ?? "(none)"}");
@@ -1065,10 +2321,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
     private static bool TryParseScreenSharePayload(ReadOnlySpan<byte> payload, out string messageType, out string? messageSessionId)
     {
-        if (ScreenSharePayloadCodec.TryDeserialize(payload, out var chunk))
+        if (ScreenShareVideoPayloadCodec.TryDeserializeFragmentEnvelope(payload, out var fragments, out _) &&
+            fragments.Length > 0)
         {
             messageType = "frame";
-            messageSessionId = chunk.SessionId;
+            messageSessionId = fragments[0].SessionId;
             return true;
         }
 
@@ -1108,6 +2365,18 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private ControlDisplayInfoMessageV1 EnsureControlSessionId(ControlDisplayInfoMessageV1 message)
         => message with { SessionId = ResolveControlSessionId(message.SessionId) };
 
+    private ScreenSharePressureStateV1 EnsureScreenSharePressureStateSessionId(ScreenSharePressureStateV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private ScreenShareVideoStreamConfigV1 EnsureScreenShareVideoStreamConfigSessionId(ScreenShareVideoStreamConfigV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private ScreenShareVideoKeyframeRequestV1 EnsureScreenShareVideoKeyframeRequestSessionId(ScreenShareVideoKeyframeRequestV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private ScreenShareRecoveryReceiptV1 EnsureScreenShareRecoveryReceiptSessionId(ScreenShareRecoveryReceiptV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
 
     private string ResolveControlSessionId(string? current)
     {
@@ -1115,6 +2384,23 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             ? currentSessionSecurityState.SessionId?.Value ?? string.Empty
             : current.Trim();
     }
+
+    private sealed record QueuedScreenShareEnvelope(
+        string Destination,
+        byte[] Payload,
+        string? SessionId,
+        long Generation,
+        TaskCompletionSource Completion,
+        QueuedScreenShareEnvelopeMetadata? Metadata);
+
+    private sealed record QueuedScreenShareEnvelopeMetadata(
+        string SessionId,
+        long StreamEpoch,
+        long FrameId,
+        long CapturedTsUtcMs,
+        bool IsKeyFrame,
+        string? RecoverySendRole,
+        long RecoveryBurstToken);
 
     private byte[] CreateSecureChatPayload(byte[] plaintextPayload)
     {

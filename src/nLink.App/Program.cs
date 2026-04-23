@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Threading;
 using Avalonia;
+using NLink.App.Configuration;
 
 namespace NLink.App;
 
@@ -10,6 +11,8 @@ sealed class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        AppStartupTelemetry.Mark("app_startup_program_main_entered");
+
         if (HasBenchmarkArgument(args))
         {
             var exitCode = BenchmarkRunner.RunAsync(args, Console.Out, Console.Error, CancellationToken.None)
@@ -55,6 +58,7 @@ sealed class Program
             return;
         }
 
+        AppStartupTelemetry.Mark("app_startup_before_classic_desktop_lifetime");
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 

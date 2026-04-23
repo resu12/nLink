@@ -23,5 +23,7 @@ public sealed class FakeScreenCaptureSourceTests
         Assert.Equal(360, received.Height);
         Assert.Equal("jpeg", received.Encoding);
         Assert.Equal(new byte[] { 1, 2, 3 }, received.EncodedFrameData);
+        Assert.False(received.IsKeyFrame);
+        Assert.Equal(0, received.StreamEpoch);
     }
 }

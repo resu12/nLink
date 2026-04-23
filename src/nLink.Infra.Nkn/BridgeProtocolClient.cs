@@ -13,6 +13,10 @@ internal sealed class BridgeProtocolClient
     private readonly Action<JsonElement> onDisconnected;
     private readonly Action<JsonElement> onHelloOk;
     private readonly Action<JsonElement> onPong;
+    private readonly Action<JsonElement> onScreenShareQueueState;
+    private readonly Action<JsonElement> onBridgeEventLoopSummary;
+    private readonly Action<JsonElement> onBridgeMediaSendSummary;
+    private readonly Action<JsonElement> onBridgeTransportHealthSummary;
     private readonly Action<string> onUnmatchedBridgeError;
     private readonly Action<string, int>? onCommandSerialized;
 
@@ -31,6 +35,10 @@ internal sealed class BridgeProtocolClient
         Action<JsonElement> onDisconnected,
         Action<JsonElement> onHelloOk,
         Action<JsonElement> onPong,
+        Action<JsonElement> onScreenShareQueueState,
+        Action<JsonElement> onBridgeEventLoopSummary,
+        Action<JsonElement> onBridgeMediaSendSummary,
+        Action<JsonElement> onBridgeTransportHealthSummary,
         Action<string> onUnmatchedBridgeError,
         Action<string, int>? onCommandSerialized = null)
     {
@@ -42,6 +50,10 @@ internal sealed class BridgeProtocolClient
         this.onDisconnected = onDisconnected;
         this.onHelloOk = onHelloOk;
         this.onPong = onPong;
+        this.onScreenShareQueueState = onScreenShareQueueState;
+        this.onBridgeEventLoopSummary = onBridgeEventLoopSummary;
+        this.onBridgeMediaSendSummary = onBridgeMediaSendSummary;
+        this.onBridgeTransportHealthSummary = onBridgeTransportHealthSummary;
         this.onUnmatchedBridgeError = onUnmatchedBridgeError;
         this.onCommandSerialized = onCommandSerialized;
     }
@@ -141,6 +153,18 @@ internal sealed class BridgeProtocolClient
                     break;
                 case "pong":
                     HandlePong(root);
+                    break;
+                case "screen_share_queue_state":
+                    onScreenShareQueueState(root.Clone());
+                    break;
+                case "bridge_event_loop_summary":
+                    onBridgeEventLoopSummary(root.Clone());
+                    break;
+                case "bridge_media_send_summary":
+                    onBridgeMediaSendSummary(root.Clone());
+                    break;
+                case "bridge_transport_health_summary":
+                    onBridgeTransportHealthSummary(root.Clone());
                     break;
                 case "ready":
                     onReady(root.Clone());

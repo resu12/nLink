@@ -26,6 +26,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
     private Task? stderrReaderTask;
     private CancellationTokenSource? readerLoopCts;
     private BridgeStdioWriter? stdinWriter;
+    private WindowsKillOnCloseProcessJob? processLifetimeGuard;
     private bool forcedKillRequested;
     private long currentBridgeSpawnTicks;
     private int trackedBridgePid;
@@ -174,6 +175,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         };
 
         startInfo.ArgumentList.Add(bridgePath);
+        startInfo.Environment["NLINK_BRIDGE_OWNER_PID"] = Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
         var newProcess = new Process
         {
@@ -190,6 +192,9 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         ct.ThrowIfCancellationRequested();
 
         var newStdinWriter = new BridgeStdioWriter(newProcess.StandardInput.BaseStream, leaveOpen: true);
+        var newProcessLifetimeGuard = WindowsKillOnCloseProcessJob.TryAttach(
+            newProcess,
+            message => callbacks.Log(message));
 
         // Wait for old reader loops to stop before wiring the new process. This avoids
         // stale stdout/stderr lines from a previous bridge instance racing into startup.
@@ -201,6 +206,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         {
             process = newProcess;
             stdinWriter = newStdinWriter;
+            processLifetimeGuard = newProcessLifetimeGuard;
             forcedKillRequested = false;
             currentBridgeSpawnTicks = Stopwatch.GetTimestamp();
             trackedBridgePid = newProcess.Id;
@@ -228,7 +234,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         callbacks.Log($"Bridge process started (pid={newProcess.Id}, node={Path.GetFileName(nodePath)}, script={bridgePath})");
     }
 
-    public async Task RequestShutdownAndCleanupAsync(Func<CancellationToken, Task> sendShutdownAsync, CancellationToken ct)
+    public async Task RequestShutdownAndCleanupAsync(Func<CancellationToken, Task> sendShutdownAsync, CancellationToken ct, string shutdownReason)
     {
         Process? processToClose;
         lock (gate)
@@ -240,6 +246,13 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         {
             return;
         }
+
+        var shutdownLogFields = BuildBridgeBundleLogFields();
+        var gracefulCompleted = false;
+        var gracefulTimedOut = false;
+        var forceKillRequestedForShutdown = false;
+        callbacks.Log(
+            $"event=bridge_shutdown_started; pid={SafeGetPid(processToClose)}; owner_pid={Environment.ProcessId}; reason={shutdownReason}; graceful_timeout_ms={ShutdownWaitMilliseconds}{shutdownLogFields}");
 
         try
         {
@@ -258,13 +271,30 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
             {
                 if (!await WaitForProcessExitAsync(processToClose, TimeSpan.FromMilliseconds(ShutdownWaitMilliseconds)).ConfigureAwait(false))
                 {
+                    gracefulTimedOut = true;
                     callbacks.RecordBridgeFailure("bridge_shutdown_forced_kill", "Needed to close the local helper process.");
                     lock (gate)
                     {
                         forcedKillRequested = true;
                     }
+                    forceKillRequestedForShutdown = true;
+                    callbacks.Log(
+                        $"event=bridge_shutdown_force_kill; pid={SafeGetPid(processToClose)}; owner_pid={Environment.ProcessId}; reason={shutdownReason}; graceful_timed_out=true{shutdownLogFields}");
                     processToClose.Kill(entireProcessTree: true);
+                    _ = await WaitForProcessExitAsync(processToClose, TimeSpan.FromMilliseconds(ShutdownWaitMilliseconds)).ConfigureAwait(false);
                 }
+                else
+                {
+                    gracefulCompleted = true;
+                    callbacks.Log(
+                        $"event=bridge_shutdown_graceful_completed; pid={SafeGetPid(processToClose)}; owner_pid={Environment.ProcessId}; reason={shutdownReason}{shutdownLogFields}");
+                }
+            }
+            else
+            {
+                gracefulCompleted = true;
+                callbacks.Log(
+                    $"event=bridge_shutdown_graceful_completed; pid={SafeGetPid(processToClose)}; owner_pid={Environment.ProcessId}; reason={shutdownReason}; already_exited=true{shutdownLogFields}");
             }
         }
         catch (Exception ex)
@@ -291,7 +321,8 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
                     exitCodeText = "unknown";
                 }
 
-                callbacks.Log($"Bridge shutdown complete (pid={pid}, exit_code={exitCodeText})");
+                callbacks.Log(
+                    $"event=bridge_shutdown_completed; pid={pid}; owner_pid={Environment.ProcessId}; reason={shutdownReason}; exit_code={exitCodeText}; graceful_completed={FormatBool(gracefulCompleted)}; graceful_timed_out={FormatBool(gracefulTimedOut)}; force_kill={FormatBool(forceKillRequestedForShutdown)}{shutdownLogFields}");
             }
             catch
             {
@@ -467,6 +498,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
             var snapshot = new ProcessStateSnapshot(
                 process,
                 stdinWriter,
+                processLifetimeGuard,
                 stdoutReaderTask,
                 stderrReaderTask,
                 readerLoopCts,
@@ -475,6 +507,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
 
             process = null;
             stdinWriter = null;
+            processLifetimeGuard = null;
             forcedKillRequested = false;
             currentBridgeSpawnTicks = 0;
             stdoutReaderTask = null;
@@ -489,6 +522,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
     private void CleanupDetachedProcessState(ProcessStateSnapshot snapshot, bool waitForReaders, string cleanupReason)
     {
         try { snapshot.ReaderLoopCts?.Cancel(); } catch { }
+        try { snapshot.ProcessLifetimeGuard?.Dispose(); } catch { }
         if (snapshot.Process is { } p)
         {
             TryKillDetachedBridgeProcessIfStillRunning(p, cleanupReason);
@@ -515,6 +549,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
     private async Task CleanupDetachedProcessStateAsync(ProcessStateSnapshot snapshot, bool waitForReaders, string cleanupReason)
     {
         try { snapshot.ReaderLoopCts?.Cancel(); } catch { }
+        try { snapshot.ProcessLifetimeGuard?.Dispose(); } catch { }
         if (snapshot.Process is { } p)
         {
             await TryKillDetachedBridgeProcessIfStillRunningAsync(p, cleanupReason).ConfigureAwait(false);
@@ -555,7 +590,8 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
 
         try
         {
-            callbacks.Log($"Cleaning bridge process during {cleanupReason} (pid={processToKill.Id})");
+            callbacks.Log(
+                $"event=bridge_shutdown_force_kill; pid={SafeGetPid(processToKill)}; owner_pid={Environment.ProcessId}; reason={cleanupReason}; graceful_timed_out=false; cleanup_path=detached_process{BuildBridgeBundleLogFields()}");
             lock (gate)
             {
                 forcedKillRequested = true;
@@ -580,7 +616,8 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         {
             if (TryCleanupTrackedNodeProcessByPid(pid, startTimeUtcFileTime))
             {
-                callbacks.Log($"Cleaning orphan bridge process by tracked pid (pid={pid}, reason={cleanupReason})");
+                callbacks.Log(
+                    $"event=bridge_shutdown_force_kill; pid={pid}; owner_pid={Environment.ProcessId}; reason={cleanupReason}; graceful_timed_out=false; cleanup_path=tracked_orphan{BuildBridgeBundleLogFields()}");
                 lock (gate)
                 {
                     forcedKillRequested = true;
@@ -864,9 +901,33 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         return elapsedTicks * 1000d / Stopwatch.Frequency;
     }
 
+    private string BuildBridgeBundleLogFields()
+    {
+        var identity = callbacks.GetBridgeBundleIdentity?.Invoke();
+        return identity?.BuildStructuredLogFields() ?? "; manifest_status=(unknown)";
+    }
+
+    private static int SafeGetPid(Process process)
+    {
+        try
+        {
+            return process.Id;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private static string FormatBool(bool value)
+    {
+        return value ? "true" : "false";
+    }
+
     private sealed record ProcessStateSnapshot(
         Process? Process,
         BridgeStdioWriter? Writer,
+        WindowsKillOnCloseProcessJob? ProcessLifetimeGuard,
         Task? StdoutReaderTask,
         Task? StderrReaderTask,
         CancellationTokenSource? ReaderLoopCts,
@@ -881,4 +942,5 @@ internal sealed class BridgeSupervisorCallbacks
     public required Action<string> OnUnexpectedExitDetected { get; init; }
     public required Action<string, string?> RecordBridgeFailure { get; init; }
     public required Action<BridgeLifecycleEvent> EmitBridgeLifecycle { get; init; }
+    public Func<BridgeBundleIdentity?>? GetBridgeBundleIdentity { get; init; }
 }

@@ -1,4 +1,5 @@
 using NLink.App.Services;
+using NLink.App.Services.ScreenCapture;
 using NLink.App.ViewModels;
 using NLink.Core;
 using NLink.Core.SessionConnect;
@@ -24,6 +25,9 @@ public partial class SmokeTests
 
         SetPrivateField(helpee, "connectionState", "Connected");
         SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateProperty(helpee, "ScreenSharePreviewStatus", new ScreenShareStatus(ScreenShareState.Active, null, DateTimeOffset.UtcNow));
+        SetPrivateProperty(helpee, "ScreenSharePreviewFrame", CreateTestBitmap(2, 1));
+        SetPrivateProperty(helpee, "IsScreenSharingPreviewActive", true);
         SetPrivateField(helpeeRuntime, "state", SessionRuntimeState.Disconnected);
         SetPrivateField(helpeeRuntime, "statusText", "The other side ended the session.");
         SetPrivateField(helpeeRuntime, "lastTransportFailure", null);
@@ -63,6 +67,8 @@ public partial class SmokeTests
         Assert.Equal("The other side ended the session.", helpee.TransientBannerText);
         Assert.False(helpee.IsChatInputEnabled);
         Assert.False(helpee.ShowFailurePanel);
+        Assert.Null(helpee.ScreenSharePreviewFrame);
+        Assert.Equal(ScreenShareState.Off, helpee.ScreenSharePreviewStatus.State);
     }
 
     [Trait("Category", "Smoke")]
@@ -153,7 +159,11 @@ public partial class SmokeTests
         WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
 
         helpee.InviteHelperIdentityInput = helperInput;
-        InvokePrivateMethod(helpee, "SetVerifiedInviteHelperIdentity", new PeerAddress(helperInput), helperTarget, true, helperInput);
+        helpee.SetVerifiedInviteHelperIdentity(
+            new PeerAddress(helperInput),
+            helperTargetAddress: helperTarget,
+            refreshInvite: true,
+            normalizedInputOverride: helperInput);
         WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
 
         var requestTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helpee, "RequestHelpAsync"));
@@ -227,6 +237,66 @@ public partial class SmokeTests
                   helpee.HasShareInvite &&
                   helpee.RequestHelpCommand.CanExecute(null),
             TimeSpan.FromSeconds(5));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_HelperAccepted_FinalizingSecureConnection_KeepsRequestHelpDisabled()
+    {
+        var scriptedTransport = new ScriptedSignalingTransport(
+            onHostByAddressAsync: _ => Task.CompletedTask,
+            localPeerAddress: "helpee.accepted.finalizing");
+
+        using var runtime = new SessionRuntime(() => scriptedTransport);
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateNknTestConfig(), runtime);
+
+        var helperIdentity = new PeerAddress("nlink-helper.accepted.identity");
+        var helperTarget = new PeerAddress("nlink-helper.accepted.target");
+        var helperBootstrap = HelperBootstrapQrPayload.Format(
+            HelperBootstrapPayload.Create(
+                helperTarget,
+                helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
+
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
+
+        helpee.SetVerifiedInviteHelperIdentity(
+            helperIdentity,
+            helperTargetAddress: helperTarget,
+            refreshInvite: true,
+            normalizedInputOverride: helperBootstrap);
+
+        await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
+
+        SetPrivateField(
+            runtime,
+            "<PendingOutboundHelpRequestDecision>k__BackingField",
+            new HelpRequestDecisionMessage(
+                "hr_accept",
+                new PeerAddress("helpee.accepted.finalizing"),
+                helperTarget,
+                Accepted: true));
+        SetPrivateField(runtime, "state", SessionRuntimeState.Waiting);
+        SetPrivateField(runtime, "statusText", "Helper accepted. Finalizing secure connection…");
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = SessionFlowPhase.Connecting,
+                UiPhase = SessionUiPhase.Waiting,
+                Role = SessionRuntimeRole.Helpee,
+                RuntimeState = SessionRuntimeState.Waiting,
+                DisplayStatusText = "Helper accepted. Finalizing secure connection…",
+                DisplayConnectionState = "Waiting",
+            });
+
+        InvokePrivateMethod(helpee, "OnHelpRequestDecisionAvailable", runtime, EventArgs.Empty);
+
+        await WaitUntilAsync(
+            () => !helpee.RequestHelpCommand.CanExecute(null) &&
+                  !helpee.CanRequestHelpAction &&
+                  string.Equals(helpee.ConnectionStatus, "Helper accepted. Establishing secure session…", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(2));
     }
 
     [Trait("Category", "Smoke")]

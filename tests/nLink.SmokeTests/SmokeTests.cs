@@ -2012,7 +2012,6 @@ public partial class SmokeTests
         var previousScreenShareTransportMaxFps = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS");
         var previousScreenShareTransportAutotune = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE");
         var previousScreenShareScale = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCALE");
-        var previousScreenShareJpegQuality = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_JPEG_QUALITY");
         try
         {
             SessionTimeline.Clear();
@@ -2032,7 +2031,6 @@ public partial class SmokeTests
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS", null);
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE", null);
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCALE", null);
-            Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_JPEG_QUALITY", null);
             var config = TransportRuntimeConfig.Select();
             var inviteSecurity = InviteSecurityDiagnostics.Snapshot();
             using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
@@ -2133,7 +2131,6 @@ public partial class SmokeTests
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS", previousScreenShareTransportMaxFps);
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE", previousScreenShareTransportAutotune);
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCALE", previousScreenShareScale);
-            Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_JPEG_QUALITY", previousScreenShareJpegQuality);
         }
     }
 
@@ -3134,9 +3131,12 @@ public partial class SmokeTests
 
         Assert.NotNull(helpeeRuntime.PendingOutboundHelpRequestDecision);
         Assert.True(helpeeRuntime.PendingOutboundHelpRequestDecision!.Accepted);
-        Assert.Equal(SessionRuntimeState.IncomingJoinRequest, helpeeRuntime.State);
+        Assert.False(helpeeRuntime.HasPendingOutboundHelpRequest);
         Assert.NotNull(helpeeRuntime.PendingApprovalRequest);
         Assert.Equal(GetHostedAddressOrThrow(helperRuntime), helpeeRuntime.PendingApprovalRequest!.HelperIdentity);
+        Assert.True(
+            helpeeRuntime.State is SessionRuntimeState.Waiting or SessionRuntimeState.IncomingJoinRequest,
+            $"Unexpected helpee state during accepted direct-help transition: {helpeeRuntime.State}");
 
         await helpeeRuntime.ApproveAsync(cts.Token);
         await acceptTask;
@@ -3150,6 +3150,214 @@ public partial class SmokeTests
         Assert.Equal("Connected", helperRuntime.StatusText);
         Assert.True(helpeeRuntime.CanSendChat);
         Assert.True(helperRuntime.CanSendChat);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task SessionRuntime_StartHelperListening_PublishesAndClearsBootstrapSnapshot()
+    {
+        var previousGuiSmokeScenarios = Environment.GetEnvironmentVariable("NLINK_GUI_SMOKE_SCENARIOS");
+        var helperArtifactDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "nLink",
+            "gui-smoke");
+        var staleArtifactPath = Path.Combine(helperArtifactDirectory, "helper-address.txt");
+
+        using var runtime = new SessionRuntime(() => new DevLocalTransport());
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_GUI_SMOKE_SCENARIOS", "bootstrap_snapshot_test");
+            Directory.CreateDirectory(helperArtifactDirectory);
+            File.WriteAllText(staleArtifactPath, "run_id=stale;listener_generation=99;address=stale-address;published_utc_ms=1;host_ready=1");
+
+            await runtime.StartHelperListeningAsync(cts.Token);
+
+            var snapshot = runtime.CurrentHelperListenerBootstrapSnapshot;
+            Assert.NotNull(snapshot);
+            Assert.True(snapshot!.HostReady);
+            Assert.Equal(runtime.CurrentLocalPeerAddress, snapshot.Address);
+            Assert.False(string.IsNullOrWhiteSpace(snapshot.RunId));
+            Assert.True(snapshot.ListenerGeneration > 0);
+            Assert.Contains("event=helper_local_peer_address_ready;", LocalOperationalLog.GetRecentLogText(), StringComparison.Ordinal);
+
+            var helperArtifacts = Directory.GetFiles(helperArtifactDirectory, "helper-address*.txt");
+            Assert.Single(helperArtifacts);
+            var helperArtifactPath = helperArtifacts[0];
+            Assert.DoesNotContain("helper-address.txt", helperArtifactPath, StringComparison.OrdinalIgnoreCase);
+            var artifactText = File.ReadAllText(helperArtifactPath);
+            Assert.Contains($"run_id={snapshot.RunId}", artifactText, StringComparison.Ordinal);
+            Assert.Contains($"listener_generation={snapshot.ListenerGeneration}", artifactText, StringComparison.Ordinal);
+            Assert.Contains($"address={snapshot.Address.Value}", artifactText, StringComparison.Ordinal);
+
+            await runtime.ResetAsync();
+
+            Assert.Null(runtime.CurrentHelperListenerBootstrapSnapshot);
+            Assert.Contains("event=helper_local_peer_address_cleared;", LocalOperationalLog.GetRecentLogText(), StringComparison.Ordinal);
+            Assert.Empty(Directory.GetFiles(helperArtifactDirectory, "helper-address*.txt"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_GUI_SMOKE_SCENARIOS", previousGuiSmokeScenarios);
+            try
+            {
+                if (Directory.Exists(helperArtifactDirectory))
+                {
+                    foreach (var helperArtifactPath in Directory.GetFiles(helperArtifactDirectory, "helper-address*.txt"))
+                    {
+                        File.Delete(helperArtifactPath);
+                    }
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup only.
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task SessionRuntime_NknIncomingHelpRequest_ReusesWarmListenerTransport_AndPreservesHelperAddress()
+    {
+        FakeNknClient.ResetNetwork();
+
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var helperTransports = new List<NknSignalingTransport>();
+            var helperTransportCount = 0;
+            NknSignalingTransport CreateHelperTransport()
+            {
+                var ordinal = Interlocked.Increment(ref helperTransportCount);
+                var client = new FakeNknClient($"helper.listener.warm.{ordinal}.{Guid.NewGuid():N}");
+                var identity = new NknIdentity($"helper-listener-warm-{ordinal}", $"helper.listener.warm.{ordinal}.test.fake");
+                var transport = new NknSignalingTransport(client, options, identity);
+                helperTransports.Add(transport);
+                return transport;
+            }
+
+            using var helpeeTransport = new NknSignalingTransport(
+                new FakeNknClient("helpee.listener.warm." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helpee-listener-warm", "helpee.listener.warm.test.fake"));
+            using var helpeeRuntime = new SessionRuntime(() => helpeeTransport);
+            using var helperRuntime = new SessionRuntime(
+                createTransport: CreateHelperTransport,
+                watchdogOptions: null,
+                bridgeReusePolicy: BridgeReusePolicy.Default);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            await helperRuntime.StartHelperListeningAsync(cts.Token);
+            var listeningAddress = GetHostedAddressOrThrow(helperRuntime);
+            Assert.Single(helperTransports);
+
+            await helpeeRuntime.StartHelpeeAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(
+                GetHostedAddressOrThrow(helpeeRuntime),
+                out var rawToken,
+                boundHelperAddress: listeningAddress);
+
+            await helpeeRuntime.RequestHelpAsync(listeningAddress, rawToken, cts.Token);
+            await WaitUntilAsync(() => helperRuntime.HasPendingHelpRequest, TimeSpan.FromSeconds(3));
+
+            var acceptTask = helperRuntime.AcceptIncomingHelpRequestAsync(cts.Token);
+            await WaitUntilAsync(
+                () => helpeeRuntime.PendingOutboundHelpRequestDecision is not null &&
+                      helpeeRuntime.PendingApprovalRequest is not null,
+                TimeSpan.FromSeconds(5));
+
+            await helpeeRuntime.ApproveAsync(cts.Token);
+            await acceptTask;
+
+            await WaitUntilAsync(
+                () => helperRuntime.State == SessionRuntimeState.Connected &&
+                      helpeeRuntime.State == SessionRuntimeState.Connected,
+                TimeSpan.FromSeconds(5));
+
+            Assert.Single(helperTransports);
+            Assert.Equal(listeningAddress, helperRuntime.CurrentLocalPeerAddress);
+            Assert.Contains(
+                "event=helper_listener_handoff_completed; mode=warm; reused_cached_bridge=1;",
+                LocalOperationalLog.GetRecentLogText(),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task SessionRuntime_NknIncomingHelpRequest_WarmHandoffFallsBackToSingleColdRetry()
+    {
+        FakeNknClient.ResetNetwork();
+
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var createdHelperTransports = new List<NknSignalingTransport>();
+            var helperTransportCount = 0;
+            NknSignalingTransport CreateHelperTransport()
+            {
+                var ordinal = Interlocked.Increment(ref helperTransportCount);
+                var client = new FakeNknClient($"helper.listener.fallback.{ordinal}.{Guid.NewGuid():N}");
+                var identity = new NknIdentity($"helper-listener-fallback-{ordinal}", $"helper.listener.fallback.{ordinal}.test.fake");
+                var transport = new NknSignalingTransport(client, options, identity);
+                createdHelperTransports.Add(transport);
+                return transport;
+            }
+
+            using var helpeeTransport = new NknSignalingTransport(
+                new FakeNknClient("helpee.listener.fallback." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helpee-listener-fallback", "helpee.listener.fallback.test.fake"));
+            using var helpeeRuntime = new SessionRuntime(() => helpeeTransport);
+            using var helperRuntime = new SessionRuntime(
+                createTransport: CreateHelperTransport,
+                watchdogOptions: null,
+                bridgeReusePolicy: BridgeReusePolicy.Default);
+            using var staleCachedTransport = new NknSignalingTransport(
+                new FakeNknClient("helper.listener.stale." + Guid.NewGuid().ToString("N")),
+                options,
+                new NknIdentity("helper-listener-stale", "helper.listener.stale.test.fake"));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            staleCachedTransport.Dispose();
+            SetPrivateField(helperRuntime, "cachedBridgeTransport", staleCachedTransport);
+
+            await helpeeRuntime.StartHelpeeAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(GetHostedAddressOrThrow(helpeeRuntime), out var rawToken);
+            var connectTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(
+                helperRuntime,
+                "StartHelperCoreAsync",
+                invite.TargetAddress,
+                invite,
+                rawToken,
+                HelperConnectOrigin.IncomingHelpRequest,
+                cts.Token));
+
+            await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(5));
+            await helpeeRuntime.ApproveAsync(cts.Token);
+            await connectTask;
+
+            await WaitUntilAsync(
+                () => helperRuntime.State == SessionRuntimeState.Connected &&
+                      helpeeRuntime.State == SessionRuntimeState.Connected,
+                TimeSpan.FromSeconds(5));
+
+            Assert.Single(createdHelperTransports);
+            Assert.Contains("event=helper_listener_handoff_fallback;", LocalOperationalLog.GetRecentLogText(), StringComparison.Ordinal);
+            Assert.Contains(
+                "event=helper_listener_handoff_completed; mode=cold; reused_cached_bridge=0;",
+                LocalOperationalLog.GetRecentLogText(),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
     }
 
     [Trait("Category", "LegacySmoke")]
@@ -4875,6 +5083,27 @@ public partial class SmokeTests
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task ScreenShareFrameSendPipeline_DefaultConstructor_UsesSingleBufferCapacityWithoutThrowing()
+    {
+        await using var pipeline = new ScreenShareFrameSendPipeline(
+            sendFrameAsync: (_, _) => Task.FromResult(1));
+
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-default-capacity",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 1, 2, 3 },
+            timestampUnixMilliseconds: 1000,
+            cancellationToken: CancellationToken.None);
+
+        var metrics = pipeline.GetMetricsSnapshot();
+        Assert.Equal(1, metrics.FramesCaptured);
+        Assert.True(metrics.FramesQueued >= 1);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task ScreenShareAndChat_Coexist_WithoutStarvingChatProcessing()
     {
         ChatRuntimeCounters.ResetForTests();
@@ -4886,7 +5115,7 @@ public partial class SmokeTests
         using var helperChat = new SessionChatService(() => new DateTimeOffset(2026, 3, 3, 18, 0, 5, TimeSpan.Zero));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         var screenShareClock = new FakeScreenShareClock(new DateTimeOffset(2026, 3, 3, 18, 0, 0, TimeSpan.Zero));
-        var reassembler = new ScreenShareFrameReassembler();
+        var reassembler = new ScreenShareVideoFrameReassembler();
         var receivedChatTexts = new ConcurrentQueue<string>();
         var allChatReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var completedFrameCount = 0;
@@ -4920,10 +5149,30 @@ public partial class SmokeTests
         await WaitUntilAsync(() => helperChat.HasSessionKey && helpeeChat.HasSessionKey, TimeSpan.FromSeconds(2));
 
         await using var pipeline = new ScreenShareFrameSendPipeline(
-            sendChunkAsync: async (chunk, _) =>
+            sendFrameAsync: async (frame, _) =>
             {
-                reassembler.OnChunk(chunk);
+                if (frame.StreamConfig is not null)
+                {
+                    reassembler.OnStreamConfig(frame.StreamConfig);
+                }
+
+                var fragments = ScreenShareVideoFragmenter.FragmentAccessUnit(
+                    frame.SessionId,
+                    frame.StreamEpoch,
+                    frame.FrameId,
+                    frame.TimestampUnixMilliseconds,
+                    frame.Width,
+                    frame.Height,
+                    frame.Encoding,
+                    frame.IsKeyFrame,
+                    frame.EncodedFrameBytes);
+                foreach (var fragment in fragments)
+                {
+                    reassembler.OnFragment(fragment);
+                }
+
                 await Task.Yield();
+                return fragments.Count;
             },
             capacity: ScreenShareFrameSendPipeline.MaxBufferedFrames,
             clock: screenShareClock);
@@ -4939,9 +5188,21 @@ public partial class SmokeTests
                     sessionId: "session-chat-share",
                     width: 640 + i,
                     height: 360 + i,
-                    encoding: "jpeg",
+                    encoding: "h264",
                     encodedFrameBytes: new byte[] { (byte)(i + 1), (byte)(i + 2), (byte)(i + 3) },
                     timestampUnixMilliseconds: 1000 + i,
+                    isKeyFrame: i == 0,
+                    streamEpoch: 1,
+                    streamConfig: i == 0
+                        ? new ScreenShareVideoStreamConfigV1
+                        {
+                            SessionId = "session-chat-share",
+                            StreamEpoch = 1,
+                            Encoding = "h264",
+                            CodecProfile = "baseline",
+                            DecoderConfigData = new byte[] { 1, 2, 3 },
+                        }
+                        : null,
                     cancellationToken: cts.Token);
                 await Task.Yield();
             }
@@ -4962,6 +5223,413 @@ public partial class SmokeTests
         Assert.True(senderMetrics.FramesQueued >= 1);
         Assert.True(senderMetrics.ChunksSent >= 1);
         Assert.True(reassembler.GetMetricsSnapshot().FramesCompleted >= 1);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task ScreenShareFrameSendPipeline_DeferredFrame_SendsAtNextSlotWithoutNewArrival()
+    {
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 4, 14, 18, 0, 0, TimeSpan.Zero));
+        var delayScheduler = new ControlledDelayScheduler();
+        var sentPackets = new ConcurrentQueue<ScreenShareEncodedFramePacket>();
+
+        await using var pipeline = CreateControlledScreenShareFrameSendPipeline(
+            sendFrameAsync: (packet, _) =>
+            {
+                sentPackets.Enqueue(packet);
+                return Task.FromResult(1);
+            },
+            clock,
+            delayScheduler,
+            maxFramesPerSecond: 5);
+
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-slot-send",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 1, 2, 3 },
+            timestampUnixMilliseconds: 1000,
+            isKeyFrame: true,
+            streamEpoch: 1,
+            streamConfig: new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "session-slot-send",
+                StreamEpoch = 1,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            },
+            cancellationToken: CancellationToken.None);
+
+        await WaitUntilAsync(() => sentPackets.Count >= 1, TimeSpan.FromSeconds(1));
+
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-slot-send",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 4, 5, 6 },
+            timestampUnixMilliseconds: 1010,
+            isKeyFrame: false,
+            streamEpoch: 1,
+            streamConfig: null,
+            cancellationToken: CancellationToken.None);
+
+        Assert.Equal(1, delayScheduler.PendingCount);
+
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        delayScheduler.CompleteLatest();
+
+        await WaitUntilAsync(() => sentPackets.Count >= 2, TimeSpan.FromSeconds(1));
+
+        var packets = sentPackets.ToArray();
+        Assert.Equal(2, packets.Length);
+        Assert.Equal(0, packets[0].FrameId);
+        Assert.Equal(1, packets[1].FrameId);
+        Assert.Equal(new byte[] { 4, 5, 6 }, packets[1].EncodedFrameBytes);
+
+        var metrics = pipeline.GetMetricsSnapshot();
+        Assert.Equal(1, metrics.FramesDeferredToSendSlot);
+        Assert.Equal(0, metrics.FramesReplacedBeforeSendSlot);
+        Assert.Equal(0, metrics.FramesDroppedByRateGate);
+        Assert.True(metrics.SlotCoalescingActive);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task ScreenShareFrameSendPipeline_CoalescesBurst_AndSendsFreshestFrameAtNextSlot()
+    {
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 4, 14, 18, 5, 0, TimeSpan.Zero));
+        var delayScheduler = new ControlledDelayScheduler();
+        var sentPackets = new ConcurrentQueue<ScreenShareEncodedFramePacket>();
+
+        await using var pipeline = CreateControlledScreenShareFrameSendPipeline(
+            sendFrameAsync: (packet, _) =>
+            {
+                sentPackets.Enqueue(packet);
+                return Task.FromResult(1);
+            },
+            clock,
+            delayScheduler,
+            maxFramesPerSecond: 5);
+
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-slot-coalesce",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 1, 1, 1 },
+            timestampUnixMilliseconds: 2000,
+            isKeyFrame: true,
+            streamEpoch: 1,
+            streamConfig: new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "session-slot-coalesce",
+                StreamEpoch = 1,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            },
+            cancellationToken: CancellationToken.None);
+
+        await WaitUntilAsync(() => sentPackets.Count >= 1, TimeSpan.FromSeconds(1));
+
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-slot-coalesce",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 2, 2, 2 },
+            timestampUnixMilliseconds: 2010,
+            isKeyFrame: false,
+            streamEpoch: 1,
+            streamConfig: null,
+            cancellationToken: CancellationToken.None);
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-slot-coalesce",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 3, 3, 3 },
+            timestampUnixMilliseconds: 2020,
+            isKeyFrame: false,
+            streamEpoch: 1,
+            streamConfig: null,
+            cancellationToken: CancellationToken.None);
+
+        Assert.Equal(1, delayScheduler.PendingCount);
+
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        delayScheduler.CompleteLatest();
+
+        await WaitUntilAsync(() => sentPackets.Count >= 2, TimeSpan.FromSeconds(1));
+
+        var packets = sentPackets.ToArray();
+        Assert.Equal(2, packets.Length);
+        Assert.Equal(new byte[] { 3, 3, 3 }, packets[1].EncodedFrameBytes);
+
+        var metrics = pipeline.GetMetricsSnapshot();
+        Assert.Equal(2, metrics.FramesDeferredToSendSlot);
+        Assert.Equal(1, metrics.FramesReplacedBeforeSendSlot);
+        Assert.Equal(0, metrics.FramesDroppedByRateGate);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task ScreenShareFrameSendPipeline_PrefersSameEpochKeyframe_AndThenNewerEpoch_FrameForNextSlot()
+    {
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 4, 14, 18, 10, 0, TimeSpan.Zero));
+        var delayScheduler = new ControlledDelayScheduler();
+        var sentPackets = new ConcurrentQueue<ScreenShareEncodedFramePacket>();
+
+        await using var pipeline = CreateControlledScreenShareFrameSendPipeline(
+            sendFrameAsync: (packet, _) =>
+            {
+                sentPackets.Enqueue(packet);
+                return Task.FromResult(1);
+            },
+            clock,
+            delayScheduler,
+            maxFramesPerSecond: 5);
+
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-slot-priority",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 9, 9, 9 },
+            timestampUnixMilliseconds: 3000,
+            isKeyFrame: true,
+            streamEpoch: 1,
+            streamConfig: new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "session-slot-priority",
+                StreamEpoch = 1,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            },
+            cancellationToken: CancellationToken.None);
+
+        await WaitUntilAsync(() => sentPackets.Count >= 1, TimeSpan.FromSeconds(1));
+
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-slot-priority",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 1, 0, 0 },
+            timestampUnixMilliseconds: 3010,
+            isKeyFrame: false,
+            streamEpoch: 1,
+            streamConfig: null,
+            cancellationToken: CancellationToken.None);
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-slot-priority",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 1, 1, 1 },
+            timestampUnixMilliseconds: 3020,
+            isKeyFrame: true,
+            streamEpoch: 1,
+            streamConfig: new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "session-slot-priority",
+                StreamEpoch = 1,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 7, 8, 9 },
+            },
+            cancellationToken: CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        delayScheduler.CompleteLatest();
+        await WaitUntilAsync(() => sentPackets.Count >= 2, TimeSpan.FromSeconds(1));
+
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-slot-priority",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 2, 0, 0 },
+            timestampUnixMilliseconds: 3030,
+            isKeyFrame: false,
+            streamEpoch: 1,
+            streamConfig: null,
+            cancellationToken: CancellationToken.None);
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-slot-priority",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 2, 2, 2 },
+            timestampUnixMilliseconds: 3040,
+            isKeyFrame: false,
+            streamEpoch: 2,
+            streamConfig: null,
+            cancellationToken: CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        delayScheduler.CompleteLatest();
+        await WaitUntilAsync(() => sentPackets.Count >= 3, TimeSpan.FromSeconds(1));
+
+        var packets = sentPackets.ToArray();
+        Assert.Equal(3, packets.Length);
+        Assert.Equal(0, packets[0].FrameId);
+        Assert.True(packets[1].IsKeyFrame);
+        Assert.Equal(1, packets[1].StreamEpoch);
+        Assert.Equal(1, packets[1].FrameId);
+        Assert.Equal(new byte[] { 1, 1, 1 }, packets[1].EncodedFrameBytes);
+        Assert.False(packets[2].IsKeyFrame);
+        Assert.Equal(2, packets[2].StreamEpoch);
+        Assert.Equal(0, packets[2].FrameId);
+        Assert.Equal(new byte[] { 2, 2, 2 }, packets[2].EncodedFrameBytes);
+
+        var metrics = pipeline.GetMetricsSnapshot();
+        Assert.Equal(4, metrics.FramesDeferredToSendSlot);
+        Assert.Equal(2, metrics.FramesReplacedBeforeSendSlot);
+        Assert.Equal(0, metrics.FramesDroppedByRateGate);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task ScreenShareFrameSendPipeline_OrdinaryFrame_CannotEvictOrDelayQueuedRecoveryOwnerAndFollowers()
+    {
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 4, 14, 18, 15, 0, TimeSpan.Zero));
+        var delayScheduler = new ControlledDelayScheduler();
+        var sentPackets = new ConcurrentQueue<ScreenShareEncodedFramePacket>();
+
+        await using var pipeline = CreateControlledScreenShareFrameSendPipeline(
+            sendFrameAsync: (packet, _) =>
+            {
+                sentPackets.Enqueue(packet);
+                return Task.FromResult(1);
+            },
+            clock,
+            delayScheduler,
+            maxFramesPerSecond: 5);
+
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-recovery-protected",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 1, 1, 1 },
+            timestampUnixMilliseconds: 4000,
+            isKeyFrame: true,
+            streamEpoch: 1,
+            streamConfig: new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "session-recovery-protected",
+                StreamEpoch = 1,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            },
+            cancellationToken: CancellationToken.None);
+
+        await WaitUntilAsync(() => sentPackets.Count >= 1, TimeSpan.FromSeconds(1));
+
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-recovery-protected",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 9, 8, 7 },
+            timestampUnixMilliseconds: 4005,
+            isKeyFrame: false,
+            streamEpoch: 2,
+            streamConfig: null,
+            cancellationToken: CancellationToken.None);
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-recovery-protected",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 2, 2, 2 },
+            timestampUnixMilliseconds: 4010,
+            isKeyFrame: true,
+            streamEpoch: 2,
+            streamConfig: new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "session-recovery-protected",
+                StreamEpoch = 2,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 4, 5, 6 },
+            },
+            cancellationToken: CancellationToken.None,
+            preserveOrdering: true);
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-recovery-protected",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 3, 3, 3 },
+            timestampUnixMilliseconds: 4020,
+            isKeyFrame: false,
+            streamEpoch: 2,
+            streamConfig: null,
+            cancellationToken: CancellationToken.None,
+            preserveOrdering: true);
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-recovery-protected",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 4, 4, 4 },
+            timestampUnixMilliseconds: 4030,
+            isKeyFrame: false,
+            streamEpoch: 2,
+            streamConfig: null,
+            cancellationToken: CancellationToken.None,
+            preserveOrdering: true);
+        await pipeline.EnqueueFrameAsync(
+            sessionId: "session-recovery-protected",
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { 9, 9, 9 },
+            timestampUnixMilliseconds: 4040,
+            isKeyFrame: false,
+            streamEpoch: 2,
+            streamConfig: null,
+            cancellationToken: CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        delayScheduler.CompleteLatest();
+        await WaitUntilAsync(() => sentPackets.Count >= 2, TimeSpan.FromSeconds(1));
+
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        delayScheduler.CompleteLatest();
+        await WaitUntilAsync(() => sentPackets.Count >= 3, TimeSpan.FromSeconds(1));
+
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        delayScheduler.CompleteLatest();
+        await WaitUntilAsync(() => sentPackets.Count >= 4, TimeSpan.FromSeconds(1));
+
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        delayScheduler.CompleteLatest();
+        await WaitUntilAsync(() => sentPackets.Count >= 5, TimeSpan.FromSeconds(1));
+
+        var packets = sentPackets.ToArray();
+        Assert.Equal(5, packets.Length);
+        Assert.True(packets[1].IsKeyFrame);
+        Assert.Equal(2, packets[1].StreamEpoch);
+        Assert.Equal(new byte[] { 2, 2, 2 }, packets[1].EncodedFrameBytes);
+        Assert.Equal(new byte[] { 3, 3, 3 }, packets[2].EncodedFrameBytes);
+        Assert.Equal(new byte[] { 4, 4, 4 }, packets[3].EncodedFrameBytes);
+        Assert.Equal(new byte[] { 9, 8, 7 }, packets[4].EncodedFrameBytes);
+        Assert.DoesNotContain(packets, static packet => packet.EncodedFrameBytes.SequenceEqual(new byte[] { 9, 9, 9 }));
+
+        var metrics = pipeline.GetMetricsSnapshot();
+        Assert.Equal(4, metrics.FramesDeferredToSendSlot);
+        Assert.Equal(0, metrics.FramesReplacedBeforeSendSlot);
+        Assert.Equal(3, metrics.ProtectedRecoveryFramesDispatched);
+        Assert.Equal(3, metrics.RecoveryProtectedFrameBlockedByOrdinaryCount);
+        Assert.True(metrics.FramesDropped >= 1);
     }
 
     [Trait("Category", "LegacySmoke")]
@@ -5584,6 +6252,73 @@ public partial class SmokeTests
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void HelpeePageViewModel_PersistedUnsupportedCaptureTarget_LoadsPrimaryDisplaySelection()
+    {
+        using var captureTargetOverride = new EnvironmentOverride(
+            "NLINK_FEATURE_SCREENCAP_TARGET",
+            "{\"mode\":\"Window\",\"windowId\":\"ABC123\"}");
+        var transportConfig = CreateDevLocalTestConfig();
+        using var runtime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            screenCaptureSourceFactory: new FixedCaptureSourceFactory(new FakeScreenCaptureSource()));
+
+        Assert.NotEmpty(helpee.AvailableCaptureDisplays);
+        Assert.NotNull(helpee.SelectedCaptureDisplay);
+        Assert.True(helpee.SelectedCaptureDisplay!.IsPrimaryDisplay);
+        Assert.Equal("Primary display", helpee.SelectedCaptureDisplay.Label);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_ShareStart_PersistsSelectedDisplayTarget()
+    {
+        using var captureTargetOverride = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_TARGET", string.Empty);
+        var transportConfig = CreateDevLocalTestConfig();
+        using var transport = new DevLocalTransport();
+        var captureSource = new FakeScreenCaptureSource();
+        using var runtime = new SessionRuntime(() => transport);
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            screenCaptureSourceFactory: new FixedCaptureSourceFactory(captureSource));
+
+        SetPrivateField(runtime, "transport", transport);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "transportState", TransportState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        InvokePrivateMethod(
+            runtime,
+            "ApplyTransportSecurityState",
+            CreateApprovedSecurityState(
+                new PeerAddress(transport.LocalPeerAddress),
+                new PeerAddress("helpee.screenshare.helper"),
+                CapabilityGrant.ScreenShare));
+        SetPrivateProperty(helpee, "ConnectionState", "Connected");
+        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
+
+        var specificDisplay = helpee.AvailableCaptureDisplays.FirstOrDefault(option => !option.IsPrimaryDisplay);
+        Assert.NotNull(specificDisplay);
+
+        helpee.SelectedCaptureDisplay = specificDisplay;
+        Assert.Null(Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TARGET"));
+
+        helpee.ToggleScreenSharePreviewCommand.Execute(null);
+
+        await WaitUntilAsync(() => captureSource.IsStarted, TimeSpan.FromSeconds(2));
+
+        var persisted = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TARGET");
+        Assert.NotNull(persisted);
+        using var document = JsonDocument.Parse(persisted!);
+        Assert.Equal("Display", document.RootElement.GetProperty("mode").GetString());
+        Assert.Equal(specificDisplay!.DisplayId, document.RootElement.GetProperty("displayId").GetString());
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task HelpeePageViewModel_StopScreenShareWhileConsentPending_ClearsApprovalUiImmediately()
     {
         var transportConfig = CreateDevLocalTestConfig();
@@ -5599,6 +6334,18 @@ public partial class SmokeTests
         SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
         SetPrivateField(runtime, "transportState", TransportState.Connected);
         SetPrivateField(runtime, "statusText", "Connected");
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = SessionFlowPhase.ActiveSession,
+                UiPhase = SessionUiPhase.Connected,
+                Role = SessionRuntimeRole.Helpee,
+                RuntimeState = SessionRuntimeState.Connected,
+                DisplayStatusText = "Connected",
+                DisplayConnectionState = "Connected",
+            });
         SetPrivateField(
             runtime,
             "remoteControlSessionState",
@@ -5630,6 +6377,156 @@ public partial class SmokeTests
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task HelpeePageViewModel_AllowControlConsentCommand_SendsAllowResponse()
+    {
+        ControlResponseMessageV1? sentResponse = null;
+        var transportConfig = CreateDevLocalTestConfig();
+        using var scripted = new ScriptedSignalingTransport(
+            onSendControlResponseAsync: (message, _) =>
+            {
+                sentResponse = message;
+                return Task.CompletedTask;
+            });
+        using var runtime = new SessionRuntime(() => scripted);
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            screenCaptureSourceFactory: new FixedCaptureSourceFactory(new FakeScreenCaptureSource()));
+
+        runtime.SetRoleForTests(SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "transportState", TransportState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        scripted.SetSessionSecurityStateForTests(
+            CreateApprovedSecurityState(
+                new PeerAddress(scripted.LocalPeerAddress),
+                new PeerAddress("helper-peer")));
+        InvokePrivateMethod(runtime, "RefreshRemoteControlCapabilitiesFromTransport");
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = SessionFlowPhase.ActiveSession,
+                UiPhase = SessionUiPhase.Connected,
+                Role = SessionRuntimeRole.Helpee,
+                RuntimeState = SessionRuntimeState.Connected,
+                TransportState = TransportState.Connected,
+                ApprovalActive = true,
+                ApprovedCapabilities = CapabilityGrant.Chat | CapabilityGrant.ScreenShare | CapabilityGrant.RemoteControl,
+                DisplayStatusText = "Connected",
+                DisplayConnectionState = "Connected",
+            });
+        SetPrivateProperty(helpee, "ConnectionState", "Connected");
+        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateField(helpee, "isScreenSharingPreviewActive", true);
+
+        scripted.InjectIncomingControlRequest(
+            new ControlRequestMessageV1
+            {
+                RequestId = "req-allow-consent",
+                Caps = new[] { "mouse", "keyboard" },
+            },
+            "helper-peer");
+
+        await WaitUntilAsync(
+            () => runtime.ControlState == ControlState.Requesting &&
+                  runtime.HasPendingRemoteControlConsentPrompt &&
+                  helpee.ShowRemoteControlConsentDialog,
+            TimeSpan.FromSeconds(1));
+
+        Assert.True(helpee.ShowRemoteControlConsentDialog);
+        Assert.True(helpee.AllowControlConsentCommand.CanExecute(null));
+
+        await helpee.AllowControlConsentCommand.ExecuteAsync(null);
+
+        Assert.NotNull(sentResponse);
+        Assert.Equal("req-allow-consent", sentResponse!.RequestId);
+        Assert.Equal("allow", sentResponse.Decision);
+        Assert.False(string.IsNullOrWhiteSpace(sentResponse.ConsentToken));
+        Assert.False(helpee.ShowRemoteControlConsentFeedback);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_DenyControlConsentCommand_SendsDenyResponse()
+    {
+        ControlResponseMessageV1? sentResponse = null;
+        var transportConfig = CreateDevLocalTestConfig();
+        using var scripted = new ScriptedSignalingTransport(
+            onSendControlResponseAsync: (message, _) =>
+            {
+                sentResponse = message;
+                return Task.CompletedTask;
+            });
+        using var runtime = new SessionRuntime(() => scripted);
+        using var helpee = new HelpeePageViewModel(
+            cancelAction: static () => { },
+            transportConfig,
+            runtime,
+            screenCaptureSourceFactory: new FixedCaptureSourceFactory(new FakeScreenCaptureSource()));
+
+        runtime.SetRoleForTests(SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "transportState", TransportState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        InvokePrivateMethod(runtime, "WireTransport", scripted);
+        scripted.SetSessionSecurityStateForTests(
+            CreateApprovedSecurityState(
+                new PeerAddress(scripted.LocalPeerAddress),
+                new PeerAddress("helper-peer")));
+        InvokePrivateMethod(runtime, "RefreshRemoteControlCapabilitiesFromTransport");
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = SessionFlowPhase.ActiveSession,
+                UiPhase = SessionUiPhase.Connected,
+                Role = SessionRuntimeRole.Helpee,
+                RuntimeState = SessionRuntimeState.Connected,
+                TransportState = TransportState.Connected,
+                ApprovalActive = true,
+                ApprovedCapabilities = CapabilityGrant.Chat | CapabilityGrant.ScreenShare | CapabilityGrant.RemoteControl,
+                DisplayStatusText = "Connected",
+                DisplayConnectionState = "Connected",
+            });
+        SetPrivateProperty(helpee, "ConnectionState", "Connected");
+        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
+        SetPrivateField(helpee, "isScreenSharingPreviewActive", true);
+
+        scripted.InjectIncomingControlRequest(
+            new ControlRequestMessageV1
+            {
+                RequestId = "req-deny-consent",
+                Caps = new[] { "mouse", "keyboard" },
+            },
+            "helper-peer");
+
+        await WaitUntilAsync(
+            () => runtime.ControlState == ControlState.Requesting &&
+                  runtime.HasPendingRemoteControlConsentPrompt &&
+                  helpee.ShowRemoteControlConsentDialog,
+            TimeSpan.FromSeconds(1));
+
+        Assert.True(helpee.ShowRemoteControlConsentDialog);
+        Assert.True(helpee.DenyControlConsentCommand.CanExecute(null));
+
+        await helpee.DenyControlConsentCommand.ExecuteAsync(null);
+
+        Assert.NotNull(sentResponse);
+        Assert.Equal("req-deny-consent", sentResponse!.RequestId);
+        Assert.Equal("deny", sentResponse.Decision);
+        Assert.Equal("helpee_denied", sentResponse.Reason);
+        Assert.False(helpee.ShowRemoteControlConsentFeedback);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task HelpeePageViewModel_StopScreenShareWhileControlActive_ClearsActiveUiImmediately()
     {
         var transportConfig = CreateDevLocalTestConfig();
@@ -5645,6 +6542,18 @@ public partial class SmokeTests
         SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
         SetPrivateField(runtime, "transportState", TransportState.Connected);
         SetPrivateField(runtime, "statusText", "Connected");
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = SessionFlowPhase.ActiveSession,
+                UiPhase = SessionUiPhase.Connected,
+                Role = SessionRuntimeRole.Helpee,
+                RuntimeState = SessionRuntimeState.Connected,
+                DisplayStatusText = "Connected",
+                DisplayConnectionState = "Connected",
+            });
         SetPrivateField(
             runtime,
             "remoteControlSessionState",
@@ -5699,6 +6608,9 @@ public partial class SmokeTests
                   helpee.ScreenSharePreviewFrame is null &&
                   !helpee.IsScreenSharingPreviewActive,
             TimeSpan.FromSeconds(1));
+
+        Assert.Equal(ScreenShareState.Off, helpee.ScreenSharePreviewStatus.State);
+        Assert.DoesNotContain("Screen sharing", helpee.HeaderStatusText, StringComparison.Ordinal);
     }
 
     [Trait("Category", "LegacySmoke")]
@@ -6651,6 +7563,168 @@ public partial class SmokeTests
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task NknTransport_HelpRequestAckTimeout_DoesNotDisconnectTransport()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var helpeeClient = new FakeNknClient("helpee.helprequest.timeout.addr." + Guid.NewGuid().ToString("N"));
+            var helperClient = new FakeNknClient("helper.helprequest.timeout.addr." + Guid.NewGuid().ToString("N"));
+            using var helpeeTransport = new NknSignalingTransport(
+                helpeeClient,
+                options,
+                new NknIdentity("helpee-helprequest-timeout-test", helpeeClient.InitialAddress));
+            using var helperTransport = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-helprequest-timeout-test", helperClient.InitialAddress));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+            helperClient.ShouldDeliverSendAsync = static (_, payload, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var env) &&
+                    env.Type == MsgType.Ack)
+                {
+                    return Task.FromResult(false);
+                }
+
+                return Task.FromResult(true);
+            };
+
+            var helperDisconnected = false;
+            var helpeeDisconnected = false;
+            helperTransport.Disconnected += (_, _) => helperDisconnected = true;
+            helpeeTransport.Disconnected += (_, _) => helpeeDisconnected = true;
+
+            await helperTransport.HostByAddressAsync(cts.Token);
+            await helpeeTransport.HostByAddressAsync(cts.Token);
+
+            var helpeeAddress = new PeerAddress(helpeeTransport.LocalPeerAddress);
+            var helperAddress = new PeerAddress(helperTransport.LocalPeerAddress);
+            Assert.True(SessionId.TryParse("sess_" + Guid.NewGuid().ToString("N"), out var sessionId));
+            var createResult = InviteTokenServiceFactory.CreateInviteTokenFactory().Create(
+                new InviteTokenCreateRequest(
+                    IssuerAddress: helpeeAddress,
+                    TargetAddress: helpeeAddress,
+                    SessionId: sessionId!,
+                    Capabilities: InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+                    Lifetime: TimeSpan.FromMinutes(5),
+                    BoundHelperAddress: helperAddress),
+                DateTimeOffset.UtcNow);
+
+            Assert.True(createResult.IsSuccess);
+            Assert.NotNull(createResult.Token);
+
+            await Assert.ThrowsAsync<TimeoutException>(() => helpeeTransport.SendHelpRequestAsync(
+                new HelpRequestMessage(
+                    "hr_timeout_" + Guid.NewGuid().ToString("N"),
+                    helpeeAddress,
+                    helperAddress,
+                    createResult.Token!),
+                cts.Token));
+
+            Assert.False(helperDisconnected);
+            Assert.False(helpeeDisconnected);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task NknTransport_HelpRequestAckWait_IsSupersededByDecisionReceipt()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var helpeeClient = new FakeNknClient("helpee.helprequest.supersede.addr." + Guid.NewGuid().ToString("N"));
+            var helperClient = new FakeNknClient("helper.helprequest.supersede.addr." + Guid.NewGuid().ToString("N"));
+            using var helpeeTransport = new NknSignalingTransport(
+                helpeeClient,
+                options,
+                new NknIdentity("helpee-helprequest-supersede-test", helpeeClient.InitialAddress));
+            using var helperTransport = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-helprequest-supersede-test", helperClient.InitialAddress));
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+            helperClient.ShouldDeliverSendAsync = static (_, payload, _) =>
+            {
+                if (EnvelopeCodec.TryDeserialize(payload, out var env) &&
+                    env.Type == MsgType.Ack)
+                {
+                    return Task.FromResult(false);
+                }
+
+                return Task.FromResult(true);
+            };
+
+            var helperDisconnected = false;
+            var helpeeDisconnected = false;
+            helperTransport.Disconnected += (_, _) => helperDisconnected = true;
+            helpeeTransport.Disconnected += (_, _) => helpeeDisconnected = true;
+
+            var incomingRequest = new TaskCompletionSource<HelpRequestMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var incomingDecision = new TaskCompletionSource<HelpRequestDecisionMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            helperTransport.IncomingHelpRequest += (_, e) => incomingRequest.TrySetResult(e.Request);
+            helpeeTransport.HelpRequestDecisionReceived += (_, e) => incomingDecision.TrySetResult(e.Decision);
+
+            await helperTransport.HostByAddressAsync(cts.Token);
+            await helpeeTransport.HostByAddressAsync(cts.Token);
+
+            var helpeeAddress = new PeerAddress(helpeeTransport.LocalPeerAddress);
+            var helperAddress = new PeerAddress(helperTransport.LocalPeerAddress);
+            Assert.True(SessionId.TryParse("sess_" + Guid.NewGuid().ToString("N"), out var sessionId));
+            var createResult = InviteTokenServiceFactory.CreateInviteTokenFactory().Create(
+                new InviteTokenCreateRequest(
+                    IssuerAddress: helpeeAddress,
+                    TargetAddress: helpeeAddress,
+                    SessionId: sessionId!,
+                    Capabilities: InviteCapabilities.Chat | InviteCapabilities.ScreenShare | InviteCapabilities.RemoteControl,
+                    Lifetime: TimeSpan.FromMinutes(5),
+                    BoundHelperAddress: helperAddress),
+                DateTimeOffset.UtcNow);
+
+            Assert.True(createResult.IsSuccess);
+            Assert.NotNull(createResult.Token);
+
+            var sendTask = helpeeTransport.SendHelpRequestAsync(
+                new HelpRequestMessage(
+                    "hr_supersede_" + Guid.NewGuid().ToString("N"),
+                    helpeeAddress,
+                    helperAddress,
+                    createResult.Token!),
+                cts.Token);
+
+            var receivedRequest = await incomingRequest.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperTransport.SendHelpRequestDecisionAsync(
+                new HelpRequestDecisionMessage(
+                    receivedRequest.RequestId,
+                    receivedRequest.HelpeeAddress,
+                    receivedRequest.HelperAddress,
+                    Accepted: true),
+                cts.Token);
+
+            var receivedDecision = await incomingDecision.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            Assert.True(receivedDecision.Accepted);
+            await sendTask.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            Assert.False(helperDisconnected);
+            Assert.False(helpeeDisconnected);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task SessionRuntime_HelperListenerOnNkn_DoesNotEnterOutboundConnectingTimeout()
     {
         FakeNknClient.ResetNetwork();
@@ -6836,36 +7910,15 @@ public partial class SmokeTests
             SetPrivateField(helperTransport, "controlSessionSharedKey", Enumerable.Repeat((byte)0x5A, 32).ToArray());
             InvokePrivateMethod(helperTransport, "UpdateSessionSecurityState", approvedState);
 
-            var mismatchedPayload = ScreenSharePayloadCodec.Serialize(
-                new ScreenShareFrameChunkV1
-                {
-                    SessionId = "sess_old_screenshare",
-                    FrameId = 1,
-                    Width = 1,
-                    Height = 1,
-                    TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                    Encoding = "jpeg",
-                    ChunkIndex = 0,
-                    ChunkCount = 1,
-                    DataBase64 = Convert.ToBase64String(new byte[] { 0x01 }),
-                });
+            var mismatchedPayload = CreateScreenShareVideoPayload("sess_old_screenshare", frameId: 1, data: new byte[] { 0x01 });
 
             await helperTransport.SendScreenSharePayloadAsync(mismatchedPayload, CancellationToken.None);
             Assert.Equal(0, Volatile.Read(ref sentCount));
 
-            var matchingPayload = ScreenSharePayloadCodec.Serialize(
-                new ScreenShareFrameChunkV1
-                {
-                    SessionId = approvedState.SessionId!.Value.Value,
-                    FrameId = 2,
-                    Width = 1,
-                    Height = 1,
-                    TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                    Encoding = "jpeg",
-                    ChunkIndex = 0,
-                    ChunkCount = 1,
-                    DataBase64 = Convert.ToBase64String(new byte[] { 0x02 }),
-                });
+            var matchingPayload = CreateScreenShareVideoPayload(
+                approvedState.SessionId!.Value.Value,
+                frameId: 2,
+                data: new byte[] { 0x02 });
 
             await helperTransport.SendScreenSharePayloadAsync(matchingPayload, CancellationToken.None);
             Assert.Equal(1, Volatile.Read(ref sentCount));
@@ -6919,22 +7972,16 @@ public partial class SmokeTests
             await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             await attackerClient.ConnectAsync(cts.Token);
 
+            var sessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value;
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
+            await helper.SendScreenShareVideoStreamConfigAsync(CreateScreenShareVideoStreamConfig(sessionId), cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
             var forgedEnvelope = BuildSecureScreenShareEnvelope(
                 helper,
                 MsgType.ScreenShareFrame,
-                ScreenSharePayloadCodec.Serialize(
-                    new ScreenShareFrameChunkV1
-                    {
-                        SessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value,
-                        FrameId = 1,
-                        Width = 1,
-                        Height = 1,
-                        TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                        Encoding = "jpeg",
-                        ChunkIndex = 0,
-                        ChunkCount = 1,
-                        DataBase64 = Convert.ToBase64String(new byte[] { 0x01 }),
-                    }),
+                CreateScreenShareVideoPayload(sessionId, frameId: 1, data: new byte[] { 0x01 }),
                 sequence: 1);
 
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
@@ -7000,22 +8047,16 @@ public partial class SmokeTests
             await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
 
+            var sessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value;
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
+            await helper.SendScreenShareVideoStreamConfigAsync(CreateScreenShareVideoStreamConfig(sessionId), cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
             var envelope = BuildSecureScreenShareEnvelope(
                 helper,
                 MsgType.ScreenShareFrame,
-                ScreenSharePayloadCodec.Serialize(
-                    new ScreenShareFrameChunkV1
-                    {
-                        SessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value,
-                        FrameId = 1,
-                        Width = 1,
-                        Height = 1,
-                        TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                        Encoding = "jpeg",
-                        ChunkIndex = 0,
-                        ChunkCount = 1,
-                        DataBase64 = Convert.ToBase64String(new byte[] { 0x02 }),
-                    }),
+                CreateScreenShareVideoPayload(sessionId, frameId: 1, data: new byte[] { 0x02 }),
                 sequence: 1);
             var tamperedPayload = envelope.Payload.AsSpan().ToArray();
             tamperedPayload[^1] ^= 0x01;
@@ -7086,20 +8127,14 @@ public partial class SmokeTests
             await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
 
+            var sessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value;
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
+            await helper.SendScreenShareVideoStreamConfigAsync(CreateScreenShareVideoStreamConfig(sessionId), cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
             await helper.SendScreenSharePayloadAsync(
-                ScreenSharePayloadCodec.Serialize(
-                    new ScreenShareFrameChunkV1
-                    {
-                        SessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value,
-                        FrameId = 1,
-                        Width = 1,
-                        Height = 1,
-                        TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                        Encoding = "jpeg",
-                        ChunkIndex = 0,
-                        ChunkCount = 1,
-                        DataBase64 = Convert.ToBase64String(new byte[] { 0x03 }),
-                    }),
+                CreateScreenShareVideoPayload(sessionId, frameId: 1, data: new byte[] { 0x03 }),
                 cts.Token);
             var envelopeBytes = await capturedEnvelope.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
             Assert.True(EnvelopeCodec.TryDeserialize(envelopeBytes, out var envelope));
@@ -7114,6 +8149,174 @@ public partial class SmokeTests
 
             Assert.Equal(1, Volatile.Read(ref frameCount));
             Assert.Equal("screenshare_frame_replay_duplicate", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task NknTransport_ScreenShareFrame_OutOfOrderSecureEnvelopes_WithinReplayWindow_AreAccepted()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.screenshare.reorder.address");
+            var helperClient = new FakeNknClient("helper.screenshare.reorder.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var frameCompleted = new TaskCompletionSource<ScreenShareFrameCompletedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareFrameCompleted += (_, e) => frameCompleted.TrySetResult(e);
+
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(
+                new PeerAddress(host.LocalPeerAddress),
+                out var rawToken,
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var sessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value;
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
+            await helper.SendScreenShareVideoStreamConfigAsync(CreateScreenShareVideoStreamConfig(sessionId), cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var chunkZeroEnvelope = BuildSecureScreenShareEnvelope(
+                helper,
+                MsgType.ScreenShareFrame,
+                CreateScreenShareVideoPayload(
+                    sessionId,
+                    frameId: 7,
+                    data: new byte[] { 0x0A },
+                    fragmentIndex: 0,
+                    fragmentCount: 2,
+                    capturedTsUtcMs: timestamp),
+                sequence: 300);
+            var chunkOneEnvelope = BuildSecureScreenShareEnvelope(
+                helper,
+                MsgType.ScreenShareFrame,
+                CreateScreenShareVideoPayload(
+                    sessionId,
+                    frameId: 7,
+                    data: new byte[] { 0x0B },
+                    fragmentIndex: 1,
+                    fragmentCount: 2,
+                    capturedTsUtcMs: timestamp),
+                sequence: 100);
+
+            InvokeNknIncomingMessage(
+                host,
+                helperClient,
+                new NknIncomingMessage(helperClient.ConnectedMediaAddress, EnvelopeCodec.Serialize(chunkZeroEnvelope), isTopic: false, topic: null, channel: NknBridgeChannel.Media));
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            InvokeNknIncomingMessage(
+                host,
+                helperClient,
+                new NknIncomingMessage(helperClient.ConnectedMediaAddress, EnvelopeCodec.Serialize(chunkOneEnvelope), isTopic: false, topic: null, channel: NknBridgeChannel.Media));
+
+            var completed = await frameCompleted.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            Assert.Equal(7, completed.FrameId);
+            Assert.Equal(new byte[] { 0x0A, 0x0B }, completed.EncodedFrameBytes);
+            Assert.NotEqual("screenshare_frame_replay_stale", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task NknTransport_ScreenShareFrame_TooFarAheadSecureEnvelope_IsRejected()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.screenshare.toofarahead.address");
+            var helperClient = new FakeNknClient("helper.screenshare.toofarahead.address");
+            var hostIdentity = new NknIdentity("host-id", hostClient.Address);
+            var helperIdentity = new NknIdentity("helper-id", helperClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using var helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+
+            var joinRequestRaised = new TaskCompletionSource<IncomingJoinRequestEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var hostApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var helperApproved = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var frameCount = 0;
+
+            host.IncomingJoinRequest += (_, e) => joinRequestRaised.TrySetResult(e);
+            host.Approved += (_, _) => hostApproved.TrySetResult();
+            helper.Approved += (_, _) => helperApproved.TrySetResult();
+            host.ScreenShareFrameCompleted += (_, _) => Interlocked.Increment(ref frameCount);
+
+            await host.HostByAddressAsync(cts.Token);
+            var invite = CreateValidatedInviteForTarget(
+                new PeerAddress(host.LocalPeerAddress),
+                out var rawToken,
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
+
+            var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
+            await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
+            var sessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value;
+            var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
+            await helper.SendScreenShareVideoStreamConfigAsync(CreateScreenShareVideoStreamConfig(sessionId), cts.Token);
+            await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+            var acceptedEnvelope = BuildSecureScreenShareEnvelope(
+                helper,
+                MsgType.ScreenShareFrame,
+                CreateScreenShareVideoPayload(sessionId, frameId: 1, data: new byte[] { 0x01 }),
+                sequence: 1);
+            var tooFarAheadEnvelope = BuildSecureScreenShareEnvelope(
+                helper,
+                MsgType.ScreenShareFrame,
+                CreateScreenShareVideoPayload(sessionId, frameId: 2, data: new byte[] { 0x02 }),
+                sequence: 40000);
+
+            InvokeNknIncomingMessage(
+                host,
+                helperClient,
+                new NknIncomingMessage(helperClient.ConnectedMediaAddress, EnvelopeCodec.Serialize(acceptedEnvelope), isTopic: false, topic: null, channel: NknBridgeChannel.Media));
+            await Task.Delay(150, cts.Token);
+
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+            InvokeNknIncomingMessage(
+                host,
+                helperClient,
+                new NknIncomingMessage(helperClient.ConnectedMediaAddress, EnvelopeCodec.Serialize(tooFarAheadEnvelope), isTopic: false, topic: null, channel: NknBridgeChannel.Media));
+            await Task.Delay(300, cts.Token);
+
+            Assert.Equal(1, Volatile.Read(ref frameCount));
+            Assert.Equal("screenshare_frame_replay_too_far_ahead", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
         }
         finally
         {
@@ -10330,23 +11533,14 @@ public partial class SmokeTests
         await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
         await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
 
+        var sessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value;
+        await helper.SendScreenShareVideoStreamConfigAsync(CreateScreenShareVideoStreamConfig(sessionId), cts.Token);
+
         var securePayload = BuildSecureDevLocalPayload(
             helper,
             SessionSecureMessageFamily.ScreenShare,
             "screenshare_frame",
-            ScreenSharePayloadCodec.Serialize(
-                new ScreenShareFrameChunkV1
-                {
-                    SessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value,
-                    FrameId = 1,
-                    Width = 1,
-                    Height = 1,
-                    TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                    Encoding = "jpeg",
-                    ChunkIndex = 0,
-                    ChunkCount = 1,
-                    DataBase64 = Convert.ToBase64String(new byte[] { 0x04 }),
-                }),
+            CreateScreenShareVideoPayload(sessionId, frameId: 1, data: new byte[] { 0x04 }),
             requestId: null,
             sequence: 1);
         securePayload[^1] ^= 0x01;
@@ -10395,23 +11589,17 @@ public partial class SmokeTests
         await hostApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
         await helperApproved.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
 
+        var sessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value;
+        var streamConfigReceived = new TaskCompletionSource<ScreenShareVideoStreamConfigV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
+        await helper.SendScreenShareVideoStreamConfigAsync(CreateScreenShareVideoStreamConfig(sessionId), cts.Token);
+        await streamConfigReceived.Task.WaitAsync(TimeSpan.FromSeconds(3), cts.Token);
+
         var securePayload = BuildSecureDevLocalPayload(
             helper,
             SessionSecureMessageFamily.ScreenShare,
             "screenshare_frame",
-            ScreenSharePayloadCodec.Serialize(
-                new ScreenShareFrameChunkV1
-                {
-                    SessionId = host.CurrentSessionSecurityState.SessionId!.Value.Value,
-                    FrameId = 1,
-                    Width = 1,
-                    Height = 1,
-                    TimestampUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                    Encoding = "jpeg",
-                    ChunkIndex = 0,
-                    ChunkCount = 1,
-                    DataBase64 = Convert.ToBase64String(new byte[] { 0x05 }),
-                }),
+            CreateScreenShareVideoPayload(sessionId, frameId: 1, data: new byte[] { 0x05 }),
             requestId: null,
             sequence: 1);
 
@@ -11625,6 +12813,7 @@ public partial class SmokeTests
         var approvedState = CreateApprovedSecurityState(helpeeIdentity, verifiedHelperIdentity);
 
         SetPrivateField(helper, "bootstrapHelperIdentity", bootstrapHelperIdentity);
+        SetPrivateField(helper, "bootstrapHelperIdentityIsAuthoritative", false);
         SetPrivateField(helperRuntime, "sessionSecurityState", approvedState);
         SetPrivateField(helperRuntime, "state", SessionRuntimeState.Connected);
         InvokePrivateMethod(helper, "SyncFromRuntime");
@@ -11675,6 +12864,7 @@ public partial class SmokeTests
             var pending = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helper, "ResolveBootstrapHelperIdentityAsync", CancellationToken.None));
             await pending;
             Assert.Equal(string.Empty, helper.HelperIdentityBootstrapText);
+            Assert.False(helper.HasHelperIdentityBootstrapVerificationCode);
 
             await transport.HostByAddressAsync(CancellationToken.None);
 
@@ -11682,9 +12872,11 @@ public partial class SmokeTests
 
             Assert.StartsWith("nlinkh1.", helper.HelperIdentityBootstrapText, StringComparison.Ordinal);
             Assert.NotEqual(separatelyResolvedAddress.Value, helper.HelperIdentityBootstrapText);
+            Assert.True(helper.HasHelperIdentityBootstrapVerificationCode);
             Assert.True(HelperBootstrapQrPayload.TryParse(helper.HelperIdentityBootstrapText, out var parsedBootstrap));
             Assert.NotNull(parsedBootstrap);
             Assert.Equal(authoritativeAddress, parsedBootstrap!.HelperAddress.Value);
+            Assert.False(string.IsNullOrWhiteSpace(parsedBootstrap.HelperId));
         }
         finally
         {
@@ -12838,6 +14030,52 @@ public partial class SmokeTests
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void HelpeePreviewVerificationCode_IsShown_WhenBootstrapPayloadContainsHelperId()
+    {
+        using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+        var transportConfig = CreateNknTestConfig();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+
+        var helperAddress = new PeerAddress("nlink-helper.connect.target");
+        var helperVerificationIdentity = new PeerAddress("nlink-helper.verification.identity");
+        var payload = HelperBootstrapQrPayload.Format(
+            HelperBootstrapPayload.Create(
+                helperAddress,
+                helperId: HelperIdentityTokenCodec.Encode(helperVerificationIdentity)));
+
+        helpee.InviteHelperIdentityInput = payload;
+
+        Assert.True(helpee.HasVerifiedInviteHelperIdentity);
+        Assert.True(helpee.HasVerifiedInviteHelperVerificationCode);
+        Assert.Equal(
+            HelperVerificationCodeFormatter.Format(helperVerificationIdentity),
+            helpee.VerifiedInviteHelperVerificationCode);
+        Assert.Equal(helperVerificationIdentity.Value, helpee.VerifiedInviteTechnicalHelperIdentityText);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void HelpeePreviewVerificationCode_IsHidden_WhenBootstrapPayloadHasNoHelperId()
+    {
+        using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+        var transportConfig = CreateNknTestConfig();
+        using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, transportConfig, helpeeRuntime);
+
+        var helperAddress = new PeerAddress("nlink-helper.connect.target.noid");
+        var payload = HelperBootstrapQrPayload.Format(HelperBootstrapPayload.Create(helperAddress));
+
+        helpee.InviteHelperIdentityInput = payload;
+
+        Assert.True(helpee.HasVerifiedInviteHelperIdentity);
+        Assert.False(helpee.HasVerifiedInviteHelperVerificationCode);
+        Assert.Equal(string.Empty, helpee.VerifiedInviteHelperVerificationCode);
+        Assert.Equal(helperAddress.Value, helpee.VerifiedInviteTechnicalHelperIdentityText);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public void HelperVerificationCode_IsHiddenUntilStableSessionSecurityHelperIdentityExists()
     {
         var transportConfig = CreateDevLocalTestConfig();
@@ -12866,7 +14104,7 @@ public partial class SmokeTests
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public void HelperHeaderVerificationCode_StaysPinnedToBootstrapIdentity_WhileConnecting()
+    public void HelperHeaderVerificationCode_IsHidden_WhileConnecting_WhenBootstrapIdentityIsNotAuthoritative()
     {
         using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
         var transportConfig = CreateNknTestConfig();
@@ -12887,6 +14125,7 @@ public partial class SmokeTests
                 stableSessionHelperIdentity,
                 inviteValidated: true));
         SetPrivateField(helper, "bootstrapHelperIdentity", bootstrapHelperIdentity);
+        SetPrivateField(helper, "bootstrapHelperIdentityIsAuthoritative", false);
 
         var invite = CreateValidatedInviteForTarget(
             new PeerAddress("helpee.preview.target"),
@@ -12896,20 +14135,16 @@ public partial class SmokeTests
         helper.CodeInput = rawToken;
         SetPrivateField(helper, "effectivePhase", SessionUiPhase.Connecting);
 
-        var expected = HelperVerificationCodeFormatter.Format(bootstrapHelperIdentity);
-        var unexpectedPreview = HelperVerificationCodeFormatter.Format(boundHelperIdentity);
-        var unexpectedSession = HelperVerificationCodeFormatter.Format(stableSessionHelperIdentity);
+        var expected = HelperVerificationCodeFormatter.Format(stableSessionHelperIdentity);
 
         Assert.Equal(boundHelperIdentity, invite.BoundHelperAddress);
         Assert.True(helper.ShowHeaderVerificationCode);
         Assert.Equal(expected, helper.HeaderVerificationCodeText);
-        Assert.NotEqual(unexpectedPreview, helper.HeaderVerificationCodeText);
-        Assert.NotEqual(unexpectedSession, helper.HeaderVerificationCodeText);
     }
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public void HelperHeaderVerificationCode_RevertsToStableHelperIdentity_WhenConnectionFails()
+    public void HelperHeaderVerificationCode_IsHidden_WhenConnectionFails_WithoutAuthoritativeBootstrapIdentity()
     {
         var transportConfig = CreateDevLocalTestConfig();
         using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
@@ -12929,6 +14164,7 @@ public partial class SmokeTests
                 stableSessionHelperIdentity,
                 inviteValidated: true));
         SetPrivateField(helper, "bootstrapHelperIdentity", bootstrapHelperIdentity);
+        SetPrivateField(helper, "bootstrapHelperIdentityIsAuthoritative", false);
 
         _ = CreateValidatedInviteForTarget(
             new PeerAddress("helpee.preview.target"),
@@ -12938,19 +14174,15 @@ public partial class SmokeTests
         helper.CodeInput = rawToken;
         SetPrivateField(helper, "effectivePhase", SessionUiPhase.Failed);
 
-        var expectedStable = HelperVerificationCodeFormatter.Format(bootstrapHelperIdentity);
-        var expectedPreview = HelperVerificationCodeFormatter.Format(boundHelperIdentity);
-        var unexpectedSession = HelperVerificationCodeFormatter.Format(stableSessionHelperIdentity);
+        var expected = HelperVerificationCodeFormatter.Format(stableSessionHelperIdentity);
 
         Assert.True(helper.ShowHeaderVerificationCode);
-        Assert.Equal(expectedStable, helper.HeaderVerificationCodeText);
-        Assert.NotEqual(expectedPreview, helper.HeaderVerificationCodeText);
-        Assert.NotEqual(unexpectedSession, helper.HeaderVerificationCodeText);
+        Assert.Equal(expected, helper.HeaderVerificationCodeText);
     }
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public void HelperFirstPillVerificationCode_StaysPinnedToBootstrapIdentity_WhileConnecting()
+    public void HelperFirstPillVerificationCode_IsHidden_WhileConnecting_WhenBootstrapIdentityIsNotAuthoritative()
     {
         using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
         var transportConfig = CreateNknTestConfig();
@@ -12961,18 +14193,16 @@ public partial class SmokeTests
 
         SetPrivateField(helperRuntime, "transport", new ScriptedSignalingTransport(localPeerAddress: "nlink-runtime.local.identity"));
         SetPrivateField(helper, "bootstrapHelperIdentity", bootstrapHelperIdentity);
+        SetPrivateField(helper, "bootstrapHelperIdentityIsAuthoritative", false);
         SetPrivateField(helper, "effectivePhase", SessionUiPhase.Connecting);
 
-        var expected = HelperVerificationCodeFormatter.Format(bootstrapHelperIdentity);
-        var unexpected = HelperVerificationCodeFormatter.Format(new PeerAddress("nlink-runtime.local.identity"));
-
-        Assert.Equal(expected, helper.FirstPillVerificationCodeText);
-        Assert.NotEqual(unexpected, helper.FirstPillVerificationCodeText);
+        Assert.Equal(string.Empty, helper.FirstPillVerificationCodeText);
+        Assert.False(helper.ShowFirstPillVerificationCode);
     }
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task HelperFirstPillVerificationCode_DoesNotFlip_WhenLateBootstrapResolutionReturnsDifferentIdentity()
+    public async Task HelperFirstPillVerificationCode_RemainsHidden_WhenLateBootstrapResolutionReturnsNonAuthoritativeIdentity()
     {
         using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
         var transportConfig = CreateNknTestConfig();
@@ -12989,18 +14219,16 @@ public partial class SmokeTests
         var lateResolvedIdentity = new PeerAddress("nlink-late.resolved.identity");
 
         SetPrivateField(helper, "bootstrapHelperIdentity", bootstrapHelperIdentity);
+        SetPrivateField(helper, "bootstrapHelperIdentityIsAuthoritative", false);
         SetPrivateField(helper, "effectivePhase", SessionUiPhase.Connecting);
-
-        var expected = HelperVerificationCodeFormatter.Format(bootstrapHelperIdentity);
-        var unexpected = HelperVerificationCodeFormatter.Format(lateResolvedIdentity);
 
         var pending = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helper, "ResolveBootstrapHelperIdentityAsync", CancellationToken.None));
         SetPrivateField(helper, "bootstrapHelperIdentityResolutionTask", pending);
         bootstrapResolution.SetResult(lateResolvedIdentity);
         await pending;
 
-        Assert.Equal(expected, helper.FirstPillVerificationCodeText);
-        Assert.NotEqual(unexpected, helper.FirstPillVerificationCodeText);
+        Assert.Equal(string.Empty, helper.FirstPillVerificationCodeText);
+        Assert.False(helper.ShowFirstPillVerificationCode);
     }
 
     [Trait("Category", "LegacySmoke")]
@@ -15395,7 +16623,7 @@ return;
         var nodeFileName = OperatingSystem.IsWindows() ? "node.exe" : "node";
         File.WriteAllText(Path.Combine(bridgeRoot, "index.js"), "// fake");
         File.WriteAllText(Path.Combine(bridgeRoot, nodeFileName), "fake");
-        Directory.CreateDirectory(Path.Combine(bridgeRoot, "node_modules"));
+        File.WriteAllText(Path.Combine(bridgeRoot, "package.json"), "{\"name\":\"fake-bridge\",\"version\":\"1.0.0\"}");
     }
 
     private static string BuildMockBridgeScript(int delayPongMs, bool respondToPing, bool respondToShutdown = true)
@@ -15691,6 +16919,48 @@ rl.on('line', (line) => {
 
         Assert.NotNull(method);
         method!.Invoke(transport, new object?[] { senderClient, message });
+    }
+
+    private static ScreenShareVideoStreamConfigV1 CreateScreenShareVideoStreamConfig(string sessionId, long streamEpoch = 1)
+    {
+        return new ScreenShareVideoStreamConfigV1
+        {
+            SessionId = sessionId,
+            StreamEpoch = streamEpoch,
+            Encoding = "h264",
+            CodecProfile = "baseline",
+            DecoderConfigData = new byte[] { 1, 2, 3 },
+            DisplayInfoRevision = 0,
+        };
+    }
+
+    private static byte[] CreateScreenShareVideoPayload(
+        string sessionId,
+        long frameId,
+        byte[] data,
+        long streamEpoch = 1,
+        int width = 1,
+        int height = 1,
+        int fragmentIndex = 0,
+        int fragmentCount = 1,
+        long? capturedTsUtcMs = null,
+        bool isKeyFrame = true)
+    {
+        return ScreenShareVideoPayloadCodec.SerializeFragment(
+            new ScreenShareVideoFragmentV1
+            {
+                SessionId = sessionId,
+                StreamEpoch = streamEpoch,
+                FrameId = frameId,
+                CapturedTsUtcMs = capturedTsUtcMs ?? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                Width = width,
+                Height = height,
+                Encoding = "h264",
+                IsKeyFrame = isKeyFrame,
+                FragmentIndex = fragmentIndex,
+                FragmentCount = fragmentCount,
+                Data = data,
+            });
     }
 
     private static Envelope BuildSecureLifecycleEnvelope(
@@ -16390,6 +17660,26 @@ rl.on('line', (line) => {
             currentSessionSecurityState = nextState;
             SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(nextState));
         }
+
+        public void InjectIncomingControlRequest(ControlRequestMessageV1 message, string? peerId)
+        {
+            RemoteControlRequestReceived?.Invoke(this, new RemoteControlRequestReceivedEventArgs(message, peerId));
+        }
+
+        public void InjectIncomingControlResponse(ControlResponseMessageV1 message, string? peerId)
+        {
+            RemoteControlResponseReceived?.Invoke(this, new RemoteControlResponseReceivedEventArgs(message, peerId));
+        }
+
+        public void InjectIncomingControlStart(ControlStartMessageV1 message, string? peerId)
+        {
+            RemoteControlStartReceived?.Invoke(this, new RemoteControlStartReceivedEventArgs(message, peerId));
+        }
+
+        public void InjectIncomingControlStop(ControlStopMessageV1 message, string? peerId)
+        {
+            RemoteControlStopReceived?.Invoke(this, new RemoteControlStopReceivedEventArgs(message, peerId));
+        }
     }
 
     private sealed class NoOpQrCodeService : IQrCodeService
@@ -16470,6 +17760,39 @@ rl.on('line', (line) => {
 
             throw new InvalidOperationException("No pending delay task to complete.");
         }
+    }
+
+    private static ScreenShareFrameSendPipeline CreateControlledScreenShareFrameSendPipeline(
+        Func<ScreenShareEncodedFramePacket, CancellationToken, Task<int>> sendFrameAsync,
+        IScreenShareClock clock,
+        ControlledDelayScheduler delayScheduler,
+        int capacity = ScreenShareFrameSendPipeline.MaxBufferedFrames,
+        int maxFramesPerSecond = 5)
+    {
+        var constructor = typeof(ScreenShareFrameSendPipeline).GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            new[]
+            {
+                typeof(Func<ScreenShareEncodedFramePacket, CancellationToken, Task<int>>),
+                typeof(int),
+                typeof(IScreenShareClock),
+                typeof(int),
+                typeof(Func<TimeSpan, CancellationToken, Task>),
+            },
+            modifiers: null);
+
+        Assert.NotNull(constructor);
+
+        return (ScreenShareFrameSendPipeline)constructor!.Invoke(
+            new object[]
+            {
+                sendFrameAsync,
+                capacity,
+                clock,
+                maxFramesPerSecond,
+                new Func<TimeSpan, CancellationToken, Task>(delayScheduler.DelayAsync),
+            });
     }
 
     private sealed class FakeScreenShareClock : IScreenShareClock

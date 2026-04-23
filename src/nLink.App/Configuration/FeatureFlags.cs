@@ -27,6 +27,15 @@ public static class FeatureFlags
     public static bool EnableScreenShareTransport { get; } =
         ReadBoolEnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT", defaultValue: true);
 
+    public static bool ScreenShareH264InfrastructureEnabled => true;
+
+    public static bool ScreenShareH264DecodeEnabled => true;
+
+    public static bool ScreenShareH264PreviewEnabled => true;
+
+    public static bool ScreenShareDeepDiagnostics =>
+        ReadBoolEnvironmentOverride("NLINK_FEATURE_SCREENCAP_DEEP_DIAGNOSTICS", defaultValue: false);
+
     public static int ScreenShareMaxFps =>
         ReadIntEnvironmentOverride("NLINK_FEATURE_SCREENCAP_MAX_FPS", defaultValue: 15, minValue: 1, maxValue: 30);
 
@@ -38,9 +47,6 @@ public static class FeatureFlags
 
     public static double ScreenShareScale =>
         ReadDoubleEnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCALE", defaultValue: 1d, minValue: 0.25d, maxValue: 1d);
-
-    public static long ScreenShareJpegQuality =>
-        ReadIntEnvironmentOverride("NLINK_FEATURE_SCREENCAP_JPEG_QUALITY", defaultValue: 75, minValue: 30, maxValue: 80);
 
     public static bool EnableSessionHeader { get; } =
         ReadBoolEnvironmentOverride("NLINK_FEATURE_SESSION_HEADER", defaultValue: true);

@@ -13,8 +13,9 @@ public sealed class SessionReplayWindow
 {
     private readonly int windowSize;
     private readonly long maxForwardAdvance;
-    private readonly HashSet<long> acceptedSequences = [];
+    private readonly long[] trackedSequences;
     private long highestAcceptedSequence;
+    private int trackedSequenceCount;
     private bool hasHighestSequence;
 
     public SessionReplayWindow(int windowSize = 128, long maxForwardAdvance = 4096)
@@ -31,6 +32,7 @@ public sealed class SessionReplayWindow
 
         this.windowSize = windowSize;
         this.maxForwardAdvance = maxForwardAdvance;
+        trackedSequences = new long[windowSize];
     }
 
     public int WindowSize => windowSize;
@@ -41,7 +43,11 @@ public sealed class SessionReplayWindow
 
     public long HighestAcceptedSequence => highestAcceptedSequence;
 
-    public int TrackedSequenceCount => acceptedSequences.Count;
+    public long LowestAcceptedSequence => !hasHighestSequence
+        ? 0
+        : Math.Max(1, highestAcceptedSequence - windowSize + 1);
+
+    public int TrackedSequenceCount => trackedSequenceCount;
 
     public SessionReplaySequenceResult EvaluateAndTrack(long sequence)
     {
@@ -54,7 +60,7 @@ public sealed class SessionReplayWindow
         {
             hasHighestSequence = true;
             highestAcceptedSequence = sequence;
-            acceptedSequences.Add(sequence);
+            TrackAcceptedSequence(sequence);
             return SessionReplaySequenceResult.Accepted;
         }
 
@@ -65,43 +71,91 @@ public sealed class SessionReplayWindow
                 return SessionReplaySequenceResult.TooFarAhead;
             }
 
+            AdvanceWindow(sequence);
             highestAcceptedSequence = sequence;
-            PruneOldSequences();
-            acceptedSequences.Add(sequence);
+            TrackAcceptedSequence(sequence);
             return SessionReplaySequenceResult.Accepted;
         }
 
-        var minimumAcceptedSequence = highestAcceptedSequence - windowSize + 1;
+        var minimumAcceptedSequence = LowestAcceptedSequence;
         if (sequence < minimumAcceptedSequence)
         {
             return SessionReplaySequenceResult.Stale;
         }
 
-        if (!acceptedSequences.Add(sequence))
+        if (IsTracked(sequence))
         {
             return SessionReplaySequenceResult.Duplicate;
         }
 
+        TrackAcceptedSequence(sequence);
         return SessionReplaySequenceResult.Accepted;
     }
 
     public void Reset()
     {
-        acceptedSequences.Clear();
+        Array.Clear(trackedSequences);
         highestAcceptedSequence = 0;
+        trackedSequenceCount = 0;
         hasHighestSequence = false;
     }
 
-    private void PruneOldSequences()
+    private void AdvanceWindow(long nextHighestSequence)
     {
-        var minimumAcceptedSequence = highestAcceptedSequence - windowSize + 1;
-        foreach (var acceptedSequence in acceptedSequences.ToArray())
+        var delta = nextHighestSequence - highestAcceptedSequence;
+        if (delta >= windowSize)
         {
-            if (acceptedSequence < minimumAcceptedSequence)
-            {
-                acceptedSequences.Remove(acceptedSequence);
-            }
+            Array.Clear(trackedSequences);
+            trackedSequenceCount = 0;
+            return;
         }
+
+        for (var sequence = highestAcceptedSequence + 1; sequence <= nextHighestSequence; sequence++)
+        {
+            ClearTrackedSlot(sequence);
+        }
+    }
+
+    private bool IsTracked(long sequence)
+    {
+        return trackedSequences[GetSlotIndex(sequence)] == sequence;
+    }
+
+    private void TrackAcceptedSequence(long sequence)
+    {
+        var index = GetSlotIndex(sequence);
+        if (trackedSequences[index] == sequence)
+        {
+            return;
+        }
+
+        if (trackedSequences[index] == 0)
+        {
+            trackedSequenceCount++;
+        }
+
+        trackedSequences[index] = sequence;
+    }
+
+    private void ClearTrackedSlot(long sequence)
+    {
+        var index = GetSlotIndex(sequence);
+        if (trackedSequences[index] != 0)
+        {
+            trackedSequences[index] = 0;
+            trackedSequenceCount = Math.Max(0, trackedSequenceCount - 1);
+        }
+    }
+
+    private int GetSlotIndex(long sequence)
+    {
+        var index = sequence % windowSize;
+        if (index < 0)
+        {
+            index += windowSize;
+        }
+
+        return (int)index;
     }
 }
 

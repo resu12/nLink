@@ -44,3 +44,22 @@ On shutdown it:
 4. Verifies metrics stabilize before reporting success
 
 Use this for 5–10 minute stability validation before release or after screenshare pipeline changes.
+
+## Retained Track B Closeout Evidence
+
+The retained Track B analyzer chain is kept as closeout evidence for the parked local runtime boundary, not as the default invitation to continue Track B experimentation in normal repo work.
+
+Keep and use these analyzers together when validating the final local screenshare boundary:
+
+- `Analyze-ScreenShareLatencyRegression.ps1`
+- `Analyze-ScreenShareHelperUpstreamLatency.ps1`
+- `Analyze-ScreenShareHelperReadyPath.ps1`
+- `Analyze-ScreenShareHelperReceivePath.ps1`
+- `Analyze-ScreenShareHelperBridgeIngress.ps1`
+- `Analyze-ScreenShareHelperNknReceive.ps1`
+- `Analyze-ScreenShareHelperWsReceive.ps1`
+- `Analyze-ScreenShareHelperSocketReceive.ps1`
+- `Analyze-ScreenShareExternalDelivery.ps1`
+- `Analyze-ScreenShareExternalTransportHealth.ps1`
+
+These scripts preserve the proof chain that the remaining latency after local Track B work was external to the repo-owned runtime path. If future work revisits that conclusion, do it from a new explicit plan rather than by extending the old Track B investigation line by default.

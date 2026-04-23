@@ -587,6 +587,8 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        var envelopeParsedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
         NknRuntimeDiagnostics.SetLastEnvelopeType(env.Type.ToString());
 
         if (env.Type != MsgType.JoinRequest &&
@@ -622,7 +624,21 @@ public sealed partial class NknSignalingTransport
 
         try
         {
-            envelopeRouter.RouteInboundMessage(e.Source, e.Channel, env);
+            envelopeRouter.RouteInboundMessage(
+                new NknInboundEnvelopeContext(
+                    e.Source,
+                    e.Channel,
+                    env,
+                    e.BridgeIngressObservedUtcMs,
+                    envelopeParsedUtcMs,
+                    e.BridgeMessageObservedUtcMs,
+                    e.BinaryFrameDecodedUtcMs,
+                    e.SocketDataEventEmittedUtcMs,
+                    e.WsReceiverWriteEnteredUtcMs,
+                    e.WsMessageEmittedUtcMs,
+                    e.SdkHandleMsgEnteredUtcMs,
+                    e.ClientMessageDispatchUtcMs,
+                    e.MultiClientMessageDispatchUtcMs));
         }
         catch (Exception ex)
         {
@@ -676,23 +692,35 @@ public sealed partial class NknSignalingTransport
             case MsgType.ControlDisplayInfo:
                 HandleControlDisplayInfo(source, env);
                 break;
+            case MsgType.ScreenSharePressureState:
+                HandleScreenSharePressureState(source, env);
+                break;
+            case MsgType.ScreenShareVideoStreamConfig:
+                HandleScreenShareVideoStreamConfig(source, env);
+                break;
+            case MsgType.ScreenShareVideoKeyframeRequest:
+                HandleScreenShareVideoKeyframeRequest(source, env);
+                break;
+            case MsgType.ScreenShareRecoveryReceipt:
+                HandleScreenShareRecoveryReceipt(source, env);
+                break;
             default:
                 throw new InvalidOperationException($"Control channel cannot route {env.Type}.");
         }
     }
 
-    internal void RouteScreenShareEnvelope(string source, Envelope env)
+    internal void RouteScreenShareEnvelope(NknInboundEnvelopeContext inboundContext)
     {
-        switch (env.Type)
+        switch (inboundContext.Envelope.Type)
         {
             case MsgType.ScreenShareFrame:
-                HandleScreenShareFrame(source, env);
+                HandleScreenShareFrame(inboundContext);
                 break;
             case MsgType.ScreenShareStop:
-                HandleScreenShareStop(source, env);
+                HandleScreenShareStop(inboundContext.Source, inboundContext.Envelope);
                 break;
             default:
-                throw new InvalidOperationException($"Screen share channel cannot route {env.Type}.");
+                throw new InvalidOperationException($"Screen share channel cannot route {inboundContext.Envelope.Type}.");
         }
     }
 
@@ -2049,6 +2077,132 @@ public sealed partial class NknSignalingTransport
         RemoteControlDisplayInfoReceived?.Invoke(this, new RemoteControlDisplayInfoReceivedEventArgs(displayInfo, source));
     }
 
+    private void HandleScreenSharePressureState(string source, Envelope env)
+    {
+        if (!TryDecryptControlPayload(source, env, MsgType.ScreenSharePressureState, out var securePayload))
+        {
+            return;
+        }
+
+        if (!ScreenSharePressureStateCodec.TryDeserialize(securePayload.Plaintext, out var message))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_pressure_state_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("screenshare_pressure_state_payload_invalid");
+            Log($"ScreenSharePressureState payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlSecureMetadata("screenshare_pressure_state", securePayload.Metadata, requestId: null, env.MessageId) ||
+            !TryValidateScreenShareMessageSession(
+                "screenshare_pressure_state",
+                message.SessionId,
+                env.MessageId,
+                requestId: null,
+                source) ||
+            !TryValidateScreenShareSession("pressure_state", message.SessionId))
+        {
+            return;
+        }
+
+        ScreenSharePressureStateReceived?.Invoke(this, new ScreenSharePressureStateReceivedEventArgs(message, source));
+    }
+
+    private void HandleScreenShareVideoStreamConfig(string source, Envelope env)
+    {
+        if (!TryDecryptControlPayload(source, env, MsgType.ScreenShareVideoStreamConfig, out var securePayload))
+        {
+            return;
+        }
+
+        if (!ScreenShareVideoPayloadCodec.TryDeserializeStreamConfig(securePayload.Plaintext, out var message))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_video_stream_config_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("screenshare_video_stream_config_payload_invalid");
+            Log($"ScreenShareVideoStreamConfig payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlSecureMetadata("screenshare_video_stream_config", securePayload.Metadata, requestId: null, env.MessageId) ||
+            !TryValidateScreenShareMessageSession(
+                "screenshare_video_stream_config",
+                message.SessionId,
+                env.MessageId,
+                requestId: null,
+                source) ||
+            !TryValidateScreenShareSession("stream_config", message.SessionId))
+        {
+            return;
+        }
+
+        secureScreenShareFrameReassembler.OnStreamConfig(message);
+        NknRuntimeDiagnostics.SetMediaPlaneGeneration(Math.Max(0, message.StreamEpoch));
+        NknRuntimeDiagnostics.SetMediaPlaneAttached(true);
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_video_stream_config_received; session_id={message.SessionId}; stream_epoch={Math.Max(0, message.StreamEpoch)}; source={source}; config_bytes={message.DecoderConfigData?.Length ?? 0}; encoding={message.Encoding}; codec_profile={message.CodecProfile}");
+        ScreenShareVideoStreamConfigReceived?.Invoke(this, new ScreenShareVideoStreamConfigReceivedEventArgs(message, source));
+    }
+
+    private void HandleScreenShareVideoKeyframeRequest(string source, Envelope env)
+    {
+        if (!TryDecryptControlPayload(source, env, MsgType.ScreenShareVideoKeyframeRequest, out var securePayload))
+        {
+            return;
+        }
+
+        if (!ScreenShareVideoKeyframeRequestCodec.TryDeserialize(securePayload.Plaintext, out var message))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_video_keyframe_request_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("screenshare_video_keyframe_request_payload_invalid");
+            Log($"ScreenShareVideoKeyframeRequest payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlSecureMetadata("screenshare_video_keyframe_request", securePayload.Metadata, requestId: null, env.MessageId) ||
+            !TryValidateScreenShareMessageSession(
+                "screenshare_video_keyframe_request",
+                message.SessionId,
+                env.MessageId,
+                requestId: null,
+                source) ||
+            !TryValidateScreenShareSession("keyframe_request", message.SessionId))
+        {
+            return;
+        }
+
+        ScreenShareVideoKeyframeRequestReceived?.Invoke(this, new ScreenShareVideoKeyframeRequestReceivedEventArgs(message, source));
+    }
+
+    private void HandleScreenShareRecoveryReceipt(string source, Envelope env)
+    {
+        if (!TryDecryptControlPayload(source, env, MsgType.ScreenShareRecoveryReceipt, out var securePayload))
+        {
+            return;
+        }
+
+        if (!ScreenShareRecoveryReceiptCodec.TryDeserialize(securePayload.Plaintext, out var message))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_recovery_receipt_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("screenshare_recovery_receipt_payload_invalid");
+            Log($"ScreenShareRecoveryReceipt payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlSecureMetadata("screenshare_recovery_receipt", securePayload.Metadata, requestId: null, env.MessageId) ||
+            !TryValidateScreenShareMessageSession(
+                "screenshare_recovery_receipt",
+                message.SessionId,
+                env.MessageId,
+                requestId: null,
+                source) ||
+            !TryValidateScreenShareSession("recovery_receipt", message.SessionId))
+        {
+            return;
+        }
+
+        ScreenShareRecoveryReceiptReceived?.Invoke(this, new ScreenShareRecoveryReceiptReceivedEventArgs(message, source));
+    }
+
     private bool TryValidateControlMessageSession(
         string messageType,
         string? messageSessionId,
@@ -2105,9 +2259,9 @@ public sealed partial class NknSignalingTransport
         string? source)
     {
         var expectedSessionId = currentSessionSecurityState.SessionId?.Value;
-        var expectedSource = string.Equals(messageType, "screenshare_stop", StringComparison.Ordinal)
-            ? ResolveExpectedRemotePeerAddressForCurrentSession()
-            : ResolveExpectedRemoteMediaPeerAddressForCurrentSession();
+        var expectedSource = string.Equals(messageType, "screenshare_frame", StringComparison.Ordinal)
+            ? ResolveExpectedRemoteScreenShareFrameSourcesForLog()
+            : ResolveExpectedRemotePeerAddressForCurrentSession();
         var normalizedMessageSessionId = string.IsNullOrWhiteSpace(messageSessionId) ? null : messageSessionId.Trim();
         var normalizedSource = string.IsNullOrWhiteSpace(source) ? null : source.Trim();
         string failureReason;
@@ -2128,6 +2282,17 @@ public sealed partial class NknSignalingTransport
         {
             failureReason = "missing_source_identity";
         }
+        else if (string.Equals(messageType, "screenshare_frame", StringComparison.Ordinal))
+        {
+            if (!MatchesExpectedRemoteScreenShareFrameSource(normalizedSource))
+            {
+                failureReason = "source_identity_mismatch";
+            }
+            else
+            {
+                return true;
+            }
+        }
         else if (!string.IsNullOrWhiteSpace(expectedSource) &&
                  !AddressMatchesForSessionPolicy(normalizedSource, expectedSource))
         {
@@ -2140,11 +2305,66 @@ public sealed partial class NknSignalingTransport
 
         NknRuntimeDiagnostics.SetLastError($"{messageType}_{failureReason}");
         NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageType}_{failureReason}");
+        if (string.Equals(messageType, "screenshare_frame", StringComparison.Ordinal))
+        {
+            NknRuntimeDiagnostics.IncrementMediaPlaneSessionMismatchRejectCount();
+            NknRuntimeDiagnostics.SetLastMediaPlaneRejectReason(failureReason);
+        }
+
         LocalOperationalLog.Warn(
             "SessionSecurity",
             $"event=screen_share_message_rejected; message_type={messageType}; reason={failureReason}; session_id={normalizedMessageSessionId ?? "(none)"}; source={normalizedSource ?? "(none)"}; expected_source={expectedSource ?? "(none)"}; request_id={requestId ?? "(none)"}; msg_id={messageId}");
         Log($"ScreenShare message rejected (type={messageType}, msg_id={messageId}, request_id={requestId ?? "(none)"}, reason={failureReason})");
         return false;
+    }
+
+    private bool MatchesExpectedRemoteScreenShareFrameSource(string? source)
+    {
+        if (string.IsNullOrWhiteSpace(source))
+        {
+            return false;
+        }
+
+        var normalizedSource = source.Trim();
+
+        var expectedMediaSource = ResolveExpectedRemoteMediaPeerAddressForCurrentSession();
+        if (!string.IsNullOrWhiteSpace(expectedMediaSource))
+        {
+            var normalizedExpectedMediaSource = expectedMediaSource.Trim();
+            if (string.Equals(normalizedSource, normalizedExpectedMediaSource, StringComparison.Ordinal) ||
+                AddressMatchesForSessionPolicy(normalizedSource, normalizedExpectedMediaSource))
+            {
+                return true;
+            }
+        }
+
+        var expectedControlSource = ResolveExpectedRemotePeerAddressForCurrentSession();
+        if (string.IsNullOrWhiteSpace(expectedControlSource))
+        {
+            return false;
+        }
+
+        var normalizedExpectedControlSource = expectedControlSource.Trim();
+        return string.Equals(normalizedSource, normalizedExpectedControlSource, StringComparison.Ordinal) ||
+               AddressMatchesForSessionPolicy(normalizedSource, normalizedExpectedControlSource);
+    }
+
+    private string? ResolveExpectedRemoteScreenShareFrameSourcesForLog()
+    {
+        var expectedMediaSource = ResolveExpectedRemoteMediaPeerAddressForCurrentSession();
+        var expectedControlSource = ResolveExpectedRemotePeerAddressForCurrentSession();
+        if (string.IsNullOrWhiteSpace(expectedMediaSource))
+        {
+            return expectedControlSource;
+        }
+
+        if (string.IsNullOrWhiteSpace(expectedControlSource) ||
+            string.Equals(expectedMediaSource, expectedControlSource, StringComparison.Ordinal))
+        {
+            return expectedMediaSource;
+        }
+
+        return $"{expectedMediaSource}|{expectedControlSource}";
     }
 
     private byte[] CreateSecureControlPayload(MsgType messageType, string? requestId, byte[] plaintextPayload)
@@ -2481,9 +2701,20 @@ public sealed partial class NknSignalingTransport
         }
 
         SessionReplaySequenceResult replay;
+        var replayWindowSize = 0;
+        var replayHighestSequence = 0L;
+        var replayLowestSequence = 0L;
+        var replaySequenceDeltaFromHighest = 0L;
         lock (controlSecureStateGate)
         {
             replay = inboundScreenShareReplayWindow.EvaluateAndTrack(securePayload.Metadata.Sequence);
+            replayWindowSize = inboundScreenShareReplayWindow.WindowSize;
+            if (inboundScreenShareReplayWindow.HasHighestSequence)
+            {
+                replayHighestSequence = inboundScreenShareReplayWindow.HighestAcceptedSequence;
+                replayLowestSequence = inboundScreenShareReplayWindow.LowestAcceptedSequence;
+                replaySequenceDeltaFromHighest = securePayload.Metadata.Sequence - replayHighestSequence;
+            }
         }
 
         if (replay != SessionReplaySequenceResult.Accepted)
@@ -2497,10 +2728,12 @@ public sealed partial class NknSignalingTransport
             };
             NknRuntimeDiagnostics.SetLastError($"{MapSecureScreenShareMessageType(messageType)}_{replayReason}");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureScreenShareMessageType(messageType)}_{replayReason}");
+            NknRuntimeDiagnostics.SetLastMediaPlaneRejectReason(replayReason);
+            NknRuntimeDiagnostics.IncrementMediaPlaneReplayRejectCount();
             LocalOperationalLog.Warn(
                 "SessionSecurity",
-                $"event=screen_share_message_rejected; message_type={MapSecureScreenShareMessageType(messageType)}; reason={replayReason}; session_id={sessionId.Value}; source={source ?? "(none)"}; sequence={securePayload.Metadata.Sequence}; msg_id={env.MessageId}");
-            Log($"ScreenShare secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason={replayReason}, seq={securePayload.Metadata.Sequence})");
+                $"event=screen_share_message_rejected; message_type={MapSecureScreenShareMessageType(messageType)}; reason={replayReason}; session_id={sessionId.Value}; source={source ?? "(none)"}; sequence={securePayload.Metadata.Sequence}; msg_id={env.MessageId}; window_size={replayWindowSize}; highest_sequence={replayHighestSequence}; lowest_sequence={replayLowestSequence}; sequence_delta_from_highest={replaySequenceDeltaFromHighest}");
+            Log($"ScreenShare secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason={replayReason}, seq={securePayload.Metadata.Sequence}, window={replayWindowSize}, highest={replayHighestSequence}, lowest={replayLowestSequence}, delta={replaySequenceDeltaFromHighest})");
             return false;
         }
 
@@ -3091,6 +3324,10 @@ public sealed partial class NknSignalingTransport
             MsgType.ControlAck => "control_ack",
             MsgType.ControlStateSnapshot => "control_state_snapshot",
             MsgType.ControlDisplayInfo => "control_display_info",
+            MsgType.ScreenSharePressureState => "screenshare_pressure_state",
+            MsgType.ScreenShareVideoStreamConfig => "screenshare_video_stream_config",
+            MsgType.ScreenShareVideoKeyframeRequest => "screenshare_video_keyframe_request",
+            MsgType.ScreenShareRecoveryReceipt => "screenshare_recovery_receipt",
             _ => throw new ArgumentOutOfRangeException(nameof(messageType), messageType, "Unsupported secure control message type."),
         };
     }

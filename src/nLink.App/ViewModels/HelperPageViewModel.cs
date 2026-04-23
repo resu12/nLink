@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -104,11 +105,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool isChatInputEnabled;
     private bool controlModeEnabled;
     private SessionUiPhase effectivePhase;
-    private bool wasConnected;
     private bool localEndCommandInFlight;
     private DateTimeOffset endSessionGuardUntilUtc = DateTimeOffset.MinValue;
     private CancellationTokenSource? connectCts;
     private Task? bootstrapHelperIdentityResolutionTask;
+    private string lastPublishedHelperBootstrapSnapshotKey = string.Empty;
     private readonly InlineTransientText copyFeedback = new();
     private readonly Func<DateTimeOffset> nowProvider;
     private readonly TimeSpan connectFailureCooldown;
@@ -120,6 +121,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool lastKnownShowRemoteScreenShareFrame;
     private bool lastKnownShowHelperMainContent = true;
     private string lastKnownHeaderStatusText = "Ready";
+    private string lastKnownScreenShareViewerMessage = string.Empty;
+    private bool lastKnownShowScreenShareViewerError;
+    private bool helperRemoteSurfaceVisibleLogged;
     private int remoteControlDebugMouseMovesPerSecond;
     private int remoteControlDebugMouseMovesInWindow;
     private long remoteControlDebugMouseMoveWindowStartTickMs;
@@ -145,6 +149,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private string lastConversationSessionId = string.Empty;
     private bool suppressRetryActionForReturnToWaiting;
     private bool helperListenerReturnToWaitingRequested;
+    private string lastHelperBootstrapQrPayload = string.Empty;
 
     public HelperPageViewModel(
         Action cancelAction,
@@ -183,7 +188,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         this.connectFailureCooldown = connectFailureCooldown ?? DefaultConnectFailureCooldown;
         this.nowProvider = nowProvider ?? (() => DateTimeOffset.UtcNow);
         lastObservedUiPhase = uiStateStore?.Phase ?? SessionUiPhase.Idle;
-        ScreenShareViewer = new ScreenShareViewerViewModel();
+        ScreenShareViewer = new ScreenShareViewerViewModel(
+            decodeFrame: null,
+            postToUiAsync: null,
+            h264Decoder: null,
+            logRole: "helper_remote");
         remoteControlStateSnapshotTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(FeatureFlags.RemoteControlStateSnapshotIntervalMs),
@@ -196,6 +205,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         peerEndedNoticeTimer.Tick += OnPeerEndedNoticeTimerTick;
         lastKnownShowRemoteScreenShareFrame = ShowRemoteScreenShareFrame;
         lastKnownShowHelperMainContent = ShowHelperMainContent;
+        lastKnownScreenShareViewerMessage = ScreenShareViewerMessage;
+        lastKnownShowScreenShareViewerError = ShowScreenShareViewerError;
         lastKnownHeaderStatusText = HeaderStatusText;
 
         ChatMessages = new ObservableCollection<ChatLineViewModel>();
@@ -215,9 +226,16 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.FileTransferChanged += OnFileTransferChanged;
         sessionRuntime.RemoteControlStateChanged += OnRemoteControlStateChanged;
         sessionRuntime.IncomingHelpRequestAvailable += OnIncomingHelpRequestAvailable;
+        sessionRuntime.HelperListenerBootstrapSnapshotChanged += OnHelperListenerBootstrapSnapshotChanged;
         this.statusPresenter.StatusChanged += OnStatusPresenterChanged;
         copyFeedback.PropertyChanged += OnCopyFeedbackPropertyChanged;
         ScreenShareViewer.PropertyChanged += OnScreenShareViewerPropertyChanged;
+        ScreenShareViewer.FrameApplied += OnScreenShareViewerFrameApplied;
+        ScreenShareViewer.StaleFrameDropped += OnScreenShareViewerStaleFrameDropped;
+        ScreenShareViewer.DecodeNeedsMoreInput += OnScreenShareViewerDecodeNeedsMoreInput;
+        ScreenShareViewer.ContinuityLost += OnScreenShareViewerContinuityLost;
+        ScreenShareViewer.RecoveryKeyframeApplied += OnScreenShareViewerRecoveryKeyframeApplied;
+        ScreenShareViewer.RecoveryWindowStateChanged += OnScreenShareViewerRecoveryWindowStateChanged;
         if (this.uiStateStore is not null)
         {
             this.uiStateStore.PropertyChanged += OnUiStateStorePropertyChanged;
@@ -365,6 +383,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private PeerAddress? HelperVerificationIdentity => sessionRuntime.SecurityState.HelperAddress;
     private PeerAddress? HelperRequestTargetAddress => sessionRuntime.CurrentLocalPeerAddress;
     private PeerAddress? HelperIdentityForInviteBinding => bootstrapHelperIdentity ?? HelperRequestTargetAddress;
+    private PeerAddress? HelperCanonicalBootstrapVerificationIdentity =>
+        bootstrapHelperIdentityIsAuthoritative
+            ? HelperIdentityForInviteBinding
+            : null;
     private PeerAddress? HelperIdentityForDisplay =>
         HelperRequestTargetAddress ??
         (bootstrapHelperIdentityIsAuthoritative ? bootstrapHelperIdentity : null);
@@ -398,7 +420,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             : "The helpee enters this helper address to request help.";
 
     public string HelperIdentityBootstrapVerificationCode =>
-        HelperVerificationCodeFormatter.FormatOrNull(HelperIdentityForInviteBinding) ?? string.Empty;
+        HelperVerificationCodeFormatter.FormatOrNull(HelperCanonicalBootstrapVerificationIdentity) ?? string.Empty;
 
     public bool HasHelperIdentityBootstrapVerificationCode =>
         !string.IsNullOrWhiteSpace(HelperIdentityBootstrapVerificationCode);
@@ -922,9 +944,16 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.FileTransferChanged -= OnFileTransferChanged;
         sessionRuntime.RemoteControlStateChanged -= OnRemoteControlStateChanged;
         sessionRuntime.IncomingHelpRequestAvailable -= OnIncomingHelpRequestAvailable;
+        sessionRuntime.HelperListenerBootstrapSnapshotChanged -= OnHelperListenerBootstrapSnapshotChanged;
         statusPresenter.StatusChanged -= OnStatusPresenterChanged;
         copyFeedback.PropertyChanged -= OnCopyFeedbackPropertyChanged;
         ScreenShareViewer.PropertyChanged -= OnScreenShareViewerPropertyChanged;
+        ScreenShareViewer.FrameApplied -= OnScreenShareViewerFrameApplied;
+        ScreenShareViewer.StaleFrameDropped -= OnScreenShareViewerStaleFrameDropped;
+        ScreenShareViewer.DecodeNeedsMoreInput -= OnScreenShareViewerDecodeNeedsMoreInput;
+        ScreenShareViewer.ContinuityLost -= OnScreenShareViewerContinuityLost;
+        ScreenShareViewer.RecoveryKeyframeApplied -= OnScreenShareViewerRecoveryKeyframeApplied;
+        ScreenShareViewer.RecoveryWindowStateChanged -= OnScreenShareViewerRecoveryWindowStateChanged;
         if (uiStateStore is not null)
         {
             uiStateStore.PropertyChanged -= OnUiStateStorePropertyChanged;
@@ -2058,7 +2087,14 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void NotifyHelperIdentityBootstrapChanged()
     {
+        NotifyHelperBootstrapPropertiesChanged();
+        RefreshHelperBootstrapQrBitmap();
+    }
+
+    private void NotifyHelperBootstrapPropertiesChanged()
+    {
         OnPropertyChanged(nameof(HelperIdentityBootstrapText));
+        OnPropertyChanged(nameof(HasReadyHelperIdentityBootstrapText));
         OnPropertyChanged(nameof(HelperIdentityBootstrapWatermarkText));
         OnPropertyChanged(nameof(HelperIdentityBootstrapHintText));
         OnPropertyChanged(nameof(HelperIdentityBootstrapVerificationCode));
@@ -2068,7 +2104,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowHeaderVerificationCode));
         OnPropertyChanged(nameof(FirstPillVerificationCodeText));
         OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
-        RefreshHelperBootstrapQrBitmap();
     }
 
     private void PromoteBootstrapHelperIdentityFromConnectedSessionIfAvailable()
@@ -2099,15 +2134,29 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void CacheBootstrapHelperIdentityFromRuntimeIfAvailable()
     {
-        var resolvedIdentity = sessionRuntime.CurrentLocalPeerAddress;
-        if (resolvedIdentity is null)
+        var snapshot = sessionRuntime.CurrentHelperListenerBootstrapSnapshot;
+        if (snapshot is null)
         {
+            if (!string.IsNullOrWhiteSpace(lastPublishedHelperBootstrapSnapshotKey))
+            {
+                lastPublishedHelperBootstrapSnapshotKey = string.Empty;
+            }
+
             return;
+        }
+
+        var resolvedIdentity = snapshot.Address;
+        var snapshotKey = string.Create(
+            CultureInfo.InvariantCulture,
+            $"{snapshot.RunId}|{snapshot.ListenerGeneration}|{resolvedIdentity.Value}");
+        if (!string.Equals(lastPublishedHelperBootstrapSnapshotKey, snapshotKey, StringComparison.Ordinal))
+        {
+            lastPublishedHelperBootstrapSnapshotKey = snapshotKey;
         }
 
         var changed =
             bootstrapHelperIdentity is null ||
-            bootstrapHelperIdentity.Value != resolvedIdentity.Value ||
+            bootstrapHelperIdentity.Value != resolvedIdentity ||
             !bootstrapHelperIdentityIsAuthoritative;
         bootstrapHelperIdentity = resolvedIdentity;
         bootstrapHelperIdentityIsAuthoritative = true;
@@ -2128,11 +2177,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void RefreshHelperBootstrapQrBitmap()
     {
-        helperBootstrapQrBitmap?.Dispose();
-        helperBootstrapQrBitmap = null;
-
-        if (HelperRequestTargetAddress is not { } helperTargetAddress ||
-            HelperIdentityForInviteBinding is not { } helperIdentity)
+        var payload = GetHelperBootstrapShareValue();
+        if (string.Equals(lastHelperBootstrapQrPayload, payload, StringComparison.Ordinal) &&
+            ((helperBootstrapQrBitmap is not null) || string.IsNullOrWhiteSpace(payload)))
         {
             OnPropertyChanged(nameof(HelperBootstrapQrImage));
             OnPropertyChanged(nameof(ShowHelperBootstrapQr));
@@ -2140,22 +2187,38 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        var payload = HelperBootstrapQrPayload.Format(
-            HelperBootstrapPayload.Create(
-                helperTargetAddress,
-                helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
-        if (qrCodeService.TryCreatePng(payload, out var pngBytes, out _))
+        lastHelperBootstrapQrPayload = payload;
+        helperBootstrapQrBitmap?.Dispose();
+        helperBootstrapQrBitmap = null;
+
+        if (string.IsNullOrWhiteSpace(payload))
+        {
+            OnPropertyChanged(nameof(HelperBootstrapQrImage));
+            OnPropertyChanged(nameof(ShowHelperBootstrapQr));
+            OnPropertyChanged(nameof(ShowHelperBootstrapQrPlaceholder));
+            return;
+        }
+
+        if (qrCodeService.TryCreatePng(payload, out var pngBytes, out var errorMessage))
         {
             try
             {
                 using var stream = new System.IO.MemoryStream(pngBytes, writable: false);
                 helperBootstrapQrBitmap = new Bitmap(stream);
             }
-            catch (InvalidOperationException)
+            catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException or ArgumentException)
             {
-                // Headless/non-rendering smoke paths may not have a platform render interface.
+                LocalOperationalLog.Warn(
+                    "HelperUi",
+                    $"event=helper_bootstrap_qr_decode_failed; payload_len={payload.Length}; reason={ex.GetType().Name}");
                 helperBootstrapQrBitmap = null;
             }
+        }
+        else
+        {
+            LocalOperationalLog.Warn(
+                "HelperUi",
+                $"event=helper_bootstrap_qr_generation_failed; payload_len={payload.Length}; reason={(string.IsNullOrWhiteSpace(errorMessage) ? "unknown" : errorMessage)}");
         }
 
         OnPropertyChanged(nameof(HelperBootstrapQrImage));
@@ -2165,13 +2228,14 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private string BuildHelperBootstrapDisplayValue()
     {
-        if (HelperRequestTargetAddress is { } helperTargetAddress &&
-            HelperIdentityForInviteBinding is { } helperIdentity)
+        if (HelperRequestTargetAddress is { } helperTargetAddress)
         {
             return HelperBootstrapQrPayload.Format(
                 HelperBootstrapPayload.Create(
                     helperTargetAddress,
-                    helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
+                    helperId: HelperCanonicalBootstrapVerificationIdentity is { } helperIdentity
+                        ? HelperIdentityTokenCodec.Encode(helperIdentity)
+                        : null));
         }
 
         return HelperIdentityForDisplay is { } helperIdentityForDisplay
@@ -2333,7 +2397,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void OnApproved(object? sender, EventArgs e)
     {
-        wasConnected = true;
         connectOutcome?.TrySetResult(HelperConnectOutcome.Approved);
         _ = UiThreadDispatch.RunAsync(() =>
         {
@@ -2497,13 +2560,41 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         _ = UiThreadDispatch.RunAsync(SyncFromRuntime);
     }
 
+    private void OnHelperListenerBootstrapSnapshotChanged(object? sender, EventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(SyncFromRuntime);
+    }
+
     private void OnScreenShareFrameCompleted(object? sender, ScreenShareFrameCompletedEventArgs e)
     {
-        ScreenShareViewer.OnJpegFrame(
-            e.EncodedFrameBytes,
-            e.CapturedTsUtcMs,
-            e.ChunksDroppedOlderFrame,
-            e.AssembliesExpired);
+        try
+        {
+            ScreenShareViewer.OnOwnedEncodedFrame(
+                e.Encoding,
+                e.EncodedFrameBytes,
+                e.CapturedTsUtcMs,
+                e.IsKeyFrame,
+                e.StreamEpoch,
+                e.StreamConfig,
+                e.ChunksDroppedOlderFrame,
+                e.AssembliesExpired,
+                e.FrameId,
+                e.SessionId,
+                e.RecoveryDeliveryClass,
+                e.FrameReadyObservedUtcMs);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Info(
+                "HelperUi",
+                $"event=helper_screenshare_frame_dispatch_failed; stage=viewer_enqueue; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; is_keyframe={(e.IsKeyFrame ? 1 : 0)}; encoding={e.Encoding}; reason={ex.GetType().Name}; message={SanitizeScreenShareDispatchExceptionMessage(ex.Message)}");
+            throw;
+        }
     }
 
     private void OnScreenShareStopped(object? sender, EventArgs e)
@@ -2513,16 +2604,17 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        LocalOperationalLog.Info(
-            "HelperUi",
-            $"event=helper_screenshare_viewer_clear_requested; control_state={sessionRuntime.ControlState}; header_status={HeaderStatusText}; has_visible_frame={ShowRemoteScreenShareFrame}");
         _ = UiThreadDispatch.RunAsync(() =>
         {
             ClearRemoteScreenShareFrame();
-            LocalOperationalLog.Info(
-                "HelperUi",
-                $"event=helper_screenshare_viewer_cleared; control_state={sessionRuntime.ControlState}; header_status={HeaderStatusText}; has_visible_frame={ShowRemoteScreenShareFrame}");
         });
+    }
+
+    private static string SanitizeScreenShareDispatchExceptionMessage(string? message)
+    {
+        return string.IsNullOrWhiteSpace(message)
+            ? "(none)"
+            : message.Replace(';', ',').Trim();
     }
 
     private void OnScreenShareViewerPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -2534,8 +2626,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             var previousShowRemoteScreenShareFrame = lastKnownShowRemoteScreenShareFrame;
             var previousShowHelperMainContent = lastKnownShowHelperMainContent;
             var previousHeaderStatusText = lastKnownHeaderStatusText;
-            var previousShowViewerError = ShowScreenShareViewerError;
-            var previousViewerMessage = ScreenShareViewerMessage;
+            var previousShowViewerError = lastKnownShowScreenShareViewerError;
+            var previousViewerMessage = lastKnownScreenShareViewerMessage;
 
             OnPropertyChanged(nameof(RemoteScreenShareFrame));
 
@@ -2558,8 +2650,17 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 EnsureControlModeConsistency();
                 if (!nextShowRemoteScreenShareFrame)
                 {
+                    helperRemoteSurfaceVisibleLogged = false;
                     ResetRemoteControlDebugMetrics();
                 }
+            }
+
+            if (nextShowRemoteScreenShareFrame && !helperRemoteSurfaceVisibleLogged)
+            {
+                LocalOperationalLog.Info(
+                    "HelperUi",
+                    $"event=helper_screenshare_viewer_surface_visible; role=helper_remote; control_state={sessionRuntime.ControlState}; header_status={HeaderStatusText}; viewer_status={ScreenShareViewer.StatusText}");
+                helperRemoteSurfaceVisibleLogged = true;
             }
 
             var nextShowHelperMainContent = ShowHelperMainContent;
@@ -2572,11 +2673,19 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             if (previousShowViewerError != ShowScreenShareViewerError)
             {
                 OnPropertyChanged(nameof(ShowScreenShareViewerError));
+                if (ShowScreenShareViewerError)
+                {
+                    LocalOperationalLog.Info(
+                        "HelperUi",
+                        $"event=helper_screenshare_viewer_error_visible; role=helper_remote; control_state={sessionRuntime.ControlState}; header_status={HeaderStatusText}; message={SanitizeForLog(ScreenShareViewerMessage)}");
+                }
+                lastKnownShowScreenShareViewerError = ShowScreenShareViewerError;
             }
 
             if (!string.Equals(previousViewerMessage, ScreenShareViewerMessage, StringComparison.Ordinal))
             {
                 OnPropertyChanged(nameof(ScreenShareViewerMessage));
+                lastKnownScreenShareViewerMessage = ScreenShareViewerMessage;
             }
 
             var nextHeaderStatusText = HeaderStatusText;
@@ -2587,6 +2696,91 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
             }
         }
+    }
+
+    private void OnScreenShareViewerFrameApplied(object? sender, ScreenShareViewerFrameAppliedEventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        var helperSessionSnapshot = ScreenShareViewer.GetHelperRemoteSessionSnapshot();
+        sessionRuntime.ReportHelperRemoteScreenShareFrameApplied(
+            e.AgeMs,
+            e.StreamEpoch,
+            e.FrameId,
+            e.VisibleHeadFrameId,
+            e.StableVisibleHeadFrameId,
+            e.FramesAppliedSinceLastGap,
+            helperSessionSnapshot);
+    }
+
+    private void OnScreenShareViewerStaleFrameDropped(object? sender, ScreenShareViewerStaleFrameDroppedEventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        sessionRuntime.ReportHelperRemoteScreenShareStaleFrameDropped(e.RenderedAgeMs, e.StreamEpoch);
+    }
+
+    private void OnScreenShareViewerDecodeNeedsMoreInput(object? sender, ScreenShareViewerDecodeNeedsMoreInputEventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        sessionRuntime.ReportHelperRemoteScreenShareDecodeNeedsMoreInput(e.StreamEpoch);
+        sessionRuntime.ReportHelperRemoteScreenShareSessionSnapshot(ScreenShareViewer.GetHelperRemoteSessionSnapshot());
+    }
+
+    private void OnScreenShareViewerContinuityLost(object? sender, ScreenShareViewerContinuityLostEventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        sessionRuntime.ReportHelperRemoteScreenShareContinuityLost(
+            e.StreamEpoch,
+            e.Reason,
+            e.ShouldRequestRecoveryKeyframe,
+            e.CurrentEpochNeedMoreInputCount,
+            e.ExpectedNextFrameId,
+            e.ReceivedFrameId,
+            e.LastCleanFrameId);
+        sessionRuntime.ReportHelperRemoteScreenShareSessionSnapshot(ScreenShareViewer.GetHelperRemoteSessionSnapshot());
+    }
+
+    private void OnScreenShareViewerRecoveryKeyframeApplied(object? sender, ScreenShareViewerRecoveryKeyframeAppliedEventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        sessionRuntime.ReportHelperRemoteScreenShareRecoveryKeyframeApplied(e.AgeMs, e.StreamEpoch);
+        sessionRuntime.ReportHelperRemoteScreenShareSessionSnapshot(ScreenShareViewer.GetHelperRemoteSessionSnapshot());
+    }
+
+    private void OnScreenShareViewerRecoveryWindowStateChanged(object? sender, ScreenShareViewerRecoveryWindowStateChangedEventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        sessionRuntime.ReportHelperRemoteScreenShareRecoveryWindowStateChanged(
+            e.StreamEpoch,
+            e.RecoveryFrameId,
+            e.LastContiguousFrameId,
+            e.ContiguousFollowerApplyCount,
+            e.Status,
+            e.AbortReason);
+        sessionRuntime.ReportHelperRemoteScreenShareSessionSnapshot(ScreenShareViewer.GetHelperRemoteSessionSnapshot());
     }
 
     private void OnTransientStatusChanged(object? sender, SessionRuntimeTransientStatusChangedEventArgs e)
@@ -2815,7 +3009,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
             if (string.Equals(flow.DisplayConnectionState, "Connected", StringComparison.Ordinal))
             {
-                wasConnected = true;
                 ShowChatNotice = false;
             }
         }
@@ -2864,6 +3057,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowHeaderVerificationCode));
         OnPropertyChanged(nameof(FirstPillVerificationCodeText));
         OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+        NotifyHelperBootstrapPropertiesChanged();
+        RefreshHelperBootstrapQrBitmap();
         OnPropertyChanged(nameof(HelperTechnicalIdentityText));
         OnPropertyChanged(nameof(HelperTechnicalSessionIdText));
         OnPropertyChanged(nameof(HasHelperTechnicalDetails));
@@ -3330,7 +3525,13 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         lastChatPanelStateLog = payload;
-        LocalOperationalLog.Info("HelperUi", payload);
+        WriteDebugTrace($"[HelperUi] {payload}");
+    }
+
+    [Conditional("DEBUG")]
+    private static void WriteDebugTrace(string message)
+    {
+        Trace.WriteLine(message);
     }
 
     private static bool CanEndForPhase(SessionUiPhase phase) =>
@@ -3563,7 +3764,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void ResetToWaitingScreen(bool clearConnectInput = true)
     {
-        wasConnected = false;
         localEndCommandInFlight = false;
         lastPeerEndedNoticeKey = string.Empty;
         ClearFailurePresentation();
@@ -3755,6 +3955,13 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         return string.Equals(statusText, "Invalid frame received", StringComparison.Ordinal)
             ? "Screen sharing is active, but the latest frame could not be displayed."
             : statusText;
+    }
+
+    private static string SanitizeForLog(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            ? "(empty)"
+            : value.Replace("\r", "\\r", StringComparison.Ordinal).Replace("\n", "\\n", StringComparison.Ordinal);
     }
 
     private string AppendScreenShareSuffix(string text)

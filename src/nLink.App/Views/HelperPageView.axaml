@@ -124,6 +124,7 @@
                         <Grid VerticalAlignment="Top">
                             <views:ScreenShareSurfaceView x:Name="RemoteScreenShareSurface"
                                                           Frame="{Binding RemoteScreenShareFrame}"
+                                                          SurfaceRole="helper_remote"
                                                           CaptureEnabled="{Binding IsRemoteControlInputCaptureEnabled}"
                                                           KeyboardCaptureEnabled="{Binding IsRemoteControlKeyboardCaptureEnabled}"
                                                           MouseMoveRateHz="{Binding RemoteControlMouseMoveRateHz}"
@@ -367,7 +368,7 @@
                                                                     AutomationProperties.AutomationId="Helper.ShareHelperIdentity"
                                                                     Content="Share helper address"
                                                                     Command="{Binding ShareHelperIdentityCommand}"
-                                                                    IsEnabled="{Binding HasHelperIdentityBootstrapVerificationCode}"
+                                                                    IsEnabled="{Binding HasReadyHelperIdentityBootstrapText}"
                                                                     HorizontalAlignment="Stretch"
                                                                     MinWidth="0"/>
                                                             <Button Grid.Column="1"
@@ -375,7 +376,7 @@
                                                                     AutomationProperties.AutomationId="Helper.CopyHelperIdentity"
                                                                     Content="Copy helper address"
                                                                     Command="{Binding CopyHelperIdentityCommand}"
-                                                                    IsEnabled="{Binding HasHelperIdentityBootstrapVerificationCode}"
+                                                                    IsEnabled="{Binding HasReadyHelperIdentityBootstrapText}"
                                                                     HorizontalAlignment="Stretch"
                                                                     MinWidth="0"/>
                                                         </Grid>

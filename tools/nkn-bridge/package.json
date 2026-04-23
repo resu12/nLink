@@ -6,9 +6,13 @@
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "bundle": "ncc build index.js -o .nlink-bundle"
   },
   "dependencies": {
     "nkn-sdk": "1.3.6"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "0.38.3"
   }
 }

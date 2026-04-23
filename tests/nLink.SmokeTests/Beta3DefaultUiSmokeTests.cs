@@ -186,6 +186,8 @@ public sealed class Beta3DefaultUiSmokeTests : IClassFixture<Beta3DefaultUiFixtu
                 Assert.True(helperTextBox.IsEnabled);
                 Assert.True(shareButton.IsEnabled);
                 Assert.True(copyButton.IsEnabled);
+                Assert.True(helper.ShowHelperBootstrapQr);
+                Assert.False(helper.ShowHelperBootstrapQrPlaceholder);
             }
             finally
             {
