@@ -1,0 +1,1481 @@
+using System.Runtime.InteropServices;
+using Avalonia;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
+using Avalonia.Threading;
+using NLink.App.Services.ScreenCapture;
+using NLink.App.ViewModels;
+using NLink.Core.Logging;
+using NLink.Core.ScreenShare;
+
+namespace NLink.SmokeTests;
+
+[Collection(AvaloniaHeadlessUiCollection.Name)]
+[Trait("Area", "ScreenShare")]
+public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareViewerViewModelTestBase, IClassFixture<ScreenShareCoordinatorFixture>
+{
+    public ScreenShareViewerHelperRemoteRecoveryTests(ScreenShareCoordinatorFixture fixture) : base(fixture)
+    {
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_ProtectedRecoveryBurstWhileUiApplyIsBlocked_DecodesBeyondSingleLatestFrame()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            ScreenShareFrameLossAttributionRegistry.ResetAllForTests();
+            var releaseUiApply = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var applyStarted = 0;
+            var decodeStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseDecode = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: async action =>
+                {
+                    if (Interlocked.Increment(ref applyStarted) == 1)
+                    {
+                        await releaseUiApply.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                    }
+
+                    action();
+                },
+                h264Decoder: new BlockingH264BitmapDecoder(decodeStarted, releaseDecode),
+                logRole: "helper_remote");
+
+            vm.OnEncodedFrame("h264", new byte[] { 1 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), isKeyFrame: true, streamEpoch: 1, streamConfig: new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper-burst-attribution",
+                StreamEpoch = 1,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            }, frameId: 1, sessionId: "helper-burst-attribution", recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            await decodeStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            vm.OnEncodedFrame("h264", new byte[] { 2 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), isKeyFrame: false, streamEpoch: 1, frameId: 2, sessionId: "helper-burst-attribution", recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
+            vm.OnEncodedFrame("h264", new byte[] { 3 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), isKeyFrame: false, streamEpoch: 1, frameId: 3, sessionId: "helper-burst-attribution", recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
+
+            releaseDecode.TrySetResult(true);
+            await WaitUntilAsync(() => Volatile.Read(ref applyStarted) >= 1, TimeSpan.FromSeconds(2));
+
+            releaseUiApply.TrySetResult(true);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap current && current.PixelSize.Width >= 1 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            var metrics = vm.GetMetricsSnapshot();
+            var current = Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
+            Assert.True(metrics.FramesDecoded >= 1);
+            Assert.True(metrics.MaxPendingEncodedDepth >= 1);
+            Assert.InRange(metrics.DecodeWorkerDroppedBeforeDecodeCount, 0, 1);
+            Assert.Equal(0, metrics.DecodeQueueOverflowCount);
+            Assert.Equal(0, metrics.DecodeWorkerDropQueueOverflowCount);
+            Assert.Equal(0, metrics.BlockedByReservedRecoveryFrameRejectCount);
+            Assert.Equal(0, metrics.DecodedBlockedByReservedRecoveryFrameCount);
+            Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
+            Assert.Equal(0, metrics.StartupCorridorReleaseCount);
+            Assert.Equal(0, metrics.StartupCorridorAbortCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
+            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            Assert.True(current.PixelSize.Width >= 1);
+            var snapshot = vm.GetFrameLossSnapshotForDiagnostics();
+            Assert.DoesNotContain(
+                snapshot.RecentLosses,
+                static loss => string.Equals(loss.Reason, "recovery_runway_overflow", StringComparison.Ordinal));
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_H264Frames_WaitForStreamConfigBeforeDecode()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var h264Decoder = new FakeH264BitmapDecoder();
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: h264Decoder);
+
+            vm.OnOwnedEncodedFrame(
+                "h264",
+                new byte[] { 4 },
+                capturedTsUtcMs: 0,
+                isKeyFrame: true,
+                streamEpoch: 7);
+
+            await Task.Delay(50);
+            Assert.Null(vm.CurrentFrame);
+            Assert.Equal(0, h264Decoder.ConfigureCallCount);
+            Assert.Equal(0, h264Decoder.DecodeCallCount);
+
+            vm.OnOwnedEncodedFrame(
+                "h264",
+                new byte[] { 9 },
+                capturedTsUtcMs: 0,
+                isKeyFrame: true,
+                streamEpoch: 7,
+                streamConfig: new ScreenShareVideoStreamConfigV1
+                {
+                    SessionId = "viewer",
+                    StreamEpoch = 7,
+                    Encoding = "h264",
+                    CodecProfile = "baseline",
+                    DecoderConfigData = new byte[] { 1, 2, 3 },
+                });
+
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap latest && latest.PixelSize.Width == 9 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            Assert.Equal(1, h264Decoder.ConfigureCallCount);
+            Assert.Equal(1, h264Decoder.DecodeCallCount);
+            Assert.Equal(7, h264Decoder.LastConfiguredEpoch);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemoteNeedMoreInput_KeepsViewerLiveWithoutSurfacingFrame()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new NeedMoreInputH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 9,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 9 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 9, streamConfig: config);
+            await WaitUntilAsync(
+                () => vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 10 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 9);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            Assert.True(vm.IsActive);
+            Assert.Equal("Live", vm.StatusText);
+            Assert.Null(vm.CurrentFrame);
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.Equal(2, metrics.NeedMoreInputCount);
+            Assert.Equal(2, metrics.CompletedWithoutPictureCount);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemoteNeedMoreInput_RaisesDecodeNeedsMoreInputForEpoch()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new NeedMoreInputH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var signaledEpochs = new List<long>();
+            vm.DecodeNeedsMoreInput += (_, e) => signaledEpochs.Add(e.StreamEpoch);
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 11,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 11 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 11, streamConfig: config);
+            await WaitUntilAsync(
+                () => vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            Assert.Equal(new long[] { 11 }, signaledEpochs);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_FrameGap_RequestsRecoveryBeforeDecode()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+            var staleDropCount = 0;
+            vm.StaleFrameDropped += (_, _) => staleDropCount++;
+
+            ScreenShareViewerContinuityLostEventArgs? continuityLost = null;
+            var recoveryAppliedEpochs = new List<long>();
+            vm.ContinuityLost += (_, e) => continuityLost = e;
+            vm.RecoveryKeyframeApplied += (_, e) => recoveryAppliedEpochs.Add(e.StreamEpoch);
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 15,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 10 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 15, streamConfig: config, frameId: 10);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 10 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 12 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 15, frameId: 12);
+            await WaitUntilAsync(
+                () => continuityLost is not null && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            var stillVisible = Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
+            Assert.Equal(10, stillVisible.PixelSize.Width);
+            Assert.NotNull(continuityLost);
+            Assert.Equal("frame_gap", continuityLost!.Reason);
+            Assert.True(continuityLost.ShouldRequestRecoveryKeyframe);
+            Assert.Equal(11, continuityLost.ExpectedNextFrameId);
+            Assert.Equal(12, continuityLost.ReceivedFrameId);
+            Assert.Equal(10, continuityLost.LastCleanFrameId);
+
+            var midMetrics = vm.GetMetricsSnapshot();
+            Assert.Equal(1, midMetrics.FrameGapContinuityLossCount);
+            Assert.Equal(1, midMetrics.FramesDroppedForFrameGap);
+
+            vm.OnOwnedEncodedFrame(
+                "h264",
+                new byte[] { 13 },
+                capturedTsUtcMs: 0,
+                isKeyFrame: true,
+                streamEpoch: 15,
+                frameId: 13,
+                recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap recovered && recovered.PixelSize.Width == 13 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            Assert.Equal(new long[] { 15 }, recoveryAppliedEpochs);
+            var finalMetrics = vm.GetMetricsSnapshot();
+            Assert.Equal(0, finalMetrics.BlockedByReservedRecoveryFrameRejectCount);
+            Assert.Equal(0, finalMetrics.DecodedBlockedByReservedRecoveryFrameCount);
+            Assert.Equal(0, finalMetrics.StartupCorridorReleaseCount);
+            Assert.Equal(0, finalMetrics.StartupCorridorAbortCount);
+            Assert.Equal(0, finalMetrics.RecoveryProgressCorridorCount);
+            Assert.Equal(0, finalMetrics.RecoveryProgressCorridorAbortCount);
+            Assert.Equal(0, finalMetrics.ProtectedRecoveryDeliveryCount);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_FirstFrameNonKey_RequestsRecoveryUntilKeyframe()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            ScreenShareViewerContinuityLostEventArgs? continuityLost = null;
+            vm.ContinuityLost += (_, e) => continuityLost = e;
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 16,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 20 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 16, streamConfig: config, frameId: 20);
+            await WaitUntilAsync(
+                () => continuityLost is not null && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            Assert.Null(vm.CurrentFrame);
+            Assert.NotNull(continuityLost);
+            Assert.Equal("frame_gap", continuityLost!.Reason);
+            Assert.Equal(0, continuityLost.ExpectedNextFrameId);
+            Assert.Equal(20, continuityLost.ReceivedFrameId);
+            Assert.Equal(-1, continuityLost.LastCleanFrameId);
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 21 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 16, frameId: 21);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap recovered && recovered.PixelSize.Width == 21 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_StaleSupersededBeforeVisibleHead_TriggersConservativeRecovery()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            ScreenShareViewerContinuityLostEventArgs? continuityLost = null;
+            vm.ContinuityLost += (_, e) => continuityLost = e;
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 160,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame(
+                "h264",
+                new byte[] { 20 },
+                capturedTsUtcMs: 0,
+                isKeyFrame: true,
+                streamEpoch: 160,
+                streamConfig: config,
+                chunksDroppedOlderFrame: 1,
+                frameId: 20);
+            await WaitUntilAsync(
+                () => continuityLost is not null &&
+                      vm.CurrentFrame is Bitmap recovered &&
+                      recovered.PixelSize.Width == 20 &&
+                      vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            Assert.NotNull(continuityLost);
+            Assert.Equal("stale_frame_superseded", continuityLost!.Reason);
+            Assert.False(continuityLost.ShouldRequestRecoveryKeyframe);
+
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.Equal(1, metrics.ContinuityLossCount);
+            Assert.Equal(0, metrics.StaleSupersededRecoverySuppressedCount);
+            Assert.Equal(0, metrics.SoftStaleCleanupCount);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_StaleSupersededAfterVisibleHead_DoesNotReopenRecovery()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var continuityLossCount = 0;
+            vm.ContinuityLost += (_, _) => continuityLossCount++;
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 161,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 30 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 161, streamConfig: config, frameId: 30);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 30 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 31 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 161, frameId: 31);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap second && second.PixelSize.Width == 31 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame(
+                "h264",
+                new byte[] { 32 },
+                capturedTsUtcMs: 0,
+                isKeyFrame: false,
+                streamEpoch: 161,
+                chunksDroppedOlderFrame: 1,
+                frameId: 32);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap latest && latest.PixelSize.Width == 32 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.Equal(0, continuityLossCount);
+            Assert.Equal(1, metrics.StaleSupersededRecoverySuppressedCount);
+            Assert.Equal(1, metrics.SoftStaleCleanupCount);
+            Assert.Equal(32, metrics.VisibleHeadFrameId);
+            Assert.Equal(0, metrics.FrameGapContinuityLossCount);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_ProvenHeadFloor_PreservesSoftCleanupAfterViewerReset()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var continuityLossCount = 0;
+            vm.ContinuityLost += (_, _) => continuityLossCount++;
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper-proven-floor",
+                StreamEpoch = 162,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 40 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 162, streamConfig: config, frameId: 40);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 40 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.Clear();
+
+            vm.OnOwnedEncodedFrame(
+                "h264",
+                new byte[] { 41 },
+                capturedTsUtcMs: 0,
+                isKeyFrame: true,
+                streamEpoch: 162,
+                streamConfig: config,
+                chunksDroppedOlderFrame: 1,
+                frameId: 41);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap next && next.PixelSize.Width == 41 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.Equal(0, continuityLossCount);
+            Assert.Equal(0, metrics.ContinuityLossCount);
+            Assert.Equal(1, metrics.SoftStaleCleanupCount);
+            Assert.Equal(0, metrics.ActionableLateFragmentCount);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_RecoveryKeyframe_BypassesStaleDropThreshold()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+            var staleDropCount = 0;
+            vm.StaleFrameDropped += (_, _) => staleDropCount++;
+
+            var priorConfig = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 20,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 40 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), isKeyFrame: true, streamEpoch: 20, streamConfig: priorConfig, frameId: 40);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 40 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            var nextConfig = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 21,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3, 4 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 50 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), isKeyFrame: false, streamEpoch: 21, streamConfig: nextConfig, frameId: 50);
+            await WaitUntilAsync(
+                () => vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 51 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 5000, isKeyFrame: true, streamEpoch: 21, frameId: 51);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap recovered && recovered.PixelSize.Width == 51 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            Assert.Equal(0, staleDropCount);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_ProtectedRecoveryFrames_BypassStartupCorridorAndApplyImmediately()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 29,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 1 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 29, streamConfig: config, frameId: 0);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 1 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 3 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 29, frameId: 2);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 4 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 29, frameId: 3, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap recoveryKeyframe && recoveryKeyframe.PixelSize.Width == 4 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 5 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 29, frameId: 4);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap current && current.PixelSize.Width == 5 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            var finalFrame = Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
+            Assert.Equal(5, finalFrame.PixelSize.Width);
+            Assert.True(vm.IsIdleForDiagnostics);
+
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.Equal(0, metrics.StartupCorridorBufferedFollowerCount);
+            Assert.Equal(0, metrics.StartupCorridorReleaseCount);
+            Assert.Equal(0, metrics.StartupCorridorAbortCount);
+            Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
+            Assert.Equal(0, metrics.BlockedByReservedRecoveryFrameRejectCount);
+            Assert.Equal(0, metrics.DecodedBlockedByReservedRecoveryFrameCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
+            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_NormalFollowersBeforeRecoveryOwner_AreRejected_NotBuffered()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 32,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 20 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 32, streamConfig: config, frameId: 0);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 20 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 21 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 32, frameId: 2);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 22 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 32, frameId: 3);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            var metricsBeforeRecoveryOwner = vm.GetMetricsSnapshot();
+            Assert.Equal(0, metricsBeforeRecoveryOwner.RecoveryFollowerWindowBufferedCount);
+            Assert.Equal(0, metricsBeforeRecoveryOwner.StartupCorridorBufferedFollowerCount);
+            Assert.True(metricsBeforeRecoveryOwner.FramesDroppedWaitingForRecoveryKeyframe >= 1);
+            Assert.Equal(20, Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame).PixelSize.Width);
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 24 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 32, frameId: 4, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap recoveryOwner && recoveryOwner.PixelSize.Width == 24,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 25 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 32, frameId: 5);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap follower && follower.PixelSize.Width == 25,
+                TimeSpan.FromSeconds(2));
+
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.Equal(0, metrics.BlockedByReservedRecoveryFrameRejectCount);
+            Assert.Equal(0, metrics.DecodedBlockedByReservedRecoveryFrameCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
+            Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
+            Assert.Equal(0, metrics.StartupCorridorBufferedFollowerCount);
+            Assert.Equal(0, metrics.StartupCorridorReleaseCount);
+            Assert.True(metrics.FramesDroppedWaitingForRecoveryKeyframe >= 1);
+            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_SimplifiedRecoveryOwner_ClearsRecoveryWithoutCorridor()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 132,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 20 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 132, streamConfig: config, frameId: 0);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 20 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 22 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 132, frameId: 2);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 24 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 132, frameId: 4, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap recoveryOwner && recoveryOwner.PixelSize.Width == 24,
+                TimeSpan.FromSeconds(2));
+
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
+            Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
+            Assert.Equal(0, metrics.StartupCorridorBufferedFollowerCount);
+            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            Assert.True(metrics.FramesDroppedWaitingForRecoveryKeyframe >= 1);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_SimplifiedProtectedFollowerCompatibility_IsTreatedAsNormalWithoutCorridor()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 133,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 30 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 133, streamConfig: config, frameId: 0);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 30 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 32 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 133, frameId: 2);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 33 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 133, frameId: 3, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap recoveryOwner && recoveryOwner.PixelSize.Width == 33,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 34 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 133, frameId: 4, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap follower && follower.PixelSize.Width == 34,
+                TimeSpan.FromSeconds(2));
+
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
+            Assert.Equal(0, metrics.StartupCorridorReleaseCount);
+            Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
+            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_ProtectedFollowerTags_AreTreatedAsOrdinaryAfterRecoveryKeyframe()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 30,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 10 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 30, streamConfig: config, frameId: 10);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 10 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 12 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 30, frameId: 12);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 13 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 30, frameId: 13, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap recoveryOwner &&
+                      recoveryOwner.PixelSize.Width == 13 &&
+                      vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 14 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 30, frameId: 14, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap firstFollower &&
+                      firstFollower.PixelSize.Width == 14 &&
+                      vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 15 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 30, frameId: 15, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
+
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap recovered &&
+                      recovered.PixelSize.Width == 15 &&
+                      vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.Equal(0, metrics.BlockedByReservedRecoveryFrameRejectCount);
+            Assert.Equal(0, metrics.DecodedBlockedByReservedRecoveryFrameCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
+            Assert.Equal(0, metrics.StartupCorridorReleaseCount);
+            Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
+            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_PostRecoveryFramesResumeAsOrdinaryTraffic()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 300,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 30 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 300, streamConfig: config, frameId: 30);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 30 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 32 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 300, frameId: 32);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 33 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 300, frameId: 33, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap recoveryOwner &&
+                      recoveryOwner.PixelSize.Width == 33 &&
+                      vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 34 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 300, frameId: 34, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap firstFollower && firstFollower.PixelSize.Width == 34,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 35 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 300, frameId: 35, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap secondFollower &&
+                      secondFollower.PixelSize.Width == 35 &&
+                      vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 36 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 300, frameId: 36);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap latest && latest.PixelSize.Width == 36,
+                TimeSpan.FromSeconds(2));
+
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorAppliedCount);
+            Assert.Equal(0, metrics.StartupCorridorReleaseCount);
+            Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
+            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            Assert.True(metrics.PostRecoveryVisibleGenerationResetCount >= 1);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_InFlightKeyframe_DoesNotBecomeRecoveryApply_WhenRecoveryStartsLater()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var decodeStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseDecode = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var recoveryKeyframeAppliedCount = 0;
+
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FrameBlockingH264BitmapDecoder(11, decodeStarted, releaseDecode),
+                logRole: "helper_remote");
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 301,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 10 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 301, streamConfig: config, frameId: 10);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 10 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            var initialMetrics = vm.GetMetricsSnapshot();
+            vm.RecoveryKeyframeApplied += (_, _) => Interlocked.Increment(ref recoveryKeyframeAppliedCount);
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 11 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 301, frameId: 11);
+            await decodeStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 12 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 301, frameId: 12);
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 13 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 301, frameId: 13);
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 14 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 301, frameId: 14);
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 15 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 301, frameId: 15);
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 16 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 301, frameId: 16);
+
+            await WaitUntilAsync(
+                () => vm.GetMetricsSnapshot().ContinuityLossCount >= initialMetrics.ContinuityLossCount + 1,
+                TimeSpan.FromSeconds(2));
+
+            releaseDecode.TrySetResult(true);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.Equal(0, Volatile.Read(ref recoveryKeyframeAppliedCount));
+            Assert.Equal(initialMetrics.RecoveryProgressCorridorCount, metrics.RecoveryProgressCorridorCount);
+            Assert.True(metrics.ContinuityLossCount >= initialMetrics.ContinuityLossCount + 1);
+            Assert.True(metrics.FramesDroppedWaitingForRecoveryKeyframe >= initialMetrics.FramesDroppedWaitingForRecoveryKeyframe + 1);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_NonContiguousFollowerAfterRecovery_StartsNewGapRecovery()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 31,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 20 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 31, streamConfig: config, frameId: 20);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 20 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 22 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 31, frameId: 22);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 23 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 31, frameId: 23, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap recoveryOwner && recoveryOwner.PixelSize.Width == 23,
+                TimeSpan.FromSeconds(2));
+            var metricsBeforeGap = vm.GetMetricsSnapshot();
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 25 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 31, frameId: 25, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
+
+            await WaitUntilAsync(
+                () => vm.IsIdleForDiagnostics &&
+                      vm.GetMetricsSnapshot().FramesDroppedWaitingForRecoveryKeyframe >= metricsBeforeGap.FramesDroppedWaitingForRecoveryKeyframe + 1,
+                TimeSpan.FromSeconds(2));
+
+            var current = Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
+            Assert.Equal(23, current.PixelSize.Width);
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.True(metrics.FrameGapContinuityLossCount >= metricsBeforeGap.FrameGapContinuityLossCount + 1);
+            Assert.True(metrics.ContinuityLossCount >= metricsBeforeGap.ContinuityLossCount + 1);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorAppliedCount);
+            Assert.Equal(0, metrics.StartupCorridorAbortCount);
+            Assert.Equal("none", metrics.StartupCorridorAbortReason);
+            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_LateMissingFollowerDuringGap_IsDroppedWaitingForKeyframe()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            ScreenShareFrameLossAttributionRegistry.ResetAllForTests();
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 310,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 20 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 310, streamConfig: config, frameId: 20);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 20 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 23 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 310, frameId: 23, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap recoveryOwner && recoveryOwner.PixelSize.Width == 23 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            var metricsBeforeGap = vm.GetMetricsSnapshot();
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 25 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 310, frameId: 25);
+            await WaitUntilAsync(
+                () => vm.IsIdleForDiagnostics &&
+                      vm.GetMetricsSnapshot().FramesDroppedWaitingForRecoveryKeyframe >= metricsBeforeGap.FramesDroppedWaitingForRecoveryKeyframe + 1,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 24 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 310, frameId: 24);
+            await WaitUntilAsync(
+                () => vm.IsIdleForDiagnostics &&
+                      vm.GetMetricsSnapshot().FramesDroppedWaitingForRecoveryKeyframe >= metricsBeforeGap.FramesDroppedWaitingForRecoveryKeyframe + 2,
+                TimeSpan.FromSeconds(2));
+
+            var current = Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
+            Assert.Equal(23, current.PixelSize.Width);
+
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
+            Assert.Equal(0, metrics.StartupCorridorAbortCount);
+
+            var snapshot = vm.GetFrameLossSnapshotForDiagnostics();
+            Assert.Equal(0, snapshot.StaleRunwayWindowAbortCount);
+            Assert.Equal(0, snapshot.LateSameEpochAfterHeadAdvancedDropCount);
+            Assert.Contains(
+                snapshot.RecentLosses,
+                static loss => loss.FrameId == 25 && string.Equals(loss.Reason, "waiting_for_recovery_keyframe", StringComparison.Ordinal));
+            Assert.Contains(
+                snapshot.RecentLosses,
+                static loss => loss.FrameId == 24 && string.Equals(loss.Reason, "waiting_for_recovery_keyframe", StringComparison.Ordinal));
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_RecoveryOwnerUiDelay_DoesNotUseStartupCorridorTimeout()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var pendingUiActions = new Queue<Action>();
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    pendingUiActions.Enqueue(action);
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 32,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 23 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 32, streamConfig: config, frameId: 23, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            await WaitUntilAsync(() => pendingUiActions.Count > 0, TimeSpan.FromSeconds(2));
+
+            await Task.Delay(TimeSpan.FromMilliseconds(500));
+            var metricsBeforeRelease = vm.GetMetricsSnapshot();
+            Assert.Equal(0, metricsBeforeRelease.StartupCorridorAbortCount);
+            Assert.Equal(0, metricsBeforeRelease.RecoveryProgressCorridorAbortCount);
+            Assert.Null(vm.CurrentFrame);
+
+            while (pendingUiActions.Count > 0)
+            {
+                pendingUiActions.Dequeue().Invoke();
+                await Task.Yield();
+            }
+
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap progressed && progressed.PixelSize.Width == 23,
+                TimeSpan.FromSeconds(2));
+
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.Equal(0, metrics.BlockedByReservedRecoveryFrameRejectCount);
+            Assert.Equal(0, metrics.DecodedBlockedByReservedRecoveryFrameCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorAppliedCount);
+            Assert.Equal(0, metrics.StartupCorridorAbortCount);
+            Assert.Equal("none", metrics.StartupCorridorAbortReason);
+            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_NewerEpochNonKey_IsIgnoredUntilRecoveryKeyframeArrives()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 18,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 40 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 18, streamConfig: config, frameId: 40);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 40 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 42 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 18, frameId: 42);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame(
+                "h264",
+                new byte[] { 50 },
+                capturedTsUtcMs: 0,
+                isKeyFrame: false,
+                streamEpoch: 19,
+                streamConfig: new ScreenShareVideoStreamConfigV1
+                {
+                    SessionId = "helper",
+                    StreamEpoch = 19,
+                    Encoding = "h264",
+                    CodecProfile = "baseline",
+                    DecoderConfigData = new byte[] { 4, 5, 6 },
+                },
+                frameId: 0);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            var stillVisible = Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
+            Assert.Equal(40, stillVisible.PixelSize.Width);
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 51 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 19, frameId: 1);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap recovered && recovered.PixelSize.Width == 51 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.True(metrics.FramesDroppedWaitingForRecoveryKeyframe >= 1);
+            Assert.True(metrics.NewerEpochNonKeyIgnoredDuringLockCount >= 1);
+            return true;
+        }, default);
+    }
+
+public async Task ScreenShareViewer_HelperRemote_SequentialPFrames_StayLiveWithoutRecovery()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            ScreenShareFrameLossAttributionRegistry.ResetAllForTests();
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var continuityLossCount = 0;
+            vm.ContinuityLost += (_, _) => continuityLossCount++;
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 17,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 30 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 17, streamConfig: config, frameId: 30, sessionId: "helper-sequential");
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 30 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 31 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 17, frameId: 31, sessionId: "helper-sequential");
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap second && second.PixelSize.Width == 31 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 32 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 17, frameId: 32, sessionId: "helper-sequential");
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap third && third.PixelSize.Width == 32 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            Assert.Equal(0, continuityLossCount);
+            Assert.Equal(0, vm.GetMetricsSnapshot().FrameGapContinuityLossCount);
+            var snapshot = vm.GetFrameLossSnapshotForDiagnostics();
+            Assert.Equal(3, snapshot.FramesEmitted);
+            Assert.Equal(3, snapshot.FramesApplied);
+            Assert.Equal(0, snapshot.UnattributedLossCount);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_RecoveryOwnerThenLaterFramesApplyInOrderWithoutProtectedWindow()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var blockReservedApply = false;
+            var reservedApplyReleased = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var appliedFrameIds = new List<long>();
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: async action =>
+                {
+                    if (blockReservedApply)
+                    {
+                        await reservedApplyReleased.Task.ConfigureAwait(false);
+                    }
+
+                    action();
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+            vm.FrameApplied += (_, args) =>
+            {
+                appliedFrameIds.Add(args.FrameId);
+            };
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 30,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 70 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 30, streamConfig: config, frameId: 70);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 70 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 72 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 30, frameId: 72);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            blockReservedApply = true;
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 73 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 30, frameId: 73, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            await Task.Delay(100);
+
+            var stillVisible = Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
+            Assert.Equal(70, stillVisible.PixelSize.Width);
+
+            reservedApplyReleased.TrySetResult();
+            blockReservedApply = false;
+            await WaitUntilAsync(
+                () => appliedFrameIds.Contains(73),
+                TimeSpan.FromSeconds(2));
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 74 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 30, frameId: 74, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 75 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 30, frameId: 75, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
+            await WaitUntilAsync(
+                () =>
+                {
+                    var appliedSnapshot = appliedFrameIds.ToArray();
+                    return appliedSnapshot.Any(frameId => frameId == 74 || frameId == 75);
+                },
+                TimeSpan.FromSeconds(2));
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 76 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 30, frameId: 76);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            var metrics = vm.GetMetricsSnapshot();
+            var appliedSnapshot = appliedFrameIds.ToArray();
+            Assert.True(Array.IndexOf(appliedSnapshot, 73) >= 0);
+            Assert.True(appliedSnapshot.Any(frameId => frameId == 74 || frameId == 75));
+            Assert.True(Array.FindIndex(appliedSnapshot, frameId => frameId == 74 || frameId == 75) > Array.IndexOf(appliedSnapshot, 73));
+            Assert.True(Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame).PixelSize.Width >= 74);
+            Assert.Equal(0, metrics.DecodedBlockedByReservedRecoveryFrameCount);
+            Assert.Equal(0, metrics.BlockedByReservedRecoveryFrameRejectCount);
+            Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
+            Assert.Equal(0, metrics.RecoveryFollowerWindowAppliedCount);
+            Assert.Equal(0, metrics.RecoveryFollowerWindowTrimmedCount);
+            Assert.Equal(0, metrics.StartupCorridorReleaseCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
+            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            Assert.True(metrics.AverageDecodeCompleteToVisibleApplyMs > 0);
+            Assert.True(metrics.LastReservedApplyHoldMs > 0);
+            Assert.True(metrics.AverageVisibleHeadLagFrames >= 0);
+            Assert.True(metrics.AverageStableHeadLagFrames >= 0);
+            Assert.NotEqual("no_visible_baseline", metrics.HelperSessionPhase);
+            Assert.False(string.IsNullOrWhiteSpace(metrics.HelperRecoveryMechanism));
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_PostRecoveryStaleFrames_DoNotBypassStaleDrop()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+            var staleDropCount = 0;
+            vm.StaleFrameDropped += (_, _) => staleDropCount++;
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper",
+                StreamEpoch = 31,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 80 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), isKeyFrame: true, streamEpoch: 31, streamConfig: config, frameId: 80);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 80 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(5));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 82 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 31, frameId: 82);
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(5));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 83 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), isKeyFrame: true, streamEpoch: 31, frameId: 83, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap recovered && recovered.PixelSize.Width == 83 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(5));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 84 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 5000, isKeyFrame: false, streamEpoch: 31, frameId: 84, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
+            await WaitUntilAsync(
+                () => vm.IsIdleForDiagnostics && staleDropCount >= 1,
+                TimeSpan.FromSeconds(5));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 85 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 5000, isKeyFrame: false, streamEpoch: 31, frameId: 85, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
+            await WaitUntilAsync(
+                () => vm.IsIdleForDiagnostics && staleDropCount >= 2,
+                TimeSpan.FromSeconds(5));
+
+            var current = Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
+            Assert.Equal(83, current.PixelSize.Width);
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.True(staleDropCount >= 2);
+            Assert.Equal(0, metrics.DecodeAgeBudgetCount);
+            Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
+            Assert.Equal(0, metrics.StartupCorridorReleaseCount);
+            Assert.True(metrics.PostRecoveryVisibleGenerationResetCount >= 1);
+            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            return true;
+        }, default);
+    }
+
+}

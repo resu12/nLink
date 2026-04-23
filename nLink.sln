@@ -5,17 +5,19 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{827E0CD3-B72D-47B6-A68D-7590B98EB39B}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NLink.App", "src\nLink.App\nLink.App.csproj", "{8DDC984F-A596-4101-BC76-60E285EA7871}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "nLink.App", "src\nLink.App\nLink.App.csproj", "{8DDC984F-A596-4101-BC76-60E285EA7871}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{0AB3BF05-4346-4AA6-1389-037BE0695223}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NLink.SmokeTests", "tests\nLink.SmokeTests\nLink.SmokeTests.csproj", "{71B4A5A6-CF62-442A-B1A9-91D80252A0AA}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "nLink.SmokeTests", "tests\nLink.SmokeTests\nLink.SmokeTests.csproj", "{71B4A5A6-CF62-442A-B1A9-91D80252A0AA}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NLink.Core", "src\nLink.Core\nLink.Core.csproj", "{3F3AA52A-4E43-4A68-A0C6-84C47069A31A}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "nLink.Core", "src\nLink.Core\nLink.Core.csproj", "{3F3AA52A-4E43-4A68-A0C6-84C47069A31A}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NLink.Infra.DevLocal", "src\nLink.Infra.DevLocal\nLink.Infra.DevLocal.csproj", "{C8D81E04-3C0D-4A7F-B826-8F9780E7C12F}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "nLink.Infra.DevLocal", "src\nLink.Infra.DevLocal\nLink.Infra.DevLocal.csproj", "{C8D81E04-3C0D-4A7F-B826-8F9780E7C12F}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NLink.Infra.Nkn", "src\nLink.Infra.Nkn\nLink.Infra.Nkn.csproj", "{8A7FF312-18AC-46AB-BF91-BCBF706619B8}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "nLink.Infra.Nkn", "src\nLink.Infra.Nkn\nLink.Infra.Nkn.csproj", "{8A7FF312-18AC-46AB-BF91-BCBF706619B8}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "nLink.TestCommon", "tests\nLink.TestCommon\nLink.TestCommon.csproj", "{C42F542E-D426-4FE2-B596-D5B66432C31E}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -87,6 +89,18 @@ Global
 		{8A7FF312-18AC-46AB-BF91-BCBF706619B8}.Release|x64.Build.0 = Release|Any CPU
 		{8A7FF312-18AC-46AB-BF91-BCBF706619B8}.Release|x86.ActiveCfg = Release|Any CPU
 		{8A7FF312-18AC-46AB-BF91-BCBF706619B8}.Release|x86.Build.0 = Release|Any CPU
+		{C42F542E-D426-4FE2-B596-D5B66432C31E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C42F542E-D426-4FE2-B596-D5B66432C31E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C42F542E-D426-4FE2-B596-D5B66432C31E}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{C42F542E-D426-4FE2-B596-D5B66432C31E}.Debug|x64.Build.0 = Debug|Any CPU
+		{C42F542E-D426-4FE2-B596-D5B66432C31E}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{C42F542E-D426-4FE2-B596-D5B66432C31E}.Debug|x86.Build.0 = Debug|Any CPU
+		{C42F542E-D426-4FE2-B596-D5B66432C31E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C42F542E-D426-4FE2-B596-D5B66432C31E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C42F542E-D426-4FE2-B596-D5B66432C31E}.Release|x64.ActiveCfg = Release|Any CPU
+		{C42F542E-D426-4FE2-B596-D5B66432C31E}.Release|x64.Build.0 = Release|Any CPU
+		{C42F542E-D426-4FE2-B596-D5B66432C31E}.Release|x86.ActiveCfg = Release|Any CPU
+		{C42F542E-D426-4FE2-B596-D5B66432C31E}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -97,6 +111,6 @@ Global
 		{3F3AA52A-4E43-4A68-A0C6-84C47069A31A} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{C8D81E04-3C0D-4A7F-B826-8F9780E7C12F} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{8A7FF312-18AC-46AB-BF91-BCBF706619B8} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{C42F542E-D426-4FE2-B596-D5B66432C31E} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 EndGlobal
-
