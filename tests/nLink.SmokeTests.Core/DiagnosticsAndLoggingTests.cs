@@ -124,6 +124,10 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
             Assert.Contains("screenshare_messages_sent:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_payload_bytes_sent:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_bridge_bytes_sent:", copied!, StringComparison.Ordinal);
+            Assert.Contains("Screenshare evidence", copied!, StringComparison.Ordinal);
+            Assert.Contains("screenshare_evidence_status:", copied!, StringComparison.Ordinal);
+            Assert.Contains("screenshare_operator_verdict:", copied!, StringComparison.Ordinal);
+            Assert.Contains("screenshare_next_operator_action:", copied!, StringComparison.Ordinal);
             Assert.Contains("high_priority_control_queue_overflows:", copied!, StringComparison.Ordinal);
             Assert.Contains("high_priority_control_rejected:", copied!, StringComparison.Ordinal);
             Assert.Contains("high_priority_control_coalesced:", copied!, StringComparison.Ordinal);
@@ -174,6 +178,200 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCALE", previousScreenShareScale);
         }
     }
+
+[Fact]
+public void ScreenShareEvidenceLocator_ReportsNoneFound_WhenNoArtifactsExist()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-evidence-empty-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(tempRoot);
+
+    try
+    {
+        var snapshot = new ScreenShareEvidenceLocator([tempRoot]).ReadLatest();
+
+        Assert.Equal(ScreenShareEvidenceStatus.NoneFound, snapshot.Status);
+        Assert.Equal("none_found", snapshot.StatusKey);
+        Assert.Contains("screenshare_evidence_status: none_found", snapshot.ToReportText(), StringComparison.Ordinal);
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+[Fact]
+public void ScreenShareEvidenceLocator_ReportsArtifactWithoutVerdict_WhenLatestArtifactIsUnanalyzed()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-evidence-missing-verdict-" + Guid.NewGuid().ToString("N"));
+    var artifactDir = Path.Combine(tempRoot, "20260423-010101");
+    Directory.CreateDirectory(artifactDir);
+    File.WriteAllText(Path.Combine(artifactDir, "stability-gates-summary.txt"), "behavior_first_gate_status=pass");
+
+    try
+    {
+        var snapshot = new ScreenShareEvidenceLocator([tempRoot]).ReadLatest();
+
+        Assert.Equal(ScreenShareEvidenceStatus.ArtifactWithoutVerdict, snapshot.Status);
+        Assert.Equal("artifact_without_verdict", snapshot.StatusKey);
+        Assert.Equal("20260423-010101", snapshot.ArtifactName);
+        Assert.Equal("screenshare-operator-verdict.txt", snapshot.MissingRequiredInputs);
+        Assert.Contains("AnalyzeRetained", snapshot.NextOperatorAction, StringComparison.Ordinal);
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+[Fact]
+public void ScreenShareEvidenceLocator_ParsesLatestVerdict_AndRedactsReportPaths()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-evidence-verdict-" + Guid.NewGuid().ToString("N"));
+    var olderArtifact = Path.Combine(tempRoot, "20260423-010101");
+    var latestArtifact = Path.Combine(tempRoot, "20260423-020202");
+    Directory.CreateDirectory(olderArtifact);
+    Directory.CreateDirectory(latestArtifact);
+    File.WriteAllText(Path.Combine(olderArtifact, "stability-gates-summary.txt"), "behavior_first_gate_status=pass");
+    WriteScreenShareVerdict(
+        latestArtifact,
+        "fail_live_transport_evidence",
+        "Live transport remained outside the local runtime.",
+        "Attach the artifact if support requests raw evidence.",
+        "external_transport_health",
+        "steady_external_delivery_latency");
+
+    try
+    {
+        var snapshot = new ScreenShareEvidenceLocator([tempRoot]).ReadLatest();
+        var report = snapshot.ToReportText();
+
+        Assert.Equal(ScreenShareEvidenceStatus.VerdictAvailable, snapshot.Status);
+        Assert.Equal("verdict_available", snapshot.StatusKey);
+        Assert.Equal("20260423-020202", snapshot.ArtifactName);
+        Assert.Equal("fail_live_transport_evidence", snapshot.OperatorVerdict);
+        Assert.Equal("external_transport_health", snapshot.DeepestTrackBStage);
+        Assert.Equal("steady_external_delivery_latency", snapshot.DeepestTrackBClassification);
+        Assert.Contains("screenshare_artifact_dir: [REDACTED_PATH]/20260423-020202", report, StringComparison.Ordinal);
+        Assert.Contains("screenshare_verdict_path: [REDACTED_PATH]/screenshare-operator-verdict.txt", report, StringComparison.Ordinal);
+        Assert.DoesNotContain(tempRoot, report, StringComparison.OrdinalIgnoreCase);
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+[Fact]
+public void ScreenShareEvidenceLocator_ReadLatest_DoesNotModifyArtifactFiles()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-evidence-readonly-" + Guid.NewGuid().ToString("N"));
+    var artifactDir = Path.Combine(tempRoot, "20260423-025252");
+    Directory.CreateDirectory(artifactDir);
+    WriteScreenShareVerdict(
+        artifactDir,
+        "pass",
+        "Read-only evidence was available.",
+        "No action needed.",
+        "external_transport_health",
+        "steady_external_delivery_latency");
+    var verdictPath = Path.Combine(artifactDir, "screenshare-operator-verdict.txt");
+    var beforeEntries = Directory.GetFileSystemEntries(tempRoot, "*", SearchOption.AllDirectories)
+        .Select(path => Path.GetRelativePath(tempRoot, path))
+        .OrderBy(path => path, StringComparer.Ordinal)
+        .ToArray();
+    var beforeVerdictWriteUtc = File.GetLastWriteTimeUtc(verdictPath);
+
+    try
+    {
+        var snapshot = new ScreenShareEvidenceLocator([tempRoot]).ReadLatest();
+        var afterEntries = Directory.GetFileSystemEntries(tempRoot, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(tempRoot, path))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(ScreenShareEvidenceStatus.VerdictAvailable, snapshot.Status);
+        Assert.Equal(beforeEntries, afterEntries);
+        Assert.Equal(beforeVerdictWriteUtc, File.GetLastWriteTimeUtc(verdictPath));
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+[Fact]
+public void DiagnosticsCopy_IncludesScreenshareEvidenceSnapshot_AndRedactsArtifactPath()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-evidence-diagnostics-" + Guid.NewGuid().ToString("N"));
+    var artifactDir = Path.Combine(tempRoot, "20260423-030303");
+    Directory.CreateDirectory(artifactDir);
+    WriteScreenShareVerdict(
+        artifactDir,
+        "fail_live_transport_evidence",
+        "Live transport evidence was collected.",
+        "Share copied diagnostics first.",
+        "external_transport_health",
+        "steady_external_delivery_latency");
+
+    try
+    {
+        var config = TransportRuntimeConfig.Select();
+        var vm = new DiagnosticsPageViewModel(
+            new ScreenShareEvidenceLocator([tempRoot]),
+            static () => { },
+            config);
+
+        var copied = vm.BuildDiagnosticsCopyTextForTests();
+
+        Assert.Contains("Screenshare evidence", copied, StringComparison.Ordinal);
+        Assert.Contains("screenshare_evidence_status: verdict_available", copied, StringComparison.Ordinal);
+        Assert.Contains("screenshare_operator_verdict: fail_live_transport_evidence", copied, StringComparison.Ordinal);
+        Assert.Contains("screenshare_deepest_classification: steady_external_delivery_latency", copied, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED_PATH]/20260423-030303", copied, StringComparison.Ordinal);
+        Assert.DoesNotContain(tempRoot, copied, StringComparison.OrdinalIgnoreCase);
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+[Fact]
+public void HangReport_WritesScreenshareEvidenceText()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-evidence-hang-" + Guid.NewGuid().ToString("N"));
+    var artifactDir = Path.Combine(tempRoot, "20260423-040404");
+    var hangRoot = Path.Combine(tempRoot, "hang");
+    Directory.CreateDirectory(artifactDir);
+    WriteScreenShareVerdict(
+        artifactDir,
+        "pass",
+        "Screenshare evidence is green.",
+        "Continue with normal support triage.",
+        "external_transport_health",
+        "steady_external_delivery_latency");
+
+    try
+    {
+        var service = new HangReportService(
+            new ScreenShareEvidenceLocator([tempRoot]),
+            nowProvider: () => new DateTimeOffset(2026, 4, 23, 4, 4, 4, TimeSpan.Zero),
+            hangArtifactsRootProvider: () => hangRoot);
+
+        var result = service.Capture(HangReportTriggerKind.ManualDiagnostics, "test", diagnosticsTextOverride: "diag");
+        var evidencePath = Path.Combine(result.FolderPath, "screenshare-evidence.txt");
+
+        Assert.True(File.Exists(evidencePath), $"Expected hang-report screenshare evidence: {evidencePath}");
+        var evidence = File.ReadAllText(evidencePath);
+        Assert.Contains("screenshare_evidence_status: verdict_available", evidence, StringComparison.Ordinal);
+        Assert.Contains("screenshare_operator_verdict: pass", evidence, StringComparison.Ordinal);
+        Assert.DoesNotContain(tempRoot, evidence, StringComparison.OrdinalIgnoreCase);
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
 
 [Trait("Category", "LegacySmoke")]
     [Fact]
@@ -490,6 +688,43 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
         {
             SessionTimeline.Clear();
             Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
+        }
+    }
+
+    private static void WriteScreenShareVerdict(
+        string artifactDir,
+        string verdict,
+        string summary,
+        string nextAction,
+        string deepestStage,
+        string deepestClassification)
+    {
+        Directory.CreateDirectory(artifactDir);
+        File.WriteAllLines(
+            Path.Combine(artifactDir, "screenshare-operator-verdict.txt"),
+            [
+                "operator_verdict=" + verdict,
+                "operator_summary=" + summary,
+                "next_operator_action=" + nextAction,
+                "artifact_dir=" + artifactDir,
+                "missing_required_inputs=(none)",
+                "deepest_track_b_stage=" + deepestStage,
+                "deepest_track_b_classification=" + deepestClassification
+            ]);
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+        catch
+        {
+            // Best-effort temp cleanup only.
         }
     }
 

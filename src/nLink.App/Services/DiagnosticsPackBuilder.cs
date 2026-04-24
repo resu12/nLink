@@ -15,6 +15,15 @@ internal static class DiagnosticsPackBuilder
         string diagnosticsText,
         string outputFolderPath,
         CancellationToken ct)
+        => await CreateAsync(logsFolderPath, diagnosticsText, outputFolderPath, screenShareEvidenceText: null, ct)
+            .ConfigureAwait(false);
+
+    public static async Task<string> CreateAsync(
+        string logsFolderPath,
+        string diagnosticsText,
+        string outputFolderPath,
+        string? screenShareEvidenceText,
+        CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(logsFolderPath);
         ArgumentNullException.ThrowIfNull(diagnosticsText);
@@ -32,6 +41,15 @@ internal static class DiagnosticsPackBuilder
         {
             var safeDiagnostics = DiagnosticsRedactor.Redact(diagnosticsText);
             await writer.WriteAsync(safeDiagnostics.AsMemory(), ct).ConfigureAwait(false);
+        }
+
+        if (!string.IsNullOrWhiteSpace(screenShareEvidenceText))
+        {
+            var evidenceEntry = zip.CreateEntry("screenshare-evidence.txt", CompressionLevel.Optimal);
+            await using var evidenceStream = evidenceEntry.Open();
+            await using var evidenceWriter = new StreamWriter(evidenceStream, new UTF8Encoding(false));
+            var safeEvidence = DiagnosticsExportBuilder.RedactStructuredEvidenceText(screenShareEvidenceText);
+            await evidenceWriter.WriteAsync(safeEvidence.AsMemory(), ct).ConfigureAwait(false);
         }
 
         if (Directory.Exists(logsFolderPath))

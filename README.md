@@ -43,7 +43,7 @@ Remote control:
 ![Remote control session](docs/images/remote-control-0.4.5.png)
 
 If connection fails:
-Open Diagnostics -> Copy diagnostics and include it when reporting issues.
+Open Diagnostics -> Copy diagnostics and include it when reporting issues. If a screenshare soak artifact has already been analyzed, Diagnostics includes a compact screenshare evidence summary; for hangs or freezes, use Diagnostics -> Save Hang Report.
 
 For release-safe builds, Diagnostics should show:
 - `invite_security_mode: issued_one_time_secret_invites`
@@ -89,6 +89,9 @@ License:
   `powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane Smoke -Configuration Release`
 - See the lane matrix:
   [`docs/test-lanes.md`](docs/test-lanes.md)
+- For screenshare validation and support flow selection:
+  `powershell -ExecutionPolicy Bypass -File .\tools\ScreenShare-Ops.ps1 -Mode Test`
+  [`docs/screenshare-operability.md`](docs/screenshare-operability.md)
 
 ### Release Validation (Maintainers, Windows)
 

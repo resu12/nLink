@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace NLink.SmokeTests;
 
@@ -7,20 +9,6 @@ namespace NLink.SmokeTests;
 [Collection(AvaloniaHeadlessUiCollection.Name)]
 public sealed class ScreenShareRetainedAnalyzerScriptsTests
 {
-    private static readonly string[] RetainedScripts =
-    {
-        "Analyze-ScreenShareLatencyRegression.ps1",
-        "Analyze-ScreenShareHelperUpstreamLatency.ps1",
-        "Analyze-ScreenShareHelperReadyPath.ps1",
-        "Analyze-ScreenShareHelperReceivePath.ps1",
-        "Analyze-ScreenShareHelperBridgeIngress.ps1",
-        "Analyze-ScreenShareHelperNknReceive.ps1",
-        "Analyze-ScreenShareHelperWsReceive.ps1",
-        "Analyze-ScreenShareHelperSocketReceive.ps1",
-        "Analyze-ScreenShareExternalDelivery.ps1",
-        "Analyze-ScreenShareExternalTransportHealth.ps1",
-    };
-
     [Fact]
     [Trait("Category", "Smoke")]
     public async Task RetainedTrackBAnalyzerScripts_ParseWithoutSyntaxErrors()
@@ -31,7 +19,7 @@ public sealed class ScreenShareRetainedAnalyzerScriptsTests
         }
 
         var repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
-        var scriptPaths = RetainedScripts
+        var scriptPaths = LoadRetainedAnalyzerScriptNames(repoRoot)
             .Select(name => Path.Combine(repoRoot, "tools", name))
             .ToArray();
 
@@ -88,6 +76,17 @@ public sealed class ScreenShareRetainedAnalyzerScriptsTests
         }
     }
 
+    private static string[] LoadRetainedAnalyzerScriptNames(string repoRoot)
+    {
+        var manifestPath = Path.Combine(repoRoot, "tools", "ScreenShareOps", "retained-analyzer-chain.json");
+        Assert.True(File.Exists(manifestPath), $"Expected retained analyzer manifest: {manifestPath}");
+
+        var manifest = JsonSerializer.Deserialize<RetainedAnalyzerManifest>(File.ReadAllText(manifestPath));
+        Assert.NotNull(manifest);
+        Assert.NotNull(manifest.RetainedAnalyzers);
+        return manifest.RetainedAnalyzers.Select(analyzer => analyzer.Script).ToArray();
+    }
+
     private static string BuildParserHarness()
     {
         return """
@@ -111,6 +110,7 @@ foreach ($scriptPath in $ScriptPaths) {
 
         exit 1
     }
+
 }
 """;
     }
@@ -128,5 +128,17 @@ foreach ($scriptPath in $ScriptPaths) {
         {
             // Best-effort temp cleanup only.
         }
+    }
+
+    private sealed class RetainedAnalyzerManifest
+    {
+        [JsonPropertyName("retained_analyzers")]
+        public RetainedAnalyzerEntry[] RetainedAnalyzers { get; init; } = [];
+    }
+
+    private sealed class RetainedAnalyzerEntry
+    {
+        [JsonPropertyName("script")]
+        public string Script { get; init; } = "";
     }
 }

@@ -25,10 +25,28 @@ public sealed class HangReportService
     private readonly Func<DateTimeOffset> nowProvider;
     private readonly Func<string> hangArtifactsRootProvider;
     private readonly int logTailLines;
+    private readonly ScreenShareEvidenceLocator screenShareEvidenceLocator;
     private readonly object gate = new();
     private DateTimeOffset lastCaptureUtc = DateTimeOffset.MinValue;
 
     public HangReportService(
+        SessionRuntime? sessionRuntime = null,
+        ResourceRuntimeTracker? resourceRuntimeTracker = null,
+        Func<DateTimeOffset>? nowProvider = null,
+        Func<string>? hangArtifactsRootProvider = null,
+        int logTailLines = DefaultLogTailLines)
+        : this(
+            ScreenShareEvidenceLocator.CreateDefault(),
+            sessionRuntime,
+            resourceRuntimeTracker,
+            nowProvider,
+            hangArtifactsRootProvider,
+            logTailLines)
+    {
+    }
+
+    internal HangReportService(
+        ScreenShareEvidenceLocator screenShareEvidenceLocator,
         SessionRuntime? sessionRuntime = null,
         ResourceRuntimeTracker? resourceRuntimeTracker = null,
         Func<DateTimeOffset>? nowProvider = null,
@@ -40,12 +58,14 @@ public sealed class HangReportService
         this.nowProvider = nowProvider ?? (() => DateTimeOffset.UtcNow);
         this.hangArtifactsRootProvider = hangArtifactsRootProvider ?? DefaultHangArtifactsRootProvider;
         this.logTailLines = logTailLines > 0 ? logTailLines : DefaultLogTailLines;
+        this.screenShareEvidenceLocator = screenShareEvidenceLocator;
     }
 
     internal HangReportCaptureResult Capture(
         HangReportTriggerKind triggerKind,
         string reason,
-        string? diagnosticsTextOverride = null)
+        string? diagnosticsTextOverride = null,
+        string? screenShareEvidenceTextOverride = null)
     {
         var now = nowProvider();
         var root = hangArtifactsRootProvider();
@@ -79,6 +99,11 @@ public sealed class HangReportService
 
         var resourcePath = Path.Combine(folder, "resource-snapshot.txt");
         File.WriteAllText(resourcePath, DiagnosticsRedactor.Redact(BuildResourceSnapshotText()));
+
+        var screenShareEvidencePath = Path.Combine(folder, "screenshare-evidence.txt");
+        var screenShareEvidenceText = screenShareEvidenceTextOverride ??
+            screenShareEvidenceLocator.ReadLatest().ToReportText();
+        File.WriteAllText(screenShareEvidencePath, DiagnosticsExportBuilder.RedactStructuredEvidenceText(screenShareEvidenceText));
 
         LocalOperationalLog.Warn(
             "HangReport",

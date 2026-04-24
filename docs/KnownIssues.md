@@ -7,7 +7,7 @@ This beta is focused on session UX stability and release readiness. Some rough e
 - Some failure and recovery flows may still feel abrupt compared with a final release
 - Diagnostics content is intended for troubleshooting and may still change between beta builds
 - Performance and layout should be checked on the target machine if you use unusual scaling or window sizes
-- Screenshare UI is scaffolded only; actual screenshare streaming is not implemented in this beta
+- Screenshare streaming is available, but live NKN performance can vary with transport conditions; include diagnostics and any available soak artifact when reporting issues.
 
 ## How to report an issue
 

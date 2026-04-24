@@ -37,8 +37,34 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private readonly InviteSecurityStatus inviteSecurityStatus;
     private readonly NknRuntimeDiagnosticsSnapshot nknDiagnosticsSnapshot;
     private readonly PersistenceDiagnosticsSnapshot persistenceDiagnosticsSnapshot;
+    private readonly ScreenShareEvidenceSnapshot screenShareEvidenceSnapshot;
 
     public DiagnosticsPageViewModel(
+        Action backAction,
+        TransportRuntimeConfig transportConfig,
+        ShareMessageConfig? linksConfig = null,
+        SessionRuntime? sessionRuntime = null,
+        MetricsRegistry? metricsRegistry = null,
+        ResourceRuntimeTracker? resourceRuntimeTracker = null,
+        HangReportService? hangReportService = null,
+        Func<DateTimeOffset>? nowProvider = null,
+        Func<string>? diagnosticsExportRootProvider = null)
+        : this(
+            ScreenShareEvidenceLocator.CreateDefault(),
+            backAction,
+            transportConfig,
+            linksConfig,
+            sessionRuntime,
+            metricsRegistry,
+            resourceRuntimeTracker,
+            hangReportService,
+            nowProvider,
+            diagnosticsExportRootProvider)
+    {
+    }
+
+    internal DiagnosticsPageViewModel(
+        ScreenShareEvidenceLocator screenShareEvidenceLocator,
         Action backAction,
         TransportRuntimeConfig transportConfig,
         ShareMessageConfig? linksConfig = null,
@@ -57,6 +83,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         this.hangReportService = hangReportService;
         this.nowProvider = nowProvider ?? DefaultNowProvider;
         this.diagnosticsExportRootProvider = diagnosticsExportRootProvider ?? DefaultDiagnosticsExportRootProvider;
+        screenShareEvidenceSnapshot = screenShareEvidenceLocator.ReadLatest();
 
         ActiveTransport = transportConfig.DisplayName;
         TransportKey = transportConfig.Key;
@@ -189,6 +216,12 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string ScreenSharePresetLowEnd => ScreenShareQualitySettings.LowEndPreset.Describe();
     public string ScreenSharePresetSharperText => ScreenShareQualitySettings.SharperTextPreset.Describe();
     public string ScreenShareCaptureEnvHint => "Apply preset, then restart screen sharing. Settings apply instantly and are persisted in background via env vars: NLINK_FEATURE_SCREENCAP_MAX_FPS, NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS, NLINK_FEATURE_SCREENCAP_SCALE.";
+    public string ScreenShareEvidenceStatus => screenShareEvidenceSnapshot.StatusKey;
+    public string ScreenShareEvidenceArtifactName => screenShareEvidenceSnapshot.ArtifactName;
+    public string ScreenShareEvidenceVerdict => screenShareEvidenceSnapshot.OperatorVerdict;
+    public string ScreenShareEvidenceSummary => screenShareEvidenceSnapshot.OperatorSummary;
+    public string ScreenShareEvidenceNextAction => screenShareEvidenceSnapshot.NextOperatorAction;
+    public string ScreenShareEvidenceDeepestClassification => screenShareEvidenceSnapshot.DeepestTrackBClassification;
 
     public string AppVersion { get; }
 
@@ -431,7 +464,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             var result = hangReportService.Capture(
                 HangReportTriggerKind.ManualDiagnostics,
                 "manual_diagnostics_page",
-                diagnosticsTextOverride: BuildDiagnosticsCopyText());
+                diagnosticsTextOverride: BuildDiagnosticsCopyText(),
+                screenShareEvidenceTextOverride: BuildScreenShareEvidenceText());
             OpenHangReportFolderRequested?.Invoke(this, result.FolderPath);
             copyFeedback.Show("Hang report saved");
         }
@@ -475,7 +509,11 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     }
 
     internal string BuildDiagnosticsCopyTextForTests() => BuildDiagnosticsCopyText();
+    internal string BuildScreenShareEvidenceTextForTests() => BuildScreenShareEvidenceText();
     internal string ExportMetricsJsonForTests() => ExportMetricsJsonToFile();
+
+    private string BuildScreenShareEvidenceText()
+        => DiagnosticsRedactor.Redact(screenShareEvidenceSnapshot.ToReportText());
 
     private string BuildDiagnosticsCopyText()
     {
@@ -540,6 +578,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"  low_end_cpu_network: {ScreenSharePresetLowEnd}",
             $"  sharper_text: {ScreenSharePresetSharperText}",
             $"  apply_hint: {ScreenShareCaptureEnvHint}",
+            string.Empty,
+            BuildScreenShareEvidenceText(),
             string.Empty,
             "Bridge / NKN",
             "------------",

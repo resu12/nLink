@@ -81,6 +81,49 @@ public sealed class DiagnosticsPackSmokeTests
         CleanupDirectoryIfExists(tempRoot);
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task DiagnosticsPack_AddsOptionalScreenshareEvidence_WhenProvided()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-diagpack-evidence-" + Guid.NewGuid().ToString("N"));
+        var logsDir = Path.Combine(tempRoot, "logs");
+        var outDir = Path.Combine(tempRoot, "out");
+        Directory.CreateDirectory(logsDir);
+
+        try
+        {
+            var evidenceText = string.Join(
+                Environment.NewLine,
+                [
+                    "Screenshare evidence",
+                    "--------------------",
+                    "screenshare_evidence_status: verdict_available",
+                    "screenshare_artifact_dir: C:\\Users\\Someone\\artifacts\\soak\\20260423-040404",
+                    "screenshare_operator_verdict: pass"
+                ]);
+
+            var zipPath = await DiagnosticsPackBuilder.CreateAsync(
+                logsDir,
+                "diag text",
+                outDir,
+                evidenceText,
+                CancellationToken.None);
+
+            using var zip = ZipFile.OpenRead(zipPath);
+            var evidenceEntry = Assert.Single(zip.Entries.Where(e => e.FullName == "screenshare-evidence.txt"));
+            using var evidenceReader = new StreamReader(evidenceEntry.Open());
+            var evidence = await evidenceReader.ReadToEndAsync();
+            Assert.Contains("screenshare_evidence_status: verdict_available", evidence, StringComparison.Ordinal);
+            Assert.Contains("screenshare_operator_verdict: pass", evidence, StringComparison.Ordinal);
+            Assert.DoesNotContain("C:\\Users\\Someone", evidence, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("[REDACTED_PATH]/20260423-040404", evidence, StringComparison.Ordinal);
+        }
+        finally
+        {
+            CleanupDirectoryIfExists(tempRoot);
+        }
+    }
+
     private static void CleanupDirectoryIfExists(string path)
     {
         try

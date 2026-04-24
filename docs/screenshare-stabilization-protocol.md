@@ -163,8 +163,17 @@ Until explicitly changed by a new plan:
 - Treat helper progress as factual input, not recovery ownership.
 - Favor simpler recovery primitives over sophisticated continuity salvage.
 
+## Track D Operability Note
+
+Track D is about simplifying how operators validate, collect, and interpret screenshare evidence. It does not reopen Track B latency tuning by default.
+
+Use `docs/screenshare-operability.md` as the top-level operator model. Use this protocol only when planning a screenshare runtime behavior change that needs promotion criteria.
+
+Track D is closed with `tools\ScreenShare-Ops.ps1` as the only screenshare operator entry point, `screenshare-operator-verdict.txt` as the first-read live evidence artifact, and app Diagnostics / Save Hang Report as the first support capture surfaces. Retained Track B analyzers stay available as closeout evidence only.
+
 ## Related Docs
 
+- `docs/screenshare-operability.md`
 - `docs/screenshare-soak.md`
 - `docs/release/rc-guardrails.md`
 - `tools/Run-ScreenShareNknSoak.ps1`

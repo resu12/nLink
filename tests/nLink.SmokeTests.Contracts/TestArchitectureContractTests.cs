@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
@@ -64,6 +66,41 @@ public sealed class TestArchitectureContractTests
         "BridgeStabilityPromotion",
         "TrackBRetained",
         "All"
+    ];
+
+    private static readonly string[] RequiredScreenShareOperatorFlows =
+    [
+        "Code-change validation",
+        "Local stability soak",
+        "Live NKN evidence",
+        "Support/debug capture"
+    ];
+
+    private static readonly string[] RequiredScreenShareOpsModes =
+    [
+        "Test",
+        "LocalSoak",
+        "NknSoak",
+        "AnalyzeRetained",
+        "TrackBRetained",
+        "SupportCapture"
+    ];
+
+    private static readonly string[] RetiredScreenShareUnimplementedPhrases =
+    [
+        "Screenshare UI is scaffolded only",
+        "actual screenshare streaming is not implemented",
+        "No WebRTC or screenshare streaming implementation",
+        "No WebRTC or screenshare implementation"
+    ];
+
+    private static readonly string[] RequiredTrackDCloseoutPhrases =
+    [
+        "Track D Closeout State",
+        @"tools\ScreenShare-Ops.ps1` is the only screenshare operator entry point",
+        "`screenshare-operator-verdict.txt` is the first-read live evidence artifact",
+        "App Diagnostics and Save Hang Report are the first support capture surfaces",
+        "Retained Track B analyzers are preserved closeout evidence"
     ];
 
     [Fact]
@@ -259,6 +296,193 @@ public sealed class TestArchitectureContractTests
     }
 
     [Fact]
+    public void ScreenShareOperatorGuide_Exists_AndDefinesRequiredFlows()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var guidePath = Path.Combine(repoRoot, "docs", "screenshare-operability.md");
+
+        Assert.True(File.Exists(guidePath), $"Expected screenshare operator guide: {guidePath}");
+
+        var guideText = File.ReadAllText(guidePath);
+        foreach (var flow in RequiredScreenShareOperatorFlows)
+        {
+            Assert.Contains(flow, guideText, StringComparison.Ordinal);
+        }
+
+        Assert.Contains(@"tools\ScreenShare-Ops.ps1", guideText, StringComparison.Ordinal);
+        Assert.Contains("-Mode Test", guideText, StringComparison.Ordinal);
+        Assert.Contains("-Mode LocalSoak", guideText, StringComparison.Ordinal);
+        Assert.Contains("-Mode NknSoak", guideText, StringComparison.Ordinal);
+        Assert.Contains("-Mode AnalyzeRetained", guideText, StringComparison.Ordinal);
+        Assert.Contains("-Mode SupportCapture", guideText, StringComparison.Ordinal);
+        Assert.Contains("screenshare-operator-verdict.txt", guideText, StringComparison.Ordinal);
+        Assert.Contains(@"tools\Test-Lanes.ps1 -Lane ScreenShare", guideText, StringComparison.Ordinal);
+        Assert.Contains("--screenshare-soak", guideText, StringComparison.Ordinal);
+        Assert.Contains(@"tools\Run-ScreenShareNknSoak.ps1", guideText, StringComparison.Ordinal);
+        Assert.Contains("Diagnostics -> Copy diagnostics", guideText, StringComparison.Ordinal);
+        Assert.Contains("Diagnostics -> Save Hang Report", guideText, StringComparison.Ordinal);
+        Assert.Contains("screenshare evidence", guideText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("screenshare-evidence.txt", guideText, StringComparison.Ordinal);
+        Assert.Contains("steady_external_delivery_latency", guideText, StringComparison.Ordinal);
+        foreach (var phrase in RequiredTrackDCloseoutPhrases)
+        {
+            Assert.Contains(phrase, guideText, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void ScreenShareOpsScript_Exists_AndContainsRequiredModes()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var scriptPath = Path.Combine(repoRoot, "tools", "ScreenShare-Ops.ps1");
+        var orchestrationPath = Path.Combine(repoRoot, "tools", "ScreenShareOps", "AnalyzerOrchestration.ps1");
+        var manifestPath = Path.Combine(repoRoot, "tools", "ScreenShareOps", "retained-analyzer-chain.json");
+
+        Assert.True(File.Exists(scriptPath), $"Expected screenshare ops script: {scriptPath}");
+        Assert.True(File.Exists(orchestrationPath), $"Expected screenshare analyzer orchestration module: {orchestrationPath}");
+        Assert.True(File.Exists(manifestPath), $"Expected screenshare analyzer manifest: {manifestPath}");
+
+        var scriptText = File.ReadAllText(scriptPath);
+        var orchestrationText = File.ReadAllText(orchestrationPath);
+        var expected = RequiredScreenShareOpsModes.OrderBy(mode => mode, StringComparer.Ordinal).ToArray();
+        Assert.Equal(expected, ExtractPowerShellValidateSetValues(scriptText, "Mode"));
+        Assert.Contains("Test-Lanes.ps1", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Run-ScreenShareNknSoak.ps1", scriptText, StringComparison.Ordinal);
+        Assert.Contains("AnalyzerOrchestration.ps1", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Invoke-ScreenShareRetainedAnalyzerChain", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Write-ScreenShareOperatorVerdictReport", scriptText, StringComparison.Ordinal);
+        Assert.Contains("screenshare-operator-verdict.txt", scriptText, StringComparison.Ordinal);
+        Assert.Contains("retained-analyzer-chain.json", orchestrationText, StringComparison.Ordinal);
+        Assert.Contains("Analyze-ScreenShareLatencyRegression.ps1", File.ReadAllText(manifestPath), StringComparison.Ordinal);
+        Assert.Contains("Diagnostics -> Copy diagnostics", scriptText, StringComparison.Ordinal);
+        Assert.Contains("Diagnostics -> Save Hang Report", scriptText, StringComparison.Ordinal);
+        Assert.Contains("screenshare evidence summary", scriptText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("screenshare-evidence.txt", scriptText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ScreenShareAnalyzerOrchestrationManifest_MatchesDocumentedRetainedChain()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var manifest = LoadScreenShareAnalyzerManifest(repoRoot);
+        var docsPath = Path.Combine(repoRoot, "docs", "screenshare-soak.md");
+        var docsText = File.ReadAllText(docsPath);
+        var scripts = manifest.RetainedAnalyzers.Select(analyzer => analyzer.Script).ToArray();
+
+        Assert.Equal(1, manifest.SchemaVersion);
+        Assert.Equal(10, scripts.Length);
+        Assert.Equal(scripts.Length, scripts.Distinct(StringComparer.Ordinal).Count());
+        Assert.Contains("steady_external_delivery_latency", manifest.ExternalTransportClassifications);
+        foreach (var script in scripts)
+        {
+            Assert.True(File.Exists(Path.Combine(repoRoot, "tools", script)), $"Expected retained analyzer script: {script}");
+            Assert.Contains(script, docsText, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void NknSoakRefactor_KeepsSingleOperatorFacingSoakCommand()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var opsScriptPath = Path.Combine(repoRoot, "tools", "ScreenShare-Ops.ps1");
+        var soakFacadePath = Path.Combine(repoRoot, "tools", "Run-ScreenShareNknSoak.ps1");
+        var soakImplementationRoot = Path.Combine(repoRoot, "tools", "ScreenShareSoak");
+
+        var opsScriptText = File.ReadAllText(opsScriptPath);
+        Assert.Contains("Run-ScreenShareNknSoak.ps1", opsScriptText, StringComparison.Ordinal);
+        Assert.True(File.Exists(soakFacadePath), $"Expected NKN soak facade: {soakFacadePath}");
+        Assert.True(Directory.Exists(soakImplementationRoot), $"Expected internal NKN soak implementation root: {soakImplementationRoot}");
+
+        var docsAdvertisingImplementation = GetActiveDocsFiles(repoRoot)
+            .Where(file =>
+            {
+                var text = File.ReadAllText(file);
+                return text.Contains(@"tools\ScreenShareSoak", StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("tools/ScreenShareSoak", StringComparison.OrdinalIgnoreCase);
+            })
+            .Select(file => Path.GetRelativePath(repoRoot, file).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Empty(docsAdvertisingImplementation);
+    }
+
+    [Fact]
+    public void ScreenShareOps_IsTheOnlyRootScreenshareOperatorScript()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var toolsRoot = Path.Combine(repoRoot, "tools");
+        var rootScreenshareScripts = Directory.GetFiles(toolsRoot, "ScreenShare-*.ps1", SearchOption.TopDirectoryOnly)
+            .Select(Path.GetFileName)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(["ScreenShare-Ops.ps1"], rootScreenshareScripts);
+    }
+
+    [Fact]
+    public void ScreenShareOperatorVerdict_IsDocumentedAsFirstReadArtifact()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var operatorGuidePath = Path.Combine(repoRoot, "docs", "screenshare-operability.md");
+        var soakDocsPath = Path.Combine(repoRoot, "docs", "screenshare-soak.md");
+
+        var operatorGuideText = File.ReadAllText(operatorGuidePath);
+        var soakDocsText = File.ReadAllText(soakDocsPath);
+
+        Assert.Contains("screenshare-operator-verdict.txt", operatorGuideText, StringComparison.Ordinal);
+        Assert.Contains("screenshare-operator-verdict.txt", soakDocsText, StringComparison.Ordinal);
+        Assert.Contains("first operator-facing artifact to read", soakDocsText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("-Mode AnalyzeRetained", operatorGuideText, StringComparison.Ordinal);
+        Assert.Contains("-Mode AnalyzeRetained", soakDocsText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ActiveDocs_DescribeDiagnosticsScreenshareEvidence()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var docsToCheck = new[]
+        {
+            Path.Combine(repoRoot, "README.md"),
+            Path.Combine(repoRoot, "docs", "screenshare-operability.md"),
+            Path.Combine(repoRoot, "docs", "screenshare-soak.md")
+        };
+
+        foreach (var path in docsToCheck)
+        {
+            var text = File.ReadAllText(path);
+            Assert.Contains("screenshare evidence", text, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var operatorGuideText = File.ReadAllText(docsToCheck[1]);
+        var soakDocsText = File.ReadAllText(docsToCheck[2]);
+        Assert.Contains("Diagnostics -> Copy diagnostics", operatorGuideText, StringComparison.Ordinal);
+        Assert.Contains("Diagnostics -> Save Hang Report", operatorGuideText, StringComparison.Ordinal);
+        Assert.Contains("screenshare-evidence.txt", operatorGuideText, StringComparison.Ordinal);
+        Assert.Contains("screenshare-evidence.txt", soakDocsText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ActiveDocs_CrossReferenceTrackDCloseoutState()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var operatorGuideText = File.ReadAllText(Path.Combine(repoRoot, "docs", "screenshare-operability.md"));
+        var soakDocsText = File.ReadAllText(Path.Combine(repoRoot, "docs", "screenshare-soak.md"));
+        var protocolText = File.ReadAllText(Path.Combine(repoRoot, "docs", "screenshare-stabilization-protocol.md"));
+
+        foreach (var phrase in RequiredTrackDCloseoutPhrases)
+        {
+            Assert.Contains(phrase, operatorGuideText, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("Track D closeout state", soakDocsText, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Track D is closed", protocolText, StringComparison.Ordinal);
+        Assert.Contains(@"tools\ScreenShare-Ops.ps1", protocolText, StringComparison.Ordinal);
+        Assert.Contains("screenshare-operator-verdict.txt", protocolText, StringComparison.Ordinal);
+        Assert.Contains("app Diagnostics / Save Hang Report", protocolText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Readme_AdvertisesTestLanes_AndCurrentRcChecklist()
     {
         var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
@@ -266,7 +490,9 @@ public sealed class TestArchitectureContractTests
         var readmeText = File.ReadAllText(readmePath);
 
         Assert.Contains(@"tools\Test-Lanes.ps1", readmeText, StringComparison.Ordinal);
+        Assert.Contains(@"tools\ScreenShare-Ops.ps1", readmeText, StringComparison.Ordinal);
         Assert.Contains("docs/test-lanes.md", readmeText, StringComparison.Ordinal);
+        Assert.Contains("docs/screenshare-operability.md", readmeText, StringComparison.Ordinal);
         Assert.Contains("docs/release/rc-validation-checklist.md", readmeText, StringComparison.Ordinal);
         Assert.DoesNotContain("docs/release/0.3.0-rc-validation-checklist.md", readmeText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("dotnet test -c Release --filter Category=Smoke", readmeText, StringComparison.OrdinalIgnoreCase);
@@ -317,6 +543,101 @@ public sealed class TestArchitectureContractTests
     }
 
     [Fact]
+    public void ActiveDocs_DoNotClaimScreenShareStreamingIsUnimplemented()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var offenders = GetActiveDocsFiles(repoRoot)
+            .Where(file =>
+            {
+                var text = File.ReadAllText(file);
+                return RetiredScreenShareUnimplementedPhrases.Any(phrase =>
+                    text.Contains(phrase, StringComparison.OrdinalIgnoreCase));
+            })
+            .Select(file => Path.GetRelativePath(repoRoot, file).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Empty(offenders);
+    }
+
+    [Fact]
+    public void ActiveDocs_PresentRetainedTrackBAnalyzersOnlyAsCloseoutEvidence()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var offenders = GetActiveDocsFiles(repoRoot)
+            .Where(file =>
+            {
+                var text = File.ReadAllText(file);
+                if (!Regex.IsMatch(text, @"Analyze-ScreenShare[A-Za-z0-9-]*\.ps1", RegexOptions.IgnoreCase))
+                {
+                    return false;
+                }
+
+                return !text.Contains("Retained Track B Closeout Evidence", StringComparison.Ordinal) ||
+                    !text.Contains("closeout evidence", StringComparison.OrdinalIgnoreCase) ||
+                    !text.Contains("not as the default invitation", StringComparison.OrdinalIgnoreCase);
+            })
+            .Select(file => Path.GetRelativePath(repoRoot, file).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Empty(offenders);
+    }
+
+    [Fact]
+    public void AppCode_DoesNotInvokeScreenShareAnalyzersOrLiveSoakTooling()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var srcRoot = Path.Combine(repoRoot, "src");
+        var forbiddenReference = new Regex(
+            @"Analyze-ScreenShare[A-Za-z0-9-]*\.ps1|Run-ScreenShareNknSoak\.ps1",
+            RegexOptions.IgnoreCase);
+        var sourceExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".cs",
+            ".axaml",
+            ".csproj",
+            ".json",
+            ".ps1"
+        };
+
+        var offenders = Directory.GetFiles(srcRoot, "*", SearchOption.AllDirectories)
+            .Where(file => sourceExtensions.Contains(Path.GetExtension(file)))
+            .Where(file =>
+            {
+                var relativePath = Path.GetRelativePath(srcRoot, file).Replace('\\', '/');
+                return !relativePath.Contains("/bin/", StringComparison.OrdinalIgnoreCase) &&
+                    !relativePath.Contains("/obj/", StringComparison.OrdinalIgnoreCase);
+            })
+            .Where(file => forbiddenReference.IsMatch(File.ReadAllText(file)))
+            .Select(file => Path.GetRelativePath(repoRoot, file).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Empty(offenders);
+    }
+
+    [Fact]
+    public void AppDiagnostics_DoNotAttachFullScreenShareSoakArtifacts()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var diagnosticsPaths = new[]
+        {
+            Path.Combine(repoRoot, "src", "nLink.App", "Services", "DiagnosticsPackBuilder.cs"),
+            Path.Combine(repoRoot, "src", "nLink.App", "Services", "HangReportService.cs"),
+            Path.Combine(repoRoot, "src", "nLink.App", "ViewModels", "DiagnosticsPageViewModel.cs")
+        };
+        var combinedText = string.Join(Environment.NewLine, diagnosticsPaths.Select(File.ReadAllText));
+
+        Assert.Contains("screenshare-evidence.txt", combinedText, StringComparison.Ordinal);
+        Assert.DoesNotContain("File.Copy", combinedText, StringComparison.Ordinal);
+        Assert.DoesNotContain("CreateEntryFromFile", combinedText, StringComparison.Ordinal);
+        Assert.DoesNotContain("helper-socket-receive-summary.txt", combinedText, StringComparison.Ordinal);
+        Assert.DoesNotContain("bridge-media-send-summary.txt", combinedText, StringComparison.Ordinal);
+        Assert.DoesNotContain("bridge-transport-health-summary.txt", combinedText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CategoryPerformance_IsNotAdvertisedWithoutMatchingTests()
     {
         var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
@@ -340,6 +661,16 @@ public sealed class TestArchitectureContractTests
             .ToArray();
 
         Assert.Empty(offenders);
+    }
+
+    private static ScreenShareAnalyzerManifest LoadScreenShareAnalyzerManifest(string repoRoot)
+    {
+        var manifestPath = Path.Combine(repoRoot, "tools", "ScreenShareOps", "retained-analyzer-chain.json");
+        var manifest = JsonSerializer.Deserialize<ScreenShareAnalyzerManifest>(File.ReadAllText(manifestPath));
+        Assert.NotNull(manifest);
+        Assert.NotNull(manifest.RetainedAnalyzers);
+        Assert.NotNull(manifest.ExternalTransportClassifications);
+        return manifest;
     }
 
     private static bool ContainsTestMethod(string text)
@@ -375,6 +706,18 @@ public sealed class TestArchitectureContractTests
         return Regex.Matches(docsText, @"^\|\s*`(?<lane>[^`]+)`\s*\|", RegexOptions.Multiline)
             .Select(match => match.Groups["lane"].Value)
             .OrderBy(lane => lane, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static string[] ExtractPowerShellValidateSetValues(string scriptText, string parameterName)
+    {
+        var pattern = @"(?s)\[ValidateSet\((?<body>.*?)\)\]\s*\[string\]\$" + Regex.Escape(parameterName) + @"\b";
+        var match = Regex.Match(scriptText, pattern);
+        Assert.True(match.Success, $"Could not find ValidateSet for ${parameterName}.");
+
+        return Regex.Matches(match.Groups["body"].Value, @"[""'](?<value>[^""']+)[""']")
+            .Select(match => match.Groups["value"].Value)
+            .OrderBy(value => value, StringComparer.Ordinal)
             .ToArray();
     }
 
@@ -423,5 +766,49 @@ public sealed class TestArchitectureContractTests
                 }
             }
         }
+    }
+
+    private static IEnumerable<string> GetActiveDocsFiles(string repoRoot)
+    {
+        var readmePath = Path.Combine(repoRoot, "README.md");
+        if (File.Exists(readmePath))
+        {
+            yield return readmePath;
+        }
+
+        var docsRoot = Path.Combine(repoRoot, "docs");
+        if (!Directory.Exists(docsRoot))
+        {
+            yield break;
+        }
+
+        foreach (var file in Directory.GetFiles(docsRoot, "*.md", SearchOption.AllDirectories))
+        {
+            var relativePath = Path.GetRelativePath(repoRoot, file).Replace('\\', '/');
+            if (relativePath.StartsWith("docs/releases/", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            yield return file;
+        }
+    }
+
+    private sealed class ScreenShareAnalyzerManifest
+    {
+        [JsonPropertyName("schema_version")]
+        public int SchemaVersion { get; init; }
+
+        [JsonPropertyName("retained_analyzers")]
+        public ScreenShareAnalyzerEntry[] RetainedAnalyzers { get; init; } = [];
+
+        [JsonPropertyName("external_transport_classifications")]
+        public string[] ExternalTransportClassifications { get; init; } = [];
+    }
+
+    private sealed class ScreenShareAnalyzerEntry
+    {
+        [JsonPropertyName("script")]
+        public string Script { get; init; } = "";
     }
 }

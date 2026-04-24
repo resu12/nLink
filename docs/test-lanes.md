@@ -41,6 +41,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane GuiSmoke -
 
 The old performance category is not an active lane. Reintroduce it only with real performance tests and update this file, CI, and architecture guardrails together.
 
+For screenshare-specific validation and support capture decisions, use `docs/screenshare-operability.md` and `tools\ScreenShare-Ops.ps1` before reaching for live soak or retained Track B evidence directly.
+
 ## Track C Closeout Guardrails
 
 - Domain projects are the ownership boundary for normal test selection.
