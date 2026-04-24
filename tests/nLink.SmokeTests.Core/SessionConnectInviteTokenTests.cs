@@ -5,6 +5,7 @@ using NLink.SmokeTests.TestUtilities;
 
 namespace NLink.SmokeTests;
 
+[Collection(FakeNknNetworkCollection.Name)]
 [Trait("Area", "Core")]
 public sealed class SessionConnectInviteTokenTests
 {

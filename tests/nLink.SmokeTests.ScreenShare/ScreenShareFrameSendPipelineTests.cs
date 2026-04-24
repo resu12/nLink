@@ -432,18 +432,22 @@ public sealed class ScreenShareFrameSendPipelineTests : CoreSmokeTestsBase
             cancellationToken: CancellationToken.None);
 
         clock.Advance(TimeSpan.FromMilliseconds(200));
+        await WaitUntilAsync(() => delayScheduler.PendingCount >= 1, TimeSpan.FromSeconds(1));
         delayScheduler.CompleteLatest();
         await WaitUntilAsync(() => sentPackets.Count >= 2, TimeSpan.FromSeconds(1));
 
         clock.Advance(TimeSpan.FromMilliseconds(200));
+        await WaitUntilAsync(() => delayScheduler.PendingCount >= 1, TimeSpan.FromSeconds(1));
         delayScheduler.CompleteLatest();
         await WaitUntilAsync(() => sentPackets.Count >= 3, TimeSpan.FromSeconds(1));
 
         clock.Advance(TimeSpan.FromMilliseconds(200));
+        await WaitUntilAsync(() => delayScheduler.PendingCount >= 1, TimeSpan.FromSeconds(1));
         delayScheduler.CompleteLatest();
         await WaitUntilAsync(() => sentPackets.Count >= 4, TimeSpan.FromSeconds(1));
 
         clock.Advance(TimeSpan.FromMilliseconds(200));
+        await WaitUntilAsync(() => delayScheduler.PendingCount >= 1, TimeSpan.FromSeconds(1));
         delayScheduler.CompleteLatest();
         await WaitUntilAsync(() => sentPackets.Count >= 5, TimeSpan.FromSeconds(1));
 

@@ -9,9 +9,9 @@
 5. Optional beta hardening extras (installer/offline/permissions):
    - See `docs/BETA_HARDENING_EXTRAS.md`
 6. Run smoke tests (if not using the pre-release check script):
-   `dotnet test -c Release --filter Category=Smoke`
-7. Run performance tests:
-   `dotnet test -c Release --filter Category=Performance`
+   `powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane Smoke -Configuration Release`
+7. Run any focused ownership lane needed for the change:
+   `powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane Core,Gui,ScreenShare,RemoteControl,Contracts -Configuration Release`
 8. Build (if not using the pre-release check script):
    - `installer/Build-BridgeBundle.ps1`
    - `installer/Build-Portable.ps1`
@@ -21,3 +21,5 @@
 11. Draft GitHub release:
    - Tag: `v<version>`
    - Upload installer + portable zip + `SHA256SUMS.txt`
+
+See `docs/test-lanes.md` for the current lane matrix. The old performance category is intentionally not advertised until real performance tests are reintroduced.

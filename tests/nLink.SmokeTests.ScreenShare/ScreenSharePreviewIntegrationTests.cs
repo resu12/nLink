@@ -16,14 +16,9 @@ namespace NLink.SmokeTests;
 
 [Collection(AvaloniaHeadlessUiCollection.Name)]
 [Trait("Area", "ScreenShare")]
-public sealed class ScreenSharePreviewIntegrationTests : IClassFixture<ScreenSharePreviewFixture>
+public sealed class ScreenSharePreviewIntegrationTests
 {
-    private readonly ScreenSharePreviewFixture fixture;
-
-    public ScreenSharePreviewIntegrationTests(ScreenSharePreviewFixture fixture)
-    {
-        this.fixture = fixture;
-    }
+    private static readonly SemaphoreSlim PreviewDispatchGate = new(1, 1);
 
     [Fact]
     public async Task HelpeePreview_ToggleOnOff_Repeatedly_DoesNotCrash_AndCleansUp()
@@ -35,7 +30,7 @@ public sealed class ScreenSharePreviewIntegrationTests : IClassFixture<ScreenSha
             return;
         }
 
-        await fixture.Session.Dispatch(async () =>
+        await DispatchAsync(async () =>
         {
             var transportConfig = CreateDevLocalTestConfig();
             var fakeSource = new FakeScreenCaptureSource();
@@ -98,9 +93,7 @@ public sealed class ScreenSharePreviewIntegrationTests : IClassFixture<ScreenSha
             finally
             {
             }
-
-            return true;
-        }, default);
+        });
     }
 
     [Fact]
@@ -113,7 +106,7 @@ public sealed class ScreenSharePreviewIntegrationTests : IClassFixture<ScreenSha
             return;
         }
 
-        await fixture.Session.Dispatch(async () =>
+        await DispatchAsync(async () =>
         {
             var transportConfig = CreateDevLocalTestConfig();
             var fakeSource = new FakeScreenCaptureSource();
@@ -200,9 +193,7 @@ public sealed class ScreenSharePreviewIntegrationTests : IClassFixture<ScreenSha
             Assert.True(helpee.ShowScreenSharePreviewFrame);
             Assert.NotNull(helpee.ScreenSharePreviewFrame);
             Assert.Equal(ScreenShareState.Active, helpee.ScreenSharePreviewStatus.State);
-
-            return true;
-        }, default);
+        });
     }
 
     [Fact]
@@ -215,7 +206,7 @@ public sealed class ScreenSharePreviewIntegrationTests : IClassFixture<ScreenSha
             return;
         }
 
-        await fixture.Session.Dispatch(async () =>
+        await DispatchAsync(async () =>
         {
             var transportConfig = CreateDevLocalTestConfig();
             var fakeSource = new FakeScreenCaptureSource();
@@ -285,9 +276,7 @@ public sealed class ScreenSharePreviewIntegrationTests : IClassFixture<ScreenSha
             Assert.True(helpee.ShowScreenSharePreviewFrame);
             Assert.NotNull(helpee.ScreenSharePreviewFrame);
             Assert.Equal(ScreenShareState.Active, helpee.ScreenSharePreviewStatus.State);
-
-            return true;
-        }, default);
+        });
     }
 
     [Fact]
@@ -300,7 +289,7 @@ public sealed class ScreenSharePreviewIntegrationTests : IClassFixture<ScreenSha
             return;
         }
 
-        await fixture.Session.Dispatch(async () =>
+        await DispatchAsync(async () =>
         {
             var transportConfig = CreateDevLocalTestConfig();
             var fakeSource = new FakeScreenCaptureSource();
@@ -397,9 +386,25 @@ public sealed class ScreenSharePreviewIntegrationTests : IClassFixture<ScreenSha
             Assert.False(helpee.ShowScreenSharePreviewFrame);
             Assert.Null(helpee.ScreenSharePreviewFrame);
             Assert.Equal(ScreenShareState.Off, helpee.ScreenSharePreviewStatus.State);
+        });
+    }
 
-            return true;
-        }, default);
+    private static async Task DispatchAsync(Func<Task> action)
+    {
+        await PreviewDispatchGate.WaitAsync();
+        try
+        {
+            using var session = HeadlessUnitTestSession.StartNew(typeof(AvaloniaHeadlessUiAppBootstrap));
+            await session.Dispatch(async () =>
+            {
+                await action();
+                return true;
+            }, default);
+        }
+        finally
+        {
+            PreviewDispatchGate.Release();
+        }
     }
 
     private static async Task WaitForSignalAsync(
@@ -512,21 +517,6 @@ public sealed class ScreenSharePreviewIntegrationTests : IClassFixture<ScreenSha
         {
             Environment.SetEnvironmentVariable("FRH_TRANSPORT", previous);
         }
-    }
-}
-
-public sealed class ScreenSharePreviewFixture : IDisposable
-{
-    public ScreenSharePreviewFixture()
-    {
-        Session = HeadlessUnitTestSession.StartNew(typeof(AvaloniaHeadlessUiAppBootstrap));
-    }
-
-    public HeadlessUnitTestSession Session { get; }
-
-    public void Dispose()
-    {
-        Session.Dispose();
     }
 }
 

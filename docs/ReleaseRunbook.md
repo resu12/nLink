@@ -8,10 +8,8 @@ Run from the repo root on Windows:
 
 ```powershell
 dotnet build .\nLink.sln -c Release
-dotnet test .\tests\nLink.SmokeTests\nLink.SmokeTests.csproj -c Release --filter Category=Smoke
-$env:NLINK_RUN_GUI_SMOKE='1'
-dotnet test .\tests\nLink.SmokeTests\nLink.SmokeTests.csproj -c Release --filter Category=GuiSmoke
-Remove-Item Env:NLINK_RUN_GUI_SMOKE -ErrorAction SilentlyContinue
+powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane Smoke -Configuration Release
+powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane GuiSmoke -Configuration Release
 powershell -ExecutionPolicy Bypass -File .\tools\BetaReadiness-Check.ps1
 ```
 
@@ -20,7 +18,9 @@ Expected outcome:
 - smoke tests pass
 - GUI smoke passes
 - BetaReadiness reports `PASS`
-- performance gate passes
+- reliability and packaging gates pass
+
+Test ownership lanes are documented in `docs\test-lanes.md`. Prefer named lanes for local validation instead of invoking a retired monolith project path.
 
 Invite-security preflight:
 

@@ -401,15 +401,15 @@ try {
     # A2 Unit tests (exclude GUI smoke)
     $s = New-SectionResult -Name "Unit Tests"
     try {
-        Invoke-Step "Unit tests (non-GUI)" { dotnet test -c Release --filter "Category!=GuiSmoke"; if ($LASTEXITCODE -ne 0) { throw "unit tests failed (exit $LASTEXITCODE)" } }
-        [void]$s.Notes.Add("dotnet test -c Release --filter Category!=GuiSmoke")
+        Invoke-Step "Unit tests (non-GUI)" { & powershell -ExecutionPolicy Bypass -File ".\tools\Test-Lanes.ps1" -Lane NonGui -Configuration Release; if ($LASTEXITCODE -ne 0) { throw "unit tests failed (exit $LASTEXITCODE)" } }
+        [void]$s.Notes.Add("tools\Test-Lanes.ps1 -Lane NonGui -Configuration Release")
         Add-SectionResult (Complete-SectionSuccess $s)
     } catch { Add-SectionResult (Complete-SectionFailure $s $_.Exception.Message) }
 
     # A3 Smoke tests
     $s = New-SectionResult -Name "Smoke Tests"
     try {
-        Invoke-Step "Smoke tests" { dotnet test -c Release --filter Category=Smoke --no-build; if ($LASTEXITCODE -ne 0) { throw "smoke tests failed (exit $LASTEXITCODE)" } }
+        Invoke-Step "Smoke tests" { & powershell -ExecutionPolicy Bypass -File ".\tools\Test-Lanes.ps1" -Lane Smoke -Configuration Release -NoBuild; if ($LASTEXITCODE -ne 0) { throw "smoke tests failed (exit $LASTEXITCODE)" } }
         Add-SectionResult (Complete-SectionSuccess $s)
     } catch { Add-SectionResult (Complete-SectionFailure $s $_.Exception.Message) }
 
@@ -478,7 +478,7 @@ try {
     $s = New-SectionResult -Name "Bridge Stability Promotion"
     try {
         Invoke-Step "Bridge stability promotion tests" {
-            dotnet test -c Release --filter Category=BridgeStabilityPromotion --no-build
+            & powershell -ExecutionPolicy Bypass -File ".\tools\Test-Lanes.ps1" -Lane BridgeStabilityPromotion -Configuration Release -NoBuild
             if ($LASTEXITCODE -ne 0) { throw "bridge stability promotion tests failed (exit $LASTEXITCODE)" }
         }
         $bridgeSummaryLines = @(
@@ -510,10 +510,10 @@ try {
     $s = New-SectionResult -Name "Contract Freeze Promotion"
     try {
         Invoke-Step "Contract freeze tests" {
-            dotnet test -c Release --filter Category=ContractFreeze --no-build
+            & powershell -ExecutionPolicy Bypass -File ".\tools\Test-Lanes.ps1" -Lane ContractFreeze -Configuration Release -NoBuild
             if ($LASTEXITCODE -ne 0) { throw "contract freeze tests failed (exit $LASTEXITCODE)" }
         }
-        $contractDir = Join-Path $repoRoot "tests\nLink.SmokeTests\GoldenFiles\Contracts"
+        $contractDir = Join-Path $repoRoot "tests\nLink.SmokeTests.Contracts\GoldenFiles\Contracts"
         [void]$s.Artifacts.Add((Resolve-Path $contractDir).Path)
         Add-SectionResult (Complete-SectionSuccess $s)
     } catch { Add-SectionResult (Complete-SectionFailure $s $_.Exception.Message) }
@@ -627,7 +627,7 @@ try {
         }
         else {
             Invoke-Step "Hang/network diagnostics checks" {
-                dotnet test -c Release --filter 'FullyQualifiedName~DiagnosticsRedactorTests|FullyQualifiedName~DiagnosticsPackSmokeTests|FullyQualifiedName~NetworkResilienceCoordinatorTests' --no-build
+                dotnet test .\tests\nLink.SmokeTests.Core\nLink.SmokeTests.Core.csproj -c Release --filter 'FullyQualifiedName~DiagnosticsRedactorTests|FullyQualifiedName~DiagnosticsPackSmokeTests|FullyQualifiedName~NetworkResilienceCoordinatorTests' --no-build
                 if ($LASTEXITCODE -ne 0) { throw "hang diagnostics checks failed (exit $LASTEXITCODE)" }
             }
             [void]$s.Notes.Add("Manual UI freeze / sleep-resume validation steps: docs/BETA_HARDENING_EXTRAS.md (Prompt 2)")

@@ -88,10 +88,8 @@ jobs:
           Get-ChildItem -Path (Join-Path $env:NLINK_BRIDGE_RUNTIME_DIR "node_modules") -Force | Select-Object -First 20
 
       - name: Smoke tests
-        run: dotnet test -c Release --filter Category=Smoke --no-build --logger "trx;LogFileName=smoke-results.trx"
-
-      - name: Performance tests
-        run: dotnet test -c Release --filter "Category=Performance&Category!=ManualSoak" --no-build --logger "trx;LogFileName=performance-results.trx"
+        shell: powershell
+        run: .\tools\Test-Lanes.ps1 -Lane Smoke -Configuration Release -NoBuild -Logger "trx;LogFilePrefix=smoke-results"
 
       - name: Reliability gate (DevLocal benchmark, fast)
         run: dotnet run -c Release --no-build --project src/nLink.App -- --bench --cycles 20 --delay-ms 0 --transport devlocal --bridge-reuse-mode persession --reliability-gate
@@ -136,7 +134,7 @@ jobs:
         if: always()
         with:
           name: smoke-test-results
-          path: '**/smoke-results.trx'
+          path: '**/smoke-results*.trx'
           if-no-files-found: ignore
 
       - name: Upload benchmark artifacts
@@ -145,14 +143,6 @@ jobs:
         with:
           name: bench-artifacts
           path: artifacts/bench/**
-          if-no-files-found: ignore
-
-      - name: Upload performance test results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: performance-test-results
-          path: '**/performance-results.trx'
           if-no-files-found: ignore
 
       - name: Upload release assets
@@ -175,16 +165,15 @@ jobs:
 
       - name: GUI smoke tests (optional)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_gui_smoke == true }}
-        env:
-          NLINK_RUN_GUI_SMOKE: '1'
-        run: dotnet test -c Release --filter Category=GuiSmoke --no-build --logger "trx;LogFileName=gui-smoke-results.trx"
+        shell: powershell
+        run: .\tools\Test-Lanes.ps1 -Lane GuiSmoke -Configuration Release -NoBuild -Logger "trx;LogFilePrefix=gui-smoke-results"
 
       - name: Upload GUI smoke test results
         uses: actions/upload-artifact@v4
         if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_gui_smoke == true }}
         with:
           name: gui-smoke-test-results
-          path: '**/gui-smoke-results.trx'
+          path: '**/gui-smoke-results*.trx'
           if-no-files-found: ignore
 
       - name: Upload GUI smoke artifacts

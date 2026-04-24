@@ -38,7 +38,7 @@ public sealed class BackgroundTaskRunnerTests
         var counters = ActiveRuntimeCounters.Snapshot();
         Assert.Equal(0, counters.ActiveTransportTasks);
 
-        var logText = File.ReadAllText(LocalOperationalLog.LogFilePath);
+        var logText = await ReadOperationalLogWithRetryAsync(LocalOperationalLog.LogFilePath);
         var matchingLine = logText
             .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
             .LastOrDefault(line =>
@@ -50,5 +50,26 @@ public sealed class BackgroundTaskRunnerTests
         Assert.Contains("event=background_task_failed", matchingLine!, StringComparison.Ordinal);
         Assert.Contains("ex=InvalidOperationException", matchingLine!, StringComparison.Ordinal);
         Assert.Contains("scope=test", matchingLine!, StringComparison.Ordinal);
+    }
+
+    private static async Task<string> ReadOperationalLogWithRetryAsync(string path)
+    {
+        IOException? lastError = null;
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            try
+            {
+                await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var reader = new StreamReader(stream);
+                return await reader.ReadToEndAsync();
+            }
+            catch (IOException ex)
+            {
+                lastError = ex;
+                await Task.Delay(50);
+            }
+        }
+
+        throw lastError ?? new IOException($"Could not read operational log: {path}");
     }
 }

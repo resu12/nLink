@@ -108,7 +108,7 @@ Manual verification:
 5. Verify a single debounced recovery dispatch after resume and that the app remains usable.
 
 Automated verification:
-- `dotnet test .\tests\nLink.SmokeTests\nLink.SmokeTests.csproj -c Release --filter FullyQualifiedName~NetworkResilienceCoordinatorTests`
+- `dotnet test .\tests\nLink.SmokeTests.Core\nLink.SmokeTests.Core.csproj -c Release --filter FullyQualifiedName~NetworkResilienceCoordinatorTests`
 
 ## Prompt 3: Diagnostics Privacy + Cold Start Awareness
 
@@ -122,8 +122,8 @@ Automated verification:
   - `[REDACTED]`
 
 Automated verification:
-- `dotnet test .\tests\nLink.SmokeTests\nLink.SmokeTests.csproj -c Release --filter FullyQualifiedName~DiagnosticsRedactorTests`
-- `dotnet test .\tests\nLink.SmokeTests\nLink.SmokeTests.csproj -c Release --filter FullyQualifiedName~DiagnosticsPackSmokeTests`
+- `dotnet test .\tests\nLink.SmokeTests.Core\nLink.SmokeTests.Core.csproj -c Release --filter FullyQualifiedName~DiagnosticsRedactorTests`
+- `dotnet test .\tests\nLink.SmokeTests.Core\nLink.SmokeTests.Core.csproj -c Release --filter FullyQualifiedName~DiagnosticsPackSmokeTests`
 
 ### Cold-start awareness
 

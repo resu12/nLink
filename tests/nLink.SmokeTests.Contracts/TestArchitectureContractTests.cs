@@ -36,6 +36,22 @@ public sealed class TestArchitectureContractTests
         "tests/nLink.SmokeTests/ScreenShare/ScreenCaptureAbstractionTests.cs"
     ];
 
+    private static readonly string[] RequiredTestLanes =
+    [
+        "Core",
+        "Gui",
+        "ScreenShare",
+        "RemoteControl",
+        "Contracts",
+        "Smoke",
+        "NonGui",
+        "GuiSmoke",
+        "ContractFreeze",
+        "BridgeStabilityPromotion",
+        "TrackBRetained",
+        "All"
+    ];
+
     [Fact]
     public void DomainTestProjects_Exist_AndRetiredMonolithProjectDoesNot()
     {
@@ -195,6 +211,71 @@ public sealed class TestArchitectureContractTests
         }
     }
 
+    [Fact]
+    public void TestLaneScript_Exists_AndContainsRequiredLanes()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var scriptPath = Path.Combine(repoRoot, "tools", "Test-Lanes.ps1");
+
+        Assert.True(File.Exists(scriptPath), $"Expected lane script: {scriptPath}");
+
+        var scriptText = File.ReadAllText(scriptPath);
+        foreach (var lane in RequiredTestLanes)
+        {
+            Assert.Contains($"\"{lane}\"", scriptText);
+        }
+    }
+
+    [Fact]
+    public void ActiveDocsScriptsAndCi_DoNotReferenceRetiredMonolithProject()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var retiredReferences = new[]
+        {
+            @"tests\nLink.SmokeTests\nLink.SmokeTests.csproj",
+            "tests/nLink.SmokeTests/nLink.SmokeTests.csproj"
+        };
+
+        var offenders = GetActiveDocsScriptsAndCiFiles(repoRoot)
+            .Where(file =>
+            {
+                var text = File.ReadAllText(file);
+                return retiredReferences.Any(reference =>
+                    text.Contains(reference, StringComparison.OrdinalIgnoreCase));
+            })
+            .Select(file => Path.GetRelativePath(repoRoot, file).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Empty(offenders);
+    }
+
+    [Fact]
+    public void CategoryPerformance_IsNotAdvertisedWithoutMatchingTests()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var testFiles = DomainProjects
+            .SelectMany(project => Directory.GetFiles(
+                Path.Combine(repoRoot, "tests", project.ProjectName),
+                "*.cs",
+                SearchOption.AllDirectories));
+        var hasPerformanceTests = testFiles.Any(file =>
+            File.ReadAllText(file).Contains("[Trait(\"Category\", \"Performance\")", StringComparison.Ordinal));
+
+        if (hasPerformanceTests)
+        {
+            return;
+        }
+
+        var offenders = GetActiveDocsScriptsAndCiFiles(repoRoot)
+            .Where(file => File.ReadAllText(file).Contains("Category=Performance", StringComparison.OrdinalIgnoreCase))
+            .Select(file => Path.GetRelativePath(repoRoot, file).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Empty(offenders);
+    }
+
     private static bool ContainsTestMethod(string text)
     {
         return text.Contains("[Fact]", StringComparison.Ordinal)
@@ -210,5 +291,38 @@ public sealed class TestArchitectureContractTests
         return relative != "."
             && !relative.StartsWith("..", StringComparison.Ordinal)
             && !Path.IsPathRooted(relative);
+    }
+
+    private static IEnumerable<string> GetActiveDocsScriptsAndCiFiles(string repoRoot)
+    {
+        var roots = new[]
+        {
+            Path.Combine(repoRoot, "docs"),
+            Path.Combine(repoRoot, "tools"),
+            Path.Combine(repoRoot, ".github", "workflows")
+        };
+
+        foreach (var root in roots)
+        {
+            if (!Directory.Exists(root))
+            {
+                continue;
+            }
+
+            foreach (var file in Directory.GetFiles(root, "*", SearchOption.AllDirectories))
+            {
+                var relativePath = Path.GetRelativePath(repoRoot, file).Replace('\\', '/');
+                if (relativePath.StartsWith("docs/releases/", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var extension = Path.GetExtension(file);
+                if (extension is ".md" or ".ps1" or ".yml" or ".yaml")
+                {
+                    yield return file;
+                }
+            }
+        }
     }
 }

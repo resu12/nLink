@@ -3,6 +3,8 @@
 ## Build & Packaging
 
 - [ ] CI is green for smoke, reliability gate, packaging, and `installer_smoke`.
+- [ ] `tools\Test-Lanes.ps1 -Lane Smoke -Configuration Release` passes, or the CI smoke lane passed from the same commit.
+- [ ] Any changed domain has its ownership lane green: `Core`, `Gui`, `ScreenShare`, `RemoteControl`, or `Contracts`.
 - [ ] `artifacts/releases/<version>/` contains `nLink-Portable-win-x64-<version>.zip`.
 - [ ] `artifacts/releases/<version>/` contains `nLink-Setup-win-x64-<version>.exe`.
 - [ ] `artifacts/releases/<version>/` contains `SHA256SUMS.txt`.

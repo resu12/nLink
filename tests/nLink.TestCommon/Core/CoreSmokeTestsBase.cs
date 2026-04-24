@@ -1238,7 +1238,21 @@ internal static TransportRuntimeConfig CreateNknTestConfig()
         try
         {
             Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "NKN");
-            return TransportRuntimeConfig.Select();
+            var selected = TransportRuntimeConfig.Select();
+            if (!selected.HasStartupWarning)
+            {
+                return selected;
+            }
+
+            // Most smoke tests that call this helper inject scripted/fake transports.
+            // Keep those tests independent of whether a Release bridge bundle is staged
+            // in the test output; CreateStartupBlockedNknTestConfig covers that path.
+            NknRuntimeDiagnostics.SetLastError(string.Empty);
+            return CreateTransportRuntimeConfigForTests(
+                selected,
+                bridgeBundled: true,
+                bridgeBundleProbeReason: "test:scripted-nkn-bridge-available",
+                startupWarningText: null);
         }
         finally
         {
@@ -1249,6 +1263,19 @@ internal static TransportRuntimeConfig CreateNknTestConfig()
 internal static TransportRuntimeConfig CreateStartupBlockedNknTestConfig(string startupWarningText = "Couldn't start the connection. Please reinstall.")
     {
         var baseline = CreateNknTestConfig();
+        return CreateTransportRuntimeConfigForTests(
+            baseline,
+            bridgeBundled: false,
+            bridgeBundleProbeReason: "test:forced-missing-bridge",
+            startupWarningText: startupWarningText);
+    }
+
+    private static TransportRuntimeConfig CreateTransportRuntimeConfigForTests(
+        TransportRuntimeConfig baseline,
+        bool bridgeBundled,
+        string bridgeBundleProbeReason,
+        string? startupWarningText)
+    {
         var ctor = typeof(TransportRuntimeConfig).GetConstructor(
             BindingFlags.Instance | BindingFlags.NonPublic,
             binder: null,
@@ -1283,8 +1310,8 @@ internal static TransportRuntimeConfig CreateStartupBlockedNknTestConfig(string 
                 baseline.ForcedByEnvironment,
                 baseline.AutoSelected,
                 baseline.IsDevLocal,
-                false,
-                "test:forced-missing-bridge",
+                bridgeBundled,
+                bridgeBundleProbeReason,
                 startupWarningText,
                 baseline.ConfigurationErrorText,
                 baseline.BridgeReusePolicy,

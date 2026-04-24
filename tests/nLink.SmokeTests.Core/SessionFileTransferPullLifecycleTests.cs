@@ -77,6 +77,7 @@ public sealed class SessionFileTransferPullLifecycleTests : SessionFileTransferS
         using var destination = new NonDisposingMemoryStream();
         await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
         await WaitUntilAsync(() => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed && receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed, timeoutMs: 12000);
+        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("event=window_startup_completed", StringComparison.Ordinal), timeoutMs: 3000);
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Equal(payload, destination.ToArray());
         Assert.Contains("event=window_startup_completed", logTail, StringComparison.Ordinal);

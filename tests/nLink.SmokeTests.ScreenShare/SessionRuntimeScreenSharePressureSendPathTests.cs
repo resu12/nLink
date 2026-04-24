@@ -217,7 +217,10 @@ public sealed class SessionRuntimeScreenSharePressureSendPathTests : ScreenShare
             string value = sessionRuntime.SecurityState.SessionId.Value.Value;
             ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "TrackHelperRemoteScreenShareAcceptedFrame", new ScreenShareFrameCompletedEventArgs(1L, 1280, 720, "h264", new byte[1] { 1 }, 0L, 0L, 0L, value, IsKeyFrame: false, 1L, null, ScreenShareRecoveryDeliveryClass.Normal, 0L));
             ScreenShareTransportBoundaryTestBase.ReportHelperRemoteFrameApplied(sessionRuntime, 120L, 1L, 1L, 1L, 1L, 4L);
-            Thread.Sleep(100);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(
+                sessionRuntime,
+                "helperRemoteCurrentPressureEpochFirstAcceptedFrameUtc",
+                now.AddSeconds(-5.0));
             transport.SentPressureStates.Clear();
             now = now.AddMilliseconds(1700.0);
             ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureMode", ScreenSharePressureMode.Normal);
@@ -229,7 +232,7 @@ public sealed class SessionRuntimeScreenSharePressureSendPathTests : ScreenShare
             Assert.DoesNotContain(transport.SentPressureStates, (ScreenSharePressureStateV1 sent) => sent.Mode == ScreenSharePressureMode.ReduceFps && string.Equals(sent.Reason, "bridge_health", StringComparison.Ordinal));
             transport.SentPressureStates.Clear();
             ScreenSharePressureStateV1 screenSharePressureStateV = null;
-            for (int num = 0; num < 3; num++)
+            for (int num = 0; num < 5; num++)
             {
                 if ((object)screenSharePressureStateV != null)
                 {
