@@ -2,6 +2,8 @@
 
 These scripts add installer/environment resilience checks for beta stabilization without changing runtime architecture.
 
+For general support evidence collection, start with `docs/supportability.md`; this file covers optional Windows hardening extras only.
+
 ## Prerequisites
 
 - Windows machine (interactive user session)
@@ -25,7 +27,7 @@ Validates silent old->current upgrade, uninstall, rollback reinstall, DevLocal C
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\Installer-UpgradeRollback-Test.ps1 `
-  -OldInstallerPath .\artifacts\releases\0.1.0-alpha.5\nLink-Setup-win-x64-0.1.0-alpha.5.exe `
+  -OldInstallerPath <previous-signed-installer-path> `
   -CurrentInstallerPath .\artifacts\installer\nLink-Setup-win-x64-<current>.exe
 ```
 
@@ -89,7 +91,7 @@ Artifact:
 Manual verification:
 1. Open Diagnostics page and click `Save Hang Report`.
 2. Confirm a new `hang-<timestamp>` folder is created.
-3. Verify the folder contains `summary.txt`, `diagnostics-snapshot.txt`, `log-tail.txt`, and `resource-snapshot.txt`.
+3. Verify the folder contains `summary.txt`, `diagnostics-snapshot.txt`, `log-tail.txt`, `resource-snapshot.txt`, and `screenshare-evidence.txt`.
 
 ### Network change / resume robustness
 

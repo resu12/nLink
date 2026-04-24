@@ -1,26 +1,56 @@
 # Release Runbook
 
-This runbook describes the exact steps to ship `0.4.5`.
+This runbook describes the version-neutral steps to ship `v<version>` from a clean Windows release shell.
 
 ## Preflight
 
-Run from the repo root on Windows:
+Run from the repo root:
 
 ```powershell
 dotnet build .\nLink.sln -c Release
 powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane Smoke -Configuration Release
-powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane GuiSmoke -Configuration Release
 powershell -ExecutionPolicy Bypass -File .\tools\BetaReadiness-Check.ps1
+```
+
+Optional GUI smoke requires an interactive Windows desktop:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane GuiSmoke -Configuration Release
 ```
 
 Expected outcome:
 - build passes
 - smoke tests pass
-- GUI smoke passes
+- GUI smoke passes when run
 - BetaReadiness reports `PASS`
 - reliability and packaging gates pass
 
-Test ownership lanes are documented in `docs\test-lanes.md`. Prefer named lanes for local validation instead of invoking a retired monolith project path.
+Test ownership lanes are documented in `docs\test-lanes.md`. Prefer named lanes for local validation instead of invoking retired project paths.
+
+Support evidence and bug-report expectations are documented in `docs\supportability.md`.
+
+## Version Bump Locations
+
+Primary version source:
+
+```powershell
+Get-Content .\VERSION
+```
+
+Version-related files to verify:
+- `VERSION`
+- `installer\nLink.iss` (`AppVersion` fallback used by direct Inno compilation)
+- `docs\releases\<version>.md`
+- `docs\releases\<version>-github.md`
+
+Quick check:
+
+```powershell
+Get-Content .\VERSION
+Get-Content .\installer\nLink.iss | Select-String "AppVersion|OutputBaseFilename"
+```
+
+## Security And Transport Preflight
 
 Invite-security preflight:
 
@@ -52,31 +82,6 @@ Transport abuse-resistance limit matrix:
   - screen-share payload/chunk budgets
 - release validation must review both transport-local queue limits and lower-layer payload limits together
 
-## Version Bump Locations
-
-Primary version source:
-
-```powershell
-Get-Content .\VERSION
-```
-
-Current expected value:
-
-```text
-0.4.5
-```
-
-Version-related files to verify:
-- `VERSION`
-- `installer\nLink.iss` (`AppVersion` fallback used by direct Inno compilation)
-
-Quick check:
-
-```powershell
-Get-Content .\VERSION
-Get-Content .\installer\nLink.iss | Select-String "AppVersion|OutputBaseFilename"
-```
-
 ## Packaging
 
 Build the bundled bridge, portable ZIP, and installer:
@@ -87,22 +92,22 @@ powershell -ExecutionPolicy Bypass -File .\installer\Build-Portable.ps1 -Runtime
 powershell -ExecutionPolicy Bypass -File .\installer\Build-Installer.ps1 -Runtime win-x64
 ```
 
-Preferred one-shot validation + packaging path:
+Preferred one-shot validation and packaging path:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1 -RunGuiSmoke -RunBetaReadiness
 ```
 
 Expected release outputs:
-- `artifacts\releases\0.4.5\nLink-Portable-win-x64-0.4.5.zip`
-- `artifacts\releases\0.4.5\nLink-Setup-win-x64-0.4.5.exe`
-- `artifacts\releases\0.4.5\SHA256SUMS.txt`
+- `artifacts\releases\<version>\nLink-Portable-win-x64-<version>.zip`
+- `artifacts\releases\<version>\nLink-Setup-win-x64-<version>.exe`
+- `artifacts\releases\<version>\SHA256SUMS.txt`
 
 Verify artifacts:
 
 ```powershell
-Get-ChildItem .\artifacts\releases\0.4.5
-Get-Content .\artifacts\releases\0.4.5\SHA256SUMS.txt
+Get-ChildItem .\artifacts\releases\<version>
+Get-Content .\artifacts\releases\<version>\SHA256SUMS.txt
 ```
 
 Packaging robustness checks:
@@ -110,18 +115,18 @@ Packaging robustness checks:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build\verify-package-manifest.ps1 -StageDir .\artifacts\portable\nLink\win-x64 -ManifestPath .\installer\package-manifest.win-x64.txt
 powershell -ExecutionPolicy Bypass -File .\build\verify-package-manifest.ps1 -StageDir .\artifacts\portable\helper\win-x64 -ManifestPath .\installer\package-manifest.win-x64.txt
-Get-AuthenticodeSignature .\artifacts\releases\0.4.5\nLink-Setup-win-x64-0.4.5.exe | Format-List Status,StatusMessage,SignerCertificate
+Get-AuthenticodeSignature .\artifacts\releases\<version>\nLink-Setup-win-x64-<version>.exe | Format-List Status,StatusMessage,SignerCertificate
 Get-AuthenticodeSignature .\artifacts\portable\helper\win-x64\nLink.exe | Format-List Status,StatusMessage,SignerCertificate
 ```
 
 Signing policy:
 - public release artifacts must be Authenticode-signed before publish
 - at minimum:
-  - `artifacts\releases\0.4.5\nLink-Setup-win-x64-0.4.5.exe`
+  - `artifacts\releases\<version>\nLink-Setup-win-x64-<version>.exe`
   - `artifacts\portable\helper\win-x64\nLink.exe`
 - local/manual packaging runs may remain unsigned until the signing step, but an unsigned artifact must not be published as the public release build
 
-Expected outcome for `0.4.5`:
+Expected outcome:
 - package manifest checks pass
 - release staging contains no `.pdb`, `.xml`, `Avalonia.Diagnostics.dll`, or `nLink.runtimeconfig.dev.json`
 - Authenticode status is `Valid` for the public installer and installed app binary
@@ -133,33 +138,34 @@ Expected outcome for `0.4.5`:
 Create and push the release tag:
 
 ```powershell
-git tag v0.4.5
-git push origin v0.4.5
+git tag v<version>
+git push origin v<version>
 ```
 
 ## GitHub Release
 
 Create a GitHub release with:
-- Tag: `v0.4.5`
-- Title: `nLink 0.4.5`
+- Tag: `v<version>`
+- Title: `nLink <version>`
 
 Attach:
-- `artifacts\releases\0.4.5\nLink-Setup-win-x64-0.4.5.exe`
-- `artifacts\releases\0.4.5\nLink-Portable-win-x64-0.4.5.zip`
-- `artifacts\releases\0.4.5\SHA256SUMS.txt`
+- `artifacts\releases\<version>\nLink-Setup-win-x64-<version>.exe`
+- `artifacts\releases\<version>\nLink-Portable-win-x64-<version>.zip`
+- `artifacts\releases\<version>\SHA256SUMS.txt`
 
 Paste release notes from:
-- `docs\releases\0.4.5.md`
+- `docs\releases\<version>.md`
 
-Link current beta issues guidance from:
+Link current support guidance from:
 - `docs\KnownIssues.md`
+- `docs\supportability.md`
 
 ## Post-Release
 
 Run a quick sanity install test:
 
 ```powershell
-Start-Process .\artifacts\installer\nLink-Setup-win-x64-0.4.5.exe
+Start-Process .\artifacts\installer\nLink-Setup-win-x64-<version>.exe
 ```
 
 Verify:
@@ -205,7 +211,7 @@ Safe invite flow sanity check:
 Portable sanity check:
 
 ```powershell
-Expand-Archive .\artifacts\releases\0.4.5\nLink-Portable-win-x64-0.4.5.zip -DestinationPath .\artifacts\portable-smoke -Force
+Expand-Archive .\artifacts\releases\<version>\nLink-Portable-win-x64-<version>.zip -DestinationPath .\artifacts\portable-smoke -Force
 Start-Process .\artifacts\portable-smoke\nLink.exe
 ```
 
@@ -213,8 +219,8 @@ Upgrade sanity check:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build\validate-upgrade-uninstall.ps1 `
-  -OldInstallerPath .\artifacts\releases\0.4.0\nLink-Setup-win-x64-0.4.0.exe `
-  -NewInstallerPath .\artifacts\releases\0.4.5\nLink-Setup-win-x64-0.4.5.exe
+  -OldInstallerPath <previous-signed-installer-path> `
+  -NewInstallerPath .\artifacts\releases\<version>\nLink-Setup-win-x64-<version>.exe
 ```
 
 ## Rollback Notes
@@ -223,8 +229,8 @@ powershell -ExecutionPolicy Bypass -File .\build\validate-upgrade-uninstall.ps1 
 - If the tag was pushed incorrectly:
 
 ```powershell
-git tag -d v0.4.5
-git push origin :refs/tags/v0.4.5
+git tag -d v<version>
+git push origin :refs/tags/v<version>
 ```
 
 - If an installed build needs cleanup, use the generated uninstaller from the install directory or rerun the previous known-good installer.

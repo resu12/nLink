@@ -53,4 +53,5 @@ Track D is parked with one supported screenshare operator topology:
 
 - `docs/screenshare-soak.md` for local soak details and retained Track B closeout evidence.
 - `docs/screenshare-stabilization-protocol.md` for branch promotion rules when screenshare runtime behavior changes.
+- `docs/supportability.md` for general diagnostics, hang report, and issue evidence guidance.
 - `docs/test-lanes.md` for the domain test lane matrix.

@@ -49,7 +49,12 @@ public sealed class TestArchitectureContractTests
         "docs/release/0.3.0-rc-validation-checklist.md",
         "docs/release/0.3.3-manual-validation-checklist.md",
         "docs/release/0.3.3-packaging-checklist.md",
-        "docs/release/upgrade-0.1.0-beta.5-to-0.2.0-rc.1.md"
+        "docs/release/upgrade-0.1.0-beta.5-to-0.2.0-rc.1.md",
+        "docs/address-native-connect.md",
+        "docs/remote-control-p6-manual-qa.md",
+        "docs/remote-control-quick-sanity-checklist.md",
+        "docs/remote-control-sanity-checklist.md",
+        "docs/soak/0.3.3-screenshare-soak.md"
     ];
 
     private static readonly string[] RequiredTestLanes =
@@ -119,6 +124,12 @@ public sealed class TestArchitectureContractTests
         }
 
         var actualProjectNames = Directory.GetDirectories(Path.Combine(repoRoot, "tests"), "nLink.SmokeTests.*")
+            .Where(directory =>
+            {
+                var name = Path.GetFileName(directory);
+                return !string.IsNullOrWhiteSpace(name) &&
+                    File.Exists(Path.Combine(directory, $"{name}.csproj"));
+            })
             .Select(Path.GetFileName)
             .Where(name => !string.IsNullOrWhiteSpace(name))
             .OrderBy(name => name, StringComparer.Ordinal)
@@ -489,6 +500,8 @@ public sealed class TestArchitectureContractTests
         var readmePath = Path.Combine(repoRoot, "README.md");
         var readmeText = File.ReadAllText(readmePath);
 
+        Assert.Contains("docs/README.md", readmeText, StringComparison.Ordinal);
+        Assert.Contains("docs/supportability.md", readmeText, StringComparison.Ordinal);
         Assert.Contains(@"tools\Test-Lanes.ps1", readmeText, StringComparison.Ordinal);
         Assert.Contains(@"tools\ScreenShare-Ops.ps1", readmeText, StringComparison.Ordinal);
         Assert.Contains("docs/test-lanes.md", readmeText, StringComparison.Ordinal);
@@ -498,6 +511,115 @@ public sealed class TestArchitectureContractTests
         Assert.DoesNotContain("dotnet test -c Release --filter Category=Smoke", readmeText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(@"tests\nLink.SmokeTests\nLink.SmokeTests.csproj", readmeText, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("tests/nLink.SmokeTests/nLink.SmokeTests.csproj", readmeText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void DocsIndexAndSupportabilityGuide_Exist_AndDescribeCurrentSupportPath()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var docsIndexPath = Path.Combine(repoRoot, "docs", "README.md");
+        var supportabilityPath = Path.Combine(repoRoot, "docs", "supportability.md");
+
+        Assert.True(File.Exists(docsIndexPath), $"Expected docs index: {docsIndexPath}");
+        Assert.True(File.Exists(supportabilityPath), $"Expected supportability guide: {supportabilityPath}");
+
+        var docsIndex = File.ReadAllText(docsIndexPath);
+        Assert.Contains("docs/supportability.md", docsIndex, StringComparison.Ordinal);
+        Assert.Contains("docs/screenshare-operability.md", docsIndex, StringComparison.Ordinal);
+        Assert.Contains("docs/test-lanes.md", docsIndex, StringComparison.Ordinal);
+        Assert.Contains("docs/ReleaseRunbook.md", docsIndex, StringComparison.Ordinal);
+        Assert.Contains("docs/releases/**", docsIndex, StringComparison.Ordinal);
+
+        var supportability = File.ReadAllText(supportabilityPath);
+        Assert.Contains("Diagnostics", supportability, StringComparison.Ordinal);
+        Assert.Contains("Copy diagnostics", supportability, StringComparison.Ordinal);
+        Assert.Contains("Save Hang Report", supportability, StringComparison.Ordinal);
+        Assert.Contains("screenshare-operator-verdict.txt", supportability, StringComparison.Ordinal);
+        Assert.Contains(@"tools\ScreenShare-Ops.ps1", supportability, StringComparison.Ordinal);
+        Assert.Contains("%LOCALAPPDATA%\\nLink\\logs", supportability, StringComparison.Ordinal);
+        Assert.Contains("%LOCALAPPDATA%\\nLink\\artifacts\\hang", supportability, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ActiveDocsAndTemplates_HaveResolvableLocalMarkdownLinks()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var missingLinks = GetActiveDocsAndTemplateFiles(repoRoot)
+            .SelectMany(file => FindMissingLocalMarkdownLinks(repoRoot, file))
+            .OrderBy(item => item, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Empty(missingLinks);
+    }
+
+    [Fact]
+    public void DeletedStaleProcessDocs_DoNotExist()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var existingDeletedDocs = DeletedProcessDocReferences
+            .Select(path => Path.Combine(repoRoot, path.Replace('/', Path.DirectorySeparatorChar)))
+            .Where(File.Exists)
+            .Select(path => Path.GetRelativePath(repoRoot, path).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Empty(existingDeletedDocs);
+    }
+
+    [Fact]
+    public void ActiveDocsAndTemplates_DoNotHardCodeStaleReleaseVersions()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var currentVersion = File.ReadAllText(Path.Combine(repoRoot, "VERSION")).Trim();
+        var offenders = new List<string>();
+        var versionPattern = new Regex(@"\b0\.\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9.]+)?\b");
+
+        foreach (var file in GetActiveDocsAndTemplateFiles(repoRoot))
+        {
+            var relativePath = Path.GetRelativePath(repoRoot, file).Replace('\\', '/');
+            var lines = File.ReadLines(file).Select((line, index) => (Line: line, Number: index + 1));
+            foreach (var (line, lineNumber) in lines)
+            {
+                foreach (Match match in versionPattern.Matches(line))
+                {
+                    var value = match.Value;
+                    if (string.Equals(value, currentVersion, StringComparison.Ordinal) ||
+                        value.StartsWith(currentVersion + "-", StringComparison.Ordinal) ||
+                        IsAllowedImageVersionReference(line))
+                    {
+                        continue;
+                    }
+
+                    offenders.Add($"{relativePath}:{lineNumber}: {value}");
+                }
+            }
+        }
+
+        Assert.Empty(offenders.OrderBy(item => item, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void BugReportTemplates_RequestCurrentSupportEvidence()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var templatePaths = new[]
+        {
+            Path.Combine(repoRoot, ".github", "ISSUE_TEMPLATE", "bug_report.md"),
+            Path.Combine(repoRoot, ".github", "ISSUE_TEMPLATE", "bug_report.yml")
+        };
+        var currentVersion = File.ReadAllText(Path.Combine(repoRoot, "VERSION")).Trim();
+
+        foreach (var path in templatePaths)
+        {
+            var text = File.ReadAllText(path);
+            Assert.Contains($"v{currentVersion}", text, StringComparison.Ordinal);
+            Assert.Contains("Diagnostics", text, StringComparison.Ordinal);
+            Assert.Contains("Copy diagnostics", text, StringComparison.Ordinal);
+            Assert.Contains("Save Hang Report", text, StringComparison.Ordinal);
+            Assert.Contains("screenshare evidence", text, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("screenshare-operator-verdict.txt", text, StringComparison.Ordinal);
+            Assert.Contains("docs/supportability.md", text, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -719,6 +841,90 @@ public sealed class TestArchitectureContractTests
             .Select(match => match.Groups["value"].Value)
             .OrderBy(value => value, StringComparer.Ordinal)
             .ToArray();
+    }
+
+    private static string[] FindMissingLocalMarkdownLinks(string repoRoot, string file)
+    {
+        var text = File.ReadAllText(file);
+        var baseDirectory = Path.GetDirectoryName(file) ?? repoRoot;
+        var missing = new List<string>();
+        foreach (Match match in Regex.Matches(text, @"!?\[[^\]]+\]\((?<target>[^)]+)\)"))
+        {
+            var target = match.Groups["target"].Value.Trim();
+            if (string.IsNullOrWhiteSpace(target) ||
+                target.StartsWith("#", StringComparison.Ordinal) ||
+                target.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                target.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                target.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase) ||
+                target.StartsWith("app://", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var targetWithoutAnchor = target.Split('#', 2)[0].Trim();
+            if (string.IsNullOrWhiteSpace(targetWithoutAnchor))
+            {
+                continue;
+            }
+
+            var candidate = Path.IsPathRooted(targetWithoutAnchor)
+                ? Path.Combine(repoRoot, targetWithoutAnchor.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+                : Path.Combine(baseDirectory, targetWithoutAnchor.Replace('/', Path.DirectorySeparatorChar));
+            if (!File.Exists(candidate) && !Directory.Exists(candidate))
+            {
+                var relativePath = Path.GetRelativePath(repoRoot, file).Replace('\\', '/');
+                missing.Add($"{relativePath} -> {target}");
+            }
+        }
+
+        return missing.ToArray();
+    }
+
+    private static bool IsAllowedImageVersionReference(string line)
+        => line.Contains("docs/images/", StringComparison.OrdinalIgnoreCase) &&
+            line.Contains(".png", StringComparison.OrdinalIgnoreCase);
+
+    private static IEnumerable<string> GetActiveDocsAndTemplateFiles(string repoRoot)
+    {
+        var readmePath = Path.Combine(repoRoot, "README.md");
+        if (File.Exists(readmePath))
+        {
+            yield return readmePath;
+        }
+
+        var docsRoot = Path.Combine(repoRoot, "docs");
+        if (Directory.Exists(docsRoot))
+        {
+            foreach (var file in Directory.GetFiles(docsRoot, "*.md", SearchOption.AllDirectories))
+            {
+                var relativePath = Path.GetRelativePath(repoRoot, file).Replace('\\', '/');
+                if (relativePath.StartsWith("docs/releases/", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                yield return file;
+            }
+        }
+
+        var pullRequestTemplatePath = Path.Combine(repoRoot, ".github", "pull_request_template.md");
+        if (File.Exists(pullRequestTemplatePath))
+        {
+            yield return pullRequestTemplatePath;
+        }
+
+        var issueTemplateRoot = Path.Combine(repoRoot, ".github", "ISSUE_TEMPLATE");
+        if (Directory.Exists(issueTemplateRoot))
+        {
+            foreach (var file in Directory.GetFiles(issueTemplateRoot, "*", SearchOption.AllDirectories))
+            {
+                var extension = Path.GetExtension(file);
+                if (extension is ".md" or ".yml" or ".yaml")
+                {
+                    yield return file;
+                }
+            }
+        }
     }
 
     private static IEnumerable<string> GetActiveDocsScriptsAndCiFiles(string repoRoot)

@@ -23,3 +23,4 @@
    - Upload installer + portable zip + `SHA256SUMS.txt`
 
 See `docs/test-lanes.md` for the current lane matrix. The old performance category is intentionally not advertised until real performance tests are reintroduced.
+See `docs/supportability.md` for the current support evidence checklist, including Diagnostics, Save Hang Report, logs, and screenshare verdict guidance.

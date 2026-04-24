@@ -4,7 +4,7 @@ body:
   - type: input
     attributes:
       label: Version
-      description: Example: v0.1.0-alpha.2
+      description: Example: v0.5.3
     validations:
       required: true
 
@@ -14,6 +14,33 @@ body:
       options:
         - Installer
         - Portable
+        - From source
+    validations:
+      required: true
+
+  - type: dropdown
+    attributes:
+      label: Role
+      options:
+        - Helper
+        - Helpee
+        - Both
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    attributes:
+      label: Area
+      options:
+        - Connection/session
+        - Chat
+        - File transfer
+        - Screen share
+        - Remote control
+        - Install/update
+        - Diagnostics/support
+        - Other
     validations:
       required: true
 
@@ -28,6 +55,7 @@ body:
   - type: textarea
     attributes:
       label: Steps to reproduce
+      description: List exactly what you clicked or ran.
     validations:
       required: true
 
@@ -44,4 +72,14 @@ body:
   - type: textarea
     attributes:
       label: Diagnostics output
-      description: Paste from Diagnostics -> Copy diagnostics
+      description: Paste from Diagnostics -> Copy diagnostics. See docs/supportability.md for what to collect.
+
+  - type: textarea
+    attributes:
+      label: Hang Report
+      description: If the app froze, paste the Save Hang Report path or attach the report when requested.
+
+  - type: textarea
+    attributes:
+      label: Screenshare evidence
+      description: For screenshare issues, paste the Diagnostics screenshare evidence block or screenshare-operator-verdict.txt when available.

@@ -1,17 +1,18 @@
 # Known Issues
 
-This beta is focused on session UX stability and release readiness. Some rough edges may still remain.
+This file lists current support notes for the active release. Use `docs/supportability.md` for evidence collection and issue-reporting details.
 
-## Current beta notes
+## Current notes
 
-- Some failure and recovery flows may still feel abrupt compared with a final release
-- Diagnostics content is intended for troubleshooting and may still change between beta builds
-- Performance and layout should be checked on the target machine if you use unusual scaling or window sizes
-- Screenshare streaming is available, but live NKN performance can vary with transport conditions; include diagnostics and any available soak artifact when reporting issues.
+- Some failure and recovery flows may still feel abrupt compared with a final polished support product.
+- Diagnostics content is intended for troubleshooting and may change between builds.
+- Performance and layout should be checked on the target machine if you use unusual scaling or window sizes.
+- Screenshare streaming is available, but live NKN performance can vary with transport conditions. Include Diagnostics and any available `screenshare-operator-verdict.txt` evidence when reporting screenshare issues.
 
 ## How to report an issue
 
-- Describe what you clicked and what you expected to happen
-- Include whether you were the helper or the person receiving help
-- Attach app logs if available
-- Attach Diagnostics details or copied diagnostics text when relevant
+- Describe what you clicked and what you expected to happen.
+- Include whether you were the helper, the person receiving help, or both.
+- Paste `Diagnostics -> Copy diagnostics` output.
+- For hangs or freezes, include the Save Hang Report output when available.
+- For screenshare issues, include the screenshare evidence block from Diagnostics or the latest `screenshare-operator-verdict.txt` when available.

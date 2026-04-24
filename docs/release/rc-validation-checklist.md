@@ -17,7 +17,7 @@
 
 ## Upgrade
 
-- [ ] `0.1.0-beta.5` -> `0.2.0-rc.1` in-place upgrade was tested.
+- [ ] Previous supported public installer -> current RC in-place upgrade was tested.
 - [ ] Settings or local runtime data were preserved where applicable.
 
 ## UI Sanity
@@ -33,4 +33,5 @@
 ## Tag Readiness
 
 - [ ] `VERSION` matches the intended tag.
-- [ ] Release notes and changelog are ready.
+- [ ] Release notes are ready under `docs/releases/<version>.md`.
+- [ ] Support guidance still points to `docs/supportability.md` and Diagnostics / Hang Report capture.

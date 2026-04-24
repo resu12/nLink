@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Use the RC checklist: [docs/release/rc-validation-checklist.md](../blob/main/docs/release/rc-validation-checklist.md)
+        Use the RC checklist: docs/release/rc-validation-checklist.md
 
   - type: input
     attributes:
@@ -42,7 +42,7 @@ body:
         - label: Feature flags and defaults reviewed
         - label: UX coherence checked for Helper and Helpee
         - label: Failure mapping lockdown verified
-        - label: Screenshare readiness reviewed (video-only)
+        - label: Screenshare readiness and support evidence reviewed
         - label: Performance and resource sanity checked
         - label: Testing gates passed
         - label: Packaging and distribution artifacts verified

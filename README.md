@@ -43,7 +43,7 @@ Remote control:
 ![Remote control session](docs/images/remote-control-0.4.5.png)
 
 If connection fails:
-Open Diagnostics -> Copy diagnostics and include it when reporting issues. If a screenshare soak artifact has already been analyzed, Diagnostics includes a compact screenshare evidence summary; for hangs or freezes, use Diagnostics -> Save Hang Report.
+Open Diagnostics -> Copy diagnostics and include it when reporting issues. If a screenshare soak artifact has already been analyzed, Diagnostics includes a compact screenshare evidence summary; for hangs or freezes, use Diagnostics -> Save Hang Report. See [`docs/supportability.md`](docs/supportability.md) for the support evidence checklist.
 
 For release-safe builds, Diagnostics should show:
 - `invite_security_mode: issued_one_time_secret_invites`
@@ -66,6 +66,17 @@ Notes:
 
 License:
 - MIT (see `LICENSE`)
+
+## Documentation
+
+- Current docs index:
+  [`docs/README.md`](docs/README.md)
+- Support evidence guide:
+  [`docs/supportability.md`](docs/supportability.md)
+- Test lane matrix:
+  [`docs/test-lanes.md`](docs/test-lanes.md)
+- Screenshare operator guide:
+  [`docs/screenshare-operability.md`](docs/screenshare-operability.md)
 
 ## Build from source (developers)
 
