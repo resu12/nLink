@@ -40,3 +40,10 @@ powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane GuiSmoke -
 | `All` | All five domain projects | Full domain test sweep without relying on the old monolith project. |
 
 The old performance category is not an active lane. Reintroduce it only with real performance tests and update this file, CI, and architecture guardrails together.
+
+## Track C Closeout Guardrails
+
+- Domain projects are the ownership boundary for normal test selection.
+- `Area` traits are secondary filters and architecture guardrails, not a replacement for project ownership.
+- `nLink.TestCommon` is harness-only and must not contain test methods or collection definitions.
+- Adding a future test domain requires updating the solution, `tools\Test-Lanes.ps1`, this lane matrix, and `TestArchitectureContractTests` in the same change.

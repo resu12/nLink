@@ -93,6 +93,13 @@ public sealed class SessionFileTransferPullRepairTests : SessionFileTransferServ
         using var destination = new NonDisposingMemoryStream();
         await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
         await WaitUntilAsync(() => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed && receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed, timeoutMs: 15000);
+        await WaitUntilAsync(() =>
+        {
+            var tail = ReadOperationalLogTail(logStart);
+            return tail.Contains("event=filetransfer_request_timeout_detected", StringComparison.Ordinal)
+                && tail.Contains("event=filetransfer_chunk_retry_requested", StringComparison.Ordinal)
+                && tail.Contains("event=filetransfer_chunk_retry_sent", StringComparison.Ordinal);
+        }, timeoutMs: 3000);
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Equal(payload, destination.ToArray());
         Assert.Equal(2, senderTransport.SentDataFrames.OfType<FileTransferChunkDataFrameV2>().Count(frame => frame.ChunkIndex == 3));

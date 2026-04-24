@@ -83,10 +83,12 @@ License:
 
 ### Tests
 
-- Run all tests:
-  `dotnet test`
-- Run deterministic smoke tests (always available):
-  `dotnet test -c Release --filter Category=Smoke`
+- Run all domain ownership lanes:
+  `powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane Core,Gui,ScreenShare,RemoteControl,Contracts`
+- Run deterministic release smoke tests:
+  `powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane Smoke -Configuration Release`
+- See the lane matrix:
+  [`docs/test-lanes.md`](docs/test-lanes.md)
 
 ### Release Validation (Maintainers, Windows)
 
@@ -101,8 +103,8 @@ License:
   [`docs/releases/0.5.3.md`](docs/releases/0.5.3.md)
 - GitHub release body:
   [`docs/releases/0.5.3-github.md`](docs/releases/0.5.3-github.md)
-- Screenshare RC/final validation checklist:
-  [`docs/release/0.3.0-rc-validation-checklist.md`](docs/release/0.3.0-rc-validation-checklist.md)
+- RC/final validation checklist:
+  [`docs/release/rc-validation-checklist.md`](docs/release/rc-validation-checklist.md)
 
 ### Dead-Code Report (Local, Non-Destructive)
 

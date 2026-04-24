@@ -36,6 +36,20 @@ public sealed class TestArchitectureContractTests
         "tests/nLink.SmokeTests/ScreenShare/ScreenCaptureAbstractionTests.cs"
     ];
 
+    private static readonly string[] DeletedProcessDocReferences =
+    [
+        "docs/performance/0.3.4-baseline.md",
+        "docs/release/0.2.0-rc-readiness.md",
+        "docs/release/0.2.0-rc.1-release-notes.md",
+        "docs/release/0.2.0-rc.1.md",
+        "docs/release/0.3.0-freeze.md",
+        "docs/release/0.3.0-promotion.md",
+        "docs/release/0.3.0-rc-validation-checklist.md",
+        "docs/release/0.3.3-manual-validation-checklist.md",
+        "docs/release/0.3.3-packaging-checklist.md",
+        "docs/release/upgrade-0.1.0-beta.5-to-0.2.0-rc.1.md"
+    ];
+
     private static readonly string[] RequiredTestLanes =
     [
         "Core",
@@ -56,11 +70,27 @@ public sealed class TestArchitectureContractTests
     public void DomainTestProjects_Exist_AndRetiredMonolithProjectDoesNot()
     {
         var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var expectedProjectNames = DomainProjects
+            .Select(project => project.ProjectName)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
 
         foreach (var (_, projectName) in DomainProjects)
         {
             var projectPath = Path.Combine(repoRoot, "tests", projectName, $"{projectName}.csproj");
             Assert.True(File.Exists(projectPath), $"Expected domain test project: {projectPath}");
+        }
+
+        var actualProjectNames = Directory.GetDirectories(Path.Combine(repoRoot, "tests"), "nLink.SmokeTests.*")
+            .Select(Path.GetFileName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(expectedProjectNames, actualProjectNames);
+
+        foreach (var (area, _) in DomainProjects)
+        {
+            Assert.Contains(area, RequiredTestLanes);
         }
 
         var retiredProjectPath = Path.Combine(repoRoot, "tests", "nLink.SmokeTests", "nLink.SmokeTests.csproj");
@@ -216,14 +246,32 @@ public sealed class TestArchitectureContractTests
     {
         var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
         var scriptPath = Path.Combine(repoRoot, "tools", "Test-Lanes.ps1");
+        var docsPath = Path.Combine(repoRoot, "docs", "test-lanes.md");
 
         Assert.True(File.Exists(scriptPath), $"Expected lane script: {scriptPath}");
+        Assert.True(File.Exists(docsPath), $"Expected lane docs: {docsPath}");
 
         var scriptText = File.ReadAllText(scriptPath);
-        foreach (var lane in RequiredTestLanes)
-        {
-            Assert.Contains($"\"{lane}\"", scriptText);
-        }
+        var docsText = File.ReadAllText(docsPath);
+        var expected = RequiredTestLanes.OrderBy(lane => lane, StringComparer.Ordinal).ToArray();
+        Assert.Equal(expected, ExtractLaneScriptLanes(scriptText));
+        Assert.Equal(expected, ExtractLaneDocLanes(docsText));
+    }
+
+    [Fact]
+    public void Readme_AdvertisesTestLanes_AndCurrentRcChecklist()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var readmePath = Path.Combine(repoRoot, "README.md");
+        var readmeText = File.ReadAllText(readmePath);
+
+        Assert.Contains(@"tools\Test-Lanes.ps1", readmeText, StringComparison.Ordinal);
+        Assert.Contains("docs/test-lanes.md", readmeText, StringComparison.Ordinal);
+        Assert.Contains("docs/release/rc-validation-checklist.md", readmeText, StringComparison.Ordinal);
+        Assert.DoesNotContain("docs/release/0.3.0-rc-validation-checklist.md", readmeText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("dotnet test -c Release --filter Category=Smoke", readmeText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(@"tests\nLink.SmokeTests\nLink.SmokeTests.csproj", readmeText, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("tests/nLink.SmokeTests/nLink.SmokeTests.csproj", readmeText, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -241,6 +289,24 @@ public sealed class TestArchitectureContractTests
             {
                 var text = File.ReadAllText(file);
                 return retiredReferences.Any(reference =>
+                    text.Contains(reference, StringComparison.OrdinalIgnoreCase));
+            })
+            .Select(file => Path.GetRelativePath(repoRoot, file).Replace('\\', '/'))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Empty(offenders);
+    }
+
+    [Fact]
+    public void ActiveDocsScriptsCiAndIssueTemplates_DoNotLinkDeletedProcessDocs()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var offenders = GetActiveDocsScriptsAndCiFiles(repoRoot)
+            .Where(file =>
+            {
+                var text = File.ReadAllText(file).Replace('\\', '/');
+                return DeletedProcessDocReferences.Any(reference =>
                     text.Contains(reference, StringComparison.OrdinalIgnoreCase));
             })
             .Select(file => Path.GetRelativePath(repoRoot, file).Replace('\\', '/'))
@@ -293,13 +359,39 @@ public sealed class TestArchitectureContractTests
             && !Path.IsPathRooted(relative);
     }
 
+    private static string[] ExtractLaneScriptLanes(string scriptText)
+    {
+        var match = Regex.Match(scriptText, @"(?s)\$validLanes\s*=\s*@\((?<body>.*?)\)");
+        Assert.True(match.Success, "Could not find $validLanes in tools/Test-Lanes.ps1.");
+
+        return Regex.Matches(match.Groups["body"].Value, "\"(?<lane>[^\"]+)\"")
+            .Select(match => match.Groups["lane"].Value)
+            .OrderBy(lane => lane, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static string[] ExtractLaneDocLanes(string docsText)
+    {
+        return Regex.Matches(docsText, @"^\|\s*`(?<lane>[^`]+)`\s*\|", RegexOptions.Multiline)
+            .Select(match => match.Groups["lane"].Value)
+            .OrderBy(lane => lane, StringComparer.Ordinal)
+            .ToArray();
+    }
+
     private static IEnumerable<string> GetActiveDocsScriptsAndCiFiles(string repoRoot)
     {
+        var readmePath = Path.Combine(repoRoot, "README.md");
+        if (File.Exists(readmePath))
+        {
+            yield return readmePath;
+        }
+
         var roots = new[]
         {
             Path.Combine(repoRoot, "docs"),
             Path.Combine(repoRoot, "tools"),
-            Path.Combine(repoRoot, ".github", "workflows")
+            Path.Combine(repoRoot, ".github", "workflows"),
+            Path.Combine(repoRoot, ".github", "ISSUE_TEMPLATE")
         };
 
         foreach (var root in roots)
@@ -313,6 +405,13 @@ public sealed class TestArchitectureContractTests
             {
                 var relativePath = Path.GetRelativePath(repoRoot, file).Replace('\\', '/');
                 if (relativePath.StartsWith("docs/releases/", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (relativePath.StartsWith("tools/node/", StringComparison.OrdinalIgnoreCase) ||
+                    relativePath.StartsWith("tools/nkn-bridge/node_modules/", StringComparison.OrdinalIgnoreCase) ||
+                    relativePath.StartsWith("tools/nkn-bridge/.nlink-bundle/", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
