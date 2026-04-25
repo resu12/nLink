@@ -5,6 +5,4 @@ bridge/win-x64/
 bridge/win-x64/index.js
 bridge/win-x64/node.exe
 bridge/win-x64/package.json
-bridge/win-x64/package-lock.json
-bridge/win-x64/node_modules/
-bridge/win-x64/node_modules/axios/package.json
+bridge/win-x64/bridge-manifest.json
