@@ -568,7 +568,7 @@ public sealed class SessionRuntimeScreenSharePressureSendPathTests : ScreenShare
 
     [Trait("Category", "Smoke")]
     [Fact]
-    public void SessionRuntime_HelperScreenSharePressureFeedback_SteadyVisibleProgress_AllowsSustainedHighFrameAgeAfterHeadAdvances()
+    public void SessionRuntime_HelperScreenSharePressureFeedback_TrustedSteadyVisibleProgress_SuppressesSustainedAgeOnlyHighFrameAge()
     {
         DateTimeOffset now = new DateTimeOffset(2026, 4, 18, 11, 5, 0, TimeSpan.Zero);
         ScreenShareAwareSignalingTransportDouble transport = new ScreenShareAwareSignalingTransportDouble();
@@ -615,12 +615,275 @@ public sealed class SessionRuntimeScreenSharePressureSendPathTests : ScreenShare
             ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureModeEnteredUtc", now.AddSeconds(-5.0));
             ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "healthyScreenSharePressureIntervals", 4);
             ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "MaybeSendScreenSharePressureState");
-            ScreenSharePressureStateV1 screenSharePressureStateV = ScreenShareTransportBoundaryTestBase.WaitForSinglePressureState(transport.SentPressureStates);
-            Assert.Equal(ScreenSharePressureMode.ReduceFps, screenSharePressureStateV.Mode);
-            Assert.Equal("high_frame_age", screenSharePressureStateV.Reason);
+            Assert.DoesNotContain(transport.SentPressureStates, (ScreenSharePressureStateV1 sent) => sent.Mode == ScreenSharePressureMode.ReduceFps && string.Equals(sent.Reason, "high_frame_age", StringComparison.Ordinal));
             SessionRuntime.HelperRemoteScreenSharePressureDiagnosticsSnapshot helperRemoteScreenSharePressureDiagnosticsSnapshotForTests = sessionRuntime.GetHelperRemoteScreenSharePressureDiagnosticsSnapshotForTests();
-            Assert.True(helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.ActionableHighFrameAgeCount >= 1);
-            Assert.False(helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.SteadyVisibleProgressActive);
+            Assert.Equal(0L, helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.ActionableHighFrameAgeCount);
+            Assert.True(helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.SteadyVisibleProgressActive);
+            Assert.True(helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.HighFrameAgeSuppressedDueToVisibleProgressCount >= 1);
+        }
+        finally
+        {
+            if (transport != null)
+            {
+                ((IDisposable)transport).Dispose();
+            }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_HelperScreenSharePressureFeedback_TrustedSteadyVisibleProgress_ClearsHeldHighFrameAgeReduceFps()
+    {
+        DateTimeOffset now = new DateTimeOffset(2026, 4, 18, 11, 7, 0, TimeSpan.Zero);
+        ScreenShareAwareSignalingTransportDouble transport = new ScreenShareAwareSignalingTransportDouble();
+        try
+        {
+            using SessionRuntime sessionRuntime = new SessionRuntime(() => transport, SessionRuntimeWatchdogOptions.Default, null, null, null, null, null, null, () => now);
+            sessionRuntime.SetRoleForTests(SessionRuntimeRole.Helper);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "transport", transport);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "state", SessionRuntimeState.Connected);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "statusText", "Connected");
+            ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "WireTransport", transport);
+            transport.SetSessionSecurityStateForTests(ScreenShareTransportBoundaryTestBase.CreateApprovedSecurityState(new PeerAddress("pressure.helpee"), new PeerAddress("pressure.helper"), CapabilityGrant.ScreenShare));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpoch", 1L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochStartedUtc", now.AddSeconds(-10.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochFirstApplySeen", true);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochApplyCount", 12);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochLastVisibleApplyFrameId", 24L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochWarmupStartedUtc", now.AddSeconds(-10.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochWarmupEndedUtc", now.AddSeconds(-9.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineEstablished", true);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs", 500.0);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineSampleCount", 4L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochAgePressureConsecutiveCount", 2);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochLastEvaluatedAppliedHeadFrameId", 24L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochLastEvaluatedStableVisibleHeadFrameId", 24L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecentAppliedFrameCount", 1);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecentAppliedFrameIndex", 1);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecentAppliedFrameAgesMs", new long[3] { 1500L, 0L, 0L });
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteLastAppliedFrameAgeMs", 1500L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteLastAppliedFrameUtc", now.AddMilliseconds(-100.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteLastApplyCadenceMs", 120L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteApplyCadenceObserved", 12L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteTotalApplyCadenceMs", 1440L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteSteadyProgressEpoch", 1L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteSteadyVisibleProgressActive", true);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteSteadyProgressActivationFrameId", 18L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteSteadyProgressStableVisibleHeadFrameId", 24L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteSteadyProgressVisibleHeadFrameId", 24L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteSteadyProgressFramesAppliedSinceLastGap", 12L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureMode", ScreenSharePressureMode.ReduceFps);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureReason", "high_frame_age");
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureAgeMs", 1600L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureUtc", now.AddMilliseconds(-100.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureModeEnteredUtc", now.AddMilliseconds(-500.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "healthyScreenSharePressureIntervals", 0);
+
+            ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "MaybeSendScreenSharePressureState");
+
+            ScreenSharePressureStateV1 screenSharePressureStateV = ScreenShareTransportBoundaryTestBase.WaitForSinglePressureState(transport.SentPressureStates);
+            Assert.Equal(ScreenSharePressureMode.Normal, screenSharePressureStateV.Mode);
+            Assert.Equal("healthy", screenSharePressureStateV.Reason);
+            SessionRuntime.HelperRemoteScreenSharePressureDiagnosticsSnapshot helperRemoteScreenSharePressureDiagnosticsSnapshotForTests = sessionRuntime.GetHelperRemoteScreenSharePressureDiagnosticsSnapshotForTests();
+            Assert.True(helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.SteadyVisibleProgressActive);
+            Assert.Equal(0L, helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.ActionableHighFrameAgeCount);
+            Assert.True(helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.HighFrameAgeSuppressedDueToVisibleProgressCount >= 1);
+        }
+        finally
+        {
+            if (transport != null)
+            {
+                ((IDisposable)transport).Dispose();
+            }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_HelperScreenSharePressureFeedback_TrustedApplyProgressWithoutStableHead_ClearsHeldHighFrameAgeReduceFps()
+    {
+        DateTimeOffset now = new DateTimeOffset(2026, 4, 18, 11, 7, 30, TimeSpan.Zero);
+        ScreenShareAwareSignalingTransportDouble transport = new ScreenShareAwareSignalingTransportDouble();
+        try
+        {
+            using SessionRuntime sessionRuntime = new SessionRuntime(() => transport, SessionRuntimeWatchdogOptions.Default, null, null, null, null, null, null, () => now);
+            sessionRuntime.SetRoleForTests(SessionRuntimeRole.Helper);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "transport", transport);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "state", SessionRuntimeState.Connected);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "statusText", "Connected");
+            ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "WireTransport", transport);
+            transport.SetSessionSecurityStateForTests(ScreenShareTransportBoundaryTestBase.CreateApprovedSecurityState(new PeerAddress("pressure.helpee"), new PeerAddress("pressure.helper"), CapabilityGrant.ScreenShare));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpoch", 1L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochStartedUtc", now.AddSeconds(-10.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochFirstApplySeen", true);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochApplyCount", 6);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochLastVisibleApplyFrameId", 42L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochWarmupStartedUtc", now.AddSeconds(-10.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochWarmupEndedUtc", now.AddSeconds(-9.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineEstablished", true);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs", 500.0);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineSampleCount", 4L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochAgePressureConsecutiveCount", 2);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochLastEvaluatedAppliedHeadFrameId", 42L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochLastEvaluatedStableVisibleHeadFrameId", -1L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecentAppliedFrameCount", 1);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecentAppliedFrameIndex", 1);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecentAppliedFrameAgesMs", new long[3] { 1500L, 0L, 0L });
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteLastAppliedFrameAgeMs", 1500L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteLastAppliedFrameUtc", now.AddMilliseconds(-100.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteLastApplyCadenceMs", 120L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteApplyCadenceObserved", 6L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteTotalApplyCadenceMs", 720L);
+            sessionRuntime.ReportHelperRemoteScreenShareSessionSnapshot(ScreenShareTransportBoundaryTestBase.CreateHelperSessionSnapshot(1L, -1L, 42L, -1L, 2L, -1L));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureMode", ScreenSharePressureMode.ReduceFps);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureReason", "high_frame_age");
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureAgeMs", 1600L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureUtc", now.AddMilliseconds(-100.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureModeEnteredUtc", now.AddMilliseconds(-500.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "healthyScreenSharePressureIntervals", 0);
+
+            ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "MaybeSendScreenSharePressureState");
+
+            ScreenSharePressureStateV1 screenSharePressureStateV = ScreenShareTransportBoundaryTestBase.WaitForSinglePressureState(transport.SentPressureStates);
+            Assert.Equal(ScreenSharePressureMode.Normal, screenSharePressureStateV.Mode);
+            Assert.Equal("healthy", screenSharePressureStateV.Reason);
+            Assert.Null(screenSharePressureStateV.StableVisibleHeadFrameId);
+            Assert.Equal(42L, screenSharePressureStateV.AppliedHeadFrameId);
+            SessionRuntime.HelperRemoteScreenSharePressureDiagnosticsSnapshot helperRemoteScreenSharePressureDiagnosticsSnapshotForTests = sessionRuntime.GetHelperRemoteScreenSharePressureDiagnosticsSnapshotForTests();
+            Assert.True(helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.SteadyVisibleProgressActive);
+            Assert.Equal(-1L, helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.StableVisibleHeadFrameId);
+            Assert.True(helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.HighFrameAgeSuppressedDueToVisibleProgressCount >= 1);
+            Assert.Equal(0L, helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.ActionableHighFrameAgeCount);
+        }
+        finally
+        {
+            if (transport != null)
+            {
+                ((IDisposable)transport).Dispose();
+            }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_HelperScreenSharePressureFeedback_TrustedApplyProgress_ClearsHeldSlowApplyCadenceReduceFps()
+    {
+        DateTimeOffset now = new DateTimeOffset(2026, 4, 18, 11, 7, 45, TimeSpan.Zero);
+        ScreenShareAwareSignalingTransportDouble transport = new ScreenShareAwareSignalingTransportDouble();
+        try
+        {
+            using SessionRuntime sessionRuntime = new SessionRuntime(() => transport, SessionRuntimeWatchdogOptions.Default, null, null, null, null, null, null, () => now);
+            sessionRuntime.SetRoleForTests(SessionRuntimeRole.Helper);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "transport", transport);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "state", SessionRuntimeState.Connected);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "statusText", "Connected");
+            ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "WireTransport", transport);
+            transport.SetSessionSecurityStateForTests(ScreenShareTransportBoundaryTestBase.CreateApprovedSecurityState(new PeerAddress("pressure.helpee"), new PeerAddress("pressure.helper"), CapabilityGrant.ScreenShare));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpoch", 1L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochStartedUtc", now.AddSeconds(-10.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochFirstApplySeen", true);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochApplyCount", 6);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochLastVisibleApplyFrameId", 52L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochWarmupStartedUtc", now.AddSeconds(-10.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochWarmupEndedUtc", now.AddSeconds(-9.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineEstablished", true);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs", 500.0);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineSampleCount", 4L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecentAppliedFrameCount", 1);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecentAppliedFrameIndex", 1);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecentAppliedFrameAgesMs", new long[3] { 200L, 0L, 0L });
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteLastAppliedFrameAgeMs", 200L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteLastAppliedFrameUtc", now.AddMilliseconds(-100.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteLastApplyCadenceMs", 120L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteApplyCadenceObserved", 6L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteTotalApplyCadenceMs", 720L);
+            sessionRuntime.ReportHelperRemoteScreenShareSessionSnapshot(ScreenShareTransportBoundaryTestBase.CreateHelperSessionSnapshot(1L, -1L, 52L, -1L, 2L, -1L));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureMode", ScreenSharePressureMode.ReduceFps);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureReason", "slow_apply_cadence");
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureAgeMs", 200L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureUtc", now.AddMilliseconds(-100.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureModeEnteredUtc", now.AddMilliseconds(-500.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "healthyScreenSharePressureIntervals", 0);
+
+            ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "MaybeSendScreenSharePressureState");
+
+            ScreenSharePressureStateV1 screenSharePressureStateV = ScreenShareTransportBoundaryTestBase.WaitForSinglePressureState(transport.SentPressureStates);
+            Assert.Equal(ScreenSharePressureMode.Normal, screenSharePressureStateV.Mode);
+            Assert.Equal("healthy", screenSharePressureStateV.Reason);
+            Assert.Equal(52L, screenSharePressureStateV.AppliedHeadFrameId);
+            SessionRuntime.HelperRemoteScreenSharePressureDiagnosticsSnapshot helperRemoteScreenSharePressureDiagnosticsSnapshotForTests = sessionRuntime.GetHelperRemoteScreenSharePressureDiagnosticsSnapshotForTests();
+            Assert.Equal(0L, helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.SlowApplyCadenceTicks);
+            Assert.True(helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.SteadyVisibleProgressActive);
+        }
+        finally
+        {
+            if (transport != null)
+            {
+                ((IDisposable)transport).Dispose();
+            }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_HelperScreenSharePressureFeedback_TrustedSteadyVisibleProgress_RestartsStallBaselineReseed()
+    {
+        DateTimeOffset now = new DateTimeOffset(2026, 4, 18, 11, 8, 0, TimeSpan.Zero);
+        ScreenShareAwareSignalingTransportDouble transport = new ScreenShareAwareSignalingTransportDouble();
+        try
+        {
+            using SessionRuntime sessionRuntime = new SessionRuntime(() => transport, SessionRuntimeWatchdogOptions.Default, null, null, null, null, null, null, () => now);
+            sessionRuntime.SetRoleForTests(SessionRuntimeRole.Helper);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "transport", transport);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "state", SessionRuntimeState.Connected);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "statusText", "Connected");
+            ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "WireTransport", transport);
+            transport.SetSessionSecurityStateForTests(ScreenShareTransportBoundaryTestBase.CreateApprovedSecurityState(new PeerAddress("pressure.helpee"), new PeerAddress("pressure.helper"), CapabilityGrant.ScreenShare));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpoch", 1L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochStartedUtc", now.AddSeconds(-10.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochFirstApplySeen", true);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochApplyCount", 12);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochLastVisibleApplyFrameId", 30L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochWarmupStartedUtc", now.AddSeconds(-10.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochWarmupEndedUtc", now.AddSeconds(-9.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineEstablished", true);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs", 500.0);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineSampleCount", 4L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineReseedAfterStallPending", true);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineFreezeUntilNextApply", false);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochBaselineReseedRemainingVisibleApplies", 0);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochAgePressureConsecutiveCount", 2);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochLastEvaluatedAppliedHeadFrameId", 30L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochLastEvaluatedStableVisibleHeadFrameId", 30L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecentAppliedFrameCount", 1);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecentAppliedFrameIndex", 1);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteRecentAppliedFrameAgesMs", new long[3] { 1500L, 0L, 0L });
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteLastAppliedFrameAgeMs", 1500L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteLastAppliedFrameUtc", now.AddMilliseconds(-100.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteLastApplyCadenceMs", 120L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteApplyCadenceObserved", 12L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteTotalApplyCadenceMs", 1440L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteSteadyProgressEpoch", 1L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteSteadyVisibleProgressActive", true);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteSteadyProgressActivationFrameId", 24L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteSteadyProgressStableVisibleHeadFrameId", 30L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteSteadyProgressVisibleHeadFrameId", 30L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteSteadyProgressFramesAppliedSinceLastGap", 12L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureMode", ScreenSharePressureMode.Normal);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureReason", "healthy");
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureAgeMs", 220L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureUtc", now.AddSeconds(-2.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureModeEnteredUtc", now.AddSeconds(-5.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "healthyScreenSharePressureIntervals", 4);
+
+            ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "MaybeSendScreenSharePressureState");
+
+            Assert.DoesNotContain(transport.SentPressureStates, (ScreenSharePressureStateV1 sent) => sent.Mode == ScreenSharePressureMode.ReduceFps && string.Equals(sent.Reason, "high_frame_age", StringComparison.Ordinal));
+            SessionRuntime.HelperRemoteScreenSharePressureDiagnosticsSnapshot helperRemoteScreenSharePressureDiagnosticsSnapshotForTests = sessionRuntime.GetHelperRemoteScreenSharePressureDiagnosticsSnapshotForTests();
+            Assert.True(helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.SteadyVisibleProgressActive);
+            Assert.True(helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.BaselineReseedInProgress);
+            Assert.False(helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.BaselineEstablished);
+            Assert.Equal(0L, helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.ActionableHighFrameAgeCount);
         }
         finally
         {

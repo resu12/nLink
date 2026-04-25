@@ -7,6 +7,9 @@ namespace NLink.Infra.Nkn;
 
 internal sealed class NknTransportOptions
 {
+    private const int DefaultNumSubClients = 4;
+    private const int DefaultMediaNumSubClients = 8;
+
     private readonly struct ResolvedKeyPath
     {
         public ResolvedKeyPath(string path, bool isGeneratedPerProcessKeyPath)
@@ -47,6 +50,17 @@ internal sealed class NknTransportOptions
     public int PreflightCacheTtlMs { get; private set; }
 
     public int FileTransferChunkPacingMs { get; private set; }
+
+    public int NumSubClients { get; private set; }
+
+    public int MediaNumSubClients { get; private set; }
+
+    internal bool HasSubClientTopologyOverride { get; private set; }
+
+    internal bool ShouldSendSubClientTopology =>
+        HasSubClientTopologyOverride ||
+        NumSubClients != DefaultNumSubClients ||
+        MediaNumSubClients != DefaultMediaNumSubClients;
 
     public static NknTransportOptions Load()
     {
@@ -92,7 +106,15 @@ internal sealed class NknTransportOptions
             appSettings.Get("NLINK_NKN_FILE_TRANSFER_CHUNK_PACING_MS"),
             appSettings.Get("nLink:nkn:fileTransferChunkPacingMs"));
 
+        var numSubClients = Environment.GetEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS");
+        var mediaNumSubClients = Environment.GetEnvironmentVariable("NLINK_NKN_MEDIA_NUM_SUBCLIENTS");
         var resolvedKeyPath = ResolveKeyPath(configuredKeyPath);
+        var parsedNumSubClients = ParseInt(numSubClients, defaultValue: DefaultNumSubClients, minValue: 1, maxValue: 16);
+        var parsedMediaNumSubClients = ParseInt(
+            mediaNumSubClients,
+            defaultValue: string.IsNullOrWhiteSpace(numSubClients) ? DefaultMediaNumSubClients : parsedNumSubClients,
+            minValue: 1,
+            maxValue: 16);
 
         return new NknTransportOptions
         {
@@ -105,6 +127,9 @@ internal sealed class NknTransportOptions
             PreflightConcurrency = ParseInt(preflightConcurrency, defaultValue: 8, minValue: 1, maxValue: 256),
             PreflightCacheTtlMs = ParseInt(preflightCacheTtlMs, defaultValue: 600_000, minValue: 0, maxValue: 86_400_000),
             FileTransferChunkPacingMs = ParseInt(fileTransferChunkPacingMs, defaultValue: 2, minValue: 0, maxValue: 1_000),
+            NumSubClients = parsedNumSubClients,
+            MediaNumSubClients = parsedMediaNumSubClients,
+            HasSubClientTopologyOverride = !string.IsNullOrWhiteSpace(numSubClients) || !string.IsNullOrWhiteSpace(mediaNumSubClients),
         };
     }
 

@@ -6,15 +6,20 @@ param(
         "NknSoak",
         "AnalyzeRetained",
         "TrackBRetained",
-        "SupportCapture"
+        "SupportCapture",
+        "ExternalTopologyAudit"
     )]
     [string]$Mode,
 
+    [ValidateSet("Default", "PinnedMainnetRpc", "PinnedSeedHttps", "MediaFanout8", "MediaFanout12", "DefaultKeepAlive")]
+    [string]$ExternalTopologyProfile = "Default",
     [string]$Configuration = "Debug",
     [switch]$NoBuild,
     [int]$DurationSeconds = 0,
     [int]$SampleIntervalSeconds = 5,
     [string]$ArtifactDir = "",
+    [string[]]$ArtifactDirs = @(),
+    [string]$OutputPath = "",
     [string]$ExePath = "",
     [switch]$Build,
     [int]$TimeoutSeconds = 0,
@@ -131,6 +136,82 @@ function Get-ResolvedDurationSeconds {
     return $value
 }
 
+function Set-ProcessEnvironmentValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowNull()][string]$Value
+    )
+
+    if ($null -eq $Value) {
+        Remove-Item -LiteralPath ("Env:{0}" -f $Name) -ErrorAction SilentlyContinue
+        return
+    }
+
+    Set-Item -LiteralPath ("Env:{0}" -f $Name) -Value $Value
+}
+
+function Set-ExternalTopologyProfileEnvironment {
+    param([Parameter(Mandatory = $true)][string]$Profile)
+
+    $keys = @(
+        "NLINK_NKN_SEED_RPC",
+        "NLINK_NKN_NUM_SUBCLIENTS",
+        "NLINK_NKN_MEDIA_NUM_SUBCLIENTS",
+        "NLINK_BRIDGE_REUSE_MODE",
+        "NLINK_SCREENSHARE_EXTERNAL_TOPOLOGY_PROFILE"
+    )
+
+    $restore = @{}
+    foreach ($key in $keys) {
+        $restore[$key] = [pscustomobject]@{
+            HadValue = Test-Path -LiteralPath ("Env:{0}" -f $key)
+            Value = [System.Environment]::GetEnvironmentVariable($key)
+        }
+    }
+
+    foreach ($key in $keys) {
+        Set-ProcessEnvironmentValue -Name $key -Value $null
+    }
+
+    Set-ProcessEnvironmentValue -Name "NLINK_SCREENSHARE_EXTERNAL_TOPOLOGY_PROFILE" -Value $Profile
+
+    switch ($Profile) {
+        "PinnedMainnetRpc" {
+            Set-ProcessEnvironmentValue -Name "NLINK_NKN_SEED_RPC" -Value "https://mainnet-rpc-node-0001.nkn.org/mainnet/api/wallet"
+        }
+        "PinnedSeedHttps" {
+            Set-ProcessEnvironmentValue -Name "NLINK_NKN_SEED_RPC" -Value "https://seed.nkn.org:30003"
+        }
+        "MediaFanout8" {
+            Set-ProcessEnvironmentValue -Name "NLINK_NKN_NUM_SUBCLIENTS" -Value "4"
+            Set-ProcessEnvironmentValue -Name "NLINK_NKN_MEDIA_NUM_SUBCLIENTS" -Value "8"
+        }
+        "MediaFanout12" {
+            Set-ProcessEnvironmentValue -Name "NLINK_NKN_NUM_SUBCLIENTS" -Value "4"
+            Set-ProcessEnvironmentValue -Name "NLINK_NKN_MEDIA_NUM_SUBCLIENTS" -Value "12"
+        }
+        "DefaultKeepAlive" {
+            Set-ProcessEnvironmentValue -Name "NLINK_BRIDGE_REUSE_MODE" -Value "KeepAlive"
+        }
+    }
+
+    return $restore
+}
+
+function Restore-ExternalTopologyProfileEnvironment {
+    param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Restore)
+
+    foreach ($key in $Restore.Keys) {
+        $entry = $Restore[$key]
+        if ($entry.HadValue) {
+            Set-ProcessEnvironmentValue -Name $key -Value $entry.Value
+        }
+        else {
+            Set-ProcessEnvironmentValue -Name $key -Value $null
+        }
+    }
+}
+
 function Write-SupportCaptureInstructions {
     param([Parameter(Mandatory = $true)][string]$RepoRoot)
 
@@ -171,9 +252,12 @@ function Write-SupportCaptureInstructions {
 Assert-ParameterMode -Name "Configuration" -AllowedModes @("Test", "LocalSoak", "TrackBRetained")
 Assert-ParameterMode -Name "NoBuild" -AllowedModes @("Test", "LocalSoak", "TrackBRetained")
 Assert-ParameterMode -Name "Logger" -AllowedModes @("Test", "TrackBRetained")
+Assert-ParameterMode -Name "ExternalTopologyProfile" -AllowedModes @("NknSoak")
 Assert-ParameterMode -Name "DurationSeconds" -AllowedModes @("LocalSoak", "NknSoak")
 Assert-ParameterMode -Name "SampleIntervalSeconds" -AllowedModes @("LocalSoak")
 Assert-ParameterMode -Name "ArtifactDir" -AllowedModes @("AnalyzeRetained")
+Assert-ParameterMode -Name "ArtifactDirs" -AllowedModes @("ExternalTopologyAudit")
+Assert-ParameterMode -Name "OutputPath" -AllowedModes @("ExternalTopologyAudit")
 Assert-ParameterMode -Name "ExePath" -AllowedModes @("NknSoak")
 Assert-ParameterMode -Name "Build" -AllowedModes @("NknSoak")
 Assert-ParameterMode -Name "TimeoutSeconds" -AllowedModes @("NknSoak")
@@ -253,7 +337,17 @@ try {
                 $parameters["SkipBehaviorFirstGate"] = $true
             }
 
-            exit (Invoke-PowerShellScript -ScriptPath (Join-Path $repoRoot "tools\Run-ScreenShareNknSoak.ps1") -Parameters $parameters)
+            $profileRestore = Set-ExternalTopologyProfileEnvironment -Profile $ExternalTopologyProfile
+            $soakExitCode = 0
+            try {
+                Write-Host ("[ScreenShareOps] ExternalTopologyProfile={0}" -f $ExternalTopologyProfile) -ForegroundColor Cyan
+                $soakExitCode = Invoke-PowerShellScript -ScriptPath (Join-Path $repoRoot "tools\Run-ScreenShareNknSoak.ps1") -Parameters $parameters
+            }
+            finally {
+                Restore-ExternalTopologyProfileEnvironment -Restore $profileRestore
+            }
+
+            exit $soakExitCode
         }
         "AnalyzeRetained" {
             if ([string]::IsNullOrWhiteSpace($ArtifactDir)) {
@@ -273,6 +367,8 @@ try {
                 exit $retainedAnalyzerExitCode
             }
 
+            Write-ScreenShareLowFpsCatchUpReport -ArtifactDir $resolvedArtifactDir | Out-Null
+            Write-ScreenShareExternalTopologyReport -ArtifactDir $resolvedArtifactDir | Out-Null
             $verdictResult = Write-ScreenShareOperatorVerdictReport -ArtifactDir $resolvedArtifactDir
             if ([string]::Equals($verdictResult.OperatorVerdict, "inconclusive_missing_artifact", [System.StringComparison]::Ordinal)) {
                 Write-Error ("ScreenShare operator verdict is missing required inputs: {0}" -f $verdictResult.MissingRequiredInputs)
@@ -298,6 +394,39 @@ try {
         }
         "SupportCapture" {
             Write-SupportCaptureInstructions -RepoRoot $repoRoot
+            exit 0
+        }
+        "ExternalTopologyAudit" {
+            $resolvedArtifactDirs = @(
+                $ArtifactDirs |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                    ForEach-Object { $_ -split ";" } |
+                    ForEach-Object { $_.Trim() } |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                    ForEach-Object {
+                        if ([System.IO.Path]::IsPathRooted($_)) { $_ } else { Join-Path $repoRoot $_ }
+                    }
+            )
+            if ($resolvedArtifactDirs.Count -eq 0) {
+                throw "Mode ExternalTopologyAudit requires -ArtifactDirs."
+            }
+
+            foreach ($resolvedArtifactDir in $resolvedArtifactDirs) {
+                if (-not (Test-Path -LiteralPath $resolvedArtifactDir)) {
+                    throw "ArtifactDirs entry not found: $resolvedArtifactDir"
+                }
+            }
+
+            $resolvedOutputPath = $OutputPath
+            if ([string]::IsNullOrWhiteSpace($resolvedOutputPath)) {
+                $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
+                $resolvedOutputPath = Join-Path $repoRoot ("artifacts\soak\external-topology-audit-{0}.txt" -f $timestamp)
+            }
+            elseif (-not [System.IO.Path]::IsPathRooted($resolvedOutputPath)) {
+                $resolvedOutputPath = Join-Path $repoRoot $resolvedOutputPath
+            }
+
+            Write-ScreenShareExternalTopologyComparison -ArtifactDirs $resolvedArtifactDirs -OutputPath $resolvedOutputPath | Out-Null
             exit 0
         }
         default {

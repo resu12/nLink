@@ -88,7 +88,8 @@ public sealed class TestArchitectureContractTests
         "NknSoak",
         "AnalyzeRetained",
         "TrackBRetained",
-        "SupportCapture"
+        "SupportCapture",
+        "ExternalTopologyAudit"
     ];
 
     private static readonly string[] RetiredScreenShareUnimplementedPhrases =

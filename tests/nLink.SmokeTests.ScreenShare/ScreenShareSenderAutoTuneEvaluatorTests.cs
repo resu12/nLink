@@ -107,6 +107,49 @@ public sealed class ScreenShareSenderAutoTuneEvaluatorTests
         Assert.Equal("recovered", decision.NextSenderModeReason);
     }
 
+    [Fact]
+    public void Evaluate_ReducedAfterHelperSoftPressureClears_PromotesThroughHealthyProgress()
+    {
+        var decision = ScreenShareSenderAutoTuneEvaluator.Evaluate(CreateInputs(
+            currentSenderMode: ScreenShareSenderFreshnessMode.Reduced,
+            reducedRecoveryLowPressureTicks: 2,
+            remoteHighFrameAgePressure: false,
+            helperPromotionHealthy: true,
+            helperProgressProofSatisfied: true,
+            remotePressureObservedFrameAgeMs: 180,
+            captureToSendAgeMs: 120,
+            lastEncodeTotalDurationMs: 32,
+            remotePressureMode: ScreenShareRemotePressureMode.None,
+            currentRemotePressureReason: ScreenSharePressureProtocol.PressureReasonHealthy));
+
+        Assert.True(decision.ReducedLowPressureTick);
+        Assert.Equal(3, decision.ReducedRecoveryLowPressureTicks);
+        Assert.Equal(ScreenShareSenderFreshnessMode.Normal, decision.NextSenderMode);
+        Assert.Equal("recovered", decision.NextSenderModeReason);
+    }
+
+    [Fact]
+    public void Evaluate_ReducedWithQueuePressure_DoesNotPromoteDespiteHealthyHelperProgress()
+    {
+        var decision = ScreenShareSenderAutoTuneEvaluator.Evaluate(CreateInputs(
+            currentSenderMode: ScreenShareSenderFreshnessMode.Reduced,
+            reducedRecoveryLowPressureTicks: 2,
+            remoteHighFrameAgePressure: false,
+            helperPromotionHealthy: true,
+            helperProgressProofSatisfied: true,
+            remotePressureObservedFrameAgeMs: 180,
+            captureToSendAgeMs: 120,
+            lastEncodeTotalDurationMs: 32,
+            laneQueueDepth: 1,
+            remotePressureMode: ScreenShareRemotePressureMode.None,
+            currentRemotePressureReason: ScreenSharePressureProtocol.PressureReasonHealthy));
+
+        Assert.False(decision.ReducedLowPressureTick);
+        Assert.Equal(0, decision.ReducedRecoveryLowPressureTicks);
+        Assert.Equal(ScreenShareSenderFreshnessMode.Reduced, decision.NextSenderMode);
+        Assert.Equal("queue_evict", decision.DominantPressureBlocker);
+    }
+
     private static ScreenShareSenderAutoTuneInputs CreateInputs(
         ScreenShareSenderFreshnessMode currentSenderMode = ScreenShareSenderFreshnessMode.Reduced,
         int captureToSendCatchUpPressureTicks = 0,

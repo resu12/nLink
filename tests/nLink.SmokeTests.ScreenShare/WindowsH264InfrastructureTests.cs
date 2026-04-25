@@ -299,6 +299,20 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void ScreenShareSurfaceView_UpscaledPresentation_UsesHighQualityInterpolation()
+    {
+        var interpolationMode = ScreenShareSurfaceView.ResolveInterpolationModeForPresentation(
+            frameWidth: 1280,
+            frameHeight: 720,
+            viewportWidth: 1385,
+            viewportHeight: 779,
+            renderScaling: 1.25d);
+
+        Assert.Equal(BitmapInterpolationMode.HighQuality, interpolationMode);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void ScreenShareSurfaceView_DownscaledPresentation_UsesHighQualityInterpolation()
     {
         var interpolationMode = ScreenShareSurfaceView.ResolveInterpolationModeForPresentation(

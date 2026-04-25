@@ -26,8 +26,14 @@ public static class UserErrorMapper
 
     public static bool IsNknStartFailure(string? lastError)
     {
-        return !string.IsNullOrWhiteSpace(lastError) &&
-               lastError.StartsWith("NKN_START_FAILED:", StringComparison.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(lastError) ||
+            !lastError.StartsWith("NKN_START_FAILED:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return lastError.StartsWith("NKN_START_FAILED: bridge_start", StringComparison.OrdinalIgnoreCase) ||
+               lastError.StartsWith("NKN_START_FAILED: bridge_missing", StringComparison.OrdinalIgnoreCase);
     }
 
     public static string FromHelperTimeoutException(TimeoutException ex)

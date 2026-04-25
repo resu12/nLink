@@ -36,6 +36,10 @@ const MAX_INPUT_LINE_BYTES = 256 * 1024;
 const MAX_DECODED_PAYLOAD_BYTES = 64 * 1024;
 const DEFAULT_SUBSCRIBE_DURATION = 1440;
 const DEFAULT_CONNECT_READY_TIMEOUT_MS = 12000;
+const DEFAULT_NUM_SUBCLIENTS = 4;
+const DEFAULT_MEDIA_NUM_SUBCLIENTS = 8;
+const MIN_NUM_SUBCLIENTS = 1;
+const MAX_NUM_SUBCLIENTS = 16;
 const OWNER_PID_CHECK_INTERVAL_MS = 2000;
 const BRIDGE_EVENT_LOOP_SAMPLE_WINDOW_MS = 2000;
 const BRIDGE_EVENT_LOOP_RESOLUTION_MS = 20;
@@ -129,6 +133,9 @@ const state = {
   controlClientIdentifier: '',
   mediaClientIdentifier: '',
   bulkClientIdentifier: '',
+  controlNumSubClients: DEFAULT_NUM_SUBCLIENTS,
+  mediaNumSubClients: DEFAULT_MEDIA_NUM_SUBCLIENTS,
+  bulkNumSubClients: DEFAULT_NUM_SUBCLIENTS,
   connectId: '',
   connectAttemptId: 0,
   preflightProgressEnabled: false,
@@ -771,6 +778,9 @@ function emitBridgeTransportHealthSummary() {
     bulk_ready: state.bulkReady ? 1 : 0,
     frames_sent_since_last: window.framesSentSinceLast,
     latest_disconnect_reason: state.lastDisconnectReason || '(none)',
+    control_subclients: state.controlNumSubClients,
+    media_subclients: state.mediaNumSubClients,
+    bulk_subclients: state.bulkNumSubClients,
     sample_window_ms: BRIDGE_TRANSPORT_HEALTH_SAMPLE_WINDOW_MS
   });
 }
@@ -953,6 +963,32 @@ function trackSelectedRpc(rpc, stage) {
   state.selectedRpc = normalizedRpc;
   state.selectedRpcKey = computeStableKey(normalizedRpc);
   state.selectedRpcStage = stage === 'fallback' ? 'fallback' : 'initial';
+}
+
+function normalizeSubClientCount(value, fallback = DEFAULT_NUM_SUBCLIENTS) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(MAX_NUM_SUBCLIENTS, Math.max(MIN_NUM_SUBCLIENTS, parsed));
+}
+
+function hasCommandValue(command, key) {
+  return command[key] !== undefined && command[key] !== null && String(command[key]).trim() !== '';
+}
+
+function resolveSubClientTopology(command) {
+  const hasControlOverride = hasCommandValue(command, 'numSubClients');
+  const controlCount = normalizeSubClientCount(command.numSubClients, DEFAULT_NUM_SUBCLIENTS);
+  const mediaFallback = hasControlOverride ? controlCount : DEFAULT_MEDIA_NUM_SUBCLIENTS;
+  const mediaCount = normalizeSubClientCount(command.mediaNumSubClients, mediaFallback);
+  const bulkCount = normalizeSubClientCount(command.bulkNumSubClients, controlCount);
+  return {
+    control: controlCount,
+    media: mediaCount,
+    bulk: bulkCount
+  };
 }
 
 function getScreenShareQueueLimits() {
@@ -1527,6 +1563,9 @@ async function closeClient() {
   state.controlClientIdentifier = '';
   state.mediaClientIdentifier = '';
   state.bulkClientIdentifier = '';
+  state.controlNumSubClients = DEFAULT_NUM_SUBCLIENTS;
+  state.mediaNumSubClients = DEFAULT_MEDIA_NUM_SUBCLIENTS;
+  state.bulkNumSubClients = DEFAULT_NUM_SUBCLIENTS;
   state.connectAttemptId = 0;
   state.clientReadyAtMs = 0;
   state.screenShareQueueMode = 'normal';
@@ -1552,9 +1591,13 @@ async function handleConnect(command) {
   state.preflightProgressEnabled = Boolean(command.preflightRpcEnabled);
 
   const seed = decodeSeed(command.seedHex, command.seedBase64);
+  const subClientTopology = resolveSubClientTopology(command);
+  state.controlNumSubClients = subClientTopology.control;
+  state.mediaNumSubClients = subClientTopology.media;
+  state.bulkNumSubClients = subClientTopology.bulk;
   const baseOptions = {
     // MultiClient reliability defaults inspired by production NKN apps.
-    numSubClients: 4,
+    numSubClients: subClientTopology.control,
     originalClient: true,
     reconnectIntervalMin: 1000,
     reconnectIntervalMax: 16000,
@@ -1600,7 +1643,7 @@ async function handleConnect(command) {
     }
   }
 
-  logStderr(`Creating NKN clients (rpc=${baseOptions.rpcServerAddr || 'default'})`);
+  logStderr(`Creating NKN clients (rpc=${baseOptions.rpcServerAddr || 'default'}, control_subclients=${subClientTopology.control}, media_subclients=${subClientTopology.media}, bulk_subclients=${subClientTopology.bulk})`);
   const ClientCtor = nkn.MultiClient || nkn.Client;
   if (typeof ClientCtor !== 'function') {
     throw new Error('NKN Client constructor not found in SDK.');
@@ -1612,10 +1655,12 @@ async function handleConnect(command) {
   };
   const mediaOptions = {
     ...baseOptions,
+    numSubClients: subClientTopology.media,
     identifier: buildMediaIdentifier(requestedIdentifier || 'nlink')
   };
   const bulkOptions = {
     ...baseOptions,
+    numSubClients: subClientTopology.bulk,
     identifier: buildBulkIdentifier(requestedIdentifier || 'nlink')
   };
 
@@ -1674,8 +1719,12 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
       state.preflightProgressEnabled = Boolean(originalCommand.preflightRpcEnabled);
 
       const seed = decodeSeed(originalCommand.seedHex, originalCommand.seedBase64);
+      const subClientTopology = resolveSubClientTopology(originalCommand);
+      state.controlNumSubClients = subClientTopology.control;
+      state.mediaNumSubClients = subClientTopology.media;
+      state.bulkNumSubClients = subClientTopology.bulk;
       const baseOptions = {
-        numSubClients: 4,
+        numSubClients: subClientTopology.control,
         originalClient: true,
         reconnectIntervalMin: 1000,
         reconnectIntervalMax: 16000,
@@ -1701,12 +1750,14 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
       };
       const mediaOptions = {
         ...baseOptions,
+        numSubClients: subClientTopology.media,
         identifier: buildMediaIdentifier(requestedIdentifier || 'nlink')
       };
       const controlClient = new ClientCtor(controlOptions);
       const mediaClient = new ClientCtor(mediaOptions);
       const bulkOptions = {
         ...baseOptions,
+        numSubClients: subClientTopology.bulk,
         identifier: buildBulkIdentifier(requestedIdentifier || 'nlink')
       };
       const bulkClient = new ClientCtor(bulkOptions);

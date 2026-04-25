@@ -30,7 +30,10 @@ public static partial class SensitiveDataRedactor
         var redacted = ProtectStructuredEventValues(text, protectedEventValues);
         redacted = SecretKeyValueRegex().Replace(redacted, "[redacted]");
         redacted = ChatPlaintextKeyValueRegex().Replace(redacted, "[redacted]");
+        var protectedStructuredKeys = new List<string>();
+        redacted = ProtectStructuredKeys(redacted, protectedStructuredKeys);
         redacted = LongSecretTokenRegex().Replace(redacted, "[redacted]");
+        redacted = RestoreStructuredKeys(redacted, protectedStructuredKeys);
         redacted = RestoreStructuredEventValues(redacted, protectedEventValues);
         return redacted;
     }
@@ -75,6 +78,9 @@ public static partial class SensitiveDataRedactor
     [GeneratedRegex(@"\bevent=(?<value>[A-Za-z0-9._/-]+)", RegexOptions.CultureInvariant)]
     private static partial Regex EventKeyValueRegex();
 
+    [GeneratedRegex(@"(?<prefix>(?:^|[\s|,;]))(?<key>[A-Za-z_][A-Za-z0-9._/-]{1,127})=", RegexOptions.CultureInvariant)]
+    private static partial Regex StructuredKeyRegex();
+
     private static string ProtectStructuredEventValues(string text, List<string> protectedEventValues)
     {
         return EventKeyValueRegex().Replace(text, match =>
@@ -96,6 +102,32 @@ public static partial class SensitiveDataRedactor
         for (var i = 0; i < protectedEventValues.Count; i++)
         {
             restored = restored.Replace($"event=EVP{i}", $"event={protectedEventValues[i]}", StringComparison.Ordinal);
+        }
+
+        return restored;
+    }
+
+    private static string ProtectStructuredKeys(string text, List<string> protectedStructuredKeys)
+    {
+        return StructuredKeyRegex().Replace(text, match =>
+        {
+            var placeholder = $"SKP{protectedStructuredKeys.Count}";
+            protectedStructuredKeys.Add(match.Groups["key"].Value);
+            return $"{match.Groups["prefix"].Value}{placeholder}=";
+        });
+    }
+
+    private static string RestoreStructuredKeys(string text, List<string> protectedStructuredKeys)
+    {
+        if (protectedStructuredKeys.Count == 0)
+        {
+            return text;
+        }
+
+        var restored = text;
+        for (var i = 0; i < protectedStructuredKeys.Count; i++)
+        {
+            restored = restored.Replace($"SKP{i}=", $"{protectedStructuredKeys[i]}=", StringComparison.Ordinal);
         }
 
         return restored;

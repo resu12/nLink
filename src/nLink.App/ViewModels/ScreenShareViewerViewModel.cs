@@ -606,10 +606,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
                 helperRemoteSessionController.SetSessionId(effectiveSessionId);
             }
 
-            // The simplified recovery model only treats recovery owners specially.
-            // Legacy protected-follower markings are tolerated on the wire but
-            // handled as ordinary frames on the helper side.
-            if (recoveryDeliveryClass == ScreenShareRecoveryDeliveryClass.ProtectedFollower)
+            if (recoveryDeliveryClass == ScreenShareRecoveryDeliveryClass.ProtectedFollower && isKeyFrame)
             {
                 recoveryDeliveryClass = ScreenShareRecoveryDeliveryClass.Normal;
             }
@@ -651,7 +648,8 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
                     streamEpoch,
                     frameId,
                     isKeyFrame,
-                    assumeOwnership))
+                    assumeOwnership,
+                    recoveryDeliveryClass))
             {
                 Interlocked.Increment(ref framesReceived);
                 return;
@@ -726,6 +724,12 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
 
         var viewerAcceptedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         ObserveViewerAcceptedForDecode(effectiveSessionId, encoding, streamEpoch, frameId, isKeyFrame, viewerAcceptedUtcMs);
+        if (isHelperRemoteH264 &&
+            recoveryDeliveryClass == ScreenShareRecoveryDeliveryClass.ProtectedFollower)
+        {
+            Interlocked.Increment(ref protectedRecoveryDeliveryCount);
+        }
+
         var bypassOrdinaryNonKeyAgeBudget =
             recoveryDeliveryClass == ScreenShareRecoveryDeliveryClass.Normal &&
             ShouldBypassHelperRemoteDecodeAgeBudget(encoding, streamEpoch, isKeyFrame);
@@ -949,8 +953,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
                 if (helperRemoteRecoveryState.RecoveryActive &&
                     decodedFrame.Request.RecoveryDeliveryClass == ScreenShareRecoveryDeliveryClass.Normal &&
                     helperRemoteRecoveryState.RecoveryStreamEpoch == decodedFrame.Request.StreamEpoch &&
-                    !decodedFrame.Request.IsKeyFrame &&
-                    !IsHelperRemoteProofStableForCurrentEpoch(decodedFrame.Request.StreamEpoch, helperSessionSnapshot))
+                    !decodedFrame.Request.IsKeyFrame)
                 {
                     if (HasHelperRemoteBufferedRecoveryCandidate(decodedFrame.Request.SessionId, decodedFrame.Request.StreamEpoch))
                     {
@@ -990,6 +993,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             {
                 helperRemoteSessionController.CompleteRecoveryAfterVisibleResync();
                 ResetHelperRemoteVisibleGenerationAfterRecoveryApply(decodedFrame.Request);
+                StartRecoveryProgressCorridor(decodedFrame.Request.StreamEpoch, decodedFrame.Request.FrameId);
             }
 
             ReplaceCurrentFrame(nextBitmap);
@@ -1027,6 +1031,14 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             {
                 ObserveRecoveryProgressCorridorApply(decodedFrame.Request.StreamEpoch, decodedFrame.Request.FrameId);
             }
+
+            if (isHelperRemoteFrame && decodedFrame.Request.FrameId >= 0)
+            {
+                ReleaseDeferredPostRecoveryCandidateIfMatch(
+                    decodedFrame.Request.StreamEpoch,
+                    decodedFrame.Request.FrameId);
+            }
+
             var visibleApplyProgress = BuildHelperRemoteVisibleApplyProgress(decodedFrame.Request);
             RecordHelperVisibleApplyDiagnostics(
                 decodedFrame,
@@ -1070,17 +1082,6 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             endToEndLatency.RecordTimeSpanTicks(DateTime.UtcNow.Ticks - decodedFrame.ReceivedUtcTicks);
 #endif
         }).ConfigureAwait(false);
-    }
-
-    private static bool IsHelperRemoteProofStableForCurrentEpoch(long streamEpoch, HelperRemoteSessionSnapshot helperSessionSnapshot)
-    {
-        return helperSessionSnapshot.CurrentEpoch == streamEpoch &&
-               helperSessionSnapshot.Phase == HelperRemoteSessionPhase.VisibleStable &&
-               helperSessionSnapshot.SteadyVisibleProgressActive &&
-               !helperSessionSnapshot.RecoveryActive &&
-               !helperSessionSnapshot.RecoveryCorridorActive &&
-               !helperSessionSnapshot.RunwayCleanupActive &&
-               !helperSessionSnapshot.PostRecoveryStabilizationActive;
     }
 
     private void PostViewerStatusUpdate(string statusText, bool isActive, bool startSnapshotTimer)
@@ -1762,17 +1763,167 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         long streamEpoch,
         long frameId,
         bool isKeyFrame,
-        bool assumeOwnership)
+        bool assumeOwnership,
+        ScreenShareRecoveryDeliveryClass recoveryDeliveryClass)
     {
-        _ = sessionId;
-        _ = encoding;
-        _ = encodedFrameBytes;
-        _ = capturedTsUtcMs;
-        _ = streamEpoch;
-        _ = frameId;
-        _ = isKeyFrame;
-        _ = assumeOwnership;
+        if (!IsHelperRemoteH264(encoding) ||
+            isKeyFrame ||
+            streamEpoch <= 0 ||
+            frameId < 0)
+        {
+            return false;
+        }
+
+        if (!TryResolveHelperRemotePostRecoveryFollowerWindow(
+                streamEpoch,
+                out var recoveryFrameId,
+                out var lastContiguousFrameId,
+                out var reservedApplyPending))
+        {
+            return false;
+        }
+
+        if (frameId <= lastContiguousFrameId)
+        {
+            ObserveViewerRejectedBeforeEnqueue(
+                sessionId,
+                encoding,
+                streamEpoch,
+                frameId,
+                isKeyFrame,
+                "late_same_epoch_after_head_advanced_drop");
+            return true;
+        }
+
+        var maximumActionableFrameId = recoveryFrameId + HelperRemotePostRecoveryFollowerWindowSize;
+        if (frameId > maximumActionableFrameId)
+        {
+            ObserveViewerRejectedBeforeEnqueue(
+                sessionId,
+                encoding,
+                streamEpoch,
+                frameId,
+                isKeyFrame,
+                "recovery_runway_overflow");
+            return true;
+        }
+
+        var expectedNextFrameId = lastContiguousFrameId + 1;
+        if (!reservedApplyPending &&
+            frameId == expectedNextFrameId)
+        {
+            MarkReservedApplyPending(streamEpoch, frameId);
+            return false;
+        }
+
+        BufferDeferredPostRecoveryCandidate(
+            sessionId,
+            encoding,
+            assumeOwnership ? encodedFrameBytes : encodedFrameBytes.ToArray(),
+            capturedTsUtcMs,
+            streamEpoch,
+            frameId,
+            isKeyFrame,
+            recoveryDeliveryClass == ScreenShareRecoveryDeliveryClass.Normal
+                ? ScreenShareRecoveryDeliveryClass.ProtectedFollower
+                : recoveryDeliveryClass,
+            reservedApplyPending);
+        return true;
+    }
+
+    private bool TryResolveHelperRemotePostRecoveryFollowerWindow(
+        long streamEpoch,
+        out long recoveryFrameId,
+        out long lastContiguousFrameId,
+        out bool reservedApplyPending)
+    {
+        recoveryFrameId = -1;
+        lastContiguousFrameId = -1;
+        reservedApplyPending =
+            helperRemoteFollowerState.ReservedApplyActive &&
+            helperRemoteFollowerState.ReservedApplyStreamEpoch == streamEpoch;
+
+        if (helperRemoteFollowerState.RecoveryProgressCorridorActive &&
+            helperRemoteFollowerState.RecoveryProgressCorridorEpoch == streamEpoch &&
+            helperRemoteFollowerState.RecoveryProgressCorridorRecoveryFrameId >= 0)
+        {
+            recoveryFrameId = helperRemoteFollowerState.RecoveryProgressCorridorRecoveryFrameId;
+            lastContiguousFrameId = Math.Max(
+                helperRemoteFollowerState.RecoveryProgressCorridorLastFrameId,
+                recoveryFrameId);
+
+            return true;
+        }
+
+        if (reservedApplyPending && helperRemoteFollowerState.ReservedApplyFrameId >= 0)
+        {
+            recoveryFrameId = helperRemoteFollowerState.ReservedApplyFrameId;
+            lastContiguousFrameId = helperRemoteFollowerState.ReservedApplyFrameId;
+            return true;
+        }
+
         return false;
+    }
+
+    private void BufferDeferredPostRecoveryCandidate(
+        string sessionId,
+        string encoding,
+        byte[] encodedFrameBytes,
+        long capturedTsUtcMs,
+        long streamEpoch,
+        long frameId,
+        bool isKeyFrame,
+        ScreenShareRecoveryDeliveryClass recoveryDeliveryClass,
+        bool reservedApplyPending)
+    {
+        DeferredHelperRemoteFrameCandidate? replacedCandidate = null;
+        var buffered = false;
+        lock (helperRemoteFollowerState.DeferredFollowerGate)
+        {
+            var candidate = new DeferredHelperRemoteFrameCandidate(
+                sessionId,
+                encoding,
+                encodedFrameBytes,
+                capturedTsUtcMs,
+                streamEpoch,
+                frameId,
+                isKeyFrame,
+                ++helperRemoteFollowerState.DeferredPostRecoveryCandidateSequence,
+                recoveryDeliveryClass);
+            if (helperRemoteFollowerState.DeferredPostRecoveryCandidates.TryGetValue(frameId, out var existing) &&
+                !IsBetterDeferredPostRecoveryCandidate(candidate, existing))
+            {
+                replacedCandidate = candidate;
+            }
+            else
+            {
+                if (helperRemoteFollowerState.DeferredPostRecoveryCandidates.TryGetValue(frameId, out existing))
+                {
+                    replacedCandidate = existing;
+                }
+
+                helperRemoteFollowerState.DeferredPostRecoveryCandidates[frameId] = candidate;
+                buffered = true;
+            }
+        }
+
+        if (replacedCandidate is not null)
+        {
+            ObserveViewerRejectedBeforeEnqueue(
+                replacedCandidate.Value.SessionId,
+                replacedCandidate.Value.Encoding,
+                replacedCandidate.Value.StreamEpoch,
+                replacedCandidate.Value.FrameId,
+                replacedCandidate.Value.IsKeyFrame,
+                "deferred_post_recovery_candidate_replaced");
+        }
+
+        if (!buffered)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref recoveryFollowerWindowBufferedCount);
     }
 
     private string? TryRejectHelperRemoteFrameBeforeDecode(
@@ -1943,7 +2094,11 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             return;
         }
 
-        helperRemoteSessionController.StartRecoveryProgressCorridor(streamEpoch, frameId, DateTimeOffset.UtcNow);
+        helperRemoteSessionController.StartRecoveryProgressCorridor(
+            streamEpoch,
+            frameId,
+            DateTimeOffset.UtcNow,
+            HelperRemotePostRecoveryReservedApplyCount);
         Interlocked.Increment(ref recoveryProgressCorridorCount);
         Interlocked.Increment(ref recoveryProgressCorridorAppliedCount);
         NotifyRecoveryWindowStateChanged(
@@ -2078,6 +2233,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         if (corridorResult.Succeeded)
         {
             Interlocked.Increment(ref recoveryProgressCorridorSuccessCount);
+            helperRemoteSessionController.CompletePostRecoveryFollowerWindow(corridorResult.StreamEpoch);
             NotifyRecoveryWindowStateChanged(
                 corridorResult.StreamEpoch,
                 corridorResult.RecoveryFrameId,
@@ -2095,8 +2251,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         }
 
         Interlocked.Increment(ref recoveryProgressCorridorAbortCount);
-        Interlocked.Increment(ref startupCorridorAbortCount);
-        startupCorridorAbortReason = string.IsNullOrWhiteSpace(abortResult.Reason)
+        var recoveryCorridorAbortReason = string.IsNullOrWhiteSpace(abortResult.Reason)
             ? "unknown"
             : abortResult.Reason.Trim();
         NotifyRecoveryWindowStateChanged(
@@ -2105,7 +2260,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             abortResult.LastContiguousFrameId,
             abortResult.ContiguousFollowerApplyCount,
             status: "aborted",
-            abortReason: startupCorridorAbortReason);
+            abortReason: recoveryCorridorAbortReason);
     }
 
     private void NotifyRecoveryWindowStateChanged(
@@ -2257,8 +2412,9 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
     {
         var releaseResult = helperRemoteSessionController.ReleaseDeferredPostRecoveryCandidateIfMatch(
             streamEpoch,
-            previousVisibleFrameId);
-        foreach (var rejectedCandidate in releaseResult.RejectedCandidates)
+            previousVisibleFrameId,
+            HelperRemotePostRecoveryFollowerWindowSize);
+        foreach (var rejectedCandidate in releaseResult.RejectedCandidates ?? Array.Empty<DeferredHelperRemoteFrameCandidate>())
         {
             var rejectionReason = rejectedCandidate.StreamEpoch != streamEpoch
                 ? "post_recovery_visible_generation_reset"
@@ -2289,6 +2445,11 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
 
         var candidate = releaseResult.CandidateToEnqueue;
         MarkReservedApplyPending(candidate.StreamEpoch, candidate.FrameId);
+        if (candidate.RecoveryDeliveryClass == ScreenShareRecoveryDeliveryClass.ProtectedFollower)
+        {
+            Interlocked.Increment(ref protectedRecoveryDeliveryCount);
+        }
+
         var viewerAcceptedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         ObserveViewerAcceptedForDecode(
             candidate.SessionId,
@@ -2307,13 +2468,13 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             sessionId: candidate.SessionId,
             requiresReservedApply: true,
             bypassesAgeBudget: true,
+            recoveryDeliveryClass: candidate.RecoveryDeliveryClass,
             frameReadyObservedUtcMs: 0,
             viewerAcceptedUtcMs: viewerAcceptedUtcMs);
         if (enqueueResult.DroppedPendingFrame)
         {
             Interlocked.Increment(ref framesCoalesced);
         }
-        Interlocked.Increment(ref startupCorridorReleaseCount);
     }
 
     private void PurgeDeferredPostRecoveryCandidateIfStale(EncodedFrameDecodeRequest recoveryRequest)
@@ -2403,10 +2564,29 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         long ageMs,
         HelperRemoteSessionSnapshot helperSessionSnapshot)
     {
-        _ = request;
-        _ = ageMs;
-        _ = helperSessionSnapshot;
-        return false;
+        if (!IsHelperRemoteH264(request.Encoding) ||
+            request.IsKeyFrame ||
+            request.RecoveryDeliveryClass != ScreenShareRecoveryDeliveryClass.Normal ||
+            ageMs < 0)
+        {
+            return false;
+        }
+
+        if (helperSessionSnapshot.CurrentEpoch != request.StreamEpoch ||
+            helperSessionSnapshot.Phase != HelperRemoteSessionPhase.VisibleStable ||
+            !helperSessionSnapshot.BaselineEstablished ||
+            !helperSessionSnapshot.SteadyVisibleProgressActive ||
+            helperSessionSnapshot.RecoveryActive ||
+            helperSessionSnapshot.RecoveryCorridorActive ||
+            helperSessionSnapshot.RunwayCleanupActive ||
+            helperSessionSnapshot.PostRecoveryStabilizationActive)
+        {
+            return false;
+        }
+
+        var thresholdMs = HelperRemoteMaxPendingEncodedFrameAgeMs +
+            (long)HelperRemoteVisibleProgressDecodeAgeBudgetGrace.TotalMilliseconds;
+        return ageMs > thresholdMs;
     }
 
     private string ResolveStaleDropReason(EncodedFrameDecodeRequest request)
@@ -2425,7 +2605,14 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
 
     private void OnHelperRemoteFrameAppliedVisible(EncodedFrameDecodeRequest request)
     {
+        var wasPostRecoveryFollower =
+            IsHelperRemotePostRecoveryStabilizationFrame(request) &&
+            !request.IsKeyFrame;
         helperRemoteSessionController.OnFrameAppliedVisible(request);
+        if (wasPostRecoveryFollower)
+        {
+            Interlocked.Increment(ref recoveryFollowerWindowAppliedCount);
+        }
     }
 
     private HelperRemoteVisibleApplyProgress BuildHelperRemoteVisibleApplyProgress(
@@ -2678,6 +2865,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             return;
         }
 
+        SuppressPendingHelperRemoteUnsafeFrames(streamEpoch, reason);
         Interlocked.Increment(ref continuityLossCount);
         if (string.Equals(reason, "frame_gap", StringComparison.Ordinal))
         {
@@ -2713,6 +2901,29 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
                 activation.RecoveryExpectedNextFrameId,
                 activation.RecoveryReceivedFrameId,
                 activation.LastCleanFrameId));
+    }
+
+    private void SuppressPendingHelperRemoteUnsafeFrames(long streamEpoch, string reason)
+    {
+        if (string.Equals(reason, "decode_drop_before_decode", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref generation);
+        decodeWorker.ClearPending();
+        if (!string.IsNullOrWhiteSpace(helperRemoteRecoveryState.SessionId))
+        {
+            ScreenShareFrameLossAttributionRegistry.ObserveEpochContinuityEvent(
+                helperRemoteRecoveryState.SessionId,
+                streamEpoch,
+                "post_recovery_visible_generation_reset",
+                helperRemoteRecoveryState.LastCleanFrameId);
+        }
+
+        LocalOperationalLog.Info(
+            "ScreenShare",
+            $"event=screenshare_viewer_recovery_pending_suppressed; role={logRole}; stream_epoch={streamEpoch}; reason={SanitizeRecoveryReason(reason)}; last_clean_frame_id={FormatFrameIdForLog(helperRemoteRecoveryState.LastCleanFrameId)}");
     }
 
     private void LogWaitingForRecoveryKeyframe(long streamEpoch)

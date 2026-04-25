@@ -528,6 +528,52 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         }
     }
 
+    [Fact]
+    public void NknTransportOptions_ParsesSubClientTopologyOverrides()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-nkn-topology-options", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var prevNumSubClients = Environment.GetEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS");
+        var prevMediaNumSubClients = Environment.GetEnvironmentVariable("NLINK_NKN_MEDIA_NUM_SUBCLIENTS");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_MEDIA_NUM_SUBCLIENTS", null);
+            var defaults = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "default.json"), "topology-default");
+            Assert.Equal(4, defaults.NumSubClients);
+            Assert.Equal(8, defaults.MediaNumSubClients);
+            Assert.False(defaults.HasSubClientTopologyOverride);
+            Assert.False(defaults.ShouldSendSubClientTopology);
+
+            Environment.SetEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS", "6");
+            Environment.SetEnvironmentVariable("NLINK_NKN_MEDIA_NUM_SUBCLIENTS", null);
+            var inheritedMedia = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "inherited.json"), "topology-inherited");
+            Assert.Equal(6, inheritedMedia.NumSubClients);
+            Assert.Equal(6, inheritedMedia.MediaNumSubClients);
+            Assert.True(inheritedMedia.HasSubClientTopologyOverride);
+
+            Environment.SetEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS", "0");
+            Environment.SetEnvironmentVariable("NLINK_NKN_MEDIA_NUM_SUBCLIENTS", "99");
+            var clamped = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "clamped.json"), "topology-clamped");
+            Assert.Equal(1, clamped.NumSubClients);
+            Assert.Equal(16, clamped.MediaNumSubClients);
+            Assert.True(clamped.HasSubClientTopologyOverride);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS", prevNumSubClients);
+            Environment.SetEnvironmentVariable("NLINK_NKN_MEDIA_NUM_SUBCLIENTS", prevMediaNumSubClients);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
     [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_ConnectPayload_RespectsPreflightOptions()
@@ -626,6 +672,96 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", prevTimeout);
             Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CONCURRENCY", prevConc);
             Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CACHE_TTL_MS", prevTtl);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ConnectPayload_RespectsSubClientTopologyOptions()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-topology-payload", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var payloadFile = Path.Combine(tempDir, "payload.json");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-topology-payload.js");
+        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: $@"
+    fs.writeFileSync({JsonSerializer.Serialize(payloadFile)}, JSON.stringify(msg));
+    emit({{ event:'ok', id: msg.id ?? null, cmd:'connect' }});
+    setTimeout(() => emit({{ event:'ready', protocol:2, channels:['control','media','bulk'], address:'payload-test.addr', controlAddress:'payload-test.addr', mediaAddress:'payload-test-media.addr', bulkAddress:'payload-test-bulk.addr', connectId: msg.connectId ?? null }}), 20);
+    return;
+    "));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevNumSubClients = Environment.GetEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS");
+        var prevMediaNumSubClients = Environment.GetEnvironmentVariable("NLINK_NKN_MEDIA_NUM_SUBCLIENTS");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_MEDIA_NUM_SUBCLIENTS", null);
+
+            var defaultOptions = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id-default.json"), "mock-topology-default");
+            var defaultIdentity = NknIdentityStore.LoadOrCreate(defaultOptions);
+            using (var adapterDefault = new RealNknClientAdapter(defaultIdentity, defaultOptions))
+            {
+                await adapterDefault.ConnectAsync(CancellationToken.None);
+                await adapterDefault.DisconnectAsync();
+            }
+
+            using (var payloadDoc = JsonDocument.Parse(File.ReadAllText(payloadFile)))
+            {
+                var root = payloadDoc.RootElement;
+                Assert.False(root.TryGetProperty("numSubClients", out _));
+                Assert.False(root.TryGetProperty("mediaNumSubClients", out _));
+            }
+
+            Environment.SetEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS", "6");
+            Environment.SetEnvironmentVariable("NLINK_NKN_MEDIA_NUM_SUBCLIENTS", "8");
+            var configuredOptions = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id-configured.json"), "mock-topology-configured");
+            var configuredIdentity = NknIdentityStore.LoadOrCreate(configuredOptions);
+            using (var adapterConfigured = new RealNknClientAdapter(configuredIdentity, configuredOptions))
+            {
+                await adapterConfigured.ConnectAsync(CancellationToken.None);
+                await adapterConfigured.DisconnectAsync();
+            }
+
+            using (var payloadDoc = JsonDocument.Parse(File.ReadAllText(payloadFile)))
+            {
+                var root = payloadDoc.RootElement;
+                Assert.Equal(6, root.GetProperty("numSubClients").GetInt32());
+                Assert.Equal(8, root.GetProperty("mediaNumSubClients").GetInt32());
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS", prevNumSubClients);
+            Environment.SetEnvironmentVariable("NLINK_NKN_MEDIA_NUM_SUBCLIENTS", prevMediaNumSubClients);
             try
             {
                 CleanupDirectoryIfExists(tempDir);
@@ -745,8 +881,11 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Assert.Equal("rpc_selected", snapshot.LastProgressEventType);
             Assert.Equal("https://mock-rpc-1.example:30003", snapshot.LastSelectedRpc);
             Assert.True(snapshot.LastProgressEventUtcTicks > 0);
-            Assert.Contains("NKN_START_FAILED", snapshot.LastError, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("bridge_connect_ready_timeout", snapshot.LastError, StringComparison.OrdinalIgnoreCase);
             Assert.Contains("progress=rpc_selected", snapshot.LastError, StringComparison.OrdinalIgnoreCase);
+            var failure = TransportFailureMapper.FromSignals(snapshot.LastError);
+            Assert.Equal(TransportFailureCategory.HandshakeTimeout, failure.Category);
+            Assert.True(failure.IsTransient);
         }
         finally
         {

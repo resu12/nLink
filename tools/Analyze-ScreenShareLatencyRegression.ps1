@@ -162,7 +162,7 @@ function Get-NullableEventFieldDouble {
         [string]$Key
     )
 
-    if ($Events.Count -eq 0) {
+    if ($null -eq $Events -or $Events.Count -eq 0) {
         return $null
     }
 
@@ -176,14 +176,15 @@ function Get-NullableEventFieldDouble {
 
 function Get-NullableEventFieldString {
     param(
-        [Parameter(Mandatory = $true)]
+        [Parameter()]
+        [AllowNull()]
         [object[]]$Events,
 
         [Parameter(Mandatory = $true)]
         [string]$Key
     )
 
-    if ($Events.Count -eq 0) {
+    if ($null -eq $Events -or $Events.Count -eq 0) {
         return $null
     }
 
@@ -259,9 +260,20 @@ function Get-Stats {
 
 function Get-WindowAnchor {
     param(
-        [Parameter(Mandatory = $true)]
+        [Parameter()]
+        [AllowNull()]
+        [AllowEmptyCollection()]
         [object[]]$HealthEvents
     )
+
+    if ($null -eq $HealthEvents -or $HealthEvents.Count -eq 0) {
+        return [pscustomobject]@{
+            FirstRecovery = $null
+            FirstStableAfterRecovery = $null
+            FinalSteadyTail = $null
+            FinalEvent = $null
+        }
+    }
 
     $firstRecovery = $HealthEvents | Where-Object {
         $_.Fields["helper_session_phase"] -eq "recovering"
@@ -405,9 +417,9 @@ function Read-Artifact {
     $helperPressure = Read-KeyValueFile -Path $helperPressurePath
     $health = Read-KeyValueFile -Path $healthPath
 
-    $qualityEvents = Get-SummaryEventObjects -Path $helperQualityPath -EventName "screenshare_helper_quality_summary"
-    $pressureEvents = Get-SummaryEventObjects -Path $helperPressurePath -EventName "screenshare_helper_pressure_epoch_summary"
-    $healthEvents = Get-SummaryEventObjects -Path $healthPath -EventName "screenshare_health_snapshot"
+    $qualityEvents = @(Get-SummaryEventObjects -Path $helperQualityPath -EventName "screenshare_helper_quality_summary")
+    $pressureEvents = @(Get-SummaryEventObjects -Path $helperPressurePath -EventName "screenshare_helper_pressure_epoch_summary")
+    $healthEvents = @(Get-SummaryEventObjects -Path $healthPath -EventName "screenshare_health_snapshot")
     $anchor = Get-WindowAnchor -HealthEvents $healthEvents
     $timeRange = Resolve-RunTimeRange -EventCollections @($qualityEvents, $pressureEvents, $healthEvents)
     $rawPressureEvents = Get-RawLogPressureEvents -ResolvedLogPath $ResolvedLogPath -TimeRange $timeRange
@@ -525,6 +537,113 @@ function Add-WindowSection {
     }
 }
 
+function Read-OptionalKeyValueFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return [ordered]@{}
+    }
+
+    return Read-KeyValueFile -Path $Path
+}
+
+function Test-NoScreenShareSessionArtifact {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Artifact
+    )
+
+    $bridgeMedia = Read-OptionalKeyValueFile -Path (Join-Path $Artifact.ArtifactDir "bridge-media-send-summary.txt")
+    $qualityPresentation = Read-OptionalKeyValueFile -Path (Join-Path $Artifact.ArtifactDir "quality-presentation-summary.txt")
+    $framesSent = Get-LongValue -Map $bridgeMedia -Key "frames_sent" -Default -1
+    $mediaPlaneFramesSent = Get-LongValue -Map $bridgeMedia -Key "media_plane_frames_sent" -Default $framesSent
+    $activeTargetFps = Get-LongValue -Map $qualityPresentation -Key "active_encode_target_fps" -Default -1
+
+    $noFramesSent = $framesSent -le 0 -and $mediaPlaneFramesSent -le 0
+    $noHelperApplySamples = $Artifact.HelperApplyMsAvg -lt 0 -or $Artifact.QualityEvents.Count -eq 0
+    $noVisibleProgress = $Artifact.VisibleApplyRatio -lt 0
+    $noBaseline = $Artifact.BaselineEstablished -le 0
+    $noVisibleBaselinePhase = $Artifact.FinalHelperSessionPhase -eq "no_visible_baseline" -or
+        $Artifact.FinalHelperSessionPhase -eq "(none)"
+    $noActiveTarget = $activeTargetFps -le 0
+
+    return $noFramesSent -and
+        $noHelperApplySamples -and
+        $noVisibleProgress -and
+        $noBaseline -and
+        ($noVisibleBaselinePhase -or $noActiveTarget)
+}
+
+function Write-NoScreenShareSessionReport {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Candidate,
+
+        [string]$EffectiveLogPath
+    )
+
+    $bridgeMedia = Read-OptionalKeyValueFile -Path (Join-Path $Candidate.ArtifactDir "bridge-media-send-summary.txt")
+    $qualityPresentation = Read-OptionalKeyValueFile -Path (Join-Path $Candidate.ArtifactDir "quality-presentation-summary.txt")
+    $framesSent = Get-LongValue -Map $bridgeMedia -Key "frames_sent" -Default -1
+    $mediaPlaneFramesSent = Get-LongValue -Map $bridgeMedia -Key "media_plane_frames_sent" -Default $framesSent
+    $activeTargetFps = Get-LongValue -Map $qualityPresentation -Key "active_encode_target_fps" -Default -1
+
+    $evidence = New-Object System.Collections.Generic.List[string]
+    if ($framesSent -le 0 -and $mediaPlaneFramesSent -le 0) {
+        $evidence.Add("no_frames_sent")
+    }
+    if ($Candidate.HelperApplyMsAvg -lt 0 -or $Candidate.QualityEvents.Count -eq 0) {
+        $evidence.Add("no_helper_apply_samples")
+    }
+    if ($Candidate.VisibleApplyRatio -lt 0) {
+        $evidence.Add("no_visible_apply_evidence")
+    }
+    if ($Candidate.BaselineEstablished -le 0) {
+        $evidence.Add("no_visible_baseline")
+    }
+    if ($activeTargetFps -le 0) {
+        $evidence.Add("no_active_target_fps")
+    }
+
+    $reportLines = New-Object System.Collections.Generic.List[string]
+    $reportLines.Add("comparison_status=invalid_no_screenshare_session")
+    $reportLines.Add("regression_classification=invalid_no_screenshare_session")
+    $reportLines.Add("smallest_next_fix_area=setup/connect before screenshare")
+    $reportLines.Add("candidate_artifact_dir=$($Candidate.ArtifactDir)")
+    $reportLines.Add("reference_artifact_dirs=(skipped)")
+    $reportLines.Add("log_path=$EffectiveLogPath")
+    $reportLines.Add("comparison_failures=no_screenshare_session")
+    $reportLines.Add("classification_evidence=$($evidence -join ',')")
+    $reportLines.Add("candidate_frames_sent=$framesSent")
+    $reportLines.Add("candidate_media_plane_frames_sent=$mediaPlaneFramesSent")
+    $reportLines.Add("candidate_active_target_fps=$activeTargetFps")
+    $reportLines.Add("candidate_baseline_capture_to_render_ms=$($Candidate.BaselineCaptureToRenderMs)")
+    $reportLines.Add("candidate_avg_capture_to_render_ms=$(Format-Double -Value $Candidate.AvgCaptureToRenderMs)")
+    $reportLines.Add("candidate_helper_apply_ms_avg=$(Format-Double -Value $Candidate.HelperApplyMsAvg)")
+    $reportLines.Add("candidate_visible_apply_ratio=$(Format-Double2 -Value $Candidate.VisibleApplyRatio)")
+    $reportLines.Add("candidate_reassembler_loss_count=$($Candidate.ReassemblerLossCount)")
+    $reportLines.Add("candidate_sender_operating_state=$($Candidate.FinalSenderOperatingState)")
+    $reportLines.Add("candidate_sender_guard_state=$($Candidate.FinalSenderGuardState)")
+    $reportLines.Add("candidate_helper_session_phase=$($Candidate.FinalHelperSessionPhase)")
+    $reportLines.Add("candidate_helper_recovery_mechanism=$($Candidate.FinalHelperRecoveryMechanism)")
+    $reportLines.Add("candidate_dominant_loss_class=$($Candidate.FinalDominantLossClass)")
+    $reportLines.Add("candidate_dominant_pressure_blocker=$($Candidate.FinalDominantPressureBlocker)")
+    $reportLines.Add("candidate_dominant_trouble_domain=$($Candidate.FinalDominantTroubleDomain)")
+    $reportLines.Add("candidate_baseline_established=$($Candidate.BaselineEstablished)")
+    $reportLines.Add("candidate_baseline_reseed_in_progress=$($Candidate.BaselineReseedInProgress)")
+    $reportLines.Add("candidate_baseline_frozen_due_to_stall_count=$($Candidate.BaselineFrozenDueToStallCount)")
+    $reportLines.Add("candidate_cadence_stall_window_count=$($Candidate.CadenceStallWindowCount)")
+    $reportLines.Add("candidate_cadence_stall_trigger_count=$($Candidate.CadenceStallTriggerCount)")
+    $reportLines.Add("candidate_actionable_high_frame_age_count=$($Candidate.ActionableHighFrameAgeCount)")
+
+    $reportPath = Join-Path $Candidate.ArtifactDir "latency-regression-analysis.txt"
+    $reportLines | Set-Content -LiteralPath $reportPath
+    $reportLines | ForEach-Object { Write-Output $_ }
+}
+
 $effectiveLogPath = Get-EffectiveLogPath -CandidateArtifactDir $CandidateArtifactDir -OverrideLogPath $LogPath
 $normalizedReferenceArtifactDirs = if ($ReferenceArtifactDirs.Count -eq 1 -and
     $ReferenceArtifactDirs[0] -like "*,*") {
@@ -534,6 +653,11 @@ else {
     $ReferenceArtifactDirs
 }
 $candidate = Read-Artifact -ArtifactDir $CandidateArtifactDir -ResolvedLogPath $effectiveLogPath
+if (Test-NoScreenShareSessionArtifact -Artifact $candidate) {
+    Write-NoScreenShareSessionReport -Candidate $candidate -EffectiveLogPath $effectiveLogPath
+    exit 0
+}
+
 $references = @($normalizedReferenceArtifactDirs | ForEach-Object {
     Read-Artifact -ArtifactDir $_ -ResolvedLogPath $effectiveLogPath
 })

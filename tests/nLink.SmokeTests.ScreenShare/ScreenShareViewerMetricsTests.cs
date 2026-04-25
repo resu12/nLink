@@ -192,9 +192,9 @@ public sealed class ScreenShareViewerMetricsTests : ScreenShareViewerViewModelTe
         }, default);
     }
 
-[Fact]
+    [Fact]
     [Trait("Category", "Smoke")]
-    public async Task ScreenShareViewer_HelperRemote_VisibleStableOrdinaryStaleFrame_DoesNotUseVisibleStableFreshnessDrop()
+    public async Task ScreenShareViewer_HelperRemote_VisibleStableOrdinaryStaleFrame_UsesVisibleStableFreshnessDrop()
     {
         await fixture.Session.Dispatch(async () =>
         {
@@ -231,19 +231,21 @@ public sealed class ScreenShareViewerMetricsTests : ScreenShareViewerViewModelTe
 
             vm.OnOwnedEncodedFrame("h264", new byte[] { 52 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 900, isKeyFrame: false, streamEpoch: 51, frameId: 52);
             await WaitUntilAsync(
-                () => vm.CurrentFrame is Bitmap stale && stale.PixelSize.Width == 52 && vm.IsIdleForDiagnostics,
+                () => vm.CurrentFrame is Bitmap stale &&
+                      stale.PixelSize.Width == 51 &&
+                      vm.GetMetricsSnapshot().StaleFrameDropVisibleStableCount >= 1 &&
+                      vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(5));
 
             var current = Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
-            Assert.Equal(52, current.PixelSize.Width);
+            Assert.Equal(51, current.PixelSize.Width);
 
             var metrics = vm.GetMetricsSnapshot();
-            Assert.Equal(0, metrics.StaleFrameDropVisibleStableCount);
-            Assert.Equal(-1, metrics.StaleFrameDropVisibleStableLastAgeMs);
-            Assert.True(metrics.OrdinaryNonKeyAgeBudgetBypassCount >= 1);
+            Assert.True(metrics.StaleFrameDropVisibleStableCount >= 1);
+            Assert.True(metrics.StaleFrameDropVisibleStableLastAgeMs >= 700);
 
             var frameLossSnapshot = vm.GetFrameLossSnapshotForDiagnostics();
-            Assert.DoesNotContain(
+            Assert.Contains(
                 frameLossSnapshot.RecentLosses,
                 static loss => loss.FrameId == 52 && string.Equals(loss.Reason, "stale_frame_drop_visible_stable", StringComparison.Ordinal));
 

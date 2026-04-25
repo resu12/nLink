@@ -126,7 +126,7 @@ public sealed class SessionRuntimeScreenSharePressureRecoveryAwareTests : Screen
             foreach (ScreenSharePressureStateV1 sentPressureState in transport.SentPressureStates)
             {
                 Assert.Equal(ScreenSharePressureMode.Normal, sentPressureState.Mode);
-                Assert.Equal("continuity_loss", sentPressureState.Reason);
+                Assert.Equal("healthy", sentPressureState.Reason);
             }
 
             Assert.Equal(0L, helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.VisibleAppliesDuringSettleCount);
@@ -192,7 +192,7 @@ public sealed class SessionRuntimeScreenSharePressureRecoveryAwareTests : Screen
             transport.SentPressureStates.Clear();
             now = now.AddMilliseconds(900.0);
             ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "MaybeSendScreenSharePressureState");
-            Assert.Empty(transport.SentPressureStates);
+            Assert.Equal(0, transport.SentPressureStates.Count);
             now = now.AddMilliseconds(120.0);
             ScreenShareTransportBoundaryTestBase.ReportHelperRemoteFrameApplied(sessionRuntime, 570L, 1L, 44L);
             now = now.AddMilliseconds(120.0);
@@ -844,6 +844,70 @@ public sealed class SessionRuntimeScreenSharePressureRecoveryAwareTests : Screen
             Assert.Empty(transport.SentPressureStates);
             SessionRuntime.HelperRemoteScreenSharePressureDiagnosticsSnapshot helperRemoteScreenSharePressureDiagnosticsSnapshotForTests = sessionRuntime.GetHelperRemoteScreenSharePressureDiagnosticsSnapshotForTests();
             Assert.True(helperRemoteScreenSharePressureDiagnosticsSnapshotForTests.PressureSendBypassedForVisibleProgressCount > 0);
+        }
+        finally
+        {
+            if (transport != null)
+            {
+                ((IDisposable)transport).Dispose();
+            }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void SessionRuntime_HelperScreenSharePressureFeedback_SatisfiedFloorStaleContinuityLoss_PublishesHealthyProof()
+    {
+        DateTimeOffset now = new DateTimeOffset(2026, 4, 25, 9, 0, 0, TimeSpan.Zero);
+        ScreenShareAwareSignalingTransportDouble transport = new ScreenShareAwareSignalingTransportDouble();
+        try
+        {
+            using SessionRuntime sessionRuntime = new SessionRuntime(() => transport, SessionRuntimeWatchdogOptions.Default, null, null, null, null, null, null, () => now);
+            sessionRuntime.SetRoleForTests(SessionRuntimeRole.Helper);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "transport", transport);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "state", SessionRuntimeState.Connected);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "statusText", "Connected");
+            ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "WireTransport", transport);
+            transport.SetSessionSecurityStateForTests(ScreenShareTransportBoundaryTestBase.CreateApprovedSecurityState(new PeerAddress("pressure.helpee"), new PeerAddress("pressure.helper"), CapabilityGrant.ScreenShare));
+
+            ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "ReportHelperRemoteScreenShareContinuityLost", 1L, "frame_gap", true, 5L, 10L, 12L, 9L);
+            now = now.AddMilliseconds(50.0);
+            ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "ReportHelperRemoteScreenShareRecoveryKeyframeApplied", 180L, 1L);
+            now = now.AddMilliseconds(50.0);
+            ScreenShareTransportBoundaryTestBase.ReportHelperRemoteFrameApplied(
+                sessionRuntime,
+                180L,
+                1L,
+                12L,
+                12L,
+                12L,
+                3L,
+                ScreenShareTransportBoundaryTestBase.CreateHelperSessionSnapshot(1L, 12L, 12L, 12L, 3L, 10L));
+
+            SessionRuntime.HelperRemoteScreenSharePressureDiagnosticsSnapshot before = sessionRuntime.GetHelperRemoteScreenSharePressureDiagnosticsSnapshotForTests();
+            Assert.True(before.DerivedPostRecoveryHealthyActive);
+            Assert.True(before.SteadyVisibleProgressActive);
+            transport.SentPressureStates.Clear();
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureMode", ScreenSharePressureMode.Normal);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureReason", "continuity_loss");
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureUtc", now);
+
+            now = now.AddMilliseconds(50.0);
+            ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "ReportHelperRemoteScreenShareContinuityLost", 1L, "late_gap_tail", true, 5L, 11L, 12L, 12L);
+
+            ScreenSharePressureStateV1 sentPressureState = ScreenShareTransportBoundaryTestBase.WaitForSinglePressureState(transport.SentPressureStates);
+            Assert.Equal(ScreenSharePressureMode.Normal, sentPressureState.Mode);
+            Assert.Equal("healthy", sentPressureState.Reason);
+            Assert.Equal(12L, sentPressureState.VisibleHeadFrameId);
+            Assert.Equal(12L, sentPressureState.AppliedHeadFrameId);
+            Assert.Equal(12L, sentPressureState.StableVisibleHeadFrameId);
+            Assert.Equal(10L, sentPressureState.VisibleRecoveryFloorFrameId);
+            Assert.Equal(3L, sentPressureState.FramesAppliedSinceLastGap);
+
+            SessionRuntime.HelperRemoteScreenSharePressureDiagnosticsSnapshot after = sessionRuntime.GetHelperRemoteScreenSharePressureDiagnosticsSnapshotForTests();
+            Assert.True(after.SteadyVisibleProgressActive);
+            Assert.Equal(HelperRemoteRecoveryMechanism.None, after.HelperRecoveryMechanism);
+            Assert.Equal("none", after.DominantPressureBlocker);
         }
         finally
         {

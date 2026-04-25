@@ -182,7 +182,7 @@ public partial class ScreenShareSurfaceView : UserControl
         var displayedWidthPx = viewportWidth * effectiveRenderScaling;
         var displayedHeightPx = viewportHeight * effectiveRenderScaling;
         var scaleRatio = Math.Min(displayedWidthPx / frameWidth, displayedHeightPx / frameHeight);
-        return scaleRatio < 0.95d
+        return scaleRatio < 0.95d || scaleRatio > 1.05d
             ? BitmapInterpolationMode.HighQuality
             : BitmapInterpolationMode.None;
     }

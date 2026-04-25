@@ -894,6 +894,29 @@ public sealed class HelperSessionUiTests : SessionHeaderAndBannerTestBase
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void HelperViewModel_NknReadyTimeoutDiagnostic_DoesNotShowReinstall()
+    {
+        var config = CreateNknTestConfig();
+        NknRuntimeDiagnostics.SetLastError("NKN_START_FAILED: ready_timeout progress=rpc_selected");
+        try
+        {
+            using var runtime = new SessionRuntime(() => new FakeSignalingTransport());
+            using var helper = new HelperPageViewModel(cancelAction: static () =>
+            {
+            }, config, runtime);
+
+            Assert.False(helper.IsStartupBlocked);
+            Assert.NotEqual("Please reinstall.", helper.StatusText);
+            Assert.True(helper.ShowConnectAction);
+        }
+        finally
+        {
+            NknRuntimeDiagnostics.SetLastError(string.Empty);
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task HelperViewModel_Disconnect_ShowsRetry_AndRetryReturnsToIdle()
     {
         var scripted = new ScriptedSignalingTransport(onJoinByAddressAsync: static (_, __) => Task.CompletedTask);

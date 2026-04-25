@@ -388,6 +388,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 ["connectId"] = connectId,
             };
 
+            if (options.ShouldSendSubClientTopology)
+            {
+                payload["numSubClients"] = options.NumSubClients;
+                payload["mediaNumSubClients"] = options.MediaNumSubClients;
+            }
+
             if (options.PreflightRpcEnabled)
             {
                 payload["preflightRpcEnabled"] = true;
@@ -405,9 +411,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             }
             catch (TimeoutException ex)
             {
-                NknRuntimeDiagnostics.SetLastError("bridge_connect_ready_timeout");
                 var progressSuffix = BuildLastProgressSummaryForDiagnostics();
-                SetNknStartFailed("ready_timeout", $"Timed out waiting for bridge ready.{progressSuffix}");
+                NknRuntimeDiagnostics.SetLastError($"bridge_connect_ready_timeout{progressSuffix}");
                 RecordBridgeFailure("bridge_connect_ready_timeout", $"The local helper process did not become ready.{progressSuffix}");
                 throw new TimeoutException("Timed out waiting for NKN bridge ready(address) after connect.", ex);
             }
@@ -780,6 +785,9 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var framesSentSinceLast = TryGetInt64(root, "frames_sent_since_last", out var framesSentValue) ? Math.Max(0, framesSentValue) : 0;
         var latestDisconnectReason = TryGetString(root, "latest_disconnect_reason", out var latestDisconnectReasonValue) ? latestDisconnectReasonValue : "(none)";
         var sampleWindowMs = TryGetInt64(root, "sample_window_ms", out var sampleWindowValue) ? Math.Max(0, sampleWindowValue) : 0;
+        var controlSubClients = TryGetInt64(root, "control_subclients", out var controlSubClientsValue) ? Math.Max(0, controlSubClientsValue) : 0;
+        var mediaSubClients = TryGetInt64(root, "media_subclients", out var mediaSubClientsValue) ? Math.Max(0, mediaSubClientsValue) : 0;
+        var bulkSubClients = TryGetInt64(root, "bulk_subclients", out var bulkSubClientsValue) ? Math.Max(0, bulkSubClientsValue) : 0;
 
         Log(
             "event=screenshare_bridge_transport_health_summary; " +
@@ -787,7 +795,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             $"ready_emitted={readyEmitted}; client_ready_age_ms={clientReadyAgeMs}; disconnect_count_since_last={disconnectCountSinceLast}; " +
             $"connect_failed_count_since_last={connectFailedCountSinceLast}; ws_error_count_since_last={wsErrorCountSinceLast}; rpc_fallback_attempt_count_since_last={rpcFallbackAttemptCountSinceLast}; " +
             $"control_ready={controlReady}; media_ready={mediaReady}; bulk_ready={bulkReady}; frames_sent_since_last={framesSentSinceLast}; latest_disconnect_reason={latestDisconnectReason}; sample_window_ms={sampleWindowMs}; " +
-            $"srk={selectedRpcKey}; srs={selectedRpcStage}; cky={connectKey}; rdy={readyEmitted}; cra={clientReadyAgeMs}; dcc={disconnectCountSinceLast}; cfc={connectFailedCountSinceLast}; wec={wsErrorCountSinceLast}; rfc={rpcFallbackAttemptCountSinceLast}; cr={controlReady}; mr={mediaReady}; br={bulkReady}; fss={framesSentSinceLast}; ldr={latestDisconnectReason}");
+            $"control_subclients={controlSubClients}; media_subclients={mediaSubClients}; bulk_subclients={bulkSubClients}; " +
+            $"srk={selectedRpcKey}; srs={selectedRpcStage}; cky={connectKey}; rdy={readyEmitted}; cra={clientReadyAgeMs}; dcc={disconnectCountSinceLast}; cfc={connectFailedCountSinceLast}; wec={wsErrorCountSinceLast}; rfc={rpcFallbackAttemptCountSinceLast}; cr={controlReady}; mr={mediaReady}; br={bulkReady}; fss={framesSentSinceLast}; ldr={latestDisconnectReason}; csc={controlSubClients}; msc={mediaSubClients}; bsc={bulkSubClients}");
     }
 
     private void SetScreenShareQueueState(BridgeScreenShareQueueState nextState)

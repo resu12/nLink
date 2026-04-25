@@ -8,8 +8,21 @@ function Get-CurrentSoakComparisonMetrics {
         $latencyProxyValue = [double]$Summary.LatestHelperBaselineCaptureToRenderMs
     }
 
+    $noScreenShareSession = $Summary.LatestBridgeMediaSendFramesSent -le 0 -and
+        $Summary.LatestMediaPlaneFramesSent -le 0 -and
+        $Summary.HelperApplySampleCount -le 0 -and
+        $Summary.LatestHelperVisibleApplyRatio -lt 0 -and
+        $Summary.LatestHelperBaselineEstablished -le 0 -and
+        ($Summary.LatestSummaryHelperSessionPhase -eq 'no_visible_baseline' -or
+            $Summary.LatestActiveEncodeTargetFps -le 0)
+
     return @{
         artifact_dir = ''
+        no_screenshare_session = if ($noScreenShareSession) { 1 } else { 0 }
+        no_screenshare_frames_sent = $Summary.LatestBridgeMediaSendFramesSent
+        no_screenshare_media_plane_frames_sent = $Summary.LatestMediaPlaneFramesSent
+        no_screenshare_helper_apply_sample_count = $Summary.HelperApplySampleCount
+        no_screenshare_helper_session_phase = $Summary.LatestSummaryHelperSessionPhase
         visible_apply_ratio = if ($Summary.LatestHelperVisibleApplyRatio -ge 0) { [double]$Summary.LatestHelperVisibleApplyRatio } else { $null }
         helper_apply_ms_avg = if ($Summary.HelperApplyAvgMs -ge 0) { [double]$Summary.HelperApplyAvgMs } else { $null }
         helper_apply_ms_p95 = if ($Summary.HelperApplyP95Ms -ge 0) { [double]$Summary.HelperApplyP95Ms } else { $null }

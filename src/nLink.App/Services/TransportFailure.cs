@@ -140,10 +140,23 @@ public static class TransportFailureMapper
                 isTransient: true);
         }
 
+        if (normalized.Contains("bridge_connect_ready_timeout", StringComparison.Ordinal) ||
+            normalized.Contains("connecttonodetimeouterror", StringComparison.Ordinal) ||
+            normalized.Contains("rpctimeouterror", StringComparison.Ordinal) ||
+            normalized.Contains("nkn_start_failed: ready_timeout", StringComparison.Ordinal))
+        {
+            return TransportFailure.Create(
+                TransportFailureCategory.HandshakeTimeout,
+                "Timed out",
+                exceptionType,
+                raw,
+                isTransient: true);
+        }
+
         if (normalized.Contains("bridge_hello_failed", StringComparison.Ordinal) ||
             normalized.Contains("nkn bridge hello failed", StringComparison.Ordinal) ||
-            normalized.Contains("bridge_connect_ready_timeout", StringComparison.Ordinal) ||
-            normalized.Contains("nkn_start_failed", StringComparison.Ordinal) ||
+            normalized.Contains("nkn_start_failed: bridge_start", StringComparison.Ordinal) ||
+            normalized.Contains("nkn_start_failed: bridge_missing", StringComparison.Ordinal) ||
             normalized.Contains("bridge runtime not found", StringComparison.Ordinal) ||
             normalized.Contains("could not start the local helper process", StringComparison.Ordinal))
         {

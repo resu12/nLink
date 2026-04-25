@@ -18,15 +18,46 @@ function Write-StabilizationArtifacts {
         $invariantFailures.Add(("recovery_owner_replaced_before_ack_count={0}" -f $Summary.LatestRecoveryOwnerReplacedBeforeAckCount))
     }
 
-    if ($Summary.LatestHelperRecoveryRunwayOverflowRejectCount -gt 1) {
+    if ($Summary.LatestHelperPreCandidateGapTailEmittedToViewerCount -gt 0) {
+        $invariantFailures.Add(("pre_candidate_gap_tail_emitted_to_viewer_count={0}" -f $Summary.LatestHelperPreCandidateGapTailEmittedToViewerCount))
+    }
+
+    if ($Summary.LatestHelperActionableLateFragmentCount -gt 0) {
+        $invariantFailures.Add(("actionable_late_fragment_count={0}" -f $Summary.LatestHelperActionableLateFragmentCount))
+    }
+
+    $latestHelperRecoveryResolved =
+        ($Summary.LatestHelperRecoveryWindowActive -eq 0 -or
+            (($Summary.LatestHealthHelperSessionPhase -eq 'visible_stable') -and
+                ($Summary.LatestHealthHelperRecoveryMechanism -eq 'none' -or
+                    $Summary.LatestHealthHelperRecoveryMechanism -eq '(none)' -or
+                    $Summary.LatestHealthHelperRecoveryMechanism -eq '(missing)'))) -and
+        $Summary.LatestHealthRecoveryActive -eq 0
+
+    $resolvedRecoveryOwnerReplacement =
+        $Summary.LatestHelperRecoveryOwnerReplacedCount -gt 0 -and
+        $Summary.LatestHelperRecoveryProgressCorridorSuccessCount -gt 0 -and
+        $latestHelperRecoveryResolved -and
+        $Summary.LatestHelperPreCandidateGapTailEmittedToViewerCount -eq 0 -and
+        $Summary.LatestHelperActionableLateFragmentCount -eq 0 -and
+        $Summary.LatestRecoveryOwnerReplacedBeforeAckCount -eq 0
+
+    $resolvedFollowerWindow =
+        $Summary.LatestHelperRecoveryProgressCorridorSuccessCount -gt 0 -and
+        $latestHelperRecoveryResolved -and
+        $Summary.LatestHelperPreCandidateGapTailEmittedToViewerCount -eq 0 -and
+        $Summary.LatestHelperActionableLateFragmentCount -eq 0 -and
+        ($Summary.LatestHelperRecoveryOwnerReplacedCount -eq 0 -or $resolvedRecoveryOwnerReplacement)
+
+    if ($Summary.LatestHelperRecoveryRunwayOverflowRejectCount -gt 1 -and -not $resolvedFollowerWindow) {
         $invariantFailures.Add(("recovery_runway_overflow_reject_count={0}" -f $Summary.LatestHelperRecoveryRunwayOverflowRejectCount))
     }
 
-    if ($Summary.LatestHelperStartupCorridorReleaseCount -gt 0) {
+    if ($Summary.LatestHelperStartupCorridorReleaseCount -gt 0 -and -not $resolvedFollowerWindow) {
         $invariantFailures.Add(("startup_corridor_release_count={0}" -f $Summary.LatestHelperStartupCorridorReleaseCount))
     }
 
-    if ($Summary.LatestHelperRecoveryFollowerWindowBufferedCount -gt 0) {
+    if ($Summary.LatestHelperRecoveryFollowerWindowBufferedCount -gt 0 -and -not $resolvedFollowerWindow) {
         $invariantFailures.Add(("recovery_follower_window_buffered_count={0}" -f $Summary.LatestHelperRecoveryFollowerWindowBufferedCount))
     }
 
@@ -40,6 +71,15 @@ function Write-StabilizationArtifacts {
 
     if ($Summary.LatestHelperBridgeHealthActionableWithoutQueueOrDropCount -gt 0) {
         $invariantFailures.Add(("bridge_health_became_actionable_without_queue_or_drop_count={0}" -f $Summary.LatestHelperBridgeHealthActionableWithoutQueueOrDropCount))
+    }
+
+    if ($CurrentMetrics.no_screenshare_session -eq 1) {
+        $regressionFailures.Add(
+            ("invalid_no_screenshare_session frames_sent={0} media_plane_frames_sent={1} helper_apply_sample_count={2} helper_session_phase={3}" -f
+                $CurrentMetrics.no_screenshare_frames_sent,
+                $CurrentMetrics.no_screenshare_media_plane_frames_sent,
+                $CurrentMetrics.no_screenshare_helper_apply_sample_count,
+                $CurrentMetrics.no_screenshare_helper_session_phase))
     }
 
     if (@(
@@ -122,6 +162,9 @@ function Write-StabilizationArtifacts {
         ("current_latency_proxy_name={0}" -f $CurrentMetrics.latency_proxy_name),
         ("current_latency_proxy_ms={0}" -f $(if ($null -ne $CurrentMetrics.latency_proxy_ms) { $CurrentMetrics.latency_proxy_ms.ToString([System.Globalization.CultureInfo]::InvariantCulture) } else { '(none)' })),
         ("current_reassembler_loss_count={0}" -f $(if ($null -ne $CurrentMetrics.reassembler_loss_count) { $CurrentMetrics.reassembler_loss_count.ToString([System.Globalization.CultureInfo]::InvariantCulture) } else { '(none)' })),
+        ("current_no_screenshare_session={0}" -f $CurrentMetrics.no_screenshare_session),
+        ("resolved_post_recovery_follower_window={0}" -f $(if ($resolvedFollowerWindow) { 1 } else { 0 })),
+        ("resolved_recovery_owner_replacement={0}" -f $(if ($resolvedRecoveryOwnerReplacement) { 1 } else { 0 })),
         ("current_recovery_post_ack_hold_started_count={0}" -f $Summary.LatestRecoveryPostAckHoldStartedCount),
         ("current_recovery_post_ack_hold_expired_count={0}" -f $Summary.LatestRecoveryPostAckHoldExpiredCount),
         '',

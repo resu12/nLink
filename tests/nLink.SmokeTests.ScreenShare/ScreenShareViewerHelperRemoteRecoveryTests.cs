@@ -74,12 +74,13 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
             Assert.Equal(0, metrics.DecodeWorkerDropQueueOverflowCount);
             Assert.Equal(0, metrics.BlockedByReservedRecoveryFrameRejectCount);
             Assert.Equal(0, metrics.DecodedBlockedByReservedRecoveryFrameCount);
-            Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
+            Assert.True(metrics.RecoveryFollowerWindowBufferedCount >= 1);
+            Assert.Equal(0, metrics.StartupCorridorBufferedFollowerCount);
             Assert.Equal(0, metrics.StartupCorridorReleaseCount);
             Assert.Equal(0, metrics.StartupCorridorAbortCount);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
-            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            Assert.True(metrics.RecoveryProgressCorridorCount >= 1);
+            Assert.True(metrics.RecoveryProgressCorridorAppliedCount >= 1);
+            Assert.True(metrics.ProtectedRecoveryDeliveryCount >= 1);
             Assert.True(current.PixelSize.Width >= 1);
             var snapshot = vm.GetFrameLossSnapshotForDiagnostics();
             Assert.DoesNotContain(
@@ -297,8 +298,9 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
             Assert.Equal(0, finalMetrics.DecodedBlockedByReservedRecoveryFrameCount);
             Assert.Equal(0, finalMetrics.StartupCorridorReleaseCount);
             Assert.Equal(0, finalMetrics.StartupCorridorAbortCount);
-            Assert.Equal(0, finalMetrics.RecoveryProgressCorridorCount);
+            Assert.Equal(1, finalMetrics.RecoveryProgressCorridorCount);
             Assert.Equal(0, finalMetrics.RecoveryProgressCorridorAbortCount);
+            Assert.Equal(1, finalMetrics.RecoveryProgressCorridorAppliedCount);
             Assert.Equal(0, finalMetrics.ProtectedRecoveryDeliveryCount);
             return true;
         }, default);
@@ -636,9 +638,10 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
             Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
             Assert.Equal(0, metrics.BlockedByReservedRecoveryFrameRejectCount);
             Assert.Equal(0, metrics.DecodedBlockedByReservedRecoveryFrameCount);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorCount);
             Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
             Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
+            Assert.True(metrics.RecoveryProgressCorridorAppliedCount >= 2);
             Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
             return true;
         }, default);
@@ -686,22 +689,24 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
             Assert.True(metricsBeforeRecoveryOwner.FramesDroppedWaitingForRecoveryKeyframe >= 1);
             Assert.Equal(20, Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame).PixelSize.Width);
 
-            vm.OnOwnedEncodedFrame("h264", new byte[] { 24 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 32, frameId: 4, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            var recoveryNowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 24 }, capturedTsUtcMs: recoveryNowMs, isKeyFrame: true, streamEpoch: 32, frameId: 4, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
             await WaitUntilAsync(
-                () => vm.CurrentFrame is Bitmap recoveryOwner && recoveryOwner.PixelSize.Width == 24,
+                () => vm.CurrentFrame is Bitmap recoveryOwner && recoveryOwner.PixelSize.Width == 24 && vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(2));
 
-            vm.OnOwnedEncodedFrame("h264", new byte[] { 25 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 32, frameId: 5);
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 25 }, capturedTsUtcMs: recoveryNowMs, isKeyFrame: false, streamEpoch: 32, frameId: 5);
             await WaitUntilAsync(
-                () => vm.CurrentFrame is Bitmap follower && follower.PixelSize.Width == 25,
+                () => vm.CurrentFrame is Bitmap follower && follower.PixelSize.Width == 25 && vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(2));
 
             var metrics = vm.GetMetricsSnapshot();
             Assert.Equal(0, metrics.BlockedByReservedRecoveryFrameRejectCount);
             Assert.Equal(0, metrics.DecodedBlockedByReservedRecoveryFrameCount);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorCount);
             Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
             Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
+            Assert.True(metrics.RecoveryProgressCorridorAppliedCount >= 2);
             Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
             Assert.Equal(0, metrics.StartupCorridorBufferedFollowerCount);
             Assert.Equal(0, metrics.StartupCorridorReleaseCount);
@@ -713,7 +718,7 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
 
 [Fact]
     [Trait("Category", "Smoke")]
-    public async Task ScreenShareViewer_HelperRemote_SimplifiedRecoveryOwner_ClearsRecoveryWithoutCorridor()
+    public async Task ScreenShareViewer_HelperRemote_SimplifiedRecoveryOwner_StartsProtectedFollowerWindow()
     {
         await fixture.Session.Dispatch(async () =>
         {
@@ -750,9 +755,10 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
                 TimeSpan.FromSeconds(2));
 
             var metrics = vm.GetMetricsSnapshot();
-            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorCount);
             Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
             Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorAppliedCount);
             Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
             Assert.Equal(0, metrics.StartupCorridorBufferedFollowerCount);
             Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
@@ -763,7 +769,7 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
 
 [Fact]
     [Trait("Category", "Smoke")]
-    public async Task ScreenShareViewer_HelperRemote_SimplifiedProtectedFollowerCompatibility_IsTreatedAsNormalWithoutCorridor()
+    public async Task ScreenShareViewer_HelperRemote_ProtectedFollowerCompatibility_AppliesInsideRecoveryWindow()
     {
         await fixture.Session.Dispatch(async () =>
         {
@@ -796,28 +802,29 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
 
             vm.OnOwnedEncodedFrame("h264", new byte[] { 33 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 133, frameId: 3, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
             await WaitUntilAsync(
-                () => vm.CurrentFrame is Bitmap recoveryOwner && recoveryOwner.PixelSize.Width == 33,
+                () => vm.CurrentFrame is Bitmap recoveryOwner && recoveryOwner.PixelSize.Width == 33 && vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(2));
 
             vm.OnOwnedEncodedFrame("h264", new byte[] { 34 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 133, frameId: 4, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
             await WaitUntilAsync(
-                () => vm.CurrentFrame is Bitmap follower && follower.PixelSize.Width == 34,
+                () => vm.CurrentFrame is Bitmap follower && follower.PixelSize.Width == 34 && vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(2));
 
             var metrics = vm.GetMetricsSnapshot();
-            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorCount);
             Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
             Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
+            Assert.True(metrics.RecoveryProgressCorridorAppliedCount >= 1);
             Assert.Equal(0, metrics.StartupCorridorReleaseCount);
             Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
-            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            Assert.True(metrics.ProtectedRecoveryDeliveryCount >= 1);
             return true;
         }, default);
     }
 
 [Fact]
     [Trait("Category", "Smoke")]
-    public async Task ScreenShareViewer_HelperRemote_ProtectedFollowerTags_AreTreatedAsOrdinaryAfterRecoveryKeyframe()
+    public async Task ScreenShareViewer_HelperRemote_ProtectedFollowerTags_ApplyInsideRecoveryWindow()
     {
         await fixture.Session.Dispatch(async () =>
         {
@@ -873,19 +880,21 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
             var metrics = vm.GetMetricsSnapshot();
             Assert.Equal(0, metrics.BlockedByReservedRecoveryFrameRejectCount);
             Assert.Equal(0, metrics.DecodedBlockedByReservedRecoveryFrameCount);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorSuccessCount);
             Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
+            Assert.True(metrics.RecoveryProgressCorridorAppliedCount >= 3);
             Assert.Equal(0, metrics.StartupCorridorReleaseCount);
             Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
-            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            Assert.True(metrics.RecoveryFollowerWindowAppliedCount >= 2);
+            Assert.True(metrics.ProtectedRecoveryDeliveryCount >= 2);
             return true;
         }, default);
     }
 
 [Fact]
     [Trait("Category", "Smoke")]
-    public async Task ScreenShareViewer_HelperRemote_PostRecoveryFramesResumeAsOrdinaryTraffic()
+    public async Task ScreenShareViewer_HelperRemote_PostRecoveryFramesResumeAfterProtectedWindow()
     {
         await fixture.Session.Dispatch(async () =>
         {
@@ -925,7 +934,7 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
 
             vm.OnOwnedEncodedFrame("h264", new byte[] { 34 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 300, frameId: 34, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
             await WaitUntilAsync(
-                () => vm.CurrentFrame is Bitmap firstFollower && firstFollower.PixelSize.Width == 34,
+                () => vm.CurrentFrame is Bitmap firstFollower && firstFollower.PixelSize.Width == 34 && vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(2));
 
             vm.OnOwnedEncodedFrame("h264", new byte[] { 35 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 300, frameId: 35, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
@@ -941,13 +950,12 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
                 TimeSpan.FromSeconds(2));
 
             var metrics = vm.GetMetricsSnapshot();
-            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorSuccessCount);
             Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorAppliedCount);
-            Assert.Equal(0, metrics.StartupCorridorReleaseCount);
-            Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
-            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            Assert.True(metrics.RecoveryProgressCorridorAppliedCount >= 3);
+            Assert.True(metrics.RecoveryFollowerWindowAppliedCount >= 2);
+            Assert.True(metrics.ProtectedRecoveryDeliveryCount >= 2);
             Assert.True(metrics.PostRecoveryVisibleGenerationResetCount >= 1);
             return true;
         }, default);
@@ -1017,7 +1025,7 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
 
 [Fact]
     [Trait("Category", "Smoke")]
-    public async Task ScreenShareViewer_HelperRemote_NonContiguousFollowerAfterRecovery_StartsNewGapRecovery()
+    public async Task ScreenShareViewer_HelperRemote_NonContiguousFollowerAfterRecovery_IsBufferedWithoutBecomingVisible()
     {
         await fixture.Session.Dispatch(async () =>
         {
@@ -1057,28 +1065,29 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
 
             await WaitUntilAsync(
                 () => vm.IsIdleForDiagnostics &&
-                      vm.GetMetricsSnapshot().FramesDroppedWaitingForRecoveryKeyframe >= metricsBeforeGap.FramesDroppedWaitingForRecoveryKeyframe + 1,
+                      vm.GetMetricsSnapshot().RecoveryFollowerWindowBufferedCount >= metricsBeforeGap.RecoveryFollowerWindowBufferedCount + 1,
                 TimeSpan.FromSeconds(2));
 
             var current = Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
             Assert.Equal(23, current.PixelSize.Width);
             var metrics = vm.GetMetricsSnapshot();
-            Assert.True(metrics.FrameGapContinuityLossCount >= metricsBeforeGap.FrameGapContinuityLossCount + 1);
-            Assert.True(metrics.ContinuityLossCount >= metricsBeforeGap.ContinuityLossCount + 1);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(metricsBeforeGap.FrameGapContinuityLossCount, metrics.FrameGapContinuityLossCount);
+            Assert.Equal(metricsBeforeGap.ContinuityLossCount, metrics.ContinuityLossCount);
+            Assert.Equal(metricsBeforeGap.FramesDroppedWaitingForRecoveryKeyframe, metrics.FramesDroppedWaitingForRecoveryKeyframe);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorCount);
             Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorAppliedCount);
+            Assert.InRange(metrics.RecoveryProgressCorridorAbortCount, 0, 1);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorAppliedCount);
+            Assert.True(metrics.RecoveryFollowerWindowBufferedCount >= metricsBeforeGap.RecoveryFollowerWindowBufferedCount + 1);
             Assert.Equal(0, metrics.StartupCorridorAbortCount);
             Assert.Equal("none", metrics.StartupCorridorAbortReason);
-            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
             return true;
         }, default);
     }
 
 [Fact]
     [Trait("Category", "Smoke")]
-    public async Task ScreenShareViewer_HelperRemote_LateMissingFollowerDuringGap_IsDroppedWaitingForKeyframe()
+    public async Task ScreenShareViewer_HelperRemote_OutOfOrderPostRecoveryFollowers_ApplyWhenGapFills()
     {
         await fixture.Session.Dispatch(async () =>
         {
@@ -1113,35 +1122,41 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
                 TimeSpan.FromSeconds(2));
 
             var metricsBeforeGap = vm.GetMetricsSnapshot();
-            vm.OnOwnedEncodedFrame("h264", new byte[] { 25 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 310, frameId: 25);
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 25 }, capturedTsUtcMs: nowMs, isKeyFrame: false, streamEpoch: 310, frameId: 25);
             await WaitUntilAsync(
                 () => vm.IsIdleForDiagnostics &&
-                      vm.GetMetricsSnapshot().FramesDroppedWaitingForRecoveryKeyframe >= metricsBeforeGap.FramesDroppedWaitingForRecoveryKeyframe + 1,
+                      vm.GetMetricsSnapshot().RecoveryFollowerWindowBufferedCount >= metricsBeforeGap.RecoveryFollowerWindowBufferedCount + 1,
                 TimeSpan.FromSeconds(2));
 
-            vm.OnOwnedEncodedFrame("h264", new byte[] { 24 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 310, frameId: 24);
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 24 }, capturedTsUtcMs: nowMs, isKeyFrame: false, streamEpoch: 310, frameId: 24);
             await WaitUntilAsync(
-                () => vm.IsIdleForDiagnostics &&
-                      vm.GetMetricsSnapshot().FramesDroppedWaitingForRecoveryKeyframe >= metricsBeforeGap.FramesDroppedWaitingForRecoveryKeyframe + 2,
+                () => vm.CurrentFrame is Bitmap recovered &&
+                      recovered.PixelSize.Width == 25 &&
+                      vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(2));
 
             var current = Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
-            Assert.Equal(23, current.PixelSize.Width);
+            Assert.Equal(25, current.PixelSize.Width);
 
             var metrics = vm.GetMetricsSnapshot();
-            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorSuccessCount);
             Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
             Assert.Equal(0, metrics.StartupCorridorAbortCount);
+            Assert.True(metrics.RecoveryFollowerWindowBufferedCount >= metricsBeforeGap.RecoveryFollowerWindowBufferedCount + 1);
+            Assert.Equal(0, metrics.StartupCorridorReleaseCount);
+            Assert.Equal("visible_stable", metrics.HelperSessionPhase);
+            Assert.Equal("none", metrics.HelperRecoveryMechanism);
+            Assert.Equal(metricsBeforeGap.FramesDroppedWaitingForRecoveryKeyframe, metrics.FramesDroppedWaitingForRecoveryKeyframe);
 
             var snapshot = vm.GetFrameLossSnapshotForDiagnostics();
             Assert.Equal(0, snapshot.StaleRunwayWindowAbortCount);
             Assert.Equal(0, snapshot.LateSameEpochAfterHeadAdvancedDropCount);
-            Assert.Contains(
+            Assert.DoesNotContain(
                 snapshot.RecentLosses,
-                static loss => loss.FrameId == 25 && string.Equals(loss.Reason, "waiting_for_recovery_keyframe", StringComparison.Ordinal));
-            Assert.Contains(
-                snapshot.RecentLosses,
-                static loss => loss.FrameId == 24 && string.Equals(loss.Reason, "waiting_for_recovery_keyframe", StringComparison.Ordinal));
+                static loss => (loss.FrameId == 24 || loss.FrameId == 25) &&
+                               string.Equals(loss.Reason, "waiting_for_recovery_keyframe", StringComparison.Ordinal));
             return true;
         }, default);
     }
@@ -1194,10 +1209,10 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
             var metrics = vm.GetMetricsSnapshot();
             Assert.Equal(0, metrics.BlockedByReservedRecoveryFrameRejectCount);
             Assert.Equal(0, metrics.DecodedBlockedByReservedRecoveryFrameCount);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorCount);
             Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
             Assert.Equal(0, metrics.RecoveryProgressCorridorAbortCount);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorAppliedCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorAppliedCount);
             Assert.Equal(0, metrics.StartupCorridorAbortCount);
             Assert.Equal("none", metrics.StartupCorridorAbortReason);
             Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
@@ -1270,7 +1285,7 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
         }, default);
     }
 
-public async Task ScreenShareViewer_HelperRemote_SequentialPFrames_StayLiveWithoutRecovery()
+private async Task ScreenShareViewer_HelperRemote_SequentialPFrames_StayLiveWithoutRecovery()
     {
         await fixture.Session.Dispatch(async () =>
         {
@@ -1324,7 +1339,56 @@ public async Task ScreenShareViewer_HelperRemote_SequentialPFrames_StayLiveWitho
 
 [Fact]
     [Trait("Category", "Smoke")]
-    public async Task ScreenShareViewer_HelperRemote_RecoveryOwnerThenLaterFramesApplyInOrderWithoutProtectedWindow()
+    public async Task ScreenShareViewer_HelperRemote_PreCandidateGapTail_DoesNotBecomeVisible()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            ScreenShareFrameLossAttributionRegistry.ResetAllForTests();
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => throw new InvalidOperationException("jpeg should not be used"),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                },
+                h264Decoder: new FakeH264BitmapDecoder(),
+                logRole: "helper_remote");
+
+            var config = new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = "helper-gap-tail",
+                StreamEpoch = 18,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            };
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 40 }, capturedTsUtcMs: 0, isKeyFrame: true, streamEpoch: 18, streamConfig: config, frameId: 40, sessionId: "helper-gap-tail");
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 40 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(2));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 42 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 18, frameId: 42, sessionId: "helper-gap-tail");
+            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
+
+            var current = Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
+            Assert.Equal(40, current.PixelSize.Width);
+
+            var metrics = vm.GetMetricsSnapshot();
+            Assert.True(metrics.FrameGapContinuityLossCount >= 1);
+            Assert.True(metrics.FramesDroppedWaitingForRecoveryKeyframe >= 1);
+            Assert.Equal(0, metrics.PreCandidateGapTailEmittedToViewerCount);
+
+            var snapshot = vm.GetFrameLossSnapshotForDiagnostics();
+            Assert.True(snapshot.WaitingForRecoveryKeyframeRejectCount >= 1);
+            Assert.Equal(1, snapshot.FramesApplied);
+            return true;
+        }, default);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_HelperRemote_RecoveryOwnerThenLaterFramesApplyInOrderThroughProtectedWindow()
     {
         await fixture.Session.Dispatch(async () =>
         {
@@ -1337,7 +1401,7 @@ public async Task ScreenShareViewer_HelperRemote_SequentialPFrames_StayLiveWitho
                 {
                     if (blockReservedApply)
                     {
-                        await reservedApplyReleased.Task.ConfigureAwait(false);
+                        await reservedApplyReleased.Task;
                     }
 
                     action();
@@ -1393,31 +1457,30 @@ public async Task ScreenShareViewer_HelperRemote_SequentialPFrames_StayLiveWitho
             var metrics = vm.GetMetricsSnapshot();
             var appliedSnapshot = appliedFrameIds.ToArray();
             Assert.True(Array.IndexOf(appliedSnapshot, 73) >= 0);
-            Assert.True(appliedSnapshot.Any(frameId => frameId == 74 || frameId == 75));
+            Assert.Contains(appliedSnapshot, frameId => frameId == 74 || frameId == 75);
             Assert.True(Array.FindIndex(appliedSnapshot, frameId => frameId == 74 || frameId == 75) > Array.IndexOf(appliedSnapshot, 73));
             Assert.True(Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame).PixelSize.Width >= 74);
             Assert.Equal(0, metrics.DecodedBlockedByReservedRecoveryFrameCount);
             Assert.Equal(0, metrics.BlockedByReservedRecoveryFrameRejectCount);
-            Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
-            Assert.Equal(0, metrics.RecoveryFollowerWindowAppliedCount);
+            Assert.True(metrics.RecoveryFollowerWindowBufferedCount >= 1);
+            Assert.True(metrics.RecoveryFollowerWindowAppliedCount >= 1);
             Assert.Equal(0, metrics.RecoveryFollowerWindowTrimmedCount);
             Assert.Equal(0, metrics.StartupCorridorReleaseCount);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorCount);
-            Assert.Equal(0, metrics.RecoveryProgressCorridorSuccessCount);
-            Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorCount);
+            Assert.Equal(1, metrics.RecoveryProgressCorridorSuccessCount);
+            Assert.True(metrics.ProtectedRecoveryDeliveryCount >= 1);
             Assert.True(metrics.AverageDecodeCompleteToVisibleApplyMs > 0);
-            Assert.True(metrics.LastReservedApplyHoldMs > 0);
             Assert.True(metrics.AverageVisibleHeadLagFrames >= 0);
             Assert.True(metrics.AverageStableHeadLagFrames >= 0);
-            Assert.NotEqual("no_visible_baseline", metrics.HelperSessionPhase);
-            Assert.False(string.IsNullOrWhiteSpace(metrics.HelperRecoveryMechanism));
+            Assert.Equal("visible_stable", metrics.HelperSessionPhase);
+            Assert.Equal("none", metrics.HelperRecoveryMechanism);
             return true;
         }, default);
     }
 
 [Fact]
     [Trait("Category", "Smoke")]
-    public async Task ScreenShareViewer_HelperRemote_PostRecoveryStaleFrames_DoNotBypassStaleDrop()
+    public async Task ScreenShareViewer_HelperRemote_VisibleStableStaleNormalFrames_AreDropped()
     {
         await fixture.Session.Dispatch(async () =>
         {
@@ -1442,37 +1505,36 @@ public async Task ScreenShareViewer_HelperRemote_SequentialPFrames_StayLiveWitho
                 DecoderConfigData = new byte[] { 1, 2, 3 },
             };
 
-            vm.OnOwnedEncodedFrame("h264", new byte[] { 80 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), isKeyFrame: true, streamEpoch: 31, streamConfig: config, frameId: 80);
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 80 }, capturedTsUtcMs: nowMs, isKeyFrame: true, streamEpoch: 31, streamConfig: config, frameId: 80);
             await WaitUntilAsync(
                 () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 80 && vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(5));
 
-            vm.OnOwnedEncodedFrame("h264", new byte[] { 82 }, capturedTsUtcMs: 0, isKeyFrame: false, streamEpoch: 31, frameId: 82);
-            await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(5));
-
-            vm.OnOwnedEncodedFrame("h264", new byte[] { 83 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), isKeyFrame: true, streamEpoch: 31, frameId: 83, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.RecoveryOwner);
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 81 }, capturedTsUtcMs: nowMs, isKeyFrame: false, streamEpoch: 31, frameId: 81);
             await WaitUntilAsync(
-                () => vm.CurrentFrame is Bitmap recovered && recovered.PixelSize.Width == 83 && vm.IsIdleForDiagnostics,
+                () => vm.CurrentFrame is Bitmap second && second.PixelSize.Width == 81 && vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(5));
 
-            vm.OnOwnedEncodedFrame("h264", new byte[] { 84 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 5000, isKeyFrame: false, streamEpoch: 31, frameId: 84, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 82 }, capturedTsUtcMs: nowMs, isKeyFrame: false, streamEpoch: 31, frameId: 82);
+            await WaitUntilAsync(
+                () => vm.CurrentFrame is Bitmap third && third.PixelSize.Width == 82 && vm.IsIdleForDiagnostics,
+                TimeSpan.FromSeconds(5));
+
+            vm.OnOwnedEncodedFrame("h264", new byte[] { 83 }, capturedTsUtcMs: nowMs - 5000, isKeyFrame: false, streamEpoch: 31, frameId: 83);
             await WaitUntilAsync(
                 () => vm.IsIdleForDiagnostics && staleDropCount >= 1,
                 TimeSpan.FromSeconds(5));
 
-            vm.OnOwnedEncodedFrame("h264", new byte[] { 85 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 5000, isKeyFrame: false, streamEpoch: 31, frameId: 85, recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
-            await WaitUntilAsync(
-                () => vm.IsIdleForDiagnostics && staleDropCount >= 2,
-                TimeSpan.FromSeconds(5));
-
             var current = Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
-            Assert.Equal(83, current.PixelSize.Width);
+            Assert.Equal(82, current.PixelSize.Width);
             var metrics = vm.GetMetricsSnapshot();
-            Assert.True(staleDropCount >= 2);
+            Assert.True(staleDropCount >= 1);
             Assert.Equal(0, metrics.DecodeAgeBudgetCount);
+            Assert.True(metrics.StaleFrameDropVisibleStableCount >= 1);
+            Assert.True(metrics.StaleFrameDropVisibleStableLastAgeMs >= 700);
             Assert.Equal(0, metrics.RecoveryFollowerWindowBufferedCount);
             Assert.Equal(0, metrics.StartupCorridorReleaseCount);
-            Assert.True(metrics.PostRecoveryVisibleGenerationResetCount >= 1);
             Assert.Equal(0, metrics.ProtectedRecoveryDeliveryCount);
             return true;
         }, default);

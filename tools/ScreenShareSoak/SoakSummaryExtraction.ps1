@@ -46,6 +46,25 @@ function Get-SoakSummaryFromLog {
     $latestTransportIpOnlyMode = -1
     $latestLastAccessUnitKind = ''
     $latestLowDelayConfigApplied = ''
+    $latestActiveEncodeTargetWidth = -1
+    $latestActiveEncodeTargetHeight = -1
+    $latestActiveEncodeTargetBitrate = -1
+    $latestActiveEncodeTargetFps = -1
+    $latestEncoderProfile = ''
+    $latestSenderFreshnessMode = ''
+    $latestCaptureScale = -1.0
+    $latestEffectiveQualityPreset = ''
+    $latestLastEncodeDurationMs = -1
+    $latestLastPreprocessDurationMs = -1
+    $latestHelperSurfaceInterpolationMode = ''
+    $latestHelperSurfaceFrameWidth = -1
+    $latestHelperSurfaceFrameHeight = -1
+    $latestHelperSurfaceViewportWidth = -1
+    $latestHelperSurfaceViewportHeight = -1
+    $latestHelperSurfaceRenderScaling = -1.0
+    $latestHelperSurfaceDisplayedWidthPx = -1.0
+    $latestHelperSurfaceDisplayedHeightPx = -1.0
+    $latestHelperSurfaceScaleRatio = -1.0
     $latestHelperFramesCompleted = -1
     $latestHelperFramesEnqueuedForDecode = -1
     $latestHelperFramesDroppedBeforeDecode = -1
@@ -500,6 +519,9 @@ function Get-SoakSummaryFromLog {
     $latestBridgeTransportHealthLatestDisconnectReason = '(none)'
     $latestBridgeTransportHealthSampleWindowMs = -1
     $latestBridgeTransportHealthUniqueSelectedRpcCount = 0
+    $latestBridgeTransportHealthControlSubClients = -1
+    $latestBridgeTransportHealthMediaSubClients = -1
+    $latestBridgeTransportHealthBulkSubClients = -1
     $bestBridgeTransportHealthFramesSentSinceLast = -1
     $helperEpochLossLines = New-Object System.Collections.Generic.List[string]
     $helperQualitySummaryLines = New-Object System.Collections.Generic.List[string]
@@ -522,6 +544,8 @@ function Get-SoakSummaryFromLog {
     $helperPressureSummaryLines = New-Object System.Collections.Generic.List[string]
     $healthSnapshotLines = New-Object System.Collections.Generic.List[string]
     $reducedPromotionSummaryLines = New-Object System.Collections.Generic.List[string]
+    $freshnessSummaryLines = New-Object System.Collections.Generic.List[string]
+    $surfaceInterpolationLines = New-Object System.Collections.Generic.List[string]
     $helperEpochVisibleRatioByEpoch = @{}
     $helperEpochRecoveryLockMsByEpoch = @{}
     $helperEpochRootCauseByEpoch = @{}
@@ -577,6 +601,11 @@ function Get-SoakSummaryFromLog {
         }
 
         if ($line -like '*event=screenshare_freshness_summary;*') {
+            [void]$freshnessSummaryLines.Add($line)
+            while ($freshnessSummaryLines.Count -gt 24) {
+                $freshnessSummaryLines.RemoveAt(0)
+            }
+
             $pairs = Get-StructuredLogFieldPairs -Line $line
             $latestFramesDeferredToSendSlot = Get-StructuredLogIntField -Pairs $pairs -Key 'frames_deferred_to_send_slot'
             $latestFramesReplacedBeforeSendSlot = Get-StructuredLogIntField -Pairs $pairs -Key 'frames_replaced_before_send_slot'
@@ -590,6 +619,16 @@ function Get-SoakSummaryFromLog {
             $latestSummarySenderOperatingState = Get-StructuredLogStringField -Pairs $pairs -Key 'sender_operating_state' -DefaultValue $latestSummarySenderOperatingState
             $latestSummarySenderGuardState = Get-StructuredLogStringField -Pairs $pairs -Key 'sender_guard_state' -DefaultValue $latestSummarySenderGuardState
             $latestSummaryDominantPressureBlocker = Get-StructuredLogStringField -Pairs $pairs -Key 'dominant_pressure_blocker' -DefaultValue $latestSummaryDominantPressureBlocker
+            $latestActiveEncodeTargetWidth = Get-StructuredLogIntField -Pairs $pairs -Key 'active_encode_target_width' -DefaultValue $latestActiveEncodeTargetWidth
+            $latestActiveEncodeTargetHeight = Get-StructuredLogIntField -Pairs $pairs -Key 'active_encode_target_height' -DefaultValue $latestActiveEncodeTargetHeight
+            $latestActiveEncodeTargetBitrate = Get-StructuredLogIntField -Pairs $pairs -Key 'active_encode_target_bitrate' -DefaultValue $latestActiveEncodeTargetBitrate
+            $latestActiveEncodeTargetFps = Get-StructuredLogIntField -Pairs $pairs -Key 'active_encode_target_fps' -DefaultValue $latestActiveEncodeTargetFps
+            $latestEncoderProfile = Get-StructuredLogStringField -Pairs $pairs -Key 'encoder_profile' -DefaultValue $latestEncoderProfile
+            $latestSenderFreshnessMode = Get-StructuredLogStringField -Pairs $pairs -Key 'sender_freshness_mode' -DefaultValue $latestSenderFreshnessMode
+            $latestCaptureScale = Get-StructuredLogFloatField -Pairs $pairs -Key 'capture_scale' -DefaultValue $latestCaptureScale
+            $latestEffectiveQualityPreset = Get-StructuredLogStringField -Pairs $pairs -Key 'effective_quality_preset' -DefaultValue $latestEffectiveQualityPreset
+            $latestLastEncodeDurationMs = Get-StructuredLogIntField -Pairs $pairs -Key 'last_encode_duration_ms' -DefaultValue $latestLastEncodeDurationMs
+            $latestLastPreprocessDurationMs = Get-StructuredLogIntField -Pairs $pairs -Key 'last_preprocess_duration_ms' -DefaultValue $latestLastPreprocessDurationMs
             $latestPromotionCaptureToSendBudgetMs = Get-StructuredLogIntField -Pairs $pairs -Key 'promotion_capture_to_send_budget_ms'
             $latestSourceSupersededPendingFrames = Get-StructuredLogIntField -Pairs $pairs -Key 'source_superseded_pending_frames'
             $latestHelperSteadyVisibleProgressActive = Get-StructuredLogIntField -Pairs $pairs -Key 'helper_steady_visible_progress_active' -DefaultValue $latestHelperSteadyVisibleProgressActive
@@ -750,6 +789,38 @@ function Get-SoakSummaryFromLog {
             $latestPostRecoveryAgeGraceSuppressedCount = Get-StructuredLogIntField -Pairs $pairs -Key 'post_recovery_age_grace_suppressed_count' -DefaultValue $latestPostRecoveryAgeGraceSuppressedCount
             if ($latestHelperProgressPastOwnerWithoutBurstAckCount -gt 0) {
                 $recoveryAckMissedDespiteHelperProgress = 1
+            }
+        }
+
+        if ($line -like '*event=screenshare_surface_interpolation_changed;*') {
+            [void]$surfaceInterpolationLines.Add($line)
+            while ($surfaceInterpolationLines.Count -gt 24) {
+                $surfaceInterpolationLines.RemoveAt(0)
+            }
+
+            $pairs = Get-StructuredLogFieldPairs -Line $line
+            $role = Get-StructuredLogStringField -Pairs $pairs -Key 'role'
+            if ([string]::Equals($role, 'helper_remote', [System.StringComparison]::OrdinalIgnoreCase)) {
+                $latestHelperSurfaceInterpolationMode = Get-StructuredLogStringField -Pairs $pairs -Key 'viewer_interpolation_mode' -DefaultValue $latestHelperSurfaceInterpolationMode
+                $latestHelperSurfaceFrameWidth = Get-StructuredLogIntField -Pairs $pairs -Key 'frame_width' -DefaultValue $latestHelperSurfaceFrameWidth
+                $latestHelperSurfaceFrameHeight = Get-StructuredLogIntField -Pairs $pairs -Key 'frame_height' -DefaultValue $latestHelperSurfaceFrameHeight
+                $latestHelperSurfaceViewportWidth = Get-StructuredLogIntField -Pairs $pairs -Key 'viewport_width' -DefaultValue $latestHelperSurfaceViewportWidth
+                $latestHelperSurfaceViewportHeight = Get-StructuredLogIntField -Pairs $pairs -Key 'viewport_height' -DefaultValue $latestHelperSurfaceViewportHeight
+                $latestHelperSurfaceRenderScaling = Get-StructuredLogFloatField -Pairs $pairs -Key 'render_scaling' -DefaultValue $latestHelperSurfaceRenderScaling
+
+                if ($latestHelperSurfaceFrameWidth -gt 0 -and
+                    $latestHelperSurfaceFrameHeight -gt 0 -and
+                    $latestHelperSurfaceViewportWidth -gt 0 -and
+                    $latestHelperSurfaceViewportHeight -gt 0 -and
+                    $latestHelperSurfaceRenderScaling -gt 0) {
+                    $latestHelperSurfaceDisplayedWidthPx = [Math]::Round($latestHelperSurfaceViewportWidth * $latestHelperSurfaceRenderScaling, 2)
+                    $latestHelperSurfaceDisplayedHeightPx = [Math]::Round($latestHelperSurfaceViewportHeight * $latestHelperSurfaceRenderScaling, 2)
+                    $latestHelperSurfaceScaleRatio = [Math]::Round(
+                        [Math]::Min(
+                            $latestHelperSurfaceDisplayedWidthPx / [double]$latestHelperSurfaceFrameWidth,
+                            $latestHelperSurfaceDisplayedHeightPx / [double]$latestHelperSurfaceFrameHeight),
+                        3)
+                }
             }
         }
 
@@ -1571,6 +1642,21 @@ function Get-SoakSummaryFromLog {
                 $parsedBridgeTransportHealthLatestDisconnectReason = Get-StructuredLogStringField -Pairs $pairs -Key 'ldr' -DefaultValue '(none)'
             }
 
+            $parsedBridgeTransportHealthControlSubClients = Get-StructuredLogIntField -Pairs $pairs -Key 'control_subclients' -DefaultValue -1
+            if ($parsedBridgeTransportHealthControlSubClients -lt 0) {
+                $parsedBridgeTransportHealthControlSubClients = Get-StructuredLogIntField -Pairs $pairs -Key 'csc' -DefaultValue -1
+            }
+
+            $parsedBridgeTransportHealthMediaSubClients = Get-StructuredLogIntField -Pairs $pairs -Key 'media_subclients' -DefaultValue -1
+            if ($parsedBridgeTransportHealthMediaSubClients -lt 0) {
+                $parsedBridgeTransportHealthMediaSubClients = Get-StructuredLogIntField -Pairs $pairs -Key 'msc' -DefaultValue -1
+            }
+
+            $parsedBridgeTransportHealthBulkSubClients = Get-StructuredLogIntField -Pairs $pairs -Key 'bulk_subclients' -DefaultValue -1
+            if ($parsedBridgeTransportHealthBulkSubClients -lt 0) {
+                $parsedBridgeTransportHealthBulkSubClients = Get-StructuredLogIntField -Pairs $pairs -Key 'bsc' -DefaultValue -1
+            }
+
             $parsedBridgeTransportHealthSampleWindowMs = Get-StructuredLogIntField -Pairs $pairs -Key 'sample_window_ms' -DefaultValue -1
 
             if ($parsedBridgeTransportHealthFramesSentSinceLast -gt 0 -and
@@ -1599,6 +1685,9 @@ function Get-SoakSummaryFromLog {
                 $latestBridgeTransportHealthFramesSentSinceLast = $parsedBridgeTransportHealthFramesSentSinceLast
                 $latestBridgeTransportHealthLatestDisconnectReason = $parsedBridgeTransportHealthLatestDisconnectReason
                 $latestBridgeTransportHealthSampleWindowMs = $parsedBridgeTransportHealthSampleWindowMs
+                $latestBridgeTransportHealthControlSubClients = $parsedBridgeTransportHealthControlSubClients
+                $latestBridgeTransportHealthMediaSubClients = $parsedBridgeTransportHealthMediaSubClients
+                $latestBridgeTransportHealthBulkSubClients = $parsedBridgeTransportHealthBulkSubClients
             }
 
             [void]$bridgeTransportHealthSummaryLines.Add($line)
@@ -2202,6 +2291,28 @@ function Get-SoakSummaryFromLog {
         }
     }
 
+    $latestSummaryHelperRecoveryResolved =
+        $latestSummaryHelperSessionPhase -eq 'visible_stable' -and
+        ($latestSummaryHelperRecoveryMechanism -eq 'none' -or
+            $latestSummaryHelperRecoveryMechanism -eq '(none)' -or
+            $latestSummaryHelperRecoveryMechanism -eq '(missing)' -or
+            [string]::IsNullOrWhiteSpace($latestSummaryHelperRecoveryMechanism)) -and
+        $latestHelperRecoveryWindowActive -le 0 -and
+        $latestHelperPreCandidateGapTailEmittedToViewerCount -le 0 -and
+        $latestHelperActionableLateFragmentCount -le 0 -and
+        ($latestHelperVisibleApplyRatio -lt 0 -or $latestHelperVisibleApplyRatio -ge 0.98)
+
+    if ($latestSummaryHelperRecoveryResolved) {
+        $resolvedHealthHelperSessionPhase = 'visible_stable'
+        $resolvedHealthHelperRecoveryMechanism = 'none'
+        $resolvedHealthRecoveryActive = 0
+        $resolvedHealthBaselineEstablished = [Math]::Max($resolvedHealthBaselineEstablished, 1)
+        $resolvedHealthSteadyVisibleProgressActive = [Math]::Max($resolvedHealthSteadyVisibleProgressActive, 1)
+        if ($resolvedHealthDominantTroubleDomain -eq 'helper') {
+            $resolvedHealthDominantTroubleDomain = 'none'
+        }
+    }
+
     if ($healthSnapshotLines.Count -eq 0) {
         $syntheticHealthSnapshotLine =
             "event=screenshare_health_snapshot; sender_operating_state=$resolvedHealthSenderOperatingState; sender_guard_state=$resolvedHealthSenderGuardState; helper_session_phase=$resolvedHealthHelperSessionPhase; helper_recovery_mechanism=$resolvedHealthHelperRecoveryMechanism; dominant_loss_class=$resolvedHealthDominantLossClass; dominant_pressure_blocker=$resolvedHealthDominantPressureBlocker; dominant_trouble_domain=$resolvedHealthDominantTroubleDomain; recovery_active=$resolvedHealthRecoveryActive; baseline_established=$resolvedHealthBaselineEstablished; steady_visible_progress_active=$resolvedHealthSteadyVisibleProgressActive"
@@ -2267,6 +2378,25 @@ function Get-SoakSummaryFromLog {
         LatestTransportIpOnlyMode = $latestTransportIpOnlyMode
         LatestLastAccessUnitKind = $latestLastAccessUnitKind
         LatestLowDelayConfigApplied = $latestLowDelayConfigApplied
+        LatestActiveEncodeTargetWidth = $latestActiveEncodeTargetWidth
+        LatestActiveEncodeTargetHeight = $latestActiveEncodeTargetHeight
+        LatestActiveEncodeTargetBitrate = $latestActiveEncodeTargetBitrate
+        LatestActiveEncodeTargetFps = $latestActiveEncodeTargetFps
+        LatestEncoderProfile = $latestEncoderProfile
+        LatestSenderFreshnessMode = $latestSenderFreshnessMode
+        LatestCaptureScale = if ($latestCaptureScale -ge 0) { [math]::Round($latestCaptureScale, 3) } else { -1 }
+        LatestEffectiveQualityPreset = $latestEffectiveQualityPreset
+        LatestLastEncodeDurationMs = $latestLastEncodeDurationMs
+        LatestLastPreprocessDurationMs = $latestLastPreprocessDurationMs
+        LatestHelperSurfaceInterpolationMode = $latestHelperSurfaceInterpolationMode
+        LatestHelperSurfaceFrameWidth = $latestHelperSurfaceFrameWidth
+        LatestHelperSurfaceFrameHeight = $latestHelperSurfaceFrameHeight
+        LatestHelperSurfaceViewportWidth = $latestHelperSurfaceViewportWidth
+        LatestHelperSurfaceViewportHeight = $latestHelperSurfaceViewportHeight
+        LatestHelperSurfaceRenderScaling = if ($latestHelperSurfaceRenderScaling -ge 0) { [math]::Round($latestHelperSurfaceRenderScaling, 3) } else { -1 }
+        LatestHelperSurfaceDisplayedWidthPx = if ($latestHelperSurfaceDisplayedWidthPx -ge 0) { [math]::Round($latestHelperSurfaceDisplayedWidthPx, 2) } else { -1 }
+        LatestHelperSurfaceDisplayedHeightPx = if ($latestHelperSurfaceDisplayedHeightPx -ge 0) { [math]::Round($latestHelperSurfaceDisplayedHeightPx, 2) } else { -1 }
+        LatestHelperSurfaceScaleRatio = if ($latestHelperSurfaceScaleRatio -ge 0) { [math]::Round($latestHelperSurfaceScaleRatio, 3) } else { -1 }
         LatestHelperFramesCompleted = $latestHelperFramesCompleted
         LatestHelperFramesEnqueuedForDecode = $latestHelperFramesEnqueuedForDecode
         LatestHelperFramesDroppedBeforeDecode = $latestHelperFramesDroppedBeforeDecode
@@ -2729,6 +2859,9 @@ function Get-SoakSummaryFromLog {
         LatestBridgeTransportHealthLatestDisconnectReason = $latestBridgeTransportHealthLatestDisconnectReason
         LatestBridgeTransportHealthSampleWindowMs = $latestBridgeTransportHealthSampleWindowMs
         LatestBridgeTransportHealthUniqueSelectedRpcCount = $latestBridgeTransportHealthUniqueSelectedRpcCount
+        LatestBridgeTransportHealthControlSubClients = $latestBridgeTransportHealthControlSubClients
+        LatestBridgeTransportHealthMediaSubClients = $latestBridgeTransportHealthMediaSubClients
+        LatestBridgeTransportHealthBulkSubClients = $latestBridgeTransportHealthBulkSubClients
         HelperQualitySummaryLines = @($helperQualitySummaryLines.ToArray())
         HelperUpstreamLatencySummaryLines = @($helperUpstreamLatencySummaryLines.ToArray())
         HelperReadyPathSummaryLines = @($helperReadyPathSummaryLines.ToArray())
@@ -2750,6 +2883,8 @@ function Get-SoakSummaryFromLog {
         HelperPressureSummaryLines = @($helperPressureSummaryLines.ToArray())
         HealthSnapshotLines = @($healthSnapshotLines.ToArray())
         ReducedPromotionSummaryLines = @($reducedPromotionSummaryLines.ToArray())
+        FreshnessSummaryLines = @($freshnessSummaryLines.ToArray())
+        SurfaceInterpolationLines = @($surfaceInterpolationLines.ToArray())
         LogPath = $logPath
     }
 }

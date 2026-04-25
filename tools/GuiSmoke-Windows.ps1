@@ -1722,6 +1722,61 @@ function Test-ConnectionFailedSurface {
     return [string]::Equals($status, 'Connection failed', [System.StringComparison]::Ordinal)
 }
 
+function Format-ConnectionDiagnosticText {
+    param([AllowNull()][string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return '(none)'
+    }
+
+    return (($Text -replace '\s+', ' ').Trim() -replace ';', ',')
+}
+
+function Format-BannerDiagnosticText {
+    param([AllowNull()]$Bundle)
+
+    if ($null -eq $Bundle -or -not $Bundle.HasBanner) {
+        return '(none)'
+    }
+
+    $parts = @(
+        Format-ConnectionDiagnosticText -Text ([string]$Bundle.Title),
+        Format-ConnectionDiagnosticText -Text ([string]$Bundle.Message),
+        Format-ConnectionDiagnosticText -Text ([string]$Bundle.RetryCountdown)
+    ) | Where-Object { -not [string]::Equals($_, '(none)', [System.StringComparison]::Ordinal) }
+
+    if ($parts.Count -eq 0) {
+        return '(visible)'
+    }
+
+    return ($parts -join ' | ')
+}
+
+function Get-ConnectionWaitDiagnosticContext {
+    param([Parameter(Mandatory = $true)]$Context)
+
+    $helperStatus = '(unavailable)'
+    $helpeeStatus = '(unavailable)'
+    $helperBanner = '(unavailable)'
+    $helpeeBanner = '(unavailable)'
+
+    try {
+        $helperStatus = Format-ConnectionDiagnosticText -Text (Get-SessionHeaderStatusValue -Window $Context.HelperWindow)
+        $helperBanner = Format-BannerDiagnosticText -Bundle (Get-BannerTextBundle -Window $Context.HelperWindow)
+    } catch {}
+
+    try {
+        $helpeeStatus = Format-ConnectionDiagnosticText -Text (Get-SessionHeaderStatusValue -Window $Context.HelpeeWindow)
+        $helpeeBanner = Format-BannerDiagnosticText -Bundle (Get-BannerTextBundle -Window $Context.HelpeeWindow)
+    } catch {}
+
+    return ("helper_status='{0}'; helper_banner='{1}'; helpee_status='{2}'; helpee_banner='{3}'" -f `
+        $helperStatus,
+        $helperBanner,
+        $helpeeStatus,
+        $helpeeBanner)
+}
+
 function Reenter-RoleFlowAfterConnectionFailure {
     param(
         [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
@@ -2271,7 +2326,7 @@ function Wait-HelperAcceptRequestOrExit {
         Assert-ProcessStillRunning -Process $Context.HelpeeProc -Label 'Helpee'
 
         if (Test-ConnectionFailedSurface -Window $Context.HelperWindow) {
-            throw "Helper reached Connection failed before showing an incoming request."
+            throw "Helper reached Connection failed before showing an incoming request. $(Get-ConnectionWaitDiagnosticContext -Context $Context)"
         }
 
         $accept = Find-VisibleByAutomationId -Root $Context.HelperWindow -AutomationId 'Helper.AcceptHelpRequest'
@@ -2289,7 +2344,7 @@ function Wait-HelperAcceptRequestOrExit {
         Start-Sleep -Milliseconds 250
     }
 
-    throw "Timed out waiting for helper incoming request acceptance UI."
+    throw "Timed out waiting for helper incoming request acceptance UI. $(Get-ConnectionWaitDiagnosticContext -Context $Context)"
 }
 
 function Wait-HelpeeAllowOrExit {
@@ -2304,11 +2359,11 @@ function Wait-HelpeeAllowOrExit {
         Assert-ProcessStillRunning -Process $Context.HelpeeProc -Label 'Helpee'
 
         if (Test-ConnectionFailedSurface -Window $Context.HelperWindow) {
-            throw "Helper reached Connection failed before helpee approval."
+            throw "Helper reached Connection failed before helpee approval. $(Get-ConnectionWaitDiagnosticContext -Context $Context)"
         }
 
         if (Test-ConnectionFailedSurface -Window $Context.HelpeeWindow) {
-            throw "Helpee reached Connection failed before approval."
+            throw "Helpee reached Connection failed before approval. $(Get-ConnectionWaitDiagnosticContext -Context $Context)"
         }
 
         $allow = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'Helpee.Allow'
@@ -2326,7 +2381,7 @@ function Wait-HelpeeAllowOrExit {
         Start-Sleep -Milliseconds 250
     }
 
-    throw "Timed out waiting for helpee Allow approval UI."
+    throw "Timed out waiting for helpee Allow approval UI. $(Get-ConnectionWaitDiagnosticContext -Context $Context)"
 }
 
 function Wait-ConnectedChatVisibleProcessAware {
@@ -2341,11 +2396,11 @@ function Wait-ConnectedChatVisibleProcessAware {
         Assert-ProcessStillRunning -Process $Context.HelpeeProc -Label 'Helpee'
 
         if (Test-ConnectionFailedSurface -Window $Context.HelperWindow) {
-            throw "Helper reached Connection failed before connected chat became visible."
+            throw "Helper reached Connection failed before connected chat became visible. $(Get-ConnectionWaitDiagnosticContext -Context $Context)"
         }
 
         if (Test-ConnectionFailedSurface -Window $Context.HelpeeWindow) {
-            throw "Helpee reached Connection failed before connected chat became visible."
+            throw "Helpee reached Connection failed before connected chat became visible. $(Get-ConnectionWaitDiagnosticContext -Context $Context)"
         }
 
         $helpeeSend = Find-VisibleByAutomationIdOrName -Root $Context.HelpeeWindow -AutomationId 'Chat.Send' -FallbackName 'Send' -FallbackControlType ([System.Windows.Automation.ControlType]::Button)
@@ -2362,7 +2417,7 @@ function Wait-ConnectedChatVisibleProcessAware {
         Start-Sleep -Milliseconds 250
     }
 
-    throw "Timed out waiting for connected chat on both helper and helpee."
+    throw "Timed out waiting for connected chat on both helper and helpee. $(Get-ConnectionWaitDiagnosticContext -Context $Context)"
 }
 
 function Helper-SendChatMessage {

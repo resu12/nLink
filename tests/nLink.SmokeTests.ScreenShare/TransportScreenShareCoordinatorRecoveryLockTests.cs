@@ -98,7 +98,8 @@ public sealed class TransportScreenShareCoordinatorRecoveryLockTests : ScreenSha
         Assert.Equal(5, fakeSource.LastCaptureFrameRateHint);
         Assert.Equal(1L, GetPrivateFieldValue<long>(coordinator, "recoveryLockAllowedSameTuningModeChangeCount"));
         Assert.Equal("catch_up->reduced", GetPrivateFieldValue<string>(coordinator, "lastRecoveryLockAllowedSameTuningModeChange"));
-        Assert.True(GetPrivateFieldValue<bool>(coordinator, "recoveryLockActive"));
+        Assert.False(GetPrivateFieldValue<bool>(coordinator, "recoveryLockActive"));
+        Assert.Equal("acknowledged_visible_helper_proof", GetPrivateFieldValue<string>(coordinator, "recoveryLockLastClearReason"));
     }
 
     [Fact]
@@ -194,7 +195,7 @@ public sealed class TransportScreenShareCoordinatorRecoveryLockTests : ScreenSha
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task TransportScreenShareCoordinator_AcknowledgedHelperProof_DoesNotClearRecoveryLockWithoutReceipt()
+    public async Task TransportScreenShareCoordinator_AcknowledgedVisibleProof_ClearsRecoveryLockWithoutReceipt()
     {
         var fakeSource = new AdaptiveFakeScreenCaptureSource();
         var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 4, 21, 9, 0, 0, TimeSpan.Zero));
@@ -219,11 +220,127 @@ public sealed class TransportScreenShareCoordinatorRecoveryLockTests : ScreenSha
         Assert.Equal(-1L, GetPrivateFieldValue<long>(coordinator, "satisfiedRecoveryFloorFrameId"));
         Assert.Equal(string.Empty, GetPrivateFieldValue<string>(coordinator, "satisfiedRecoveryFloorSource"));
         coordinator.SetRemotePressureState(ScreenShareRemotePressureMode.None, ScreenSharePressureProtocol.PressureReasonContinuityLoss, observedFrameAgeMs: 0, recentStaleDrops: 0, currentEpochWarmupActive: false, currentEpochApplyCount: 1, currentEpochNeedMoreInputCount: 0, lastVisibleApplyFrameId: acknowledgedReleaseFloorFrameId, visibleHeadFrameId: acknowledgedReleaseFloorFrameId, appliedHeadFrameId: acknowledgedReleaseFloorFrameId, steadyVisibleProgressActive: true, stableVisibleHeadFrameId: acknowledgedReleaseFloorFrameId, framesAppliedSinceLastGap: 1, visibleRecoveryFloorFrameId: acknowledgedReleaseFloorFrameId, currentEpochRecoveryKeyframeApplyCount: 1);
-        Assert.True(GetPrivateFieldValue<bool>(coordinator, "recoveryLockActive"));
-        Assert.Equal(0L, GetPrivateFieldValue<long>(coordinator, "recoveryLockClearedByAcknowledgedProofCount"));
+        Assert.False(GetPrivateFieldValue<bool>(coordinator, "recoveryLockActive"));
+        Assert.Equal(1L, GetPrivateFieldValue<long>(coordinator, "recoveryLockClearedByAcknowledgedProofCount"));
+        Assert.Equal(1L, GetPrivateFieldValue<long>(coordinator, "recoveryLockClearedByVisibleProofCount"));
+        Assert.Equal("acknowledged_visible_helper_proof", GetPrivateFieldValue<string>(coordinator, "recoveryLockLastClearReason"));
+        Assert.Equal(1L, GetPrivateFieldValue<long>(coordinator, "recoveryBurstCompletedCount"));
+        Assert.Equal("visible_recovery_floor", GetPrivateFieldValue<string>(coordinator, "recoveryAckSource"));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_EpochlessContinuityProof_DoesNotStartRecoveryLock()
+    {
+        var fakeSource = new AdaptiveFakeScreenCaptureSource();
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 4, 24, 11, 0, 0, TimeSpan.Zero));
+        await using var coordinator = new TransportScreenShareCoordinator(captureSourceFactory: () => fakeSource, sendPayloadAsync: (_, _) => Task.CompletedTask, clock: clock);
+        await AwaitCompletesAsync(coordinator.StartAsync("session-epochless-continuity-proof", CancellationToken.None), TimeSpan.FromSeconds(2), "epochless continuity proof start");
+        DisableStartupWarmupForCoordinatorOnly(coordinator);
+        fakeSource.SetFreshnessMetrics(new ScreenCaptureFreshnessMetrics(CurrentStreamEpoch: 0, LastEncodeDurationMs: 18, LastEncodeTotalDurationMs: 32));
+        coordinator.SetRemotePressureState(ScreenShareRemotePressureMode.None, ScreenSharePressureProtocol.PressureReasonContinuityLoss, observedFrameAgeMs: 0, recentStaleDrops: 0, currentEpochWarmupActive: false, currentEpochApplyCount: 4, currentEpochNeedMoreInputCount: 0, lastVisibleApplyFrameId: 3, visibleHeadFrameId: 3, appliedHeadFrameId: 3, steadyVisibleProgressActive: true, stableVisibleHeadFrameId: 3, framesAppliedSinceLastGap: 4);
+        Assert.False(GetPrivateFieldValue<bool>(coordinator, "recoveryLockActive"));
+        Assert.Equal(0L, GetPrivateFieldValue<long>(coordinator, "recoveryLockStreamEpoch"));
         Assert.Equal(0L, GetPrivateFieldValue<long>(coordinator, "recoveryLockClearedByVisibleProofCount"));
-        coordinator.SetRemotePressureState(ScreenShareRemotePressureMode.None, ScreenSharePressureProtocol.PressureReasonContinuityLoss, observedFrameAgeMs: 0, recentStaleDrops: 0, currentEpochWarmupActive: false, currentEpochApplyCount: 1, currentEpochNeedMoreInputCount: 0, lastVisibleApplyFrameId: acknowledgedReleaseFloorFrameId, visibleHeadFrameId: acknowledgedReleaseFloorFrameId, appliedHeadFrameId: acknowledgedReleaseFloorFrameId, steadyVisibleProgressActive: true, stableVisibleHeadFrameId: acknowledgedReleaseFloorFrameId, framesAppliedSinceLastGap: 1, visibleRecoveryFloorFrameId: acknowledgedReleaseFloorFrameId, currentEpochRecoveryKeyframeApplyCount: 1);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_AppliedOnlyContinuityProof_DoesNotClearOrphanRecoveryLock()
+    {
+        var fakeSource = new AdaptiveFakeScreenCaptureSource();
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 4, 24, 11, 5, 0, TimeSpan.Zero));
+        await using var coordinator = new TransportScreenShareCoordinator(captureSourceFactory: () => fakeSource, sendPayloadAsync: (_, _) => Task.CompletedTask, clock: clock);
+        await AwaitCompletesAsync(coordinator.StartAsync("session-applied-only-orphan-lock", CancellationToken.None), TimeSpan.FromSeconds(2), "applied-only orphan lock start");
+        DisableStartupWarmupForCoordinatorOnly(coordinator);
+        fakeSource.SetFreshnessMetrics(new ScreenCaptureFreshnessMetrics(CurrentStreamEpoch: 81, LastEncodeDurationMs: 18, LastEncodeTotalDurationMs: 32));
+        SetPrivateFieldValue(coordinator, "recoveryLockActive", true);
+        SetPrivateFieldValue(coordinator, "recoveryLockStreamEpoch", 81L);
+        SetPrivateFieldValue(coordinator, "recoveryLockStartedUtc", clock.UtcNow);
+        SetPrivateFieldValue(coordinator, "recoveryLockReason", ScreenSharePressureProtocol.PressureReasonContinuityLoss);
+        coordinator.SetRemotePressureState(ScreenShareRemotePressureMode.None, ScreenSharePressureProtocol.PressureReasonContinuityLoss, observedFrameAgeMs: 0, recentStaleDrops: 0, currentEpochWarmupActive: false, currentEpochApplyCount: 8, currentEpochNeedMoreInputCount: 0, lastVisibleApplyFrameId: 8, appliedHeadFrameId: 8, framesAppliedSinceLastGap: 8);
         Assert.True(GetPrivateFieldValue<bool>(coordinator, "recoveryLockActive"));
+        Assert.Equal(0L, GetPrivateFieldValue<long>(coordinator, "recoveryLockClearedByVisibleProofCount"));
+        Assert.Equal(-1L, GetPrivateFieldValue<long>(coordinator, "satisfiedRecoveryFloorFrameId"));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_StableVisibleContinuityProof_ClearsOrphanRecoveryLockAndSuppressesImmediateHighFrameAge()
+    {
+        var fakeSource = new AdaptiveFakeScreenCaptureSource();
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 4, 24, 11, 10, 0, TimeSpan.Zero));
+        await using var coordinator = new TransportScreenShareCoordinator(captureSourceFactory: () => fakeSource, sendPayloadAsync: (_, _) => Task.CompletedTask, clock: clock);
+        await AwaitCompletesAsync(coordinator.StartAsync("session-stable-visible-orphan-lock", CancellationToken.None), TimeSpan.FromSeconds(2), "stable-visible orphan lock start");
+        DisableStartupWarmupForCoordinatorOnly(coordinator);
+        fakeSource.SetFreshnessMetrics(new ScreenCaptureFreshnessMetrics(CurrentStreamEpoch: 82, LastEncodeDurationMs: 18, LastEncodeTotalDurationMs: 32));
+        SetPrivateFieldValue(coordinator, "recoveryLockActive", true);
+        SetPrivateFieldValue(coordinator, "recoveryLockStreamEpoch", 82L);
+        SetPrivateFieldValue(coordinator, "recoveryLockStartedUtc", clock.UtcNow);
+        SetPrivateFieldValue(coordinator, "recoveryLockReason", ScreenSharePressureProtocol.PressureReasonContinuityLoss);
+        coordinator.SetRemotePressureState(ScreenShareRemotePressureMode.None, ScreenSharePressureProtocol.PressureReasonContinuityLoss, observedFrameAgeMs: 0, recentStaleDrops: 0, currentEpochWarmupActive: false, currentEpochApplyCount: 8, currentEpochNeedMoreInputCount: 0, lastVisibleApplyFrameId: 8, visibleHeadFrameId: 8, appliedHeadFrameId: 8, steadyVisibleProgressActive: true, stableVisibleHeadFrameId: 8, framesAppliedSinceLastGap: 8);
+        Assert.False(GetPrivateFieldValue<bool>(coordinator, "recoveryLockActive"));
+        Assert.Equal(1L, GetPrivateFieldValue<long>(coordinator, "recoveryLockClearedByVisibleProofCount"));
+        Assert.Equal("acknowledged_visible_helper_proof", GetPrivateFieldValue<string>(coordinator, "recoveryLockLastClearReason"));
+        Assert.Equal(8L, GetPrivateFieldValue<long>(coordinator, "satisfiedRecoveryFloorFrameId"));
+        Assert.Equal("stable_visible_head", GetPrivateFieldValue<string>(coordinator, "satisfiedRecoveryFloorSource"));
+        Assert.Equal(82L, GetPrivateFieldValue<long>(coordinator, "postRecoveryAgeGraceEpoch"));
+
+        clock.Advance(TimeSpan.FromMilliseconds(120));
+        coordinator.SetRemotePressureState(ScreenShareRemotePressureMode.ReduceFps, ScreenSharePressureProtocol.PressureReasonHighFrameAge, observedFrameAgeMs: 900, recentStaleDrops: 0, currentEpochWarmupActive: false, currentEpochApplyCount: 9, currentEpochNeedMoreInputCount: 0, lastVisibleApplyFrameId: 9, visibleHeadFrameId: 9, appliedHeadFrameId: 9, steadyVisibleProgressActive: true, stableVisibleHeadFrameId: 9, framesAppliedSinceLastGap: 9);
+        Assert.Equal(ScreenShareRemotePressureMode.None, GetPrivateFieldValue<ScreenShareRemotePressureMode>(coordinator, "remotePressureMode"));
+        Assert.Equal(ScreenSharePressureProtocol.PressureReasonHealthy, GetPrivateFieldValue<string>(coordinator, "remotePressureReason"));
+        Assert.Equal(1L, GetPrivateFieldValue<long>(coordinator, "postRecoveryAgeGraceSuppressedCount"));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_HealthyVisibleProof_ClearsOrphanRecoveryLock()
+    {
+        var fakeSource = new AdaptiveFakeScreenCaptureSource();
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 4, 25, 8, 0, 0, TimeSpan.Zero));
+        await using var coordinator = new TransportScreenShareCoordinator(captureSourceFactory: () => fakeSource, sendPayloadAsync: (_, _) => Task.CompletedTask, clock: clock);
+        await AwaitCompletesAsync(coordinator.StartAsync("session-healthy-visible-orphan-lock", CancellationToken.None), TimeSpan.FromSeconds(2), "healthy visible orphan lock start");
+        DisableStartupWarmupForCoordinatorOnly(coordinator);
+        fakeSource.SetFreshnessMetrics(new ScreenCaptureFreshnessMetrics(CurrentStreamEpoch: 83, LastEncodeDurationMs: 18, LastEncodeTotalDurationMs: 32));
+        SetPrivateFieldValue(coordinator, "recoveryLockActive", true);
+        SetPrivateFieldValue(coordinator, "recoveryLockStreamEpoch", 83L);
+        SetPrivateFieldValue(coordinator, "recoveryLockStartedUtc", clock.UtcNow);
+        SetPrivateFieldValue(coordinator, "recoveryLockReason", ScreenSharePressureProtocol.PressureReasonContinuityLoss);
+
+        coordinator.SetRemotePressureState(ScreenShareRemotePressureMode.None, ScreenSharePressureProtocol.PressureReasonHealthy, observedFrameAgeMs: 0, recentStaleDrops: 0, currentEpochWarmupActive: false, currentEpochApplyCount: 8, currentEpochNeedMoreInputCount: 0, lastVisibleApplyFrameId: 8, visibleHeadFrameId: 8, appliedHeadFrameId: 8, steadyVisibleProgressActive: true, stableVisibleHeadFrameId: 8, framesAppliedSinceLastGap: 8);
+
+        Assert.False(GetPrivateFieldValue<bool>(coordinator, "recoveryLockActive"));
+        Assert.Equal(1L, GetPrivateFieldValue<long>(coordinator, "recoveryLockClearedByVisibleProofCount"));
+        Assert.Equal("acknowledged_visible_helper_proof", GetPrivateFieldValue<string>(coordinator, "recoveryLockLastClearReason"));
+        Assert.Equal(8L, GetPrivateFieldValue<long>(coordinator, "satisfiedRecoveryFloorFrameId"));
+        Assert.Equal("stable_visible_head", GetPrivateFieldValue<string>(coordinator, "satisfiedRecoveryFloorSource"));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_HealthyVisibleProof_ClearsOlderEpochRecoveryLock()
+    {
+        var fakeSource = new AdaptiveFakeScreenCaptureSource();
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 4, 25, 8, 5, 0, TimeSpan.Zero));
+        await using var coordinator = new TransportScreenShareCoordinator(captureSourceFactory: () => fakeSource, sendPayloadAsync: (_, _) => Task.CompletedTask, clock: clock);
+        await AwaitCompletesAsync(coordinator.StartAsync("session-healthy-visible-stale-lock", CancellationToken.None), TimeSpan.FromSeconds(2), "healthy visible stale lock start");
+        DisableStartupWarmupForCoordinatorOnly(coordinator);
+        fakeSource.SetFreshnessMetrics(new ScreenCaptureFreshnessMetrics(CurrentStreamEpoch: 84, LastEncodeDurationMs: 18, LastEncodeTotalDurationMs: 32));
+        SetPrivateFieldValue(coordinator, "recoveryLockActive", true);
+        SetPrivateFieldValue(coordinator, "recoveryLockStreamEpoch", 82L);
+        SetPrivateFieldValue(coordinator, "recoveryLockStartedUtc", clock.UtcNow);
+        SetPrivateFieldValue(coordinator, "recoveryLockReason", ScreenSharePressureProtocol.PressureReasonContinuityLoss);
+
+        coordinator.SetRemotePressureState(ScreenShareRemotePressureMode.None, ScreenSharePressureProtocol.PressureReasonHealthy, observedFrameAgeMs: 0, recentStaleDrops: 0, currentEpochWarmupActive: false, currentEpochApplyCount: 8, currentEpochNeedMoreInputCount: 0, lastVisibleApplyFrameId: 8, visibleHeadFrameId: 8, appliedHeadFrameId: 8, steadyVisibleProgressActive: true, stableVisibleHeadFrameId: 8, framesAppliedSinceLastGap: 8);
+
+        Assert.False(GetPrivateFieldValue<bool>(coordinator, "recoveryLockActive"));
+        Assert.Equal(0L, GetPrivateFieldValue<long>(coordinator, "recoveryLockStreamEpoch"));
+        Assert.Equal(1L, GetPrivateFieldValue<long>(coordinator, "recoveryLockClearedByVisibleProofCount"));
+        Assert.Equal("acknowledged_visible_helper_proof", GetPrivateFieldValue<string>(coordinator, "recoveryLockLastClearReason"));
+        Assert.Equal(84L, GetPrivateFieldValue<long>(coordinator, "satisfiedRecoveryFloorEpoch"));
+        Assert.Equal(8L, GetPrivateFieldValue<long>(coordinator, "satisfiedRecoveryFloorFrameId"));
+        Assert.Equal("stable_visible_head", GetPrivateFieldValue<string>(coordinator, "satisfiedRecoveryFloorSource"));
     }
 
     [Fact]

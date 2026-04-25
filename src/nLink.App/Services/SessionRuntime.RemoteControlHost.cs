@@ -3242,6 +3242,32 @@ public sealed partial class SessionRuntime
         }
 
         var nowUtc = nowProvider();
+        var helperPressureSnapshot = GetHelperRemoteScreenSharePressureSnapshot();
+        var transportBackpressureProbe = transport as IScreenShareTransportBackpressureProbe;
+        var transportRecentDropCount = Math.Max(0, transportBackpressureProbe?.ScreenShareTransportRecentDropCount ?? 0);
+        var recentHealthIssueCount = transportBackpressureProbe?.ScreenShareTransportRecentHealthIssueCount ?? 0;
+        var hasTransportQueuePressure =
+            transportBackpressureProbe?.IsScreenShareTransportCongested == true ||
+            transportBackpressureProbe?.IsScreenShareTransportSeverelyCongested == true ||
+            Math.Max(0, transportBackpressureProbe?.ScreenShareTransportQueueDepth ?? 0) > 0 ||
+            transportRecentDropCount > 0;
+        var hasRealTransportOrBridgePressure =
+            hasTransportQueuePressure ||
+            recentHealthIssueCount > 0 ||
+            transportBackpressureProbe?.IsScreenShareTransportHealthSeverelyDegraded == true;
+        if (!hasRealTransportOrBridgePressure &&
+            ShouldSuppressSatisfiedFloorContinuityLoss(
+                helperPressureSnapshot,
+                streamEpoch,
+                expectedNextFrameId,
+                receivedFrameId,
+                lastCleanFrameId))
+        {
+            healthyScreenSharePressureIntervals = Math.Max(healthyScreenSharePressureIntervals, 4);
+            MaybeSendScreenSharePressureState();
+            return;
+        }
+
         lock (helperRemoteScreenSharePressureGate)
         {
             EnsureHelperRemoteScreenSharePressureEpoch_NoLock(streamEpoch, nowUtc);
@@ -3283,6 +3309,53 @@ public sealed partial class SessionRuntime
             expectedNextFrameId,
             receivedFrameId,
             lastCleanFrameId);
+    }
+
+    private static bool ShouldSuppressSatisfiedFloorContinuityLoss(
+        HelperRemoteScreenSharePressureSnapshot helperPressureSnapshot,
+        long streamEpoch,
+        long expectedNextFrameId,
+        long receivedFrameId,
+        long lastCleanFrameId)
+    {
+        if (streamEpoch <= 0 ||
+            helperPressureSnapshot.CurrentEpoch != streamEpoch ||
+            helperPressureSnapshot.CurrentEpochRecoveryActive ||
+            helperPressureSnapshot.CurrentEpochStaleDropCount > 0)
+        {
+            return false;
+        }
+
+        var visibleProgressWindowMs = (long)HelperRemoteScreenSharePostRecoveryVisibleProgressWindow.TotalMilliseconds;
+        if (!helperPressureSnapshot.HasAppliedFrame ||
+            helperPressureSnapshot.LastVisibleApplyFrameId < 0 ||
+            helperPressureSnapshot.FramesAppliedSinceLastGap < 2 ||
+            helperPressureSnapshot.ProgressStallMs < 0 ||
+            helperPressureSnapshot.ProgressStallMs > visibleProgressWindowMs)
+        {
+            return false;
+        }
+
+        var visibleProofHead = GetLatestHelperVisibleProofHeadFrameId(
+            helperPressureSnapshot.CurrentEpochProvenHeadFrameId >= 0
+                ? helperPressureSnapshot.CurrentEpochProvenHeadFrameId
+                : helperPressureSnapshot.VisibleHeadFrameId,
+            helperPressureSnapshot.LastVisibleApplyFrameId);
+        var reportedContinuityBoundary = Math.Max(
+            expectedNextFrameId,
+            Math.Max(receivedFrameId, lastCleanFrameId));
+        var recoveryFloorSatisfied =
+            helperPressureSnapshot.VisibleRecoveryFloorFrameId >= 0 &&
+            visibleProofHead >= helperPressureSnapshot.VisibleRecoveryFloorFrameId &&
+            (helperPressureSnapshot.CurrentEpochProgressProven ||
+             helperPressureSnapshot.DerivedPostRecoveryHealthyActive) &&
+            (string.Equals(helperPressureSnapshot.CurrentEpochProgressProofSource, "recovery_floor_plus_head", StringComparison.Ordinal) ||
+             string.Equals(helperPressureSnapshot.DerivedPostRecoveryHealthySource, "recovery_floor_plus_head", StringComparison.Ordinal) ||
+             visibleProofHead > helperPressureSnapshot.VisibleRecoveryFloorFrameId);
+
+        return recoveryFloorSatisfied &&
+               reportedContinuityBoundary >= 0 &&
+               visibleProofHead >= reportedContinuityBoundary;
     }
 
     internal void ReportHelperRemoteScreenShareRecoveryKeyframeApplied(long ageMs, long streamEpoch)

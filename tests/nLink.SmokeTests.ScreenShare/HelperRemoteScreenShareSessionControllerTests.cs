@@ -30,7 +30,7 @@ public sealed class HelperRemoteScreenShareSessionControllerTests
 
         Assert.Equal("waiting_for_recovery_keyframe", rejectionReason);
         Assert.Equal(1, context.FramesDroppedWaitingForRecoveryKeyframeCount);
-        Assert.Equal(1, context.PreCandidateGapTailEmittedCount);
+        Assert.Equal(0, context.PreCandidateGapTailEmittedCount);
         Assert.Equal(1, context.FramesDroppedForFrameGapCount);
         Assert.Equal("waiting_for_recovery_keyframe", context.LastObservedViewerRejectionReason);
     }
@@ -60,6 +60,46 @@ public sealed class HelperRemoteScreenShareSessionControllerTests
         Assert.False(controller.FollowerState.ReservedApplyActive);
         Assert.Equal(0, controller.FollowerState.PostRecoveryReservedAppliesRemaining);
         Assert.Equal(0, controller.FollowerState.PostRecoveryStabilizationEpoch);
+    }
+
+    [Fact]
+    public void CompletePostRecoveryFollowerWindow_ClearsFollowerState_AndDeferredCandidates()
+    {
+        var context = new FakeHelperRemoteScreenShareSessionContext();
+        var controller = new HelperRemoteScreenShareSessionController(context);
+        controller.FollowerState.ReservedApplyActive = true;
+        controller.FollowerState.ReservedApplyStreamEpoch = 8;
+        controller.FollowerState.ReservedApplyFrameId = 24;
+        controller.FollowerState.StartupKeyframePendingVisibleApplyActive = true;
+        controller.FollowerState.StartupKeyframePendingVisibleApplyStreamEpoch = 8;
+        controller.FollowerState.StartupKeyframePendingVisibleApplyFrameId = 24;
+        controller.FollowerState.PostRecoveryStabilizationEpoch = 8;
+        controller.FollowerState.PostRecoveryReservedAppliesRemaining = 1;
+        controller.FollowerState.ExpiredRecoveryRunwayActive = true;
+        controller.FollowerState.ExpiredRecoveryRunwayEpoch = 8;
+        controller.FollowerState.PendingRecoveryRunwayAbortActive = true;
+        controller.FollowerState.PendingRecoveryRunwayAbortEpoch = 8;
+        controller.FollowerState.DeferredPostRecoveryCandidates[25] = new DeferredHelperRemoteFrameCandidate(
+            SessionId: "session-b",
+            Encoding: "h264",
+            EncodedFrameBytes: new byte[] { 25 },
+            CapturedTsUtcMs: 0,
+            StreamEpoch: 8,
+            FrameId: 25,
+            IsKeyFrame: false,
+            ArrivalSequence: 1,
+            RecoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
+
+        var cleared = controller.CompletePostRecoveryFollowerWindow(streamEpoch: 8);
+
+        Assert.Equal(1, cleared);
+        Assert.False(controller.FollowerState.ReservedApplyActive);
+        Assert.False(controller.FollowerState.StartupKeyframePendingVisibleApplyActive);
+        Assert.Equal(0, controller.FollowerState.PostRecoveryReservedAppliesRemaining);
+        Assert.Equal(0, controller.FollowerState.PostRecoveryStabilizationEpoch);
+        Assert.False(controller.FollowerState.ExpiredRecoveryRunwayActive);
+        Assert.False(controller.FollowerState.PendingRecoveryRunwayAbortActive);
+        Assert.Empty(controller.FollowerState.DeferredPostRecoveryCandidates);
     }
 
     [Fact]
@@ -111,6 +151,109 @@ public sealed class HelperRemoteScreenShareSessionControllerTests
         Assert.True(result.Succeeded);
         Assert.True(result.HoldMs > 0);
         Assert.Equal(result.HoldMs, controller.VisibleProgressState.LastRecoveryProgressCorridorHoldMs);
+        Assert.False(controller.FollowerState.RecoveryProgressCorridorActive);
+    }
+
+    [Fact]
+    public void ReleaseDeferredPostRecoveryCandidate_WaitsForMissingInWindowFollower()
+    {
+        var context = new FakeHelperRemoteScreenShareSessionContext();
+        var controller = new HelperRemoteScreenShareSessionController(context);
+        controller.StartRecoveryProgressCorridor(
+            streamEpoch: 9,
+            frameId: 100,
+            nowUtc: DateTimeOffset.UtcNow.AddMilliseconds(-90));
+        controller.FollowerState.DeferredPostRecoveryCandidates[102] = CreateDeferredFollower(streamEpoch: 9, frameId: 102);
+
+        var waitingResult = controller.ReleaseDeferredPostRecoveryCandidateIfMatch(
+            streamEpoch: 9,
+            previousVisibleFrameId: 100,
+            maximumFollowerWindowSize: 2);
+
+        Assert.False(waitingResult.HasCandidateToEnqueue);
+        Assert.Empty(waitingResult.RejectedCandidates);
+        Assert.False(waitingResult.CorridorAbort.Aborted);
+        Assert.True(controller.FollowerState.RecoveryProgressCorridorActive);
+        Assert.True(controller.FollowerState.DeferredPostRecoveryCandidates.ContainsKey(102));
+
+        controller.FollowerState.DeferredPostRecoveryCandidates[101] = CreateDeferredFollower(streamEpoch: 9, frameId: 101);
+        var firstRelease = controller.ReleaseDeferredPostRecoveryCandidateIfMatch(
+            streamEpoch: 9,
+            previousVisibleFrameId: 100,
+            maximumFollowerWindowSize: 2);
+
+        Assert.True(firstRelease.HasCandidateToEnqueue);
+        Assert.Equal(101, firstRelease.CandidateToEnqueue.FrameId);
+        var firstApply = controller.ObserveRecoveryProgressCorridorApply(
+            streamEpoch: 9,
+            frameId: 101,
+            nowUtc: DateTimeOffset.UtcNow,
+            requiredContiguousFollowerApplyCount: 2);
+        Assert.True(firstApply.Applied);
+        Assert.False(firstApply.Succeeded);
+
+        var secondRelease = controller.ReleaseDeferredPostRecoveryCandidateIfMatch(
+            streamEpoch: 9,
+            previousVisibleFrameId: 101,
+            maximumFollowerWindowSize: 2);
+
+        Assert.True(secondRelease.HasCandidateToEnqueue);
+        Assert.Equal(102, secondRelease.CandidateToEnqueue.FrameId);
+        var secondApply = controller.ObserveRecoveryProgressCorridorApply(
+            streamEpoch: 9,
+            frameId: 102,
+            nowUtc: DateTimeOffset.UtcNow,
+            requiredContiguousFollowerApplyCount: 2);
+        Assert.True(secondApply.Succeeded);
+        Assert.False(controller.FollowerState.RecoveryProgressCorridorActive);
+    }
+
+    [Fact]
+    public void ReleaseDeferredPostRecoveryCandidate_TrimsStaleCandidateWithoutAbortingCorridor()
+    {
+        var context = new FakeHelperRemoteScreenShareSessionContext();
+        var controller = new HelperRemoteScreenShareSessionController(context);
+        controller.StartRecoveryProgressCorridor(
+            streamEpoch: 9,
+            frameId: 100,
+            nowUtc: DateTimeOffset.UtcNow.AddMilliseconds(-90));
+        controller.FollowerState.DeferredPostRecoveryCandidates[100] = CreateDeferredFollower(streamEpoch: 9, frameId: 100);
+        controller.FollowerState.DeferredPostRecoveryCandidates[101] = CreateDeferredFollower(streamEpoch: 9, frameId: 101);
+
+        var result = controller.ReleaseDeferredPostRecoveryCandidateIfMatch(
+            streamEpoch: 9,
+            previousVisibleFrameId: 100,
+            maximumFollowerWindowSize: 2);
+
+        Assert.True(result.HasCandidateToEnqueue);
+        Assert.Equal(101, result.CandidateToEnqueue.FrameId);
+        Assert.Single(result.RejectedCandidates);
+        Assert.Equal(100, result.RejectedCandidates[0].FrameId);
+        Assert.False(result.CorridorAbort.Aborted);
+        Assert.True(controller.FollowerState.RecoveryProgressCorridorActive);
+    }
+
+    [Fact]
+    public void ReleaseDeferredPostRecoveryCandidate_AbortsFutureTailBeyondFollowerWindow()
+    {
+        var context = new FakeHelperRemoteScreenShareSessionContext();
+        var controller = new HelperRemoteScreenShareSessionController(context);
+        controller.StartRecoveryProgressCorridor(
+            streamEpoch: 9,
+            frameId: 100,
+            nowUtc: DateTimeOffset.UtcNow.AddMilliseconds(-90));
+        controller.FollowerState.DeferredPostRecoveryCandidates[103] = CreateDeferredFollower(streamEpoch: 9, frameId: 103);
+
+        var result = controller.ReleaseDeferredPostRecoveryCandidateIfMatch(
+            streamEpoch: 9,
+            previousVisibleFrameId: 100,
+            maximumFollowerWindowSize: 2);
+
+        Assert.False(result.HasCandidateToEnqueue);
+        Assert.Single(result.RejectedCandidates);
+        Assert.Equal(103, result.RejectedCandidates[0].FrameId);
+        Assert.True(result.CorridorAbort.Aborted);
+        Assert.Equal("non_contiguous_follower", result.CorridorAbort.Reason);
         Assert.False(controller.FollowerState.RecoveryProgressCorridorActive);
     }
 
@@ -343,6 +486,20 @@ public sealed class HelperRemoteScreenShareSessionControllerTests
             DominantReassemblerRootCause: "none",
             TimelineEvents: Array.Empty<ScreenShareEpochContinuityEventSnapshot>(),
             TopLossBursts: Array.Empty<ScreenShareReassemblerLossBurstSnapshot>());
+    }
+
+    private static DeferredHelperRemoteFrameCandidate CreateDeferredFollower(long streamEpoch, long frameId)
+    {
+        return new DeferredHelperRemoteFrameCandidate(
+            SessionId: "session-b",
+            Encoding: "h264",
+            EncodedFrameBytes: new[] { (byte)Math.Max(0, Math.Min(byte.MaxValue, frameId)) },
+            CapturedTsUtcMs: 0,
+            StreamEpoch: streamEpoch,
+            FrameId: frameId,
+            IsKeyFrame: false,
+            ArrivalSequence: frameId,
+            RecoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
     }
 
     private sealed class FakeHelperRemoteScreenShareSessionContext : IHelperRemoteScreenShareSessionContext

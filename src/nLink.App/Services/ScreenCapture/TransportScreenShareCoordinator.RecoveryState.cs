@@ -1028,7 +1028,10 @@ internal sealed partial class TransportScreenShareCoordinator
 
         var visibleApplyFallbackHead = GetLatestHelperVisibleProgressFrameId_NoLock();
         if (helperCurrentEpochRecoveryKeyframeApplyCount > 0 &&
-            visibleApplyFallbackHead >= recoveryAckTargetFrameId)
+            visibleApplyFallbackHead >= recoveryAckTargetFrameId &&
+            (remoteHelperFactHealthyActive ||
+             helperSteadyVisibleProgressActive ||
+             helperFramesAppliedSinceLastGap >= 4))
         {
             ackFrameId = visibleApplyFallbackHead;
             ackSource = "visible_apply_fallback";
@@ -1195,7 +1198,125 @@ internal sealed partial class TransportScreenShareCoordinator
     {
         clearedEpoch = 0;
         clearedDurationMs = 0;
-        return false;
+        if (!IsRecoveryLockEligibleForTrustedVisibleProof_NoLock(streamEpoch))
+        {
+            return false;
+        }
+
+        if (!HasSatisfiedRecoveryFloorSatisfiedByAcknowledgedProof_NoLock(
+                streamEpoch,
+                nowUtc,
+                out _,
+                out _,
+                out var proofAgeMs))
+        {
+            return false;
+        }
+
+        if (proofAgeMs > (long)SatisfiedRecoveryProofFreshnessWindow.TotalMilliseconds)
+        {
+            return false;
+        }
+
+        return ClearRecoveryLock_NoLock(
+            "acknowledged_visible_helper_proof",
+            nowUtc,
+            out clearedEpoch,
+            out clearedDurationMs);
+    }
+
+    private bool IsRecoveryLockEligibleForTrustedVisibleProof_NoLock(long streamEpoch)
+    {
+        if (!recoveryLockActive || streamEpoch <= 0)
+        {
+            return false;
+        }
+
+        if (recoveryLockStreamEpoch == streamEpoch)
+        {
+            return true;
+        }
+
+        return recoveryLockStreamEpoch > 0 &&
+               recoveryLockStreamEpoch < streamEpoch &&
+               activeRecoveryBurst is null &&
+               remoteHelperFactHealthyActive &&
+               helperSteadyVisibleProgressActive &&
+               helperLatestVisibleProgressEpoch == streamEpoch &&
+               helperLatestVisibleProgressUtc != default &&
+               helperCurrentEpochNeedMoreInputCount <= 0 &&
+               helperCurrentEpochStaleDrops <= 0 &&
+               helperFramesAppliedSinceLastGap >= 8 &&
+               GetLatestHelperVisibleProgressFrameId_NoLock() >= 0;
+    }
+
+    private bool TrySatisfyRecoveryFloorFromTrustedContinuityProof_NoLock(
+        long streamEpoch,
+        DateTimeOffset nowUtc,
+        bool continuityRecoverySignal,
+        long recentStaleDrops)
+    {
+        if ((!continuityRecoverySignal &&
+            !remoteHelperFactHealthyActive &&
+             !helperSteadyVisibleProgressActive) ||
+            !IsRecoveryLockEligibleForTrustedVisibleProof_NoLock(streamEpoch) ||
+            activeRecoveryBurst is not null ||
+            recentStaleDrops > 0 ||
+            helperCurrentEpochNeedMoreInputCount > 0)
+        {
+            return false;
+        }
+
+        var visibleProofHead = Math.Max(
+            helperVisibleHeadFrameId,
+            Math.Max(helperLastVisibleApplyFrameId, helperStableVisibleHeadFrameId));
+        var releaseFloorFrameId = -1L;
+        var releaseFloorSource = string.Empty;
+        if (helperVisibleRecoveryFloorFrameId >= 0 &&
+            visibleProofHead >= helperVisibleRecoveryFloorFrameId)
+        {
+            releaseFloorFrameId = helperVisibleRecoveryFloorFrameId;
+            releaseFloorSource = "visible_recovery_floor";
+        }
+        else if (string.Equals(remoteHelperFactHealthySource, "steady_visible_progress", StringComparison.Ordinal) &&
+                 helperSteadyVisibleProgressActive &&
+                 helperStableVisibleHeadFrameId >= 0 &&
+                 helperFramesAppliedSinceLastGap >= 8 &&
+                 helperCurrentEpochApplyCount >= 8)
+        {
+            releaseFloorFrameId = helperStableVisibleHeadFrameId;
+            releaseFloorSource = "stable_visible_head";
+        }
+
+        if (releaseFloorFrameId < 0 ||
+            !(remoteHelperFactHealthyActive ||
+             helperSteadyVisibleProgressActive ||
+              helperFramesAppliedSinceLastGap >= 8))
+        {
+            return false;
+        }
+
+        var shouldUpdateSatisfiedFloor =
+            satisfiedRecoveryFloorEpoch != streamEpoch ||
+            releaseFloorFrameId > satisfiedRecoveryFloorFrameId ||
+            (releaseFloorFrameId == satisfiedRecoveryFloorFrameId &&
+             !string.Equals(satisfiedRecoveryFloorSource, releaseFloorSource, StringComparison.Ordinal));
+
+        satisfiedRecoveryFloorEpoch = streamEpoch;
+        if (shouldUpdateSatisfiedFloor)
+        {
+            satisfiedRecoveryFloorFrameId = releaseFloorFrameId;
+            satisfiedRecoveryFloorSource = releaseFloorSource;
+            if (satisfiedRecoveryFloorVisibleProofCount < long.MaxValue)
+            {
+                satisfiedRecoveryFloorVisibleProofCount++;
+            }
+        }
+
+        satisfiedRecoveryFloorUtc = nowUtc;
+        postRecoveryAgeGraceEpoch = streamEpoch;
+        postRecoveryAgeGraceUntilUtc = nowUtc + PostRecoveryAgeGraceWindow;
+        return true;
     }
 
     private void RecordCompletedRecoveryOutcome_NoLock(
@@ -1337,6 +1458,7 @@ internal sealed partial class TransportScreenShareCoordinator
         if (activeRecoveryBurst is not { } recoveryBurst ||
             recoveryBurst.StreamEpoch <= 0 ||
             recoveryBurst.OwnerFrameId < 0 ||
+            recoveryBurst.Phase != RecoveryBurstPhase.OwnerEmittedAwaitingHelperAck ||
             !TryResolveRecoveryAckFromHelperProgress_NoLock(
                 recoveryBurst.StreamEpoch,
                 recoveryBurst.OwnerFrameId,
@@ -1377,6 +1499,19 @@ internal sealed partial class TransportScreenShareCoordinator
             recoveryOwnerEmitToAckMs,
             "helper_ack",
             recoveryFirstHelperHeadAdvanceUtc);
+        satisfiedRecoveryFloorEpoch = recoveryBurst.StreamEpoch;
+        if (resolvedAckFrameId > satisfiedRecoveryFloorFrameId ||
+            !string.Equals(satisfiedRecoveryFloorSource, resolvedAckSource, StringComparison.Ordinal))
+        {
+            satisfiedRecoveryFloorFrameId = resolvedAckFrameId;
+            satisfiedRecoveryFloorSource = resolvedAckSource;
+            if (satisfiedRecoveryFloorVisibleProofCount < long.MaxValue)
+            {
+                satisfiedRecoveryFloorVisibleProofCount++;
+            }
+        }
+
+        satisfiedRecoveryFloorUtc = nowUtc;
         postRecoveryAgeGraceEpoch = recoveryBurst.StreamEpoch;
         postRecoveryAgeGraceUntilUtc = recoveryFirstHelperHeadAdvanceUtc + PostRecoveryAgeGraceWindow;
         clearedTransportBurstToken = ClearActiveRecoveryBurstAfterCompletion_NoLock();
@@ -2323,6 +2458,54 @@ internal sealed partial class TransportScreenShareCoordinator
         long ignoredRecoveryLockSentAtUtcMs = 0;
         bool suppressedHighFrameAgeDueToPostRecoveryGrace = false;
         bool suppressedHighFrameAgeDuringOwnerAck = false;
+        bool completedRecoveryBurstFromVisibleProof = false;
+        long completedRecoveryBurstStreamEpoch = 0;
+        long completedRecoveryOwnerFrameId = -1;
+        long completedRecoveryAckFrameId = -1;
+        string completedRecoveryAckSource = string.Empty;
+        long completedRecoveryOwnerEmitToFirstVisibleApplyMs = -1;
+        long completedRecoveryOwnerEmitToAckMs = -1;
+        bool satisfiedRecoveryFloorFromTrustedContinuityProof = false;
+
+        void TryCompleteVisibleProofRecovery_NoLock()
+        {
+            if (!completedRecoveryBurstFromVisibleProof &&
+                TryCompleteRecoveryBurstFromLatestHelperProgress_NoLock(
+                    nowUtc,
+                    out completedRecoveryBurstStreamEpoch,
+                    out completedRecoveryOwnerFrameId,
+                    out completedRecoveryAckFrameId,
+                    out completedRecoveryAckSource,
+                    out completedRecoveryOwnerEmitToFirstVisibleApplyMs,
+                    out completedRecoveryOwnerEmitToAckMs,
+                    out var completedRecoveryTransportBurstToken))
+            {
+                completedRecoveryBurstFromVisibleProof = true;
+                if (completedRecoveryTransportBurstToken > 0)
+                {
+                    recoveryBurstTransportClearToken = completedRecoveryTransportBurstToken;
+                }
+            }
+
+            satisfiedRecoveryFloorFromTrustedContinuityProof =
+                TrySatisfyRecoveryFloorFromTrustedContinuityProof_NoLock(
+                    currentStreamEpoch,
+                    nowUtc,
+                    continuityRecoverySignal,
+                    recentStaleDrops) ||
+                satisfiedRecoveryFloorFromTrustedContinuityProof;
+
+            if (!clearedRecoveryLock &&
+                TryClearRecoveryLockFromAcknowledgedProof_NoLock(
+                    currentStreamEpoch,
+                    nowUtc,
+                    out recoveryLockLogEpoch,
+                    out recoveryLockDurationMs))
+            {
+                clearedRecoveryLock = true;
+                recoveryLockClearReason = recoveryLockLastClearReason;
+            }
+        }
 
         lock (gate)
         {
@@ -2332,6 +2515,7 @@ internal sealed partial class TransportScreenShareCoordinator
                 var effectiveSentAtUtcMs = sentAtUtcMs > 0
                     ? sentAtUtcMs
                     : nowUtc.ToUnixTimeMilliseconds();
+                var lockableContinuitySignal = currentStreamEpoch > 0;
                 var postReceiptHoldActive =
                     activeRecoveryBurst is { } currentRecoveryBurst &&
                     currentRecoveryBurst.StreamEpoch == currentStreamEpoch &&
@@ -2340,14 +2524,16 @@ internal sealed partial class TransportScreenShareCoordinator
                     completedRecoveryForReceiptHold.StreamEpoch == currentStreamEpoch &&
                     completedRecoveryForReceiptHold.OwnerFrameId == currentRecoveryBurst.OwnerFrameId &&
                     string.Equals(completedRecoveryForReceiptHold.AckSource, "helper_visible_receipt", StringComparison.Ordinal);
-                if (!recoveryLockActive &&
+                if (lockableContinuitySignal &&
+                    !recoveryLockActive &&
                     !postReceiptHoldActive)
                 {
                     startedRecoveryLock = true;
                     recoveryLockStartedUtc = nowUtc;
                 }
 
-                if (!postReceiptHoldActive)
+                if (lockableContinuitySignal &&
+                    !postReceiptHoldActive)
                 {
                     recoveryLockActive = true;
                     recoveryLockReason = normalizedReason;
@@ -2497,6 +2683,7 @@ internal sealed partial class TransportScreenShareCoordinator
                     inboundSteadyVisibleProgressActive,
                     inboundFramesAppliedSinceLastGap,
                     nowUtc);
+                TryCompleteVisibleProofRecovery_NoLock();
                 var continuitySignalIgnoredDueToSatisfiedFloor = HasSatisfiedRecoveryFloorSatisfiedByAcknowledgedProof_NoLock(
                     currentStreamEpoch,
                     nowUtc,
@@ -2529,8 +2716,13 @@ internal sealed partial class TransportScreenShareCoordinator
 
                 helperReducedModeEntryStableVisibleHeadFrameId = -1;
                 helperReducedModeEntryStreamEpoch = 0;
-                postRecoveryAgeGraceEpoch = 0;
-                postRecoveryAgeGraceUntilUtc = default;
+                if (!completedRecoveryBurstFromVisibleProof &&
+                    !satisfiedRecoveryFloorFromTrustedContinuityProof)
+                {
+                    postRecoveryAgeGraceEpoch = 0;
+                    postRecoveryAgeGraceUntilUtc = default;
+                }
+
                 if (currentStreamEpoch > 0 &&
                     lastCompletedRecovery is { } completedRecovery &&
                     completedRecovery.StreamEpoch > 0 &&
@@ -2698,6 +2890,7 @@ internal sealed partial class TransportScreenShareCoordinator
                         inboundSteadyVisibleProgressActive,
                         inboundFramesAppliedSinceLastGap,
                         nowUtc);
+                    TryCompleteVisibleProofRecovery_NoLock();
                     var hasPersistedHelperProof = HasPersistedAcknowledgedVisibleHelperProof_NoLock(
                         currentStreamEpoch,
                         nowUtc,
@@ -2727,15 +2920,24 @@ internal sealed partial class TransportScreenShareCoordinator
                         string.Equals(normalizedReason, ScreenSharePressureProtocol.PressureReasonHighFrameAge, StringComparison.Ordinal) &&
                         !suppressedHighFrameAgeDuringOwnerAck &&
                         IsPostRecoveryAgeGraceActive_NoLock(currentStreamEpoch, nowUtc) &&
-                        activeRecoveryBurst is null &&
-                        lastCompletedRecovery is { } completedRecoveryForGrace &&
-                        completedRecoveryForGrace.OwnerFrameId >= 0 &&
-                        GetLatestHelperVisibleProgressFrameId_NoLock() >= completedRecoveryForGrace.OwnerFrameId)
+                        activeRecoveryBurst is null)
                     {
-                        suppressedHighFrameAgeDueToPostRecoveryGrace = true;
-                        postRecoveryAgeGraceSuppressedCount++;
-                        effectiveMode = ScreenShareRemotePressureMode.None;
-                        effectiveReason = ScreenSharePressureProtocol.PressureReasonHealthy;
+                        var latestVisibleProgressFrameId = GetLatestHelperVisibleProgressFrameId_NoLock();
+                        var completedRecoveryGraceApplies =
+                            lastCompletedRecovery is { } completedRecoveryForGrace &&
+                            completedRecoveryForGrace.OwnerFrameId >= 0 &&
+                            latestVisibleProgressFrameId >= completedRecoveryForGrace.OwnerFrameId;
+                        var satisfiedFloorGraceApplies =
+                            HasFreshSatisfiedRecoveryFloor_NoLock(currentStreamEpoch, nowUtc, out _) &&
+                            latestVisibleProgressFrameId >= satisfiedRecoveryFloorFrameId;
+                        if (completedRecoveryGraceApplies ||
+                            satisfiedFloorGraceApplies)
+                        {
+                            suppressedHighFrameAgeDueToPostRecoveryGrace = true;
+                            postRecoveryAgeGraceSuppressedCount++;
+                            effectiveMode = ScreenShareRemotePressureMode.None;
+                            effectiveReason = ScreenSharePressureProtocol.PressureReasonHealthy;
+                        }
                     }
 
                     remotePressureMode = effectiveMode;
@@ -2776,6 +2978,7 @@ internal sealed partial class TransportScreenShareCoordinator
                             helperAppliedHeadFrameId,
                             helperLastVisibleApplyFrameId,
                             nowUtc);
+                        TryCompleteVisibleProofRecovery_NoLock();
                     }
                     else
                     {
@@ -2862,6 +3065,13 @@ internal sealed partial class TransportScreenShareCoordinator
             LocalOperationalLog.Info(
                 "ScreenShareTransport",
                 $"event=screenshare_recovery_lock_cleared; session_id={(string.IsNullOrWhiteSpace(currentSessionId) ? "(none)" : currentSessionId)}; stream_epoch={Math.Max(0, recoveryLockLogEpoch)}; reason={(string.IsNullOrWhiteSpace(recoveryLockClearReason) ? normalizedReason : recoveryLockClearReason)}; lock_duration_ms={recoveryLockDurationMs}; current_epoch_need_more_input_count=unavailable; last_clean_frame_id=unavailable; triggered_profile_change={(recoveryLockTriggeredProfileChange ? 1 : 0)}");
+        }
+
+        if (completedRecoveryBurstFromVisibleProof)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_sender_recovery_burst_completed; session_id={(string.IsNullOrWhiteSpace(currentSessionId) ? "(none)" : currentSessionId)}; stream_epoch={Math.Max(0, completedRecoveryBurstStreamEpoch)}; recovery_owner_frame_id={completedRecoveryOwnerFrameId}; completion=helper_head_advance; helper_head_frame_id={completedRecoveryAckFrameId}; recovery_ack_source={(string.IsNullOrWhiteSpace(completedRecoveryAckSource) ? "(none)" : completedRecoveryAckSource)}; recovery_owner_emit_to_ack_ms={(completedRecoveryOwnerEmitToAckMs >= 0 ? completedRecoveryOwnerEmitToAckMs.ToString(CultureInfo.InvariantCulture) : "(none)")}; recovery_owner_emit_to_first_visible_apply_ms={(completedRecoveryOwnerEmitToFirstVisibleApplyMs >= 0 ? completedRecoveryOwnerEmitToFirstVisibleApplyMs.ToString(CultureInfo.InvariantCulture) : "(none)")}");
         }
 
         if (suppressedHighFrameAgeDueToPostRecoveryGrace)

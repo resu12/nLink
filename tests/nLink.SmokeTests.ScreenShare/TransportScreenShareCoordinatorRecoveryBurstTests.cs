@@ -134,7 +134,7 @@ public sealed class TransportScreenShareCoordinatorRecoveryBurstTests : ScreenSh
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task TransportScreenShareCoordinator_RecoveryBurst_DoesNotCompleteOnVisibleApplyFallbackAfterRecoveryKeyframeApply()
+    public async Task TransportScreenShareCoordinator_RecoveryBurst_CompletesOnVisibleApplyFallbackAfterRecoveryKeyframeApply()
     {
         var fakeSource = new AdaptiveFakeScreenCaptureSource();
         var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 4, 18, 9, 5, 20, TimeSpan.Zero));
@@ -148,14 +148,41 @@ public sealed class TransportScreenShareCoordinatorRecoveryBurstTests : ScreenSh
         var recoveryOwnerFrameId = GetPrivateFieldValue<long>(coordinator, "recoveryOwnerFrameId");
         clock.Advance(TimeSpan.FromMilliseconds(140));
         coordinator.SetRemotePressureState(mode: ScreenShareRemotePressureMode.None, reason: ScreenSharePressureProtocol.PressureReasonHealthy, observedFrameAgeMs: 0, recentStaleDrops: 0, lastVisibleApplyFrameId: recoveryOwnerFrameId, appliedHeadFrameId: recoveryOwnerFrameId > 0 ? recoveryOwnerFrameId - 1 : null, steadyVisibleProgressActive: true, stableVisibleHeadFrameId: recoveryOwnerFrameId, framesAppliedSinceLastGap: 4, currentEpochRecoveryKeyframeApplyCount: 1);
-        Assert.True(GetPrivateFieldValue<bool>(coordinator, "recoveryBurstActive"));
-        Assert.Equal("OwnerEmittedAwaitingHelperAck", GetPrivateFieldValue<object>(coordinator, "recoveryBurstPhase")?.ToString());
+        Assert.False(GetPrivateFieldValue<bool>(coordinator, "recoveryBurstActive"));
         Assert.Equal(0L, GetPrivateFieldValue<long>(coordinator, "recoveryPostAckHoldStartedCount"));
-        Assert.Equal(0L, GetPrivateFieldValue<long>(coordinator, "recoveryBurstCompletedCount"));
-        Assert.Equal(0L, GetPrivateFieldValue<long>(coordinator, "recoveryBurstCompletedByVisibleApplyFallbackCount"));
-        Assert.Equal(-1L, GetPrivateFieldValue<long>(coordinator, "recoveryOwnerAckFrameId"));
-        Assert.Equal(string.Empty, GetPrivateFieldValue<string>(coordinator, "recoveryAckSource"));
-        Assert.Equal(-1L, GetPrivateFieldValue<long>(coordinator, "recoveryOwnerEmitToAckMs"));
+        Assert.Equal(1L, GetPrivateFieldValue<long>(coordinator, "recoveryBurstCompletedCount"));
+        Assert.Equal(1L, GetPrivateFieldValue<long>(coordinator, "recoveryBurstCompletedByVisibleApplyFallbackCount"));
+        Assert.Equal(recoveryOwnerFrameId, GetPrivateFieldValue<long>(coordinator, "recoveryOwnerAckFrameId"));
+        Assert.Equal("visible_apply_fallback", GetPrivateFieldValue<string>(coordinator, "recoveryAckSource"));
+        Assert.Equal(recoveryEpochForVisibleFallback, GetPrivateFieldValue<long>(coordinator, "lastCompletedRecoveryEpoch"));
+        Assert.Equal(recoveryOwnerFrameId, GetPrivateFieldValue<long>(coordinator, "lastCompletedRecoveryOwnerFrameId"));
+        Assert.Equal(recoveryOwnerFrameId, GetPrivateFieldValue<long>(coordinator, "lastCompletedRecoveryAckFrameId"));
+        Assert.Equal("visible_apply_fallback", GetPrivateFieldValue<string>(coordinator, "lastCompletedRecoveryAckSource"));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_RecoveryBurst_CompletesOnVisibleRecoveryFloorWithoutReceipt()
+    {
+        var fakeSource = new AdaptiveFakeScreenCaptureSource();
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 4, 24, 10, 5, 0, TimeSpan.Zero));
+        await using var coordinator = new TransportScreenShareCoordinator(captureSourceFactory: () => fakeSource, sendPayloadAsync: (_, _) => Task.CompletedTask, clock: clock);
+        await AwaitCompletesAsync(coordinator.StartAsync("session-recovery-burst-visible-floor", CancellationToken.None), TimeSpan.FromSeconds(2), "recovery burst visible floor start");
+        fakeSource.SetFreshnessMetrics(new ScreenCaptureFreshnessMetrics(CurrentStreamEpoch: 708, LastEncodeDurationMs: 18, LastEncodeTotalDurationMs: 32));
+        coordinator.RequestKeyFrame(ScreenSharePressureProtocol.PressureReasonContinuityLoss);
+        var recoveryEpoch = GetPrivateFieldValue<long>(coordinator, "recoveryBurstStreamEpoch");
+        fakeSource.RaiseFrame(CreateTransportFrameEventArgs(640, 360, new byte[] { 0x31, 0x32, 0x33 }, capturedTsUtcMs: clock.UtcNow.ToUnixTimeMilliseconds(), streamEpoch: recoveryEpoch, isKeyFrame: true));
+        await WaitUntilAsync(() => GetPrivateFieldValue<long>(coordinator, "recoveryOwnerFrameId") >= 0, TimeSpan.FromSeconds(2));
+        var recoveryOwnerFrameId = GetPrivateFieldValue<long>(coordinator, "recoveryOwnerFrameId");
+        clock.Advance(TimeSpan.FromMilliseconds(140));
+        coordinator.SetRemotePressureState(mode: ScreenShareRemotePressureMode.None, reason: ScreenSharePressureProtocol.PressureReasonHealthy, observedFrameAgeMs: 0, recentStaleDrops: 0, lastVisibleApplyFrameId: recoveryOwnerFrameId, visibleHeadFrameId: recoveryOwnerFrameId, appliedHeadFrameId: recoveryOwnerFrameId, steadyVisibleProgressActive: true, stableVisibleHeadFrameId: recoveryOwnerFrameId, framesAppliedSinceLastGap: 1, visibleRecoveryFloorFrameId: recoveryOwnerFrameId);
+        Assert.False(GetPrivateFieldValue<bool>(coordinator, "recoveryBurstActive"));
+        Assert.Equal(1L, GetPrivateFieldValue<long>(coordinator, "recoveryBurstCompletedCount"));
+        Assert.Equal(1L, GetPrivateFieldValue<long>(coordinator, "recoveryBurstCompletedByVisibleRecoveryFloorCount"));
+        Assert.Equal(recoveryOwnerFrameId, GetPrivateFieldValue<long>(coordinator, "recoveryOwnerAckFrameId"));
+        Assert.Equal("visible_recovery_floor", GetPrivateFieldValue<string>(coordinator, "recoveryAckSource"));
+        Assert.Equal(recoveryOwnerFrameId, GetPrivateFieldValue<long>(coordinator, "satisfiedRecoveryFloorFrameId"));
+        Assert.Equal("helper_ack_frame", GetPrivateFieldValue<string>(coordinator, "satisfiedRecoveryFloorSource"));
     }
 
     [Fact]
@@ -441,6 +468,31 @@ public sealed class TransportScreenShareCoordinatorRecoveryBurstTests : ScreenSh
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_VisibleProofCompletion_SuppressesImmediatePostRecoveryHighFrameAge()
+    {
+        var fakeSource = new AdaptiveFakeScreenCaptureSource();
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 4, 24, 10, 15, 0, TimeSpan.Zero));
+        await using var coordinator = new TransportScreenShareCoordinator(captureSourceFactory: () => fakeSource, sendPayloadAsync: (_, _) => Task.CompletedTask, clock: clock);
+        await AwaitCompletesAsync(coordinator.StartAsync("session-visible-proof-post-recovery-grace", CancellationToken.None), TimeSpan.FromSeconds(2), "visible proof post recovery grace start");
+        fakeSource.SetFreshnessMetrics(new ScreenCaptureFreshnessMetrics(CurrentStreamEpoch: 709, LastEncodeDurationMs: 18, LastEncodeTotalDurationMs: 32));
+        coordinator.RequestKeyFrame(ScreenSharePressureProtocol.PressureReasonContinuityLoss);
+        var recoveryEpoch = GetPrivateFieldValue<long>(coordinator, "recoveryBurstStreamEpoch");
+        fakeSource.RaiseFrame(CreateTransportFrameEventArgs(640, 360, new byte[] { 0x41, 0x42, 0x43 }, capturedTsUtcMs: clock.UtcNow.ToUnixTimeMilliseconds(), streamEpoch: recoveryEpoch, isKeyFrame: true));
+        await WaitUntilAsync(() => GetPrivateFieldValue<long>(coordinator, "recoveryOwnerFrameId") >= 0, TimeSpan.FromSeconds(2));
+        var recoveryOwnerFrameId = GetPrivateFieldValue<long>(coordinator, "recoveryOwnerFrameId");
+        clock.Advance(TimeSpan.FromMilliseconds(120));
+        coordinator.SetRemotePressureState(ScreenShareRemotePressureMode.None, ScreenSharePressureProtocol.PressureReasonHealthy, observedFrameAgeMs: 0, recentStaleDrops: 0, lastVisibleApplyFrameId: recoveryOwnerFrameId, visibleHeadFrameId: recoveryOwnerFrameId, appliedHeadFrameId: recoveryOwnerFrameId, steadyVisibleProgressActive: true, stableVisibleHeadFrameId: recoveryOwnerFrameId, framesAppliedSinceLastGap: 4, visibleRecoveryFloorFrameId: recoveryOwnerFrameId);
+        Assert.False(GetPrivateFieldValue<bool>(coordinator, "recoveryBurstActive"));
+        clock.Advance(TimeSpan.FromMilliseconds(120));
+        coordinator.SetRemotePressureState(ScreenShareRemotePressureMode.ReduceFps, ScreenSharePressureProtocol.PressureReasonHighFrameAge, observedFrameAgeMs: 900, recentStaleDrops: 0, lastVisibleApplyFrameId: recoveryOwnerFrameId, visibleHeadFrameId: recoveryOwnerFrameId, appliedHeadFrameId: recoveryOwnerFrameId, steadyVisibleProgressActive: true, stableVisibleHeadFrameId: recoveryOwnerFrameId, framesAppliedSinceLastGap: 5, visibleRecoveryFloorFrameId: recoveryOwnerFrameId);
+        Assert.Equal(ScreenShareRemotePressureMode.None, GetPrivateFieldValue<ScreenShareRemotePressureMode>(coordinator, "remotePressureMode"));
+        Assert.Equal(ScreenSharePressureProtocol.PressureReasonHealthy, GetPrivateFieldValue<string>(coordinator, "remotePressureReason"));
+        Assert.Equal(1L, GetPrivateFieldValue<long>(coordinator, "postRecoveryAgeGraceSuppressedCount"));
+        Assert.Equal(0L, GetPrivateFieldValue<long>(coordinator, "highFrameAgeSuppressedDuringOwnerAckCount"));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportScreenShareCoordinator_RecoveryBurst_StaleHelperProofAllowsSameEpochRestart()
     {
         var fakeSource = new AdaptiveFakeScreenCaptureSource();
@@ -645,6 +697,7 @@ public sealed class TransportScreenShareCoordinatorRecoveryBurstTests : ScreenSh
         Assert.Equal(-1L, GetPrivateFieldValue<long>(coordinator, "helperAckAfterFactSendMs"));
         var maybeLogFreshnessSummary = typeof(TransportScreenShareCoordinator).GetMethod("MaybeLogFreshnessSummary", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(maybeLogFreshnessSummary);
+        clock.Advance(TimeSpan.FromSeconds(2));
         maybeLogFreshnessSummary!.Invoke(coordinator, new object[] { "session-recovery-burst-timeout-helper-progress", coordinator.GetMetricsSnapshot(), fakeSource.GetFreshnessMetricsSnapshot(), 0, 0, 0L, 0L, "none", 0L, 250, 70, 100 });
         Assert.Equal("timeout", GetPrivateFieldValue<string>(coordinator, "lastCompletedRecoveryCompletionKind"));
         Assert.Equal(string.Empty, GetPrivateFieldValue<string>(coordinator, "lastCompletedRecoveryAckSource"));

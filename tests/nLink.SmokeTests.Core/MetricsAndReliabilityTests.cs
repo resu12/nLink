@@ -985,6 +985,18 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
     }
 
 [Trait("Category", "LegacySmoke")]
+    [Theory]
+    [InlineData("NKN_START_FAILED: bridge_start (file missing)", true)]
+    [InlineData("NKN_START_FAILED: bridge_missing (runtime not found)", true)]
+    [InlineData("NKN_START_FAILED: ready_timeout progress=rpc_selected", false)]
+    [InlineData("bridge_connect_ready_timeout progress=rpc_selected", false)]
+    [InlineData("ConnectToNodeTimeoutError: timeout", false)]
+    public void UserErrorMapper_NknStartFailure_IsReservedForLocalStartupFailures(string lastError, bool expected)
+    {
+        Assert.Equal(expected, UserErrorMapper.IsNknStartFailure(lastError));
+    }
+
+[Trait("Category", "LegacySmoke")]
     [Fact]
     public void FailurePresenter_MapsEveryTransportFailureCategory()
     {
@@ -1008,6 +1020,20 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
         Assert.True(failure.IsTransient);
         Assert.Equal(nameof(TimeoutException), failure.ExceptionType);
         Assert.False(string.IsNullOrWhiteSpace(failure.CorrelationId));
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Theory]
+    [InlineData("bridge_connect_ready_timeout progress=rpc_selected")]
+    [InlineData("ConnectToNodeTimeoutError: connect timed out")]
+    [InlineData("RpcTimeoutError: call timed out")]
+    [InlineData("NKN_START_FAILED: ready_timeout progress=rpc_selected")]
+    public void TransportFailureMapper_MapsConnectReadyAndRpcTimeouts_ToRetryableHandshakeTimeout(string rawError)
+    {
+        var failure = TransportFailureMapper.FromSignals(rawError);
+
+        Assert.Equal(TransportFailureCategory.HandshakeTimeout, failure.Category);
+        Assert.True(failure.IsTransient);
     }
 
 [Trait("Category", "LegacySmoke")]

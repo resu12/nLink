@@ -28,7 +28,8 @@ internal readonly record struct DeferredHelperRemoteFrameCandidate(
     long StreamEpoch,
     long FrameId,
     bool IsKeyFrame,
-    long ArrivalSequence);
+    long ArrivalSequence,
+    ScreenShareRecoveryDeliveryClass RecoveryDeliveryClass);
 
 internal readonly record struct HelperRemoteRecoveryActivationResult(
     bool NewlyActive,
@@ -392,9 +393,66 @@ internal sealed class HelperRemoteScreenShareSessionController
         }
     }
 
+    public int CompletePostRecoveryFollowerWindow(long streamEpoch)
+    {
+        if (streamEpoch <= 0)
+        {
+            return 0;
+        }
+
+        lock (FollowerState.DeferredFollowerGate)
+        {
+            var clearedDeferredCandidateCount = FollowerState.DeferredPostRecoveryCandidates.Count;
+            FollowerState.DeferredPostRecoveryCandidates.Clear();
+
+            if (FollowerState.ReservedApplyActive &&
+                FollowerState.ReservedApplyStreamEpoch == streamEpoch)
+            {
+                FollowerState.ReservedApplyActive = false;
+                FollowerState.ReservedApplyStreamEpoch = -1;
+                FollowerState.ReservedApplyFrameId = -1;
+                FollowerState.ReservedApplyPendingSinceUtc = default;
+            }
+
+            if (FollowerState.StartupKeyframePendingVisibleApplyActive &&
+                FollowerState.StartupKeyframePendingVisibleApplyStreamEpoch == streamEpoch)
+            {
+                FollowerState.StartupKeyframePendingVisibleApplyActive = false;
+                FollowerState.StartupKeyframePendingVisibleApplyStreamEpoch = -1;
+                FollowerState.StartupKeyframePendingVisibleApplyFrameId = -1;
+                FollowerState.StartupKeyframePendingVisibleApplyPendingSinceUtc = default;
+            }
+
+            if (FollowerState.PostRecoveryStabilizationEpoch == streamEpoch)
+            {
+                FollowerState.PostRecoveryReservedAppliesRemaining = 0;
+                FollowerState.PostRecoveryStabilizationEpoch = 0;
+            }
+
+            if (FollowerState.ExpiredRecoveryRunwayActive &&
+                FollowerState.ExpiredRecoveryRunwayEpoch == streamEpoch)
+            {
+                FollowerState.ExpiredRecoveryRunwayActive = false;
+                FollowerState.ExpiredRecoveryRunwayEpoch = 0;
+                FollowerState.ExpiredRecoveryRunwayLastContiguousFrameId = -1;
+                FollowerState.ExpiredRecoveryRunwayMaximumFrameId = -1;
+                FollowerState.ExpiredRecoveryRunwayStartedUtc = default;
+            }
+
+            if (FollowerState.PendingRecoveryRunwayAbortActive &&
+                FollowerState.PendingRecoveryRunwayAbortEpoch == streamEpoch)
+            {
+                ClearPendingRecoveryRunwayAbort();
+            }
+
+            return clearedDeferredCandidateCount;
+        }
+    }
+
     public HelperRemoteDeferredCandidateReleaseResult ReleaseDeferredPostRecoveryCandidateIfMatch(
         long streamEpoch,
-        long previousVisibleFrameId)
+        long previousVisibleFrameId,
+        int maximumFollowerWindowSize)
     {
         lock (FollowerState.DeferredFollowerGate)
         {
@@ -408,16 +466,36 @@ internal sealed class HelperRemoteScreenShareSessionController
             {
                 var candidatePair = FollowerState.DeferredPostRecoveryCandidates.First();
                 var candidate = candidatePair.Value;
-                FollowerState.DeferredPostRecoveryCandidates.Remove(candidatePair.Key);
 
                 if (candidate.StreamEpoch != streamEpoch)
                 {
+                    FollowerState.DeferredPostRecoveryCandidates.Remove(candidatePair.Key);
+                    rejectedCandidates.Add(candidate);
+                    continue;
+                }
+
+                if (previousVisibleFrameId >= 0 && candidate.FrameId <= previousVisibleFrameId)
+                {
+                    FollowerState.DeferredPostRecoveryCandidates.Remove(candidatePair.Key);
                     rejectedCandidates.Add(candidate);
                     continue;
                 }
 
                 if (previousVisibleFrameId >= 0 && candidate.FrameId != previousVisibleFrameId + 1)
                 {
+                    if (IsDeferredCandidateStillActionableForRecoveryWindow(
+                            candidate,
+                            streamEpoch,
+                            maximumFollowerWindowSize))
+                    {
+                        return new HelperRemoteDeferredCandidateReleaseResult(
+                            HasCandidateToEnqueue: false,
+                            CandidateToEnqueue: default,
+                            RejectedCandidates: rejectedCandidates.ToArray(),
+                            CorridorAbort: default);
+                    }
+
+                    FollowerState.DeferredPostRecoveryCandidates.Remove(candidatePair.Key);
                     rejectedCandidates.Add(candidate);
                     while (FollowerState.DeferredPostRecoveryCandidates.Count > 0)
                     {
@@ -436,6 +514,7 @@ internal sealed class HelperRemoteScreenShareSessionController
                         CorridorAbort: corridorAbort);
                 }
 
+                FollowerState.DeferredPostRecoveryCandidates.Remove(candidatePair.Key);
                 return new HelperRemoteDeferredCandidateReleaseResult(
                     HasCandidateToEnqueue: true,
                     CandidateToEnqueue: candidate,
@@ -549,7 +628,11 @@ internal sealed class HelperRemoteScreenShareSessionController
         FollowerState.RecoveryProgressCorridorLastVisibleApplyUtc = default;
     }
 
-    public void StartRecoveryProgressCorridor(long streamEpoch, long frameId, DateTimeOffset nowUtc)
+    public void StartRecoveryProgressCorridor(
+        long streamEpoch,
+        long frameId,
+        DateTimeOffset nowUtc,
+        int postRecoveryReservedApplyCount = 0)
     {
         if (streamEpoch <= 0 || frameId < 0)
         {
@@ -568,6 +651,10 @@ internal sealed class HelperRemoteScreenShareSessionController
         FollowerState.RecoveryProgressCorridorAppliedCount = 1;
         FollowerState.RecoveryProgressCorridorStartedUtc = nowUtc;
         FollowerState.RecoveryProgressCorridorLastVisibleApplyUtc = nowUtc;
+        FollowerState.PostRecoveryStabilizationEpoch = postRecoveryReservedApplyCount > 0
+            ? streamEpoch
+            : 0;
+        FollowerState.PostRecoveryReservedAppliesRemaining = Math.Max(0, postRecoveryReservedApplyCount);
         ClearPendingRecoveryRunwayAbort();
     }
 
@@ -893,6 +980,19 @@ internal sealed class HelperRemoteScreenShareSessionController
         }
     }
 
+    private bool IsDeferredCandidateStillActionableForRecoveryWindow(
+        DeferredHelperRemoteFrameCandidate candidate,
+        long streamEpoch,
+        int maximumFollowerWindowSize)
+    {
+        return candidate.StreamEpoch == streamEpoch &&
+               FollowerState.RecoveryProgressCorridorActive &&
+               FollowerState.RecoveryProgressCorridorEpoch == streamEpoch &&
+               FollowerState.RecoveryProgressCorridorRecoveryFrameId >= 0 &&
+               candidate.FrameId > FollowerState.RecoveryProgressCorridorLastFrameId &&
+               candidate.FrameId <= FollowerState.RecoveryProgressCorridorRecoveryFrameId + Math.Max(0, maximumFollowerWindowSize);
+    }
+
     public HelperRemoteRecoveryActivationResult ActivateRecovery(
         string reason,
         long streamEpoch,
@@ -976,16 +1076,9 @@ internal sealed class HelperRemoteScreenShareSessionController
             return null;
         }
 
-        if (string.Equals(rejectionReason, "waiting_for_recovery_keyframe", StringComparison.Ordinal) &&
-            ShouldTreatCurrentEpochAsProofStable(sessionId, streamEpoch, frameId))
-        {
-            return null;
-        }
-
         if (string.Equals(rejectionReason, "waiting_for_recovery_keyframe", StringComparison.Ordinal))
         {
             context.IncrementFramesDroppedWaitingForRecoveryKeyframe();
-            context.IncrementPreCandidateGapTailEmittedToViewerCount();
         }
 
         if (string.Equals(rejectionReason, "waiting_for_recovery_keyframe", StringComparison.Ordinal) &&
@@ -1003,47 +1096,6 @@ internal sealed class HelperRemoteScreenShareSessionController
             isKeyFrame,
             rejectionReason);
         return rejectionReason;
-    }
-
-    private bool ShouldTreatCurrentEpochAsProofStable(string? sessionId, long streamEpoch, long frameId)
-    {
-        if (streamEpoch <= 0 || frameId < 0)
-        {
-            return false;
-        }
-
-        var effectiveSessionId = context.GetEffectiveHelperRemoteSessionId(sessionId);
-        if (string.IsNullOrWhiteSpace(effectiveSessionId))
-        {
-            effectiveSessionId = SessionId;
-        }
-
-        if (string.IsNullOrWhiteSpace(effectiveSessionId))
-        {
-            return false;
-        }
-
-        var helperSnapshot = BuildSessionSnapshot(ScreenShareFrameLossAttributionRegistry.GetSnapshot(effectiveSessionId));
-        if (helperSnapshot.CurrentEpoch != streamEpoch ||
-            helperSnapshot.Phase != HelperRemoteSessionPhase.VisibleStable ||
-            !helperSnapshot.SteadyVisibleProgressActive ||
-            helperSnapshot.RecoveryActive ||
-            helperSnapshot.RecoveryCorridorActive ||
-            helperSnapshot.RunwayCleanupActive ||
-            helperSnapshot.PostRecoveryStabilizationActive)
-        {
-            return false;
-        }
-
-        var provenHeadFrameId = Math.Max(
-            Math.Max(helperSnapshot.VisibleHeadFrameId, helperSnapshot.AppliedHeadFrameId),
-            Math.Max(helperSnapshot.StableVisibleHeadFrameId, helperSnapshot.ProvenHeadFrameId));
-        if (provenHeadFrameId < 0)
-        {
-            provenHeadFrameId = RecoveryState.LastCleanFrameId;
-        }
-
-        return provenHeadFrameId >= 0 && frameId <= provenHeadFrameId + 1;
     }
 
     public void OnFrameAppliedVisible(EncodedFrameDecodeRequest request)

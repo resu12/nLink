@@ -424,6 +424,10 @@ function Write-SoakDiagnosticsArtifacts {
         ("bulk_ready={0}" -f $Summary.LatestBridgeTransportHealthBulkReady),
         ("frames_sent_since_last={0}" -f $Summary.LatestBridgeTransportHealthFramesSentSinceLast),
         ("latest_disconnect_reason={0}" -f $Summary.LatestBridgeTransportHealthLatestDisconnectReason),
+        ("control_subclients={0}" -f $Summary.LatestBridgeTransportHealthControlSubClients),
+        ("media_subclients={0}" -f $Summary.LatestBridgeTransportHealthMediaSubClients),
+        ("bulk_subclients={0}" -f $Summary.LatestBridgeTransportHealthBulkSubClients),
+        ("external_topology_profile={0}" -f $(if ([string]::IsNullOrWhiteSpace($env:NLINK_SCREENSHARE_EXTERNAL_TOPOLOGY_PROFILE)) { 'Default' } else { $env:NLINK_SCREENSHARE_EXTERNAL_TOPOLOGY_PROFILE })),
         ("sample_window_ms={0}" -f $Summary.LatestBridgeTransportHealthSampleWindowMs),
         ("unique_selected_rpc_count={0}" -f $Summary.LatestBridgeTransportHealthUniqueSelectedRpcCount),
         '',
@@ -808,6 +812,41 @@ function Write-SoakDiagnosticsArtifacts {
         'health_snapshot_lines:'
     ) + @($Summary.HealthSnapshotLines)
 
+    $qualityPresentationSummary = @(
+        ("log_path={0}" -f $Summary.LogPath),
+        ("active_encode_target_width={0}" -f $Summary.LatestActiveEncodeTargetWidth),
+        ("active_encode_target_height={0}" -f $Summary.LatestActiveEncodeTargetHeight),
+        ("active_encode_target_bitrate={0}" -f $Summary.LatestActiveEncodeTargetBitrate),
+        ("active_encode_target_fps={0}" -f $Summary.LatestActiveEncodeTargetFps),
+        ("encoder_profile={0}" -f $Summary.LatestEncoderProfile),
+        ("sender_freshness_mode={0}" -f $Summary.LatestSenderFreshnessMode),
+        ("sender_operating_state={0}" -f $Summary.LatestHealthSenderOperatingState),
+        ("sender_guard_state={0}" -f $Summary.LatestHealthSenderGuardState),
+        ("effective_quality_preset={0}" -f $Summary.LatestEffectiveQualityPreset),
+        ("capture_scale={0}" -f $Summary.LatestCaptureScale),
+        ("last_encode_duration_ms={0}" -f $Summary.LatestLastEncodeDurationMs),
+        ("last_preprocess_duration_ms={0}" -f $Summary.LatestLastPreprocessDurationMs),
+        ("avg_encoded_frame_bytes={0}" -f $Summary.LatestAverageEncodedFrameBytes),
+        ("displayable_frame_ratio={0}" -f $Summary.LatestDisplayableFrameRatio),
+        ("normal_mode_summary_count={0}" -f $Summary.NormalModeSummaryCount),
+        ("reduced_mode_summary_count={0}" -f $Summary.ReducedModeSummaryCount),
+        ("catch_up_mode_summary_count={0}" -f $Summary.CatchUpModeSummaryCount),
+        ("helper_surface_interpolation_mode={0}" -f $Summary.LatestHelperSurfaceInterpolationMode),
+        ("helper_surface_frame_width={0}" -f $Summary.LatestHelperSurfaceFrameWidth),
+        ("helper_surface_frame_height={0}" -f $Summary.LatestHelperSurfaceFrameHeight),
+        ("helper_surface_viewport_width={0}" -f $Summary.LatestHelperSurfaceViewportWidth),
+        ("helper_surface_viewport_height={0}" -f $Summary.LatestHelperSurfaceViewportHeight),
+        ("helper_surface_render_scaling={0}" -f $Summary.LatestHelperSurfaceRenderScaling),
+        ("helper_surface_displayed_width_px={0}" -f $Summary.LatestHelperSurfaceDisplayedWidthPx),
+        ("helper_surface_displayed_height_px={0}" -f $Summary.LatestHelperSurfaceDisplayedHeightPx),
+        ("helper_surface_scale_ratio={0}" -f $Summary.LatestHelperSurfaceScaleRatio),
+        '',
+        'freshness_summary_lines:'
+    ) + @($Summary.FreshnessSummaryLines) + @(
+        '',
+        'surface_interpolation_lines:'
+    ) + @($Summary.SurfaceInterpolationLines)
+
     Set-Content -Path (Join-Path $artifactDir 'helper-decode-worker-summary.txt') -Value $helperDecodeWorkerSummary
     Set-Content -Path (Join-Path $artifactDir 'helper-quality-summary.txt') -Value $helperQualitySummary
     Set-Content -Path (Join-Path $artifactDir 'helper-upstream-latency-summary.txt') -Value $helperUpstreamLatencySummary
@@ -826,6 +865,7 @@ function Write-SoakDiagnosticsArtifacts {
     Set-Content -Path (Join-Path $artifactDir 'helper-pressure-summary.txt') -Value $helperPressureSummary
     Set-Content -Path (Join-Path $artifactDir 'helper-recovery-investigation-summary.txt') -Value $helperRecoveryInvestigationSummary
     Set-Content -Path (Join-Path $artifactDir 'health-snapshot-summary.txt') -Value $healthSnapshotSummary
+    Set-Content -Path (Join-Path $artifactDir 'quality-presentation-summary.txt') -Value $qualityPresentationSummary
     Set-Content -Path (Join-Path $artifactDir 'reduced-promotion-summary.txt') -Value $promotionSummary
     Set-Content -Path (Join-Path $artifactDir 'sender-cadence-summary.txt') -Value $senderCadenceSummary
     Set-Content -Path (Join-Path $artifactDir 'recovery-burst-summary.txt') -Value $recoveryBurstSummary

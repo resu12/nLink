@@ -157,6 +157,25 @@ public sealed partial class SessionRuntime
             appliedFrameAgeMs > 0
                 ? Math.Max(0L, appliedFrameAgeMs + Math.Max(0L, progressStallMs))
                 : appliedFrameAgeMs;
+        var trustedVisibleStableProgress =
+            currentEpochProgressProven &&
+            steadyVisibleProgressActive &&
+            stableVisibleHeadFrameId >= 0 &&
+            framesAppliedSinceLastGap >= 4 &&
+            helperPressureSnapshot.AppliedHeadFrameId >= 0 &&
+            hasAppliedFrameSample &&
+            hasOngoingVisibleProgress &&
+            progressStallMs >= 0 &&
+            progressStallMs <= visibleProgressWindowMs &&
+            !currentEpochWarmupActive &&
+            !currentEpochRecoveryActive &&
+            helperRecoveryMechanism == HelperRemoteRecoveryMechanism.None &&
+            currentEpochStaleDropCount == 0 &&
+            effectiveStaleDropDelta == 0 &&
+            transportRecentDropCount == 0 &&
+            !hasTransportQueuePressure &&
+            recentHealthIssueCount <= 0 &&
+            !severeHealthDegradation;
 
         lock (helperRemoteScreenSharePressureGate)
         {
@@ -220,11 +239,6 @@ public sealed partial class SessionRuntime
             cadenceStallEligible &&
             cadenceStallElapsedMs > (long)HelperRemoteScreenShareCadenceStallTriggerWindow.TotalMilliseconds;
         var rawCatchUpCadencePressure = false;
-        if (rawReduceAgePressure || rawReduceCadencePressure || rawCatchUpAgePressure || rawCatchUpCadencePressure)
-        {
-            hasHealthyCadence = false;
-            healthyScreenSharePressureIntervals = 0;
-        }
 
         int agePressureConsecutiveCount;
         int cadencePressureConsecutiveCount;
@@ -235,6 +249,7 @@ public sealed partial class SessionRuntime
         bool stableVisibleHeadAdvancedSinceLastEvaluation;
         bool headAdvancedSinceLastEvaluation;
         var suppressStandaloneHighFrameAgeDueToHeadAdvance = false;
+        bool cadenceStallTriggered;
         lock (helperRemoteScreenSharePressureGate)
         {
             previousEvaluatedAppliedHeadFrameId = helperRemoteCurrentPressureEpochLastEvaluatedAppliedHeadFrameId;
@@ -258,7 +273,33 @@ public sealed partial class SessionRuntime
                     helperRemoteCurrentPressureEpochLastEvaluatedStableVisibleHeadFrameId,
                     stableVisibleHeadFrameId);
             }
+
+            cadenceStallTriggered = helperRemoteCurrentPressureEpochCadenceStallTriggered;
         }
+
+        var trustedVisibleApplyProgress =
+            !trustedVisibleStableProgress &&
+            (currentEpochProgressProven ||
+             derivedPostRecoveryHealthyActive ||
+             steadyVisibleProgressActive) &&
+            framesAppliedSinceLastGap >= 2 &&
+            helperPressureSnapshot.AppliedHeadFrameId >= 0 &&
+            hasAppliedFrameSample &&
+            hasOngoingVisibleProgress &&
+            progressStallMs >= 0 &&
+            progressStallMs <= visibleProgressWindowMs &&
+            !currentEpochWarmupActive &&
+            !currentEpochRecoveryActive &&
+            helperRecoveryMechanism == HelperRemoteRecoveryMechanism.None &&
+            currentEpochStaleDropCount == 0 &&
+            effectiveStaleDropDelta == 0 &&
+            transportRecentDropCount == 0 &&
+            !hasTransportQueuePressure &&
+            recentHealthIssueCount <= 0 &&
+            !severeHealthDegradation;
+        var trustedVisibleProgress =
+            trustedVisibleStableProgress ||
+            trustedVisibleApplyProgress;
 
         suppressStandaloneHighFrameAgeDueToHeadAdvance =
             rawReduceAgePressure &&
@@ -268,12 +309,31 @@ public sealed partial class SessionRuntime
             progressStallMs <= visibleProgressWindowMs &&
             !currentEpochRecoveryActive &&
             helperRecoveryMechanism == HelperRemoteRecoveryMechanism.None;
+        var suppressStandaloneHighFrameAgeDueToTrustedVisibleProgress =
+            rawReduceAgePressure &&
+            trustedVisibleProgress;
+        var suppressSlowApplyCadenceDueToTrustedVisibleProgress =
+            rawReduceCadencePressure &&
+            trustedVisibleProgress &&
+            !cadenceStallTriggered &&
+            !rawCatchUpAgePressure &&
+            !rawCatchUpCadencePressure;
+        var suppressAgeOnlyHighFrameAgeDueToVisibleProgress =
+            rawReduceAgePressure &&
+            !rawReduceCadencePressure &&
+            !rawCatchUpAgePressure &&
+            !rawCatchUpCadencePressure &&
+            (suppressStandaloneHighFrameAgeDueToHeadAdvance ||
+             suppressStandaloneHighFrameAgeDueToTrustedVisibleProgress ||
+             postRecoveryAgeGraceActive);
 
         lock (helperRemoteScreenSharePressureGate)
         {
             if (helperRemoteCurrentPressureEpoch == helperPressureSnapshot.CurrentEpoch)
             {
                 if (suppressStandaloneHighFrameAgeDueToHeadAdvance ||
+                    suppressStandaloneHighFrameAgeDueToTrustedVisibleProgress ||
+                    suppressSlowApplyCadenceDueToTrustedVisibleProgress ||
                     postRecoveryAgeGraceActive)
                 {
                     if (rawReduceAgePressure || rawReduceCadencePressure || rawCatchUpAgePressure || rawCatchUpCadencePressure)
@@ -317,9 +377,22 @@ public sealed partial class SessionRuntime
                 }
             }
 
+            if (suppressStandaloneHighFrameAgeDueToTrustedVisibleProgress)
+            {
+                MaybeBeginHelperRemotePressureBaselineReseedAfterTrustedVisibleProgress_NoLock(
+                    nowUtc,
+                    helperPressureSnapshot.CurrentEpoch);
+            }
+
             agePressureConsecutiveCount = helperRemoteCurrentPressureEpochAgePressureConsecutiveCount;
             cadencePressureConsecutiveCount = helperRemoteCurrentPressureEpochCadencePressureConsecutiveCount;
             catchUpSuppressedDueToProgressCount = helperRemoteCurrentPressureEpochCatchUpSuppressedDueToProgressCount;
+        }
+
+        if (suppressAgeOnlyHighFrameAgeDueToVisibleProgress ||
+            suppressSlowApplyCadenceDueToTrustedVisibleProgress)
+        {
+            hasHealthyCadence = true;
         }
 
         var stableHeadAdvancedSinceSteadyProgressActivation =
@@ -340,6 +413,7 @@ public sealed partial class SessionRuntime
             rawReduceAgePressure &&
             !postRecoveryAgeGraceActive &&
             !suppressStandaloneHighFrameAgeDueToHeadAdvance &&
+            !suppressStandaloneHighFrameAgeDueToTrustedVisibleProgress &&
             (progressStallMs > visibleProgressWindowMs ||
              currentEpochRecoveryActive ||
              rawCatchUpAgePressure ||
@@ -371,7 +445,9 @@ public sealed partial class SessionRuntime
                 ? allowStandaloneHighFrameAgePressureForVisibleProgress
                 : agePressureConsecutiveCount >= HelperRemoteScreenSharePressureConsecutiveThreshold;
         var hasCatchUpAgePressure = rawCatchUpAgePressure;
-        var hasReduceCadencePressure = rawReduceCadencePressure;
+        var hasReduceCadencePressure =
+            rawReduceCadencePressure &&
+            !suppressSlowApplyCadenceDueToTrustedVisibleProgress;
         var hasCatchUpCadencePressure = rawCatchUpCadencePressure;
         var hasReduceStalePressure = consecutiveStaleDropWindows >= 2;
         var hasCatchUpStalePressure = effectiveStaleDropDelta >= 2;
@@ -380,6 +456,12 @@ public sealed partial class SessionRuntime
             hasCatchUpAgePressure ||
             hasReduceCadencePressure ||
             hasCatchUpCadencePressure;
+        if (hasAppliedFramePressure)
+        {
+            hasHealthyCadence = false;
+            healthyScreenSharePressureIntervals = 0;
+        }
+
         var hasStalePressure = hasReduceStalePressure || hasCatchUpStalePressure;
         var hasBridgeHealth = recentHealthIssueCount > 0 || severeHealthDegradation;
         var bridgeHealthQuarantineActive = false;
@@ -445,6 +527,28 @@ public sealed partial class SessionRuntime
         }
 
         var healthKind = FormatScreenSharePressureHealthKind(hasBridgeHealth, hasActionableBridgeHealth);
+        var previousReduceFpsReasonIsSoftAgeOrCadence =
+            string.Equals(lastSentScreenSharePressureReason, ScreenSharePressureProtocol.PressureReasonHighFrameAge, StringComparison.Ordinal) ||
+            string.Equals(lastSentScreenSharePressureReason, ScreenSharePressureProtocol.PressureReasonSlowApplyCadence, StringComparison.Ordinal);
+        var clearPreviousSoftPressureWithTrustedVisibleProgress =
+            trustedVisibleProgress &&
+            !hasAppliedFramePressure &&
+            !hasStalePressure &&
+            !hasBridgeHealth &&
+            !hasActionableBridgeHealth &&
+            !hasTransportQueuePressure &&
+            previousMode == ScreenSharePressureMode.ReduceFps &&
+            previousReduceFpsReasonIsSoftAgeOrCadence;
+        var clearPreviousContinuityLossWithHealthyProof =
+            trustedVisibleProgress &&
+            !hasAppliedFramePressure &&
+            !hasStalePressure &&
+            !hasBridgeHealth &&
+            !hasActionableBridgeHealth &&
+            !hasTransportQueuePressure &&
+            !currentEpochRecoveryActive &&
+            previousMode == ScreenSharePressureMode.Normal &&
+            string.Equals(lastSentScreenSharePressureReason, ScreenSharePressureProtocol.PressureReasonContinuityLoss, StringComparison.Ordinal);
 
         ScreenSharePressureMode nextMode;
         string nextReason;
@@ -568,7 +672,22 @@ public sealed partial class SessionRuntime
                 return;
             }
 
-            if (effectiveProofRefreshBypass)
+            if (clearPreviousSoftPressureWithTrustedVisibleProgress)
+            {
+                healthyScreenSharePressureIntervals = Math.Max(healthyScreenSharePressureIntervals, 4);
+                nextMode = ScreenSharePressureMode.Normal;
+                nextReason = ScreenSharePressureProtocol.PressureReasonHealthy;
+                sampleSource = ScreenSharePressureSampleSource.AppliedFrameAge;
+            }
+            else if (clearPreviousContinuityLossWithHealthyProof ||
+                     bypassPressureSendThrottleForHealthyProofKeepalive)
+            {
+                healthyScreenSharePressureIntervals = Math.Max(healthyScreenSharePressureIntervals, 4);
+                nextMode = ScreenSharePressureMode.Normal;
+                nextReason = ScreenSharePressureProtocol.PressureReasonHealthy;
+                sampleSource = ScreenSharePressureSampleSource.AppliedFrameAge;
+            }
+            else if (effectiveProofRefreshBypass)
             {
                 nextMode = lastSentScreenSharePressureMode;
                 nextReason = string.IsNullOrWhiteSpace(lastSentScreenSharePressureReason)
@@ -604,6 +723,10 @@ public sealed partial class SessionRuntime
         var ignorePreviousBridgeHealthHold =
             !hasActionableBridgeHealth &&
             string.Equals(lastSentScreenSharePressureReason, ScreenSharePressureProtocol.PressureReasonBridgeHealth, StringComparison.Ordinal);
+        var ignorePreviousSoftPressureHold =
+            clearPreviousSoftPressureWithTrustedVisibleProgress &&
+            nextMode == ScreenSharePressureMode.Normal &&
+            string.Equals(nextReason, ScreenSharePressureProtocol.PressureReasonHealthy, StringComparison.Ordinal);
         if (nextMode != previousMode &&
             lastSentScreenSharePressureModeEnteredUtc != default)
         {
@@ -619,6 +742,7 @@ public sealed partial class SessionRuntime
             }
             else if (previousMode == ScreenSharePressureMode.ReduceFps &&
                      !ignorePreviousBridgeHealthHold &&
+                     !ignorePreviousSoftPressureHold &&
                      heldFor < reduceFpsMinimumHold &&
                      nextMode == ScreenSharePressureMode.Normal)
             {
@@ -643,7 +767,14 @@ public sealed partial class SessionRuntime
             !currentEpochRecoveryActive &&
             helperRecoveryMechanism == HelperRemoteRecoveryMechanism.None;
         var preserveSteadyVisibleProgressForAgeOnlyPressure =
-            suppressNonHealthyClearDueToCurrentEpochProgress;
+            suppressNonHealthyClearDueToCurrentEpochProgress ||
+            (trustedVisibleProgress &&
+             !hasStalePressure &&
+             !hasBridgeHealth &&
+             !hasActionableBridgeHealth &&
+             !hasTransportQueuePressure &&
+             (string.Equals(nextReason, ScreenSharePressureProtocol.PressureReasonHighFrameAge, StringComparison.Ordinal) ||
+              string.Equals(nextReason, ScreenSharePressureProtocol.PressureReasonSlowApplyCadence, StringComparison.Ordinal)));
 
         if (!nextIsHealthyPressure)
         {
@@ -690,7 +821,9 @@ public sealed partial class SessionRuntime
             nextMode == lastSentScreenSharePressureMode &&
             string.Equals(nextReason, lastSentScreenSharePressureReason, StringComparison.Ordinal) &&
             effectiveStaleDropDelta == 0 &&
-            !effectiveProofRefreshBypass)
+            !effectiveProofRefreshBypass &&
+            !clearPreviousSoftPressureWithTrustedVisibleProgress &&
+            !clearPreviousContinuityLossWithHealthyProof)
         {
             return;
         }
@@ -699,14 +832,18 @@ public sealed partial class SessionRuntime
             string.Equals(nextReason, lastSentScreenSharePressureReason, StringComparison.Ordinal) &&
             effectiveStaleDropDelta == 0 &&
             !materialAgeChange &&
-            !effectiveProofRefreshBypass)
+            !effectiveProofRefreshBypass &&
+            !clearPreviousSoftPressureWithTrustedVisibleProgress &&
+            !clearPreviousContinuityLossWithHealthyProof)
         {
             return;
         }
 
         if (lastSentScreenSharePressureUtc != default &&
             nowUtc - lastSentScreenSharePressureUtc < TimeSpan.FromSeconds(1) &&
-            !effectiveProofRefreshBypass)
+            !effectiveProofRefreshBypass &&
+            !clearPreviousSoftPressureWithTrustedVisibleProgress &&
+            !clearPreviousContinuityLossWithHealthyProof)
         {
             return;
         }
@@ -866,5 +1003,19 @@ public sealed partial class SessionRuntime
             countAsTransportTask: false);
     }
 
+    private void MaybeBeginHelperRemotePressureBaselineReseedAfterTrustedVisibleProgress_NoLock(
+        DateTimeOffset nowUtc,
+        long currentEpoch)
+    {
+        if (helperRemoteCurrentPressureEpoch != currentEpoch ||
+            !helperRemoteCurrentPressureEpochBaselineReseedAfterStallPending ||
+            helperRemoteCurrentPressureEpochBaselineFreezeUntilNextApply ||
+            helperRemoteCurrentPressureEpochBaselineReseedRemainingVisibleApplies > 0)
+        {
+            return;
+        }
+
+        BeginHelperRemotePressureBaselineReseedAfterStall_NoLock(nowUtc);
+    }
 
 }

@@ -17,4 +17,18 @@ public sealed class SensitiveDataRedactorTests
         Assert.DoesNotContain("hello world", redacted, StringComparison.Ordinal);
         Assert.Contains("[redacted]", redacted, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void SensitiveDataRedactor_Preserves_Long_Structured_Diagnostic_Keys()
+    {
+        const string input =
+            "event=screenshare_helper_frame_loss_summary; recovery_progress_corridor_success_count=4; recovery_progress_corridor_applied_count=23; evidence_token=0123456789abcdef0123456789abcdef";
+
+        var redacted = SensitiveDataRedactor.Redact(input);
+
+        Assert.Contains("event=screenshare_helper_frame_loss_summary;", redacted, StringComparison.Ordinal);
+        Assert.Contains("recovery_progress_corridor_success_count=4", redacted, StringComparison.Ordinal);
+        Assert.Contains("recovery_progress_corridor_applied_count=23", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("0123456789abcdef0123456789abcdef", redacted, StringComparison.Ordinal);
+    }
 }
