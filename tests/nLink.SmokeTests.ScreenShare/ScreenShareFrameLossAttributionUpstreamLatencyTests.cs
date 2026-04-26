@@ -53,4 +53,41 @@ public sealed class ScreenShareFrameLossAttributionUpstreamLatencyTests
         Assert.Equal(1024, snapshot.FragmentSeenFrames);
         Assert.Equal(1024, epochSnapshot.FragmentSeenFrames);
     }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void FrameLossAttribution_BoundsEpochDiagnosticsAndPreservesActiveRecoveryEpoch()
+    {
+        const string sessionId = "epoch-retention-test";
+        ScreenShareFrameLossAttributionRegistry.ResetAllForTests();
+
+        for (var streamEpoch = 1; streamEpoch <= 40; streamEpoch++)
+        {
+            if (streamEpoch == 5)
+            {
+                ScreenShareFrameLossAttributionRegistry.ObserveReassemblerGapState(
+                    sessionId,
+                    streamEpoch,
+                    gapActive: true,
+                    gapExpectedFrameId: 50,
+                    bufferedRecoveryKeyframeFrameId: 52,
+                    futureNonKeyBufferedCount: 1);
+            }
+
+            ScreenShareFrameLossAttributionRegistry.ObserveEpochContinuityEvent(
+                sessionId,
+                streamEpoch,
+                "epoch_retention_probe",
+                frameId: streamEpoch);
+        }
+
+        var snapshot = ScreenShareFrameLossAttributionRegistry.GetSnapshot(sessionId);
+        var retainedEpochs = snapshot.EpochDiagnostics.Select(static epoch => epoch.StreamEpoch).ToArray();
+
+        Assert.Equal(32, retainedEpochs.Length);
+        Assert.Contains(5, retainedEpochs);
+        Assert.Contains(40, retainedEpochs);
+        Assert.DoesNotContain(1, retainedEpochs);
+        Assert.DoesNotContain(6, retainedEpochs);
+    }
 }

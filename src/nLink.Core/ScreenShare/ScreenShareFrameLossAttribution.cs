@@ -739,6 +739,7 @@ internal static class ScreenShareFrameLossAttributionRegistry
 {
     private const int MaxTrackedSessions = 8;
     private const int MaxTrackedFramesPerSession = 1024;
+    private const int MaxTrackedEpochDiagnosticsPerSession = 32;
     private const int MaxRecentLossesPerSession = 96;
     private const long UnattributedInFlightAgeThresholdMs = 1500;
     private static readonly object Gate = new();
@@ -2979,7 +2980,47 @@ internal static class ScreenShareFrameLossAttributionRegistry
 
         epochDiagnostics = new EpochDiagnosticsState(streamEpoch);
         session.EpochDiagnostics.Add(streamEpoch, epochDiagnostics);
+        TrimEpochDiagnostics(session);
         return epochDiagnostics;
+    }
+
+    private static void TrimEpochDiagnostics(SessionState session)
+    {
+        while (session.EpochDiagnostics.Count > MaxTrackedEpochDiagnosticsPerSession)
+        {
+            var newestEpoch = long.MinValue;
+            foreach (var streamEpoch in session.EpochDiagnostics.Keys)
+            {
+                newestEpoch = Math.Max(newestEpoch, streamEpoch);
+            }
+
+            var activeRecoveryEpoch = session.GapStateStreamEpoch > 0
+                ? session.GapStateStreamEpoch
+                : newestEpoch;
+            var foundOldest = false;
+            long oldestRemovableEpoch = 0;
+            foreach (var streamEpoch in session.EpochDiagnostics.Keys)
+            {
+                if (streamEpoch == newestEpoch ||
+                    streamEpoch == activeRecoveryEpoch)
+                {
+                    continue;
+                }
+
+                if (!foundOldest || streamEpoch < oldestRemovableEpoch)
+                {
+                    oldestRemovableEpoch = streamEpoch;
+                    foundOldest = true;
+                }
+            }
+
+            if (!foundOldest)
+            {
+                break;
+            }
+
+            session.EpochDiagnostics.Remove(oldestRemovableEpoch);
+        }
     }
 
     private static void NoteTimelineEvent(
