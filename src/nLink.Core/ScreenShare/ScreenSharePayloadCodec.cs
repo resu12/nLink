@@ -1,196 +1,208 @@
-using System.Text.Encodings.Web;
-using System.Text.Json;
-using NLink.Core.Logging;
+using System.Buffers.Binary;
+using System.Text;
 
 namespace NLink.Core.ScreenShare;
 
 public static class ScreenSharePayloadCodec
 {
-    public const string ScreenShareFrameTypeV1 = "screenshare.frame.v1";
     public const string ScreenShareStopTypeV1 = "screenshare.stop.v1";
-    // Keep each serialized screenshare message comfortably below the transport
-    // budgets that have been stable in practice, while reducing chunks/frame.
-    public const int MaxChunkRawBytes = 12_000;
-    public const int MaxSerializedFramePayloadBytes = 18_000;
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-        PropertyNamingPolicy = null,
-        WriteIndented = false,
-    };
-
-    public static byte[] Serialize(ScreenShareFrameChunkV1 msg)
-    {
-        ArgumentNullException.ThrowIfNull(msg);
-        var payload = JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
-        if (payload.Length > MaxSerializedFramePayloadBytes)
-        {
-            var diagnostics = BuildFrameChunkSerializationDiagnostics(msg, payload.Length);
-            LocalOperationalLog.Warn("ScreenSharePayload", $"event=serialize_frame_payload_budget_exceeded; {diagnostics}");
-            throw new InvalidOperationException(
-                $"Serialized screenshare frame payload exceeded safe budget of {MaxSerializedFramePayloadBytes} bytes ({diagnostics}).");
-        }
-
-        return payload;
-    }
+    private const uint BinaryMagic = 0x3153534E; // "NSS1"
+    private const byte BinaryVersion = 1;
+    private const byte MessageKindStop = 2;
+    private const byte StopReasonPresentFlag = 0x01;
 
     public static byte[] SerializeStop(ScreenShareStopMessageV1 msg)
     {
         ArgumentNullException.ThrowIfNull(msg);
-        return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
+
+        var normalized = NormalizeStopMessageForSerialization(msg);
+        var sessionIdBytes = Encoding.UTF8.GetBytes(normalized.SessionId);
+        var reasonBytes = string.IsNullOrWhiteSpace(normalized.Reason)
+            ? Array.Empty<byte>()
+            : Encoding.UTF8.GetBytes(normalized.Reason);
+        if (sessionIdBytes.Length > ushort.MaxValue || reasonBytes.Length > ushort.MaxValue)
+        {
+            throw new InvalidOperationException("Screen share stop payload contained an oversized string field.");
+        }
+
+        var flags = reasonBytes.Length > 0 ? StopReasonPresentFlag : (byte)0;
+        var payload = new byte[
+            sizeof(uint) +
+            sizeof(byte) +
+            sizeof(byte) +
+            sizeof(byte) +
+            sizeof(ushort) +
+            sizeof(ushort) +
+            sessionIdBytes.Length +
+            reasonBytes.Length];
+        var span = payload.AsSpan();
+        var offset = 0;
+
+        BinaryPrimitives.WriteUInt32LittleEndian(span[offset..], BinaryMagic);
+        offset += sizeof(uint);
+        span[offset++] = BinaryVersion;
+        span[offset++] = MessageKindStop;
+        span[offset++] = flags;
+        BinaryPrimitives.WriteUInt16LittleEndian(span[offset..], checked((ushort)sessionIdBytes.Length));
+        offset += sizeof(ushort);
+        BinaryPrimitives.WriteUInt16LittleEndian(span[offset..], checked((ushort)reasonBytes.Length));
+        offset += sizeof(ushort);
+        sessionIdBytes.CopyTo(span[offset..]);
+        offset += sessionIdBytes.Length;
+        reasonBytes.CopyTo(span[offset..]);
+
+        return payload;
     }
 
-    public static bool TryDeserialize(ReadOnlySpan<byte> utf8Json, out ScreenShareFrameChunkV1 msg)
+    public static bool TryDeserializeStop(ReadOnlySpan<byte> payload, out ScreenShareStopMessageV1 msg)
     {
         msg = default!;
 
-        if (utf8Json.IsEmpty)
+        if (!TryReadHeader(payload, out var offset, out var messageKind, out var flags) ||
+            messageKind != MessageKindStop ||
+            (flags & ~StopReasonPresentFlag) != 0 ||
+            !TryReadUInt16(payload, ref offset, out var sessionIdLength) ||
+            !TryReadUInt16(payload, ref offset, out var reasonLength) ||
+            !TryReadString(payload, ref offset, sessionIdLength, out var sessionId))
+        {
+            return false;
+        }
+
+        string? reason = null;
+        if ((flags & StopReasonPresentFlag) != 0)
+        {
+            if (reasonLength == 0 || !TryReadString(payload, ref offset, reasonLength, out var parsedReason))
+            {
+                return false;
+            }
+
+            reason = string.IsNullOrWhiteSpace(parsedReason) ? null : parsedReason.Trim();
+        }
+        else if (reasonLength != 0)
+        {
+            return false;
+        }
+
+        if (offset != payload.Length || string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        msg = new ScreenShareStopMessageV1
+        {
+            Kind = "screenshare",
+            Type = ScreenShareStopTypeV1,
+            SessionId = sessionId.Trim(),
+            Reason = reason,
+        };
+        return true;
+    }
+
+    private static ScreenShareStopMessageV1 NormalizeStopMessageForSerialization(ScreenShareStopMessageV1 msg)
+    {
+        var normalizedSessionId = (msg.SessionId ?? string.Empty).Trim();
+        var normalizedReason = string.IsNullOrWhiteSpace(msg.Reason) ? null : msg.Reason.Trim();
+
+        if (!string.IsNullOrWhiteSpace(msg.Kind) &&
+            !string.Equals(msg.Kind, "screenshare", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Screen share stop kind is invalid.");
+        }
+
+        if (!string.Equals(msg.Type, ScreenShareStopTypeV1, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Screen share stop type is invalid.");
+        }
+
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            throw new InvalidOperationException("Screen share stop payload is invalid.");
+        }
+
+        return msg with
+        {
+            Kind = "screenshare",
+            SessionId = normalizedSessionId,
+            Reason = normalizedReason,
+        };
+    }
+
+    private static bool TryReadHeader(ReadOnlySpan<byte> payload, out int offset, out byte messageKind, out byte flags)
+    {
+        offset = 0;
+        messageKind = 0;
+        flags = 0;
+
+        if (!TryReadUInt32(payload, ref offset, out var magic) ||
+            magic != BinaryMagic ||
+            !TryReadByte(payload, ref offset, out var version) ||
+            version != BinaryVersion ||
+            !TryReadByte(payload, ref offset, out messageKind) ||
+            !TryReadByte(payload, ref offset, out flags))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryReadByte(ReadOnlySpan<byte> payload, ref int offset, out byte value)
+    {
+        value = 0;
+        if (offset + sizeof(byte) > payload.Length)
+        {
+            return false;
+        }
+
+        value = payload[offset++];
+        return true;
+    }
+
+    private static bool TryReadUInt16(ReadOnlySpan<byte> payload, ref int offset, out ushort value)
+    {
+        value = 0;
+        if (offset + sizeof(ushort) > payload.Length)
+        {
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadUInt16LittleEndian(payload[offset..]);
+        offset += sizeof(ushort);
+        return true;
+    }
+
+    private static bool TryReadUInt32(ReadOnlySpan<byte> payload, ref int offset, out uint value)
+    {
+        value = 0;
+        if (offset + sizeof(uint) > payload.Length)
+        {
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadUInt32LittleEndian(payload[offset..]);
+        offset += sizeof(uint);
+        return true;
+    }
+
+    private static bool TryReadString(ReadOnlySpan<byte> payload, ref int offset, int byteLength, out string value)
+    {
+        value = string.Empty;
+        if (byteLength < 0 || offset + byteLength > payload.Length)
         {
             return false;
         }
 
         try
         {
-            var parsed = JsonSerializer.Deserialize<ScreenShareFrameChunkV1>(utf8Json, JsonOptions);
-            if (parsed is null)
-            {
-                return false;
-            }
-
-            if (!string.IsNullOrWhiteSpace(parsed.Kind) &&
-                !string.Equals(parsed.Kind, "screenshare", StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            if (!string.Equals(parsed.Type, ScreenShareFrameTypeV1, StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            if (string.IsNullOrWhiteSpace(parsed.SessionId) ||
-                parsed.FrameId < 0 ||
-                parsed.Width <= 0 ||
-                parsed.Height <= 0 ||
-                string.IsNullOrWhiteSpace(parsed.Encoding) ||
-                parsed.ChunkIndex < 0 ||
-                parsed.ChunkCount <= 0 ||
-                parsed.ChunkIndex >= parsed.ChunkCount ||
-                string.IsNullOrWhiteSpace(parsed.DataBase64))
-            {
-                return false;
-            }
-
-            try
-            {
-                var chunkBytes = Convert.FromBase64String(parsed.DataBase64);
-                if (chunkBytes.Length == 0 || chunkBytes.Length > MaxChunkRawBytes)
-                {
-                    return false;
-                }
-            }
-            catch (FormatException)
-            {
-                return false;
-            }
-
-            msg = parsed with
-            {
-                Kind = string.IsNullOrWhiteSpace(parsed.Kind) ? "screenshare" : parsed.Kind.Trim(),
-                SessionId = parsed.SessionId.Trim(),
-                Encoding = parsed.Encoding.Trim(),
-            };
+            value = Encoding.UTF8.GetString(payload.Slice(offset, byteLength));
+            offset += byteLength;
             return true;
         }
-        catch
+        catch (DecoderFallbackException)
         {
+            value = string.Empty;
             return false;
         }
-    }
-
-    public static bool TryDeserializeStop(ReadOnlySpan<byte> utf8Json, out ScreenShareStopMessageV1 msg)
-    {
-        msg = default!;
-
-        if (utf8Json.IsEmpty)
-        {
-            return false;
-        }
-
-        try
-        {
-            var parsed = JsonSerializer.Deserialize<ScreenShareStopMessageV1>(utf8Json, JsonOptions);
-            if (parsed is null)
-            {
-                return false;
-            }
-
-            if (!string.IsNullOrWhiteSpace(parsed.Kind) &&
-                !string.Equals(parsed.Kind, "screenshare", StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            if (!string.Equals(parsed.Type, ScreenShareStopTypeV1, StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            if (string.IsNullOrWhiteSpace(parsed.SessionId))
-            {
-                return false;
-            }
-
-            msg = parsed with
-            {
-                Kind = string.IsNullOrWhiteSpace(parsed.Kind) ? "screenshare" : parsed.Kind.Trim(),
-                SessionId = parsed.SessionId.Trim(),
-                Reason = string.IsNullOrWhiteSpace(parsed.Reason) ? null : parsed.Reason.Trim(),
-            };
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static string BuildFrameChunkSerializationDiagnostics(ScreenShareFrameChunkV1 msg, int serializedLength)
-    {
-        var rawChunkBytes = EstimateRawBytesFromBase64(msg.DataBase64);
-        return string.Join(
-            "; ",
-            $"serialized_bytes={serializedLength}",
-            $"budget_bytes={MaxSerializedFramePayloadBytes}",
-            $"raw_chunk_bytes={rawChunkBytes}",
-            $"base64_bytes={msg.DataBase64.Length}",
-            $"session_id_len={msg.SessionId?.Length ?? 0}",
-            $"frame_id={msg.FrameId}",
-            $"frame={msg.Width}x{msg.Height}",
-            $"chunk={msg.ChunkIndex + 1}/{msg.ChunkCount}",
-            $"encoding={msg.Encoding}");
-    }
-
-    private static int EstimateRawBytesFromBase64(string? base64)
-    {
-        if (string.IsNullOrEmpty(base64))
-        {
-            return 0;
-        }
-
-        var length = base64.Length;
-        var padding = 0;
-        if (length > 0 && base64[^1] == '=')
-        {
-            padding++;
-        }
-
-        if (length > 1 && base64[^2] == '=')
-        {
-            padding++;
-        }
-
-        return Math.Max(0, (length / 4 * 3) - padding);
     }
 }

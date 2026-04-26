@@ -7,6 +7,7 @@ namespace NLink.App.Views;
 public partial class SessionHeaderView : UserControl
 {
     private bool hasRoleText;
+    private bool hasScreenShareAccessory;
 
     public static readonly StyledProperty<string?> StatusTextProperty =
         AvaloniaProperty.Register<SessionHeaderView, string?>(nameof(StatusText));
@@ -77,21 +78,32 @@ public partial class SessionHeaderView : UserControl
     public static readonly StyledProperty<bool> CanControlModeToggleProperty =
         AvaloniaProperty.Register<SessionHeaderView, bool>(nameof(CanControlModeToggle), false);
 
+    public static readonly StyledProperty<Control?> ScreenShareAccessoryProperty =
+        AvaloniaProperty.Register<SessionHeaderView, Control?>(nameof(ScreenShareAccessory));
+
     public static readonly DirectProperty<SessionHeaderView, bool> HasRoleTextProperty =
         AvaloniaProperty.RegisterDirect<SessionHeaderView, bool>(
             nameof(HasRoleText),
             view => view.HasRoleText);
 
+    public static readonly DirectProperty<SessionHeaderView, bool> HasScreenShareAccessoryProperty =
+        AvaloniaProperty.RegisterDirect<SessionHeaderView, bool>(
+            nameof(HasScreenShareAccessory),
+            view => view.HasScreenShareAccessory);
+
     static SessionHeaderView()
     {
         RoleTextProperty.Changed.AddClassHandler<SessionHeaderView>((view, _) =>
             view.UpdateHasRoleText());
+        ScreenShareAccessoryProperty.Changed.AddClassHandler<SessionHeaderView>((view, _) =>
+            view.UpdateHasScreenShareAccessory());
     }
 
     public SessionHeaderView()
     {
         InitializeComponent();
         UpdateHasRoleText();
+        UpdateHasScreenShareAccessory();
     }
 
     public string? StatusText
@@ -232,12 +244,26 @@ public partial class SessionHeaderView : UserControl
         set => SetValue(CanControlModeToggleProperty, value);
     }
 
+    public Control? ScreenShareAccessory
+    {
+        get => GetValue(ScreenShareAccessoryProperty);
+        set => SetValue(ScreenShareAccessoryProperty, value);
+    }
+
     public bool HasRoleText => hasRoleText;
+
+    public bool HasScreenShareAccessory => hasScreenShareAccessory;
 
     private void UpdateHasRoleText()
     {
         var next = !string.IsNullOrWhiteSpace(RoleText);
         SetAndRaise(HasRoleTextProperty, ref hasRoleText, next);
+    }
+
+    private void UpdateHasScreenShareAccessory()
+    {
+        var next = ScreenShareAccessory is not null;
+        SetAndRaise(HasScreenShareAccessoryProperty, ref hasScreenShareAccessory, next);
     }
 
     private void ShareScreenButton_Click(object? sender, RoutedEventArgs e)

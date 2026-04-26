@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using NLink.Core.Logging;
 
 namespace NLink.Infra.Nkn;
 
@@ -21,26 +22,36 @@ public sealed partial class NknSignalingTransport
             return messageType switch
             {
                 MsgType.ControlInput when isLowPriorityMouseMove => ControlOutboundLane.Low,
+                MsgType.ScreenShareCursorState => ControlOutboundLane.Low,
                 MsgType.ControlDisplayInfo => ControlOutboundLane.High,
                 MsgType.ControlRequest or
                     MsgType.ControlResponse or
                     MsgType.ControlStart or
                     MsgType.ControlStop or
                     MsgType.ControlAck or
-                    MsgType.ControlStateSnapshot => ControlOutboundLane.High,
+                    MsgType.ControlStateSnapshot or
+                    MsgType.ScreenSharePressureState => ControlOutboundLane.High,
                 _ => ControlOutboundLane.High,
             };
         }
 
-        public Task QueueEnvelopeAsync(
+        public Task<bool> QueueEnvelopeAsync(
             string destination,
             Envelope envelope,
             ControlOutboundLane lane,
             CancellationToken ct,
-            bool isLowPriorityMouseMove = false)
+            bool isLowPriorityMouseMove = false,
+            bool isLowPriorityScreenShareCursorState = false)
         {
             var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var queued = new QueuedControlEnvelope(destination, envelope, completion, ct, isLowPriorityMouseMove);
+            var queued = new QueuedControlEnvelope(
+                destination,
+                envelope,
+                completion,
+                ct,
+                isLowPriorityMouseMove,
+                isLowPriorityScreenShareCursorState);
+            var logBootstrapScreenShareControl = TryGetStartupScreenShareControlMetadata(envelope, out var startupScreenShareMetadata);
             List<TaskCompletionSource<bool>>? droppedCompletions = null;
             var shouldStartDrainer = false;
             var lowLaneDroppedCount = 0;
@@ -57,13 +68,23 @@ public sealed partial class NknSignalingTransport
                         Interlocked.Increment(ref owner.lowLaneEnqueuedMoves);
                     }
 
-                    if (isLowPriorityMouseMove && owner.queuedLowPriorityMouseMoveNode is not null)
+                    var existingLatestNode = isLowPriorityMouseMove
+                        ? owner.queuedLowPriorityMouseMoveNode
+                        : isLowPriorityScreenShareCursorState
+                            ? owner.queuedLowPriorityScreenShareCursorNode
+                            : null;
+
+                    if (existingLatestNode is not null)
                     {
                         droppedCompletions ??= [];
-                        droppedCompletions.Add(owner.queuedLowPriorityMouseMoveNode.Value.Completion);
-                        Interlocked.Increment(ref owner.lowLaneDroppedMoves);
+                        droppedCompletions.Add(existingLatestNode.Value.Completion);
+                        if (isLowPriorityMouseMove)
+                        {
+                            Interlocked.Increment(ref owner.lowLaneDroppedMoves);
+                        }
+
                         lowLaneDroppedCount++;
-                        owner.queuedLowPriorityMouseMoveNode.Value = queued;
+                        existingLatestNode.Value = queued;
                     }
                     else
                     {
@@ -80,6 +101,10 @@ public sealed partial class NknSignalingTransport
                             {
                                 owner.queuedLowPriorityMouseMoveNode = null;
                             }
+                            else if (ReferenceEquals(droppedNode, owner.queuedLowPriorityScreenShareCursorNode))
+                            {
+                                owner.queuedLowPriorityScreenShareCursorNode = null;
+                            }
 
                             droppedCompletions ??= [];
                             droppedCompletions.Add(droppedNode.Value.Completion);
@@ -95,6 +120,10 @@ public sealed partial class NknSignalingTransport
                         if (isLowPriorityMouseMove)
                         {
                             owner.queuedLowPriorityMouseMoveNode = inserted;
+                        }
+                        else if (isLowPriorityScreenShareCursorState)
+                        {
+                            owner.queuedLowPriorityScreenShareCursorNode = inserted;
                         }
                     }
 
@@ -157,6 +186,11 @@ public sealed partial class NknSignalingTransport
                 }
             }
 
+            if (logBootstrapScreenShareControl)
+            {
+                LogBootstrapScreenShareControlStage("enqueued", envelope, startupScreenShareMetadata!, queuedResult: null);
+            }
+
             if (droppedCompletions is not null)
             {
                 foreach (var dropped in droppedCompletions)
@@ -208,6 +242,7 @@ public sealed partial class NknSignalingTransport
                 }
 
                 owner.queuedLowPriorityMouseMoveNode = null;
+                owner.queuedLowPriorityScreenShareCursorNode = null;
             }
 
             if (droppedCompletions is null)
@@ -246,6 +281,7 @@ public sealed partial class NknSignalingTransport
                 }
 
                 owner.queuedLowPriorityMouseMoveNode = null;
+                owner.queuedLowPriorityScreenShareCursorNode = null;
             }
 
             if (droppedCompletions is null)
@@ -329,6 +365,10 @@ public sealed partial class NknSignalingTransport
                         {
                             owner.queuedLowPriorityMouseMoveNode = null;
                         }
+                        else if (ReferenceEquals(nextNode, owner.queuedLowPriorityScreenShareCursorNode))
+                        {
+                            owner.queuedLowPriorityScreenShareCursorNode = null;
+                        }
                     }
                     else
                     {
@@ -341,24 +381,79 @@ public sealed partial class NknSignalingTransport
 
                 if (queued.CancellationToken.IsCancellationRequested)
                 {
+                    if (TryGetStartupScreenShareControlMetadata(queued.Envelope, out var canceledMetadata))
+                    {
+                        LogBootstrapScreenShareControlStage("canceled_before_send", queued.Envelope, canceledMetadata!, queuedResult: null);
+                    }
+
                     queued.Completion.TrySetCanceled(queued.CancellationToken);
                     continue;
+                }
+
+                var logBootstrapScreenShareControl = TryGetStartupScreenShareControlMetadata(queued.Envelope, out var startupScreenShareMetadata);
+                if (logBootstrapScreenShareControl)
+                {
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_control_bootstrap_lane_stage; stage=dequeued; stream_epoch={startupScreenShareMetadata!.StreamEpoch}; frame_id={startupScreenShareMetadata.FrameId}; is_keyframe={(startupScreenShareMetadata.IsKeyFrame ? 1 : 0)}; msg_id={queued.Envelope.MessageId}; queued_result=-1; gate_count={owner.outboundSendGate.CurrentCount}; gate_holder={owner.outboundSendGateOwnerForDiagnostics ?? "(none)"}");
                 }
 
                 try
                 {
                     await owner.SendEnvelopeAsync(queued.Destination, queued.Envelope, queued.CancellationToken).ConfigureAwait(false);
+                    if (logBootstrapScreenShareControl)
+                    {
+                        LogBootstrapScreenShareControlStage("sent", queued.Envelope, startupScreenShareMetadata!, queuedResult: true);
+                    }
+
                     queued.Completion.TrySetResult(true);
                 }
                 catch (OperationCanceledException) when (queued.CancellationToken.IsCancellationRequested)
                 {
+                    if (logBootstrapScreenShareControl)
+                    {
+                        LogBootstrapScreenShareControlStage("canceled_during_send", queued.Envelope, startupScreenShareMetadata!, queuedResult: null);
+                    }
+
                     queued.Completion.TrySetCanceled(queued.CancellationToken);
                 }
                 catch (Exception ex)
                 {
+                    if (logBootstrapScreenShareControl)
+                    {
+                        LocalOperationalLog.Info(
+                            "ScreenShareTransport",
+                            $"event=screenshare_control_bootstrap_lane_stage; stage=send_failed; stream_epoch={startupScreenShareMetadata!.StreamEpoch}; frame_id={startupScreenShareMetadata.FrameId}; is_keyframe={(startupScreenShareMetadata.IsKeyFrame ? 1 : 0)}; msg_id={queued.Envelope.MessageId}; ex={ex.GetType().Name}");
+                    }
+
                     queued.Completion.TrySetException(ex);
                 }
             }
+        }
+
+        private bool TryGetStartupScreenShareControlMetadata(
+            Envelope envelope,
+            out QueuedScreenShareEnvelopeMetadata? metadata)
+        {
+            metadata = null;
+            if (envelope.Type != MsgType.ScreenShareFrame)
+            {
+                return false;
+            }
+
+            metadata = owner.TryCreateQueuedScreenShareEnvelopeMetadata(EnvelopeCodec.Serialize(envelope), recoverySendRole: null, recoveryBurstToken: 0);
+            return metadata is not null && metadata.FrameId <= ScreenShareControlBootstrapMaxFrameId;
+        }
+
+        private static void LogBootstrapScreenShareControlStage(
+            string stage,
+            Envelope envelope,
+            QueuedScreenShareEnvelopeMetadata metadata,
+            bool? queuedResult)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_control_bootstrap_lane_stage; stage={stage}; stream_epoch={metadata.StreamEpoch}; frame_id={metadata.FrameId}; is_keyframe={(metadata.IsKeyFrame ? 1 : 0)}; msg_id={envelope.MessageId}; queued_result={(queuedResult.HasValue ? (queuedResult.Value ? 1 : 0) : -1)}");
         }
 
         private static void Log(string message) => NknSignalingTransport.Log(message);

@@ -8,5 +8,11 @@ Describe the change.
 - memory usage
 - network protocol correctness
 
+## Touched lanes
+List the relevant `tools\Test-Lanes.ps1` lane(s), for example `Core`, `Gui`, `ScreenShare`, `RemoteControl`, or `Contracts`.
+
+## Support/docs impact
+Mention any update needed for `docs/supportability.md`, `docs/README.md`, release docs, issue templates, or operator guides.
+
 ## Testing
-Explain how this was tested.
+List the exact validation command(s) run.

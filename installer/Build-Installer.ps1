@@ -7,7 +7,11 @@ param(
     [string]$BridgeBundleDir = "artifacts/bridge/win-x64",
     [string]$InstallerOutDir = "artifacts/installer",
     [string]$ReleasesRootDir = "artifacts/releases",
-    [string]$AppVersion = ""
+    [string]$AppVersion = "",
+    [ValidateSet("DownloadSize", "InstalledSize")]
+    [string]$OptimizeFor = "DownloadSize",
+    [switch]$CopyHelperAlias,
+    [switch]$LocalOnly
 )
 
 Set-StrictMode -Version Latest
@@ -197,6 +201,23 @@ function Get-DirectorySizeBytes {
     return $sum
 }
 
+function Get-PathSizeBytes {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    if (-not (Test-Path $Path)) {
+        return [int64]0
+    }
+
+    $item = Get-Item -LiteralPath $Path
+    if (-not $item.PSIsContainer) {
+        return [int64]$item.Length
+    }
+
+    return Get-DirectorySizeBytes -RootDir $item.FullName
+}
+
 function Format-Size {
     param([int64]$Bytes)
 
@@ -204,6 +225,118 @@ function Format-Size {
     if ($Bytes -lt 1MB) { return ("{0:N1} KB" -f ($Bytes / 1KB)) }
     if ($Bytes -lt 1GB) { return ("{0:N1} MB" -f ($Bytes / 1MB)) }
     return ("{0:N2} GB" -f ($Bytes / 1GB))
+}
+
+function Write-PackageSizeSummary {
+    param(
+        [Parameter(Mandatory = $true)][string]$SummaryPath,
+        [Parameter(Mandatory = $true)][string]$Version,
+        [Parameter(Mandatory = $true)][string]$Runtime,
+        [Parameter(Mandatory = $true)][string]$InstallerStageDir,
+        [Parameter(Mandatory = $true)][string]$PortableZipPath,
+        [Parameter(Mandatory = $true)][string]$InstallerExePath,
+        [Parameter(Mandatory = $true)][string]$ReleasesRootDir,
+        [Parameter(Mandatory = $true)][string]$OptimizeFor,
+        [Parameter(Mandatory = $true)][bool]$SingleFileCompression,
+        [bool]$LocalOnly
+    )
+
+    $previousSummary = @{}
+    if (Test-Path $SummaryPath) {
+        foreach ($line in Get-Content -Path $SummaryPath -ErrorAction SilentlyContinue) {
+            $separatorIndex = $line.IndexOf('=')
+            if ($separatorIndex -le 0) {
+                continue
+            }
+
+            $key = $line.Substring(0, $separatorIndex)
+            $value = $line.Substring($separatorIndex + 1)
+            $previousSummary[$key] = $value
+        }
+    }
+
+    $bridgeRoot = Join-Path $InstallerStageDir "bridge"
+    $ffmpegRoot = Join-Path $InstallerStageDir "ffmpeg"
+    $appExe = Join-Path $InstallerStageDir "nLink.exe"
+    $releaseDir = Join-Path $ReleasesRootDir $Version
+
+    $stageSize = Get-PathSizeBytes -Path $InstallerStageDir
+    $installerSize = Get-PathSizeBytes -Path $InstallerExePath
+    $portableZipSize = Get-PathSizeBytes -Path $PortableZipPath
+    $appExeSize = Get-PathSizeBytes -Path $appExe
+    $bridgeSize = Get-PathSizeBytes -Path $bridgeRoot
+    $ffmpegSize = Get-PathSizeBytes -Path $ffmpegRoot
+    $releaseSize = if ($LocalOnly) { [int64]0 } else { Get-PathSizeBytes -Path $releaseDir }
+    $releaseDirText = if ($LocalOnly) { "(skipped)" } else { $releaseDir }
+    $localOnlyValue = if ($LocalOnly) { 1 } else { 0 }
+    $singleFileCompressionValue = if ($SingleFileCompression) { 1 } else { 0 }
+
+    $lines = @(
+        "generated_utc=$([DateTimeOffset]::UtcNow.ToString('u'))",
+        "version=$Version",
+        "runtime=$Runtime",
+        "local_only=$localOnlyValue",
+        "optimize_for=$OptimizeFor",
+        "single_file_compression=$singleFileCompressionValue",
+        "installer_stage_dir=$InstallerStageDir",
+        "installer_stage_size_bytes=$stageSize",
+        "installer_stage_size=$((Format-Size $stageSize))",
+        "installer_exe=$InstallerExePath",
+        "installer_exe_size_bytes=$installerSize",
+        "installer_exe_size=$((Format-Size $installerSize))",
+        "portable_zip=$PortableZipPath",
+        "portable_zip_size_bytes=$portableZipSize",
+        "portable_zip_size=$((Format-Size $portableZipSize))",
+        "app_exe_size_bytes=$appExeSize",
+        "app_exe_size=$((Format-Size $appExeSize))",
+        "bridge_size_bytes=$bridgeSize",
+        "bridge_size=$((Format-Size $bridgeSize))",
+        "ffmpeg_size_bytes=$ffmpegSize",
+        "ffmpeg_size=$((Format-Size $ffmpegSize))",
+        "release_assets_dir=$releaseDirText",
+        "release_assets_size_bytes=$releaseSize",
+        "release_assets_size=$((Format-Size $releaseSize))"
+    )
+
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $SummaryPath) | Out-Null
+    Set-Content -Path $SummaryPath -Value $lines -Encoding ascii
+
+    Write-Host "[nLink] Package size summary:" -ForegroundColor Cyan
+    Write-Host ("  optimize for: {0}" -f $OptimizeFor)
+    Write-Host ("  single-file compression: {0}" -f $singleFileCompressionValue)
+    Write-Host ("  installer staging: {0} ({1} bytes)" -f (Format-Size $stageSize), $stageSize)
+    Write-Host ("  app executable: {0} ({1} bytes)" -f (Format-Size $appExeSize), $appExeSize)
+    Write-Host ("  bridge folder: {0} ({1} bytes)" -f (Format-Size $bridgeSize), $bridgeSize)
+    Write-Host ("  ffmpeg folder: {0} ({1} bytes)" -f (Format-Size $ffmpegSize), $ffmpegSize)
+    Write-Host ("  portable ZIP: {0} ({1} bytes)" -f (Format-Size $portableZipSize), $portableZipSize)
+    Write-Host ("  installer EXE: {0} ({1} bytes)" -f (Format-Size $installerSize), $installerSize)
+    Write-Host ("  release assets: {0} ({1} bytes)" -f (Format-Size $releaseSize), $releaseSize)
+    if ($previousSummary.Count -gt 0) {
+        Write-Host "[nLink] Previous package comparison:" -ForegroundColor Cyan
+        $comparisonKeys = @(
+            @{ Label = "installer EXE"; Key = "installer_exe_size_bytes"; NewBytes = $installerSize },
+            @{ Label = "portable ZIP"; Key = "portable_zip_size_bytes"; NewBytes = $portableZipSize },
+            @{ Label = "installer staging"; Key = "installer_stage_size_bytes"; NewBytes = $stageSize },
+            @{ Label = "app executable"; Key = "app_exe_size_bytes"; NewBytes = $appExeSize }
+        )
+
+        foreach ($entry in $comparisonKeys) {
+            if (-not $previousSummary.ContainsKey($entry.Key)) {
+                continue
+            }
+
+            $oldBytes = 0L
+            if (-not [int64]::TryParse([string]$previousSummary[$entry.Key], [ref]$oldBytes)) {
+                continue
+            }
+
+            $deltaBytes = [int64]$entry.NewBytes - $oldBytes
+            $sign = if ($deltaBytes -ge 0) { "+" } else { "-" }
+            Write-Host ("  {0}: {1} -> {2} ({3}{4})" -f $entry.Label, (Format-Size $oldBytes), (Format-Size ([int64]$entry.NewBytes)), $sign, (Format-Size ([Math]::Abs($deltaBytes))))
+        }
+    }
+
+    Write-Host "[nLink] Package size summary file: $SummaryPath" -ForegroundColor Green
 }
 
 function Publish-ReleaseAssets {
@@ -267,9 +400,15 @@ $verifyPackageManifestPath = Join-Path $repoRoot "build\verify-package-manifest.
 $packageManifestPath = Join-Path $repoRoot ("installer\package-manifest.{0}.txt" -f $Runtime)
 
 New-Item -ItemType Directory -Force -Path $canonicalPortableOutAbs | Out-Null
-New-Item -ItemType Directory -Force -Path $helperPortableOutAbs | Out-Null
 New-Item -ItemType Directory -Force -Path $installerOutAbs | Out-Null
-New-Item -ItemType Directory -Force -Path $releasesRootAbs | Out-Null
+if ($CopyHelperAlias) {
+    New-Item -ItemType Directory -Force -Path $helperPortableOutAbs | Out-Null
+}
+if (-not $LocalOnly) {
+    New-Item -ItemType Directory -Force -Path $releasesRootAbs | Out-Null
+}
+
+$singleFileCompressionEnabled = [string]::Equals($OptimizeFor, "InstalledSize", [System.StringComparison]::OrdinalIgnoreCase)
 
 Write-Host "[nLink] Building canonical portable app output + ZIP..." -ForegroundColor Cyan
 & $portableScriptPath `
@@ -279,7 +418,9 @@ Write-Host "[nLink] Building canonical portable app output + ZIP..." -Foreground
     -ZipOutPath $PortableZipPath `
     -Version $resolvedVersion `
     -HelperAliasOutDir $HelperPortableOutDir `
-    -CopyHelperAlias
+    -OptimizeFor $OptimizeFor `
+    -CopyHelperAlias:$CopyHelperAlias `
+    -LocalOnly:$LocalOnly
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
@@ -309,21 +450,30 @@ if ($LASTEXITCODE -ne 0) {
 # Packaging validation step: inspect staging folder used for installer packaging.
 Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $installerStageAbs "bridge") $Runtime)
 $installerExeAbs = Join-Path $installerOutAbs ("nLink-Setup-win-x64-{0}.exe" -f $resolvedVersion)
-$releasePublish = Publish-ReleaseAssets `
-    -RepoRoot $repoRoot `
-    -Version $resolvedVersion `
-    -ReleasesRootDir $ReleasesRootDir `
-    -AssetPaths @($portableZipAbs, $installerExeAbs)
+if ($LocalOnly) {
+    $releasePublish = $null
+    Write-Host "[nLink] LocalOnly: skipped release asset copy." -ForegroundColor Yellow
+}
+else {
+    $releasePublish = Publish-ReleaseAssets `
+        -RepoRoot $repoRoot `
+        -Version $resolvedVersion `
+        -ReleasesRootDir $ReleasesRootDir `
+        -AssetPaths @($portableZipAbs, $installerExeAbs)
+}
 
 Write-Host "[nLink] Canonical portable folder: $canonicalPortableOutAbs" -ForegroundColor Green
 Write-Host "[nLink] Portable ZIP: $portableZipAbs" -ForegroundColor Green
 Write-Host "[nLink] Installer output folder: $installerOutAbs" -ForegroundColor Green
 Write-Host "[nLink] Release version: $resolvedVersion" -ForegroundColor Green
-Write-Host "[nLink] Release assets folder: $($releasePublish.ReleaseDir)" -ForegroundColor Green
-Write-Host "[nLink] SHA256SUMS: $($releasePublish.ChecksumsPath)" -ForegroundColor Green
-foreach ($asset in @($releasePublish.Assets)) {
-    if (-not [string]::IsNullOrWhiteSpace($asset)) {
-        Write-Host "[nLink] Release asset: $asset" -ForegroundColor Green
+Write-Host "[nLink] OptimizeFor: $OptimizeFor" -ForegroundColor Green
+if ($releasePublish) {
+    Write-Host "[nLink] Release assets folder: $($releasePublish.ReleaseDir)" -ForegroundColor Green
+    Write-Host "[nLink] SHA256SUMS: $($releasePublish.ChecksumsPath)" -ForegroundColor Green
+    foreach ($asset in @($releasePublish.Assets)) {
+        if (-not [string]::IsNullOrWhiteSpace($asset)) {
+            Write-Host "[nLink] Release asset: $asset" -ForegroundColor Green
+        }
     }
 }
 
@@ -336,6 +486,21 @@ $bridgeSizeBytes = Get-DirectorySizeBytes -RootDir $bridgeRootAbs
 $nodeModulesSizeBytes = Get-DirectorySizeBytes -RootDir $nodeModulesAbs
 
 Write-Host "[nLink] Size summary (installer staging):" -ForegroundColor Cyan
+Write-Host ("  optimize for: {0}" -f $OptimizeFor)
+Write-Host ("  single-file compression: {0}" -f ($(if ($singleFileCompressionEnabled) { 1 } else { 0 })))
 Write-Host ("  total output size: {0} ({1} bytes)" -f (Format-Size $totalSizeBytes), $totalSizeBytes)
 Write-Host ("  bridge folder size: {0} ({1} bytes)" -f (Format-Size $bridgeSizeBytes), $bridgeSizeBytes)
 Write-Host ("  bridge/{0}/node_modules size: {1} ({2} bytes)" -f $Runtime, (Format-Size $nodeModulesSizeBytes), $nodeModulesSizeBytes)
+
+$packageSizeSummaryPath = Join-Path $installerOutAbs "package-size-summary.txt"
+Write-PackageSizeSummary `
+    -SummaryPath $packageSizeSummaryPath `
+    -Version $resolvedVersion `
+    -Runtime $Runtime `
+    -InstallerStageDir $installerStageAbs `
+    -PortableZipPath $portableZipAbs `
+    -InstallerExePath $installerExeAbs `
+    -ReleasesRootDir $releasesRootAbs `
+    -OptimizeFor $OptimizeFor `
+    -SingleFileCompression:$singleFileCompressionEnabled `
+    -LocalOnly:$LocalOnly

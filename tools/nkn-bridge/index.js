@@ -1,5 +1,30 @@
 'use strict';
 
+let AsyncLocalStorage = null;
+try {
+  ({ AsyncLocalStorage } = require('node:async_hooks'));
+} catch {
+  try {
+    ({ AsyncLocalStorage } = require('async_hooks'));
+  } catch {
+    AsyncLocalStorage = null;
+  }
+}
+
+let monitorEventLoopDelay = null;
+try {
+  ({ monitorEventLoopDelay } = require('node:perf_hooks'));
+} catch {
+  monitorEventLoopDelay = null;
+}
+
+let cryptoRuntime = null;
+try {
+  cryptoRuntime = require('node:crypto');
+} catch {
+  cryptoRuntime = null;
+}
+
 const BRIDGE_PROTOCOL_VERSION = 2;
 const BINARY_FRAME_MAGIC = 0x00;
 const BINARY_FRAME_HEADER_SIZE = 16;
@@ -11,12 +36,35 @@ const MAX_INPUT_LINE_BYTES = 256 * 1024;
 const MAX_DECODED_PAYLOAD_BYTES = 64 * 1024;
 const DEFAULT_SUBSCRIBE_DURATION = 1440;
 const DEFAULT_CONNECT_READY_TIMEOUT_MS = 12000;
+const DEFAULT_NUM_SUBCLIENTS = 4;
+const DEFAULT_MEDIA_NUM_SUBCLIENTS = 8;
+const MIN_NUM_SUBCLIENTS = 1;
+const MAX_NUM_SUBCLIENTS = 16;
+const OWNER_PID_CHECK_INTERVAL_MS = 2000;
+const BRIDGE_EVENT_LOOP_SAMPLE_WINDOW_MS = 2000;
+const BRIDGE_EVENT_LOOP_RESOLUTION_MS = 20;
+const BRIDGE_MEDIA_SEND_SAMPLE_WINDOW_MS = 2000;
+const BRIDGE_TRANSPORT_HEALTH_SAMPLE_WINDOW_MS = 2000;
+const SCREEN_SHARE_QUEUE_MAX_MESSAGES = 24;
+const SCREEN_SHARE_QUEUE_MAX_BYTES = 384 * 1024;
+const SCREEN_SHARE_QUEUE_CONGESTED_MESSAGES = 8;
+const SCREEN_SHARE_QUEUE_CONGESTED_BYTES = 128 * 1024;
+const SCREEN_SHARE_QUEUE_CONGESTED_AGE_MS = 250;
+const SCREEN_SHARE_QUEUE_SEVERE_MESSAGES = 16;
+const SCREEN_SHARE_QUEUE_SEVERE_BYTES = 256 * 1024;
+const SCREEN_SHARE_QUEUE_SEVERE_AGE_MS = 500;
+const SCREEN_SHARE_CATCH_UP_QUEUE_MAX_MESSAGES = 4;
+const SCREEN_SHARE_CATCH_UP_QUEUE_MAX_BYTES = 96 * 1024;
 const DEFAULT_RPC_SERVERS = [
   'https://mainnet-rpc-node-0001.nkn.org/mainnet/api/wallet',
   'https://seed.nkn.org:30003',
   'http://seed.nkn.org:30003'
 ];
 const SUPPORTED_CHANNELS = ['control', 'media', 'bulk'];
+const RECEIVE_TIMING_METADATA_SYMBOL = Symbol('nlink.bridge.receiveTimingMetadata');
+const RECEIVE_TIMING_HOOKS_INSTALLED_SYMBOL = Symbol('nlink.bridge.receiveTimingHooksInstalled');
+const RECEIVE_TIMING_WRAPPER_SYMBOL = Symbol('nlink.bridge.receiveTimingWrapper');
+const RECEIVE_TIMING_NKN_SOCKET_SYMBOL = Symbol('nlink.bridge.receiveTimingNknSocket');
 let BRIDGE_APP_VERSION = '';
 
 // Redirect accidental console output (including some library logs) away from stdout.
@@ -44,6 +92,20 @@ try {
   });
 }
 
+let wsRuntime = null;
+try {
+  wsRuntime = require('ws');
+} catch {
+  wsRuntime = null;
+}
+
+let netRuntime = null;
+try {
+  netRuntime = require('net');
+} catch {
+  netRuntime = null;
+}
+
 try {
   const bridgePackage = require('./package.json');
   if (bridgePackage && typeof bridgePackage.version === 'string') {
@@ -52,6 +114,11 @@ try {
 } catch {
   BRIDGE_APP_VERSION = '';
 }
+
+installNknReceiveTimingHooks();
+startBridgeEventLoopMonitor();
+startBridgeMediaSendSummaryMonitor();
+startBridgeTransportHealthSummaryMonitor();
 
 const state = {
   controlClient: null,
@@ -66,23 +133,37 @@ const state = {
   controlClientIdentifier: '',
   mediaClientIdentifier: '',
   bulkClientIdentifier: '',
+  controlNumSubClients: DEFAULT_NUM_SUBCLIENTS,
+  mediaNumSubClients: DEFAULT_MEDIA_NUM_SUBCLIENTS,
+  bulkNumSubClients: DEFAULT_NUM_SUBCLIENTS,
   connectId: '',
   connectAttemptId: 0,
   preflightProgressEnabled: false,
-  inboundScreenSharePolicy: {
-    enabled: false,
-    sessionId: null,
-    sourceAddress: null,
-    expiresAtUnixMs: 0
-  },
-  lastScreenShareDropLogTs: 0,
-  lastScreenShareDropReason: '',
-  lastScreenShareDropSessionId: ''
+  clientReadyAtMs: 0,
+  lastDisconnectReason: '',
+  selectedRpc: '',
+  selectedRpcKey: '',
+  selectedRpcStage: 'none',
+  screenShareQueue: [],
+  screenShareQueuedBytes: 0,
+  screenShareQueueMode: 'normal',
+  screenShareQueueGeneration: 0,
+  screenShareQueueDrainActive: false,
+  screenShareQueueInFlight: false,
+  screenShareQueueDroppedSinceLast: 0,
+  lastEmittedScreenShareQueueStateKey: '',
+  lastEmittedScreenShareQueueStateAt: 0,
+  bridgeMediaSendSummaryWindow: createBridgeMediaSendSummaryWindow(),
+  bridgeTransportHealthSummaryWindow: createBridgeTransportHealthSummaryWindow()
 };
+
+const inboundReceiveContextStorage = AsyncLocalStorage ? new AsyncLocalStorage() : null;
 
 let rpcCandidateCursor = 0;
 let stdinBuffer = Buffer.alloc(0);
 let stdinProcessing = false;
+const ownerPid = Number.parseInt(process.env.NLINK_BRIDGE_OWNER_PID || '', 10);
+let ownerPidMonitor = null;
 
 function emitJson(obj) {
   // Control/status events stay on the JSONL control plane.
@@ -135,15 +216,605 @@ function buildBinaryFrame(kind, channel, flags, primaryText, secondaryText, payl
   return frame;
 }
 
-function emitBinaryMessage(channel, source, payload, isTopic, topic) {
+function isObjectLike(value) {
+  return value !== null && (typeof value === 'object' || typeof value === 'function');
+}
+
+function getReceiveTimingMetadata(payload) {
+  if (!isObjectLike(payload)) {
+    return null;
+  }
+
+  return payload[RECEIVE_TIMING_METADATA_SYMBOL] || null;
+}
+
+function ensureReceiveTimingMetadata(payload) {
+  if (!isObjectLike(payload)) {
+    return null;
+  }
+
+  let metadata = payload[RECEIVE_TIMING_METADATA_SYMBOL];
+  if (!metadata) {
+    metadata = {};
+    Object.defineProperty(payload, RECEIVE_TIMING_METADATA_SYMBOL, {
+      value: metadata,
+      enumerable: false,
+      configurable: true,
+      writable: false
+    });
+  }
+
+  return metadata;
+}
+
+function recordReceiveTimingMetadata(payload, patch) {
+  if (!patch) {
+    return null;
+  }
+
+  const metadata = ensureReceiveTimingMetadata(payload);
+  if (!metadata) {
+    return null;
+  }
+
+  if (Number.isFinite(patch.sdkHandleMsgEnteredUtcMs) &&
+      patch.sdkHandleMsgEnteredUtcMs > 0 &&
+      (!Number.isFinite(metadata.sdkHandleMsgEnteredUtcMs) || metadata.sdkHandleMsgEnteredUtcMs <= 0)) {
+    metadata.sdkHandleMsgEnteredUtcMs = Math.trunc(patch.sdkHandleMsgEnteredUtcMs);
+  }
+
+  if (Number.isFinite(patch.socketDataEventEmittedUtcMs) &&
+      patch.socketDataEventEmittedUtcMs > 0 &&
+      (!Number.isFinite(metadata.socketDataEventEmittedUtcMs) || metadata.socketDataEventEmittedUtcMs <= 0)) {
+    metadata.socketDataEventEmittedUtcMs = Math.trunc(patch.socketDataEventEmittedUtcMs);
+  }
+
+  if (Number.isFinite(patch.wsReceiverWriteEnteredUtcMs) &&
+      patch.wsReceiverWriteEnteredUtcMs > 0 &&
+      (!Number.isFinite(metadata.wsReceiverWriteEnteredUtcMs) || metadata.wsReceiverWriteEnteredUtcMs <= 0)) {
+    metadata.wsReceiverWriteEnteredUtcMs = Math.trunc(patch.wsReceiverWriteEnteredUtcMs);
+  }
+
+  if (Number.isFinite(patch.wsMessageEmittedUtcMs) &&
+      patch.wsMessageEmittedUtcMs > 0 &&
+      (!Number.isFinite(metadata.wsMessageEmittedUtcMs) || metadata.wsMessageEmittedUtcMs <= 0)) {
+    metadata.wsMessageEmittedUtcMs = Math.trunc(patch.wsMessageEmittedUtcMs);
+  }
+
+  if (Number.isFinite(patch.clientMessageDispatchUtcMs) && patch.clientMessageDispatchUtcMs > 0) {
+    metadata.clientMessageDispatchUtcMs = Math.trunc(patch.clientMessageDispatchUtcMs);
+  }
+
+  if (Number.isFinite(patch.multiClientMessageDispatchUtcMs) && patch.multiClientMessageDispatchUtcMs > 0) {
+    metadata.multiClientMessageDispatchUtcMs = Math.trunc(patch.multiClientMessageDispatchUtcMs);
+  }
+
+  return metadata;
+}
+
+function readReceiveTimingMetadata(value) {
+  const metadata = getReceiveTimingMetadata(value);
+  if (!metadata) {
+    return null;
+  }
+
+  const normalized = {};
+  if (Number.isFinite(metadata.socketDataEventEmittedUtcMs) && metadata.socketDataEventEmittedUtcMs > 0) {
+    normalized.socketDataEventEmittedUtcMs = Math.trunc(metadata.socketDataEventEmittedUtcMs);
+  }
+  if (Number.isFinite(metadata.wsReceiverWriteEnteredUtcMs) && metadata.wsReceiverWriteEnteredUtcMs > 0) {
+    normalized.wsReceiverWriteEnteredUtcMs = Math.trunc(metadata.wsReceiverWriteEnteredUtcMs);
+  }
+  if (Number.isFinite(metadata.wsMessageEmittedUtcMs) && metadata.wsMessageEmittedUtcMs > 0) {
+    normalized.wsMessageEmittedUtcMs = Math.trunc(metadata.wsMessageEmittedUtcMs);
+  }
+  if (Number.isFinite(metadata.sdkHandleMsgEnteredUtcMs) && metadata.sdkHandleMsgEnteredUtcMs > 0) {
+    normalized.sdkHandleMsgEnteredUtcMs = Math.trunc(metadata.sdkHandleMsgEnteredUtcMs);
+  }
+  if (Number.isFinite(metadata.clientMessageDispatchUtcMs) && metadata.clientMessageDispatchUtcMs > 0) {
+    normalized.clientMessageDispatchUtcMs = Math.trunc(metadata.clientMessageDispatchUtcMs);
+  }
+  if (Number.isFinite(metadata.multiClientMessageDispatchUtcMs) && metadata.multiClientMessageDispatchUtcMs > 0) {
+    normalized.multiClientMessageDispatchUtcMs = Math.trunc(metadata.multiClientMessageDispatchUtcMs);
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function buildMediaReceiveTimingMetadataString(bridgeMessageObservedUtcMs, receiveTimingMetadata) {
+  const parts = ['ver=4'];
+  let hasValue = false;
+
+  if (Number.isFinite(bridgeMessageObservedUtcMs) && bridgeMessageObservedUtcMs > 0) {
+    parts.push(`b=${Math.trunc(bridgeMessageObservedUtcMs)}`);
+    hasValue = true;
+  }
+
+  if (receiveTimingMetadata) {
+    if (Number.isFinite(receiveTimingMetadata.socketDataEventEmittedUtcMs) && receiveTimingMetadata.socketDataEventEmittedUtcMs > 0) {
+      parts.push(`s=${Math.trunc(receiveTimingMetadata.socketDataEventEmittedUtcMs)}`);
+      hasValue = true;
+    }
+
+    if (Number.isFinite(receiveTimingMetadata.wsReceiverWriteEnteredUtcMs) && receiveTimingMetadata.wsReceiverWriteEnteredUtcMs > 0) {
+      parts.push(`r=${Math.trunc(receiveTimingMetadata.wsReceiverWriteEnteredUtcMs)}`);
+      hasValue = true;
+    }
+
+    if (Number.isFinite(receiveTimingMetadata.wsMessageEmittedUtcMs) && receiveTimingMetadata.wsMessageEmittedUtcMs > 0) {
+      parts.push(`w=${Math.trunc(receiveTimingMetadata.wsMessageEmittedUtcMs)}`);
+      hasValue = true;
+    }
+
+    if (Number.isFinite(receiveTimingMetadata.sdkHandleMsgEnteredUtcMs) && receiveTimingMetadata.sdkHandleMsgEnteredUtcMs > 0) {
+      parts.push(`h=${Math.trunc(receiveTimingMetadata.sdkHandleMsgEnteredUtcMs)}`);
+      hasValue = true;
+    }
+
+    if (Number.isFinite(receiveTimingMetadata.clientMessageDispatchUtcMs) && receiveTimingMetadata.clientMessageDispatchUtcMs > 0) {
+      parts.push(`c=${Math.trunc(receiveTimingMetadata.clientMessageDispatchUtcMs)}`);
+      hasValue = true;
+    }
+
+    if (Number.isFinite(receiveTimingMetadata.multiClientMessageDispatchUtcMs) && receiveTimingMetadata.multiClientMessageDispatchUtcMs > 0) {
+      parts.push(`m=${Math.trunc(receiveTimingMetadata.multiClientMessageDispatchUtcMs)}`);
+      hasValue = true;
+    }
+  }
+
+  return hasValue ? parts.join(';') : null;
+}
+
+function emitBinaryMessage(channel, source, payload, isTopic, topic, bridgeMessageObservedUtcMs, receiveTimingMetadata) {
+  const secondaryText = isTopic && topic
+    ? topic
+    : channel === 'media' && !isTopic
+      ? buildMediaReceiveTimingMetadataString(bridgeMessageObservedUtcMs, receiveTimingMetadata)
+      : null;
   const frame = buildBinaryFrame(
     BINARY_FRAME_KIND_MESSAGE,
     channel,
     isTopic ? BINARY_FLAG_IS_TOPIC : 0,
     source,
-    isTopic && topic ? topic : null,
+    secondaryText,
     payload);
   process.stdout.write(frame);
+}
+
+function installNknReceiveTimingHooks() {
+  if (!nkn || !nkn.Client || !nkn.Client.prototype) {
+    return;
+  }
+
+  const clientProto = nkn.Client.prototype;
+  const wsWebSocketCtor = wsRuntime && typeof wsRuntime === 'function'
+    ? wsRuntime
+    : wsRuntime && wsRuntime.WebSocket && wsRuntime.WebSocket.prototype
+      ? wsRuntime.WebSocket
+      : null;
+  const wsWebSocketProto = wsWebSocketCtor && wsWebSocketCtor.prototype
+    ? wsWebSocketCtor.prototype
+    : null;
+  const wsReceiverProto = wsRuntime && wsRuntime.Receiver && wsRuntime.Receiver.prototype
+    ? wsRuntime.Receiver.prototype
+    : null;
+  const netSocketProto = netRuntime && netRuntime.Socket && netRuntime.Socket.prototype
+    ? netRuntime.Socket.prototype
+    : null;
+  const clientHooksInstalled = Boolean(clientProto[RECEIVE_TIMING_HOOKS_INSTALLED_SYMBOL]);
+  const wsHooksInstalled = (!wsWebSocketProto || wsWebSocketProto[RECEIVE_TIMING_HOOKS_INSTALLED_SYMBOL]) &&
+    (!wsReceiverProto || wsReceiverProto[RECEIVE_TIMING_HOOKS_INSTALLED_SYMBOL]) &&
+    (!netSocketProto || netSocketProto[RECEIVE_TIMING_HOOKS_INSTALLED_SYMBOL]);
+  if (clientHooksInstalled && wsHooksInstalled) {
+    return;
+  }
+
+  const multiClientProto = nkn.MultiClient && nkn.MultiClient.prototype
+    ? nkn.MultiClient.prototype
+    : null;
+
+  if (wsWebSocketProto && typeof wsWebSocketProto.setSocket === 'function') {
+    const originalSetSocket = wsWebSocketProto.setSocket;
+    if (!originalSetSocket[RECEIVE_TIMING_WRAPPER_SYMBOL]) {
+      const wrappedSetSocket = function patchedSetSocket(...args) {
+        const result = originalSetSocket.apply(this, args);
+        if (this && this._socket) {
+          this._socket[RECEIVE_TIMING_NKN_SOCKET_SYMBOL] = true;
+        }
+        if (this && this._receiver) {
+          this._receiver[RECEIVE_TIMING_NKN_SOCKET_SYMBOL] = true;
+        }
+        return result;
+      };
+      wrappedSetSocket[RECEIVE_TIMING_WRAPPER_SYMBOL] = true;
+      wsWebSocketProto.setSocket = wrappedSetSocket;
+    }
+  }
+
+  if (netSocketProto && typeof netSocketProto.emit === 'function') {
+    const originalNetSocketEmit = netSocketProto.emit;
+    if (!originalNetSocketEmit[RECEIVE_TIMING_WRAPPER_SYMBOL]) {
+      const wrappedNetSocketEmit = function patchedNetSocketEmit(eventName, ...args) {
+        if (eventName !== 'data' || !this || !this[RECEIVE_TIMING_NKN_SOCKET_SYMBOL] || !inboundReceiveContextStorage) {
+          return originalNetSocketEmit.call(this, eventName, ...args);
+        }
+
+        const existingContext = inboundReceiveContextStorage.getStore();
+        const nextContext = existingContext && typeof existingContext === 'object'
+          ? { ...existingContext }
+          : {};
+        nextContext.socketDataEventEmittedUtcMs = Date.now();
+
+        return inboundReceiveContextStorage.run(nextContext, () => originalNetSocketEmit.call(this, eventName, ...args));
+      };
+      wrappedNetSocketEmit[RECEIVE_TIMING_WRAPPER_SYMBOL] = true;
+      netSocketProto.emit = wrappedNetSocketEmit;
+    }
+  }
+
+  if (wsReceiverProto && typeof wsReceiverProto._write === 'function') {
+    const originalReceiverWrite = wsReceiverProto._write;
+    if (!originalReceiverWrite[RECEIVE_TIMING_WRAPPER_SYMBOL]) {
+      const wrappedReceiverWrite = function patchedReceiverWrite(...args) {
+        if (!inboundReceiveContextStorage) {
+          return originalReceiverWrite.apply(this, args);
+        }
+
+        const existingContext = inboundReceiveContextStorage.getStore();
+        const nextContext = existingContext && typeof existingContext === 'object'
+          ? { ...existingContext }
+          : {};
+        nextContext.wsReceiverWriteEnteredUtcMs = Date.now();
+
+        return inboundReceiveContextStorage.run(nextContext, () => originalReceiverWrite.apply(this, args));
+      };
+      wrappedReceiverWrite[RECEIVE_TIMING_WRAPPER_SYMBOL] = true;
+      wsReceiverProto._write = wrappedReceiverWrite;
+    }
+  }
+
+  if (wsWebSocketProto && typeof wsWebSocketProto.emit === 'function') {
+    const originalWebSocketEmit = wsWebSocketProto.emit;
+    if (!originalWebSocketEmit[RECEIVE_TIMING_WRAPPER_SYMBOL]) {
+      const wrappedWebSocketEmit = function patchedWebSocketEmit(eventName, ...args) {
+        if (eventName !== 'message' || !inboundReceiveContextStorage) {
+          return originalWebSocketEmit.call(this, eventName, ...args);
+        }
+
+        const existingContext = inboundReceiveContextStorage.getStore();
+        const nextContext = existingContext && typeof existingContext === 'object'
+          ? { ...existingContext }
+          : {};
+        nextContext.wsMessageEmittedUtcMs = Date.now();
+
+        return inboundReceiveContextStorage.run(nextContext, () => originalWebSocketEmit.call(this, eventName, ...args));
+      };
+      wrappedWebSocketEmit[RECEIVE_TIMING_WRAPPER_SYMBOL] = true;
+      wsWebSocketProto.emit = wrappedWebSocketEmit;
+    }
+  }
+
+  if (typeof clientProto._handleMsg === 'function') {
+    const originalHandleMsg = clientProto._handleMsg;
+    if (!originalHandleMsg[RECEIVE_TIMING_WRAPPER_SYMBOL]) {
+      const wrappedHandleMsg = function patchedHandleMsg(...args) {
+        if (!inboundReceiveContextStorage) {
+          return originalHandleMsg.apply(this, args);
+        }
+
+        const existingContext = inboundReceiveContextStorage.getStore();
+        const nextContext = existingContext && typeof existingContext === 'object'
+          ? { ...existingContext }
+          : {};
+        if (!Number.isFinite(nextContext.sdkHandleMsgEnteredUtcMs) || nextContext.sdkHandleMsgEnteredUtcMs <= 0) {
+          nextContext.sdkHandleMsgEnteredUtcMs = Date.now();
+        }
+
+        return inboundReceiveContextStorage.run(
+          nextContext,
+          () => originalHandleMsg.apply(this, args));
+      };
+      wrappedHandleMsg[RECEIVE_TIMING_WRAPPER_SYMBOL] = true;
+      clientProto._handleMsg = wrappedHandleMsg;
+    }
+  }
+
+  if (typeof clientProto.onMessage === 'function') {
+    const originalClientOnMessage = clientProto.onMessage;
+    if (!originalClientOnMessage[RECEIVE_TIMING_WRAPPER_SYMBOL]) {
+      const wrappedClientOnMessage = function patchedClientOnMessage(func) {
+        if (typeof func !== 'function') {
+          return originalClientOnMessage.call(this, func);
+        }
+
+        const wrappedListener = async (...args) => {
+          const message = args[0];
+          const payload = message && typeof message === 'object'
+            ? (message.payload != null ? message.payload : message.data)
+            : null;
+          const receiveContext = inboundReceiveContextStorage
+            ? inboundReceiveContextStorage.getStore()
+            : null;
+          recordReceiveTimingMetadata(payload, {
+            socketDataEventEmittedUtcMs: receiveContext && Number.isFinite(receiveContext.socketDataEventEmittedUtcMs)
+              ? receiveContext.socketDataEventEmittedUtcMs
+              : 0,
+            wsReceiverWriteEnteredUtcMs: receiveContext && Number.isFinite(receiveContext.wsReceiverWriteEnteredUtcMs)
+              ? receiveContext.wsReceiverWriteEnteredUtcMs
+              : 0,
+            wsMessageEmittedUtcMs: receiveContext && Number.isFinite(receiveContext.wsMessageEmittedUtcMs)
+              ? receiveContext.wsMessageEmittedUtcMs
+              : 0,
+            sdkHandleMsgEnteredUtcMs: receiveContext && Number.isFinite(receiveContext.sdkHandleMsgEnteredUtcMs)
+              ? receiveContext.sdkHandleMsgEnteredUtcMs
+              : 0,
+            clientMessageDispatchUtcMs: Date.now()
+          });
+          return await func(...args);
+        };
+
+        return originalClientOnMessage.call(this, wrappedListener);
+      };
+      wrappedClientOnMessage[RECEIVE_TIMING_WRAPPER_SYMBOL] = true;
+      clientProto.onMessage = wrappedClientOnMessage;
+    }
+  }
+
+  if (multiClientProto && typeof multiClientProto.onMessage === 'function') {
+    const originalMultiClientOnMessage = multiClientProto.onMessage;
+    if (!originalMultiClientOnMessage[RECEIVE_TIMING_WRAPPER_SYMBOL]) {
+      const wrappedMultiClientOnMessage = function patchedMultiClientOnMessage(func) {
+        if (typeof func !== 'function') {
+          return originalMultiClientOnMessage.call(this, func);
+        }
+
+        const wrappedListener = async (...args) => {
+          const message = args[0];
+          const payload = message && typeof message === 'object'
+            ? (message.payload != null ? message.payload : message.data)
+            : null;
+          recordReceiveTimingMetadata(payload, {
+            multiClientMessageDispatchUtcMs: Date.now()
+          });
+          return await func(...args);
+        };
+
+        return originalMultiClientOnMessage.call(this, wrappedListener);
+      };
+      wrappedMultiClientOnMessage[RECEIVE_TIMING_WRAPPER_SYMBOL] = true;
+      multiClientProto.onMessage = wrappedMultiClientOnMessage;
+    }
+  }
+
+  clientProto[RECEIVE_TIMING_HOOKS_INSTALLED_SYMBOL] = true;
+  if (multiClientProto) {
+    multiClientProto[RECEIVE_TIMING_HOOKS_INSTALLED_SYMBOL] = true;
+  }
+  if (wsReceiverProto) {
+    wsReceiverProto[RECEIVE_TIMING_HOOKS_INSTALLED_SYMBOL] = true;
+  }
+  if (wsWebSocketProto) {
+    wsWebSocketProto[RECEIVE_TIMING_HOOKS_INSTALLED_SYMBOL] = true;
+  }
+  if (netSocketProto) {
+    netSocketProto[RECEIVE_TIMING_HOOKS_INSTALLED_SYMBOL] = true;
+  }
+}
+
+function startBridgeEventLoopMonitor() {
+  if (typeof monitorEventLoopDelay !== 'function') {
+    return;
+  }
+
+  const histogram = monitorEventLoopDelay({
+    resolution: BRIDGE_EVENT_LOOP_RESOLUTION_MS
+  });
+  histogram.enable();
+
+  const timer = setInterval(() => {
+    try {
+      const p95 = Math.max(0, Math.round(histogram.percentile(95) / 1e6));
+      const max = Math.max(0, Math.round(histogram.max / 1e6));
+      const mean = Number.isFinite(histogram.mean)
+        ? Math.max(0, Math.round(histogram.mean / 1e6))
+        : 0;
+
+      emitJson({
+        event: 'bridge_event_loop_summary',
+        event_loop_p95_ms: p95,
+        event_loop_max_ms: max,
+        event_loop_mean_ms: mean,
+        sample_window_ms: BRIDGE_EVENT_LOOP_SAMPLE_WINDOW_MS
+      });
+    } catch (error) {
+      logStderr(`Event loop summary failed: ${safeErrorMessage(error)}`);
+    } finally {
+      histogram.reset();
+    }
+  }, BRIDGE_EVENT_LOOP_SAMPLE_WINDOW_MS);
+
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
+}
+
+function createBridgeMediaSendSummaryWindow() {
+  return {
+    binarySendFrameObservedToQueueEnqueueMs: [],
+    queueEnqueueToQueueDequeueMs: [],
+    queueDequeueToMediaSendStartedMs: [],
+    mediaSendStartedToMediaSendResolvedMs: [],
+    framesSent: 0,
+    sendFailures: 0,
+    queueDrops: 0
+  };
+}
+
+function createBridgeTransportHealthSummaryWindow() {
+  return {
+    disconnectCountSinceLast: 0,
+    connectFailedCountSinceLast: 0,
+    wsErrorCountSinceLast: 0,
+    rpcFallbackAttemptCountSinceLast: 0,
+    framesSentSinceLast: 0
+  };
+}
+
+function resetBridgeMediaSendSummaryWindow() {
+  state.bridgeMediaSendSummaryWindow = createBridgeMediaSendSummaryWindow();
+}
+
+function resetBridgeTransportHealthSummaryWindow() {
+  state.bridgeTransportHealthSummaryWindow = createBridgeTransportHealthSummaryWindow();
+}
+
+function recordBridgeMediaSendDuration(samples, durationMs) {
+  if (!Array.isArray(samples) || !Number.isFinite(durationMs)) {
+    return;
+  }
+
+  samples.push(Math.max(0, Math.round(durationMs)));
+}
+
+function buildDurationStats(values) {
+  if (!Array.isArray(values) || values.length === 0) {
+    return {
+      avg: -1,
+      median: -1,
+      p95: -1,
+      max: -1
+    };
+  }
+
+  const sorted = values
+    .filter((value) => Number.isFinite(value))
+    .map((value) => Math.max(0, Math.round(value)))
+    .sort((left, right) => left - right);
+  if (!sorted.length) {
+    return {
+      avg: -1,
+      median: -1,
+      p95: -1,
+      max: -1
+    };
+  }
+
+  const sum = sorted.reduce((total, value) => total + value, 0);
+  const medianIndex = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 1
+    ? sorted[medianIndex]
+    : Math.round((sorted[medianIndex - 1] + sorted[medianIndex]) / 2);
+  const p95Index = Math.max(0, Math.ceil(sorted.length * 0.95) - 1);
+
+  return {
+    avg: Math.round(sum / sorted.length),
+    median,
+    p95: sorted[p95Index],
+    max: sorted[sorted.length - 1]
+  };
+}
+
+function emitBridgeMediaSendSummary() {
+  const window = state.bridgeMediaSendSummaryWindow;
+  const ingressStats = buildDurationStats(window.binarySendFrameObservedToQueueEnqueueMs);
+  const queueStats = buildDurationStats(window.queueEnqueueToQueueDequeueMs);
+  const sendStartStats = buildDurationStats(window.queueDequeueToMediaSendStartedMs);
+  const sendResolveStats = buildDurationStats(window.mediaSendStartedToMediaSendResolvedMs);
+
+  emitJson({
+    event: 'bridge_media_send_summary',
+    binary_send_frame_observed_to_queue_enqueue_avg_ms: ingressStats.avg,
+    binary_send_frame_observed_to_queue_enqueue_median_ms: ingressStats.median,
+    binary_send_frame_observed_to_queue_enqueue_p95_ms: ingressStats.p95,
+    binary_send_frame_observed_to_queue_enqueue_max_ms: ingressStats.max,
+    queue_enqueue_to_queue_dequeue_avg_ms: queueStats.avg,
+    queue_enqueue_to_queue_dequeue_median_ms: queueStats.median,
+    queue_enqueue_to_queue_dequeue_p95_ms: queueStats.p95,
+    queue_enqueue_to_queue_dequeue_max_ms: queueStats.max,
+    queue_dequeue_to_media_send_started_avg_ms: sendStartStats.avg,
+    queue_dequeue_to_media_send_started_median_ms: sendStartStats.median,
+    queue_dequeue_to_media_send_started_p95_ms: sendStartStats.p95,
+    queue_dequeue_to_media_send_started_max_ms: sendStartStats.max,
+    media_send_started_to_media_send_resolved_avg_ms: sendResolveStats.avg,
+    media_send_started_to_media_send_resolved_median_ms: sendResolveStats.median,
+    media_send_started_to_media_send_resolved_p95_ms: sendResolveStats.p95,
+    media_send_started_to_media_send_resolved_max_ms: sendResolveStats.max,
+    frames_sent: window.framesSent,
+    send_failures: window.sendFailures,
+    queue_drops: window.queueDrops,
+    queue_mode: state.screenShareQueueMode,
+    queue_depth: state.screenShareQueue.length,
+    oldest_queued_age_ms: getScreenShareQueueOldestAgeMs(),
+    sample_window_ms: BRIDGE_MEDIA_SEND_SAMPLE_WINDOW_MS
+  });
+}
+
+function emitBridgeTransportHealthSummary() {
+  const window = state.bridgeTransportHealthSummaryWindow;
+  const readyEmitted = Boolean(state.readyEmitted && state.controlReady && state.mediaReady && state.bulkReady);
+  const clientReadyAgeMs = readyEmitted && state.clientReadyAtMs > 0
+    ? Math.max(0, Date.now() - state.clientReadyAtMs)
+    : -1;
+  const selectedRpc = state.selectedRpc || '(none)';
+  const selectedRpcKey = state.selectedRpcKey || '(none)';
+  const connectId = state.connectId || '(none)';
+  const connectKey = computeStableKey(connectId) || '(none)';
+
+  emitJson({
+    event: 'bridge_transport_health_summary',
+    selected_rpc: selectedRpc,
+    selected_rpc_key: selectedRpcKey,
+    selected_rpc_stage: state.selectedRpcStage || 'none',
+    connect_id: connectId,
+    connect_key: connectKey,
+    ready_emitted: readyEmitted ? 1 : 0,
+    client_ready_age_ms: clientReadyAgeMs,
+    disconnect_count_since_last: window.disconnectCountSinceLast,
+    connect_failed_count_since_last: window.connectFailedCountSinceLast,
+    ws_error_count_since_last: window.wsErrorCountSinceLast,
+    rpc_fallback_attempt_count_since_last: window.rpcFallbackAttemptCountSinceLast,
+    control_ready: state.controlReady ? 1 : 0,
+    media_ready: state.mediaReady ? 1 : 0,
+    bulk_ready: state.bulkReady ? 1 : 0,
+    frames_sent_since_last: window.framesSentSinceLast,
+    latest_disconnect_reason: state.lastDisconnectReason || '(none)',
+    control_subclients: state.controlNumSubClients,
+    media_subclients: state.mediaNumSubClients,
+    bulk_subclients: state.bulkNumSubClients,
+    sample_window_ms: BRIDGE_TRANSPORT_HEALTH_SAMPLE_WINDOW_MS
+  });
+}
+
+function startBridgeMediaSendSummaryMonitor() {
+  const timer = setInterval(() => {
+    try {
+      emitBridgeMediaSendSummary();
+    } catch (error) {
+      logStderr(`Bridge media send summary failed: ${safeErrorMessage(error)}`);
+    } finally {
+      resetBridgeMediaSendSummaryWindow();
+    }
+  }, BRIDGE_MEDIA_SEND_SAMPLE_WINDOW_MS);
+
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
+}
+
+function startBridgeTransportHealthSummaryMonitor() {
+  const timer = setInterval(() => {
+    try {
+      emitBridgeTransportHealthSummary();
+    } catch (error) {
+      logStderr(`Bridge transport health summary failed: ${safeErrorMessage(error)}`);
+    } finally {
+      resetBridgeTransportHealthSummaryWindow();
+    }
+  }, BRIDGE_TRANSPORT_HEALTH_SAMPLE_WINDOW_MS);
+
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
 }
 
 function tryDecodeBinaryFrameHeader(buffer) {
@@ -202,6 +873,52 @@ function logStderr(message) {
   stderrWrite(`[nkn-bridge] ${message}\n`);
 }
 
+function isOwnerProcessAlive() {
+  if (!Number.isFinite(ownerPid) || ownerPid <= 0 || ownerPid === process.pid) {
+    return true;
+  }
+
+  try {
+    process.kill(ownerPid, 0);
+    return true;
+  } catch (error) {
+    if (error && error.code === 'EPERM') {
+      return true;
+    }
+
+    return false;
+  }
+}
+
+function startOwnerPidMonitor() {
+  if (!Number.isFinite(ownerPid) || ownerPid <= 0 || ownerPid === process.pid) {
+    return;
+  }
+
+  const checkOwner = async () => {
+    if (state.shuttingDown || isOwnerProcessAlive()) {
+      return;
+    }
+
+    logStderr(`Owner process exited (owner_pid=${ownerPid})`);
+    try {
+      await handleShutdown();
+    } catch {
+      process.exit(0);
+    }
+  };
+
+  ownerPidMonitor = setInterval(() => {
+    void checkOwner();
+  }, OWNER_PID_CHECK_INTERVAL_MS);
+
+  if (ownerPidMonitor && typeof ownerPidMonitor.unref === 'function') {
+    ownerPidMonitor.unref();
+  }
+
+  void checkOwner();
+}
+
 function safeErrorMessage(error) {
   if (!error) {
     return 'Unknown error';
@@ -212,6 +929,254 @@ function safeErrorMessage(error) {
   }
 
   return error.message || error.name || 'Unknown error';
+}
+
+function computeStableKey(value) {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  if (!normalized) {
+    return '';
+  }
+
+  if (cryptoRuntime && typeof cryptoRuntime.createHash === 'function') {
+    try {
+      return cryptoRuntime.createHash('sha1').update(normalized, 'utf8').digest('hex').slice(0, 8);
+    } catch {
+      // Fall back to the simple hash below.
+    }
+  }
+
+  let hash = 2166136261;
+  for (let i = 0; i < normalized.length; i += 1) {
+    hash ^= normalized.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function trackSelectedRpc(rpc, stage) {
+  const normalizedRpc = typeof rpc === 'string' ? rpc.trim() : '';
+  if (!normalizedRpc) {
+    return;
+  }
+
+  state.selectedRpc = normalizedRpc;
+  state.selectedRpcKey = computeStableKey(normalizedRpc);
+  state.selectedRpcStage = stage === 'fallback' ? 'fallback' : 'initial';
+}
+
+function normalizeSubClientCount(value, fallback = DEFAULT_NUM_SUBCLIENTS) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(MAX_NUM_SUBCLIENTS, Math.max(MIN_NUM_SUBCLIENTS, parsed));
+}
+
+function hasCommandValue(command, key) {
+  return command[key] !== undefined && command[key] !== null && String(command[key]).trim() !== '';
+}
+
+function resolveSubClientTopology(command) {
+  const hasControlOverride = hasCommandValue(command, 'numSubClients');
+  const controlCount = normalizeSubClientCount(command.numSubClients, DEFAULT_NUM_SUBCLIENTS);
+  const mediaFallback = hasControlOverride ? controlCount : DEFAULT_MEDIA_NUM_SUBCLIENTS;
+  const mediaCount = normalizeSubClientCount(command.mediaNumSubClients, mediaFallback);
+  const bulkCount = normalizeSubClientCount(command.bulkNumSubClients, controlCount);
+  return {
+    control: controlCount,
+    media: mediaCount,
+    bulk: bulkCount
+  };
+}
+
+function getScreenShareQueueLimits() {
+  if (state.screenShareQueueMode === 'catch_up_only') {
+    return {
+      maxMessages: SCREEN_SHARE_CATCH_UP_QUEUE_MAX_MESSAGES,
+      maxBytes: SCREEN_SHARE_CATCH_UP_QUEUE_MAX_BYTES
+    };
+  }
+
+  return {
+    maxMessages: SCREEN_SHARE_QUEUE_MAX_MESSAGES,
+    maxBytes: SCREEN_SHARE_QUEUE_MAX_BYTES
+  };
+}
+
+function getScreenShareQueueOldestAgeMs(nowMs = Date.now()) {
+  if (!state.screenShareQueue.length) {
+    return 0;
+  }
+
+  return Math.max(0, nowMs - state.screenShareQueue[0].queuedAtMs);
+}
+
+function buildScreenShareQueueState() {
+  const queueDepth = state.screenShareQueue.length;
+  const queuedBytes = state.screenShareQueuedBytes;
+  const oldestQueuedAgeMs = getScreenShareQueueOldestAgeMs();
+  const congested =
+    queueDepth >= SCREEN_SHARE_QUEUE_CONGESTED_MESSAGES ||
+    queuedBytes >= SCREEN_SHARE_QUEUE_CONGESTED_BYTES ||
+    oldestQueuedAgeMs >= SCREEN_SHARE_QUEUE_CONGESTED_AGE_MS;
+  const severe =
+    queueDepth >= SCREEN_SHARE_QUEUE_SEVERE_MESSAGES ||
+    queuedBytes >= SCREEN_SHARE_QUEUE_SEVERE_BYTES ||
+    oldestQueuedAgeMs >= SCREEN_SHARE_QUEUE_SEVERE_AGE_MS;
+  return {
+    queueDepth,
+    queuedBytes,
+    oldestQueuedAgeMs,
+    inFlight: Boolean(state.screenShareQueueInFlight),
+    droppedSinceLast: state.screenShareQueueDroppedSinceLast,
+    congested,
+    severe,
+    mode: state.screenShareQueueMode
+  };
+}
+
+function emitScreenShareQueueState(force = false) {
+  const snapshot = buildScreenShareQueueState();
+  const key = JSON.stringify([
+    snapshot.queueDepth,
+    snapshot.queuedBytes,
+    snapshot.oldestQueuedAgeMs > 0 ? 1 : 0,
+    snapshot.inFlight ? 1 : 0,
+    snapshot.droppedSinceLast,
+    snapshot.congested ? 1 : 0,
+    snapshot.severe ? 1 : 0,
+    snapshot.mode
+  ]);
+  if (!force &&
+      key === state.lastEmittedScreenShareQueueStateKey &&
+      Date.now() - state.lastEmittedScreenShareQueueStateAt < 250) {
+    return;
+  }
+
+  state.lastEmittedScreenShareQueueStateKey = key;
+  state.lastEmittedScreenShareQueueStateAt = Date.now();
+  emitJson({
+    event: 'screen_share_queue_state',
+    ...snapshot
+  });
+  state.screenShareQueueDroppedSinceLast = 0;
+}
+
+function dropOldestScreenShareQueuedItem(reason) {
+  if (!state.screenShareQueue.length) {
+    return false;
+  }
+
+  const dropped = state.screenShareQueue.shift();
+  state.screenShareQueuedBytes = Math.max(0, state.screenShareQueuedBytes - dropped.payload.length);
+  state.screenShareQueueDroppedSinceLast += 1;
+  state.bridgeMediaSendSummaryWindow.queueDrops += 1;
+  logStderr(`ScreenShare queue drop (${reason}, queue_depth=${state.screenShareQueue.length}, queued_bytes=${state.screenShareQueuedBytes})`);
+  emitScreenShareQueueState(true);
+  return true;
+}
+
+function clearScreenShareQueue(reason) {
+  if (state.screenShareQueue.length > 0) {
+    state.screenShareQueueDroppedSinceLast += state.screenShareQueue.length;
+    state.bridgeMediaSendSummaryWindow.queueDrops += state.screenShareQueue.length;
+  }
+
+  state.screenShareQueue = [];
+  state.screenShareQueuedBytes = 0;
+  logStderr(`ScreenShare queue cleared (${reason})`);
+  emitScreenShareQueueState(true);
+}
+
+function enqueueScreenShareSend(destination, payload, binarySendFrameObservedUtcMs = 0) {
+  const limits = getScreenShareQueueLimits();
+  const normalizedPayload = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+  while (state.screenShareQueue.length >= limits.maxMessages ||
+         state.screenShareQueuedBytes + normalizedPayload.length > limits.maxBytes) {
+    if (!dropOldestScreenShareQueuedItem('overflow_oldest')) {
+      break;
+    }
+  }
+
+  const queueEnqueuedUtcMs = Date.now();
+  state.screenShareQueue.push({
+    destination,
+    payload: normalizedPayload,
+    queuedAtMs: queueEnqueuedUtcMs,
+    queueEnqueuedUtcMs,
+    binarySendFrameObservedUtcMs: Number.isFinite(binarySendFrameObservedUtcMs)
+      ? Math.max(0, Math.round(binarySendFrameObservedUtcMs))
+      : 0,
+    generation: state.screenShareQueueGeneration
+  });
+  state.screenShareQueuedBytes += normalizedPayload.length;
+  if (binarySendFrameObservedUtcMs > 0) {
+    recordBridgeMediaSendDuration(
+      state.bridgeMediaSendSummaryWindow.binarySendFrameObservedToQueueEnqueueMs,
+      queueEnqueuedUtcMs - binarySendFrameObservedUtcMs);
+  }
+  emitScreenShareQueueState(true);
+  scheduleScreenShareQueueDrain();
+}
+
+function scheduleScreenShareQueueDrain() {
+  if (state.screenShareQueueDrainActive || state.shuttingDown) {
+    return;
+  }
+
+  state.screenShareQueueDrainActive = true;
+  void drainScreenShareQueue().finally(() => {
+    state.screenShareQueueDrainActive = false;
+    if (state.screenShareQueue.length > 0 && !state.shuttingDown) {
+      scheduleScreenShareQueueDrain();
+    }
+  });
+}
+
+async function drainScreenShareQueue() {
+  while (state.screenShareQueue.length > 0 && !state.shuttingDown) {
+    const item = state.screenShareQueue[0];
+    if (!item) {
+      break;
+    }
+
+    state.screenShareQueue.shift();
+    state.screenShareQueuedBytes = Math.max(0, state.screenShareQueuedBytes - item.payload.length);
+    if (item.generation !== state.screenShareQueueGeneration) {
+      emitScreenShareQueueState(true);
+      continue;
+    }
+
+    state.screenShareQueueInFlight = true;
+    emitScreenShareQueueState(true);
+    const queueDequeuedUtcMs = Date.now();
+    if (item.queueEnqueuedUtcMs > 0) {
+      recordBridgeMediaSendDuration(
+        state.bridgeMediaSendSummaryWindow.queueEnqueueToQueueDequeueMs,
+        queueDequeuedUtcMs - item.queueEnqueuedUtcMs);
+    }
+    const mediaSendStartedUtcMs = Date.now();
+    recordBridgeMediaSendDuration(
+      state.bridgeMediaSendSummaryWindow.queueDequeueToMediaSendStartedMs,
+      mediaSendStartedUtcMs - queueDequeuedUtcMs);
+    try {
+      await callClientMethod('send', [item.destination, item.payload, { noReply: true }], 'media');
+      state.bridgeMediaSendSummaryWindow.framesSent += 1;
+      state.bridgeTransportHealthSummaryWindow.framesSentSinceLast += 1;
+    } catch (error) {
+      state.bridgeMediaSendSummaryWindow.sendFailures += 1;
+      logStderr(`ScreenShare queue send failed: ${safeErrorMessage(error)}`);
+    } finally {
+      const mediaSendResolvedUtcMs = Date.now();
+      recordBridgeMediaSendDuration(
+        state.bridgeMediaSendSummaryWindow.mediaSendStartedToMediaSendResolvedMs,
+        mediaSendResolvedUtcMs - mediaSendStartedUtcMs);
+      state.screenShareQueueInFlight = false;
+      emitScreenShareQueueState(true);
+    }
+  }
 }
 
 function decodeSeed(seedHex, seedBase64) {
@@ -408,12 +1373,14 @@ function getClientByChannel(channel) {
 function normalizeMessageEvent(args) {
   if (args.length === 1 && args[0] && typeof args[0] === 'object') {
     const msg = args[0];
+    const rawPayload = msg.payload != null ? msg.payload : msg.data;
     const source = msg.src || msg.source || msg.from || '';
     const topic = typeof msg.topic === 'string' ? msg.topic : undefined;
     const isTopic = Boolean(msg.isTopic || msg.isTopicMessage || topic);
     return {
       source: String(source || ''),
-      payload: toBufferPayload(msg.payload != null ? msg.payload : msg.data),
+      payload: toBufferPayload(rawPayload),
+      receiveTimingMetadata: readReceiveTimingMetadata(rawPayload),
       isTopic,
       topic
     };
@@ -425,140 +1392,9 @@ function normalizeMessageEvent(args) {
   return {
     source: src == null ? '' : String(src),
     payload: toBufferPayload(payload),
+    receiveTimingMetadata: readReceiveTimingMetadata(payload),
     isTopic: false
   };
-}
-
-function normalizePolicyAddress(value) {
-  if (typeof value !== 'string') {
-    return '';
-  }
-
-  return value.trim();
-}
-
-function getAddressTail(address) {
-  const normalized = normalizePolicyAddress(address);
-  if (!normalized) {
-    return '';
-  }
-
-  const lastDot = normalized.lastIndexOf('.');
-  if (lastDot < 0 || lastDot === normalized.length - 1) {
-    return normalized;
-  }
-
-  return normalized.slice(lastDot + 1);
-}
-
-function looksLikeNknPubKeyTail(value) {
-  return typeof value === 'string' &&
-    value.length >= 32 &&
-    /^[0-9a-fA-F]+$/.test(value);
-}
-
-function addressesLikelySamePeer(left, right) {
-  const normalizedLeft = normalizePolicyAddress(left);
-  const normalizedRight = normalizePolicyAddress(right);
-  if (!normalizedLeft || !normalizedRight) {
-    return false;
-  }
-
-  if (normalizedLeft === normalizedRight) {
-    return true;
-  }
-
-  const leftTail = getAddressTail(normalizedLeft);
-  const rightTail = getAddressTail(normalizedRight);
-  return looksLikeNknPubKeyTail(leftTail) &&
-    looksLikeNknPubKeyTail(rightTail) &&
-    leftTail === rightTail;
-}
-
-function tryParseInboundScreenShare(payload) {
-  if (!Buffer.isBuffer(payload) || payload.length < 32 || payload[0] !== 0x7b) {
-    return null;
-  }
-
-  const text = payload.toString('utf8');
-  if (!text.includes('screenshare')) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(text);
-    if (!parsed || typeof parsed !== 'object') {
-      return null;
-    }
-
-    if (typeof parsed.kind === 'string' && parsed.kind.trim() && parsed.kind.trim() !== 'screenshare') {
-      return null;
-    }
-
-    const type = typeof parsed.type === 'string' ? parsed.type.trim() : '';
-    if (type !== 'screenshare.frame.v1' && type !== 'screenshare.stop.v1') {
-      return null;
-    }
-
-    const sessionId = typeof parsed.sessionId === 'string' ? parsed.sessionId.trim() : '';
-    if (!sessionId) {
-      return null;
-    }
-
-    return {
-      type,
-      sessionId
-    };
-  } catch {
-    return null;
-  }
-}
-
-function maybeLogScreenShareDrop(reason, sessionId) {
-  const now = Date.now();
-  const normalizedSessionId = typeof sessionId === 'string' && sessionId.trim().length > 0
-    ? sessionId.trim()
-    : '(none)';
-  if (now - state.lastScreenShareDropLogTs < 2000 &&
-      state.lastScreenShareDropReason === reason &&
-      state.lastScreenShareDropSessionId === normalizedSessionId) {
-    return;
-  }
-
-  state.lastScreenShareDropLogTs = now;
-  state.lastScreenShareDropReason = reason;
-  state.lastScreenShareDropSessionId = normalizedSessionId;
-  logStderr(`Dropped inbound screenshare before stdout (reason=${reason}, sessionId=${normalizedSessionId})`);
-}
-
-function shouldDropInboundScreenShare(msg) {
-  const screenShare = tryParseInboundScreenShare(msg.payload);
-  if (!screenShare) {
-    return false;
-  }
-
-  const policy = state.inboundScreenSharePolicy;
-  if (!policy.enabled) {
-    maybeLogScreenShareDrop('policy_disabled', screenShare.sessionId);
-    return true;
-  }
-
-  if (!policy.expiresAtUnixMs || Date.now() >= policy.expiresAtUnixMs) {
-    maybeLogScreenShareDrop('approval_expired', screenShare.sessionId);
-    return true;
-  }
-
-  if (policy.sessionId !== screenShare.sessionId) {
-    maybeLogScreenShareDrop('session_id_mismatch', screenShare.sessionId);
-    return true;
-  }
-
-  if (!addressesLikelySamePeer(msg.source, policy.sourceAddress)) {
-    maybeLogScreenShareDrop('source_mismatch', screenShare.sessionId);
-    return true;
-  }
-
-  return false;
 }
 
 function attachClientHandlers(client, channel) {
@@ -578,6 +1414,7 @@ function attachClientHandlers(client, channel) {
     }
 
     state.readyEmitted = true;
+    state.clientReadyAtMs = Date.now();
     emitJson({
       event: 'ready',
       protocol: BRIDGE_PROTOCOL_VERSION,
@@ -589,6 +1426,7 @@ function attachClientHandlers(client, channel) {
       ...(BRIDGE_APP_VERSION ? { bridgeAppVersion: BRIDGE_APP_VERSION } : {}),
       ...(state.connectId ? { connectId: state.connectId } : {}),
     });
+    emitScreenShareQueueState(true);
   };
 
   const onReady = () => {
@@ -604,6 +1442,8 @@ function attachClientHandlers(client, channel) {
       return;
     }
 
+    state.lastDisconnectReason = reason || 'Disconnected';
+    state.bridgeTransportHealthSummaryWindow.disconnectCountSinceLast += 1;
     emitJson({
       event: 'disconnected',
       reason: reason || 'Disconnected'
@@ -613,10 +1453,15 @@ function attachClientHandlers(client, channel) {
   const onMessage = (...args) => {
     try {
       const msg = normalizeMessageEvent(args);
-      if (channel === 'media' && shouldDropInboundScreenShare(msg)) {
-        return;
-      }
-      emitBinaryMessage(channel, msg.source, msg.payload, Boolean(msg.isTopic), msg.topic || null);
+      const bridgeMessageObservedUtcMs = channel === 'media' ? Date.now() : 0;
+      emitBinaryMessage(
+        channel,
+        msg.source,
+        msg.payload,
+        Boolean(msg.isTopic),
+        msg.topic || null,
+        bridgeMessageObservedUtcMs,
+        msg.receiveTimingMetadata);
     } catch (error) {
       logStderr(`Failed to normalize message event: ${safeErrorMessage(error)}`);
     }
@@ -645,6 +1490,7 @@ function attachClientHandlers(client, channel) {
         // MultiClient can report connect-failed during bootstrap/reconnect attempts.
         // Do not immediately tear down the bridge; let the SDK continue retrying and
         // let our RPC fallback attempts run before .NET times out waiting for ready.
+        state.bridgeTransportHealthSummaryWindow.connectFailedCountSinceLast += 1;
         logStderr('Connect failed (SDK reported onConnectFailed)');
       });
     } catch (error) {
@@ -658,6 +1504,7 @@ function attachClientHandlers(client, channel) {
         // WebSocket errors can occur during bootstrap/reconnect attempts.
         // Do not force a protocol-level disconnect here; let the SDK recover
         // or emit a real connect/disconnect/close event.
+        state.bridgeTransportHealthSummaryWindow.wsErrorCountSinceLast += 1;
         logStderr(`WebSocket error: ${safeErrorMessage(e)}`);
       });
     } catch (error) {
@@ -716,13 +1563,14 @@ async function closeClient() {
   state.controlClientIdentifier = '';
   state.mediaClientIdentifier = '';
   state.bulkClientIdentifier = '';
+  state.controlNumSubClients = DEFAULT_NUM_SUBCLIENTS;
+  state.mediaNumSubClients = DEFAULT_MEDIA_NUM_SUBCLIENTS;
+  state.bulkNumSubClients = DEFAULT_NUM_SUBCLIENTS;
   state.connectAttemptId = 0;
-  state.inboundScreenSharePolicy = {
-    enabled: false,
-    sessionId: null,
-    sourceAddress: null,
-    expiresAtUnixMs: 0
-  };
+  state.clientReadyAtMs = 0;
+  state.screenShareQueueMode = 'normal';
+  state.screenShareQueueGeneration = 0;
+  clearScreenShareQueue('close_client');
 
   await closeSingleClient(controlClient);
   if (mediaClient && mediaClient !== controlClient) {
@@ -743,9 +1591,13 @@ async function handleConnect(command) {
   state.preflightProgressEnabled = Boolean(command.preflightRpcEnabled);
 
   const seed = decodeSeed(command.seedHex, command.seedBase64);
+  const subClientTopology = resolveSubClientTopology(command);
+  state.controlNumSubClients = subClientTopology.control;
+  state.mediaNumSubClients = subClientTopology.media;
+  state.bulkNumSubClients = subClientTopology.bulk;
   const baseOptions = {
     // MultiClient reliability defaults inspired by production NKN apps.
-    numSubClients: 4,
+    numSubClients: subClientTopology.control,
     originalClient: true,
     reconnectIntervalMin: 1000,
     reconnectIntervalMax: 16000,
@@ -768,6 +1620,7 @@ async function handleConnect(command) {
     // Keep both keys for compatibility with SDK versions/docs naming differences.
     baseOptions.rpcServerAddr = rpcCandidates[0];
     baseOptions.seedRPCServerAddr = rpcCandidates[0];
+    trackSelectedRpc(baseOptions.rpcServerAddr, 'initial');
   }
 
   if (state.preflightProgressEnabled) {
@@ -790,7 +1643,7 @@ async function handleConnect(command) {
     }
   }
 
-  logStderr(`Creating NKN clients (rpc=${baseOptions.rpcServerAddr || 'default'})`);
+  logStderr(`Creating NKN clients (rpc=${baseOptions.rpcServerAddr || 'default'}, control_subclients=${subClientTopology.control}, media_subclients=${subClientTopology.media}, bulk_subclients=${subClientTopology.bulk})`);
   const ClientCtor = nkn.MultiClient || nkn.Client;
   if (typeof ClientCtor !== 'function') {
     throw new Error('NKN Client constructor not found in SDK.');
@@ -802,10 +1655,12 @@ async function handleConnect(command) {
   };
   const mediaOptions = {
     ...baseOptions,
+    numSubClients: subClientTopology.media,
     identifier: buildMediaIdentifier(requestedIdentifier || 'nlink')
   };
   const bulkOptions = {
     ...baseOptions,
+    numSubClients: subClientTopology.bulk,
     identifier: buildBulkIdentifier(requestedIdentifier || 'nlink')
   };
 
@@ -849,6 +1704,7 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
 
     try {
       logStderr(`Retrying NKN client bootstrap with alternate rpc=${rpc}`);
+      state.bridgeTransportHealthSummaryWindow.rpcFallbackAttemptCountSinceLast += 1;
       if (state.preflightProgressEnabled) {
         emitJson({
           event: 'rpc_fallback_attempt',
@@ -863,8 +1719,12 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
       state.preflightProgressEnabled = Boolean(originalCommand.preflightRpcEnabled);
 
       const seed = decodeSeed(originalCommand.seedHex, originalCommand.seedBase64);
+      const subClientTopology = resolveSubClientTopology(originalCommand);
+      state.controlNumSubClients = subClientTopology.control;
+      state.mediaNumSubClients = subClientTopology.media;
+      state.bulkNumSubClients = subClientTopology.bulk;
       const baseOptions = {
-        numSubClients: 4,
+        numSubClients: subClientTopology.control,
         originalClient: true,
         reconnectIntervalMin: 1000,
         reconnectIntervalMax: 16000,
@@ -873,6 +1733,7 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
         rpcServerAddr: rpc,
         seedRPCServerAddr: rpc
       };
+      trackSelectedRpc(rpc, 'fallback');
 
       if (seed) {
         baseOptions.seed = seed;
@@ -889,12 +1750,14 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
       };
       const mediaOptions = {
         ...baseOptions,
+        numSubClients: subClientTopology.media,
         identifier: buildMediaIdentifier(requestedIdentifier || 'nlink')
       };
       const controlClient = new ClientCtor(controlOptions);
       const mediaClient = new ClientCtor(mediaOptions);
       const bulkOptions = {
         ...baseOptions,
+        numSubClients: subClientTopology.bulk,
         identifier: buildBulkIdentifier(requestedIdentifier || 'nlink')
       };
       const bulkClient = new ClientCtor(bulkOptions);
@@ -1060,29 +1923,31 @@ async function handleBinarySendFrame(frame) {
     throw new Error('binary send payload too large.');
   }
 
+  if (frame.channel === 'media') {
+    enqueueScreenShareSend(destination, frame.payload, Date.now());
+    return;
+  }
+
   await callClientMethod('send', [destination, frame.payload, { noReply: true }], frame.channel);
 }
 
 async function handleSetScreenSharePolicy(command) {
-  const sessionId = typeof command.sessionId === 'string' && command.sessionId.trim().length > 0
-    ? command.sessionId.trim()
-    : null;
-  const sourceAddress = typeof command.sourceAddress === 'string' && command.sourceAddress.trim().length > 0
-    ? command.sourceAddress.trim()
-    : null;
-  const expiresAtUnixMs = Number(command.expiresAtUnixMs);
-  const enabled = Boolean(command.enabled) &&
-    Boolean(sessionId) &&
-    Boolean(sourceAddress) &&
-    Number.isFinite(expiresAtUnixMs) &&
-    expiresAtUnixMs > 0;
+  const nextMode = String(command.mode || '').trim().toLowerCase() === 'catch_up_only'
+    ? 'catch_up_only'
+    : 'normal';
+  const flushQueued = Boolean(command.flushQueued);
+  const nextGeneration = Number.isFinite(Number(command.generation))
+    ? Math.max(0, Number(command.generation))
+    : state.screenShareQueueGeneration;
 
-  state.inboundScreenSharePolicy = {
-    enabled,
-    sessionId: enabled ? sessionId : null,
-    sourceAddress: enabled ? sourceAddress : null,
-    expiresAtUnixMs: enabled ? expiresAtUnixMs : 0
-  };
+  const generationChanged = nextGeneration !== state.screenShareQueueGeneration;
+  state.screenShareQueueMode = nextMode;
+  state.screenShareQueueGeneration = nextGeneration;
+  if (generationChanged || flushQueued) {
+    clearScreenShareQueue(generationChanged ? 'generation_changed' : 'policy_flush');
+  } else {
+    emitScreenShareQueueState(true);
+  }
 }
 
 async function handleShutdown() {
@@ -1361,5 +2226,6 @@ process.stdin.on('end', async () => {
 });
 
 process.stdin.resume();
+startOwnerPidMonitor();
 
 logStderr('Bridge started');

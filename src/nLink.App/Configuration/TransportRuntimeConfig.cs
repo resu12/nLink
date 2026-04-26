@@ -260,9 +260,8 @@ public sealed class TransportRuntimeConfig
             var bridgeDir = Path.Combine(baseDir, "bridge", rid);
             var indexJs = Path.Combine(bridgeDir, "index.js");
             var nodeExe = Path.Combine(bridgeDir, RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "node.exe" : "node");
-            var nodeModules = Path.Combine(bridgeDir, "node_modules");
 
-            if (File.Exists(indexJs) && File.Exists(nodeExe) && Directory.Exists(nodeModules))
+            if (File.Exists(indexJs) && File.Exists(nodeExe))
             {
                 reason = "ok";
                 return true;
@@ -273,18 +272,17 @@ public sealed class TransportRuntimeConfig
                 var resourcesDir = Path.GetFullPath(Path.Combine(baseDir, "..", "Resources", "bridge", rid));
                 var macIndex = Path.Combine(resourcesDir, "index.js");
                 var macNode = Path.Combine(resourcesDir, "node");
-                var macNodeModules = Path.Combine(resourcesDir, "node_modules");
-                if (File.Exists(macIndex) && File.Exists(macNode) && Directory.Exists(macNodeModules))
+                if (File.Exists(macIndex) && File.Exists(macNode))
                 {
                     reason = "ok";
                     return true;
                 }
 
-                reason = MissingBridgeReason(macIndex, macNode, macNodeModules);
+                reason = MissingBridgeReason(macIndex, macNode);
                 return false;
             }
 
-            reason = MissingBridgeReason(indexJs, nodeExe, nodeModules);
+            reason = MissingBridgeReason(indexJs, nodeExe);
             return false;
         }
         catch (Exception ex)
@@ -484,7 +482,7 @@ public sealed class TransportRuntimeConfig
         throw new NotSupportedException();
     }
 
-    private static string MissingBridgeReason(string indexJsPath, string nodePath, string nodeModulesPath)
+    private static string MissingBridgeReason(string indexJsPath, string nodePath)
     {
         if (!File.Exists(indexJsPath))
         {
@@ -494,11 +492,6 @@ public sealed class TransportRuntimeConfig
         if (!File.Exists(nodePath))
         {
             return $"missing {nodePath}";
-        }
-
-        if (!Directory.Exists(nodeModulesPath))
-        {
-            return $"missing {nodeModulesPath}";
         }
 
         return "bridge runtime incomplete";

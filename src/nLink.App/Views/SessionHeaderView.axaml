@@ -41,7 +41,7 @@
         </Style>
     </UserControl.Styles>
 
-    <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+    <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
           ColumnSpacing="10"
           MinHeight="38">
         <TextBlock Grid.Column="0"
@@ -98,7 +98,12 @@
                 MinWidth="132"
                 Padding="10,0"/>
 
-        <Button Grid.Column="6"
+        <ContentPresenter Grid.Column="6"
+                          Content="{Binding #Root.ScreenShareAccessory}"
+                          VerticalAlignment="Center"
+                          IsVisible="{Binding #Root.HasScreenShareAccessory}"/>
+
+        <Button Grid.Column="7"
                 x:Name="ShareScreenButton"
                 Classes="appButton secondaryButton"
                 AutomationProperties.AutomationId="SessionHeader.ShareScreen"
@@ -111,7 +116,7 @@
                 MinWidth="132"
                 Padding="10,0"/>
 
-        <Button Grid.Column="7"
+        <Button Grid.Column="8"
                 Classes="appButton primaryButton"
                 AutomationProperties.AutomationId="SessionHeader.StopControl"
                 Content="{Binding #Root.StopControlButtonText}"
@@ -123,7 +128,7 @@
                 MinWidth="120"
                 Padding="10,0"/>
 
-        <Button Grid.Column="8"
+        <Button Grid.Column="9"
                 Classes="appButton secondaryButton"
                 Content="End session"
                 Command="{Binding #Root.EndSessionCommand}"

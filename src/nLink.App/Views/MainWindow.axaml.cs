@@ -4,6 +4,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
+using NLink.App.Configuration;
 using NLink.App.ViewModels;
 
 namespace NLink.App.Views;
@@ -14,11 +15,13 @@ public partial class MainWindow : Window
     private bool narwhalImageLoaded;
     private bool closePrepared;
     private bool closePreparationInProgress;
+    private bool startupOpenedLogged;
 
     public MainWindow()
     {
         InitializeComponent();
         DataContextChanged += OnDataContextChanged;
+        Opened += OnMainWindowOpened;
         Closing += OnMainWindowClosing;
         KeyDown += OnMainWindowKeyDown;
         TryLoadNarwhalPeekImage();
@@ -39,6 +42,17 @@ public partial class MainWindow : Window
         }
 
         UpdateNarwhalVisibility();
+    }
+
+    private void OnMainWindowOpened(object? sender, EventArgs e)
+    {
+        if (startupOpenedLogged)
+        {
+            return;
+        }
+
+        startupOpenedLogged = true;
+        AppStartupTelemetry.Mark("app_startup_main_window_opened");
     }
 
     private void OnMainViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)

@@ -71,7 +71,7 @@ function Assert-InstalledLayout {
         'bridge\win-x64\index.js',
         'bridge\win-x64\node.exe',
         'bridge\win-x64\package.json',
-        'bridge\win-x64\package-lock.json'
+        'bridge\win-x64\bridge-manifest.json'
     )
 
     foreach ($relativePath in $requiredPaths) {
@@ -81,9 +81,18 @@ function Assert-InstalledLayout {
         }
     }
 
-    $nodeModulesDir = Join-Path $TargetDir 'bridge\win-x64\node_modules'
-    if (-not (Test-Path -Path $nodeModulesDir -PathType Container)) {
-        throw "Installed payload is missing bridge node_modules: $nodeModulesDir"
+    $bridgeDir = Join-Path $TargetDir 'bridge\win-x64'
+    $manifestPath = Join-Path $bridgeDir 'bridge-manifest.json'
+    $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.runtime -ne 'win-x64') {
+        throw "Installed bridge manifest runtime mismatch: $($manifest.runtime)"
+    }
+
+    $bridgeScriptPath = Join-Path $bridgeDir 'index.js'
+    $actualHash = (Get-FileHash -Path $bridgeScriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $expectedHash = ([string]$manifest.bridgeScriptSha256).ToLowerInvariant()
+    if ($actualHash -ne $expectedHash) {
+        throw 'Installed bridge script hash does not match bridge manifest.'
     }
 }
 

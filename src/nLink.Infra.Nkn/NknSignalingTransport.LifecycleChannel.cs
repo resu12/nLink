@@ -206,6 +206,7 @@ public sealed partial class NknSignalingTransport
                 helperIdentifier = identity.Identifier,
                 helperEcdhPublicKey = Convert.ToBase64String(helperKeyPair.PublicKey),
                 remoteControlSupported = LocalSupportsRemoteControl,
+                screenShareCursorOverlaySupported = LocalSupportsScreenShareCursorOverlay,
             };
 
             var joinEnvelope = CreateEnvelope(
@@ -493,6 +494,11 @@ public sealed partial class NknSignalingTransport
             SendAckFireAndForget(source, env.Code, env.MessageId);
         }
 
+        CancelPendingDirectHelpRequestAcks(
+            helperAddress.Value,
+            "decision_received",
+            MsgType.HelpRequest);
+
         LocalOperationalLog.Info(
             "DirectHelpRequest",
             $"event=help_request_decision_received; request_id={decision.requestId}; accepted={decision.accepted == true}; source={source ?? "(none)"}; helper_address={decision.helperAddress}; helpee_address={decision.helpeeAddress}; reason={decision.reason ?? "(none)"}");
@@ -568,6 +574,7 @@ public sealed partial class NknSignalingTransport
             : join.helperBulkEndpoint;
         lastPeerAddress = string.IsNullOrWhiteSpace(source) ? join.helperEndpoint : source;
         remoteSupportsRemoteControl = join.remoteControlSupported == true;
+        remoteSupportsScreenShareCursorOverlay = join.screenShareCursorOverlaySupported == true;
         transportRemoteControlState = transportRemoteControlState with
         {
             SupportsRemoteControl = LocalSupportsRemoteControl,
@@ -941,6 +948,11 @@ public sealed partial class NknSignalingTransport
             approvalRequest));
         ClearPendingInboundHandshake(pending.JoinRequestMessageId);
         UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeVerified(pending.HelperAddress));
+        CancelPendingDirectHelpRequestAcks(
+            pending.HelperAddress.Value,
+            "incoming_join_request",
+            MsgType.HelpRequest,
+            MsgType.HelpRequestDecision);
 
         IncomingJoinRequest?.Invoke(
             this,
@@ -1130,6 +1142,7 @@ public sealed partial class NknSignalingTransport
             }
 
             remoteSupportsRemoteControl = secureApprove.remoteControlSupported == true;
+            remoteSupportsScreenShareCursorOverlay = secureApprove.screenShareCursorOverlaySupported == true;
             remoteMediaEndpoint = string.IsNullOrWhiteSpace(secureApprove.helpeeMediaEndpoint)
                 ? remoteEndpoint
                 : secureApprove.helpeeMediaEndpoint;
@@ -1448,35 +1461,99 @@ public sealed partial class NknSignalingTransport
         RemoteSessionEnded?.Invoke(this, EventArgs.Empty);
     }
 
-    private void HandleScreenShareFrame(string source, Envelope env)
+    private void HandleScreenShareFrame(NknInboundEnvelopeContext inboundContext)
     {
-        if (!TryDecryptScreenSharePayload(source, env, MsgType.ScreenShareFrame, out var securePayload))
+        if (!TryDecryptScreenSharePayload(inboundContext.Source, inboundContext.Envelope, MsgType.ScreenShareFrame, out var securePayload))
         {
             return;
         }
 
-        if (!ScreenSharePayloadCodec.TryDeserialize(securePayload.Plaintext, out var chunk))
+        var secureDecryptCompletedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        if (!ScreenShareVideoPayloadCodec.TryDeserializeFragmentEnvelope(securePayload.Plaintext, out var fragments, out _)
+            || fragments.Length == 0)
         {
             NknRuntimeDiagnostics.SetLastError("screenshare_frame_payload_invalid");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("screenshare_frame_payload_invalid");
-            Log($"ScreenShareFrame payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            Log($"ScreenShareFrame payload invalid (msg_id={inboundContext.Envelope.MessageId}, payload_len={inboundContext.Envelope.Payload.Length})");
             return;
         }
 
-        if (!TryValidateScreenShareSecureMetadata("screenshare_frame", securePayload.Metadata, env.MessageId) ||
+        var fragmentEnvelopeDeserializedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        var chunk = fragments[0];
+        var logStartupFrameDispatch = chunk.FrameId <= ScreenShareControlBootstrapMaxFrameId;
+        if (inboundContext.Channel == NknBridgeChannel.Control)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_frame_inbound_transport; channel=control; session_id={chunk.SessionId}; stream_epoch={chunk.StreamEpoch}; frame_id={chunk.FrameId}; fragment_index={chunk.FragmentIndex}; fragment_count={chunk.FragmentCount}; fragments_in_envelope={fragments.Length}; is_keyframe={(chunk.IsKeyFrame ? 1 : 0)}; source={inboundContext.Source}");
+        }
+        else if (inboundContext.Channel == NknBridgeChannel.Media && chunk.FrameId <= 2)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_frame_inbound_transport; channel=media; session_id={chunk.SessionId}; stream_epoch={chunk.StreamEpoch}; frame_id={chunk.FrameId}; fragment_index={chunk.FragmentIndex}; fragment_count={chunk.FragmentCount}; fragments_in_envelope={fragments.Length}; is_keyframe={(chunk.IsKeyFrame ? 1 : 0)}; source={inboundContext.Source}");
+        }
+
+        if (!TryValidateScreenShareSecureMetadata("screenshare_frame", securePayload.Metadata, inboundContext.Envelope.MessageId) ||
             !TryValidateScreenShareMessageSession(
                 "screenshare_frame",
                 chunk.SessionId,
-                env.MessageId,
+                inboundContext.Envelope.MessageId,
                 requestId: null,
-                source) ||
+                inboundContext.Source) ||
             !TryValidateScreenShareSession("frame", chunk.SessionId) ||
             !IsScreenShareAuthorizedForDispatch("frame", chunk.SessionId))
         {
             return;
         }
 
-        secureScreenShareFrameReassembler.OnChunk(chunk);
+        foreach (var fragment in fragments)
+        {
+            ScreenShareFrameLossAttributionRegistry.ObserveInboundReceivePath(
+                fragment.SessionId,
+                fragment.StreamEpoch,
+                fragment.FrameId,
+                fragment.IsKeyFrame,
+                capturedTsUtcMs: fragment.CapturedTsUtcMs,
+                envelopeSendUtcMs: inboundContext.Envelope.UnixTimeMs,
+                socketDataEventEmittedUtcMs: inboundContext.SocketDataEventEmittedUtcMs,
+                wsReceiverWriteEnteredUtcMs: inboundContext.WsReceiverWriteEnteredUtcMs,
+                wsMessageEmittedUtcMs: inboundContext.WsMessageEmittedUtcMs,
+                sdkHandleMsgEnteredUtcMs: inboundContext.SdkHandleMsgEnteredUtcMs,
+                clientMessageDispatchUtcMs: inboundContext.ClientMessageDispatchUtcMs,
+                multiClientMessageDispatchUtcMs: inboundContext.MultiClientMessageDispatchUtcMs,
+                bridgeMessageObservedUtcMs: inboundContext.BridgeMessageObservedUtcMs,
+                binaryFrameDecodedUtcMs: inboundContext.BinaryFrameDecodedUtcMs,
+                bridgeIngressObservedUtcMs: inboundContext.BridgeIngressObservedUtcMs,
+                envelopeParsedUtcMs: inboundContext.EnvelopeParsedUtcMs,
+                secureDecryptCompletedUtcMs: secureDecryptCompletedUtcMs,
+                fragmentEnvelopeDeserializedUtcMs: fragmentEnvelopeDeserializedUtcMs);
+
+            if (logStartupFrameDispatch)
+            {
+                LocalOperationalLog.Info(
+                    "ScreenShareTransport",
+                    $"event=screenshare_frame_inbound_dispatch; stage=reassembler_enter; channel={inboundContext.Channel.ToString().ToLowerInvariant()}; session_id={fragment.SessionId}; stream_epoch={fragment.StreamEpoch}; frame_id={fragment.FrameId}; fragment_index={fragment.FragmentIndex}; fragment_count={fragment.FragmentCount}; is_keyframe={(fragment.IsKeyFrame ? 1 : 0)}; msg_id={inboundContext.Envelope.MessageId}");
+            }
+
+            secureScreenShareFrameReassembler.OnFragment(fragment);
+
+            if (logStartupFrameDispatch)
+            {
+                LocalOperationalLog.Info(
+                    "ScreenShareTransport",
+                    $"event=screenshare_frame_inbound_dispatch; stage=reassembler_exit; channel={inboundContext.Channel.ToString().ToLowerInvariant()}; session_id={fragment.SessionId}; stream_epoch={fragment.StreamEpoch}; frame_id={fragment.FrameId}; fragment_index={fragment.FragmentIndex}; fragment_count={fragment.FragmentCount}; is_keyframe={(fragment.IsKeyFrame ? 1 : 0)}; msg_id={inboundContext.Envelope.MessageId}");
+            }
+        }
+
+        if (logStartupFrameDispatch)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_frame_inbound_dispatch; stage=completed; channel={inboundContext.Channel.ToString().ToLowerInvariant()}; session_id={chunk.SessionId}; stream_epoch={chunk.StreamEpoch}; frame_id={chunk.FrameId}; fragment_count={chunk.FragmentCount}; is_keyframe={(chunk.IsKeyFrame ? 1 : 0)}; msg_id={inboundContext.Envelope.MessageId}");
+        }
     }
 
     private void HandleScreenShareStop(string source, Envelope env)
@@ -1652,7 +1729,7 @@ public sealed partial class NknSignalingTransport
 
         if (pendingAcks.TryRemove(env.ReplyTo, out var removed))
         {
-            removed.Completion.TrySetResult(true);
+            removed.TryComplete(AckWaitOutcome.Acknowledged, reason: null);
         }
 
         Log($"Ack handled (msg_id={env.MessageId}, reply_to={env.ReplyTo})");
@@ -1670,6 +1747,11 @@ public sealed partial class NknSignalingTransport
         try
         {
             var pendingState = pending!;
+            CancelPendingDirectHelpRequestAcks(
+                pendingState.HelperAddress.Value,
+                "local_approve",
+                MsgType.HelpRequest,
+                MsgType.HelpRequestDecision);
             if (pendingState.ApprovalRequest is null)
             {
                 LocalOperationalLog.Warn("SessionSecurity", "event=approval_denied; reason=approval_request_missing");
@@ -1736,6 +1818,7 @@ public sealed partial class NknSignalingTransport
                 JsonSerializer.SerializeToUtf8Bytes(new ApproveSecurePayload
                 {
                     remoteControlSupported = LocalSupportsRemoteControl,
+                    screenShareCursorOverlaySupported = LocalSupportsScreenShareCursorOverlay,
                     helpeeMediaEndpoint = client.MediaAddress,
                     helpeeBulkEndpoint = client.BulkAddress,
                     approvalDecisionBase64 = Convert.ToBase64String(SessionHandshakeProtocol.Serialize(decision)),
@@ -1857,10 +1940,36 @@ public sealed partial class NknSignalingTransport
 
     private async Task SendEnvelopeAsync(string destination, Envelope envelope, byte[] bytes, CancellationToken ct)
     {
+        var logBootstrapGate = false;
+        QueuedScreenShareEnvelopeMetadata? bootstrapMetadata = null;
+        if (envelope.Type == MsgType.ScreenShareFrame)
+        {
+            bootstrapMetadata = TryCreateQueuedScreenShareEnvelopeMetadata(bytes, recoverySendRole: null, recoveryBurstToken: 0);
+            logBootstrapGate = bootstrapMetadata is not null && bootstrapMetadata.FrameId <= ScreenShareControlBootstrapMaxFrameId;
+        }
 
         try
         {
-            await outboundSendGate.WaitAsync(ct).ConfigureAwait(false);
+            if (!await outboundSendGate.WaitAsync(0, ct).ConfigureAwait(false))
+            {
+                if (logBootstrapGate)
+                {
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_control_bootstrap_gate_stage; stage=blocked; stream_epoch={bootstrapMetadata!.StreamEpoch}; frame_id={bootstrapMetadata.FrameId}; is_keyframe={(bootstrapMetadata.IsKeyFrame ? 1 : 0)}; msg_id={envelope.MessageId}; holder={outboundSendGateOwnerForDiagnostics ?? "(none)"}");
+                }
+
+                await outboundSendGate.WaitAsync(ct).ConfigureAwait(false);
+            }
+
+            outboundSendGateOwnerForDiagnostics = $"{envelope.Type}:{envelope.MessageId}";
+            if (logBootstrapGate)
+            {
+                LocalOperationalLog.Info(
+                    "ScreenShareTransport",
+                    $"event=screenshare_control_bootstrap_gate_stage; stage=acquired; stream_epoch={bootstrapMetadata!.StreamEpoch}; frame_id={bootstrapMetadata.FrameId}; is_keyframe={(bootstrapMetadata.IsKeyFrame ? 1 : 0)}; msg_id={envelope.MessageId}");
+            }
+
             NknRuntimeDiagnostics.IncrementMessagesSent();
             try
             {
@@ -1868,7 +1977,14 @@ public sealed partial class NknSignalingTransport
             }
             finally
             {
+                outboundSendGateOwnerForDiagnostics = null;
                 outboundSendGate.Release();
+                if (logBootstrapGate)
+                {
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_control_bootstrap_gate_stage; stage=released; stream_epoch={bootstrapMetadata!.StreamEpoch}; frame_id={bootstrapMetadata.FrameId}; is_keyframe={(bootstrapMetadata.IsKeyFrame ? 1 : 0)}; msg_id={envelope.MessageId}");
+                }
             }
             Log($"Envelope sent (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
         }
@@ -1905,7 +2021,7 @@ public sealed partial class NknSignalingTransport
 
     private async Task SendEnvelopeWithAckRetryAsync(string destination, Envelope envelope, CancellationToken ct)
     {
-        var ackWait = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ackWait = new TaskCompletionSource<AckWaitOutcome>(TaskCreationOptions.RunContinuationsAsynchronously);
         var pendingAck = new PendingAckWait(destination, envelope.Type, ackWait);
         if (!pendingAcks.TryAdd(envelope.MessageId, pendingAck))
         {
@@ -1922,7 +2038,13 @@ public sealed partial class NknSignalingTransport
 
                 try
                 {
-                    await ackWait.Task.WaitAsync(AckWaitTimeout, ct);
+                    var outcome = await ackWait.Task.WaitAsync(AckWaitTimeout, ct);
+                    if (outcome == AckWaitOutcome.Superseded)
+                    {
+                        Log($"Ack wait superseded (msg_id={envelope.MessageId}, type={envelope.Type}, reason={pendingAck.CompletionReason ?? "superseded"})");
+                        return;
+                    }
+
                     Log($"Ack received (msg_id={envelope.MessageId}, type={envelope.Type}, attempt={attempt + 1})");
                     return;
                 }
@@ -1935,7 +2057,7 @@ public sealed partial class NknSignalingTransport
                             "DirectHelpRequest",
                             $"event=ack_timeout; type={envelope.Type}; destination={destination}; msg_id={envelope.MessageId}; attempts={attempt + 1}");
                         Log($"Ack timeout (msg_id={envelope.MessageId}, type={envelope.Type}, attempts={attempt + 1})");
-                        if (envelope.Type != MsgType.Chat)
+                        if (ShouldDisconnectOnAckTimeout(envelope.Type))
                         {
                             Disconnected?.Invoke(this, EventArgs.Empty);
                         }
@@ -1999,6 +2121,7 @@ public sealed partial class NknSignalingTransport
     private void ResetSessionTracking()
     {
         FlushAllControlOutboundQueues("reset_session_tracking");
+        ClearScreenShareOutboundQueue("reset_session_tracking");
         ResetControlSecureState();
         secureScreenShareFrameReassembler.ClearAll();
         remoteEndpoint = null;
@@ -2009,6 +2132,7 @@ public sealed partial class NknSignalingTransport
         helperJoinRequestMessageId = null;
         pendingOutboundHandshake = null;
         remoteSupportsRemoteControl = false;
+        remoteSupportsScreenShareCursorOverlay = false;
         transportRemoteControlState = RemoteControlSessionState.Default;
 
         DisposeEphemeralKeyState();
@@ -2043,6 +2167,7 @@ public sealed partial class NknSignalingTransport
     private void ClearActivePeerSessionTracking(bool preserveHelpeeHostKeyPair)
     {
         ResetControlSecureState();
+        ClearScreenShareOutboundQueue("clear_active_peer_session_tracking");
         secureScreenShareFrameReassembler.ClearAll();
         remoteEndpoint = null;
         remoteMediaEndpoint = null;
@@ -2052,6 +2177,7 @@ public sealed partial class NknSignalingTransport
         helperJoinRequestMessageId = null;
         pendingOutboundHandshake = null;
         remoteSupportsRemoteControl = false;
+        remoteSupportsScreenShareCursorOverlay = false;
         transportRemoteControlState = RemoteControlSessionState.Default;
         DisposeEphemeralKeyState(preserveHelpeeHostKeyPair);
     }
@@ -2062,9 +2188,54 @@ public sealed partial class NknSignalingTransport
         {
             if (pendingAcks.TryRemove(pair.Key, out var pending))
             {
-                pending.Completion.TrySetCanceled();
+                pending.TryCancel();
             }
         }
+    }
+
+    private void CancelPendingDirectHelpRequestAcks(
+        string? destination,
+        string reason,
+        params MsgType[] types)
+    {
+        if (types is null || types.Length == 0)
+        {
+            return;
+        }
+
+        foreach (var pair in pendingAcks.ToArray())
+        {
+            var pending = pair.Value;
+            if (Array.IndexOf(types, pending.Type) < 0)
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(destination) &&
+                !AddressesLikelySamePeer(destination, pending.Destination))
+            {
+                continue;
+            }
+
+            if (pendingAcks.TryRemove(pair.Key, out var removed) &&
+                removed.TryComplete(AckWaitOutcome.Superseded, reason))
+            {
+                LocalOperationalLog.Info(
+                    "DirectHelpRequest",
+                    $"event=ack_wait_canceled; type={removed.Type}; destination={removed.Destination}; reason={reason}; msg_id={pair.Key}");
+            }
+        }
+    }
+
+    private static bool ShouldDisconnectOnAckTimeout(MsgType type)
+    {
+        return type switch
+        {
+            MsgType.Chat => false,
+            MsgType.HelpRequest => false,
+            MsgType.HelpRequestDecision => false,
+            _ => true,
+        };
     }
 
     private void ReplaceHelpeeHostKeyPair(SessionEcdhKeyPair keyPair)
@@ -2333,7 +2504,6 @@ public sealed partial class NknSignalingTransport
 
         currentSessionSecurityState = nextState;
         UpdateActiveApprovedSessionTracking(nextState);
-        SyncInboundScreenSharePolicyToBridge(nextState);
         SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(nextState));
     }
 
@@ -2428,66 +2598,6 @@ public sealed partial class NknSignalingTransport
                state.IsApprovalActive(nowUtc) &&
                state.SessionId is not null &&
                state.HelperAddress is not null;
-    }
-
-    private void SyncInboundScreenSharePolicyToBridge(SessionSecurityState nextState)
-    {
-        if (client is not RealNknClientAdapter realClient)
-        {
-            return;
-        }
-
-        var shouldEnable = false;
-        string? allowedSessionId = null;
-        string? allowedSourceAddress = null;
-        DateTimeOffset? policyExpiresAtUtc = null;
-        var nowUtc = DateTimeOffset.UtcNow;
-
-        if (nextState.InviteValidated &&
-            nextState.HandshakeCompleted &&
-            nextState.HandshakeState == SessionHandshakeState.Verified &&
-            nextState.ApprovalGranted &&
-            nextState.ApprovalExpiresAt is DateTimeOffset expiresAtUtc &&
-            nextState.SessionId is SessionId sessionId &&
-            nextState.HelpeeAddress is PeerAddress helpeeAddress &&
-            nextState.HelperAddress is PeerAddress helperAddress &&
-            AddressMatchesForSessionPolicy(helperAddress.Value, LocalPeerAddress) &&
-            nextState.HasCapability(CapabilityGrant.ScreenShare, nowUtc))
-        {
-            shouldEnable = true;
-            allowedSessionId = sessionId.Value;
-            allowedSourceAddress = string.IsNullOrWhiteSpace(remoteMediaEndpoint)
-                ? helpeeAddress.Value
-                : remoteMediaEndpoint;
-            policyExpiresAtUtc = expiresAtUtc;
-        }
-
-        _ = Task.Run(
-            async () =>
-            {
-                try
-                {
-                    await realClient.UpdateInboundScreenSharePolicyAsync(
-                            shouldEnable,
-                            allowedSessionId,
-                            allowedSourceAddress,
-                            policyExpiresAtUtc,
-                            CancellationToken.None)
-                        .ConfigureAwait(false);
-                }
-                catch (ObjectDisposedException)
-                {
-                }
-                catch (InvalidOperationException)
-                {
-                    // Bridge may not be running yet; the adapter still applies the local fail-closed policy.
-                }
-                catch (Exception ex)
-                {
-                    Log($"Bridge screenshare policy sync failed ({ex.GetType().Name})");
-                }
-            },
-            CancellationToken.None);
     }
 
     private void AbortOutboundHandshake(string reason, SessionHandshakeState failureState = SessionHandshakeState.Failed)
@@ -3093,7 +3203,8 @@ public sealed partial class NknSignalingTransport
         Envelope Envelope,
         TaskCompletionSource<bool> Completion,
         CancellationToken CancellationToken,
-        bool IsLowPriorityMouseMove);
+        bool IsLowPriorityMouseMove,
+        bool IsLowPriorityScreenShareCursorState);
 
     private sealed class JoinRequestPayload
     {
@@ -3103,6 +3214,7 @@ public sealed partial class NknSignalingTransport
         public string? helperIdentifier { get; set; }
         public string? helperEcdhPublicKey { get; set; }
         public bool? remoteControlSupported { get; set; }
+        public bool? screenShareCursorOverlaySupported { get; set; }
     }
 
     private sealed class HelpRequestPayload
@@ -3132,6 +3244,7 @@ public sealed partial class NknSignalingTransport
     private sealed class ApproveSecurePayload
     {
         public bool? remoteControlSupported { get; set; }
+        public bool? screenShareCursorOverlaySupported { get; set; }
         public string? helpeeMediaEndpoint { get; set; }
         public string? helpeeBulkEndpoint { get; set; }
         public string? approvalDecisionBase64 { get; set; }
@@ -3260,7 +3373,9 @@ public sealed partial class NknSignalingTransport
 
     private sealed class PendingAckWait
     {
-        public PendingAckWait(string destination, MsgType type, TaskCompletionSource<bool> completion)
+        private int completionState;
+
+        public PendingAckWait(string destination, MsgType type, TaskCompletionSource<AckWaitOutcome> completion)
         {
             Destination = destination ?? throw new ArgumentNullException(nameof(destination));
             Type = type;
@@ -3269,7 +3384,37 @@ public sealed partial class NknSignalingTransport
 
         public string Destination { get; }
         public MsgType Type { get; }
-        public TaskCompletionSource<bool> Completion { get; }
+        public TaskCompletionSource<AckWaitOutcome> Completion { get; }
+        public string? CompletionReason { get; private set; }
+
+        public bool TryComplete(AckWaitOutcome outcome, string? reason)
+        {
+            if (Interlocked.CompareExchange(ref completionState, (int)outcome, (int)AckWaitOutcome.Pending) != (int)AckWaitOutcome.Pending)
+            {
+                return false;
+            }
+
+            CompletionReason = reason;
+            return Completion.TrySetResult(outcome);
+        }
+
+        public void TryCancel()
+        {
+            if (Interlocked.CompareExchange(ref completionState, (int)AckWaitOutcome.Canceled, (int)AckWaitOutcome.Pending) != (int)AckWaitOutcome.Pending)
+            {
+                return;
+            }
+
+            Completion.TrySetCanceled();
+        }
+    }
+
+    private enum AckWaitOutcome
+    {
+        Pending = 0,
+        Acknowledged = 1,
+        Superseded = 2,
+        Canceled = 3,
     }
 
     private sealed class SessionEcdhKeyPair : IDisposable

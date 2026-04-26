@@ -19,7 +19,7 @@
 - Be patient on the first launch before concluding startup is hung.
 - If your environment allows it, use an antivirus exclusion for the app install/portable folder and `%LOCALAPPDATA%\\nLink` artifacts/logs.
 - Prefer testing performance after one warm-up launch.
-- Use Diagnostics export / metrics to compare first cold start vs later runs.
+- Use Diagnostics copy/export and metrics to compare first cold start vs later runs; see `docs/supportability.md` before sharing evidence.
 
 ## Diagnostics note
 

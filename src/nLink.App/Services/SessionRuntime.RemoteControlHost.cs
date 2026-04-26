@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Runtime.CompilerServices;
@@ -28,6 +29,237 @@ namespace NLink.App.Services;
 
 public sealed partial class SessionRuntime
 {
+    private const int HelperRemoteScreenShareMinimumWarmupApplies = 3;
+    private const int HelperRemoteScreenShareCadencePressureMinimumApplies = 4;
+    private const long HelperRemoteScreenShareHealthyApplyCadenceThresholdMs = 300;
+    private const long HelperRemoteScreenShareHealthyApplyCadenceBurstThresholdMs = 400;
+    private const long HelperRemoteScreenShareReduceApplyCadenceThresholdMs = 350;
+    private const long HelperRemoteScreenShareReduceApplyCadenceBurstThresholdMs = 500;
+    private const long HelperRemoteScreenShareCatchUpApplyCadenceThresholdMs = 700;
+    private const long HelperRemoteScreenShareCatchUpApplyCadenceBurstThresholdMs = 900;
+    private const int HelperRemoteScreenShareBaselineEstablishVisibleApplies = 8;
+    private const int HelperRemoteScreenSharePressureConsecutiveThreshold = 3;
+    private const long HelperRemoteScreenShareAgeExcessReduceThresholdMs = 250;
+    private const long HelperRemoteScreenShareAgeExcessCatchUpThresholdMs = 900;
+    private const long HelperRemoteScreenShareCadencePressureThresholdMs = 500;
+    private const double HelperRemoteScreenShareBaselineEwmaAlpha = 0.25d;
+    private const long HelperRemoteScreenShareBaselineReseedEligibleAgeThresholdMs = 900;
+    private static readonly TimeSpan HelperRemoteScreenShareEpochWarmupTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan HelperRemoteScreenShareRecoveryOnlyWindow = TimeSpan.FromSeconds(3);
+    private const int HelperRemoteScreenSharePostRecoveryMinimumApplies = 3;
+    private const int HelperRemoteScreenShareBaselineReseedVisibleApplies = 3;
+    private static readonly TimeSpan HelperRemoteScreenShareBaselineReseedTimeout = TimeSpan.FromMilliseconds(1500);
+    private static readonly TimeSpan HelperRemoteScreenSharePostRecoveryStabilizationWindow = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan HelperRemoteScreenSharePostRecoveryVisibleProgressWindow = TimeSpan.FromMilliseconds(400);
+    private static readonly TimeSpan HelperRemoteScreenSharePostRecoveryAgeGraceWindow = TimeSpan.FromMilliseconds(1000);
+    private static readonly TimeSpan HelperRemoteScreenSharePostRecoveryHealthyLatchStallTimeout = TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan HelperRemoteScreenSharePressureReevaluationInterval = TimeSpan.FromMilliseconds(200);
+    private static readonly TimeSpan HelperRemoteScreenShareProofKeepaliveInterval = TimeSpan.FromMilliseconds(400);
+    private static readonly TimeSpan HelperRemoteScreenShareRecoveryReceiptRetryDelay = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan HelperRemoteScreenShareCadenceStallTriggerWindow = TimeSpan.FromMilliseconds(800);
+    private static readonly TimeSpan HelperRemoteScreenShareBridgeHealthQuarantineWindow = TimeSpan.FromMilliseconds(1500);
+    private long helperRemoteLastReportedAppliedFrameEpoch = -1;
+    private long helperRemoteLastReportedAppliedFrameId = -1;
+    private HelperRemoteSessionSnapshot helperRemoteLastReportedSessionSnapshot = default;
+    private DateTimeOffset helperRemoteLastReportedSessionSnapshotUtc;
+    private bool helperRemoteLastAppliedHeadAdvancedSincePressureEvaluation;
+    private bool helperRemoteLastStableVisibleHeadAdvancedSincePressureEvaluation;
+    private string helperRemoteLastHealthyStateEstablishedBy = "none";
+    private long helperRemoteCurrentPressureEpochNonHealthyClearSuppressedDueToProgressCount;
+
+    private enum ScreenSharePressureSampleSource
+    {
+        AppliedFrameAge = 0,
+        ApplyCadence = 1,
+        StaleDropOnly = 2,
+        BridgeHealth = 3,
+    }
+
+    private readonly record struct HelperRemoteScreenSharePressureSnapshot(
+        bool HasAppliedFrame,
+        long LastAppliedFrameAgeMs,
+        int RecentAppliedHighFrameCount,
+        int ConsecutiveVeryHighAppliedFrames,
+        long LastApplyCadenceMs,
+        double AverageApplyCadenceMs,
+        long ViewerStaleDropCount,
+        long ViewerSoftStaleDropCount,
+        long CurrentEpoch,
+        bool CurrentEpochFirstApplySeen,
+        bool CurrentEpochWarmupActive,
+        int CurrentEpochApplyCount,
+        long CurrentEpochNeedMoreInputCount,
+        long CurrentEpochStaleDropCount,
+        long CurrentEpochSoftStaleDropCount,
+        long LastVisibleApplyFrameId,
+        long VisibleHeadFrameId,
+        long VisibleRecoveryFloorFrameId,
+        long AppliedHeadFrameId,
+        long FramesAppliedSinceLastGap,
+        long StableVisibleHeadFrameId,
+        long CurrentEpochGapCount,
+        long CurrentEpochRecoveryKeyframeApplyCount,
+        long CurrentEpochResyncCount,
+        bool CurrentEpochRecoveryActive,
+        DateTimeOffset CurrentEpochRecoveryStartedUtc,
+        bool CurrentEpochRecoveryTimeoutSent,
+        bool CurrentEpochPostRecoveryStabilizationActive,
+        bool CurrentEpochPostRecoveryHealthySignalSent,
+        HelperRemoteSessionPhase HelperSessionPhase,
+        HelperRemoteRecoveryMechanism HelperRecoveryMechanism,
+        bool HelperBaselineEstablished,
+        bool CurrentEpochProgressProven,
+        string CurrentEpochProgressProofSource,
+        long CurrentEpochProvenHeadFrameId,
+        long TimeSinceLastVisibleApplyMs,
+        bool BaselineEstablished,
+        long BaselineCaptureToRenderMs,
+        long AgeExcessMs,
+        long ProgressStallMs,
+        bool BaselineReseedInProgress,
+        int AgePressureConsecutiveCount,
+        int CadencePressureConsecutiveCount,
+        long CatchUpSuppressedDueToProgressCount,
+        long BaselineFrozenDueToStallCount,
+        long BaselineReseedAfterRecoveryCount,
+        long CadenceStallWindowCount,
+        long CadenceStallTriggerCount,
+        bool DerivedPostRecoveryHealthyActive,
+        string DerivedPostRecoveryHealthySource,
+        long DerivedPostRecoveryProofFrameId,
+        bool SteadyVisibleProgressActive,
+        long SteadyVisibleProgressActivationFrameId,
+        long LastSentVisibleHeadFrameId,
+        long LastSentStableVisibleHeadFrameId,
+        long PressureSendBypassedForVisibleProgressCount,
+        long ProofKeepaliveSendCount,
+        long ProofKeepaliveTimerDrivenSendCount,
+        long ProofKeepaliveLastHeadFrameId,
+        long ProofKeepaliveLastSendAgeMs,
+        long SteadyVisibleProgressClearedCount,
+        string SteadyVisibleProgressClearedReason,
+        long PostRecoveryHealthyLatchCount,
+        long PostRecoveryHealthyLatchClearCount,
+        string PostRecoveryHealthyLatchClearReason,
+        bool PostRecoveryAgeGraceActive,
+        long PostRecoveryAgeGraceSuppressedCount,
+        long BridgeHealthAdvisoryCount,
+        long BridgeHealthActionableCount,
+        long BridgeHealthQuarantineSuppressedCount,
+        long BridgeHealthActionableWithoutQueueOrDropCount,
+        long TimeSpentInHelperWarmupMs,
+        long VisibleAppliesDuringSettleCount,
+        long PostRecoverySettleWindowCount,
+        long PostRecoverySettleWindowSuccessCount,
+        long PostRecoverySettleWindowTimeoutCount,
+        long VisibleAppliesBeforePressureReenabled,
+        bool AppliedHeadAdvancedSinceLastEvaluation,
+        bool StableVisibleHeadAdvancedSinceLastEvaluation,
+        string HelperHealthyStateEstablishedBy,
+        long NonHealthyClearSuppressedDueToProgressCount);
+
+    internal sealed record HelperRemoteScreenSharePressureDiagnosticsSnapshot(
+        long StreamEpoch,
+        long LastVisibleApplyFrameId,
+        long VisibleHeadFrameId,
+        long VisibleRecoveryFloorFrameId,
+        long AppliedHeadFrameId,
+        long FramesAppliedSinceLastGap,
+        long StableVisibleHeadFrameId,
+        long CurrentEpochGapCount,
+        long CurrentEpochRecoveryKeyframeApplyCount,
+        long CurrentEpochResyncCount,
+        bool RecoveryWindowActive,
+        bool RecoveryWindowProgressed,
+        bool RecoveryWindowSucceeded,
+        long RecoveryWindowProgressedCount,
+        long RecoveryWindowSuccessCount,
+        long ActiveRecoveryWindowEpoch,
+        long ActiveRecoveryWindowRecoveryFrameId,
+        long RecoveryWindowContiguousFollowerApplyCount,
+        long ContinuityLossTicks,
+        long WarmupTicks,
+        long BeforeFirstVisibleApplyTicks,
+        long AfterVisibleRecoveryFrameTicks,
+        long AfterVisibleRecoveryFrameSuppressedDueToSuccessCount,
+        long SlowApplyCadenceTicks,
+        long HighFrameAgeTicks,
+        long HighFrameAgeSuppressedDueToVisibleProgressCount,
+        long HighFrameAgeSuppressedDueToHeadAdvanceCount,
+        long ActionableHighFrameAgeCount,
+        long PostRecoveryHighFrameAgeSuppressedTicks,
+        long RepeatedStaleDropsTicks,
+        long BridgeHealthTicks,
+        bool BaselineEstablished,
+        long BaselineCaptureToRenderMs,
+        long AgeExcessMs,
+        long ProgressStallMs,
+        bool BaselineReseedInProgress,
+        int AgePressureConsecutiveCount,
+        int CadencePressureConsecutiveCount,
+        long CatchUpSuppressedDueToProgressCount,
+        long BaselineFrozenDueToStallCount,
+        long BaselineReseedAfterRecoveryCount,
+        long CadenceStallWindowCount,
+        long CadenceStallTriggerCount,
+        bool DerivedPostRecoveryHealthyActive,
+        string DerivedPostRecoveryHealthySource,
+        long DerivedPostRecoveryProofFrameId,
+        bool SteadyVisibleProgressActive,
+        long SteadyVisibleProgressActivationFrameId,
+        long LastSentVisibleHeadFrameId,
+        long LastSentStableVisibleHeadFrameId,
+        long PressureSendBypassedForVisibleProgressCount,
+        long ProofKeepaliveSendCount,
+        long ProofKeepaliveTimerDrivenSendCount,
+        long ProofKeepaliveLastHeadFrameId,
+        long ProofKeepaliveLastSendAgeMs,
+        long SteadyVisibleProgressClearedCount,
+        string SteadyVisibleProgressClearedReason,
+        long PostRecoveryHealthyLatchCount,
+        long PostRecoveryHealthyLatchClearCount,
+        string PostRecoveryHealthyLatchClearReason,
+        bool PostRecoveryAgeGraceActive,
+        long PostRecoveryAgeGraceSuppressedCount,
+        long BridgeHealthAdvisoryCount,
+        long BridgeHealthActionableCount,
+        long BridgeHealthQuarantineSuppressedCount,
+        long BridgeHealthActionableWithoutQueueOrDropCount,
+        HelperRemoteSessionPhase HelperSessionPhase,
+        HelperRemoteRecoveryMechanism HelperRecoveryMechanism,
+        bool HelperBaselineEstablished,
+        bool CurrentEpochProgressProven,
+        string CurrentEpochProgressProofSource,
+        long CurrentEpochProvenHeadFrameId,
+        bool AppliedHeadAdvancedSinceLastEvaluation,
+        bool StableVisibleHeadAdvancedSinceLastEvaluation,
+        string HelperHealthyStateEstablishedBy,
+        long NonHealthyClearSuppressedDueToProgressCount,
+        long TimeSpentInHelperWarmupMs,
+        long VisibleAppliesDuringSettleCount,
+        long PostRecoverySettleWindowCount,
+        long PostRecoverySettleWindowSuccessCount,
+        long PostRecoverySettleWindowTimeoutCount,
+        long VisibleAppliesBeforePressureReenabled,
+        string DominantPressureBlocker);
+
+    private enum HelperRemoteRecoveryWindowStatus
+    {
+        Unknown = 0,
+        Started,
+        FollowerApplied,
+        Succeeded,
+        Aborted,
+    }
+
+    private readonly record struct HelperRemoteRecoveryReceiptPublicationCandidate(
+        long StreamEpoch,
+        long OwnerFrameId,
+        long VisibleRecoveryFrameId,
+        long VisibleHeadFrameId,
+        string ReceiptKind,
+        ScreenShareRecoveryReceiptV1 Message);
+
     internal Task<bool> DispatchRemoteControlHelperEventAsync(
         RemoteControlReducerEventKind eventKind,
         string? reason = null,
@@ -92,6 +324,8 @@ public sealed partial class SessionRuntime
         {
             ClearRemoteControlAdminRestartWarning("control_not_active");
         }
+
+        SyncTransportScreenShareCursorCaptureForRemoteControl(reducerEvent.Reason);
 
         if (!notifyStateChanged)
         {
@@ -1438,17 +1672,23 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        StopHelperRemoteScreenSharePressureTimer();
         CancelRemoteControlScreenChangedStatus();
         chatService.MessageReceived -= OnChatMessageReceived;
         chatService.MessageReceivedBeforeApproved -= OnChatMessageReceivedBeforeApproved;
         chatService.StateChanged -= OnChatStateChanged;
         fileTransferService.TransferChanged -= OnFileTransferChanged;
 
-        RunBoundedCleanup("disconnect", () => DisconnectAsync(), DisposeOperationTimeout);
+        var disconnectCompleted = RunBoundedCleanup("disconnect", () => DisconnectAsync(), DisposeOperationTimeout);
         ClearQueuedRemoteControlMouseMoves();
         ClearQueuedRemoteControlInjections();
 
         disposed = true;
+        if (!disconnectCompleted)
+        {
+            ForceDisposeLingeringTransportAfterDisconnectTimeout();
+        }
+
         TransitionTo(TransportState.Disposed, "dispose");
         CancelCachedBridgeIdleTimeout();
 
@@ -1480,7 +1720,74 @@ public sealed partial class SessionRuntime
         lifecycleGate.Dispose();
     }
 
-    private static void RunBoundedCleanup(string operationName, Func<Task> cleanup, TimeSpan timeout)
+    private void ForceDisposeLingeringTransportAfterDisconnectTimeout()
+    {
+        var lingeringSessionCts = sessionCts;
+        var lingeringTransport = transport;
+        sessionCts = null;
+        transport = null;
+
+        if (lingeringSessionCts is not null)
+        {
+            try
+            {
+                lingeringSessionCts.Cancel();
+            }
+            catch
+            {
+                // Best-effort teardown only.
+            }
+
+            try
+            {
+                lingeringSessionCts.Dispose();
+            }
+            catch
+            {
+                // Best-effort teardown only.
+            }
+        }
+
+        if (lingeringTransport is null)
+        {
+            return;
+        }
+
+        try
+        {
+            UnwireTransport(lingeringTransport);
+        }
+        catch
+        {
+            // Best-effort teardown only.
+        }
+
+        try
+        {
+            chatService.DetachTransport();
+            fileTransferService.DetachTransport();
+        }
+        catch
+        {
+            // Best-effort teardown only.
+        }
+
+        try
+        {
+            lingeringTransport.Dispose();
+            LocalOperationalLog.Warn(
+                "Session",
+                "event=dispose_forced_transport_cleanup; reason=disconnect_timeout; transport_disposed=1");
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                "Session",
+                $"event=dispose_forced_transport_cleanup_failed; reason=disconnect_timeout; ex={ex.GetType().Name}");
+        }
+    }
+
+    private static bool RunBoundedCleanup(string operationName, Func<Task> cleanup, TimeSpan timeout)
     {
         try
         {
@@ -1491,16 +1798,18 @@ public sealed partial class SessionRuntime
                 LocalOperationalLog.Warn(
                     "Session",
                     $"event=dispose_timeout; operation={operationName}; timeout_ms={timeout.TotalMilliseconds:F0}");
-                return;
+                return false;
             }
 
             cleanupTask.GetAwaiter().GetResult();
+            return true;
         }
         catch (Exception ex)
         {
             LocalOperationalLog.Warn(
                 "Session",
                 $"event=dispose_error; operation={operationName}; ex={ex.GetType().Name}");
+            return false;
         }
     }
 
@@ -1600,6 +1909,15 @@ public sealed partial class SessionRuntime
             var oldControlState = remoteControlSessionState.ControlState;
             var oldControlRequestId = remoteControlSessionState.CurrentControlRequestId;
             var hadActiveSession = oldCts is not null || oldTransport is not null || oldRole != SessionRuntimeRole.None;
+
+            ClearHelperListenerBootstrapSnapshot(notifyRemoteSessionEnd ? "remote_session_end" : "reset_core");
+
+            if (oldTransport is ILocalPeerAddressSignalingTransport localPeerTransport &&
+                oldTransport.GetType().Name == "DevLocalTransport" &&
+                !string.IsNullOrWhiteSpace(localPeerTransport.LocalPeerAddress))
+            {
+                preservedDevLocalPeerAddress = localPeerTransport.LocalPeerAddress.Trim();
+            }
 
             if (hadActiveSession && transportState is not TransportState.Disposed)
             {
@@ -1957,7 +2275,17 @@ public sealed partial class SessionRuntime
         allowTransportScreenShareAutoStart = false;
         RefreshRemoteControlCapabilitiesFromTransport();
         RunCountedBackgroundTask(
-            () => transportScreenShareCoordinator.HandleDisconnectedAsync(),
+            async () =>
+            {
+                try
+                {
+                    await transportScreenShareCoordinator.HandleDisconnectedAsync().ConfigureAwait(false);
+                }
+                finally
+                {
+                    ForceCloseWindowsGraphicsCaptureLeases("transport_disconnected");
+                }
+            },
             countAsTransportTask: false);
         try
         {
@@ -1972,7 +2300,17 @@ public sealed partial class SessionRuntime
     {
         allowTransportScreenShareAutoStart = false;
         RunCountedBackgroundTask(
-            () => transportScreenShareCoordinator.HandleDisconnectedAsync(),
+            async () =>
+            {
+                try
+                {
+                    await transportScreenShareCoordinator.HandleDisconnectedAsync().ConfigureAwait(false);
+                }
+                finally
+                {
+                    ForceCloseWindowsGraphicsCaptureLeases("remote_session_ended");
+                }
+            },
             countAsTransportTask: false);
         try
         {
@@ -2043,10 +2381,11 @@ public sealed partial class SessionRuntime
         out string messageType,
         out string? messageSessionId)
     {
-        if (ScreenSharePayloadCodec.TryDeserialize(payload, out var chunk))
+        if (ScreenShareVideoPayloadCodec.TryDeserializeFragmentEnvelope(payload, out var fragments, out _) &&
+            fragments.Length > 0)
         {
             messageType = "frame";
-            messageSessionId = chunk.SessionId;
+            messageSessionId = fragments[0].SessionId;
             return true;
         }
 
@@ -2572,10 +2911,2425 @@ public sealed partial class SessionRuntime
         Interlocked.Exchange(ref remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs, 0);
         lastScreenShareStopSuppressedLogTick = 0;
         CancelRemoteControlScreenShareStopGrace("screenshare_frame_resumed");
-        remoteScreenShareActive = true;
-        SyncFileTransferFlowControlMode();
+        screenShareControlHost.ObserveAcceptedFrame(e);
+        try
+        {
+            TrackHelperRemoteScreenShareAcceptedFrameCore(e);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_frame_dispatch_stage_failed; stage=track_helper_remote_frame; session_id={e.SessionId}; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; is_keyframe={(e.IsKeyFrame ? 1 : 0)}; encoding={e.Encoding}; reason={ex.GetType().Name}; message={SanitizeDispatchExceptionMessage(ex.Message)}");
+            throw;
+        }
 
-        ScreenShareFrameCompleted?.Invoke(this, e);
+        try
+        {
+            SyncFileTransferFlowControlMode();
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_frame_dispatch_stage_failed; stage=sync_filetransfer_flow_control; session_id={e.SessionId}; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; is_keyframe={(e.IsKeyFrame ? 1 : 0)}; encoding={e.Encoding}; reason={ex.GetType().Name}; message={SanitizeDispatchExceptionMessage(ex.Message)}");
+            throw;
+        }
+
+        try
+        {
+            screenShareControlHost.MaybeSendScreenSharePressureState();
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_frame_dispatch_stage_failed; stage=send_pressure_state; session_id={e.SessionId}; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; is_keyframe={(e.IsKeyFrame ? 1 : 0)}; encoding={e.Encoding}; reason={ex.GetType().Name}; message={SanitizeDispatchExceptionMessage(ex.Message)}");
+            throw;
+        }
+
+        try
+        {
+            ScreenShareFrameCompleted?.Invoke(this, e);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_frame_dispatch_stage_failed; stage=screen_share_frame_completed_subscriber; session_id={e.SessionId}; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; is_keyframe={(e.IsKeyFrame ? 1 : 0)}; encoding={e.Encoding}; reason={ex.GetType().Name}; message={SanitizeDispatchExceptionMessage(ex.Message)}");
+            throw;
+        }
+    }
+
+    private void OnTransportScreenShareCursorStateReceived(object? sender, ScreenShareCursorStateReceivedEventArgs e)
+    {
+        if (!IsFromCurrentTransport(sender) ||
+            remoteSessionEndHandling ||
+            lastDisconnectWasRemoteEnd ||
+            resetInProgress ||
+            state is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected)
+        {
+            return;
+        }
+
+        if (role != SessionRuntimeRole.Helper ||
+            !FeatureFlags.EnableScreenShareTransport ||
+            !TryValidateScreenShareSession(e.Message.SessionId, "screen_share_cursor_state_received", "cursor_state") ||
+            !RequireCapability(SessionCapability.ScreenShare, "screen_share_cursor_state_received"))
+        {
+            return;
+        }
+
+        if (transport is not IScreenShareCursorOverlayCapabilityProvider cursorOverlayProvider ||
+            !cursorOverlayProvider.SessionSupportsScreenShareCursorOverlay)
+        {
+            return;
+        }
+
+        ScreenShareCursorStateReceived?.Invoke(this, e);
+    }
+
+    private void TrackHelperRemoteScreenShareAcceptedFrame(ScreenShareFrameCompletedEventArgs e)
+    {
+        screenShareControlHost.ObserveAcceptedFrame(e);
+    }
+
+    private void TrackHelperRemoteScreenShareAcceptedFrameCore(ScreenShareFrameCompletedEventArgs e)
+    {
+        if (role != SessionRuntimeRole.Helper)
+        {
+            return;
+        }
+
+        _ = Interlocked.Increment(ref helperRemoteScreenShareAcceptedFrames);
+        var streamEpoch = e.StreamEpoch;
+        Interlocked.Exchange(ref helperRemoteScreenShareLastAcceptedEpoch, streamEpoch);
+        if (e.StreamConfig is not null)
+        {
+            Interlocked.Exchange(ref helperRemoteScreenShareSawConfig, 1);
+        }
+
+        if (streamEpoch <= 0)
+        {
+            return;
+        }
+
+        var nowUtc = nowProvider();
+        var epochChanged = false;
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            var suppressEpochAdvanceForNonVisibleRecoveryChurn =
+                streamEpoch > 0 &&
+                helperRemoteCurrentPressureEpoch > 0 &&
+                helperRemoteCurrentPressureEpoch != streamEpoch &&
+                helperRemoteContinuityRecoveryActive;
+
+            if (!suppressEpochAdvanceForNonVisibleRecoveryChurn &&
+                helperRemoteCurrentPressureEpoch != streamEpoch)
+            {
+                BeginHelperRemoteScreenSharePressureEpoch_NoLock(streamEpoch, nowUtc);
+                epochChanged = true;
+            }
+
+            if (helperRemoteCurrentPressureEpoch == streamEpoch &&
+                helperRemoteCurrentPressureEpochFirstAcceptedFrameUtc == default)
+            {
+                helperRemoteCurrentPressureEpochFirstAcceptedFrameUtc = nowUtc;
+            }
+        }
+
+        if (epochChanged)
+        {
+            healthyScreenSharePressureIntervals = 0;
+            lastObservedRemoteScreenShareStaleDrops = 0;
+            lastSentScreenSharePressureAgeMs = 0;
+            lastSentScreenSharePressureStaleDrops = 0;
+            lastSentScreenSharePressureUtc = default;
+        }
+    }
+
+    internal void ReportHelperRemoteScreenShareFrameApplied(long ageMs, long streamEpoch)
+    {
+        screenShareControlHost.ReportHelperRemoteScreenShareFrameApplied(
+            ageMs,
+            streamEpoch,
+            frameId: -1,
+            visibleHeadFrameId: -1,
+            stableVisibleHeadFrameId: -1,
+            framesAppliedSinceLastGap: 0);
+    }
+
+    internal void ReportHelperRemoteScreenShareFrameApplied(long ageMs, long streamEpoch, long frameId)
+    {
+        screenShareControlHost.ReportHelperRemoteScreenShareFrameApplied(
+            ageMs,
+            streamEpoch,
+            frameId,
+            visibleHeadFrameId: frameId,
+            stableVisibleHeadFrameId: -1,
+            framesAppliedSinceLastGap: 0);
+    }
+
+    internal void ReportHelperRemoteScreenShareFrameApplied(
+        long ageMs,
+        long streamEpoch,
+        long frameId,
+        long visibleHeadFrameId,
+        long stableVisibleHeadFrameId,
+        long framesAppliedSinceLastGap)
+    {
+        screenShareControlHost.ReportHelperRemoteScreenShareFrameApplied(
+            ageMs,
+            streamEpoch,
+            frameId,
+            visibleHeadFrameId,
+            stableVisibleHeadFrameId,
+            framesAppliedSinceLastGap);
+    }
+
+    internal void ReportHelperRemoteScreenShareFrameApplied(
+        long ageMs,
+        long streamEpoch,
+        long frameId,
+        long visibleHeadFrameId,
+        long stableVisibleHeadFrameId,
+        long framesAppliedSinceLastGap,
+        HelperRemoteSessionSnapshot sessionSnapshot)
+    {
+        screenShareControlHost.ReportHelperRemoteScreenShareFrameApplied(
+            ageMs,
+            streamEpoch,
+            frameId,
+            visibleHeadFrameId,
+            stableVisibleHeadFrameId,
+            framesAppliedSinceLastGap,
+            sessionSnapshot);
+    }
+
+    internal void ReportHelperRemoteScreenShareSessionSnapshot(HelperRemoteSessionSnapshot snapshot)
+    {
+        screenShareControlHost.ReportHelperRemoteScreenShareSessionSnapshot(snapshot);
+    }
+
+    private void ReportHelperRemoteScreenShareFrameAppliedCore(
+        long ageMs,
+        long streamEpoch,
+        long frameId,
+        long visibleHeadFrameId,
+        long stableVisibleHeadFrameId,
+        long framesAppliedSinceLastGap)
+    {
+        ReportHelperRemoteScreenShareFrameAppliedCore(
+            ageMs,
+            streamEpoch,
+            frameId,
+            visibleHeadFrameId,
+            stableVisibleHeadFrameId,
+            framesAppliedSinceLastGap,
+            sessionSnapshot: null);
+    }
+
+    private void ReportHelperRemoteScreenShareFrameAppliedCore(
+        long ageMs,
+        long streamEpoch,
+        long frameId,
+        long visibleHeadFrameId,
+        long stableVisibleHeadFrameId,
+        long framesAppliedSinceLastGap,
+        HelperRemoteSessionSnapshot? sessionSnapshot)
+    {
+        if (disposed || role != SessionRuntimeRole.Helper)
+        {
+            return;
+        }
+
+        var nowUtc = nowProvider();
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            if (frameId >= 0 &&
+                helperRemoteLastReportedAppliedFrameEpoch == streamEpoch &&
+                helperRemoteLastReportedAppliedFrameId == frameId)
+            {
+                return;
+            }
+
+            EnsureHelperRemoteScreenSharePressureEpoch_NoLock(streamEpoch, nowUtc);
+            var normalizedAgeMs = Math.Max(0, ageMs);
+            if (helperRemoteLastAppliedFrameUtc != default)
+            {
+                var cadenceMs = Math.Max(0L, (long)(nowUtc - helperRemoteLastAppliedFrameUtc).TotalMilliseconds);
+                helperRemoteLastApplyCadenceMs = cadenceMs;
+                helperRemoteTotalApplyCadenceMs += cadenceMs;
+                helperRemoteApplyCadenceObserved++;
+            }
+
+            helperRemoteLastAppliedFrameUtc = nowUtc;
+            helperRemoteLastAppliedFrameAgeMs = normalizedAgeMs;
+            helperRemoteRecentAppliedFrameAgesMs[helperRemoteRecentAppliedFrameIndex] = normalizedAgeMs;
+            helperRemoteRecentAppliedFrameIndex = (helperRemoteRecentAppliedFrameIndex + 1) % helperRemoteRecentAppliedFrameAgesMs.Length;
+            if (helperRemoteRecentAppliedFrameCount < helperRemoteRecentAppliedFrameAgesMs.Length)
+            {
+                helperRemoteRecentAppliedFrameCount++;
+            }
+
+            helperRemoteConsecutiveVeryHighAppliedFrames = normalizedAgeMs >= 1200
+                ? helperRemoteConsecutiveVeryHighAppliedFrames + 1
+                : 0;
+            if (!helperRemoteCurrentPressureEpochFirstApplySeen)
+            {
+                helperRemoteCurrentPressureEpochFirstVisibleApplyUtc = nowUtc;
+            }
+
+            helperRemoteCurrentPressureEpochFirstApplySeen = true;
+            helperRemoteCurrentPressureEpochApplyCount++;
+            if (frameId >= 0)
+            {
+                helperRemoteLastReportedAppliedFrameEpoch = streamEpoch;
+                helperRemoteLastReportedAppliedFrameId = frameId;
+                helperRemoteCurrentPressureEpochLastVisibleApplyFrameId = frameId;
+            }
+
+            if (!(helperRemoteContinuityRecoveryActive && helperRemoteContinuityRecoveryEpoch == streamEpoch))
+            {
+                helperRemoteCurrentPressureEpochAgePressureConsecutiveCount = 0;
+                helperRemoteCurrentPressureEpochCadencePressureConsecutiveCount = 0;
+            }
+
+            helperRemoteCurrentPressureEpochCadenceStallStartedUtc = default;
+            helperRemoteCurrentPressureEpochCadenceStallTriggered = false;
+            if (sessionSnapshot.HasValue)
+            {
+                UpdateHelperRemoteReportedSessionSnapshot_NoLock(sessionSnapshot.Value);
+            }
+
+            UpdateHelperRemotePressureBaselineForVisibleApply_NoLock(streamEpoch, normalizedAgeMs, frameId);
+            UpdateHelperRemoteSteadyVisibleProgressStateForApply_NoLock(
+                streamEpoch,
+                frameId,
+                visibleHeadFrameId,
+                stableVisibleHeadFrameId,
+                framesAppliedSinceLastGap,
+                normalizedAgeMs,
+                nowUtc);
+
+            if (helperRemoteCurrentPressureEpochRecoveryKeyframeApplyCountLocal > 0 &&
+                frameId >= 0)
+            {
+                helperRemotePostRecoveryAgeGraceEpoch = streamEpoch;
+                helperRemotePostRecoveryAgeGraceUntilUtc = nowUtc + HelperRemoteScreenSharePostRecoveryAgeGraceWindow;
+                helperRemoteCurrentPressureEpochAgePressureConsecutiveCount = 0;
+            }
+        }
+
+        MaybeSendScreenSharePressureState();
+        MaybePublishHelperRemoteRecoveryReceipt();
+    }
+
+    private void ReportHelperRemoteScreenShareSessionSnapshotCore(HelperRemoteSessionSnapshot snapshot)
+    {
+        if (disposed || role != SessionRuntimeRole.Helper)
+        {
+            return;
+        }
+
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            UpdateHelperRemoteReportedSessionSnapshot_NoLock(snapshot);
+        }
+    }
+
+    internal void ReportHelperRemoteScreenShareDecodeNeedsMoreInput(long streamEpoch)
+    {
+        screenShareControlHost.ReportHelperRemoteScreenShareDecodeNeedsMoreInput(streamEpoch);
+    }
+
+    private void ReportHelperRemoteScreenShareDecodeNeedsMoreInputCore(long streamEpoch)
+    {
+        if (disposed || role != SessionRuntimeRole.Helper)
+        {
+            return;
+        }
+
+        var nowUtc = nowProvider();
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            EnsureHelperRemoteScreenSharePressureEpoch_NoLock(streamEpoch, nowUtc);
+            helperRemoteCurrentPressureEpochNeedMoreInputCount++;
+        }
+
+        MaybeSendScreenSharePressureState();
+    }
+
+    internal void ReportHelperRemoteScreenShareContinuityLost(
+        long streamEpoch,
+        string reason,
+        bool shouldRequestRecoveryKeyframe,
+        long currentEpochNeedMoreInputCount,
+        long expectedNextFrameId,
+        long receivedFrameId,
+        long lastCleanFrameId)
+    {
+        screenShareControlHost.ReportHelperRemoteScreenShareContinuityLost(
+            streamEpoch,
+            reason,
+            shouldRequestRecoveryKeyframe,
+            currentEpochNeedMoreInputCount,
+            expectedNextFrameId,
+            receivedFrameId,
+            lastCleanFrameId);
+    }
+
+    private void ReportHelperRemoteScreenShareContinuityLostCore(
+        long streamEpoch,
+        string reason,
+        bool shouldRequestRecoveryKeyframe,
+        long currentEpochNeedMoreInputCount,
+        long expectedNextFrameId,
+        long receivedFrameId,
+        long lastCleanFrameId)
+    {
+        if (disposed || role != SessionRuntimeRole.Helper)
+        {
+            return;
+        }
+
+        var nowUtc = nowProvider();
+        var helperPressureSnapshot = GetHelperRemoteScreenSharePressureSnapshot();
+        var transportBackpressureProbe = transport as IScreenShareTransportBackpressureProbe;
+        var transportRecentDropCount = Math.Max(0, transportBackpressureProbe?.ScreenShareTransportRecentDropCount ?? 0);
+        var recentHealthIssueCount = transportBackpressureProbe?.ScreenShareTransportRecentHealthIssueCount ?? 0;
+        var hasTransportQueuePressure =
+            transportBackpressureProbe?.IsScreenShareTransportCongested == true ||
+            transportBackpressureProbe?.IsScreenShareTransportSeverelyCongested == true ||
+            Math.Max(0, transportBackpressureProbe?.ScreenShareTransportQueueDepth ?? 0) > 0 ||
+            transportRecentDropCount > 0;
+        var hasRealTransportOrBridgePressure =
+            hasTransportQueuePressure ||
+            recentHealthIssueCount > 0 ||
+            transportBackpressureProbe?.IsScreenShareTransportHealthSeverelyDegraded == true;
+        if (!hasRealTransportOrBridgePressure &&
+            ShouldSuppressSatisfiedFloorContinuityLoss(
+                helperPressureSnapshot,
+                streamEpoch,
+                expectedNextFrameId,
+                receivedFrameId,
+                lastCleanFrameId))
+        {
+            healthyScreenSharePressureIntervals = Math.Max(healthyScreenSharePressureIntervals, 4);
+            MaybeSendScreenSharePressureState();
+            return;
+        }
+
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            EnsureHelperRemoteScreenSharePressureEpoch_NoLock(streamEpoch, nowUtc);
+            var epochChanged = helperRemoteContinuityRecoveryEpoch != streamEpoch;
+            helperRemoteContinuityRecoveryActive = true;
+            helperRemotePostRecoveryHealthySignalSent = false;
+            ResetHelperRemoteProgressAwarePressureState_NoLock();
+            ClearHelperRemoteSteadyVisibleProgressState_NoLock("continuity_loss");
+            ClearHelperRemoteActiveRecoveryReceiptOwner_NoLock();
+            helperRemoteContinuityRecoveryEpoch = streamEpoch;
+            if (epochChanged || helperRemoteContinuityRecoveryStartedUtc == default)
+            {
+                helperRemoteContinuityRecoveryStartedUtc = nowUtc;
+                helperRemoteContinuityRecoveryTimeoutSent = false;
+            }
+
+            if (epochChanged)
+            {
+                helperRemoteCurrentPressureEpochRecoveryKeyframeApplyCountLocal = 0;
+            }
+
+            helperRemoteCurrentPressureEpochNeedMoreInputCount = Math.Max(
+                helperRemoteCurrentPressureEpochNeedMoreInputCount,
+                Math.Max(0, currentEpochNeedMoreInputCount));
+        }
+
+        healthyScreenSharePressureIntervals = 0;
+        MaybeSendScreenSharePressureState();
+
+        if (!shouldRequestRecoveryKeyframe)
+        {
+            return;
+        }
+
+        RequestHelperRemoteRecoveryKeyframe(
+            streamEpoch,
+            reason,
+            currentEpochNeedMoreInputCount,
+            expectedNextFrameId,
+            receivedFrameId,
+            lastCleanFrameId);
+    }
+
+    private static bool ShouldSuppressSatisfiedFloorContinuityLoss(
+        HelperRemoteScreenSharePressureSnapshot helperPressureSnapshot,
+        long streamEpoch,
+        long expectedNextFrameId,
+        long receivedFrameId,
+        long lastCleanFrameId)
+    {
+        if (streamEpoch <= 0 ||
+            helperPressureSnapshot.CurrentEpoch != streamEpoch ||
+            helperPressureSnapshot.CurrentEpochRecoveryActive ||
+            GetActionableStaleDropCount(
+                helperPressureSnapshot.CurrentEpochStaleDropCount,
+                helperPressureSnapshot.CurrentEpochSoftStaleDropCount) > 0)
+        {
+            return false;
+        }
+
+        var visibleProgressWindowMs = (long)HelperRemoteScreenSharePostRecoveryVisibleProgressWindow.TotalMilliseconds;
+        if (!helperPressureSnapshot.HasAppliedFrame ||
+            helperPressureSnapshot.LastVisibleApplyFrameId < 0 ||
+            helperPressureSnapshot.FramesAppliedSinceLastGap < 2 ||
+            helperPressureSnapshot.ProgressStallMs < 0 ||
+            helperPressureSnapshot.ProgressStallMs > visibleProgressWindowMs)
+        {
+            return false;
+        }
+
+        var visibleProofHead = GetLatestHelperVisibleProofHeadFrameId(
+            helperPressureSnapshot.CurrentEpochProvenHeadFrameId >= 0
+                ? helperPressureSnapshot.CurrentEpochProvenHeadFrameId
+                : helperPressureSnapshot.VisibleHeadFrameId,
+            helperPressureSnapshot.LastVisibleApplyFrameId);
+        var reportedContinuityBoundary = Math.Max(
+            expectedNextFrameId,
+            Math.Max(receivedFrameId, lastCleanFrameId));
+        var recoveryFloorSatisfied =
+            helperPressureSnapshot.VisibleRecoveryFloorFrameId >= 0 &&
+            visibleProofHead >= helperPressureSnapshot.VisibleRecoveryFloorFrameId &&
+            (helperPressureSnapshot.CurrentEpochProgressProven ||
+             helperPressureSnapshot.DerivedPostRecoveryHealthyActive) &&
+            (string.Equals(helperPressureSnapshot.CurrentEpochProgressProofSource, "recovery_floor_plus_head", StringComparison.Ordinal) ||
+             string.Equals(helperPressureSnapshot.DerivedPostRecoveryHealthySource, "recovery_floor_plus_head", StringComparison.Ordinal) ||
+             visibleProofHead > helperPressureSnapshot.VisibleRecoveryFloorFrameId);
+
+        return recoveryFloorSatisfied &&
+               reportedContinuityBoundary >= 0 &&
+               visibleProofHead >= reportedContinuityBoundary;
+    }
+
+    private static long GetActionableStaleDropCount(long totalStaleDropCount, long softStaleDropCount)
+    {
+        return Math.Max(0L, Math.Max(0L, totalStaleDropCount) - Math.Max(0L, softStaleDropCount));
+    }
+
+    internal void ReportHelperRemoteScreenShareRecoveryKeyframeApplied(long ageMs, long streamEpoch)
+    {
+        screenShareControlHost.ReportHelperRemoteScreenShareRecoveryKeyframeApplied(ageMs, streamEpoch);
+    }
+
+    private void ReportHelperRemoteScreenShareRecoveryKeyframeAppliedCore(long ageMs, long streamEpoch)
+    {
+        if (disposed || role != SessionRuntimeRole.Helper)
+        {
+            return;
+        }
+
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            if (!helperRemoteContinuityRecoveryActive || helperRemoteContinuityRecoveryEpoch != streamEpoch)
+            {
+                return;
+            }
+
+            ResetHelperRemoteScreenSharePressureAfterRecoveryKeyframe_NoLock(
+                streamEpoch,
+                nowProvider());
+            helperRemoteCurrentPressureEpochRecoveryKeyframeApplyCountLocal = 1;
+        }
+
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_viewer_recovery_keyframe_applied; role=helper_remote; stream_epoch={streamEpoch}; recovery_active=0; age_ms={Math.Max(0, ageMs)}");
+        healthyScreenSharePressureIntervals = 0;
+        MaybeSendScreenSharePressureState();
+        MaybePublishHelperRemoteRecoveryReceipt();
+    }
+
+    internal void ReportHelperRemoteScreenShareRecoveryWindowStateChanged(
+        long streamEpoch,
+        long recoveryFrameId,
+        long lastContiguousFrameId,
+        int contiguousFollowerApplyCount,
+        string status,
+        string? abortReason = null)
+    {
+        screenShareControlHost.ReportHelperRemoteScreenShareRecoveryWindowStateChanged(
+            streamEpoch,
+            recoveryFrameId,
+            lastContiguousFrameId,
+            contiguousFollowerApplyCount,
+            status,
+            abortReason);
+    }
+
+    private void ReportHelperRemoteScreenShareRecoveryWindowStateChangedCore(
+        long streamEpoch,
+        long recoveryFrameId,
+        long lastContiguousFrameId,
+        int contiguousFollowerApplyCount,
+        string status,
+        string? abortReason = null)
+    {
+        if (disposed || role != SessionRuntimeRole.Helper || streamEpoch <= 0 || recoveryFrameId < 0)
+        {
+            return;
+        }
+
+        var effectiveStatus = ParseHelperRemoteRecoveryWindowStatus(status);
+        if (effectiveStatus == HelperRemoteRecoveryWindowStatus.Unknown)
+        {
+            return;
+        }
+
+        var shouldAttemptPublish = false;
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            switch (effectiveStatus)
+            {
+                case HelperRemoteRecoveryWindowStatus.Started:
+                case HelperRemoteRecoveryWindowStatus.FollowerApplied:
+                case HelperRemoteRecoveryWindowStatus.Succeeded:
+                    UpdateHelperRemoteActiveRecoveryReceiptOwner_NoLock(streamEpoch, recoveryFrameId);
+                    shouldAttemptPublish = true;
+                    break;
+                case HelperRemoteRecoveryWindowStatus.Aborted:
+                    ClearHelperRemoteActiveRecoveryReceiptOwner_NoLock();
+                    break;
+            }
+        }
+
+        if (effectiveStatus != HelperRemoteRecoveryWindowStatus.Succeeded)
+        {
+            if (shouldAttemptPublish)
+            {
+                MaybePublishHelperRemoteRecoveryReceipt();
+            }
+
+            return;
+        }
+
+        var activeSessionId = currentSessionGrant?.SessionId.Value ?? sessionSecurityState.SessionId?.Value ?? sessionId;
+        if (!string.IsNullOrWhiteSpace(activeSessionId))
+        {
+            ScreenShareFrameLossAttributionRegistry.ObserveRecoveryWindowSucceeded(
+                activeSessionId,
+                streamEpoch,
+                recoveryFrameId,
+                lastContiguousFrameId >= 0 ? lastContiguousFrameId : recoveryFrameId);
+        }
+
+        if (shouldAttemptPublish)
+        {
+            MaybePublishHelperRemoteRecoveryReceipt();
+        }
+    }
+
+    private static HelperRemoteRecoveryWindowStatus ParseHelperRemoteRecoveryWindowStatus(string? status)
+    {
+        if (string.IsNullOrWhiteSpace(status))
+        {
+            return HelperRemoteRecoveryWindowStatus.Unknown;
+        }
+
+        return status.Trim() switch
+        {
+            "started" => HelperRemoteRecoveryWindowStatus.Started,
+            "follower_applied" => HelperRemoteRecoveryWindowStatus.FollowerApplied,
+            "succeeded" => HelperRemoteRecoveryWindowStatus.Succeeded,
+            "aborted" => HelperRemoteRecoveryWindowStatus.Aborted,
+            _ => HelperRemoteRecoveryWindowStatus.Unknown,
+        };
+    }
+
+    private void ResetHelperRemotePublishedRecoveryReceiptState_NoLock()
+    {
+        helperRemotePublishedRecoveryReceiptEpoch = 0;
+        helperRemotePublishedRecoveryReceiptOwnerFrameId = -1;
+        helperRemotePublishedRecoveryReceiptVisibleRecoveryFrameId = -1;
+        helperRemotePublishedRecoveryReceiptVisibleHeadFrameId = -1;
+        helperRemotePublishedRecoveryReceiptKind = string.Empty;
+        helperRemotePublishedRecoveryReceiptUtc = default;
+        helperRemotePublishedRecoveryReceiptRetrySent = false;
+        helperRemoteRecoveryReceiptRetryGeneration++;
+    }
+
+    private void ResetHelperRemoteRecoveryReceiptPublicationState_NoLock()
+    {
+        helperRemoteActiveRecoveryReceiptOwnerEpoch = 0;
+        helperRemoteActiveRecoveryReceiptOwnerFrameId = -1;
+        ResetHelperRemotePublishedRecoveryReceiptState_NoLock();
+    }
+
+    private void ClearHelperRemoteActiveRecoveryReceiptOwner_NoLock()
+    {
+        helperRemoteActiveRecoveryReceiptOwnerEpoch = 0;
+        helperRemoteActiveRecoveryReceiptOwnerFrameId = -1;
+        helperRemoteRecoveryReceiptRetryGeneration++;
+    }
+
+    private void UpdateHelperRemoteActiveRecoveryReceiptOwner_NoLock(long streamEpoch, long recoveryFrameId)
+    {
+        if (streamEpoch <= 0 || recoveryFrameId < 0)
+        {
+            ClearHelperRemoteActiveRecoveryReceiptOwner_NoLock();
+            return;
+        }
+
+        if (helperRemoteActiveRecoveryReceiptOwnerEpoch == streamEpoch &&
+            helperRemoteActiveRecoveryReceiptOwnerFrameId == recoveryFrameId)
+        {
+            return;
+        }
+
+        helperRemoteActiveRecoveryReceiptOwnerEpoch = streamEpoch;
+        helperRemoteActiveRecoveryReceiptOwnerFrameId = recoveryFrameId;
+        helperRemoteRecoveryReceiptRetryGeneration++;
+    }
+
+    private bool TryBuildHelperRemoteRecoveryReceiptCandidate_NoLock(
+        out HelperRemoteRecoveryReceiptPublicationCandidate candidate)
+    {
+        candidate = default;
+
+        var activeSessionId = GetHelperRemoteActiveSessionId_NoLock();
+        if (string.IsNullOrWhiteSpace(activeSessionId))
+        {
+            return false;
+        }
+
+        var streamEpoch = helperRemoteActiveRecoveryReceiptOwnerEpoch;
+        var ownerFrameId = helperRemoteActiveRecoveryReceiptOwnerFrameId;
+        if (streamEpoch <= 0 || ownerFrameId < 0)
+        {
+            return false;
+        }
+
+        var frameLossSnapshot = ScreenShareFrameLossAttributionRegistry.GetSnapshot(activeSessionId);
+        var epochDiagnostics = frameLossSnapshot.EpochDiagnostics.FirstOrDefault(epoch => epoch.StreamEpoch == streamEpoch);
+        if (epochDiagnostics is null)
+        {
+            return false;
+        }
+
+        var visibleRecoveryFrameId = epochDiagnostics.VisibleRecoveryFloorFrameId;
+        if (visibleRecoveryFrameId < ownerFrameId)
+        {
+            return false;
+        }
+
+        var visibleHeadFrameId = Math.Max(
+            visibleRecoveryFrameId,
+            Math.Max(
+                epochDiagnostics.VisibleHeadFrameId,
+                helperRemoteSteadyProgressEpoch == streamEpoch
+                    ? helperRemoteSteadyProgressVisibleHeadFrameId
+                    : -1L));
+        var receiptKind = visibleRecoveryFrameId == ownerFrameId
+            ? ScreenShareRecoveryReceiptCodec.RecoveryKeyframeVisibleReceiptKind
+            : ScreenShareRecoveryReceiptCodec.VisibleProgressAfterRecoveryKeyframeReceiptKind;
+        var message = new ScreenShareRecoveryReceiptV1
+        {
+            SessionId = activeSessionId,
+            StreamEpoch = streamEpoch,
+            OwnerFrameId = ownerFrameId,
+            VisibleRecoveryFrameId = visibleRecoveryFrameId,
+            VisibleHeadFrameId = visibleHeadFrameId,
+            ReceiptKind = receiptKind,
+        };
+
+        candidate = new HelperRemoteRecoveryReceiptPublicationCandidate(
+            streamEpoch,
+            ownerFrameId,
+            visibleRecoveryFrameId,
+            visibleHeadFrameId,
+            receiptKind,
+            message);
+        return true;
+    }
+
+    private void MaybePublishHelperRemoteRecoveryReceipt()
+    {
+        if (disposed ||
+            role != SessionRuntimeRole.Helper ||
+            state != SessionRuntimeState.Connected ||
+            transport is not IScreenShareSignalingTransport screenShareTransport)
+        {
+            return;
+        }
+
+        HelperRemoteRecoveryReceiptPublicationCandidate candidate;
+        long retryGeneration;
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            if (!TryBuildHelperRemoteRecoveryReceiptCandidate_NoLock(out candidate))
+            {
+                return;
+            }
+
+            var sameReceiptKey =
+                helperRemotePublishedRecoveryReceiptEpoch == candidate.StreamEpoch &&
+                helperRemotePublishedRecoveryReceiptOwnerFrameId == candidate.OwnerFrameId &&
+                helperRemotePublishedRecoveryReceiptVisibleRecoveryFrameId == candidate.VisibleRecoveryFrameId &&
+                string.Equals(
+                    helperRemotePublishedRecoveryReceiptKind,
+                    candidate.ReceiptKind,
+                    StringComparison.Ordinal);
+            if (sameReceiptKey)
+            {
+                return;
+            }
+
+            helperRemotePublishedRecoveryReceiptEpoch = candidate.StreamEpoch;
+            helperRemotePublishedRecoveryReceiptOwnerFrameId = candidate.OwnerFrameId;
+            helperRemotePublishedRecoveryReceiptVisibleRecoveryFrameId = candidate.VisibleRecoveryFrameId;
+            helperRemotePublishedRecoveryReceiptVisibleHeadFrameId = candidate.VisibleHeadFrameId;
+            helperRemotePublishedRecoveryReceiptKind = candidate.ReceiptKind;
+            helperRemotePublishedRecoveryReceiptUtc = nowProvider();
+            helperRemotePublishedRecoveryReceiptRetrySent = false;
+            helperRemoteRecoveryReceiptRetryGeneration++;
+            retryGeneration = helperRemoteRecoveryReceiptRetryGeneration;
+        }
+
+        QueueHelperRemoteRecoveryReceiptSend(screenShareTransport, candidate.Message, isRetry: false);
+        ScheduleHelperRemoteRecoveryReceiptRetry(retryGeneration);
+    }
+
+    private void ScheduleHelperRemoteRecoveryReceiptRetry(long retryGeneration)
+    {
+        RunCountedBackgroundTask(
+            async () =>
+            {
+                await Task.Delay(HelperRemoteScreenShareRecoveryReceiptRetryDelay, CancellationToken.None).ConfigureAwait(false);
+                TrySendHelperRemoteRecoveryReceiptRetry(retryGeneration);
+            },
+            countAsTransportTask: false);
+    }
+
+    private void TrySendHelperRemoteRecoveryReceiptRetry(long retryGeneration)
+    {
+        if (disposed ||
+            role != SessionRuntimeRole.Helper ||
+            state != SessionRuntimeState.Connected ||
+            transport is not IScreenShareSignalingTransport screenShareTransport)
+        {
+            return;
+        }
+
+        HelperRemoteRecoveryReceiptPublicationCandidate candidate;
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            if (retryGeneration != helperRemoteRecoveryReceiptRetryGeneration ||
+                helperRemotePublishedRecoveryReceiptRetrySent ||
+                !TryBuildHelperRemoteRecoveryReceiptCandidate_NoLock(out candidate))
+            {
+                return;
+            }
+
+            var sameReceiptKey =
+                helperRemotePublishedRecoveryReceiptEpoch == candidate.StreamEpoch &&
+                helperRemotePublishedRecoveryReceiptOwnerFrameId == candidate.OwnerFrameId &&
+                helperRemotePublishedRecoveryReceiptVisibleRecoveryFrameId == candidate.VisibleRecoveryFrameId &&
+                string.Equals(
+                    helperRemotePublishedRecoveryReceiptKind,
+                    candidate.ReceiptKind,
+                    StringComparison.Ordinal);
+            if (!sameReceiptKey)
+            {
+                return;
+            }
+
+            helperRemotePublishedRecoveryReceiptRetrySent = true;
+            helperRemotePublishedRecoveryReceiptVisibleHeadFrameId = candidate.VisibleHeadFrameId;
+            helperRemotePublishedRecoveryReceiptUtc = nowProvider();
+        }
+
+        QueueHelperRemoteRecoveryReceiptSend(screenShareTransport, candidate.Message, isRetry: true);
+    }
+
+    private void QueueHelperRemoteRecoveryReceiptSend(
+        IScreenShareSignalingTransport screenShareTransport,
+        ScreenShareRecoveryReceiptV1 message,
+        bool isRetry)
+    {
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_recovery_receipt_sent; role=helper_remote; session_id={message.SessionId}; stream_epoch={message.StreamEpoch}; owner_frame_id={message.OwnerFrameId}; visible_recovery_frame_id={message.VisibleRecoveryFrameId}; visible_head_frame_id={message.VisibleHeadFrameId}; receipt_kind={message.ReceiptKind}; retry={(isRetry ? 1 : 0)}");
+
+        RunCountedBackgroundTask(
+            async () =>
+            {
+                try
+                {
+                    await screenShareTransport.SendScreenShareRecoveryReceiptAsync(message, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_recovery_receipt_send_failed; role=helper_remote; reason={ex.GetType().Name}; message={SanitizeDispatchExceptionMessage(ex.Message)}; stream_epoch={message.StreamEpoch}; owner_frame_id={message.OwnerFrameId}; visible_recovery_frame_id={message.VisibleRecoveryFrameId}; retry={(isRetry ? 1 : 0)}");
+                }
+            },
+            countAsTransportTask: false);
+    }
+
+    private bool IsHelperRemoteCurrentEpochWarmupActive_NoLock(DateTimeOffset nowUtc, long currentEpoch)
+    {
+        if (IsHelperRemotePostRecoveryHealthyLatched_NoLock(currentEpoch))
+        {
+            return false;
+        }
+
+        return currentEpoch > 0 &&
+               helperRemoteCurrentPressureEpochStartedUtc != default &&
+               nowUtc - helperRemoteCurrentPressureEpochStartedUtc < HelperRemoteScreenShareEpochWarmupTimeout &&
+               (!helperRemoteCurrentPressureEpochFirstApplySeen ||
+                helperRemoteCurrentPressureEpochApplyCount < HelperRemoteScreenShareMinimumWarmupApplies);
+    }
+
+    private void UpdateHelperRemoteReportedSessionSnapshot_NoLock(HelperRemoteSessionSnapshot snapshot)
+    {
+        if (snapshot.CurrentEpoch > 0 &&
+            helperRemoteLastReportedSessionSnapshot.CurrentEpoch > snapshot.CurrentEpoch)
+        {
+            return;
+        }
+
+        helperRemoteLastReportedSessionSnapshot = snapshot;
+        helperRemoteLastReportedSessionSnapshotUtc = nowProvider();
+    }
+
+    private void ResetHelperRemoteSentVisibleProgressProof_NoLock()
+    {
+        helperRemoteLastSentSteadyProgressEpoch = 0;
+        helperRemoteLastSentSteadyVisibleProgressActive = false;
+        helperRemoteLastSentStableVisibleHeadFrameId = -1;
+        helperRemoteLastSentVisibleHeadFrameId = -1;
+        helperRemoteLastSentFramesAppliedSinceLastGap = 0;
+        helperRemoteLastSentVisibleApplyFrameId = -1;
+        helperRemoteLastSentAppliedHeadFrameId = -1;
+        helperRemoteProofKeepaliveSendCount = 0;
+        helperRemoteProofKeepaliveTimerDrivenSendCount = 0;
+        helperRemoteLastProofKeepaliveHeadFrameId = -1;
+        helperRemoteLastProofKeepaliveSentUtc = default;
+        helperRemoteLastAppliedHeadAdvancedSincePressureEvaluation = false;
+        helperRemoteLastStableVisibleHeadAdvancedSincePressureEvaluation = false;
+        helperRemoteLastHealthyStateEstablishedBy = "none";
+    }
+
+    private static long GetLatestHelperAppliedProofHeadFrameId(
+        long lastVisibleApplyFrameId,
+        long appliedHeadFrameId,
+        long stableVisibleHeadFrameId)
+    {
+        return Math.Max(
+            Math.Max(lastVisibleApplyFrameId, appliedHeadFrameId),
+            stableVisibleHeadFrameId);
+    }
+
+    private static long GetLatestHelperVisibleProofHeadFrameId(
+        long visibleHeadFrameId,
+        long lastVisibleApplyFrameId)
+    {
+        return visibleHeadFrameId >= 0
+            ? visibleHeadFrameId
+            : lastVisibleApplyFrameId;
+    }
+
+    private string? GetHelperRemoteActiveSessionId_NoLock()
+    {
+        return currentSessionGrant?.SessionId.Value ?? sessionSecurityState.SessionId?.Value ?? sessionId;
+    }
+
+    private readonly record struct HelperRemoteAuthoritativeProgressState(
+        HelperRemoteSessionSnapshot SessionSnapshot,
+        bool SessionSnapshotPresent,
+        long LastVisibleApplyFrameId,
+        long VisibleHeadFrameId,
+        long VisibleRecoveryFloorFrameId,
+        long AppliedHeadFrameId,
+        long StableVisibleHeadFrameId,
+        long FramesAppliedSinceLastGap,
+        bool CurrentEpochProgressProven,
+        string CurrentEpochProgressProofSource,
+        long CurrentEpochProvenHeadFrameId,
+        bool SteadyVisibleProgressActive,
+        long SteadyVisibleProgressActivationFrameId);
+
+    private HelperRemoteAuthoritativeProgressState ResolveHelperRemoteAuthoritativeProgressState_NoLock(
+        long currentEpoch,
+        ScreenShareEpochDiagnosticsSnapshot? currentEpochDiagnostics)
+    {
+        var sessionSnapshotPresent =
+            currentEpoch > 0 &&
+            helperRemoteLastReportedSessionSnapshot.CurrentEpoch == currentEpoch;
+        var sessionSnapshot = sessionSnapshotPresent
+            ? helperRemoteLastReportedSessionSnapshot
+            : default;
+        var durableSteadyProgressStatePresent = helperRemoteSteadyProgressEpoch == currentEpoch;
+        var lastVisibleApplyFrameId = Math.Max(
+            Math.Max(
+                currentEpochDiagnostics?.LastAppliedFrameId ?? helperRemoteCurrentPressureEpochLastVisibleApplyFrameId,
+                sessionSnapshotPresent ? sessionSnapshot.AppliedHeadFrameId : -1L),
+            durableSteadyProgressStatePresent ? helperRemoteSteadyProgressVisibleHeadFrameId : -1L);
+        var visibleHeadFrameId = Math.Max(
+            Math.Max(
+                currentEpochDiagnostics?.VisibleHeadFrameId ?? -1L,
+                sessionSnapshotPresent ? sessionSnapshot.VisibleHeadFrameId : -1L),
+            durableSteadyProgressStatePresent ? helperRemoteSteadyProgressVisibleHeadFrameId : -1L);
+        var appliedHeadFrameId = Math.Max(
+            currentEpochDiagnostics?.AppliedHeadFrameId ?? -1L,
+            Math.Max(lastVisibleApplyFrameId, sessionSnapshotPresent ? sessionSnapshot.AppliedHeadFrameId : -1L));
+        var stableVisibleHeadFrameId = Math.Max(
+            Math.Max(
+                currentEpochDiagnostics?.StableVisibleHeadFrameId ?? -1L,
+                sessionSnapshotPresent ? sessionSnapshot.StableVisibleHeadFrameId : -1L),
+            durableSteadyProgressStatePresent ? helperRemoteSteadyProgressStableVisibleHeadFrameId : -1L);
+        var visibleRecoveryFloorFrameId = Math.Max(
+            currentEpochDiagnostics?.VisibleRecoveryFloorFrameId ?? -1L,
+            sessionSnapshotPresent ? sessionSnapshot.VisibleRecoveryFloorFrameId : -1L);
+        var fallbackDerivedPostRecoveryHealthy = ComputeDerivedPostRecoveryHealthyState(
+            visibleRecoveryFloorFrameId,
+            lastVisibleApplyFrameId,
+            appliedHeadFrameId,
+            stableVisibleHeadFrameId,
+            Math.Max(
+                durableSteadyProgressStatePresent ? helperRemoteSteadyProgressFramesAppliedSinceLastGap : 0L,
+                currentEpochDiagnostics?.FramesAppliedSinceLastGap ?? 0L),
+            helperRemoteCurrentPressureEpochApplyCount);
+        var framesAppliedSinceLastGap = Math.Max(
+            fallbackDerivedPostRecoveryHealthy.FramesAppliedSinceLastGap,
+            sessionSnapshotPresent ? sessionSnapshot.FramesAppliedSinceLastGap : 0L);
+        var currentEpochProgressProven = sessionSnapshotPresent
+            ? sessionSnapshot.CurrentEpochProgressProven
+            : fallbackDerivedPostRecoveryHealthy.Active;
+        var currentEpochProgressProofSource = sessionSnapshotPresent && sessionSnapshot.CurrentEpochProgressProven
+            ? sessionSnapshot.CurrentEpochProgressProofSource
+            : fallbackDerivedPostRecoveryHealthy.Source;
+        var currentEpochProvenHeadFrameId = sessionSnapshotPresent && sessionSnapshot.CurrentEpochProgressProven
+            ? sessionSnapshot.ProvenHeadFrameId
+            : fallbackDerivedPostRecoveryHealthy.ProofFrameId;
+        var steadyVisibleProgressActive = sessionSnapshotPresent
+            ? sessionSnapshot.SteadyVisibleProgressActive
+            : fallbackDerivedPostRecoveryHealthy.Active;
+        var steadyVisibleProgressActivationFrameId =
+            durableSteadyProgressStatePresent && helperRemoteSteadyProgressActivationFrameId >= 0
+                ? helperRemoteSteadyProgressActivationFrameId
+                : currentEpochProvenHeadFrameId;
+        return new HelperRemoteAuthoritativeProgressState(
+            sessionSnapshot,
+            sessionSnapshotPresent,
+            lastVisibleApplyFrameId,
+            visibleHeadFrameId,
+            visibleRecoveryFloorFrameId,
+            appliedHeadFrameId,
+            stableVisibleHeadFrameId,
+            framesAppliedSinceLastGap,
+            currentEpochProgressProven,
+            currentEpochProgressProofSource,
+            currentEpochProvenHeadFrameId,
+            steadyVisibleProgressActive,
+            steadyVisibleProgressActivationFrameId);
+    }
+
+    private static long ComputePostRecoveryHealthyFramesAppliedSinceLastGap(
+        long visibleRecoveryFloorFrameId,
+        long appliedHeadFrameId,
+        long stableVisibleHeadFrameId,
+        long currentFramesAppliedSinceLastGap,
+        int currentEpochApplyCount)
+    {
+        var provenFramesAppliedSinceLastGap = Math.Max(0L, currentFramesAppliedSinceLastGap);
+        var effectiveHeadFrameId = Math.Max(appliedHeadFrameId, stableVisibleHeadFrameId);
+        if (visibleRecoveryFloorFrameId >= 0 && effectiveHeadFrameId >= visibleRecoveryFloorFrameId)
+        {
+            provenFramesAppliedSinceLastGap = Math.Max(
+                provenFramesAppliedSinceLastGap,
+                effectiveHeadFrameId - visibleRecoveryFloorFrameId + 1);
+        }
+        else if (stableVisibleHeadFrameId >= 0)
+        {
+            provenFramesAppliedSinceLastGap = Math.Max(
+                provenFramesAppliedSinceLastGap,
+                Math.Max(0, currentEpochApplyCount));
+        }
+
+        return provenFramesAppliedSinceLastGap;
+    }
+
+    private static (bool Active, string Source, long ProofFrameId, long FramesAppliedSinceLastGap)
+        ComputeDerivedPostRecoveryHealthyState(
+            long visibleRecoveryFloorFrameId,
+            long lastVisibleApplyFrameId,
+            long appliedHeadFrameId,
+            long stableVisibleHeadFrameId,
+            long currentFramesAppliedSinceLastGap,
+            int currentEpochApplyCount)
+    {
+        var framesAppliedSinceLastGap = ComputePostRecoveryHealthyFramesAppliedSinceLastGap(
+            visibleRecoveryFloorFrameId,
+            appliedHeadFrameId,
+            stableVisibleHeadFrameId,
+            currentFramesAppliedSinceLastGap,
+            currentEpochApplyCount);
+        var proofFrameId = Math.Max(lastVisibleApplyFrameId, Math.Max(appliedHeadFrameId, stableVisibleHeadFrameId));
+        if (visibleRecoveryFloorFrameId >= 0 && proofFrameId >= visibleRecoveryFloorFrameId + 1)
+        {
+            return (
+                true,
+                "recovery_floor_plus_head",
+                proofFrameId,
+                Math.Max(framesAppliedSinceLastGap, proofFrameId - visibleRecoveryFloorFrameId + 1));
+        }
+
+        if (visibleRecoveryFloorFrameId < 0 &&
+            stableVisibleHeadFrameId >= 0 &&
+            framesAppliedSinceLastGap >= 4)
+        {
+            return (
+                true,
+                "stable_visible_plus_applies",
+                proofFrameId,
+                framesAppliedSinceLastGap);
+        }
+
+        return (false, "none", -1L, framesAppliedSinceLastGap);
+    }
+
+    private void ResetHelperRemotePostRecoveryHealthyLatch_NoLock()
+    {
+        helperRemotePostRecoveryHealthyLastHeadAdvanceUtc = default;
+    }
+
+    private bool IsHelperRemotePostRecoveryHealthyLatched_NoLock(long streamEpoch)
+    {
+        return streamEpoch > 0 &&
+               helperRemoteSteadyProgressEpoch == streamEpoch &&
+               helperRemoteSteadyVisibleProgressActive;
+    }
+
+    private void MarkHelperRemotePostRecoveryHealthyLatched_NoLock(
+        long streamEpoch,
+        long activationFrameId,
+        long stableVisibleHeadFrameId,
+        long framesAppliedSinceLastGap,
+        long normalizedAgeMs,
+        DateTimeOffset nowUtc)
+    {
+        var alreadyLatched = IsHelperRemotePostRecoveryHealthyLatched_NoLock(streamEpoch);
+        var reseedBaselineAfterStallRelatch =
+            !alreadyLatched &&
+            helperRemoteCurrentPressureEpochBaselineReseedAfterStallPending;
+        helperRemoteSteadyProgressEpoch = streamEpoch;
+        helperRemoteSteadyVisibleProgressActive = true;
+        helperRemoteSteadyProgressActivationFrameId = activationFrameId;
+        helperRemoteSteadyProgressStableVisibleHeadFrameId = Math.Max(
+            helperRemoteSteadyProgressStableVisibleHeadFrameId,
+            stableVisibleHeadFrameId);
+        helperRemoteSteadyProgressFramesAppliedSinceLastGap = Math.Max(
+            helperRemoteSteadyProgressFramesAppliedSinceLastGap,
+            Math.Max(1L, framesAppliedSinceLastGap));
+        helperRemoteSteadyVisibleProgressClearedReason = string.Empty;
+        helperRemotePostRecoveryHealthySignalSent = true;
+        if (reseedBaselineAfterStallRelatch)
+        {
+            BeginHelperRemotePressureBaselineReseedAfterStall_NoLock(nowUtc);
+        }
+        else
+        {
+            helperRemoteCurrentPressureEpochBaselineEstablished = true;
+            helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs = Math.Max(0L, normalizedAgeMs);
+            helperRemoteCurrentPressureEpochBaselineSampleCount = Math.Max(1L, helperRemoteCurrentPressureEpochBaselineSampleCount);
+            helperRemoteCurrentPressureEpochBaselineFreezeUntilNextApply = false;
+            helperRemoteCurrentPressureEpochBaselineReseedRemainingVisibleApplies = 0;
+            helperRemoteCurrentPressureEpochBaselineReseedAccumulatedAgeMs = 0;
+            helperRemoteCurrentPressureEpochBaselineReseedStartedUtc = default;
+            helperRemoteCurrentPressureEpochBaselineReseedMinimumFrameId = -1;
+        }
+
+        helperRemoteCurrentPressureEpochWarmupEndedUtc = nowUtc;
+        helperRemoteCurrentPressureEpochContinuityLossTicks = 0;
+        helperRemoteCurrentPressureEpochWarmupTicks = 0;
+        helperRemoteCurrentPressureEpochBeforeFirstVisibleApplyTicks = 0;
+        helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameTicks = 0;
+        helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameSuppressedDueToSuccessCount = 0;
+        helperRemotePostRecoveryHealthyLastHeadAdvanceUtc = nowUtc;
+        if (!alreadyLatched)
+        {
+            helperRemotePostRecoveryHealthyLatchCount++;
+        }
+    }
+
+    private bool ShouldClearHelperRemotePostRecoveryHealthyLatchForStall_NoLock(DateTimeOffset nowUtc, long streamEpoch)
+    {
+        if (!IsHelperRemotePostRecoveryHealthyLatched_NoLock(streamEpoch) ||
+            helperRemoteContinuityRecoveryActive && helperRemoteContinuityRecoveryEpoch == streamEpoch)
+        {
+            return false;
+        }
+
+        var lastHeadAdvanceUtc = helperRemotePostRecoveryHealthyLastHeadAdvanceUtc;
+        if (helperRemoteLastAppliedFrameUtc == default || lastHeadAdvanceUtc == default)
+        {
+            return false;
+        }
+
+        var noApplyMs = nowUtc >= helperRemoteLastAppliedFrameUtc
+            ? Math.Max(0L, (long)(nowUtc - helperRemoteLastAppliedFrameUtc).TotalMilliseconds)
+            : 0L;
+        var noHeadAdvanceMs = nowUtc >= lastHeadAdvanceUtc
+            ? Math.Max(0L, (long)(nowUtc - lastHeadAdvanceUtc).TotalMilliseconds)
+            : 0L;
+        return noApplyMs >= (long)HelperRemoteScreenSharePostRecoveryHealthyLatchStallTimeout.TotalMilliseconds &&
+               noHeadAdvanceMs >= (long)HelperRemoteScreenSharePostRecoveryHealthyLatchStallTimeout.TotalMilliseconds;
+    }
+
+    private void ClearHelperRemoteSteadyVisibleProgressState_NoLock(string reason)
+    {
+        var hadSteadyProgressState =
+            helperRemoteSteadyProgressEpoch > 0 &&
+            (helperRemoteSteadyVisibleProgressActive ||
+             helperRemoteSteadyProgressActivationFrameId >= 0 ||
+             helperRemoteSteadyProgressVisibleHeadFrameId >= 0 ||
+             helperRemoteSteadyProgressStableVisibleHeadFrameId >= 0 ||
+             helperRemoteSteadyProgressFramesAppliedSinceLastGap > 0);
+        if (hadSteadyProgressState)
+        {
+            helperRemoteSteadyVisibleProgressClearedCount++;
+            helperRemoteSteadyVisibleProgressClearedReason = string.IsNullOrWhiteSpace(reason)
+                ? "unknown"
+                : reason.Trim();
+            helperRemotePostRecoveryHealthyLatchClearCount++;
+            helperRemotePostRecoveryHealthyLatchClearReason = helperRemoteSteadyVisibleProgressClearedReason;
+        }
+
+        helperRemoteSteadyProgressEpoch = 0;
+        helperRemoteSteadyVisibleProgressActive = false;
+        helperRemoteSteadyProgressActivationFrameId = -1;
+        helperRemoteSteadyProgressVisibleHeadFrameId = -1;
+        helperRemoteSteadyProgressStableVisibleHeadFrameId = -1;
+        helperRemoteSteadyProgressFramesAppliedSinceLastGap = 0;
+        ResetHelperRemotePostRecoveryHealthyLatch_NoLock();
+        ResetHelperRemoteSentVisibleProgressProof_NoLock();
+    }
+
+    private void UpdateHelperRemoteSteadyVisibleProgressStateForApply_NoLock(
+        long streamEpoch,
+        long frameId,
+        long visibleHeadFrameId,
+        long stableVisibleHeadFrameId,
+        long framesAppliedSinceLastGap,
+        long normalizedAgeMs,
+        DateTimeOffset nowUtc)
+    {
+        if (streamEpoch <= 0 || helperRemoteCurrentPressureEpoch != streamEpoch)
+        {
+            return;
+        }
+
+        if (helperRemoteSteadyProgressEpoch != streamEpoch)
+        {
+            helperRemoteSteadyProgressEpoch = streamEpoch;
+            helperRemoteSteadyVisibleProgressActive = false;
+            helperRemoteSteadyProgressActivationFrameId = -1;
+            helperRemoteSteadyProgressVisibleHeadFrameId = -1;
+            helperRemoteSteadyProgressStableVisibleHeadFrameId = -1;
+            helperRemoteSteadyProgressFramesAppliedSinceLastGap = 0;
+        }
+
+        var activeSessionId = GetHelperRemoteActiveSessionId_NoLock();
+        var visibleRecoveryFloorFrameId =
+            !string.IsNullOrWhiteSpace(activeSessionId)
+                ? ScreenShareFrameLossAttributionRegistry.GetVisibleRecoveryFloorFrameId(activeSessionId, streamEpoch)
+                : -1L;
+        var previousVisibleHeadFrameId = helperRemoteSteadyProgressVisibleHeadFrameId;
+        var previousStableVisibleHeadFrameId = helperRemoteSteadyProgressStableVisibleHeadFrameId;
+
+        if (visibleHeadFrameId >= 0)
+        {
+            helperRemoteSteadyProgressVisibleHeadFrameId = Math.Max(
+                helperRemoteSteadyProgressVisibleHeadFrameId,
+                visibleHeadFrameId);
+        }
+
+        if (stableVisibleHeadFrameId >= 0)
+        {
+            helperRemoteSteadyProgressStableVisibleHeadFrameId = Math.Max(
+                helperRemoteSteadyProgressStableVisibleHeadFrameId,
+                stableVisibleHeadFrameId);
+        }
+
+        if (frameId > previousVisibleHeadFrameId ||
+            helperRemoteSteadyProgressVisibleHeadFrameId > previousVisibleHeadFrameId ||
+            helperRemoteSteadyProgressStableVisibleHeadFrameId > previousStableVisibleHeadFrameId)
+        {
+            helperRemotePostRecoveryHealthyLastHeadAdvanceUtc = nowUtc;
+        }
+
+        var appliedHeadFrameId = Math.Max(frameId, helperRemoteSteadyProgressVisibleHeadFrameId);
+        helperRemoteSteadyProgressFramesAppliedSinceLastGap = Math.Max(
+            helperRemoteSteadyProgressFramesAppliedSinceLastGap,
+            ComputeDerivedPostRecoveryHealthyState(
+                visibleRecoveryFloorFrameId,
+                helperRemoteSteadyProgressVisibleHeadFrameId,
+                appliedHeadFrameId,
+                helperRemoteSteadyProgressStableVisibleHeadFrameId,
+                Math.Max(0L, framesAppliedSinceLastGap),
+                helperRemoteCurrentPressureEpochApplyCount).FramesAppliedSinceLastGap);
+
+        if (helperRemoteSteadyVisibleProgressActive)
+        {
+            return;
+        }
+
+        var derivedPostRecoveryHealthy = ComputeDerivedPostRecoveryHealthyState(
+            visibleRecoveryFloorFrameId,
+            helperRemoteSteadyProgressVisibleHeadFrameId,
+            appliedHeadFrameId,
+            helperRemoteSteadyProgressStableVisibleHeadFrameId,
+            helperRemoteSteadyProgressFramesAppliedSinceLastGap,
+            helperRemoteCurrentPressureEpochApplyCount);
+        if (!derivedPostRecoveryHealthy.Active)
+        {
+            return;
+        }
+
+        MarkHelperRemotePostRecoveryHealthyLatched_NoLock(
+            streamEpoch,
+            derivedPostRecoveryHealthy.ProofFrameId >= 0
+                ? derivedPostRecoveryHealthy.ProofFrameId
+                : (frameId >= 0
+                    ? frameId
+                    : Math.Max(helperRemoteSteadyProgressVisibleHeadFrameId, helperRemoteSteadyProgressStableVisibleHeadFrameId)),
+            helperRemoteSteadyProgressStableVisibleHeadFrameId,
+            derivedPostRecoveryHealthy.FramesAppliedSinceLastGap,
+            normalizedAgeMs,
+            nowUtc);
+    }
+
+    private void ResetHelperRemoteProgressAwarePressureState_NoLock()
+    {
+        helperRemoteCurrentPressureEpochBaselineEstablished = false;
+        helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs = 0d;
+        helperRemoteCurrentPressureEpochBaselineSampleCount = 0;
+        helperRemoteCurrentPressureEpochBaselineFreezeUntilNextApply = false;
+        helperRemoteCurrentPressureEpochBaselineReseedAfterStallPending = false;
+        helperRemoteCurrentPressureEpochBaselineReseedRemainingVisibleApplies = 0;
+        helperRemoteCurrentPressureEpochBaselineReseedAccumulatedAgeMs = 0;
+        helperRemoteCurrentPressureEpochBaselineReseedStartedUtc = default;
+        helperRemoteCurrentPressureEpochBaselineReseedMinimumFrameId = -1;
+        helperRemoteCurrentPressureEpochLastEvaluatedAppliedHeadFrameId = -1;
+        helperRemoteCurrentPressureEpochLastEvaluatedStableVisibleHeadFrameId = -1;
+        helperRemoteCurrentPressureEpochAgePressureConsecutiveCount = 0;
+        helperRemoteCurrentPressureEpochCadencePressureConsecutiveCount = 0;
+        helperRemoteCurrentPressureEpochHighFrameAgeSuppressedDueToHeadAdvanceCount = 0;
+        helperRemoteCurrentPressureEpochActionableHighFrameAgeCount = 0;
+        helperRemoteCurrentPressureEpochCadenceStallStartedUtc = default;
+        helperRemoteCurrentPressureEpochCadenceStallTriggered = false;
+        helperRemoteCurrentPressureEpochNonHealthyClearSuppressedDueToProgressCount = 0;
+    }
+
+    private void FreezeHelperRemotePressureBaselineUntilNextApply_NoLock(bool dueToStall)
+    {
+        helperRemoteCurrentPressureEpochBaselineFreezeUntilNextApply = true;
+        helperRemoteCurrentPressureEpochBaselineReseedStartedUtc = default;
+        helperRemoteCurrentPressureEpochBaselineReseedMinimumFrameId = -1;
+        if (dueToStall)
+        {
+            helperRemoteCurrentPressureEpochBaselineFrozenDueToStallCount++;
+            helperRemoteCurrentPressureEpochBaselineReseedAfterStallPending = true;
+        }
+
+        helperRemoteCurrentPressureEpochAgePressureConsecutiveCount = 0;
+        helperRemoteCurrentPressureEpochCadencePressureConsecutiveCount = 0;
+    }
+
+    private void BeginHelperRemotePressureBaselineReseed_NoLock(DateTimeOffset nowUtc, bool countAsAfterRecovery)
+    {
+        helperRemoteCurrentPressureEpochBaselineEstablished = false;
+        helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs = 0d;
+        helperRemoteCurrentPressureEpochBaselineSampleCount = 0;
+        helperRemoteCurrentPressureEpochBaselineFreezeUntilNextApply = false;
+        helperRemoteCurrentPressureEpochBaselineReseedAfterStallPending = false;
+        helperRemoteCurrentPressureEpochBaselineReseedRemainingVisibleApplies = HelperRemoteScreenShareBaselineReseedVisibleApplies;
+        helperRemoteCurrentPressureEpochBaselineReseedAccumulatedAgeMs = 0;
+        helperRemoteCurrentPressureEpochBaselineReseedStartedUtc = nowUtc;
+        helperRemoteCurrentPressureEpochBaselineReseedMinimumFrameId = helperRemoteCurrentPressureEpochLastVisibleApplyFrameId;
+        if (countAsAfterRecovery)
+        {
+            helperRemoteCurrentPressureEpochBaselineReseedAfterRecoveryCount++;
+        }
+
+        helperRemoteCurrentPressureEpochAgePressureConsecutiveCount = 0;
+        helperRemoteCurrentPressureEpochCadencePressureConsecutiveCount = 0;
+        helperRemoteCurrentPressureEpochCadenceStallStartedUtc = default;
+        helperRemoteCurrentPressureEpochCadenceStallTriggered = false;
+    }
+
+    private void BeginHelperRemotePressureBaselineReseedAfterRecovery_NoLock(DateTimeOffset nowUtc)
+    {
+        BeginHelperRemotePressureBaselineReseed_NoLock(nowUtc, countAsAfterRecovery: true);
+    }
+
+    private void BeginHelperRemotePressureBaselineReseedAfterStall_NoLock(DateTimeOffset nowUtc)
+    {
+        BeginHelperRemotePressureBaselineReseed_NoLock(nowUtc, countAsAfterRecovery: false);
+    }
+
+    private void UpdateHelperRemotePressureBaselineForVisibleApply_NoLock(long streamEpoch, long normalizedAgeMs, long frameId)
+    {
+        if (streamEpoch <= 0 || helperRemoteCurrentPressureEpoch != streamEpoch)
+        {
+            return;
+        }
+
+        if (helperRemoteCurrentPressureEpochBaselineFreezeUntilNextApply)
+        {
+            helperRemoteCurrentPressureEpochBaselineFreezeUntilNextApply = false;
+            helperRemoteCurrentPressureEpochAgePressureConsecutiveCount = 0;
+            helperRemoteCurrentPressureEpochCadencePressureConsecutiveCount = 0;
+            return;
+        }
+
+        if (helperRemoteCurrentPressureEpochBaselineReseedRemainingVisibleApplies > 0)
+        {
+            helperRemoteCurrentPressureEpochAgePressureConsecutiveCount = 0;
+            helperRemoteCurrentPressureEpochCadencePressureConsecutiveCount = 0;
+            var reseedExpired =
+                helperRemoteCurrentPressureEpochBaselineReseedStartedUtc != default &&
+                nowProvider() - helperRemoteCurrentPressureEpochBaselineReseedStartedUtc > HelperRemoteScreenShareBaselineReseedTimeout;
+            var eligibleReseedApply =
+                !reseedExpired &&
+                frameId >= 0 &&
+                frameId > helperRemoteCurrentPressureEpochBaselineReseedMinimumFrameId &&
+                normalizedAgeMs <= HelperRemoteScreenShareBaselineReseedEligibleAgeThresholdMs &&
+                helperRemoteLastAppliedFrameUtc != default &&
+                nowProvider() - helperRemoteLastAppliedFrameUtc <= HelperRemoteScreenSharePostRecoveryVisibleProgressWindow;
+            if (!eligibleReseedApply)
+            {
+                return;
+            }
+
+            helperRemoteCurrentPressureEpochBaselineReseedAccumulatedAgeMs += normalizedAgeMs;
+            helperRemoteCurrentPressureEpochBaselineReseedMinimumFrameId = frameId;
+            helperRemoteCurrentPressureEpochBaselineReseedRemainingVisibleApplies--;
+            if (helperRemoteCurrentPressureEpochBaselineReseedRemainingVisibleApplies == 0)
+            {
+                helperRemoteCurrentPressureEpochBaselineEstablished = true;
+                helperRemoteCurrentPressureEpochBaselineSampleCount = HelperRemoteScreenShareBaselineReseedVisibleApplies;
+                helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs =
+                    helperRemoteCurrentPressureEpochBaselineReseedAccumulatedAgeMs / (double)HelperRemoteScreenShareBaselineReseedVisibleApplies;
+                helperRemoteCurrentPressureEpochBaselineReseedAccumulatedAgeMs = 0;
+                helperRemoteCurrentPressureEpochBaselineReseedStartedUtc = default;
+                helperRemoteCurrentPressureEpochBaselineReseedMinimumFrameId = -1;
+            }
+
+            return;
+        }
+
+        var shouldEstablishBaseline =
+            !helperRemoteContinuityRecoveryActive &&
+            helperRemoteCurrentPressureEpochApplyCount >= HelperRemoteScreenShareBaselineEstablishVisibleApplies;
+        if (!shouldEstablishBaseline)
+        {
+            return;
+        }
+
+        if (!helperRemoteCurrentPressureEpochBaselineEstablished)
+        {
+            helperRemoteCurrentPressureEpochBaselineEstablished = true;
+            helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs = normalizedAgeMs;
+            helperRemoteCurrentPressureEpochBaselineSampleCount = 1;
+            helperRemoteCurrentPressureEpochAgePressureConsecutiveCount = 0;
+            helperRemoteCurrentPressureEpochCadencePressureConsecutiveCount = 0;
+            return;
+        }
+
+        helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs =
+            (helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs * (1d - HelperRemoteScreenShareBaselineEwmaAlpha)) +
+            (normalizedAgeMs * HelperRemoteScreenShareBaselineEwmaAlpha);
+        helperRemoteCurrentPressureEpochBaselineSampleCount++;
+    }
+
+    internal void ReportHelperRemoteScreenShareStaleFrameDropped(
+        long renderedAgeMs,
+        long streamEpoch,
+        bool referenceContinuityPreserved = false)
+    {
+        screenShareControlHost.ReportHelperRemoteScreenShareStaleFrameDropped(
+            renderedAgeMs,
+            streamEpoch,
+            referenceContinuityPreserved);
+    }
+
+    private void ReportHelperRemoteScreenShareStaleFrameDroppedCore(
+        long renderedAgeMs,
+        long streamEpoch,
+        bool referenceContinuityPreserved = false)
+    {
+        if (disposed || role != SessionRuntimeRole.Helper)
+        {
+            return;
+        }
+
+        var nowUtc = nowProvider();
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            EnsureHelperRemoteScreenSharePressureEpoch_NoLock(streamEpoch, nowUtc);
+            helperRemoteViewerStaleDropCount++;
+            helperRemoteCurrentPressureEpochStaleDropCount++;
+            if (referenceContinuityPreserved)
+            {
+                helperRemoteViewerSoftStaleDropCount++;
+                helperRemoteCurrentPressureEpochSoftStaleDropCount++;
+            }
+        }
+
+        MaybeSendScreenSharePressureState();
+    }
+
+    private HelperRemoteScreenSharePressureSnapshot GetHelperRemoteScreenSharePressureSnapshot()
+    {
+        var nowUtc = nowProvider();
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            if (ShouldClearHelperRemotePostRecoveryHealthyLatchForStall_NoLock(nowUtc, helperRemoteCurrentPressureEpoch))
+            {
+                ClearHelperRemoteSteadyVisibleProgressState_NoLock("post_recovery_stall");
+            }
+
+            var recentHighAppliedFrameCount = 0;
+            for (var i = 0; i < helperRemoteRecentAppliedFrameCount; i++)
+            {
+                if (helperRemoteRecentAppliedFrameAgesMs[i] >= 450)
+                {
+                    recentHighAppliedFrameCount++;
+                }
+            }
+
+            var currentEpoch = helperRemoteCurrentPressureEpoch;
+            var currentEpochWarmupActive = IsHelperRemoteCurrentEpochWarmupActive_NoLock(nowUtc, currentEpoch);
+            if (currentEpochWarmupActive)
+            {
+                if (helperRemoteCurrentPressureEpochWarmupStartedUtc == default)
+                {
+                    helperRemoteCurrentPressureEpochWarmupStartedUtc = nowUtc;
+                }
+
+                helperRemoteCurrentPressureEpochWarmupEndedUtc = default;
+            }
+            else if (helperRemoteCurrentPressureEpochWarmupStartedUtc != default &&
+                     helperRemoteCurrentPressureEpochWarmupEndedUtc == default)
+            {
+                helperRemoteCurrentPressureEpochWarmupEndedUtc = nowUtc;
+            }
+
+            var activeSessionId = currentSessionGrant?.SessionId.Value ?? sessionSecurityState.SessionId?.Value ?? sessionId;
+            var frameLossSnapshot = string.IsNullOrWhiteSpace(activeSessionId)
+                ? ScreenShareFrameLossSessionSnapshot.Empty
+                : ScreenShareFrameLossAttributionRegistry.GetSnapshot(activeSessionId);
+            ScreenShareEpochDiagnosticsSnapshot? currentEpochDiagnostics = null;
+            if (currentEpoch > 0)
+            {
+                currentEpochDiagnostics = frameLossSnapshot.EpochDiagnostics.FirstOrDefault(epoch => epoch.StreamEpoch == currentEpoch);
+            }
+
+            var authoritativeProgressState = ResolveHelperRemoteAuthoritativeProgressState_NoLock(
+                currentEpoch,
+                currentEpochDiagnostics);
+            var lastVisibleApplyFrameId = authoritativeProgressState.LastVisibleApplyFrameId;
+            var visibleHeadFrameId = authoritativeProgressState.VisibleHeadFrameId;
+            var appliedHeadFrameId = authoritativeProgressState.AppliedHeadFrameId;
+            var stableVisibleHeadFrameId = authoritativeProgressState.StableVisibleHeadFrameId;
+            var visibleRecoveryFloorFrameId = authoritativeProgressState.VisibleRecoveryFloorFrameId;
+            var framesAppliedSinceLastGap = authoritativeProgressState.FramesAppliedSinceLastGap;
+            var currentEpochGapCount = currentEpochDiagnostics?.GapCount ?? 0;
+            var currentEpochRecoveryKeyframeApplyCount = currentEpochDiagnostics?.RecoveryKeyframeApplyCount ?? 0;
+            currentEpochRecoveryKeyframeApplyCount = Math.Max(
+                currentEpochRecoveryKeyframeApplyCount,
+                helperRemoteCurrentPressureEpochRecoveryKeyframeApplyCountLocal);
+            var currentEpochResyncCount = currentEpochDiagnostics?.ResyncCount ?? 0;
+            var timeSinceLastVisibleApplyMs =
+                helperRemoteLastAppliedFrameUtc != default && nowUtc >= helperRemoteLastAppliedFrameUtc
+                    ? Math.Max(0L, (long)(nowUtc - helperRemoteLastAppliedFrameUtc).TotalMilliseconds)
+                    : -1L;
+            var effectiveCurrentCaptureToRenderMs =
+                helperRemoteLastAppliedFrameAgeMs >= 0
+                    ? Math.Max(0L, helperRemoteLastAppliedFrameAgeMs + Math.Max(0L, timeSinceLastVisibleApplyMs))
+                    : -1L;
+            var steadyVisibleProgressActive = authoritativeProgressState.SteadyVisibleProgressActive;
+            currentEpochWarmupActive = currentEpochWarmupActive && !steadyVisibleProgressActive;
+
+            var warmupEndUtc = helperRemoteCurrentPressureEpochWarmupEndedUtc != default
+                ? helperRemoteCurrentPressureEpochWarmupEndedUtc
+                : nowUtc;
+            var timeSpentInHelperWarmupMs =
+                helperRemoteCurrentPressureEpochWarmupStartedUtc != default && warmupEndUtc >= helperRemoteCurrentPressureEpochWarmupStartedUtc
+                    ? Math.Max(0L, (long)(warmupEndUtc - helperRemoteCurrentPressureEpochWarmupStartedUtc).TotalMilliseconds)
+                    : 0L;
+            var baselineEstablished = helperRemoteCurrentPressureEpochBaselineEstablished && helperRemoteCurrentPressureEpochBaselineSampleCount > 0;
+            var baselineReseedInProgress = helperRemoteCurrentPressureEpochBaselineReseedRemainingVisibleApplies > 0;
+            var baselineCaptureToRenderMs = baselineEstablished
+                ? Math.Max(0L, (long)Math.Round(helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs, MidpointRounding.AwayFromZero))
+                : -1L;
+            var ageExcessMs =
+                baselineEstablished && effectiveCurrentCaptureToRenderMs >= 0
+                    ? Math.Max(0L, effectiveCurrentCaptureToRenderMs - baselineCaptureToRenderMs)
+                    : -1L;
+            var postRecoveryAgeGraceActive =
+                helperRemotePostRecoveryAgeGraceEpoch == currentEpoch &&
+                helperRemotePostRecoveryAgeGraceUntilUtc != default &&
+                nowUtc <= helperRemotePostRecoveryAgeGraceUntilUtc;
+            var currentEpochRecoveryActive =
+                (helperRemoteContinuityRecoveryActive && helperRemoteContinuityRecoveryEpoch == currentEpoch) ||
+                (authoritativeProgressState.SessionSnapshotPresent && authoritativeProgressState.SessionSnapshot.RecoveryActive);
+
+            return new HelperRemoteScreenSharePressureSnapshot(
+                HasAppliedFrame: helperRemoteRecentAppliedFrameCount > 0,
+                LastAppliedFrameAgeMs: helperRemoteLastAppliedFrameAgeMs,
+                RecentAppliedHighFrameCount: recentHighAppliedFrameCount,
+                ConsecutiveVeryHighAppliedFrames: helperRemoteConsecutiveVeryHighAppliedFrames,
+                LastApplyCadenceMs: helperRemoteLastApplyCadenceMs,
+                AverageApplyCadenceMs: helperRemoteApplyCadenceObserved > 0
+                    ? (double)helperRemoteTotalApplyCadenceMs / helperRemoteApplyCadenceObserved
+                    : 0d,
+                ViewerStaleDropCount: helperRemoteViewerStaleDropCount,
+                ViewerSoftStaleDropCount: helperRemoteViewerSoftStaleDropCount,
+                CurrentEpoch: currentEpoch,
+                CurrentEpochFirstApplySeen: helperRemoteCurrentPressureEpochFirstApplySeen,
+                CurrentEpochWarmupActive: currentEpochWarmupActive,
+                CurrentEpochApplyCount: helperRemoteCurrentPressureEpochApplyCount,
+                CurrentEpochNeedMoreInputCount: helperRemoteCurrentPressureEpochNeedMoreInputCount,
+                CurrentEpochStaleDropCount: helperRemoteCurrentPressureEpochStaleDropCount,
+                CurrentEpochSoftStaleDropCount: helperRemoteCurrentPressureEpochSoftStaleDropCount,
+                LastVisibleApplyFrameId: lastVisibleApplyFrameId,
+                VisibleHeadFrameId: visibleHeadFrameId,
+                VisibleRecoveryFloorFrameId: visibleRecoveryFloorFrameId,
+                AppliedHeadFrameId: appliedHeadFrameId,
+                FramesAppliedSinceLastGap: framesAppliedSinceLastGap,
+                StableVisibleHeadFrameId: stableVisibleHeadFrameId,
+                CurrentEpochGapCount: currentEpochGapCount,
+                CurrentEpochRecoveryKeyframeApplyCount: currentEpochRecoveryKeyframeApplyCount,
+                CurrentEpochResyncCount: currentEpochResyncCount,
+                CurrentEpochRecoveryActive: currentEpochRecoveryActive,
+                CurrentEpochRecoveryStartedUtc: helperRemoteContinuityRecoveryStartedUtc,
+                CurrentEpochRecoveryTimeoutSent: helperRemoteContinuityRecoveryTimeoutSent,
+                CurrentEpochPostRecoveryStabilizationActive:
+                    authoritativeProgressState.SessionSnapshotPresent &&
+                    authoritativeProgressState.SessionSnapshot.PostRecoveryStabilizationActive,
+                CurrentEpochPostRecoveryHealthySignalSent: helperRemotePostRecoveryHealthySignalSent,
+                HelperSessionPhase:
+                    authoritativeProgressState.SessionSnapshotPresent
+                        ? authoritativeProgressState.SessionSnapshot.Phase
+                        : (steadyVisibleProgressActive ? HelperRemoteSessionPhase.VisibleStable : HelperRemoteSessionPhase.NoVisibleBaseline),
+                HelperRecoveryMechanism:
+                    authoritativeProgressState.SessionSnapshotPresent
+                        ? authoritativeProgressState.SessionSnapshot.RecoveryMechanism
+                        : HelperRemoteRecoveryMechanism.None,
+                HelperBaselineEstablished:
+                    authoritativeProgressState.SessionSnapshotPresent
+                        ? authoritativeProgressState.SessionSnapshot.BaselineEstablished
+                        : visibleHeadFrameId >= 0 || appliedHeadFrameId >= 0 || stableVisibleHeadFrameId >= 0,
+                CurrentEpochProgressProven: authoritativeProgressState.CurrentEpochProgressProven,
+                CurrentEpochProgressProofSource: authoritativeProgressState.CurrentEpochProgressProofSource,
+                CurrentEpochProvenHeadFrameId: authoritativeProgressState.CurrentEpochProvenHeadFrameId,
+                TimeSinceLastVisibleApplyMs: timeSinceLastVisibleApplyMs,
+                BaselineEstablished: baselineEstablished,
+                BaselineCaptureToRenderMs: baselineCaptureToRenderMs,
+                AgeExcessMs: ageExcessMs,
+                ProgressStallMs: timeSinceLastVisibleApplyMs,
+                BaselineReseedInProgress: baselineReseedInProgress,
+                AgePressureConsecutiveCount: helperRemoteCurrentPressureEpochAgePressureConsecutiveCount,
+                CadencePressureConsecutiveCount: helperRemoteCurrentPressureEpochCadencePressureConsecutiveCount,
+                CatchUpSuppressedDueToProgressCount: helperRemoteCurrentPressureEpochCatchUpSuppressedDueToProgressCount,
+                BaselineFrozenDueToStallCount: helperRemoteCurrentPressureEpochBaselineFrozenDueToStallCount,
+                BaselineReseedAfterRecoveryCount: helperRemoteCurrentPressureEpochBaselineReseedAfterRecoveryCount,
+                CadenceStallWindowCount: helperRemoteCurrentPressureEpochCadenceStallWindowCount,
+                CadenceStallTriggerCount: helperRemoteCurrentPressureEpochCadenceStallTriggerCount,
+                DerivedPostRecoveryHealthyActive: authoritativeProgressState.CurrentEpochProgressProven,
+                DerivedPostRecoveryHealthySource: authoritativeProgressState.CurrentEpochProgressProofSource,
+                DerivedPostRecoveryProofFrameId: authoritativeProgressState.CurrentEpochProvenHeadFrameId,
+                SteadyVisibleProgressActive: steadyVisibleProgressActive,
+                SteadyVisibleProgressActivationFrameId: authoritativeProgressState.SteadyVisibleProgressActivationFrameId,
+                LastSentVisibleHeadFrameId:
+                    helperRemoteLastSentSteadyProgressEpoch == currentEpoch
+                        ? helperRemoteLastSentVisibleHeadFrameId
+                        : -1L,
+                LastSentStableVisibleHeadFrameId:
+                    helperRemoteLastSentSteadyProgressEpoch == currentEpoch
+                        ? helperRemoteLastSentStableVisibleHeadFrameId
+                        : -1L,
+                PressureSendBypassedForVisibleProgressCount: helperRemotePressureSendBypassedForVisibleProgressCount,
+                ProofKeepaliveSendCount: helperRemoteProofKeepaliveSendCount,
+                ProofKeepaliveTimerDrivenSendCount: helperRemoteProofKeepaliveTimerDrivenSendCount,
+                ProofKeepaliveLastHeadFrameId: helperRemoteLastProofKeepaliveHeadFrameId,
+                ProofKeepaliveLastSendAgeMs:
+                    helperRemoteLastProofKeepaliveSentUtc == default
+                        ? -1
+                        : Math.Max(0L, (long)(nowProvider() - helperRemoteLastProofKeepaliveSentUtc).TotalMilliseconds),
+                SteadyVisibleProgressClearedCount: helperRemoteSteadyVisibleProgressClearedCount,
+                SteadyVisibleProgressClearedReason: helperRemoteSteadyVisibleProgressClearedReason,
+                PostRecoveryHealthyLatchCount: helperRemotePostRecoveryHealthyLatchCount,
+                PostRecoveryHealthyLatchClearCount: helperRemotePostRecoveryHealthyLatchClearCount,
+                PostRecoveryHealthyLatchClearReason: helperRemotePostRecoveryHealthyLatchClearReason,
+                PostRecoveryAgeGraceActive: postRecoveryAgeGraceActive,
+                PostRecoveryAgeGraceSuppressedCount: helperRemoteCurrentPressureEpochPostRecoveryAgeGraceSuppressedCount,
+                BridgeHealthAdvisoryCount: helperRemoteCurrentPressureEpochBridgeHealthAdvisoryCount,
+                BridgeHealthActionableCount: helperRemoteCurrentPressureEpochBridgeHealthActionableCount,
+                BridgeHealthQuarantineSuppressedCount: helperRemoteCurrentPressureEpochBridgeHealthQuarantineSuppressedCount,
+                BridgeHealthActionableWithoutQueueOrDropCount: helperRemoteCurrentPressureEpochBridgeHealthActionableWithoutQueueOrDropCount,
+                TimeSpentInHelperWarmupMs: timeSpentInHelperWarmupMs,
+                VisibleAppliesDuringSettleCount: 0,
+                PostRecoverySettleWindowCount: 0,
+                PostRecoverySettleWindowSuccessCount: 0,
+                PostRecoverySettleWindowTimeoutCount: 0,
+                VisibleAppliesBeforePressureReenabled: -1,
+                AppliedHeadAdvancedSinceLastEvaluation: helperRemoteLastAppliedHeadAdvancedSincePressureEvaluation,
+                StableVisibleHeadAdvancedSinceLastEvaluation: helperRemoteLastStableVisibleHeadAdvancedSincePressureEvaluation,
+                HelperHealthyStateEstablishedBy: helperRemoteLastHealthyStateEstablishedBy,
+                NonHealthyClearSuppressedDueToProgressCount: helperRemoteCurrentPressureEpochNonHealthyClearSuppressedDueToProgressCount);
+        }
+    }
+
+    private void EnsureHelperRemoteScreenSharePressureEpoch_NoLock(long streamEpoch, DateTimeOffset nowUtc)
+    {
+        if (streamEpoch <= 0 || helperRemoteCurrentPressureEpoch == streamEpoch)
+        {
+            return;
+        }
+
+        BeginHelperRemoteScreenSharePressureEpoch_NoLock(streamEpoch, nowUtc);
+    }
+
+    private void BeginHelperRemoteScreenSharePressureEpoch_NoLock(long streamEpoch, DateTimeOffset nowUtc)
+    {
+        if (helperRemoteCurrentPressureEpoch > 0)
+        {
+            LogHelperRemoteScreenSharePressureSummary_NoLock("epoch_advanced");
+        }
+
+        if (helperRemoteActiveRecoveryReceiptOwnerEpoch != streamEpoch)
+        {
+            ClearHelperRemoteActiveRecoveryReceiptOwner_NoLock();
+        }
+
+        ResetHelperRemotePublishedRecoveryReceiptState_NoLock();
+        ClearHelperRemoteSteadyVisibleProgressState_NoLock("epoch_change");
+
+        Array.Clear(helperRemoteRecentAppliedFrameAgesMs, 0, helperRemoteRecentAppliedFrameAgesMs.Length);
+        helperRemoteRecentAppliedFrameCount = 0;
+        helperRemoteRecentAppliedFrameIndex = 0;
+        helperRemoteLastAppliedFrameAgeMs = -1;
+        helperRemoteLastAppliedFrameUtc = default;
+        helperRemoteLastApplyCadenceMs = -1;
+        helperRemoteApplyCadenceObserved = 0;
+        helperRemoteTotalApplyCadenceMs = 0;
+        helperRemoteViewerStaleDropCount = 0;
+        helperRemoteViewerSoftStaleDropCount = 0;
+        helperRemoteConsecutiveVeryHighAppliedFrames = 0;
+        helperRemoteConsecutiveStaleDropWindows = 0;
+        helperRemoteCurrentPressureEpoch = streamEpoch;
+        helperRemoteCurrentPressureEpochStartedUtc = nowUtc;
+            helperRemoteCurrentPressureEpochFirstAcceptedFrameUtc = nowUtc;
+            helperRemoteCurrentPressureEpochFirstApplySeen = false;
+            helperRemoteCurrentPressureEpochFirstVisibleApplyUtc = default;
+            helperRemoteCurrentPressureEpochApplyCount = 0;
+        helperRemoteCurrentPressureEpochRecoveryKeyframeApplyCountLocal = 0;
+        helperRemoteCurrentPressureEpochNeedMoreInputCount = 0;
+        helperRemoteCurrentPressureEpochStaleDropCount = 0;
+        helperRemoteCurrentPressureEpochSoftStaleDropCount = 0;
+        helperRemoteCurrentPressureEpochLastVisibleApplyFrameId = -1;
+        helperRemoteCurrentPressureEpochContinuityLossTicks = 0;
+        helperRemoteCurrentPressureEpochWarmupTicks = 0;
+        helperRemoteCurrentPressureEpochBeforeFirstVisibleApplyTicks = 0;
+        helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameTicks = 0;
+        helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameSuppressedDueToSuccessCount = 0;
+        helperRemoteCurrentPressureEpochSlowApplyCadenceTicks = 0;
+        helperRemoteCurrentPressureEpochHighFrameAgeTicks = 0;
+        helperRemoteCurrentPressureEpochHighFrameAgeSuppressedDueToVisibleProgressCount = 0;
+        helperRemoteCurrentPressureEpochPostRecoveryHighFrameAgeSuppressedTicks = 0;
+        helperRemoteCurrentPressureEpochPostRecoveryAgeGraceSuppressedCount = 0;
+        helperRemoteCurrentPressureEpochRepeatedStaleDropsTicks = 0;
+        helperRemoteCurrentPressureEpochBridgeHealthTicks = 0;
+        helperRemoteCurrentPressureEpochBridgeHealthAdvisoryCount = 0;
+        helperRemoteCurrentPressureEpochBridgeHealthActionableCount = 0;
+        helperRemoteCurrentPressureEpochBridgeHealthQuarantineSuppressedCount = 0;
+        helperRemoteCurrentPressureEpochBridgeHealthCorrelationConsecutiveCount = 0;
+        helperRemoteCurrentPressureEpochBridgeHealthActionableWithoutQueueOrDropCount = 0;
+        helperRemoteCurrentPressureEpochVisibleAppliesBeforePressureReenabled = -1;
+        helperRemoteCurrentPressureEpochVisibleAppliesDuringSettleCount = 0;
+        helperRemoteLastReportedAppliedFrameEpoch = -1;
+        helperRemoteLastReportedAppliedFrameId = -1;
+        helperRemoteLastReportedSessionSnapshot = default;
+        helperRemoteLastReportedSessionSnapshotUtc = default;
+        helperRemoteCurrentPressureEpochBaselineEstablished = false;
+        helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs = 0d;
+        helperRemoteCurrentPressureEpochBaselineSampleCount = 0;
+        helperRemoteCurrentPressureEpochBaselineFreezeUntilNextApply = false;
+        helperRemoteCurrentPressureEpochBaselineFrozenDueToStallCount = 0;
+        helperRemoteCurrentPressureEpochBaselineReseedAfterRecoveryCount = 0;
+        helperRemoteCurrentPressureEpochBaselineReseedAfterStallPending = false;
+        helperRemoteCurrentPressureEpochBaselineReseedRemainingVisibleApplies = 0;
+        helperRemoteCurrentPressureEpochBaselineReseedAccumulatedAgeMs = 0;
+        helperRemoteCurrentPressureEpochBaselineReseedStartedUtc = default;
+        helperRemoteCurrentPressureEpochBaselineReseedMinimumFrameId = -1;
+        helperRemoteCurrentPressureEpochAgePressureConsecutiveCount = 0;
+        helperRemoteCurrentPressureEpochCadencePressureConsecutiveCount = 0;
+        helperRemoteCurrentPressureEpochCatchUpSuppressedDueToProgressCount = 0;
+        helperRemoteCurrentPressureEpochCadenceStallStartedUtc = default;
+        helperRemoteCurrentPressureEpochCadenceStallTriggered = false;
+        helperRemoteCurrentPressureEpochCadenceStallWindowCount = 0;
+        helperRemoteCurrentPressureEpochCadenceStallTriggerCount = 0;
+        helperRemoteCurrentPressureEpochNonHealthyClearSuppressedDueToProgressCount = 0;
+        helperRemoteCurrentPressureEpochWarmupStartedUtc = nowUtc;
+        helperRemoteCurrentPressureEpochWarmupEndedUtc = default;
+        helperRemoteContinuityRecoveryActive = false;
+        helperRemoteContinuityRecoveryEpoch = 0;
+        helperRemoteContinuityRecoveryStartedUtc = default;
+        helperRemoteContinuityRecoveryTimeoutSent = false;
+        helperRemotePostRecoveryStabilizationActive = false;
+        helperRemotePostRecoveryStabilizationStartedUtc = default;
+        helperRemotePostRecoveryAgeGraceEpoch = 0;
+        helperRemotePostRecoveryAgeGraceUntilUtc = default;
+        helperRemotePostRecoveryHealthySignalSent = false;
+        helperRemotePostRecoverySettleWindowTimedOut = false;
+        helperRemotePostRecoverySettleWindowSucceeded = false;
+        helperRemoteRecoveryWindowActive = false;
+        helperRemoteRecoveryWindowProgressed = false;
+        helperRemoteRecoveryWindowSucceeded = false;
+        helperRemoteRecoveryWindowEpoch = 0;
+        helperRemoteRecoveryWindowRecoveryFrameId = -1;
+        helperRemoteRecoveryWindowLastContiguousFrameId = -1;
+        helperRemoteRecoveryWindowContiguousFollowerApplyCount = 0;
+        helperRemoteRecoveryWindowAbortReason = string.Empty;
+        helperRemoteLastRecoveryKeyframeRequestUtc = default;
+        helperRemoteLastRecoveryKeyframeRequestEpoch = 0;
+        helperRemotePostRecoveryHealthyLatchCount = 0;
+        helperRemotePostRecoveryHealthyLatchClearCount = 0;
+        helperRemotePostRecoveryHealthyLatchClearReason = string.Empty;
+        helperRemoteProofKeepaliveSendCount = 0;
+        helperRemoteProofKeepaliveTimerDrivenSendCount = 0;
+        helperRemoteLastProofKeepaliveHeadFrameId = -1;
+        helperRemoteLastProofKeepaliveSentUtc = default;
+        ResetHelperRemotePostRecoveryHealthyLatch_NoLock();
+    }
+
+    private void ResetHelperRemoteScreenSharePressureAfterRecoveryKeyframe_NoLock(
+        long streamEpoch,
+        DateTimeOffset nowUtc)
+    {
+        ClearHelperRemoteSteadyVisibleProgressState_NoLock("recovery_keyframe_applied");
+        Array.Clear(helperRemoteRecentAppliedFrameAgesMs, 0, helperRemoteRecentAppliedFrameAgesMs.Length);
+        helperRemoteRecentAppliedFrameCount = 0;
+        helperRemoteRecentAppliedFrameIndex = 0;
+        helperRemoteLastAppliedFrameAgeMs = -1;
+        helperRemoteLastAppliedFrameUtc = default;
+        helperRemoteLastApplyCadenceMs = -1;
+        helperRemoteApplyCadenceObserved = 0;
+        helperRemoteTotalApplyCadenceMs = 0;
+        helperRemoteViewerStaleDropCount = 0;
+        helperRemoteViewerSoftStaleDropCount = 0;
+        helperRemoteConsecutiveVeryHighAppliedFrames = 0;
+        helperRemoteConsecutiveStaleDropWindows = 0;
+        helperRemoteCurrentPressureEpoch = streamEpoch;
+        helperRemoteCurrentPressureEpochStartedUtc = nowUtc;
+        if (helperRemoteCurrentPressureEpochFirstAcceptedFrameUtc == default)
+        {
+            helperRemoteCurrentPressureEpochFirstAcceptedFrameUtc = nowUtc;
+        }
+        helperRemoteCurrentPressureEpochFirstApplySeen = false;
+        helperRemoteCurrentPressureEpochFirstVisibleApplyUtc = default;
+        helperRemoteCurrentPressureEpochApplyCount = 0;
+        helperRemoteCurrentPressureEpochRecoveryKeyframeApplyCountLocal = 0;
+        helperRemoteCurrentPressureEpochNeedMoreInputCount = 0;
+        helperRemoteCurrentPressureEpochStaleDropCount = 0;
+        helperRemoteCurrentPressureEpochSoftStaleDropCount = 0;
+        helperRemoteCurrentPressureEpochLastVisibleApplyFrameId = -1;
+        helperRemoteCurrentPressureEpochContinuityLossTicks = 0;
+        helperRemoteCurrentPressureEpochWarmupTicks = 0;
+        helperRemoteCurrentPressureEpochBeforeFirstVisibleApplyTicks = 0;
+        helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameTicks = 0;
+        helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameSuppressedDueToSuccessCount = 0;
+        helperRemoteCurrentPressureEpochSlowApplyCadenceTicks = 0;
+        helperRemoteCurrentPressureEpochHighFrameAgeTicks = 0;
+        helperRemoteCurrentPressureEpochHighFrameAgeSuppressedDueToVisibleProgressCount = 0;
+        helperRemoteCurrentPressureEpochHighFrameAgeSuppressedDueToHeadAdvanceCount = 0;
+        helperRemoteCurrentPressureEpochActionableHighFrameAgeCount = 0;
+        helperRemoteCurrentPressureEpochPostRecoveryHighFrameAgeSuppressedTicks = 0;
+        helperRemoteCurrentPressureEpochPostRecoveryAgeGraceSuppressedCount = 0;
+        helperRemoteCurrentPressureEpochRepeatedStaleDropsTicks = 0;
+        helperRemoteCurrentPressureEpochBridgeHealthTicks = 0;
+        helperRemoteCurrentPressureEpochBridgeHealthAdvisoryCount = 0;
+        helperRemoteCurrentPressureEpochBridgeHealthActionableCount = 0;
+        helperRemoteCurrentPressureEpochBridgeHealthQuarantineSuppressedCount = 0;
+        helperRemoteCurrentPressureEpochBridgeHealthCorrelationConsecutiveCount = 0;
+        helperRemoteCurrentPressureEpochBridgeHealthActionableWithoutQueueOrDropCount = 0;
+        helperRemoteCurrentPressureEpochVisibleAppliesBeforePressureReenabled = -1;
+        helperRemoteCurrentPressureEpochVisibleAppliesDuringSettleCount = 0;
+        helperRemoteLastReportedAppliedFrameEpoch = -1;
+        helperRemoteLastReportedAppliedFrameId = -1;
+        helperRemoteCurrentPressureEpochBaselineEstablished = false;
+        helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs = 0d;
+        helperRemoteCurrentPressureEpochBaselineSampleCount = 0;
+        helperRemoteCurrentPressureEpochBaselineFreezeUntilNextApply = false;
+        helperRemoteCurrentPressureEpochBaselineReseedAfterStallPending = false;
+        helperRemoteCurrentPressureEpochBaselineReseedRemainingVisibleApplies = 0;
+        helperRemoteCurrentPressureEpochBaselineReseedAccumulatedAgeMs = 0;
+        helperRemoteCurrentPressureEpochBaselineReseedStartedUtc = default;
+        helperRemoteCurrentPressureEpochBaselineReseedMinimumFrameId = -1;
+        helperRemoteCurrentPressureEpochAgePressureConsecutiveCount = 0;
+        helperRemoteCurrentPressureEpochCadencePressureConsecutiveCount = 0;
+        helperRemoteCurrentPressureEpochCatchUpSuppressedDueToProgressCount = 0;
+        helperRemoteCurrentPressureEpochCadenceStallStartedUtc = default;
+        helperRemoteCurrentPressureEpochCadenceStallTriggered = false;
+        helperRemoteCurrentPressureEpochWarmupStartedUtc = nowUtc;
+        helperRemoteCurrentPressureEpochWarmupEndedUtc = default;
+        helperRemoteContinuityRecoveryActive = false;
+        helperRemoteContinuityRecoveryEpoch = 0;
+        helperRemoteContinuityRecoveryStartedUtc = default;
+        helperRemoteContinuityRecoveryTimeoutSent = false;
+        helperRemotePostRecoveryStabilizationActive = false;
+        helperRemotePostRecoveryStabilizationStartedUtc = default;
+        helperRemotePostRecoveryAgeGraceEpoch = 0;
+        helperRemotePostRecoveryAgeGraceUntilUtc = default;
+        helperRemotePostRecoveryHealthySignalSent = false;
+        helperRemotePostRecoverySettleWindowTimedOut = false;
+        helperRemotePostRecoverySettleWindowSucceeded = false;
+        helperRemotePostRecoverySettleWindowCount = 0;
+        helperRemotePostRecoverySettleWindowSuccessCount = 0;
+        helperRemotePostRecoverySettleWindowTimeoutCount = 0;
+        helperRemoteRecoveryWindowActive = false;
+        helperRemoteRecoveryWindowProgressed = false;
+        helperRemoteRecoveryWindowSucceeded = false;
+        helperRemoteRecoveryWindowProgressedCount = 0;
+        helperRemoteRecoveryWindowSuccessCount = 0;
+        helperRemoteRecoveryWindowEpoch = 0;
+        helperRemoteRecoveryWindowRecoveryFrameId = -1;
+        helperRemoteRecoveryWindowLastContiguousFrameId = -1;
+        helperRemoteRecoveryWindowContiguousFollowerApplyCount = 0;
+        helperRemoteRecoveryWindowAbortReason = string.Empty;
+        helperRemoteLastRecoveryKeyframeRequestUtc = default;
+        helperRemoteLastRecoveryKeyframeRequestEpoch = 0;
+        helperRemotePostRecoveryHealthyLatchCount = 0;
+        helperRemotePostRecoveryHealthyLatchClearCount = 0;
+        helperRemotePostRecoveryHealthyLatchClearReason = string.Empty;
+        helperRemoteProofKeepaliveSendCount = 0;
+        helperRemoteProofKeepaliveTimerDrivenSendCount = 0;
+        helperRemoteLastProofKeepaliveHeadFrameId = -1;
+        helperRemoteLastProofKeepaliveSentUtc = default;
+        ResetHelperRemotePostRecoveryHealthyLatch_NoLock();
+    }
+
+    private void LogAndResetHelperRemoteScreenShareSummary(string reason)
+    {
+        if (role != SessionRuntimeRole.Helper)
+        {
+            return;
+        }
+
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            LogHelperRemoteScreenSharePressureSummary_NoLock(reason);
+        }
+
+        var acceptedFrames = Interlocked.Exchange(ref helperRemoteScreenShareAcceptedFrames, 0);
+        var lastAcceptedEpoch = Interlocked.Exchange(ref helperRemoteScreenShareLastAcceptedEpoch, 0);
+        var sawConfig = Interlocked.Exchange(ref helperRemoteScreenShareSawConfig, 0);
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=helper_remote_screenshare_frame_summary; role=helper_remote; reason={reason}; accepted_frames={acceptedFrames}; last_accepted_epoch={lastAcceptedEpoch}; saw_frame_with_config={sawConfig}");
+    }
+
+    private void ResetHelperRemoteScreenSharePressureTracking()
+    {
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            ResetHelperRemoteRecoveryReceiptPublicationState_NoLock();
+            ClearHelperRemoteSteadyVisibleProgressState_NoLock("tracking_reset");
+            Array.Clear(helperRemoteRecentAppliedFrameAgesMs, 0, helperRemoteRecentAppliedFrameAgesMs.Length);
+            helperRemoteRecentAppliedFrameCount = 0;
+            helperRemoteRecentAppliedFrameIndex = 0;
+            helperRemoteLastAppliedFrameAgeMs = -1;
+            helperRemoteLastAppliedFrameUtc = default;
+            helperRemoteLastApplyCadenceMs = -1;
+            helperRemoteApplyCadenceObserved = 0;
+            helperRemoteTotalApplyCadenceMs = 0;
+            helperRemoteViewerStaleDropCount = 0;
+            helperRemoteViewerSoftStaleDropCount = 0;
+            helperRemoteConsecutiveVeryHighAppliedFrames = 0;
+            helperRemoteConsecutiveStaleDropWindows = 0;
+            helperRemoteCurrentPressureEpoch = 0;
+            helperRemoteCurrentPressureEpochStartedUtc = default;
+            helperRemoteCurrentPressureEpochFirstAcceptedFrameUtc = default;
+            helperRemoteCurrentPressureEpochFirstApplySeen = false;
+            helperRemoteCurrentPressureEpochFirstVisibleApplyUtc = default;
+            helperRemoteCurrentPressureEpochApplyCount = 0;
+            helperRemoteCurrentPressureEpochRecoveryKeyframeApplyCountLocal = 0;
+            helperRemoteCurrentPressureEpochNeedMoreInputCount = 0;
+            helperRemoteCurrentPressureEpochStaleDropCount = 0;
+            helperRemoteCurrentPressureEpochSoftStaleDropCount = 0;
+            helperRemoteCurrentPressureEpochLastVisibleApplyFrameId = -1;
+            helperRemoteCurrentPressureEpochContinuityLossTicks = 0;
+            helperRemoteCurrentPressureEpochWarmupTicks = 0;
+            helperRemoteCurrentPressureEpochBeforeFirstVisibleApplyTicks = 0;
+            helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameTicks = 0;
+            helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameSuppressedDueToSuccessCount = 0;
+            helperRemoteCurrentPressureEpochSlowApplyCadenceTicks = 0;
+            helperRemoteCurrentPressureEpochHighFrameAgeTicks = 0;
+            helperRemoteCurrentPressureEpochHighFrameAgeSuppressedDueToVisibleProgressCount = 0;
+            helperRemoteCurrentPressureEpochHighFrameAgeSuppressedDueToHeadAdvanceCount = 0;
+            helperRemoteCurrentPressureEpochActionableHighFrameAgeCount = 0;
+            helperRemoteCurrentPressureEpochPostRecoveryHighFrameAgeSuppressedTicks = 0;
+            helperRemoteCurrentPressureEpochPostRecoveryAgeGraceSuppressedCount = 0;
+            helperRemoteCurrentPressureEpochRepeatedStaleDropsTicks = 0;
+            helperRemoteCurrentPressureEpochBridgeHealthTicks = 0;
+            helperRemoteCurrentPressureEpochBridgeHealthAdvisoryCount = 0;
+            helperRemoteCurrentPressureEpochBridgeHealthActionableCount = 0;
+            helperRemoteCurrentPressureEpochBridgeHealthQuarantineSuppressedCount = 0;
+            helperRemoteCurrentPressureEpochBridgeHealthCorrelationConsecutiveCount = 0;
+            helperRemoteCurrentPressureEpochBridgeHealthActionableWithoutQueueOrDropCount = 0;
+            helperRemoteCurrentPressureEpochVisibleAppliesBeforePressureReenabled = -1;
+            helperRemoteCurrentPressureEpochVisibleAppliesDuringSettleCount = 0;
+            helperRemoteLastReportedAppliedFrameEpoch = -1;
+            helperRemoteLastReportedAppliedFrameId = -1;
+            helperRemoteCurrentPressureEpochBaselineEstablished = false;
+            helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs = 0d;
+            helperRemoteCurrentPressureEpochBaselineSampleCount = 0;
+            helperRemoteCurrentPressureEpochBaselineFreezeUntilNextApply = false;
+            helperRemoteCurrentPressureEpochBaselineFrozenDueToStallCount = 0;
+            helperRemoteCurrentPressureEpochBaselineReseedAfterRecoveryCount = 0;
+            helperRemoteCurrentPressureEpochBaselineReseedAfterStallPending = false;
+            helperRemoteCurrentPressureEpochBaselineReseedRemainingVisibleApplies = 0;
+            helperRemoteCurrentPressureEpochBaselineReseedAccumulatedAgeMs = 0;
+            helperRemoteCurrentPressureEpochAgePressureConsecutiveCount = 0;
+            helperRemoteCurrentPressureEpochCadencePressureConsecutiveCount = 0;
+            helperRemoteCurrentPressureEpochCatchUpSuppressedDueToProgressCount = 0;
+            helperRemoteCurrentPressureEpochCadenceStallStartedUtc = default;
+            helperRemoteCurrentPressureEpochCadenceStallTriggered = false;
+            helperRemoteCurrentPressureEpochCadenceStallWindowCount = 0;
+            helperRemoteCurrentPressureEpochCadenceStallTriggerCount = 0;
+            helperRemoteCurrentPressureEpochWarmupStartedUtc = default;
+            helperRemoteCurrentPressureEpochWarmupEndedUtc = default;
+            helperRemoteContinuityRecoveryActive = false;
+            helperRemoteContinuityRecoveryEpoch = 0;
+            helperRemoteContinuityRecoveryStartedUtc = default;
+            helperRemoteContinuityRecoveryTimeoutSent = false;
+            helperRemotePostRecoveryStabilizationActive = false;
+            helperRemotePostRecoveryStabilizationStartedUtc = default;
+            helperRemotePostRecoveryAgeGraceEpoch = 0;
+            helperRemotePostRecoveryAgeGraceUntilUtc = default;
+            helperRemotePostRecoveryHealthySignalSent = false;
+            helperRemotePostRecoverySettleWindowTimedOut = false;
+            helperRemotePostRecoverySettleWindowSucceeded = false;
+            helperRemoteRecoveryWindowActive = false;
+            helperRemoteRecoveryWindowProgressed = false;
+            helperRemoteRecoveryWindowSucceeded = false;
+            helperRemoteRecoveryWindowEpoch = 0;
+            helperRemoteRecoveryWindowRecoveryFrameId = -1;
+            helperRemoteRecoveryWindowLastContiguousFrameId = -1;
+            helperRemoteRecoveryWindowContiguousFollowerApplyCount = 0;
+            helperRemoteRecoveryWindowAbortReason = string.Empty;
+            helperRemoteLastRecoveryKeyframeRequestUtc = default;
+            helperRemoteLastRecoveryKeyframeRequestEpoch = 0;
+            helperRemotePostRecoveryHealthyLatchCount = 0;
+            helperRemotePostRecoveryHealthyLatchClearCount = 0;
+            helperRemotePostRecoveryHealthyLatchClearReason = string.Empty;
+            helperRemoteProofKeepaliveSendCount = 0;
+            helperRemoteProofKeepaliveTimerDrivenSendCount = 0;
+            helperRemoteLastProofKeepaliveHeadFrameId = -1;
+            helperRemoteLastProofKeepaliveSentUtc = default;
+            ResetHelperRemotePostRecoveryHealthyLatch_NoLock();
+        }
+    }
+
+    internal HelperRemoteScreenSharePressureDiagnosticsSnapshot GetHelperRemoteScreenSharePressureDiagnosticsSnapshotForTests()
+        => screenShareControlHost.GetHelperRemoteScreenSharePressureDiagnosticsSnapshotForTests();
+
+    private HelperRemoteScreenSharePressureDiagnosticsSnapshot GetHelperRemoteScreenSharePressureDiagnosticsSnapshotForTestsCore()
+    {
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            return BuildHelperRemoteScreenSharePressureDiagnosticsSnapshot_NoLock();
+        }
+    }
+
+    private void LogHelperRemoteScreenSharePressureSummary_NoLock(string reason)
+    {
+        var snapshot = BuildHelperRemoteScreenSharePressureDiagnosticsSnapshot_NoLock();
+        if (snapshot.StreamEpoch <= 0)
+        {
+            return;
+        }
+
+        var activeSessionId = currentSessionGrant?.SessionId.Value ?? sessionSecurityState.SessionId?.Value ?? sessionId;
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_helper_pressure_epoch_summary; role=helper_remote; reason={reason}; session_id={(string.IsNullOrWhiteSpace(activeSessionId) ? "(none)" : activeSessionId)}; stream_epoch={snapshot.StreamEpoch}; last_visible_apply_frame_id={FormatFrameIdForPressureLog(snapshot.LastVisibleApplyFrameId)}; visible_head_frame_id={FormatFrameIdForPressureLog(snapshot.VisibleHeadFrameId)}; visible_recovery_floor_frame_id={FormatFrameIdForPressureLog(snapshot.VisibleRecoveryFloorFrameId)}; applied_head_frame_id={FormatFrameIdForPressureLog(snapshot.AppliedHeadFrameId)}; frames_applied_since_last_gap={snapshot.FramesAppliedSinceLastGap}; stable_visible_head_frame_id={FormatFrameIdForPressureLog(snapshot.StableVisibleHeadFrameId)}; helper_session_phase={ScreenShareConceptualModelFormatter.FormatHelperSessionPhase(snapshot.HelperSessionPhase)}; helper_recovery_mechanism={ScreenShareConceptualModelFormatter.FormatHelperRecoveryMechanism(snapshot.HelperRecoveryMechanism)}; helper_baseline_established={(snapshot.HelperBaselineEstablished ? 1 : 0)}; current_epoch_progress_proven={(snapshot.CurrentEpochProgressProven ? 1 : 0)}; current_epoch_progress_proof_source={FormatPressureTextValue(snapshot.CurrentEpochProgressProofSource)}; current_epoch_proven_head_frame_id={FormatFrameIdForPressureLog(snapshot.CurrentEpochProvenHeadFrameId)}; derived_post_recovery_healthy_active={(snapshot.DerivedPostRecoveryHealthyActive ? 1 : 0)}; derived_post_recovery_healthy_source={FormatPressureTextValue(snapshot.DerivedPostRecoveryHealthySource)}; derived_post_recovery_proof_frame_id={FormatFrameIdForPressureLog(snapshot.DerivedPostRecoveryProofFrameId)}; steady_visible_progress_active={(snapshot.SteadyVisibleProgressActive ? 1 : 0)}; steady_visible_progress_activation_frame_id={FormatFrameIdForPressureLog(snapshot.SteadyVisibleProgressActivationFrameId)}; applied_head_advanced_since_last_evaluation={(snapshot.AppliedHeadAdvancedSinceLastEvaluation ? 1 : 0)}; stable_visible_head_advanced_since_last_evaluation={(snapshot.StableVisibleHeadAdvancedSinceLastEvaluation ? 1 : 0)}; helper_healthy_state_established_by={FormatPressureTextValue(snapshot.HelperHealthyStateEstablishedBy)}; non_healthy_clear_suppressed_due_to_progress_count={snapshot.NonHealthyClearSuppressedDueToProgressCount}; last_sent_visible_head_frame_id={FormatFrameIdForPressureLog(snapshot.LastSentVisibleHeadFrameId)}; last_sent_stable_visible_head_frame_id={FormatFrameIdForPressureLog(snapshot.LastSentStableVisibleHeadFrameId)}; pressure_send_bypassed_for_visible_progress_count={snapshot.PressureSendBypassedForVisibleProgressCount}; helper_proof_keepalive_send_count={snapshot.ProofKeepaliveSendCount}; helper_proof_keepalive_timer_driven_send_count={snapshot.ProofKeepaliveTimerDrivenSendCount}; helper_proof_keepalive_last_head_frame_id={FormatFrameIdForPressureLog(snapshot.ProofKeepaliveLastHeadFrameId)}; helper_proof_keepalive_last_send_age_ms={(snapshot.ProofKeepaliveLastSendAgeMs >= 0 ? snapshot.ProofKeepaliveLastSendAgeMs.ToString(CultureInfo.InvariantCulture) : "(none)")}; steady_visible_progress_cleared_count={snapshot.SteadyVisibleProgressClearedCount}; steady_visible_progress_cleared_reason={FormatPressureTextValue(snapshot.SteadyVisibleProgressClearedReason)}; post_recovery_healthy_latch_count={snapshot.PostRecoveryHealthyLatchCount}; post_recovery_healthy_latch_clear_count={snapshot.PostRecoveryHealthyLatchClearCount}; post_recovery_healthy_latch_clear_reason={FormatPressureTextValue(snapshot.PostRecoveryHealthyLatchClearReason)}; current_epoch_gap_count={snapshot.CurrentEpochGapCount}; current_epoch_recovery_keyframe_apply_count={snapshot.CurrentEpochRecoveryKeyframeApplyCount}; current_epoch_resync_count={snapshot.CurrentEpochResyncCount}; recovery_window_active={(snapshot.RecoveryWindowActive ? 1 : 0)}; recovery_window_progressed={(snapshot.RecoveryWindowProgressed ? 1 : 0)}; recovery_window_succeeded={(snapshot.RecoveryWindowSucceeded ? 1 : 0)}; recovery_window_progressed_count={snapshot.RecoveryWindowProgressedCount}; recovery_window_success_count={snapshot.RecoveryWindowSuccessCount}; active_recovery_window_epoch={FormatFrameIdForPressureLog(snapshot.ActiveRecoveryWindowEpoch)}; active_recovery_window_recovery_frame_id={FormatFrameIdForPressureLog(snapshot.ActiveRecoveryWindowRecoveryFrameId)}; recovery_window_contiguous_follower_apply_count={snapshot.RecoveryWindowContiguousFollowerApplyCount}; continuity_loss_ticks={snapshot.ContinuityLossTicks}; warmup_ticks={snapshot.WarmupTicks}; before_first_visible_apply_ticks={snapshot.BeforeFirstVisibleApplyTicks}; after_visible_recovery_frame_ticks={snapshot.AfterVisibleRecoveryFrameTicks}; after_visible_recovery_frame_suppressed_due_to_success_count={snapshot.AfterVisibleRecoveryFrameSuppressedDueToSuccessCount}; slow_apply_cadence_ticks={snapshot.SlowApplyCadenceTicks}; high_frame_age_ticks={snapshot.HighFrameAgeTicks}; high_frame_age_suppressed_due_to_visible_progress_count={snapshot.HighFrameAgeSuppressedDueToVisibleProgressCount}; high_frame_age_suppressed_due_to_head_advance_count={snapshot.HighFrameAgeSuppressedDueToHeadAdvanceCount}; actionable_high_frame_age_count={snapshot.ActionableHighFrameAgeCount}; post_recovery_age_grace_active={(snapshot.PostRecoveryAgeGraceActive ? 1 : 0)}; post_recovery_age_grace_suppressed_count={snapshot.PostRecoveryAgeGraceSuppressedCount}; post_recovery_high_frame_age_suppressed_ticks={snapshot.PostRecoveryHighFrameAgeSuppressedTicks}; repeated_stale_drops_ticks={snapshot.RepeatedStaleDropsTicks}; viewer_stale_drops={helperRemoteViewerStaleDropCount}; viewer_soft_stale_drops={helperRemoteViewerSoftStaleDropCount}; viewer_actionable_stale_drops={GetActionableStaleDropCount(helperRemoteViewerStaleDropCount, helperRemoteViewerSoftStaleDropCount)}; current_epoch_stale_drops={helperRemoteCurrentPressureEpochStaleDropCount}; current_epoch_soft_stale_drops={helperRemoteCurrentPressureEpochSoftStaleDropCount}; current_epoch_actionable_stale_drops={GetActionableStaleDropCount(helperRemoteCurrentPressureEpochStaleDropCount, helperRemoteCurrentPressureEpochSoftStaleDropCount)}; bridge_health_ticks={snapshot.BridgeHealthTicks}; bridge_health_advisory_count={snapshot.BridgeHealthAdvisoryCount}; bridge_health_actionable_count={snapshot.BridgeHealthActionableCount}; bridge_health_quarantine_suppressed_count={snapshot.BridgeHealthQuarantineSuppressedCount}; bridge_health_became_actionable_without_queue_or_drop_count={snapshot.BridgeHealthActionableWithoutQueueOrDropCount}; baseline_established={(snapshot.BaselineEstablished ? 1 : 0)}; baseline_capture_to_render_ms={snapshot.BaselineCaptureToRenderMs}; age_excess_ms={snapshot.AgeExcessMs}; progress_stall_ms={snapshot.ProgressStallMs}; baseline_reseed_in_progress={(snapshot.BaselineReseedInProgress ? 1 : 0)}; age_pressure_consecutive_count={snapshot.AgePressureConsecutiveCount}; cadence_pressure_consecutive_count={snapshot.CadencePressureConsecutiveCount}; catch_up_suppressed_due_to_progress_count={snapshot.CatchUpSuppressedDueToProgressCount}; baseline_frozen_due_to_stall_count={snapshot.BaselineFrozenDueToStallCount}; baseline_reseed_after_recovery_count={snapshot.BaselineReseedAfterRecoveryCount}; cadence_stall_window_count={snapshot.CadenceStallWindowCount}; cadence_stall_trigger_count={snapshot.CadenceStallTriggerCount}; time_spent_in_helper_warmup_ms={snapshot.TimeSpentInHelperWarmupMs}; visible_applies_during_settle_count={snapshot.VisibleAppliesDuringSettleCount}; post_recovery_settle_window_count={snapshot.PostRecoverySettleWindowCount}; post_recovery_settle_window_success_count={snapshot.PostRecoverySettleWindowSuccessCount}; post_recovery_settle_window_timeout_count={snapshot.PostRecoverySettleWindowTimeoutCount}; visible_applies_before_pressure_reenabled={snapshot.VisibleAppliesBeforePressureReenabled}; dominant_pressure_blocker={snapshot.DominantPressureBlocker}");
+    }
+
+    private HelperRemoteScreenSharePressureDiagnosticsSnapshot BuildHelperRemoteScreenSharePressureDiagnosticsSnapshot_NoLock()
+    {
+        var currentEpoch = helperRemoteCurrentPressureEpoch;
+        if (currentEpoch <= 0)
+        {
+            return new HelperRemoteScreenSharePressureDiagnosticsSnapshot(
+                StreamEpoch: 0,
+                LastVisibleApplyFrameId: -1,
+                VisibleHeadFrameId: -1,
+                VisibleRecoveryFloorFrameId: -1,
+                AppliedHeadFrameId: -1,
+                FramesAppliedSinceLastGap: 0,
+                StableVisibleHeadFrameId: -1,
+                CurrentEpochGapCount: 0,
+                CurrentEpochRecoveryKeyframeApplyCount: 0,
+                CurrentEpochResyncCount: 0,
+                RecoveryWindowActive: false,
+                RecoveryWindowProgressed: false,
+                RecoveryWindowSucceeded: false,
+                RecoveryWindowProgressedCount: 0,
+                RecoveryWindowSuccessCount: 0,
+                ActiveRecoveryWindowEpoch: -1,
+                ActiveRecoveryWindowRecoveryFrameId: -1,
+                RecoveryWindowContiguousFollowerApplyCount: 0,
+                ContinuityLossTicks: 0,
+                WarmupTicks: 0,
+                BeforeFirstVisibleApplyTicks: 0,
+                AfterVisibleRecoveryFrameTicks: 0,
+                AfterVisibleRecoveryFrameSuppressedDueToSuccessCount: 0,
+                SlowApplyCadenceTicks: 0,
+                HighFrameAgeTicks: 0,
+                HighFrameAgeSuppressedDueToVisibleProgressCount: 0,
+                HighFrameAgeSuppressedDueToHeadAdvanceCount: 0,
+                ActionableHighFrameAgeCount: 0,
+                PostRecoveryAgeGraceActive: false,
+                PostRecoveryAgeGraceSuppressedCount: 0,
+                PostRecoveryHighFrameAgeSuppressedTicks: 0,
+                RepeatedStaleDropsTicks: 0,
+                BridgeHealthTicks: 0,
+                BridgeHealthAdvisoryCount: 0,
+                BridgeHealthActionableCount: 0,
+                BridgeHealthQuarantineSuppressedCount: 0,
+                BridgeHealthActionableWithoutQueueOrDropCount: 0,
+                HelperSessionPhase: HelperRemoteSessionPhase.NoVisibleBaseline,
+                HelperRecoveryMechanism: HelperRemoteRecoveryMechanism.None,
+                HelperBaselineEstablished: false,
+                CurrentEpochProgressProven: false,
+                CurrentEpochProgressProofSource: "none",
+                CurrentEpochProvenHeadFrameId: -1,
+                AppliedHeadAdvancedSinceLastEvaluation: false,
+                StableVisibleHeadAdvancedSinceLastEvaluation: false,
+                HelperHealthyStateEstablishedBy: "none",
+                NonHealthyClearSuppressedDueToProgressCount: 0,
+                BaselineEstablished: false,
+                BaselineCaptureToRenderMs: -1,
+                AgeExcessMs: -1,
+                ProgressStallMs: -1,
+                BaselineReseedInProgress: false,
+                AgePressureConsecutiveCount: 0,
+                CadencePressureConsecutiveCount: 0,
+                CatchUpSuppressedDueToProgressCount: 0,
+                BaselineFrozenDueToStallCount: 0,
+                BaselineReseedAfterRecoveryCount: 0,
+                CadenceStallWindowCount: 0,
+                CadenceStallTriggerCount: 0,
+                DerivedPostRecoveryHealthyActive: false,
+                DerivedPostRecoveryHealthySource: "none",
+                DerivedPostRecoveryProofFrameId: -1,
+                SteadyVisibleProgressActive: false,
+                SteadyVisibleProgressActivationFrameId: -1,
+                LastSentVisibleHeadFrameId: -1,
+                LastSentStableVisibleHeadFrameId: -1,
+                PressureSendBypassedForVisibleProgressCount: helperRemotePressureSendBypassedForVisibleProgressCount,
+                ProofKeepaliveSendCount: helperRemoteProofKeepaliveSendCount,
+                ProofKeepaliveTimerDrivenSendCount: helperRemoteProofKeepaliveTimerDrivenSendCount,
+                ProofKeepaliveLastHeadFrameId: helperRemoteLastProofKeepaliveHeadFrameId,
+                ProofKeepaliveLastSendAgeMs:
+                    helperRemoteLastProofKeepaliveSentUtc == default
+                        ? -1
+                        : Math.Max(0L, (long)(nowProvider() - helperRemoteLastProofKeepaliveSentUtc).TotalMilliseconds),
+                SteadyVisibleProgressClearedCount: 0,
+                SteadyVisibleProgressClearedReason: string.Empty,
+                PostRecoveryHealthyLatchCount: 0,
+                PostRecoveryHealthyLatchClearCount: 0,
+                PostRecoveryHealthyLatchClearReason: string.Empty,
+                TimeSpentInHelperWarmupMs: 0,
+                VisibleAppliesDuringSettleCount: 0,
+                PostRecoverySettleWindowCount: 0,
+                PostRecoverySettleWindowSuccessCount: 0,
+                PostRecoverySettleWindowTimeoutCount: 0,
+                VisibleAppliesBeforePressureReenabled: -1,
+                DominantPressureBlocker: "none");
+        }
+
+        var activeSessionId = currentSessionGrant?.SessionId.Value ?? sessionSecurityState.SessionId?.Value ?? sessionId;
+        var proofKeepaliveLastSendAgeMs =
+            helperRemoteLastProofKeepaliveSentUtc == default
+                ? -1
+                : Math.Max(0L, (long)(nowProvider() - helperRemoteLastProofKeepaliveSentUtc).TotalMilliseconds);
+        var frameLossSnapshot = string.IsNullOrWhiteSpace(activeSessionId)
+            ? ScreenShareFrameLossSessionSnapshot.Empty
+            : ScreenShareFrameLossAttributionRegistry.GetSnapshot(activeSessionId);
+        var epochDiagnostics = frameLossSnapshot.EpochDiagnostics.FirstOrDefault(epoch => epoch.StreamEpoch == currentEpoch);
+        var nowUtc = nowProvider();
+        var warmupEndUtc = helperRemoteCurrentPressureEpochWarmupEndedUtc != default
+            ? helperRemoteCurrentPressureEpochWarmupEndedUtc
+            : nowUtc;
+        var timeSpentInHelperWarmupMs =
+            helperRemoteCurrentPressureEpochWarmupStartedUtc != default && warmupEndUtc >= helperRemoteCurrentPressureEpochWarmupStartedUtc
+                ? Math.Max(0L, (long)(warmupEndUtc - helperRemoteCurrentPressureEpochWarmupStartedUtc).TotalMilliseconds)
+                : 0L;
+        var baselineEstablished = helperRemoteCurrentPressureEpochBaselineEstablished && helperRemoteCurrentPressureEpochBaselineSampleCount > 0;
+        var baselineReseedInProgress = helperRemoteCurrentPressureEpochBaselineReseedRemainingVisibleApplies > 0;
+        var baselineCaptureToRenderMs = baselineEstablished
+            ? Math.Max(0L, (long)Math.Round(helperRemoteCurrentPressureEpochBaselineCaptureToRenderMs, MidpointRounding.AwayFromZero))
+            : -1L;
+        var nowCaptureToRenderMs =
+            helperRemoteLastAppliedFrameAgeMs >= 0 && helperRemoteLastAppliedFrameUtc != default && nowUtc >= helperRemoteLastAppliedFrameUtc
+                ? Math.Max(0L, helperRemoteLastAppliedFrameAgeMs + (long)(nowUtc - helperRemoteLastAppliedFrameUtc).TotalMilliseconds)
+                : helperRemoteLastAppliedFrameAgeMs;
+        var ageExcessMs =
+            baselineEstablished && nowCaptureToRenderMs >= 0
+                ? Math.Max(0L, nowCaptureToRenderMs - baselineCaptureToRenderMs)
+                : -1L;
+        var progressStallMs =
+            helperRemoteLastAppliedFrameUtc != default && nowUtc >= helperRemoteLastAppliedFrameUtc
+                ? Math.Max(0L, (long)(nowUtc - helperRemoteLastAppliedFrameUtc).TotalMilliseconds)
+                : -1L;
+        var postRecoveryAgeGraceActive =
+            helperRemotePostRecoveryAgeGraceEpoch == currentEpoch &&
+            helperRemotePostRecoveryAgeGraceUntilUtc != default &&
+            nowUtc <= helperRemotePostRecoveryAgeGraceUntilUtc;
+        var currentEpochWarmupActive = IsHelperRemoteCurrentEpochWarmupActive_NoLock(nowUtc, currentEpoch);
+        var authoritativeProgressState = ResolveHelperRemoteAuthoritativeProgressState_NoLock(
+            currentEpoch,
+            epochDiagnostics);
+        var lastVisibleApplyFrameId = authoritativeProgressState.LastVisibleApplyFrameId;
+        var visibleHeadFrameId = authoritativeProgressState.VisibleHeadFrameId;
+        var visibleRecoveryFloorFrameId = authoritativeProgressState.VisibleRecoveryFloorFrameId;
+        var appliedHeadFrameId = authoritativeProgressState.AppliedHeadFrameId;
+        var stableVisibleHeadFrameId = authoritativeProgressState.StableVisibleHeadFrameId;
+        var framesAppliedSinceLastGap = authoritativeProgressState.FramesAppliedSinceLastGap;
+        currentEpochWarmupActive = currentEpochWarmupActive && !authoritativeProgressState.SteadyVisibleProgressActive;
+        var currentEpochProgressProven = authoritativeProgressState.CurrentEpochProgressProven;
+        var currentEpochProgressProofSource = authoritativeProgressState.CurrentEpochProgressProofSource;
+        var currentEpochProvenHeadFrameId = authoritativeProgressState.CurrentEpochProvenHeadFrameId;
+        var helperSessionPhase = authoritativeProgressState.SessionSnapshotPresent
+            ? authoritativeProgressState.SessionSnapshot.Phase
+            : (authoritativeProgressState.SteadyVisibleProgressActive
+                ? HelperRemoteSessionPhase.VisibleStable
+                : HelperRemoteSessionPhase.NoVisibleBaseline);
+        var helperRecoveryMechanism = authoritativeProgressState.SessionSnapshotPresent
+            ? authoritativeProgressState.SessionSnapshot.RecoveryMechanism
+            : HelperRemoteRecoveryMechanism.None;
+        var helperBaselineEstablished = authoritativeProgressState.SessionSnapshotPresent
+            ? authoritativeProgressState.SessionSnapshot.BaselineEstablished
+            : visibleHeadFrameId >= 0 || appliedHeadFrameId >= 0 || stableVisibleHeadFrameId >= 0;
+        var derivedPostRecoveryHealthy = (
+            Active: currentEpochProgressProven,
+            Source: currentEpochProgressProofSource,
+            ProofFrameId: currentEpochProvenHeadFrameId);
+
+            return new HelperRemoteScreenSharePressureDiagnosticsSnapshot(
+                StreamEpoch: currentEpoch,
+                LastVisibleApplyFrameId: lastVisibleApplyFrameId,
+                VisibleHeadFrameId: visibleHeadFrameId,
+                VisibleRecoveryFloorFrameId: visibleRecoveryFloorFrameId,
+                AppliedHeadFrameId: appliedHeadFrameId,
+                FramesAppliedSinceLastGap: framesAppliedSinceLastGap,
+            StableVisibleHeadFrameId: stableVisibleHeadFrameId,
+            CurrentEpochGapCount: epochDiagnostics?.GapCount ?? 0,
+            CurrentEpochRecoveryKeyframeApplyCount: epochDiagnostics?.RecoveryKeyframeApplyCount ?? 0,
+            CurrentEpochResyncCount: epochDiagnostics?.ResyncCount ?? 0,
+            RecoveryWindowActive: false,
+            RecoveryWindowProgressed: false,
+            RecoveryWindowSucceeded: false,
+            RecoveryWindowProgressedCount: 0,
+            RecoveryWindowSuccessCount: 0,
+            ActiveRecoveryWindowEpoch: -1,
+            ActiveRecoveryWindowRecoveryFrameId: -1,
+            RecoveryWindowContiguousFollowerApplyCount: 0,
+            ContinuityLossTicks: helperRemoteCurrentPressureEpochContinuityLossTicks,
+            WarmupTicks: helperRemoteCurrentPressureEpochWarmupTicks,
+            BeforeFirstVisibleApplyTicks: helperRemoteCurrentPressureEpochBeforeFirstVisibleApplyTicks,
+            AfterVisibleRecoveryFrameTicks: helperRemoteCurrentPressureEpochAfterVisibleRecoveryFrameTicks,
+            AfterVisibleRecoveryFrameSuppressedDueToSuccessCount: 0,
+            SlowApplyCadenceTicks: helperRemoteCurrentPressureEpochSlowApplyCadenceTicks,
+            HighFrameAgeTicks: helperRemoteCurrentPressureEpochHighFrameAgeTicks,
+            HighFrameAgeSuppressedDueToVisibleProgressCount: helperRemoteCurrentPressureEpochHighFrameAgeSuppressedDueToVisibleProgressCount,
+            HighFrameAgeSuppressedDueToHeadAdvanceCount: helperRemoteCurrentPressureEpochHighFrameAgeSuppressedDueToHeadAdvanceCount,
+            ActionableHighFrameAgeCount: helperRemoteCurrentPressureEpochActionableHighFrameAgeCount,
+            PostRecoveryAgeGraceActive: postRecoveryAgeGraceActive,
+            PostRecoveryAgeGraceSuppressedCount: helperRemoteCurrentPressureEpochPostRecoveryAgeGraceSuppressedCount,
+            PostRecoveryHighFrameAgeSuppressedTicks: helperRemoteCurrentPressureEpochPostRecoveryHighFrameAgeSuppressedTicks,
+            RepeatedStaleDropsTicks: helperRemoteCurrentPressureEpochRepeatedStaleDropsTicks,
+            BridgeHealthTicks: helperRemoteCurrentPressureEpochBridgeHealthTicks,
+            BridgeHealthAdvisoryCount: helperRemoteCurrentPressureEpochBridgeHealthAdvisoryCount,
+            BridgeHealthActionableCount: helperRemoteCurrentPressureEpochBridgeHealthActionableCount,
+            BridgeHealthQuarantineSuppressedCount: helperRemoteCurrentPressureEpochBridgeHealthQuarantineSuppressedCount,
+            BridgeHealthActionableWithoutQueueOrDropCount: helperRemoteCurrentPressureEpochBridgeHealthActionableWithoutQueueOrDropCount,
+            HelperSessionPhase: helperSessionPhase,
+            HelperRecoveryMechanism: helperRecoveryMechanism,
+            HelperBaselineEstablished: helperBaselineEstablished,
+            CurrentEpochProgressProven: currentEpochProgressProven,
+            CurrentEpochProgressProofSource: currentEpochProgressProofSource,
+            CurrentEpochProvenHeadFrameId: currentEpochProvenHeadFrameId,
+            AppliedHeadAdvancedSinceLastEvaluation: helperRemoteLastAppliedHeadAdvancedSincePressureEvaluation,
+            StableVisibleHeadAdvancedSinceLastEvaluation: helperRemoteLastStableVisibleHeadAdvancedSincePressureEvaluation,
+            HelperHealthyStateEstablishedBy: helperRemoteLastHealthyStateEstablishedBy,
+            NonHealthyClearSuppressedDueToProgressCount: helperRemoteCurrentPressureEpochNonHealthyClearSuppressedDueToProgressCount,
+            BaselineEstablished: baselineEstablished,
+            BaselineCaptureToRenderMs: baselineCaptureToRenderMs,
+            AgeExcessMs: ageExcessMs,
+            ProgressStallMs: progressStallMs,
+            BaselineReseedInProgress: baselineReseedInProgress,
+            AgePressureConsecutiveCount: helperRemoteCurrentPressureEpochAgePressureConsecutiveCount,
+            CadencePressureConsecutiveCount: helperRemoteCurrentPressureEpochCadencePressureConsecutiveCount,
+            CatchUpSuppressedDueToProgressCount: helperRemoteCurrentPressureEpochCatchUpSuppressedDueToProgressCount,
+            BaselineFrozenDueToStallCount: helperRemoteCurrentPressureEpochBaselineFrozenDueToStallCount,
+            BaselineReseedAfterRecoveryCount: helperRemoteCurrentPressureEpochBaselineReseedAfterRecoveryCount,
+            CadenceStallWindowCount: helperRemoteCurrentPressureEpochCadenceStallWindowCount,
+            CadenceStallTriggerCount: helperRemoteCurrentPressureEpochCadenceStallTriggerCount,
+            DerivedPostRecoveryHealthyActive: derivedPostRecoveryHealthy.Active,
+            DerivedPostRecoveryHealthySource: derivedPostRecoveryHealthy.Source,
+            DerivedPostRecoveryProofFrameId: derivedPostRecoveryHealthy.ProofFrameId,
+            SteadyVisibleProgressActive: authoritativeProgressState.SteadyVisibleProgressActive,
+            SteadyVisibleProgressActivationFrameId: authoritativeProgressState.SteadyVisibleProgressActivationFrameId,
+            LastSentVisibleHeadFrameId:
+                helperRemoteLastSentSteadyProgressEpoch == currentEpoch
+                    ? helperRemoteLastSentVisibleHeadFrameId
+                    : -1L,
+            LastSentStableVisibleHeadFrameId:
+                helperRemoteLastSentSteadyProgressEpoch == currentEpoch
+                    ? helperRemoteLastSentStableVisibleHeadFrameId
+                    : -1L,
+            PressureSendBypassedForVisibleProgressCount: helperRemotePressureSendBypassedForVisibleProgressCount,
+            ProofKeepaliveSendCount: helperRemoteProofKeepaliveSendCount,
+            ProofKeepaliveTimerDrivenSendCount: helperRemoteProofKeepaliveTimerDrivenSendCount,
+            ProofKeepaliveLastHeadFrameId: helperRemoteLastProofKeepaliveHeadFrameId,
+            ProofKeepaliveLastSendAgeMs: proofKeepaliveLastSendAgeMs,
+            SteadyVisibleProgressClearedCount: helperRemoteSteadyVisibleProgressClearedCount,
+            SteadyVisibleProgressClearedReason: helperRemoteSteadyVisibleProgressClearedReason,
+            PostRecoveryHealthyLatchCount: helperRemotePostRecoveryHealthyLatchCount,
+            PostRecoveryHealthyLatchClearCount: helperRemotePostRecoveryHealthyLatchClearCount,
+            PostRecoveryHealthyLatchClearReason: helperRemotePostRecoveryHealthyLatchClearReason,
+            TimeSpentInHelperWarmupMs: timeSpentInHelperWarmupMs,
+            VisibleAppliesDuringSettleCount: 0,
+            PostRecoverySettleWindowCount: 0,
+            PostRecoverySettleWindowSuccessCount: 0,
+            PostRecoverySettleWindowTimeoutCount: 0,
+            VisibleAppliesBeforePressureReenabled: -1,
+            DominantPressureBlocker: DetermineDominantPressureBlocker(
+                helperRemoteCurrentPressureEpochContinuityLossTicks,
+                helperRemoteCurrentPressureEpochWarmupTicks,
+                helperRemoteCurrentPressureEpochSlowApplyCadenceTicks,
+                helperRemoteCurrentPressureEpochHighFrameAgeTicks,
+                helperRemoteCurrentPressureEpochRepeatedStaleDropsTicks,
+                helperRemoteCurrentPressureEpochBridgeHealthTicks,
+                authoritativeProgressState.CurrentEpochProgressProven));
+    }
+
+    private static string DetermineDominantPressureBlocker(
+        long continuityLossTicks,
+        long warmupTicks,
+        long slowApplyCadenceTicks,
+        long highFrameAgeTicks,
+        long repeatedStaleDropsTicks,
+        long bridgeHealthTicks,
+        bool derivedPostRecoveryHealthyActive)
+    {
+        var candidates = new[]
+        {
+            (Name: "continuity_loss", Count: derivedPostRecoveryHealthyActive ? 0L : continuityLossTicks),
+            (Name: "warmup", Count: derivedPostRecoveryHealthyActive ? 0L : warmupTicks),
+            (Name: "slow_apply_cadence", Count: slowApplyCadenceTicks),
+            (Name: "high_frame_age", Count: highFrameAgeTicks),
+            (Name: "repeated_stale_drops", Count: repeatedStaleDropsTicks),
+            (Name: "bridge_health", Count: bridgeHealthTicks),
+        };
+
+        var best = candidates
+            .OrderByDescending(static candidate => candidate.Count)
+            .ThenBy(static candidate => candidate.Name, StringComparer.Ordinal)
+            .FirstOrDefault();
+
+        return best.Count > 0 ? best.Name : "none";
+    }
+
+    private void OnTransportScreenSharePressureStateReceived(object? sender, ScreenSharePressureStateReceivedEventArgs e)
+    {
+        screenShareControlHost.HandleTransportScreenSharePressureStateReceived(sender, e);
+    }
+
+    private void OnTransportScreenShareRecoveryReceiptReceived(object? sender, ScreenShareRecoveryReceiptReceivedEventArgs e)
+    {
+        screenShareControlHost.HandleTransportScreenShareRecoveryReceiptReceived(sender, e);
+    }
+
+    private void OnTransportScreenShareVideoKeyframeRequestReceived(object? sender, ScreenShareVideoKeyframeRequestReceivedEventArgs e)
+    {
+        screenShareControlHost.HandleTransportScreenShareVideoKeyframeRequestReceived(sender, e);
+    }
+
+    private void EnsureHelperRemoteScreenSharePressureTimerStarted()
+    {
+        screenShareControlHost.EnsureHelperRemoteScreenSharePressureTimerStarted();
+    }
+
+    private void StopHelperRemoteScreenSharePressureTimer()
+    {
+        screenShareControlHost.StopHelperRemoteScreenSharePressureTimer();
+    }
+
+    private void OnHelperRemoteScreenSharePressureTimerTick()
+    {
+        screenShareControlHost.OnHelperRemoteScreenSharePressureTimerTick();
+    }
+
+    private void MaybeSendScreenSharePressureState()
+    {
+        screenShareControlHost.MaybeSendScreenSharePressureState();
+    }
+
+    private void MaybeSendScreenSharePressureState(bool timerDriven)
+    {
+        screenShareControlHost.MaybeSendScreenSharePressureState(timerDriven);
+    }
+
+    private static string FormatScreenSharePressureSampleSource(ScreenSharePressureSampleSource source)
+    {
+        return source switch
+        {
+            ScreenSharePressureSampleSource.ApplyCadence => "apply_cadence",
+            ScreenSharePressureSampleSource.StaleDropOnly => "stale_drop_only",
+            ScreenSharePressureSampleSource.BridgeHealth => "bridge_health",
+            _ => "applied_frame_age",
+        };
+    }
+
+    private static string FormatScreenSharePressureHealthKind(bool hasBridgeHealth, bool hasActionableBridgeHealth)
+    {
+        if (hasActionableBridgeHealth)
+        {
+            return "actionable";
+        }
+
+        return hasBridgeHealth ? "advisory" : "none";
+    }
+
+    private static string FormatFrameIdForPressureLog(long frameId)
+    {
+        return frameId >= 0 ? frameId.ToString(CultureInfo.InvariantCulture) : "(none)";
+    }
+
+    private static string FormatPressureTextValue(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            ? "(none)"
+            : value.Trim();
     }
 
     private void OnTransportScreenShareStopped(object? sender, EventArgs e)
@@ -2585,31 +5339,122 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        screenShareControlHost.NotifyRemoteScreenShareStopped("transport_screen_share_stopped", sender, localStop: false);
+    }
+
+    private void RequestHelperRemoteRecoveryKeyframe(
+        long streamEpoch,
+        string reason,
+        long currentEpochNeedMoreInputCount,
+        long expectedNextFrameId = -1,
+        long receivedFrameId = -1,
+        long lastCleanFrameId = -1)
+    {
+        if (disposed ||
+            role != SessionRuntimeRole.Helper ||
+            state != SessionRuntimeState.Connected ||
+            transport is not IScreenShareSignalingTransport screenShareTransport)
+        {
+            return;
+        }
+
+        var sessionId = currentSessionGrant?.SessionId.Value ?? sessionSecurityState.SessionId?.Value;
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return;
+        }
+
         var nowUtc = nowProvider();
-        remoteScreenShareFramesSuppressedUntilUtc = nowUtc.Add(RemoteScreenShareStopFrameSuppressionWindow);
-        Interlocked.Exchange(ref remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs, nowUtc.ToUnixTimeMilliseconds());
-        Interlocked.Exchange(ref lastScreenShareStopSuppressedLogTick, 0);
-        remoteScreenShareActive = false;
+        lock (helperRemoteScreenSharePressureGate)
+        {
+            if (helperRemoteLastRecoveryKeyframeRequestEpoch == streamEpoch &&
+                helperRemoteLastRecoveryKeyframeRequestUtc != default &&
+                nowUtc - helperRemoteLastRecoveryKeyframeRequestUtc < TimeSpan.FromMilliseconds(500))
+            {
+                return;
+            }
+
+            helperRemoteLastRecoveryKeyframeRequestEpoch = streamEpoch;
+            helperRemoteLastRecoveryKeyframeRequestUtc = nowUtc;
+        }
+
         LocalOperationalLog.Info(
             "ScreenShareTransport",
-            $"event=screenshare_stop_received_runtime; suppressed_until_utc={remoteScreenShareFramesSuppressedUntilUtc:O}; control_state={remoteControlSessionState.ControlState}; role={role}; transport={GetTransportNameForLog(sender)}");
-        ScheduleRemoteControlScreenShareStopGrace();
-        SyncFileTransferFlowControlMode();
-        ScreenShareStopped?.Invoke(this, EventArgs.Empty);
+            $"event=screenshare_recovery_keyframe_requested; role=helper_remote; stream_epoch={streamEpoch}; reason={reason}; recovery_active=1; current_epoch_need_more_input_count={Math.Max(0, currentEpochNeedMoreInputCount)}; expected_next_frame_id={(expectedNextFrameId >= 0 ? expectedNextFrameId.ToString() : "(none)")}; received_frame_id={(receivedFrameId >= 0 ? receivedFrameId.ToString() : "(none)")}; last_clean_frame_id={(lastCleanFrameId >= 0 ? lastCleanFrameId.ToString() : "(none)")}");
+
+        var message = new ScreenShareVideoKeyframeRequestV1
+        {
+            SessionId = sessionId,
+            StreamEpoch = streamEpoch,
+            Reason = reason,
+        };
+
+        RunCountedBackgroundTask(
+            async () =>
+            {
+                try
+                {
+                    await screenShareTransport.SendScreenShareVideoKeyframeRequestAsync(message, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    LogRemoteControlInfo("screenshare_recovery_keyframe_request_failed", ex.GetType().Name, null, null);
+                }
+            },
+            countAsTransportTask: false);
     }
 
     private void NotifyLocalScreenShareStoppedForTeardown(string reason, object? sender)
+    {
+        screenShareControlHost.NotifyRemoteScreenShareStopped(reason, sender, localStop: true);
+    }
+
+    private static void ForceCloseWindowsGraphicsCaptureLeases(string reason)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var safeReason = SensitiveDataRedactor.Redact(
+            string.IsNullOrWhiteSpace(reason) ? "unspecified" : reason.Trim());
+        try
+        {
+            WindowsGraphicsCaptureRawSource.ForceCloseAllScreenShareLeases(safeReason);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_wgc_force_close_all_failed; reason={safeReason}; ex={ex.GetType().Name}");
+        }
+    }
+
+    private void NotifyRemoteScreenShareStoppedCore(string reason, object? sender, bool localStop)
     {
         var nowUtc = nowProvider();
         remoteScreenShareFramesSuppressedUntilUtc = nowUtc.Add(RemoteScreenShareStopFrameSuppressionWindow);
         Interlocked.Exchange(ref remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs, nowUtc.ToUnixTimeMilliseconds());
         Interlocked.Exchange(ref lastScreenShareStopSuppressedLogTick, 0);
-        remoteScreenShareActive = false;
-        LocalOperationalLog.Info(
-            "ScreenShareTransport",
-            $"event=screenshare_stop_local_runtime; reason={reason}; suppressed_until_utc={remoteScreenShareFramesSuppressedUntilUtc:O}; control_state={remoteControlSessionState.ControlState}; role={role}; transport={GetTransportNameForLog(sender)}");
+        screenShareControlHost.ResetRemoteScreenShareActivity();
+        StopHelperRemoteScreenSharePressureTimer();
+        LogAndResetHelperRemoteScreenShareSummary(reason);
+        ResetHelperRemoteScreenSharePressureTracking();
+        if (localStop)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_stop_local_runtime; reason={reason}; suppressed_until_utc={remoteScreenShareFramesSuppressedUntilUtc:O}; control_state={remoteControlSessionState.ControlState}; role={role}; transport={GetTransportNameForLog(sender)}");
+        }
+        else
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_stop_received_runtime; suppressed_until_utc={remoteScreenShareFramesSuppressedUntilUtc:O}; control_state={remoteControlSessionState.ControlState}; role={role}; transport={GetTransportNameForLog(sender)}");
+        }
         ScheduleRemoteControlScreenShareStopGrace();
         SyncFileTransferFlowControlMode();
+        transportScreenShareCoordinator.SetRemotePressureState(ScreenShareRemotePressureMode.None, localStop ? reason : "screenshare_stopped", 0, 0);
         try
         {
             ScreenShareStopped?.Invoke(this, EventArgs.Empty);
@@ -5018,7 +7863,7 @@ public sealed partial class SessionRuntime
         fileTransferHost.LogSnapshot(e.Snapshot);
         fileTransferService.SetSessionScreenShareDegraded(
             IsSessionScreenShareActive() &&
-            string.Equals(transportScreenShareCoordinator.GetMetricsSnapshot().FreshnessMode, "degraded", StringComparison.Ordinal));
+            !string.Equals(transportScreenShareCoordinator.GetMetricsSnapshot().FreshnessMode, "normal", StringComparison.Ordinal));
         transportScreenShareCoordinator.SetFileTransferDegradedHint(
             IsSessionScreenShareActive() && fileTransferService.IsTransferDegraded);
         transportScreenShareCoordinator.SetFileTransferCatchUpOnlyHint(
@@ -5031,6 +7876,24 @@ public sealed partial class SessionRuntime
         try
         {
             fileTransferService.SetSessionScreenShareDegraded(IsSessionScreenShareActive() && e.IsActive);
+            if (transport is IScreenShareTransportPolicyController policyController)
+            {
+                RunCountedBackgroundTask(
+                    async () =>
+                    {
+                        try
+                        {
+                            await policyController.SetScreenShareTransportCatchUpOnlyAsync(
+                                active: IsSessionScreenShareActive() && e.IsActive,
+                                CancellationToken.None).ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            LogRemoteControlInfo("screenshare_transport_policy_update_failed", ex.GetType().Name, null, null);
+                        }
+                    },
+                    countAsTransportTask: false);
+            }
         }
         catch (ObjectDisposedException)
         {
@@ -5133,6 +7996,13 @@ public sealed partial class SessionRuntime
     {
         throw new InvalidOperationException(
             $"Invalid transport transition: {from} -> {to} (reason={reason})");
+    }
+
+    private static string SanitizeDispatchExceptionMessage(string? message)
+    {
+        return string.IsNullOrWhiteSpace(message)
+            ? "(none)"
+            : message.Replace(';', ',').Trim();
     }
 
     private void TransitionTo(TransportState newState, string reason, Exception? ex = null)
@@ -5789,6 +8659,8 @@ public sealed partial class SessionRuntime
         {
             EnsureRemoteControlStoppedForAuthorizationLoss("capability_lost");
         }
+
+        SyncTransportScreenShareCursorCaptureForRemoteControl("refresh_capabilities");
     }
 
     private static void EnsureSessionSecurityTransport(ISignalingTransport signalingTransport)
@@ -5810,6 +8682,7 @@ public sealed partial class SessionRuntime
     private void ResetRemoteControlState(string reason)
     {
         Interlocked.Increment(ref remoteControlStopPriorityEpoch);
+        StopHelperRemoteScreenSharePressureTimer();
         CancelRemoteControlRequestTimeout();
         CancelRemoteControlConsentTimeout();
         CancelRemoteControlDeniedCooldown();
@@ -5847,7 +8720,16 @@ public sealed partial class SessionRuntime
         Interlocked.Exchange(ref remoteControlSnapshotForcedUpX2Tick, 0);
         remoteScreenShareFramesSuppressedUntilUtc = default;
         Interlocked.Exchange(ref remoteScreenShareSuppressFramesCapturedBeforeOrAtUtcMs, 0);
-        remoteScreenShareActive = false;
+        screenShareControlHost.ResetRemoteScreenShareActivity();
+        lastSentScreenSharePressureMode = ScreenSharePressureMode.Normal;
+        lastSentScreenSharePressureReason = ScreenSharePressureProtocol.PressureReasonHealthy;
+        lastSentScreenSharePressureAgeMs = 0;
+        lastSentScreenSharePressureStaleDrops = 0;
+        lastSentScreenSharePressureUtc = default;
+        lastSentScreenSharePressureModeEnteredUtc = default;
+        lastObservedRemoteScreenShareStaleDrops = 0;
+        healthyScreenSharePressureIntervals = 0;
+        ResetHelperRemoteScreenSharePressureTracking();
         ResetRemoteControlWheelDeltaCarry();
         ResetRemoteControlDebugLastMapped();
         Interlocked.Exchange(ref remoteControlForceNextMoveInjectionLog, 0);
@@ -5863,9 +8745,44 @@ public sealed partial class SessionRuntime
                 reason));
         remoteControlSessionState = transition.NextState;
         UpdateRemoteControlStatusHint(reason, remoteControlSessionState.ControlState);
+        SyncTransportScreenShareCursorCaptureForRemoteControl(reason);
 
         LogRemoteControlTransition(transition.PreviousState, remoteControlSessionState, reason);
         NotifyRemoteControlStateChanged();
+    }
+
+    private void SyncTransportScreenShareCursorCaptureForRemoteControl(string? reason)
+    {
+        if (role != SessionRuntimeRole.Helpee)
+        {
+            return;
+        }
+
+        var passiveOverlayActive = ShouldUsePassiveScreenShareCursorOverlayForTransport();
+        var shouldEnableCapturedCursor =
+            remoteControlSessionState.ControlState != ControlState.Active &&
+            !passiveOverlayActive;
+        var normalizedReason = string.IsNullOrWhiteSpace(reason)
+            ? "remote_control_state"
+            : reason.Trim();
+        var applied = transportScreenShareCoordinator.TrySetCapturedCursorEnabledForRemoteControl(
+            shouldEnableCapturedCursor,
+            normalizedReason);
+        LocalOperationalLog.Info(
+            "RemoteControl",
+            $"event=screen_share_cursor_capture_sync; role={role}; state={remoteControlSessionState.ControlState}; passive_cursor_overlay_active={(passiveOverlayActive ? 1 : 0)}; captured_cursor_enabled={(shouldEnableCapturedCursor ? 1 : 0)}; applied={(applied ? 1 : 0)}; reason={normalizedReason}");
+    }
+
+    private bool ShouldUsePassiveScreenShareCursorOverlayForTransport()
+    {
+        return role == SessionRuntimeRole.Helpee &&
+               state == SessionRuntimeState.Connected &&
+               remoteControlSessionState.ControlState != ControlState.Active &&
+               FeatureFlags.EnableScreenShareTransport &&
+               FeatureFlags.EnableScreenShareCapture &&
+               CanPerform(SessionCapability.ScreenShare) &&
+               transport is IScreenShareCursorOverlayCapabilityProvider cursorOverlayProvider &&
+               cursorOverlayProvider.SessionSupportsScreenShareCursorOverlay;
     }
 
     private void ResetRemoteControlRequestScopedTracking(string reason)
@@ -7397,3 +10314,4 @@ public sealed partial class SessionRuntime
     }
 
 }
+

@@ -8,9 +8,9 @@ Powered by NKN. Official website: https://nkn.org/
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
-## Current Release (0.5.3)
+## Current Release (0.6.0)
 
-`0.5.3` is the current release. It keeps the `0.5.x` authenticated session model, simplifies the helper/helpee connection flow around a helper address plus direct `Request help`, and rolls forward the latest session-lifecycle, invite-generation, and NKN/file-transfer hardening.
+`0.6.0` is the current release. It keeps the authenticated helper-address session model from the previous stable release, and moves the default screenshare path from legacy JPEG frame updates to H.264 video with stronger visual-integrity recovery, smoother cursor presentation, lower helpee CPU cost, and improved Windows Graphics Capture teardown.
 
 ## Quick Start (Windows)
 
@@ -43,7 +43,7 @@ Remote control:
 ![Remote control session](docs/images/remote-control-0.4.5.png)
 
 If connection fails:
-Open Diagnostics -> Copy diagnostics and include it when reporting issues.
+Open Diagnostics -> Copy diagnostics and include it when reporting issues. If a screenshare soak artifact has already been analyzed, Diagnostics includes a compact screenshare evidence summary; for hangs or freezes, use Diagnostics -> Save Hang Report. See [`docs/supportability.md`](docs/supportability.md) for the support evidence checklist.
 
 For release-safe builds, Diagnostics should show:
 - `invite_security_mode: issued_one_time_secret_invites`
@@ -55,17 +55,29 @@ Normal release UX uses a raw helper address plus a short verification code, then
 
 Notes:
 - Windows x64 only
-- Current release (`0.5.3`)
-- `0.5.3` includes repeated-session hardening for reject/timeout/end flows, safer invite regeneration, and improved session reset behavior after reconnects
-- Chat UX in `0.5.3` now includes `Enter` to send, `Shift+Enter` for a new line, and more stable pane sizing in chat-only and screen-sharing layouts
-- File transfer in `0.5.3` is single-file only. No folders, drag-and-drop, or resume after restart yet.
+- Current release (`0.6.0`)
+- `0.6.0` migrates default screensharing from JPEG frame updates to H.264 video transport, with helper-side recovery protection for broken reference chains.
+- `0.6.0` adds a helper-side cursor overlay for smoother cursor motion, H.264 motion/keyframe safeguards, WGC GPU scaling, and same-apartment Win10 WGC teardown for the yellow capture border.
+- Chat UX keeps `Enter` to send, `Shift+Enter` for a new line, and stable pane sizing in chat-only and screen-sharing layouts.
+- File transfer in `0.6.0` is single-file only. No folders, drag-and-drop, or resume after restart yet.
 - Received files are saved into an app-owned folder under `%LOCALAPPDATA%\nLink\transfers\incoming\...`
-- Safe-by-default file size cap for `0.5.3`: `1 GiB`
-- Large file transfers over NKN can still be noticeably slower than local or direct network copy, though `0.5.3` includes a more conservative NKN startup profile to reduce repair churn.
+- Safe-by-default file size cap for `0.6.0`: `1 GiB`
+- Large file transfers over NKN can still be noticeably slower than local or direct network copy. Live screenshare latency can also vary with NKN/network delivery.
 - Installer path: `%LOCALAPPDATA%\Programs\nLink`
 
 License:
 - MIT (see `LICENSE`)
+
+## Documentation
+
+- Current docs index:
+  [`docs/README.md`](docs/README.md)
+- Support evidence guide:
+  [`docs/supportability.md`](docs/supportability.md)
+- Test lane matrix:
+  [`docs/test-lanes.md`](docs/test-lanes.md)
+- Screenshare operator guide:
+  [`docs/screenshare-operability.md`](docs/screenshare-operability.md)
 
 ## Build from source (developers)
 
@@ -83,10 +95,15 @@ License:
 
 ### Tests
 
-- Run all tests:
-  `dotnet test`
-- Run deterministic smoke tests (always available):
-  `dotnet test -c Release --filter Category=Smoke`
+- Run all domain ownership lanes:
+  `powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane Core,Gui,ScreenShare,RemoteControl,Contracts`
+- Run deterministic release smoke tests:
+  `powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane Smoke -Configuration Release`
+- See the lane matrix:
+  [`docs/test-lanes.md`](docs/test-lanes.md)
+- For screenshare validation and support flow selection:
+  `powershell -ExecutionPolicy Bypass -File .\tools\ScreenShare-Ops.ps1 -Mode Test`
+  [`docs/screenshare-operability.md`](docs/screenshare-operability.md)
 
 ### Release Validation (Maintainers, Windows)
 
@@ -98,11 +115,11 @@ License:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
 - Final release notes:
-  [`docs/releases/0.5.3.md`](docs/releases/0.5.3.md)
+  [`docs/releases/0.6.0.md`](docs/releases/0.6.0.md)
 - GitHub release body:
-  [`docs/releases/0.5.3-github.md`](docs/releases/0.5.3-github.md)
-- Screenshare RC/final validation checklist:
-  [`docs/release/0.3.0-rc-validation-checklist.md`](docs/release/0.3.0-rc-validation-checklist.md)
+  [`docs/releases/0.6.0-github.md`](docs/releases/0.6.0-github.md)
+- RC/final validation checklist:
+  [`docs/release/rc-validation-checklist.md`](docs/release/rc-validation-checklist.md)
 
 ### Dead-Code Report (Local, Non-Destructive)
 

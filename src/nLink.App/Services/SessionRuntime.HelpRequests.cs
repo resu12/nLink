@@ -1,4 +1,6 @@
 using System;
+using System.Globalization;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using NLink.Core;
@@ -32,7 +34,9 @@ public sealed partial class SessionRuntime
             ThrowIfStartInProgress();
             startInProgress = true;
 
+            ClearGuiSmokeHelperAddressArtifact();
             await ResetCoreAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
+            var listenerGeneration = Interlocked.Increment(ref helperListenerGeneration);
             BeginConnectAttempt(SessionRuntimeRole.Helper, "helper_listener");
             TransitionTo(TransportState.TransportInitializing, "start_helper_listener");
 
@@ -80,6 +84,7 @@ public sealed partial class SessionRuntime
 
             hostReady = true;
             SetState(SessionRuntimeState.Waiting, "Waiting for help requests…");
+            PublishHelperListenerBootstrapSnapshotIfCurrent(nextTransport, linkedCts, listenerGeneration);
         }
         finally
         {
@@ -187,6 +192,132 @@ public sealed partial class SessionRuntime
             .ConfigureAwait(false);
     }
 
+    private void PublishHelperListenerBootstrapSnapshotIfCurrent(
+        ISignalingTransport nextTransport,
+        CancellationTokenSource? linkedCts,
+        long listenerGeneration)
+    {
+        if (disposed ||
+            linkedCts is null ||
+            linkedCts.IsCancellationRequested ||
+            !hostReady ||
+            !ReferenceEquals(transport, nextTransport) ||
+            !ReferenceEquals(sessionCts, linkedCts) ||
+            role != SessionRuntimeRole.Helper ||
+            helperConnectOrigin != HelperConnectOrigin.Listener ||
+            state != SessionRuntimeState.Waiting ||
+            helperListenerGeneration != listenerGeneration ||
+            CurrentLocalPeerAddress is not PeerAddress helperAddress)
+        {
+            return;
+        }
+
+        var snapshot = new HelperListenerBootstrapSnapshot(
+            helperAddress,
+            GetRunIdForLog(),
+            listenerGeneration,
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            HostReady: true);
+        helperListenerBootstrapSnapshot = snapshot;
+        WriteGuiSmokeHelperAddressArtifact(snapshot);
+        LocalOperationalLog.Info(
+            "Session",
+            $"event=helper_local_peer_address_ready; address={snapshot.Address.Value}; transport={GetCurrentTransportKind()}; state={state}; run_id={snapshot.RunId}; listener_generation={snapshot.ListenerGeneration}; published_utc_ms={snapshot.PublishedUtcMs}; host_ready={(snapshot.HostReady ? 1 : 0)}");
+        HelperListenerBootstrapSnapshotChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void ClearHelperListenerBootstrapSnapshot(string reason)
+    {
+        var snapshot = helperListenerBootstrapSnapshot;
+        helperListenerBootstrapSnapshot = null;
+        if (snapshot is null)
+        {
+            return;
+        }
+
+        ClearGuiSmokeHelperAddressArtifact();
+        LocalOperationalLog.Info(
+            "Session",
+            $"event=helper_local_peer_address_cleared; reason={reason}; address={snapshot.Address.Value}; run_id={snapshot.RunId}; listener_generation={snapshot.ListenerGeneration}; published_utc_ms={snapshot.PublishedUtcMs}; host_ready={(snapshot.HostReady ? 1 : 0)}");
+        HelperListenerBootstrapSnapshotChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private static void WriteGuiSmokeHelperAddressArtifact(HelperListenerBootstrapSnapshot snapshot)
+    {
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NLINK_GUI_SMOKE_SCENARIOS")))
+        {
+            return;
+        }
+
+        try
+        {
+            var directory = GetGuiSmokeHelperAddressArtifactDirectory();
+            Directory.CreateDirectory(directory);
+            var payload = string.Create(
+                CultureInfo.InvariantCulture,
+                $"run_id={snapshot.RunId.Trim()};listener_generation={snapshot.ListenerGeneration};address={snapshot.Address.Value.Trim()};published_utc_ms={snapshot.PublishedUtcMs};host_ready={(snapshot.HostReady ? 1 : 0)}");
+            File.WriteAllText(GetGuiSmokeHelperAddressArtifactPath(snapshot), payload);
+        }
+        catch
+        {
+            // GUI smoke artifacts must never disrupt the runtime path.
+        }
+    }
+
+    private static void ClearGuiSmokeHelperAddressArtifact()
+    {
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NLINK_GUI_SMOKE_SCENARIOS")))
+        {
+            return;
+        }
+
+        try
+        {
+            foreach (var artifactPath in Directory.EnumerateFiles(
+                         GetGuiSmokeHelperAddressArtifactDirectory(),
+                         "helper-address*.txt",
+                         SearchOption.TopDirectoryOnly))
+            {
+                if (File.Exists(artifactPath))
+                {
+                    File.Delete(artifactPath);
+                }
+            }
+        }
+        catch
+        {
+            // GUI smoke artifacts must never disrupt the runtime path.
+        }
+    }
+
+    private static string GetGuiSmokeHelperAddressArtifactDirectory()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "nLink",
+            "gui-smoke");
+    }
+
+    private static string GetGuiSmokeHelperAddressArtifactPath(HelperListenerBootstrapSnapshot snapshot)
+    {
+        var sanitizedRunId = SanitizeHelperArtifactSegment(snapshot.RunId);
+        var generation = snapshot.ListenerGeneration.ToString(CultureInfo.InvariantCulture);
+        return Path.Combine(
+            GetGuiSmokeHelperAddressArtifactDirectory(),
+            $"helper-address.{sanitizedRunId}.{generation}.txt");
+    }
+
+    private static string SanitizeHelperArtifactSegment(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "unknown";
+        }
+
+        var trimmed = value.Trim();
+        return string.Concat(trimmed.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries));
+    }
+
     public async Task RejectIncomingHelpRequestAsync(string? reason, CancellationToken uiCt)
     {
         PendingIncomingHelpRequest? pending;
@@ -249,6 +380,7 @@ public sealed partial class SessionRuntime
         {
             if (e.Decision.Accepted)
             {
+                pendingOutboundHelpRequest = null;
                 SetState(SessionRuntimeState.Waiting, "Helper accepted. Finalizing secure connection…");
                 PublishSessionFlowEvent(new SessionFlowEvent(
                     SessionFlowEventKind.LocalApprovalStarted,

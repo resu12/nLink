@@ -92,9 +92,18 @@
                                         VerticalAlignment="Stretch"
                                         ShowScreenShareAction="True"
                                         ShowChatPaneRequested="{Binding ShowConnectedPanel}">
+                    <views:SessionShellView.HeaderAccessory>
+                        <ComboBox Width="180"
+                                  MinWidth="180"
+                                  AutomationProperties.AutomationId="Helpee.ScreenShareDisplayPicker"
+                                  ItemsSource="{Binding AvailableCaptureDisplays}"
+                                  SelectedItem="{Binding SelectedCaptureDisplay, Mode=TwoWay}"
+                                  IsVisible="{Binding ShowHeaderCaptureDisplayPicker}"/>
+                    </views:SessionShellView.HeaderAccessory>
                     <views:SessionShellView.MainContent>
                         <Grid>
                             <views:ScreenShareSurfaceView Frame="{Binding ScreenSharePreviewFrame}"
+                                                          SurfaceRole="helpee_preview"
                                                           IsVisible="{Binding ShowScreenSharePreviewFrame}"/>
 
                             <Border IsVisible="{Binding ShowRemoteControlPreviewActiveCue}"
@@ -310,7 +319,7 @@
                                                             Classes="appButton positiveButton action"
                                                             Content="Request help"
                                                             Command="{Binding RequestHelpCommand}"
-                                                            IsEnabled="{Binding CanStartOrConnect}"/>
+                                                            IsEnabled="{Binding CanRequestHelpAction}"/>
 
                                                     <TextBlock Classes="appMuted"
                                                                Text="{Binding CopyFeedback.Text}"
@@ -419,10 +428,21 @@
                                     </StackPanel>
                             </Border>
 
-                            <Border Background="#7F0B111A"
-                                    IsVisible="{Binding ShowRemoteControlConsentDialog}"
-                                    HorizontalAlignment="Stretch"
-                                    VerticalAlignment="Stretch">
+                        </Grid>
+                    </views:SessionShellView.MainContent>
+
+                    <views:SessionShellView.ChatContent>
+                        <Border HorizontalAlignment="Stretch">
+                            <views:ChatView HorizontalAlignment="Stretch"/>
+                        </Border>
+                    </views:SessionShellView.ChatContent>
+
+                    <views:SessionShellView.OverlayContent>
+                        <Border Background="#7F0B111A"
+                                IsVisible="{Binding ShowRemoteControlConsentDialog}"
+                                HorizontalAlignment="Stretch"
+                                VerticalAlignment="Stretch">
+                            <Grid>
                                 <Border HorizontalAlignment="Center"
                                         VerticalAlignment="Center"
                                         MaxWidth="460"
@@ -444,6 +464,12 @@
                                                    TextWrapping="Wrap"
                                                    TextAlignment="Center"/>
 
+                                        <TextBlock Text="{Binding RemoteControlConsentFeedbackText}"
+                                                   Foreground="{StaticResource AppAccentBrush}"
+                                                   TextWrapping="Wrap"
+                                                   TextAlignment="Center"
+                                                   IsVisible="{Binding ShowRemoteControlConsentFeedback}"/>
+
                                         <Grid ColumnDefinitions="Auto,Auto"
                                               ColumnSpacing="10"
                                               HorizontalAlignment="Center">
@@ -451,24 +477,20 @@
                                                     Classes="appButton positiveButton"
                                                     AutomationProperties.AutomationId="Helpee.ControlConsent.Allow"
                                                     Content="Allow control"
-                                                    Command="{Binding AllowControlConsentCommand}"/>
+                                                    Command="{Binding AllowControlConsentCommand}"
+                                                    IsEnabled="{Binding CanSubmitRemoteControlConsent}"/>
                                             <Button Grid.Column="1"
                                                     Classes="appButton secondaryButton"
                                                     AutomationProperties.AutomationId="Helpee.ControlConsent.Deny"
                                                     Content="Deny"
-                                                    Command="{Binding DenyControlConsentCommand}"/>
+                                                    Command="{Binding DenyControlConsentCommand}"
+                                                    IsEnabled="{Binding CanSubmitRemoteControlConsent}"/>
                                         </Grid>
                                     </StackPanel>
                                 </Border>
-                            </Border>
-                        </Grid>
-                    </views:SessionShellView.MainContent>
-
-                    <views:SessionShellView.ChatContent>
-                        <Border HorizontalAlignment="Stretch">
-                            <views:ChatView HorizontalAlignment="Stretch"/>
+                            </Grid>
                         </Border>
-                    </views:SessionShellView.ChatContent>
+                    </views:SessionShellView.OverlayContent>
                 </views:SessionShellView>
 
                 <Button Grid.Row="1"

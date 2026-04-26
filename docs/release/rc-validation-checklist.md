@@ -3,6 +3,8 @@
 ## Build & Packaging
 
 - [ ] CI is green for smoke, reliability gate, packaging, and `installer_smoke`.
+- [ ] `tools\Test-Lanes.ps1 -Lane Smoke -Configuration Release` passes, or the CI smoke lane passed from the same commit.
+- [ ] Any changed domain has its ownership lane green: `Core`, `Gui`, `ScreenShare`, `RemoteControl`, or `Contracts`.
 - [ ] `artifacts/releases/<version>/` contains `nLink-Portable-win-x64-<version>.zip`.
 - [ ] `artifacts/releases/<version>/` contains `nLink-Setup-win-x64-<version>.exe`.
 - [ ] `artifacts/releases/<version>/` contains `SHA256SUMS.txt`.
@@ -15,7 +17,7 @@
 
 ## Upgrade
 
-- [ ] `0.1.0-beta.5` -> `0.2.0-rc.1` in-place upgrade was tested.
+- [ ] Previous supported public installer -> current RC in-place upgrade was tested.
 - [ ] Settings or local runtime data were preserved where applicable.
 
 ## UI Sanity
@@ -31,4 +33,5 @@
 ## Tag Readiness
 
 - [ ] `VERSION` matches the intended tag.
-- [ ] Release notes and changelog are ready.
+- [ ] Release notes are ready under `docs/releases/<version>.md`.
+- [ ] Support guidance still points to `docs/supportability.md` and Diagnostics / Hang Report capture.

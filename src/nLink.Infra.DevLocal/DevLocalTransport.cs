@@ -16,7 +16,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.DevLocal;
 
 // DEV ONLY: local machine named-pipe transport for testing two app instances without real networking.
-public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IFileTransferSignalingTransport, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider
+public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IFileTransferSignalingTransport, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider
 {
     private const string HelpRequestFrameType = "help_request";
     private const string HelpRequestDecisionFrameType = "help_request_decision";
@@ -37,8 +37,13 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private const string ControlAckFrameType = "control_ack";
     private const string ControlStateSnapshotFrameType = "control_state_snapshot";
     private const string ControlDisplayInfoFrameType = "control_display_info";
+    private const string ScreenSharePressureStateFrameType = "screenshare_pressure_state";
     private const string ScreenSharePayloadFrameType = "screenshare_payload";
     private const string ScreenShareStopFrameType = "screenshare_stop";
+    private const string ScreenShareVideoStreamConfigFrameType = "screenshare_video_stream_config";
+    private const string ScreenShareVideoKeyframeRequestFrameType = "screenshare_video_keyframe_request";
+    private const string ScreenShareRecoveryReceiptFrameType = "screenshare_recovery_receipt";
+    private const string ScreenShareCursorStateFrameType = "screenshare_cursor_state";
     private const string FileTransferOfferFrameType = "file_transfer_offer";
     private const string FileTransferAcceptFrameType = "file_transfer_accept";
     private const string FileTransferDeclineFrameType = "file_transfer_decline";
@@ -66,7 +71,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private readonly IInviteTokenValidator inviteTokenValidator;
     private readonly IInviteValidationThrottle inviteValidationThrottle;
     private readonly ISessionHandshakeReplayCache handshakeReplayCache;
-    private readonly ScreenShareFrameReassembler screenShareFrameReassembler = new();
+    private readonly ScreenShareVideoFrameReassembler screenShareFrameReassembler = new();
     private readonly object secureStateGate = new();
     private readonly SessionReplayWindow inboundChatReplayWindow = new();
     private readonly SessionReplayWindow inboundControlReplayWindow = new();
@@ -76,6 +81,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private readonly Dictionary<string, FileTransferTransportState> fileTransferStates = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
     private const bool LocalRemoteControlSupported = true;
+    private const bool LocalScreenShareCursorOverlaySupported = true;
     private readonly string localPeerAddress;
     private SessionConnection? activeConnection;
     private PendingOutboundHandshakeState? pendingOutboundHandshake;
@@ -93,6 +99,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private long nextOutboundFileTransferSecureSequence;
     private TaskCompletionSource<bool> hostReadyTcs = CreateHostReadyTcs();
     private bool remoteSupportsRemoteControl;
+    private bool remoteSupportsScreenShareCursorOverlay;
     private bool disposed;
 
     public DevLocalTransport(string? localPeerAddress = null)
@@ -102,6 +109,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         inviteValidationThrottle = InviteTokenServiceFactory.CreateInviteValidationThrottle();
         handshakeReplayCache = new InMemorySessionHandshakeReplayCache();
         screenShareFrameReassembler.FrameReady += OnScreenShareFrameReady;
+        screenShareFrameReassembler.KeyframeRequested += OnScreenShareKeyframeRequested;
     }
 
     public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
@@ -128,6 +136,11 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     public event EventHandler<RemoteControlDisplayInfoReceivedEventArgs>? RemoteControlDisplayInfoReceived;
     public event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
     public event EventHandler? ScreenShareStopped;
+    public event EventHandler<ScreenSharePressureStateReceivedEventArgs>? ScreenSharePressureStateReceived;
+    public event EventHandler<ScreenShareRecoveryReceiptReceivedEventArgs>? ScreenShareRecoveryReceiptReceived;
+    public event EventHandler<ScreenShareVideoStreamConfigReceivedEventArgs>? ScreenShareVideoStreamConfigReceived;
+    public event EventHandler<ScreenShareVideoKeyframeRequestReceivedEventArgs>? ScreenShareVideoKeyframeRequestReceived;
+    public event EventHandler<ScreenShareCursorStateReceivedEventArgs>? ScreenShareCursorStateReceived;
     public event EventHandler<FileTransferOfferReceivedEventArgs>? FileTransferOfferReceived;
     public event EventHandler<FileTransferAcceptReceivedEventArgs>? FileTransferAcceptReceived;
     public event EventHandler<FileTransferDeclineReceivedEventArgs>? FileTransferDeclineReceived;
@@ -146,6 +159,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
     public bool RemoteSupportsRemoteControl => remoteSupportsRemoteControl;
     public bool SessionSupportsRemoteControl => LocalSupportsRemoteControl && RemoteSupportsRemoteControl;
+    public bool LocalSupportsScreenShareCursorOverlay => LocalScreenShareCursorOverlaySupported;
+    public bool RemoteSupportsScreenShareCursorOverlay => remoteSupportsScreenShareCursorOverlay;
+    public bool SessionSupportsScreenShareCursorOverlay => LocalSupportsScreenShareCursorOverlay && RemoteSupportsScreenShareCursorOverlay;
 
     public void Dispose()
     {
@@ -153,6 +169,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         TryCancelHostReady();
         ClearActiveConnection()?.Dispose();
         screenShareFrameReassembler.FrameReady -= OnScreenShareFrameReady;
+        screenShareFrameReassembler.KeyframeRequested -= OnScreenShareKeyframeRequested;
         screenShareFrameReassembler.ClearAll();
     }
 
@@ -172,6 +189,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         ThrowIfDisposed();
         ResetHostReady();
         remoteSupportsRemoteControl = false;
+        remoteSupportsScreenShareCursorOverlay = false;
         UpdateSessionSecurityState(SessionSecurityState.CreateHelpeeWaiting(new PeerAddress(localPeerAddress)));
         var cancelRegistration = ct.Register(() => ClearActiveConnection()?.Dispose());
         try
@@ -326,6 +344,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         }
 
         remoteSupportsRemoteControl = false;
+        remoteSupportsScreenShareCursorOverlay = false;
         pendingOutboundHandshake = outboundHandshake;
         UpdateSessionSecurityState(SessionSecurityState.CreateHelperPending(
             outboundHandshake.SessionId,
@@ -361,6 +380,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                     Data = Convert.ToBase64String(helperKeyPair.PublicKey),
                     HelperAddress = localPeerAddress,
                     RemoteControlSupported = LocalSupportsRemoteControl,
+                    ScreenShareCursorOverlaySupported = LocalSupportsScreenShareCursorOverlay,
                 },
                 ct);
 
@@ -469,6 +489,62 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     {
         ArgumentNullException.ThrowIfNull(message);
         return SendControlFrameAsync(ControlDisplayInfoFrameType, RemoteControlPayloadCodec.Serialize(EnsureControlSessionId(message)), ct);
+    }
+
+    public Task SendScreenSharePressureStateAsync(ScreenSharePressureStateV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        return SendControlFrameAsync(
+            ScreenSharePressureStateFrameType,
+            ScreenSharePressureStateCodec.Serialize(EnsureScreenSharePressureStateSessionId(message)),
+            ct);
+    }
+
+    public Task SendScreenShareVideoStreamConfigAsync(ScreenShareVideoStreamConfigV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        return SendControlFrameAsync(
+            ScreenShareVideoStreamConfigFrameType,
+            ScreenShareVideoPayloadCodec.SerializeStreamConfig(message with
+            {
+                SessionId = ResolveControlSessionId(message.SessionId),
+            }),
+            ct);
+    }
+
+    public Task SendScreenShareVideoKeyframeRequestAsync(ScreenShareVideoKeyframeRequestV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        return SendControlFrameAsync(
+            ScreenShareVideoKeyframeRequestFrameType,
+            ScreenShareVideoKeyframeRequestCodec.Serialize(message with
+            {
+                SessionId = ResolveControlSessionId(message.SessionId),
+            }),
+            ct);
+    }
+
+    public Task SendScreenShareRecoveryReceiptAsync(ScreenShareRecoveryReceiptV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        return SendControlFrameAsync(
+            ScreenShareRecoveryReceiptFrameType,
+            ScreenShareRecoveryReceiptCodec.Serialize(EnsureScreenShareRecoveryReceiptSessionId(message)),
+            ct);
+    }
+
+    public Task SendScreenShareCursorStateAsync(ScreenShareCursorStateV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        if (!SessionSupportsScreenShareCursorOverlay)
+        {
+            return Task.CompletedTask;
+        }
+
+        return SendControlFrameAsync(
+            ScreenShareCursorStateFrameType,
+            ScreenShareCursorStateCodec.Serialize(EnsureScreenShareCursorStateSessionId(message)),
+            ct);
     }
 
     public Task SendScreenSharePayloadAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
@@ -726,6 +802,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 }
 
                 remoteSupportsRemoteControl = joinFrame.RemoteControlSupported == true;
+                remoteSupportsScreenShareCursorOverlay = joinFrame.ScreenShareCursorOverlaySupported == true;
 
                 using var hostKeyPair = ChatKeyAgreement.CreateKeyPair();
                 var sharedKey = hostKeyPair.DeriveSharedKey(helperPublicKey);
@@ -739,6 +816,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                         Type = HelloFrameType,
                         Data = Convert.ToBase64String(hostKeyPair.PublicKey),
                         RemoteControlSupported = LocalSupportsRemoteControl,
+                        ScreenShareCursorOverlaySupported = LocalSupportsScreenShareCursorOverlay,
                     },
                     ct);
 
@@ -885,6 +963,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                     if (!helloReceived.Task.IsCompleted)
                     {
                         remoteSupportsRemoteControl = frame.RemoteControlSupported == true;
+                        remoteSupportsScreenShareCursorOverlay = frame.ScreenShareCursorOverlaySupported == true;
                         var remotePublicKey = Convert.FromBase64String(frame.Data ?? string.Empty);
                         pendingSessionKey = helperKeyPair.DeriveSharedKey(remotePublicKey);
                         helloReceived.TrySetResult();
@@ -1040,6 +1119,48 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                     continue;
                 }
 
+                if (string.Equals(frame.Type, ScreenShareVideoStreamConfigFrameType, StringComparison.Ordinal))
+                {
+                    if (TryGetPayloadBytes(frame, out var payloadBytes) &&
+                        TryDecryptControlPayload(payloadBytes, ScreenShareVideoStreamConfigFrameType, ResolveExpectedRemotePeerAddressForCurrentSession(), out var securePayload) &&
+                        ScreenShareVideoPayloadCodec.TryDeserializeStreamConfig(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ScreenShareVideoStreamConfigFrameType, securePayload.Metadata, requestId: null) &&
+                        TryValidateScreenShareMessageSession("stream_config", message.SessionId))
+                    {
+                        HandleScreenShareVideoStreamConfig(message);
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(frame.Type, ScreenShareVideoKeyframeRequestFrameType, StringComparison.Ordinal))
+                {
+                    if (TryGetPayloadBytes(frame, out var payloadBytes) &&
+                        TryDecryptControlPayload(payloadBytes, ScreenShareVideoKeyframeRequestFrameType, ResolveExpectedRemotePeerAddressForCurrentSession(), out var securePayload) &&
+                        ScreenShareVideoKeyframeRequestCodec.TryDeserialize(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ScreenShareVideoKeyframeRequestFrameType, securePayload.Metadata, requestId: null) &&
+                        TryValidateScreenShareMessageSession("keyframe_request", message.SessionId))
+                    {
+                        SafeRaiseScreenShareVideoKeyframeRequestReceived(message);
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(frame.Type, ScreenShareRecoveryReceiptFrameType, StringComparison.Ordinal))
+                {
+                    if (TryGetPayloadBytes(frame, out var payloadBytes) &&
+                        TryDecryptControlPayload(payloadBytes, ScreenShareRecoveryReceiptFrameType, ResolveExpectedRemotePeerAddressForCurrentSession(), out var securePayload) &&
+                        ScreenShareRecoveryReceiptCodec.TryDeserialize(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ScreenShareRecoveryReceiptFrameType, securePayload.Metadata, requestId: null) &&
+                        TryValidateScreenShareMessageSession("recovery_receipt", message.SessionId))
+                    {
+                        SafeRaiseScreenShareRecoveryReceiptReceived(message);
+                    }
+
+                    continue;
+                }
+
                 if (TryHandleFileTransferFrame(frame))
                 {
                     continue;
@@ -1152,6 +1273,35 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                         TryValidateControlMessageSession("control_display_info", message.SessionId, requestId: null))
                     {
                         SafeRaiseRemoteControlDisplayInfoReceived(message);
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(frame.Type, ScreenSharePressureStateFrameType, StringComparison.Ordinal))
+                {
+                    if (TryGetPayloadBytes(frame, out var payloadBytes) &&
+                        TryDecryptControlPayload(payloadBytes, ScreenSharePressureStateFrameType, ResolveExpectedRemotePeerAddressForCurrentSession(), out var securePayload) &&
+                        ScreenSharePressureStateCodec.TryDeserialize(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ScreenSharePressureStateFrameType, securePayload.Metadata, requestId: null) &&
+                        TryValidateControlMessageSession("screenshare_pressure_state", message.SessionId, requestId: null))
+                    {
+                        SafeRaiseScreenSharePressureStateReceived(message);
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(frame.Type, ScreenShareCursorStateFrameType, StringComparison.Ordinal))
+                {
+                    if (SessionSupportsScreenShareCursorOverlay &&
+                        TryGetPayloadBytes(frame, out var payloadBytes) &&
+                        TryDecryptControlPayload(payloadBytes, ScreenShareCursorStateFrameType, ResolveExpectedRemotePeerAddressForCurrentSession(), out var securePayload) &&
+                        ScreenShareCursorStateCodec.TryDeserialize(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ScreenShareCursorStateFrameType, securePayload.Metadata, requestId: null) &&
+                        TryValidateControlMessageSession("screenshare_cursor_state", message.SessionId, requestId: null))
+                    {
+                        SafeRaiseScreenShareCursorStateReceived(message);
                     }
 
                     continue;
@@ -1427,6 +1577,63 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                     continue;
                 }
 
+                if (string.Equals(frame.Type, ScreenShareVideoStreamConfigFrameType, StringComparison.Ordinal))
+                {
+                    if (TryGetPayloadBytes(frame, out var payloadBytes) &&
+                        TryDecryptControlPayload(payloadBytes, ScreenShareVideoStreamConfigFrameType, currentSessionSecurityState.HelperAddress, out var securePayload) &&
+                        ScreenShareVideoPayloadCodec.TryDeserializeStreamConfig(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ScreenShareVideoStreamConfigFrameType, securePayload.Metadata, requestId: null) &&
+                        TryValidateScreenShareMessageSession("stream_config", message.SessionId))
+                    {
+                        HandleScreenShareVideoStreamConfig(message);
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(frame.Type, ScreenShareVideoKeyframeRequestFrameType, StringComparison.Ordinal))
+                {
+                    if (TryGetPayloadBytes(frame, out var payloadBytes) &&
+                        TryDecryptControlPayload(payloadBytes, ScreenShareVideoKeyframeRequestFrameType, currentSessionSecurityState.HelperAddress, out var securePayload) &&
+                        ScreenShareVideoKeyframeRequestCodec.TryDeserialize(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ScreenShareVideoKeyframeRequestFrameType, securePayload.Metadata, requestId: null) &&
+                        TryValidateScreenShareMessageSession("keyframe_request", message.SessionId))
+                    {
+                        SafeRaiseScreenShareVideoKeyframeRequestReceived(message);
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(frame.Type, ScreenShareRecoveryReceiptFrameType, StringComparison.Ordinal))
+                {
+                    if (TryGetPayloadBytes(frame, out var payloadBytes) &&
+                        TryDecryptControlPayload(payloadBytes, ScreenShareRecoveryReceiptFrameType, currentSessionSecurityState.HelperAddress, out var securePayload) &&
+                        ScreenShareRecoveryReceiptCodec.TryDeserialize(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ScreenShareRecoveryReceiptFrameType, securePayload.Metadata, requestId: null) &&
+                        TryValidateScreenShareMessageSession("recovery_receipt", message.SessionId))
+                    {
+                        SafeRaiseScreenShareRecoveryReceiptReceived(message);
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(frame.Type, ScreenShareCursorStateFrameType, StringComparison.Ordinal))
+                {
+                    if (SessionSupportsScreenShareCursorOverlay &&
+                        TryGetPayloadBytes(frame, out var payloadBytes) &&
+                        TryDecryptControlPayload(payloadBytes, ScreenShareCursorStateFrameType, currentSessionSecurityState.HelperAddress, out var securePayload) &&
+                        ScreenShareCursorStateCodec.TryDeserialize(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ScreenShareCursorStateFrameType, securePayload.Metadata, requestId: null) &&
+                        TryValidateScreenShareMessageSession("cursor_state", message.SessionId))
+                    {
+                        SafeRaiseScreenShareCursorStateReceived(message);
+                    }
+
+                    continue;
+                }
+
                 if (TryHandleFileTransferFrame(frame))
                 {
                     continue;
@@ -1531,6 +1738,33 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                         TryValidateControlSecureMetadata(ControlDisplayInfoFrameType, securePayload.Metadata, requestId: null))
                     {
                         SafeRaiseRemoteControlDisplayInfoReceived(message);
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(frame.Type, ScreenSharePressureStateFrameType, StringComparison.Ordinal))
+                {
+                    if (TryGetPayloadBytes(frame, out var payloadBytes) &&
+                        TryDecryptControlPayload(payloadBytes, ScreenSharePressureStateFrameType, currentSessionSecurityState.HelperAddress, out var securePayload) &&
+                        ScreenSharePressureStateCodec.TryDeserialize(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ScreenSharePressureStateFrameType, securePayload.Metadata, requestId: null))
+                    {
+                        SafeRaiseScreenSharePressureStateReceived(message);
+                    }
+
+                    continue;
+                }
+
+                if (string.Equals(frame.Type, ScreenShareCursorStateFrameType, StringComparison.Ordinal))
+                {
+                    if (SessionSupportsScreenShareCursorOverlay &&
+                        TryGetPayloadBytes(frame, out var payloadBytes) &&
+                        TryDecryptControlPayload(payloadBytes, ScreenShareCursorStateFrameType, currentSessionSecurityState.HelperAddress, out var securePayload) &&
+                        ScreenShareCursorStateCodec.TryDeserialize(securePayload.Plaintext, out var message) &&
+                        TryValidateControlSecureMetadata(ScreenShareCursorStateFrameType, securePayload.Metadata, requestId: null))
+                    {
+                        SafeRaiseScreenShareCursorStateReceived(message);
                     }
 
                     continue;
@@ -1776,11 +2010,15 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
     private void HandleScreenSharePayload(byte[] payloadBytes)
     {
-        if (ScreenSharePayloadCodec.TryDeserialize(payloadBytes, out var chunk))
+        if (ScreenShareVideoPayloadCodec.TryDeserializeFragmentEnvelope(payloadBytes, out var fragments, out _) &&
+            fragments.Length > 0)
         {
-            if (TryValidateScreenShareMessageSession("frame", chunk.SessionId))
+            if (TryValidateScreenShareMessageSession("frame", fragments[0].SessionId))
             {
-                screenShareFrameReassembler.OnChunk(chunk);
+                foreach (var fragment in fragments)
+                {
+                    screenShareFrameReassembler.OnFragment(fragment);
+                }
             }
 
             return;
@@ -1794,7 +2032,13 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         }
     }
 
-    private void OnScreenShareFrameReady(object? sender, ScreenShareFrameReadyEventArgs e)
+    private void HandleScreenShareVideoStreamConfig(ScreenShareVideoStreamConfigV1 message)
+    {
+        screenShareFrameReassembler.OnStreamConfig(message);
+        SafeRaiseScreenShareVideoStreamConfigReceived(message);
+    }
+
+    private void OnScreenShareFrameReady(object? sender, ScreenShareVideoFrameReadyEventArgs e)
     {
         try
         {
@@ -1806,8 +2050,12 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                     e.Height,
                     e.Encoding,
                     e.EncodedFrameBytes,
-                    e.TimestampUnixMilliseconds,
-                    SessionId: e.SessionId));
+                    e.CapturedTsUtcMs,
+                    SessionId: e.SessionId,
+                    IsKeyFrame: e.IsKeyFrame,
+                    StreamEpoch: e.StreamEpoch,
+                    StreamConfig: e.StreamConfig,
+                    FrameReadyObservedUtcMs: e.FrameReadyObservedUtcMs));
         }
         catch
         {
@@ -2319,7 +2567,8 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         var sessionId = currentSessionSecurityState.SessionId
             ?? throw new InvalidOperationException("Session security state does not have an active session id.");
         string messageType;
-        if (ScreenSharePayloadCodec.TryDeserialize(plaintextPayload, out _))
+        if (ScreenShareVideoPayloadCodec.TryDeserializeFragmentEnvelope(plaintextPayload, out var fragments, out _) &&
+            fragments.Length > 0)
         {
             messageType = ScreenSharePayloadFrameType;
         }
@@ -2649,6 +2898,75 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             }
 
             return true;
+        }
+    }
+
+    private void OnScreenShareKeyframeRequested(object? sender, ScreenShareVideoKeyframeRequestV1 e)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await SendScreenShareVideoKeyframeRequestAsync(e, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+            }
+        });
+    }
+
+    private void SafeRaiseScreenShareVideoStreamConfigReceived(ScreenShareVideoStreamConfigV1 message)
+    {
+        try
+        {
+            ScreenShareVideoStreamConfigReceived?.Invoke(this, new ScreenShareVideoStreamConfigReceivedEventArgs(message, peerId: "devlocal-peer"));
+        }
+        catch
+        {
+        }
+    }
+
+    private void SafeRaiseScreenShareVideoKeyframeRequestReceived(ScreenShareVideoKeyframeRequestV1 message)
+    {
+        try
+        {
+            ScreenShareVideoKeyframeRequestReceived?.Invoke(this, new ScreenShareVideoKeyframeRequestReceivedEventArgs(message, peerId: "devlocal-peer"));
+        }
+        catch
+        {
+        }
+    }
+
+    private void SafeRaiseScreenSharePressureStateReceived(ScreenSharePressureStateV1 message)
+    {
+        try
+        {
+            ScreenSharePressureStateReceived?.Invoke(this, new ScreenSharePressureStateReceivedEventArgs(message, peerId: "devlocal-peer"));
+        }
+        catch
+        {
+        }
+    }
+
+    private void SafeRaiseScreenShareRecoveryReceiptReceived(ScreenShareRecoveryReceiptV1 message)
+    {
+        try
+        {
+            ScreenShareRecoveryReceiptReceived?.Invoke(this, new ScreenShareRecoveryReceiptReceivedEventArgs(message, peerId: "devlocal-peer"));
+        }
+        catch
+        {
+        }
+    }
+
+    private void SafeRaiseScreenShareCursorStateReceived(ScreenShareCursorStateV1 message)
+    {
+        try
+        {
+            ScreenShareCursorStateReceived?.Invoke(this, new ScreenShareCursorStateReceivedEventArgs(message, peerId: "devlocal-peer"));
+        }
+        catch
+        {
         }
     }
 
@@ -3004,6 +3322,10 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     {
         ScreenSharePayloadFrameType => "screenshare_frame",
         ScreenShareStopFrameType => "screenshare_stop",
+        ScreenShareVideoStreamConfigFrameType => "screenshare_video_stream_config",
+        ScreenShareVideoKeyframeRequestFrameType => "screenshare_video_keyframe_request",
+        ScreenShareRecoveryReceiptFrameType => "screenshare_recovery_receipt",
+        ScreenShareCursorStateFrameType => "screenshare_cursor_state",
         _ => throw new ArgumentOutOfRangeException(nameof(frameType), frameType, "Unsupported screen-share frame type."),
     };
 
@@ -3047,6 +3369,15 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         => message with { SessionId = ResolveControlSessionId(message.SessionId) };
 
     private ControlDisplayInfoMessageV1 EnsureControlSessionId(ControlDisplayInfoMessageV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private ScreenSharePressureStateV1 EnsureScreenSharePressureStateSessionId(ScreenSharePressureStateV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private ScreenShareRecoveryReceiptV1 EnsureScreenShareRecoveryReceiptSessionId(ScreenShareRecoveryReceiptV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private ScreenShareCursorStateV1 EnsureScreenShareCursorStateSessionId(ScreenShareCursorStateV1 message)
         => message with { SessionId = ResolveControlSessionId(message.SessionId) };
 
     private FileTransferOfferV2 EnsureFileTransferSessionId(FileTransferOfferV2 message)
@@ -3703,6 +4034,9 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
         [JsonPropertyName("remoteControlSupported")]
         public bool? RemoteControlSupported { get; init; }
+
+        [JsonPropertyName("screenShareCursorOverlaySupported")]
+        public bool? ScreenShareCursorOverlaySupported { get; init; }
     }
 
     private sealed record PendingOutboundHandshakeState(

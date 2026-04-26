@@ -3,6 +3,7 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>nLink</AssemblyName>
     <RootNamespace>NLink.App</RootNamespace>
     <Product>nLink</Product>
@@ -53,9 +54,36 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(IsWindows)' == 'true'">
+    <PackageReference Include="FFmpeg.AutoGen" Version="7.1.1" />
     <PackageReference Include="Microsoft.Windows.SDK.NET" Version="10.0.18362.6-preview" />
+    <PackageReference Include="Sdcb.FFmpeg.runtime.windows-x64" Version="7.1.0" GeneratePathProperty="true" ExcludeAssets="runtime" PrivateAssets="all" />
     <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
   </ItemGroup>
+
+  <ItemGroup Condition="'$(IsWindows)' == 'true'">
+    <NLinkWindowsFfmpegRuntime Include="$(PkgSdcb_FFmpeg_runtime_windows-x64)\runtimes\win-x64\native\avcodec-61.dll" />
+    <NLinkWindowsFfmpegRuntime Include="$(PkgSdcb_FFmpeg_runtime_windows-x64)\runtimes\win-x64\native\avutil-59.dll" />
+    <NLinkWindowsFfmpegRuntime Include="$(PkgSdcb_FFmpeg_runtime_windows-x64)\runtimes\win-x64\native\swscale-8.dll" />
+    <NLinkWindowsFfmpegRuntime Include="$(PkgSdcb_FFmpeg_runtime_windows-x64)\runtimes\win-x64\native\swresample-5.dll" />
+  </ItemGroup>
+
+  <Target Name="CopyNLinkWindowsFfmpegRuntimeToBuildOutput"
+          AfterTargets="Build"
+          Condition="'$(IsWindows)' == 'true' and '@(NLinkWindowsFfmpegRuntime)' != '' and '$(TargetDir)' != ''">
+    <MakeDir Directories="$(TargetDir)ffmpeg" />
+    <Copy SourceFiles="@(NLinkWindowsFfmpegRuntime)"
+          DestinationFiles="@(NLinkWindowsFfmpegRuntime->'$(TargetDir)ffmpeg\%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyNLinkWindowsFfmpegRuntimeToPublishOutput"
+          AfterTargets="Publish"
+          Condition="'$(IsWindows)' == 'true' and '@(NLinkWindowsFfmpegRuntime)' != '' and '$(PublishDir)' != ''">
+    <MakeDir Directories="$(PublishDir)ffmpeg" />
+    <Copy SourceFiles="@(NLinkWindowsFfmpegRuntime)"
+          DestinationFiles="@(NLinkWindowsFfmpegRuntime->'$(PublishDir)ffmpeg\%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
 
   <ItemGroup>
     <ProjectReference Include="..\nLink.Core\nLink.Core.csproj" />
@@ -65,7 +93,22 @@
 
   <ItemGroup>
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
-      <_Parameter1>nLink.SmokeTests</_Parameter1>
+      <_Parameter1>NLink.SmokeTests.Contracts</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>NLink.SmokeTests.Core</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>NLink.SmokeTests.Gui</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>NLink.SmokeTests.RemoteControl</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>NLink.SmokeTests.ScreenShare</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>NLink.TestCommon</_Parameter1>
     </AssemblyAttribute>
   </ItemGroup>
 </Project>

@@ -66,6 +66,32 @@ internal static class NknIdentityStore
         return new NknIdentity(identifier, address);
     }
 
+    public static NknIdentity Regenerate(NknTransportOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(options.KeyPath)!);
+        NknSecretStore.EnsureProtectedSeedStorageAvailable(options.KeyPath);
+
+        var keyPath = Path.GetFullPath(options.KeyPath);
+        if (File.Exists(keyPath))
+        {
+            File.Delete(keyPath);
+        }
+
+        NknSecretStore.DeleteSeed(keyPath);
+
+        var identity = LoadOrCreate(options);
+        PersistenceDiagnostics.Record(
+            domain: "nkn_identity_store",
+            operation: "manual_identity_regeneration",
+            severity: PersistenceDiagnosticSeverity.Info,
+            outcome: PersistenceDiagnosticOutcome.Partial,
+            reason: "user_requested",
+            userWarning: "Helper address was regenerated. Previous helper address and invites are no longer valid.");
+        return identity;
+    }
+
     internal static string? ReadSeedBase64ForConnect(string keyPath)
     {
         NknSecretStore.EnsureProtectedSeedStorageAvailable(keyPath);

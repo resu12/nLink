@@ -24,7 +24,10 @@
 
 Open **Diagnostics** in the app and click **Copy diagnostics**.
 Paste that text into the GitHub issue/report.
+For hangs or freezes, click **Save Hang Report** and include the generated report when requested.
+For screenshare issues, include the Diagnostics screenshare evidence block or the latest `screenshare-operator-verdict.txt` when available.
 You can also click **Open logs folder** and attach the latest `nlink.log` files if needed.
+See `docs/supportability.md` for the full support evidence checklist.
 
 For a release-safe build, diagnostics should show:
 - `invite_security_mode: issued_one_time_secret_invites`

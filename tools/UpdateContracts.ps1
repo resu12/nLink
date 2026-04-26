@@ -11,9 +11,18 @@ Push-Location $repoRoot
 try {
     $env:NLINK_UPDATE_CONTRACTS = "1"
     try {
-        $argsList = @("test", "-c", "Release", "--filter", "Category=ContractFreeze")
-        if ($NoBuild) { $argsList += "--no-build" }
-        & dotnet @argsList
+        $argsList = @(
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            ".\tools\Test-Lanes.ps1",
+            "-Lane",
+            "ContractFreeze",
+            "-Configuration",
+            "Release"
+        )
+        if ($NoBuild) { $argsList += "-NoBuild" }
+        & powershell @argsList
         if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
         }
@@ -22,7 +31,7 @@ try {
         Remove-Item Env:NLINK_UPDATE_CONTRACTS -ErrorAction SilentlyContinue
     }
 
-    Write-Host "[Contracts] Updated approved contract files under tests/nLink.SmokeTests/GoldenFiles/Contracts" -ForegroundColor Green
+    Write-Host "[Contracts] Updated approved contract files under tests/nLink.SmokeTests.Contracts/GoldenFiles/Contracts" -ForegroundColor Green
 }
 finally {
     Pop-Location

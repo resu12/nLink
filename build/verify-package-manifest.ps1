@@ -36,6 +36,34 @@ function Assert-BridgeSupportsBulkChannel {
     }
 }
 
+function Assert-BridgeManifestMatchesBundle {
+    param(
+        [Parameter(Mandatory = $true)][string]$BridgeDir,
+        [Parameter(Mandatory = $true)][string]$Runtime
+    )
+
+    $manifestPath = Join-Path $BridgeDir 'bridge-manifest.json'
+    if (-not (Test-Path -Path $manifestPath -PathType Leaf)) {
+        throw "Packaged bridge manifest is missing for runtime '$Runtime': $manifestPath"
+    }
+
+    $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.runtime -ne $Runtime) {
+        throw "Packaged bridge manifest runtime mismatch: expected '$Runtime', got '$($manifest.runtime)'."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($manifest.bridgeScriptSha256)) {
+        throw "Packaged bridge manifest is missing bridgeScriptSha256: $manifestPath"
+    }
+
+    $stagedBridgePath = Join-Path $BridgeDir 'index.js'
+    $actualHash = (Get-FileHash -Path $stagedBridgePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $expectedHash = ([string]$manifest.bridgeScriptSha256).ToLowerInvariant()
+    if ($actualHash -ne $expectedHash) {
+        throw "Packaged bridge script hash does not match bridge manifest for runtime '$Runtime'."
+    }
+}
+
 $resolvedStageDir = (Resolve-Path $StageDir).Path
 $resolvedManifestPath = (Resolve-Path $ManifestPath).Path
 
@@ -117,24 +145,15 @@ if (Test-Path -Path $bridgeRoot -PathType Container) {
         throw "Package staging contains unexpected bridge runtime directories: $($unexpectedBridgeRuntimes -join ', ')"
     }
 
-    $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-    $bridgeSourcePath = Join-Path $repoRoot "tools\nkn-bridge\index.js"
-    $expectedBridgeHash = if (Test-Path $bridgeSourcePath) { (Get-FileHash -Path $bridgeSourcePath -Algorithm SHA256).Hash } else { $null }
-
     foreach ($runtime in $actualBridgeRuntimes) {
-        $stagedBridgePath = Join-Path $bridgeRoot (Join-Path $runtime 'index.js')
+        $bridgeRuntimeDir = Join-Path $bridgeRoot $runtime
+        $stagedBridgePath = Join-Path $bridgeRuntimeDir 'index.js'
         if (-not (Test-Path -Path $stagedBridgePath -PathType Leaf)) {
             continue
         }
 
         Assert-BridgeSupportsBulkChannel -BridgeScriptPath $stagedBridgePath
-
-        if ($expectedBridgeHash) {
-            $stagedHash = (Get-FileHash -Path $stagedBridgePath -Algorithm SHA256).Hash
-            if ($stagedHash -ne $expectedBridgeHash) {
-                throw "Packaged bridge script does not match repo source for runtime '$runtime'."
-            }
-        }
+        Assert-BridgeManifestMatchesBundle -BridgeDir $bridgeRuntimeDir -Runtime $runtime
     }
 }
 

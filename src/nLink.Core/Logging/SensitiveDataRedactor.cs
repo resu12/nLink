@@ -26,10 +26,15 @@ public static partial class SensitiveDataRedactor
             return string.Empty;
         }
 
-        var redacted = text;
+        var protectedEventValues = new List<string>();
+        var redacted = ProtectStructuredEventValues(text, protectedEventValues);
         redacted = SecretKeyValueRegex().Replace(redacted, "[redacted]");
         redacted = ChatPlaintextKeyValueRegex().Replace(redacted, "[redacted]");
+        var protectedStructuredKeys = new List<string>();
+        redacted = ProtectStructuredKeys(redacted, protectedStructuredKeys);
         redacted = LongSecretTokenRegex().Replace(redacted, "[redacted]");
+        redacted = RestoreStructuredKeys(redacted, protectedStructuredKeys);
+        redacted = RestoreStructuredEventValues(redacted, protectedEventValues);
         return redacted;
     }
 
@@ -69,4 +74,62 @@ public static partial class SensitiveDataRedactor
 
     [GeneratedRegex(@"(?<![A-Za-z0-9])(?:[A-Fa-f0-9]{32,}|(?=[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9]))(?=[A-Za-z0-9+/_-]*[0-9+/_-])[A-Za-z0-9+/_-]{40,}={0,2})(?![A-Za-z0-9])", RegexOptions.CultureInvariant)]
     private static partial Regex LongSecretTokenRegex();
+
+    [GeneratedRegex(@"\bevent=(?<value>[A-Za-z0-9._/-]+)", RegexOptions.CultureInvariant)]
+    private static partial Regex EventKeyValueRegex();
+
+    [GeneratedRegex(@"(?<prefix>(?:^|[\s|,;]))(?<key>[A-Za-z_][A-Za-z0-9._/-]{1,127})=", RegexOptions.CultureInvariant)]
+    private static partial Regex StructuredKeyRegex();
+
+    private static string ProtectStructuredEventValues(string text, List<string> protectedEventValues)
+    {
+        return EventKeyValueRegex().Replace(text, match =>
+        {
+            var placeholder = $"EVP{protectedEventValues.Count}";
+            protectedEventValues.Add(match.Groups["value"].Value);
+            return $"event={placeholder}";
+        });
+    }
+
+    private static string RestoreStructuredEventValues(string text, List<string> protectedEventValues)
+    {
+        if (protectedEventValues.Count == 0)
+        {
+            return text;
+        }
+
+        var restored = text;
+        for (var i = 0; i < protectedEventValues.Count; i++)
+        {
+            restored = restored.Replace($"event=EVP{i}", $"event={protectedEventValues[i]}", StringComparison.Ordinal);
+        }
+
+        return restored;
+    }
+
+    private static string ProtectStructuredKeys(string text, List<string> protectedStructuredKeys)
+    {
+        return StructuredKeyRegex().Replace(text, match =>
+        {
+            var placeholder = $"SKP{protectedStructuredKeys.Count}";
+            protectedStructuredKeys.Add(match.Groups["key"].Value);
+            return $"{match.Groups["prefix"].Value}{placeholder}=";
+        });
+    }
+
+    private static string RestoreStructuredKeys(string text, List<string> protectedStructuredKeys)
+    {
+        if (protectedStructuredKeys.Count == 0)
+        {
+            return text;
+        }
+
+        var restored = text;
+        for (var i = 0; i < protectedStructuredKeys.Count; i++)
+        {
+            restored = restored.Replace($"SKP{i}=", $"{protectedStructuredKeys[i]}=", StringComparison.Ordinal);
+        }
+
+        return restored;
+    }
 }

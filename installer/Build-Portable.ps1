@@ -8,9 +8,12 @@ param(
     [string]$HelperAliasOutDir = "artifacts/portable/helper/win-x64",
     [string]$HelpeeAliasOutDir = "artifacts/portable/helpee/win-x64",
     [string]$Version = "",
+    [ValidateSet("DownloadSize", "InstalledSize")]
+    [string]$OptimizeFor = "DownloadSize",
     [switch]$SkipBridgeBundle,
     [switch]$CopyHelperAlias,
-    [switch]$CopyHelpeeAlias
+    [switch]$CopyHelpeeAlias,
+    [switch]$LocalOnly
 )
 
 Set-StrictMode -Version Latest
@@ -109,6 +112,23 @@ function Get-DirectorySizeBytes {
     }
 
     return $sum
+}
+
+function Get-PathSizeBytes {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    if (-not (Test-Path $Path)) {
+        return [int64]0
+    }
+
+    $item = Get-Item -LiteralPath $Path
+    if (-not $item.PSIsContainer) {
+        return [int64]$item.Length
+    }
+
+    return Get-DirectorySizeBytes -RootDir $item.FullName
 }
 
 function Format-Size {
@@ -301,14 +321,42 @@ $packageManifestPath = Join-Path $repoRoot ("installer\package-manifest.{0}.txt"
 
 New-Item -ItemType Directory -Force -Path $canonicalOutAbs | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $zipOutAbs) | Out-Null
-New-Item -ItemType Directory -Force -Path $releasesRootAbs | Out-Null
+if (-not $LocalOnly) {
+    New-Item -ItemType Directory -Force -Path $releasesRootAbs | Out-Null
+}
+
+$singleFileCompressionEnabled = [string]::Equals($OptimizeFor, "InstalledSize", [System.StringComparison]::OrdinalIgnoreCase)
+$singleFileCompressionValue = if ($singleFileCompressionEnabled) { "true" } else { "false" }
+
+if (Test-Path $canonicalOutAbs) {
+    Invoke-WithRetry -OperationName "clean canonical portable folder" -Action {
+        Remove-Item -Recurse -Force $canonicalOutAbs
+    }
+}
+
+New-Item -ItemType Directory -Force -Path $canonicalOutAbs | Out-Null
+
+$publishArgs = @(
+    "publish",
+    $projectPath,
+    "-c",
+    $Configuration,
+    "-r",
+    $Runtime,
+    "--self-contained",
+    "true",
+    "/p:NLinkVersion=$resolvedVersion",
+    "/p:PublishSingleFile=true",
+    "/p:IncludeNativeLibrariesForSelfExtract=true",
+    "/p:EnableCompressionInSingleFile=$singleFileCompressionValue"
+)
+
+$publishArgs += @("-o", $canonicalOutAbs)
 
 Write-Host "[nLink] Publishing canonical portable app folder..." -ForegroundColor Cyan
-dotnet publish $projectPath -c $Configuration -r $Runtime --self-contained true `
-    /p:NLinkVersion=$resolvedVersion `
-    /p:PublishSingleFile=true `
-    /p:IncludeNativeLibrariesForSelfExtract=true `
-    -o $canonicalOutAbs
+Write-Host "[nLink] Package optimization: $OptimizeFor." -ForegroundColor Cyan
+Write-Host ("[nLink] Single-file compression: {0}." -f ($(if ($singleFileCompressionEnabled) { "enabled" } else { "disabled" }))) -ForegroundColor Cyan
+& dotnet @publishArgs
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
@@ -349,18 +397,24 @@ if ($CopyHelpeeAlias) {
 Write-Host "[nLink] Canonical portable folder: $canonicalOutAbs" -ForegroundColor Green
 Write-Host "[nLink] Portable ZIP: $zipOutAbs" -ForegroundColor Green
 Write-Host "[nLink] Release version: $resolvedVersion" -ForegroundColor Green
+Write-Host "[nLink] OptimizeFor: $OptimizeFor" -ForegroundColor Green
 
-$releasePublish = Publish-ReleaseAssets `
-    -RepoRoot $repoRoot `
-    -Version $resolvedVersion `
-    -ReleasesRootDir $ReleasesRootDir `
-    -AssetPaths @($zipOutAbs)
+if ($LocalOnly) {
+    Write-Host "[nLink] LocalOnly: skipped release asset copy." -ForegroundColor Yellow
+}
+else {
+    $releasePublish = Publish-ReleaseAssets `
+        -RepoRoot $repoRoot `
+        -Version $resolvedVersion `
+        -ReleasesRootDir $ReleasesRootDir `
+        -AssetPaths @($zipOutAbs)
 
-Write-Host "[nLink] Release assets folder: $($releasePublish.ReleaseDir)" -ForegroundColor Green
-Write-Host "[nLink] SHA256SUMS: $($releasePublish.ChecksumsPath)" -ForegroundColor Green
-foreach ($asset in @($releasePublish.Assets)) {
-    if (-not [string]::IsNullOrWhiteSpace($asset)) {
-        Write-Host "[nLink] Release asset: $asset" -ForegroundColor Green
+    Write-Host "[nLink] Release assets folder: $($releasePublish.ReleaseDir)" -ForegroundColor Green
+    Write-Host "[nLink] SHA256SUMS: $($releasePublish.ChecksumsPath)" -ForegroundColor Green
+    foreach ($asset in @($releasePublish.Assets)) {
+        if (-not [string]::IsNullOrWhiteSpace($asset)) {
+            Write-Host "[nLink] Release asset: $asset" -ForegroundColor Green
+        }
     }
 }
 
@@ -371,8 +425,16 @@ $nodeModulesAbs = Join-Path $bridgeRidAbs "node_modules"
 $totalSizeBytes = Get-DirectorySizeBytes -RootDir $canonicalOutAbs
 $bridgeSizeBytes = Get-DirectorySizeBytes -RootDir $bridgeRootAbs
 $nodeModulesSizeBytes = Get-DirectorySizeBytes -RootDir $nodeModulesAbs
+$appExeSizeBytes = Get-PathSizeBytes -Path (Join-Path $canonicalOutAbs "nLink.exe")
+$ffmpegSizeBytes = Get-PathSizeBytes -Path (Join-Path $canonicalOutAbs "ffmpeg")
+$portableZipSizeBytes = Get-PathSizeBytes -Path $zipOutAbs
 
 Write-Host "[nLink] Size summary:" -ForegroundColor Cyan
+Write-Host ("  optimize for: {0}" -f $OptimizeFor)
+Write-Host ("  single-file compression: {0}" -f ($(if ($singleFileCompressionEnabled) { 1 } else { 0 })))
 Write-Host ("  total output size: {0} ({1} bytes)" -f (Format-Size $totalSizeBytes), $totalSizeBytes)
+Write-Host ("  app executable size: {0} ({1} bytes)" -f (Format-Size $appExeSizeBytes), $appExeSizeBytes)
 Write-Host ("  bridge folder size: {0} ({1} bytes)" -f (Format-Size $bridgeSizeBytes), $bridgeSizeBytes)
+Write-Host ("  ffmpeg folder size: {0} ({1} bytes)" -f (Format-Size $ffmpegSizeBytes), $ffmpegSizeBytes)
+Write-Host ("  portable ZIP size: {0} ({1} bytes)" -f (Format-Size $portableZipSizeBytes), $portableZipSizeBytes)
 Write-Host ("  bridge/{0}/node_modules size: {1} ({2} bytes)" -f $Runtime, (Format-Size $nodeModulesSizeBytes), $nodeModulesSizeBytes)

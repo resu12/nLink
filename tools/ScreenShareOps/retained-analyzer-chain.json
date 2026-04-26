@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "retained_analyzers": [
+    {
+      "id": "latency_regression",
+      "script": "Analyze-ScreenShareLatencyRegression.ps1",
+      "report": "latency-regression-analysis.txt",
+      "classification_stage": ""
+    },
+    {
+      "id": "helper_upstream_latency",
+      "script": "Analyze-ScreenShareHelperUpstreamLatency.ps1",
+      "report": "helper-upstream-latency-analysis.txt",
+      "classification_stage": "upstream_latency"
+    },
+    {
+      "id": "helper_ready_path",
+      "script": "Analyze-ScreenShareHelperReadyPath.ps1",
+      "report": "helper-ready-path-analysis.txt",
+      "classification_stage": "ready_path"
+    },
+    {
+      "id": "helper_receive_path",
+      "script": "Analyze-ScreenShareHelperReceivePath.ps1",
+      "report": "helper-receive-path-analysis.txt",
+      "classification_stage": "receive_path"
+    },
+    {
+      "id": "helper_bridge_ingress",
+      "script": "Analyze-ScreenShareHelperBridgeIngress.ps1",
+      "report": "helper-bridge-ingress-analysis.txt",
+      "classification_stage": "bridge_ingress"
+    },
+    {
+      "id": "helper_nkn_receive",
+      "script": "Analyze-ScreenShareHelperNknReceive.ps1",
+      "report": "helper-nkn-receive-analysis.txt",
+      "classification_stage": "nkn_receive"
+    },
+    {
+      "id": "helper_ws_receive",
+      "script": "Analyze-ScreenShareHelperWsReceive.ps1",
+      "report": "helper-ws-receive-analysis.txt",
+      "classification_stage": "ws_receive"
+    },
+    {
+      "id": "helper_socket_receive",
+      "script": "Analyze-ScreenShareHelperSocketReceive.ps1",
+      "report": "helper-socket-receive-analysis.txt",
+      "classification_stage": "socket_receive"
+    },
+    {
+      "id": "external_delivery",
+      "script": "Analyze-ScreenShareExternalDelivery.ps1",
+      "report": "helper-external-delivery-analysis.txt",
+      "classification_stage": "external_delivery"
+    },
+    {
+      "id": "external_transport_health",
+      "script": "Analyze-ScreenShareExternalTransportHealth.ps1",
+      "report": "helper-external-transport-health-analysis.txt",
+      "classification_stage": "external_transport_health"
+    }
+  ],
+  "external_transport_classifications": [
+    "external_receive_latency",
+    "network_delivery_latency",
+    "steady_external_delivery_latency"
+  ]
+}

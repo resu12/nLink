@@ -41,7 +41,10 @@ internal sealed class BridgeMixedStreamReader
                     await ReadExactlyAsync(stream, bodyBuffer, ct).ConfigureAwait(false);
                 }
 
-                var frame = BridgeBinaryProtocol.DecodeFrame(header, bodyBuffer);
+                var frame = BridgeBinaryProtocol.DecodeFrame(header, bodyBuffer) with
+                {
+                    BinaryFrameDecodedUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                };
                 await onBinaryFrameAsync(frame, ct).ConfigureAwait(false);
                 continue;
             }

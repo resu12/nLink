@@ -18,6 +18,8 @@ internal sealed record BridgeBinaryFrame(
     byte[] Payload)
 {
     public bool IsTopic => (Flags & BridgeBinaryProtocol.IsTopicFlag) != 0;
+
+    public long BinaryFrameDecodedUtcMs { get; init; }
 }
 
 internal sealed record BridgeBinaryFrameHeader(

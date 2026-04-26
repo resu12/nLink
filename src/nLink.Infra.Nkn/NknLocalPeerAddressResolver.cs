@@ -21,6 +21,24 @@ public static class NknLocalPeerAddressResolver
             : (PeerAddress?)null);
     }
 
+    public static Task<PeerAddress?> RegeneratePersistedIdentityAsync(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        var options = NknTransportOptions.Load();
+        var identity = NknIdentityStore.Regenerate(options);
+        NknRuntimeDiagnostics.SetIdentity(
+            address: identity.Address,
+            identifier: identity.Identifier,
+            keyPath: options.KeyPath,
+            seedRpc: options.SeedRpc);
+        NknRuntimeDiagnostics.RecordIdentityRegenerated(DateTimeOffset.UtcNow);
+
+        return Task.FromResult(PeerAddress.TryParse(identity.Address, out var parsed)
+            ? parsed
+            : (PeerAddress?)null);
+    }
+
     public static async Task<PeerAddress?> ResolveAsync(CancellationToken ct)
     {
         var options = NknTransportOptions.Load();

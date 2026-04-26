@@ -187,7 +187,7 @@ $resourceArtifacts = @()
 Push-Location $repoRoot
 try {
     Invoke-Step -Name "Smoke tests (Category=Smoke)" -Action {
-        dotnet test -c Release --filter Category=Smoke
+        & powershell -ExecutionPolicy Bypass -File ".\tools\Test-Lanes.ps1" -Lane Smoke -Configuration Release
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 
@@ -221,7 +221,7 @@ try {
             $env:NLINK_RUN_GUI_SMOKE = "1"
             $env:NLINK_GUI_SMOKE_SCENARIOS = $GuiScenarios
             Invoke-Step -Name "Optional GUI smoke tests (Category=GuiSmoke)" -Action {
-                dotnet test -c Release --filter Category=GuiSmoke
+                & powershell -ExecutionPolicy Bypass -File ".\tools\Test-Lanes.ps1" -Lane GuiSmoke -Configuration Release -GuiScenarios $GuiScenarios
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
 
@@ -290,7 +290,7 @@ try {
     }
 
     Invoke-Step -Name "Build installer" -Action {
-        & powershell -ExecutionPolicy Bypass -File ".\installer\Build-Installer.ps1" -Runtime $Runtime
+        & powershell -ExecutionPolicy Bypass -File ".\installer\Build-Installer.ps1" -Runtime $Runtime -CopyHelperAlias
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 }

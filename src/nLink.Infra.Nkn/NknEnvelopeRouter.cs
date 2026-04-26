@@ -19,9 +19,9 @@ internal sealed class NknEnvelopeRouter
         this.fileTransferChannel = fileTransferChannel;
     }
 
-    public void RouteInboundMessage(string source, NknBridgeChannel channel, Envelope env)
+    public void RouteInboundMessage(NknInboundEnvelopeContext inboundContext)
     {
-        switch (env.Type)
+        switch (inboundContext.Envelope.Type)
         {
             case MsgType.JoinRequest:
             case MsgType.Approve:
@@ -35,7 +35,7 @@ internal sealed class NknEnvelopeRouter
             case MsgType.SessionHandshakeResult:
             case MsgType.HelpRequest:
             case MsgType.HelpRequestDecision:
-                lifecycleChannel.Handle(source, env);
+                lifecycleChannel.Handle(inboundContext);
                 break;
             case MsgType.ControlRequest:
             case MsgType.ControlResponse:
@@ -45,11 +45,16 @@ internal sealed class NknEnvelopeRouter
             case MsgType.ControlAck:
             case MsgType.ControlStateSnapshot:
             case MsgType.ControlDisplayInfo:
-                controlChannel.Handle(source, env);
+            case MsgType.ScreenSharePressureState:
+            case MsgType.ScreenShareVideoStreamConfig:
+            case MsgType.ScreenShareVideoKeyframeRequest:
+            case MsgType.ScreenShareRecoveryReceipt:
+            case MsgType.ScreenShareCursorState:
+                controlChannel.Handle(inboundContext);
                 break;
             case MsgType.ScreenShareFrame:
             case MsgType.ScreenShareStop:
-                screenShareChannel.Handle(source, env);
+                screenShareChannel.Handle(inboundContext);
                 break;
             case MsgType.FileTransferOffer:
             case MsgType.FileTransferAccept:
@@ -64,10 +69,10 @@ internal sealed class NknEnvelopeRouter
             case MsgType.FileTransferComplete:
             case MsgType.FileTransferSessionOpen:
             case MsgType.FileTransferDataFrame:
-                fileTransferChannel.Handle(source, channel, env);
+                fileTransferChannel.Handle(inboundContext);
                 break;
             default:
-                lifecycleChannel.HandleUnexpected(env);
+                lifecycleChannel.HandleUnexpected(inboundContext.Envelope);
                 break;
         }
     }
@@ -79,7 +84,7 @@ internal sealed class NknLifecycleChannel
 
     public NknLifecycleChannel(NknSignalingTransport owner) => this.owner = owner;
 
-    public void Handle(string source, Envelope env) => owner.RouteLifecycleEnvelope(source, env);
+    public void Handle(NknInboundEnvelopeContext inboundContext) => owner.RouteLifecycleEnvelope(inboundContext.Source, inboundContext.Envelope);
 
     public void HandleUnexpected(Envelope env) => owner.HandleUnexpectedEnvelopeType(env);
 }
@@ -90,7 +95,7 @@ internal sealed class NknSecureControlChannel
 
     public NknSecureControlChannel(NknSignalingTransport owner) => this.owner = owner;
 
-    public void Handle(string source, Envelope env) => owner.RouteControlEnvelope(source, env);
+    public void Handle(NknInboundEnvelopeContext inboundContext) => owner.RouteControlEnvelope(inboundContext.Source, inboundContext.Envelope);
 }
 
 internal sealed class NknScreenShareChannel
@@ -99,7 +104,7 @@ internal sealed class NknScreenShareChannel
 
     public NknScreenShareChannel(NknSignalingTransport owner) => this.owner = owner;
 
-    public void Handle(string source, Envelope env) => owner.RouteScreenShareEnvelope(source, env);
+    public void Handle(NknInboundEnvelopeContext inboundContext) => owner.RouteScreenShareEnvelope(inboundContext);
 }
 
 internal sealed class NknFileTransferChannel
@@ -108,5 +113,5 @@ internal sealed class NknFileTransferChannel
 
     public NknFileTransferChannel(NknSignalingTransport owner) => this.owner = owner;
 
-    public void Handle(string source, NknBridgeChannel channel, Envelope env) => owner.RouteFileTransferEnvelope(source, channel, env);
+    public void Handle(NknInboundEnvelopeContext inboundContext) => owner.RouteFileTransferEnvelope(inboundContext.Source, inboundContext.Channel, inboundContext.Envelope);
 }

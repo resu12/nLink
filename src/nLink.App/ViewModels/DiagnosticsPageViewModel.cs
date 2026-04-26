@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.Input;
 using NLink.App.Configuration;
 using NLink.App.Services;
+using NLink.App.Services.ScreenCapture;
 using NLink.Core;
 using NLink.Core.Chat;
 using NLink.Core.Diagnostics;
@@ -21,14 +22,13 @@ namespace NLink.App.ViewModels;
 
 public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 {
-    private const string ScreenShareMaxFpsVariable = "NLINK_FEATURE_SCREENCAP_MAX_FPS";
-    private const string ScreenShareTransportMaxFpsVariable = "NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS";
+    private const string ScreenShareMaxFpsVariable = ScreenShareQualitySettings.ScreenShareMaxFpsVariable;
+    private const string ScreenShareTransportMaxFpsVariable = ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable;
     private const string ScreenShareTransportAutotuneVariable = "NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE";
-    private const string ScreenShareScaleVariable = "NLINK_FEATURE_SCREENCAP_SCALE";
-    private const string ScreenShareJpegQualityVariable = "NLINK_FEATURE_SCREENCAP_JPEG_QUALITY";
+    private const string ScreenShareScaleVariable = ScreenShareQualitySettings.ScreenShareScaleVariable;
 
     private readonly InlineTransientText copyFeedback = new();
-    private readonly string bugReportUrl;
+    private readonly string? bugReportUrl;
     private readonly DiagnosticsSnapshot runtimeDiagnosticsSnapshot;
     private readonly MetricsRegistry? metricsRegistry;
     private readonly ResourceRuntimeTracker? resourceRuntimeTracker;
@@ -38,8 +38,35 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private readonly InviteSecurityStatus inviteSecurityStatus;
     private readonly NknRuntimeDiagnosticsSnapshot nknDiagnosticsSnapshot;
     private readonly PersistenceDiagnosticsSnapshot persistenceDiagnosticsSnapshot;
+    private readonly ScreenShareEvidenceSnapshot screenShareEvidenceSnapshot;
+    private readonly ScreenShareLiveDiagnosticsSnapshot screenShareLiveSnapshot;
 
     public DiagnosticsPageViewModel(
+        Action backAction,
+        TransportRuntimeConfig transportConfig,
+        ShareMessageConfig? linksConfig = null,
+        SessionRuntime? sessionRuntime = null,
+        MetricsRegistry? metricsRegistry = null,
+        ResourceRuntimeTracker? resourceRuntimeTracker = null,
+        HangReportService? hangReportService = null,
+        Func<DateTimeOffset>? nowProvider = null,
+        Func<string>? diagnosticsExportRootProvider = null)
+        : this(
+            ScreenShareEvidenceLocator.CreateDefault(),
+            backAction,
+            transportConfig,
+            linksConfig,
+            sessionRuntime,
+            metricsRegistry,
+            resourceRuntimeTracker,
+            hangReportService,
+            nowProvider,
+            diagnosticsExportRootProvider)
+    {
+    }
+
+    internal DiagnosticsPageViewModel(
+        ScreenShareEvidenceLocator screenShareEvidenceLocator,
         Action backAction,
         TransportRuntimeConfig transportConfig,
         ShareMessageConfig? linksConfig = null,
@@ -58,6 +85,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         this.hangReportService = hangReportService;
         this.nowProvider = nowProvider ?? DefaultNowProvider;
         this.diagnosticsExportRootProvider = diagnosticsExportRootProvider ?? DefaultDiagnosticsExportRootProvider;
+        screenShareEvidenceSnapshot = screenShareEvidenceLocator.ReadLatest();
+        screenShareLiveSnapshot = sessionRuntime?.GetScreenShareLiveDiagnosticsSnapshot() ?? ScreenShareLiveDiagnosticsSnapshot.Unavailable;
 
         ActiveTransport = transportConfig.DisplayName;
         TransportKey = transportConfig.Key;
@@ -125,6 +154,13 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         AcksReceived = nknDiagnosticsSnapshot.AcksReceived.ToString();
         AcksIgnoredSourceMismatch = nknDiagnosticsSnapshot.AcksIgnoredSourceMismatch.ToString();
         LastDisconnectReason = nknDiagnosticsSnapshot.LastDisconnectReason;
+        HelperAddressSource = nknDiagnosticsSnapshot.HelperAddressSource;
+        HelperAddressAuthoritative = nknDiagnosticsSnapshot.HelperAddressAuthoritative ? "Yes" : "No";
+        HelperVerificationCodeVisible = nknDiagnosticsSnapshot.HelperVerificationCodeVisible ? "Yes" : "No";
+        HelperIdentityRegeneratedCount = nknDiagnosticsSnapshot.HelperIdentityRegeneratedCount.ToString(CultureInfo.InvariantCulture);
+        HelperIdentityLastRegeneratedUtc = nknDiagnosticsSnapshot.HelperIdentityLastRegeneratedUtcTicks > 0
+            ? new DateTimeOffset(nknDiagnosticsSnapshot.HelperIdentityLastRegeneratedUtcTicks, TimeSpan.Zero).ToString("u")
+            : "(none)";
         FirstColdStartObserved = nknDiagnosticsSnapshot.FirstColdStartObserved ? "Yes" : "No";
         FirstColdStartMs = nknDiagnosticsSnapshot.FirstColdStartObserved && nknDiagnosticsSnapshot.FirstColdStartMs >= 0
             ? nknDiagnosticsSnapshot.FirstColdStartMs.ToString("F2")
@@ -143,12 +179,12 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         ReportBugCommand = new RelayCommand(RequestOpenBugReport);
         ApplyBalancedScreenSharePresetCommand = new RelayCommand(ApplyBalancedScreenSharePreset);
         ApplyLowEndScreenSharePresetCommand = new RelayCommand(ApplyLowEndScreenSharePreset);
-        ApplyHigherClarityScreenSharePresetCommand = new RelayCommand(ApplyHigherClarityScreenSharePreset);
+        ApplySharperTextScreenSharePresetCommand = new RelayCommand(ApplySharperTextScreenSharePreset);
     }
 
-    public string PageTitle => "App info";
+    public string PageTitle => "Diagnostics";
 
-    public string PageSubtitle => "Current app settings and connection method.";
+    public string PageSubtitle => "Support status, screen share health, and capture tools.";
 
     public string ActiveTransport { get; }
 
@@ -183,12 +219,25 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string SessionHeader { get; }
     public int ScreenShareCaptureMaxFps => FeatureFlags.ScreenShareMaxFps;
     public int ScreenShareTransportMaxFps => FeatureFlags.ScreenShareTransportMaxFps;
-    public string ScreenShareCaptureScale => FeatureFlags.ScreenShareScale.ToString("0.###", CultureInfo.InvariantCulture);
-    public long ScreenShareCaptureJpegQuality => FeatureFlags.ScreenShareJpegQuality;
-    public string ScreenSharePresetBalanced => "fps=15, scale=1.00, jpeg=75";
-    public string ScreenSharePresetLowEnd => "fps=10, scale=0.60, jpeg=50";
-    public string ScreenSharePresetHigherClarity => "fps=20, scale=0.85, jpeg=75";
-    public string ScreenShareCaptureEnvHint => "Apply preset, then restart screen sharing. Settings apply instantly and are persisted in background via env vars: NLINK_FEATURE_SCREENCAP_MAX_FPS, NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS, NLINK_FEATURE_SCREENCAP_SCALE, NLINK_FEATURE_SCREENCAP_JPEG_QUALITY.";
+    public string ScreenShareCaptureScale => ScreenShareQualitySettings.FormatScale(FeatureFlags.ScreenShareScale);
+    public string ScreenShareEffectivePresetName => ScreenShareQualitySettings.GetCurrentEnvironmentState().EffectivePresetName;
+    public string ScreenSharePresetMigrationStatus => ScreenShareQualitySettings.WasLegacyHigherClarityPresetMigrated ? "Yes" : "No";
+    public string ScreenSharePresetBalanced => ScreenShareQualitySettings.BalancedPreset.Describe();
+    public string ScreenSharePresetLowEnd => ScreenShareQualitySettings.LowEndPreset.Describe();
+    public string ScreenSharePresetSharperText => ScreenShareQualitySettings.SharperTextPreset.Describe();
+    public string ScreenShareCaptureEnvHint => "Apply preset, then restart screen sharing. Settings apply instantly and are persisted in background via env vars: NLINK_FEATURE_SCREENCAP_MAX_FPS, NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS, NLINK_FEATURE_SCREENCAP_SCALE.";
+    public string ScreenShareEvidenceStatus => screenShareEvidenceSnapshot.StatusKey;
+    public string ScreenShareEvidenceArtifactName => screenShareEvidenceSnapshot.ArtifactName;
+    public string ScreenShareEvidenceVerdict => screenShareEvidenceSnapshot.OperatorVerdict;
+    public string ScreenShareEvidenceSummary => screenShareEvidenceSnapshot.OperatorSummary;
+    public string ScreenShareEvidenceNextAction => screenShareEvidenceSnapshot.NextOperatorAction;
+    public string ScreenShareEvidenceDeepestClassification => screenShareEvidenceSnapshot.DeepestTrackBClassification;
+    public string ScreenShareEvidenceQualitySummary => screenShareEvidenceSnapshot.QualityProfileSummary;
+    public string ScreenShareEvidencePerformanceSummary => screenShareEvidenceSnapshot.PerformanceSummary;
+    public string ScreenShareEvidenceCursorSummary => screenShareEvidenceSnapshot.CursorSummary;
+    public string ScreenShareEvidenceVisualSafetySummary => screenShareEvidenceSnapshot.VisualSafetySummary;
+    public string ScreenShareEvidenceLowFpsSummary => screenShareEvidenceSnapshot.LowFpsSummary;
+    public string ScreenShareEvidenceExternalTopologySummary => screenShareEvidenceSnapshot.ExternalTopologySummary;
 
     public string AppVersion { get; }
 
@@ -217,6 +266,18 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string DiagnosticsPrivacyNotice => DiagnosticsExportBuilder.BestEffortPrivacyNotice;
     public string AuthoritativeConnectedAddress => nknDiagnosticsSnapshot.AuthoritativeConnectedAddressResolved ? "Yes" : "No";
     public string LastRejectedMessageSummary => BuildLastRejectedMessageSummary();
+    public string ConnectionStateSummary => $"session={SessionUiState}; transport={CurrentTransportState}; role_state={TransportSummary}";
+    public string ConnectionErrorSummary => BuildConnectionErrorSummary();
+    public string HelperIdentitySummary => BuildHelperIdentitySummary();
+    public string ScreenShareLiveState => screenShareLiveSnapshot.AnyScreenShareActive ? "Active" : "(not sharing)";
+    public string ScreenShareLiveProfileSummary => BuildScreenShareLiveProfileSummary();
+    public string ScreenShareLivePerformanceSummary => BuildScreenShareLivePerformanceSummary();
+    public string ScreenShareLiveCpuSummary => BuildScreenShareLiveCpuSummary();
+    public string ScreenShareLiveCursorSummary => BuildScreenShareLiveCursorSummary();
+    public string ScreenShareLiveVisualSafetySummary => BuildScreenShareLiveVisualSafetySummary();
+    public string AdvancedScreenShareSettingsSummary => BuildAdvancedScreenShareSettingsSummary();
+    public bool ShowScreenShareResetHint => ScreenShareQualitySettings.WasLegacyHigherClarityPresetMigrated ||
+        string.Equals(ScreenShareEffectivePresetName, "Custom", StringComparison.OrdinalIgnoreCase);
 
     public string NknAddress { get; }
 
@@ -277,6 +338,11 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string AcksIgnoredSourceMismatch { get; }
 
     public string LastDisconnectReason { get; }
+    public string HelperAddressSource { get; }
+    public string HelperAddressAuthoritative { get; }
+    public string HelperVerificationCodeVisible { get; }
+    public string HelperIdentityRegeneratedCount { get; }
+    public string HelperIdentityLastRegeneratedUtc { get; }
     public string FirstColdStartObserved { get; }
     public string FirstColdStartMs { get; }
     public string FirstColdStartRecordedUtc { get; }
@@ -298,9 +364,10 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public IRelayCommand OpenLogsFolderCommand { get; }
 
     public IRelayCommand ReportBugCommand { get; }
+    public bool ShowReportBug => !string.IsNullOrWhiteSpace(bugReportUrl);
     public IRelayCommand ApplyBalancedScreenSharePresetCommand { get; }
     public IRelayCommand ApplyLowEndScreenSharePresetCommand { get; }
-    public IRelayCommand ApplyHigherClarityScreenSharePresetCommand { get; }
+    public IRelayCommand ApplySharperTextScreenSharePresetCommand { get; }
 
     public IRelayCommand BackCommand { get; }
 
@@ -348,42 +415,46 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     private void RequestOpenBugReport()
     {
-        OpenBugReportRequested?.Invoke(this, bugReportUrl);
+        if (!string.IsNullOrWhiteSpace(bugReportUrl))
+        {
+            OpenBugReportRequested?.Invoke(this, bugReportUrl);
+        }
     }
 
-    private void ApplyBalancedScreenSharePreset() => ApplyScreenSharePreset(15, 1d, 75, "Balanced");
+    private void ApplyBalancedScreenSharePreset()
+        => ApplyScreenSharePreset(ScreenShareQualitySettings.BalancedPreset);
 
-    private void ApplyLowEndScreenSharePreset() => ApplyScreenSharePreset(10, 0.60d, 50, "Low-end");
+    private void ApplyLowEndScreenSharePreset()
+        => ApplyScreenSharePreset(ScreenShareQualitySettings.LowEndPreset);
 
-    private void ApplyHigherClarityScreenSharePreset() => ApplyScreenSharePreset(20, 0.85d, 75, "Higher clarity");
+    private void ApplySharperTextScreenSharePreset()
+        => ApplyScreenSharePreset(ScreenShareQualitySettings.SharperTextPreset);
 
-    private void ApplyScreenSharePreset(int fps, double scale, int jpegQuality, string presetName)
+    private void ApplyScreenSharePreset(ScreenSharePresetDefinition preset)
     {
-        var fpsText = fps.ToString(CultureInfo.InvariantCulture);
-        var transportFpsText = Math.Clamp(Math.Min(fps, 8), 1, 8).ToString(CultureInfo.InvariantCulture);
-        var scaleText = scale.ToString("0.##", CultureInfo.InvariantCulture);
-        var jpegText = jpegQuality.ToString(CultureInfo.InvariantCulture);
+        var fpsText = preset.CaptureFramesPerSecond.ToString(CultureInfo.InvariantCulture);
+        var transportFpsText = preset.TransportFramesPerSecond.ToString(CultureInfo.InvariantCulture);
+        var scaleText = preset.CaptureScale.ToString("0.##", CultureInfo.InvariantCulture);
 
         Environment.SetEnvironmentVariable(ScreenShareMaxFpsVariable, fpsText);
         Environment.SetEnvironmentVariable(ScreenShareTransportMaxFpsVariable, transportFpsText);
         Environment.SetEnvironmentVariable(ScreenShareScaleVariable, scaleText);
-        Environment.SetEnvironmentVariable(ScreenShareJpegQualityVariable, jpegText);
 
         OnPropertyChanged(nameof(ScreenShareCaptureMaxFps));
         OnPropertyChanged(nameof(ScreenShareTransportMaxFps));
         OnPropertyChanged(nameof(ScreenShareCaptureScale));
-        OnPropertyChanged(nameof(ScreenShareCaptureJpegQuality));
+        OnPropertyChanged(nameof(ScreenShareEffectivePresetName));
+        OnPropertyChanged(nameof(ScreenSharePresetMigrationStatus));
 
-        copyFeedback.Show($"{presetName} preset applied");
-        PersistScreenSharePresetInBackground(presetName, fpsText, transportFpsText, scaleText, jpegText);
+        copyFeedback.Show($"{preset.DisplayName} preset applied");
+        PersistScreenSharePresetInBackground(preset.DisplayName, fpsText, transportFpsText, scaleText);
     }
 
     private static void PersistScreenSharePresetInBackground(
         string presetName,
         string fpsText,
         string transportFpsText,
-        string scaleText,
-        string jpegText)
+        string scaleText)
     {
         _ = Task.Run(() =>
         {
@@ -391,8 +462,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             {
                 var persisted = TrySetUserEnvironmentVariable(ScreenShareMaxFpsVariable, fpsText) &&
                                 TrySetUserEnvironmentVariable(ScreenShareTransportMaxFpsVariable, transportFpsText) &&
-                                TrySetUserEnvironmentVariable(ScreenShareScaleVariable, scaleText) &&
-                                TrySetUserEnvironmentVariable(ScreenShareJpegQualityVariable, jpegText);
+                                TrySetUserEnvironmentVariable(ScreenShareScaleVariable, scaleText);
                 if (!persisted)
                 {
                     LocalOperationalLog.Warn("Diagnostics", $"Could not persist ScreenShare preset '{presetName}' to user environment.");
@@ -431,7 +501,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             var result = hangReportService.Capture(
                 HangReportTriggerKind.ManualDiagnostics,
                 "manual_diagnostics_page",
-                diagnosticsTextOverride: BuildDiagnosticsCopyText());
+                diagnosticsTextOverride: BuildDiagnosticsCopyText(),
+                screenShareEvidenceTextOverride: BuildScreenShareEvidenceText());
             OpenHangReportFolderRequested?.Invoke(this, result.FolderPath);
             copyFeedback.Show("Hang report saved");
         }
@@ -475,7 +546,11 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     }
 
     internal string BuildDiagnosticsCopyTextForTests() => BuildDiagnosticsCopyText();
+    internal string BuildScreenShareEvidenceTextForTests() => BuildScreenShareEvidenceText();
     internal string ExportMetricsJsonForTests() => ExportMetricsJsonToFile();
+
+    private string BuildScreenShareEvidenceText()
+        => DiagnosticsRedactor.Redact(screenShareEvidenceSnapshot.ToReportText());
 
     private string BuildDiagnosticsCopyText()
     {
@@ -532,13 +607,16 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"screenshare_transport_max_fps: {FeatureFlags.ScreenShareTransportMaxFps}",
             $"screenshare_transport_autotune: {FormatFeatureFlag(FeatureFlags.ScreenShareTransportAutoTuneEnabled)}",
             $"screenshare_capture_scale: {FeatureFlags.ScreenShareScale:0.###}",
-            $"screenshare_capture_jpeg_quality: {FeatureFlags.ScreenShareJpegQuality}",
+            $"screenshare_effective_preset: {ScreenShareEffectivePresetName}",
+            $"screenshare_legacy_preset_migrated: {ScreenSharePresetMigrationStatus}",
             string.Empty,
             "screenshare_capture_presets:",
             $"  balanced_default: {ScreenSharePresetBalanced}",
             $"  low_end_cpu_network: {ScreenSharePresetLowEnd}",
-            $"  higher_clarity: {ScreenSharePresetHigherClarity}",
+            $"  sharper_text: {ScreenSharePresetSharperText}",
             $"  apply_hint: {ScreenShareCaptureEnvHint}",
+            string.Empty,
+            BuildScreenShareEvidenceText(),
             string.Empty,
             "Bridge / NKN",
             "------------",
@@ -562,6 +640,11 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"last_envelope_type: {LastEnvelopeType}",
             $"last_envelope_drop_reason: {LastEnvelopeDropReason}",
             $"last_rejected_message: {LastRejectedMessageSummary}",
+            $"helper_address_source: {HelperAddressSource}",
+            $"helper_address_authoritative: {HelperAddressAuthoritative}",
+            $"helper_verification_code_visible: {HelperVerificationCodeVisible}",
+            $"helper_identity_regenerated_count: {HelperIdentityRegeneratedCount}",
+            $"helper_identity_last_regenerated_utc: {HelperIdentityLastRegeneratedUtc}",
             $"join_requests_received: {JoinRequestsReceived}",
             $"incoming_join_request_raised: {IncomingJoinRequestRaisedCount}",
             $"acks_received: {AcksReceived}",
@@ -742,13 +825,6 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             FeatureFlags.ScreenShareScale.ToString("0.###", CultureInfo.InvariantCulture),
             1d.ToString("0.###", CultureInfo.InvariantCulture),
             ScreenShareScaleVariable);
-        AddIfNonDefault(
-            riskyOverrides,
-            "screenshare_capture_jpeg_quality",
-            FeatureFlags.ScreenShareJpegQuality,
-            75L,
-            ScreenShareJpegQualityVariable);
-
         if (!FeatureFlags.ScreenShareTransportAutoTuneEnabled &&
             !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(ScreenShareTransportAutotuneVariable)))
         {
@@ -765,6 +841,68 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         var error = string.IsNullOrWhiteSpace(LastError) ? "(none)" : LastError;
         return $"envelope={envelopeType}; reason={dropReason}; error={error}";
     }
+
+    private string BuildConnectionErrorSummary()
+    {
+        var lastDisconnect = string.IsNullOrWhiteSpace(LastDisconnectReason) ? "(none)" : LastDisconnectReason;
+        var lastFailure = string.IsNullOrWhiteSpace(LastFailureCategory) ? "(none)" : LastFailureCategory;
+        var lastError = string.IsNullOrWhiteSpace(LastError) ? "(none)" : LastError;
+        return $"last_disconnect={lastDisconnect}; last_failure={lastFailure}; last_error={lastError}";
+    }
+
+    private string BuildHelperIdentitySummary()
+        => $"source={HelperAddressSource}; authoritative={HelperAddressAuthoritative}; verification_code_visible={HelperVerificationCodeVisible}; regenerated={HelperIdentityRegeneratedCount}; last_regenerated={HelperIdentityLastRegeneratedUtc}";
+
+    private string BuildScreenShareLiveProfileSummary()
+    {
+        if (!screenShareLiveSnapshot.AnyScreenShareActive &&
+            screenShareLiveSnapshot.ActiveTargetWidth <= 0 &&
+            screenShareLiveSnapshot.ActiveTargetHeight <= 0)
+        {
+            return "(none)";
+        }
+
+        var target = screenShareLiveSnapshot.ActiveTargetWidth > 0 && screenShareLiveSnapshot.ActiveTargetHeight > 0
+            ? $"{screenShareLiveSnapshot.ActiveTargetWidth}x{screenShareLiveSnapshot.ActiveTargetHeight}"
+            : "(unknown)";
+        var fps = screenShareLiveSnapshot.ActiveTargetFramesPerSecond > 0
+            ? screenShareLiveSnapshot.ActiveTargetFramesPerSecond.ToString(CultureInfo.InvariantCulture)
+            : "(unknown)";
+        var bitrate = screenShareLiveSnapshot.ActiveTargetBitrate > 0
+            ? screenShareLiveSnapshot.ActiveTargetBitrate.ToString(CultureInfo.InvariantCulture)
+            : "(unknown)";
+
+        return $"mode={screenShareLiveSnapshot.SenderMode}; operating={screenShareLiveSnapshot.SenderOperatingState}; target={target}@{fps}fps; bitrate={bitrate}; blocker={screenShareLiveSnapshot.DominantPressureBlocker}";
+    }
+
+    private string BuildScreenShareLivePerformanceSummary()
+        => $"encoded_fps={FormatOptionalDouble(screenShareLiveSnapshot.ActualEncodedDisplayableFps)}; readback_fps={FormatOptionalDouble(screenShareLiveSnapshot.RawSourceReadbackFps)}; readback_size={FormatSize(screenShareLiveSnapshot.RawSourceOutputWidth, screenShareLiveSnapshot.RawSourceOutputHeight)}; gpu_scale={FormatYesNo(screenShareLiveSnapshot.RawSourceGpuScaleEnabled)}; gpu_fallback={FormatValue(screenShareLiveSnapshot.RawSourceGpuScaleFallbackReason)}; wgc_active={FormatYesNo(screenShareLiveSnapshot.RawSourceCaptureActive)}; border={FormatYesNo(screenShareLiveSnapshot.RawSourceBorderRequired)}; border_status={FormatValue(screenShareLiveSnapshot.RawSourceBorderRequiredApplyStatus)}; last_stop_ms={FormatOptionalLong(screenShareLiveSnapshot.RawSourceLastStopDurationMs)}; wgc_leases={screenShareLiveSnapshot.RawSourceActiveSessionLeaseCount}; close_status={FormatValue(screenShareLiveSnapshot.RawSourceLastSessionCloseStatus)}; close_method={FormatValue(screenShareLiveSnapshot.RawSourceLastSessionCloseMethod)}; owner_thread={screenShareLiveSnapshot.RawSourceSessionOwnerThreadId}; close_thread={screenShareLiveSnapshot.RawSourceLastSessionCloseThreadId}; close_on_owner={FormatYesNo(screenShareLiveSnapshot.RawSourceLastSessionCloseOnOwnerThread)}; owner_active={FormatYesNo(screenShareLiveSnapshot.RawSourceOwnerDispatcherActive)}; close_timeouts={screenShareLiveSnapshot.RawSourceOwnerThreadCloseTimeoutCount}; close_anomalies={screenShareLiveSnapshot.RawSourceSessionCloseAnomalyCount}";
+
+    private string BuildScreenShareLiveCpuSummary()
+        => $"sender_cpu_pct={FormatOptionalDouble(screenShareLiveSnapshot.SenderProcessCpuPercent)}; preprocess_ms={FormatOptionalLong(screenShareLiveSnapshot.LastPreprocessDurationMs)}; resize_ms={FormatOptionalLong(screenShareLiveSnapshot.LastPreprocessResizeDurationMs)}; color_ms={FormatOptionalLong(screenShareLiveSnapshot.LastPreprocessColorConvertDurationMs)}; path={FormatValue(screenShareLiveSnapshot.PreprocessResizePath)}";
+
+    private string BuildScreenShareLiveCursorSummary()
+        => $"mode={FormatValue(screenShareLiveSnapshot.CursorDeliveryMode)}; capture_desired={FormatYesNo(screenShareLiveSnapshot.CursorCaptureDesiredEnabled)}; capture_enabled={FormatYesNo(screenShareLiveSnapshot.CursorCaptureEnabled)}; control_supported={FormatYesNo(screenShareLiveSnapshot.CursorCaptureControlSupported)}; status={FormatValue(screenShareLiveSnapshot.CursorCaptureApplyStatus)}; fallback={FormatValue(screenShareLiveSnapshot.CursorCaptureFallbackReason)}";
+
+    private string BuildScreenShareLiveVisualSafetySummary()
+        => $"unsafe_tail={screenShareLiveSnapshot.PreCandidateGapTailEmittedToViewerCount}; actionable_late={screenShareLiveSnapshot.ActionableLateFragmentCount}; h264_taint={(screenShareLiveSnapshot.H264ReferenceTaintActive ? 1 : 0)}; h264_quarantine={(screenShareLiveSnapshot.H264ReferenceQuarantineActive ? 1 : 0)}; taint_enter={screenShareLiveSnapshot.H264ReferenceTaintEnterCount}; taint_release={screenShareLiveSnapshot.H264ReferenceTaintReleaseCount}; reason={FormatValue(screenShareLiveSnapshot.H264ReferenceTaintLastReason)}";
+
+    private string BuildAdvancedScreenShareSettingsSummary()
+        => $"preset={ScreenShareEffectivePresetName}; capture_fps={ScreenShareCaptureMaxFps}; transport_fps={ScreenShareTransportMaxFps}; scale={ScreenShareCaptureScale}; legacy_migrated={ScreenSharePresetMigrationStatus}";
+
+    private static string FormatOptionalDouble(double value)
+        => value >= 0 ? value.ToString("F2", CultureInfo.InvariantCulture) : "(none)";
+
+    private static string FormatOptionalLong(long value)
+        => value >= 0 ? value.ToString(CultureInfo.InvariantCulture) : "(none)";
+
+    private static string FormatSize(int width, int height)
+        => width > 0 && height > 0 ? $"{width}x{height}" : "(none)";
+
+    private static string FormatYesNo(bool value) => value ? "Yes" : "No";
+
+    private static string FormatValue(string? value)
+        => string.IsNullOrWhiteSpace(value) ? "(none)" : value.Trim();
 
     private static void AddIfNonDefault<T>(
         List<string> riskyOverrides,
