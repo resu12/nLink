@@ -32,7 +32,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
     private readonly Task sendLoopTask;
     private readonly int capacity;
     private long minimumFrameIntervalTicks;
-    private DateTimeOffset lastSendStartedAtUtc = DateTimeOffset.MinValue;
+    private long lastSendStartedAtUtcTicks;
     private long framesCaptured;
     private long framesQueued;
     private long framesDropped;
@@ -225,10 +225,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
 
     internal void ResetPacingWindow()
     {
-        lock (gate)
-        {
-            lastSendStartedAtUtc = DateTimeOffset.MinValue;
-        }
+        Volatile.Write(ref lastSendStartedAtUtcTicks, DateTimeOffset.MinValue.UtcTicks);
     }
 
 #if DEBUG
@@ -624,12 +621,13 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
 
     private bool ShouldDeferToNextSendSlot_NoLock(DateTimeOffset now)
     {
-        if (lastSendStartedAtUtc == DateTimeOffset.MinValue)
+        var lastSendStartedTicks = Volatile.Read(ref lastSendStartedAtUtcTicks);
+        if (lastSendStartedTicks == DateTimeOffset.MinValue.UtcTicks)
         {
             return false;
         }
 
-        return now - lastSendStartedAtUtc < GetMinimumFrameInterval();
+        return now.UtcTicks - lastSendStartedTicks < GetMinimumFrameInterval().Ticks;
     }
 
     private bool TryCoalescePendingSendSlotCandidate_NoLock(PendingFrame incomingFrame)
@@ -750,25 +748,29 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
         while (true)
         {
             var now = clock.UtcNow;
-            if (lastSendStartedAtUtc == DateTimeOffset.MinValue)
+            var nowTicks = now.UtcTicks;
+            var lastSendStartedTicks = Volatile.Read(ref lastSendStartedAtUtcTicks);
+            if (lastSendStartedTicks == DateTimeOffset.MinValue.UtcTicks)
             {
-                lastSendStartedAtUtc = now;
+                Volatile.Write(ref lastSendStartedAtUtcTicks, nowTicks);
                 return;
             }
 
-            var scheduledSendAtUtc = lastSendStartedAtUtc + GetMinimumFrameInterval();
-            var remaining = scheduledSendAtUtc - now;
-            if (remaining <= TimeSpan.Zero)
+            var scheduledSendAtUtcTicks = lastSendStartedTicks + GetMinimumFrameInterval().Ticks;
+            var remainingTicks = scheduledSendAtUtcTicks - nowTicks;
+            if (remainingTicks <= 0)
             {
-                lastSendStartedAtUtc = now;
+                Volatile.Write(ref lastSendStartedAtUtcTicks, nowTicks);
                 return;
             }
 
-            await delayAsync(remaining, disposeCts.Token).ConfigureAwait(false);
-            var resumedAtUtc = clock.UtcNow;
-            lastSendStartedAtUtc = resumedAtUtc >= scheduledSendAtUtc
-                ? resumedAtUtc
-                : scheduledSendAtUtc;
+            await delayAsync(TimeSpan.FromTicks(remainingTicks), disposeCts.Token).ConfigureAwait(false);
+            var resumedAtUtcTicks = clock.UtcNow.UtcTicks;
+            Volatile.Write(
+                ref lastSendStartedAtUtcTicks,
+                resumedAtUtcTicks >= scheduledSendAtUtcTicks
+                    ? resumedAtUtcTicks
+                    : scheduledSendAtUtcTicks);
             return;
         }
     }
