@@ -91,6 +91,52 @@ public sealed class ScreenShareVideoFrameReassemblerTests : ScreenShareViewerVie
 
 [Fact]
     [Trait("Category", "Smoke")]
+    public void ScreenShareVideoFrameReassembler_AllowsFullFrameBudgetWithShortFinalFragment()
+    {
+        var reassembler = new ScreenShareVideoFrameReassembler();
+        var readyFrames = new List<ScreenShareVideoFrameReadyEventArgs>();
+        reassembler.FrameReady += (_, e) => readyFrames.Add(e);
+
+        reassembler.OnStreamConfig(new ScreenShareVideoStreamConfigV1
+        {
+            SessionId = "viewer-full-budget",
+            StreamEpoch = 1,
+            Encoding = "h264",
+            CodecProfile = "baseline",
+            DecoderConfigData = new byte[] { 1, 2, 3 },
+        });
+
+        var accessUnit = Enumerable
+            .Range(0, ScreenShareVideoFrameReassembler.MaxAssembledFrameBytes)
+            .Select(static i => (byte)(i % 251))
+            .ToArray();
+        var fragments = ScreenShareVideoFragmenter.FragmentAccessUnit(
+            "viewer-full-budget",
+            streamEpoch: 1,
+            frameId: 0,
+            capturedTsUtcMs: 1234,
+            width: 1440,
+            height: 810,
+            encoding: "h264",
+            isKeyFrame: true,
+            accessUnit);
+
+        Assert.Equal(84, fragments.Count);
+
+        foreach (var fragment in fragments)
+        {
+            reassembler.OnFragment(fragment);
+        }
+
+        var readyFrame = Assert.Single(readyFrames);
+        Assert.Equal(ScreenShareVideoFrameReassembler.MaxAssembledFrameBytes, readyFrame.EncodedFrameBytes.Length);
+        Assert.Equal(accessUnit, readyFrame.EncodedFrameBytes);
+        Assert.Equal(0, reassembler.GetMetricsSnapshot().FramesDropped);
+        Assert.Equal(0, reassembler.GetMetricsSnapshot().FramesRejectedOversize);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
     public void ScreenShareVideoFrameReassembler_DropsLateMissingHeadWhileGapIsActive()
     {
         var reassembler = new ScreenShareVideoFrameReassembler();

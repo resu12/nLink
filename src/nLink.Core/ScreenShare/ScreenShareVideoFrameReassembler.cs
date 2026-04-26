@@ -406,7 +406,9 @@ public sealed class ScreenShareVideoFrameReassembler
             return false;
         }
 
-        if ((long)fragment.FragmentCount * ScreenShareVideoPayloadCodec.MaxFragmentRawBytes > MaxAssembledFrameBytes)
+        var minimumPossibleFrameBytes =
+            ((long)fragment.FragmentCount - 1) * ScreenShareVideoPayloadCodec.MaxFragmentRawBytes + 1;
+        if (minimumPossibleFrameBytes > MaxAssembledFrameBytes)
         {
             oversizeRejected = true;
             return false;
