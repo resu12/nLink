@@ -73,7 +73,10 @@ internal interface ISessionRuntimeScreenShareControlContext
         string status,
         string? abortReason);
 
-    void ReportHelperRemoteScreenShareStaleFrameDropped(long renderedAgeMs, long streamEpoch);
+    void ReportHelperRemoteScreenShareStaleFrameDropped(
+        long renderedAgeMs,
+        long streamEpoch,
+        bool referenceContinuityPreserved);
 
     void TrackHelperRemoteScreenShareAcceptedFrame(ScreenShareFrameCompletedEventArgs e);
 

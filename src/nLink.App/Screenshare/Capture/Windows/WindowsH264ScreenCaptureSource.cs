@@ -11,9 +11,12 @@ using NLink.Core.ScreenShare;
 namespace NLink.App.Services.ScreenCapture;
 
 [SupportedOSPlatform("windows")]
-internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, IScreenCaptureMetadataSource, IScreenCaptureAdaptiveTuning, IScreenCaptureKeyFrameRequestSource, IScreenCaptureFreshnessMetricsSource, IScreenCaptureTransportRecoveryResetSource, IAsyncDisposable
+internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, IScreenCaptureMetadataSource, IScreenCaptureAdaptiveTuning, IScreenCaptureKeyFrameRequestSource, IScreenCaptureFreshnessMetricsSource, IScreenCaptureTransportRecoveryResetSource, IScreenCaptureCursorCaptureControl, IAsyncDisposable
 {
     private static readonly TimeSpan SupersededPendingRawFrameLogInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan EncodeCadenceWakePollInterval = TimeSpan.FromMilliseconds(25);
+    private static readonly TimeSpan CpuSampleMinInterval = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan EncodedFpsSampleMinInterval = TimeSpan.FromMilliseconds(500);
     private readonly object sync = new();
     private readonly ScreenCaptureTargetSelection captureTarget;
     private readonly Func<IWindowsRawCaptureSource> rawCaptureSourceFactory;
@@ -48,7 +51,18 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
     private long supersededPendingRawFrameCount;
     private long rawFramesDeferredToEncodeSlot;
     private long rawFramesReplacedBeforeEncodeSlot;
+    private long rawCaptureEventCount;
+    private long rawFramesSkippedBeforeEncode;
     private long rawEncodeSlotEmptyCount;
+    private int rawSlotCoalescingActive;
+    private long lastTransportEncodeStartedUtcMs;
+    private long lastEncodedStreamEpoch;
+    private long actualEncodedFpsSampleUtcMs;
+    private long actualEncodedFpsSampleDisplayableFrames;
+    private double actualEncodedDisplayableFps;
+    private long lastCpuSampleTimestamp;
+    private long lastCpuSampleProcessorTicks;
+    private double senderProcessCpuPercent = -1;
     private long lastCaptureToEncodeStartAgeMs = -1;
     private long lastEncodeDurationMs = -1;
     private long emittedDisplayableFrames;
@@ -60,6 +74,10 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
     private double displayableFrameRatio;
     private double averageEncodedFrameBytes;
     private long lastPreprocessDurationMs = -1;
+    private long lastPreprocessResizeDurationMs = -1;
+    private long lastPreprocessColorConvertDurationMs = -1;
+    private string preprocessResizePath = string.Empty;
+    private long preprocessDirectNv12Count;
     private long lastTransformEncodeDurationMs = -1;
     private long lastEncodeTotalDurationMs = -1;
     private double idrFrameRatio;
@@ -76,7 +94,37 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
     private int activeTargetFramesPerSecond;
     private string activeEncoderPath = string.Empty;
     private string activeEncoderProfile = string.Empty;
+    private bool motionIntegrityGuardActive;
+    private double motionIntegritySampledRatio;
+    private double motionIntegrityPeakSampledRatio;
+    private int motionIntegrityScrollMotionActiveBandCount;
+    private double motionIntegrityScrollMotionPeakBandRatio;
+    private long motionIntegrityHighMotionFrameCount;
+    private long motionIntegrityScrollTriggerCount;
+    private long motionIntegrityBurstEnterCount;
+    private long motionIntegrityBurstExitCount;
+    private long motionIntegrityForcedKeyFrameCount;
+    private string motionIntegrityLastTriggerKind = string.Empty;
+    private string motionIntegrityLastReason = string.Empty;
+    private double motionIntegrityIdrFrameRatio;
+    private long motionIntegrityForcedIdrRequestedCount;
+    private long motionIntegrityForcedIdrConfirmedCount;
+    private long motionIntegrityForcedIdrMissedCount;
+    private long motionIntegrityForcedIdrPendingCount;
+    private long motionIntegrityForcedIdrConsecutiveMissCount;
+    private long motionIntegrityForcedIdrBurstMissCount;
+    private double motionIntegrityActiveIdrFrameRatio;
+    private string motionIntegrityForcedIdrLastMissReason = string.Empty;
+    private long motionIntegrityEncoderRebuildCount;
+    private long motionIntegrityEncoderRebuildSuppressedCount;
+    private bool motionIntegrityEncoderRebuildPending;
+    private string motionIntegrityEncoderRebuildLastReason = string.Empty;
     private DateTimeOffset lastSupersededPendingRawFrameLogUtc;
+    private bool desiredCursorCaptureEnabled = true;
+    private bool cursorCaptureEnabled = true;
+    private bool cursorCaptureControlSupported;
+    private string cursorCaptureFallbackReason = string.Empty;
+    private string cursorCaptureApplyStatus = string.Empty;
 
     public WindowsH264ScreenCaptureSource()
         : this(ScreenCaptureTargetStore.Load(), sourceRole: "preview")
@@ -86,7 +134,7 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
     internal WindowsH264ScreenCaptureSource(ScreenCaptureTargetSelection captureTarget, string sourceRole = "preview")
         : this(
             captureTarget,
-            rawCaptureSourceFactory: () => CreateDefaultRawSource(captureTarget),
+            rawCaptureSourceFactory: () => CreateDefaultRawSource(captureTarget, sourceRole),
             encoderFactory: () => CreateDefaultEncoder(sourceRole),
             sourceRole: sourceRole)
     {
@@ -102,7 +150,7 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
     {
         this.captureTarget = captureTarget;
         this.rawCaptureSourceFactory = rawCaptureSourceFactory ?? throw new ArgumentNullException(nameof(rawCaptureSourceFactory));
-        this.windowsGraphicsCaptureSourceFactory = windowsGraphicsCaptureSourceFactory ?? (() => new WindowsGraphicsCaptureRawSource(captureTarget));
+        this.windowsGraphicsCaptureSourceFactory = windowsGraphicsCaptureSourceFactory ?? (() => new WindowsGraphicsCaptureRawSource(captureTarget, sourceRole));
         this.desktopDuplicationSourceFactory = desktopDuplicationSourceFactory ?? (() => new DesktopDuplicationRawSource(captureTarget));
         this.encoderFactory = encoderFactory ?? throw new ArgumentNullException(nameof(encoderFactory));
         this.sourceRole = string.IsNullOrWhiteSpace(sourceRole) ? "unknown" : sourceRole.Trim().ToLowerInvariant();
@@ -118,6 +166,28 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
     }
 
     public event EventHandler<ScreenCaptureFrameEventArgs>? FrameArrived;
+
+    public bool IsCursorCaptureControlSupported
+    {
+        get
+        {
+            lock (sync)
+            {
+                return cursorCaptureControlSupported;
+            }
+        }
+    }
+
+    public bool IsCursorCaptureEnabled
+    {
+        get
+        {
+            lock (sync)
+            {
+                return cursorCaptureEnabled;
+            }
+        }
+    }
 
     public static bool IsRuntimeSupported()
     {
@@ -148,7 +218,11 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
 
     public void SetCaptureFrameRateHint(int maxFramesPerSecond)
     {
-        captureFrameRateHint = Math.Max(1, maxFramesPerSecond);
+        lock (sync)
+        {
+            captureFrameRateHint = Math.Max(1, maxFramesPerSecond);
+            ApplyRawCaptureCadence_NoLock(rawCaptureSource, "frame_rate_hint");
+        }
     }
 
     public void SetTransportTuningLevel(ScreenShareTransportTuningLevel level)
@@ -167,6 +241,8 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
             }
 
             streamEpoch = Math.Max(1, streamEpoch + 1);
+            ApplyRawCaptureCadence_NoLock(rawCaptureSource, "tuning_level");
+            ForceNextRawCapture_NoLock("tuning_level_epoch_change");
         }
 
         Interlocked.Exchange(ref pendingForceKeyFrame, 1);
@@ -193,6 +269,8 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
                 currentEncoder = encoder;
                 currentStreamEpoch = Math.Max(0, streamEpoch);
             }
+
+            ForceNextRawCapture_NoLock("keyframe_request");
         }
 
         purgedPendingRawFrame?.Dispose();
@@ -208,11 +286,13 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
         lock (sync)
         {
             tuningLevel = level;
+            ApplyRawCaptureCadence_NoLock(rawCaptureSource, "transport_recovery_reset");
             if (IsTransportSourceRole())
             {
                 senderContinuityRecoveryActive = true;
                 lastSenderContinuityLossReason = "transport_recovery_reset";
                 currentEncoder = encoder;
+                ForceNextRawCapture_NoLock("transport_recovery_reset");
             }
 
             nextEpoch = streamEpoch > 0
@@ -233,6 +313,9 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
         lock (sync)
         {
             var nowUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var emittedDisplayableFrameCount = Interlocked.Read(ref emittedDisplayableFrames);
+            UpdateActualEncodedDisplayableFps_NoLock(nowUtcMs, emittedDisplayableFrameCount);
+            UpdateProcessCpuPercent_NoLock();
             var pendingRawFrameCount = pendingRawFrame is null ? 0 : 1;
             long oldestPendingAgeMs = 0;
             if (pendingRawFrame is not null)
@@ -244,6 +327,10 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
                         : pendingRawFrame.EnqueuedTsUtcMs));
             }
 
+            var rawSourceRuntimeMetrics = rawCaptureSource is IWindowsRawCaptureCadenceControl rawCadenceControl
+                ? rawCadenceControl.GetRawCaptureRuntimeMetricsSnapshot()
+                : default;
+
             return new ScreenCaptureFreshnessMetrics(
                 CurrentStreamEpoch: streamEpoch,
                 PendingRawFrameCount: pendingRawFrameCount,
@@ -253,9 +340,45 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
                 SupersededPendingRawFrameCount: Interlocked.Read(ref supersededPendingRawFrameCount),
                 RawFramesDeferredToEncodeSlot: Interlocked.Read(ref rawFramesDeferredToEncodeSlot),
                 RawFramesReplacedBeforeEncodeSlot: Interlocked.Read(ref rawFramesReplacedBeforeEncodeSlot),
+                RawCaptureEventCount: Interlocked.Read(ref rawCaptureEventCount),
+                RawFramesSkippedBeforeEncode: Interlocked.Read(ref rawFramesSkippedBeforeEncode),
                 RawEncodeSlotEmptyCount: Interlocked.Read(ref rawEncodeSlotEmptyCount),
-                RawSlotCoalescingActive: false,
-                EmittedDisplayableFrames: Interlocked.Read(ref emittedDisplayableFrames),
+                RawSlotCoalescingActive: Volatile.Read(ref rawSlotCoalescingActive) == 1,
+                RawSourceFrameArrivedCount: rawSourceRuntimeMetrics.FrameArrivedCount,
+                RawSourceFramesSkippedBeforeReadback: rawSourceRuntimeMetrics.FramesSkippedBeforeReadback,
+                RawSourceFramesReadbackCount: rawSourceRuntimeMetrics.FramesReadbackCount,
+                RawSourceReadbackFps: rawSourceRuntimeMetrics.ReadbackFps,
+                RawSourceLastReadbackDurationMs: rawSourceRuntimeMetrics.LastReadbackDurationMs,
+                RawSourceAverageReadbackDurationMs: rawSourceRuntimeMetrics.AverageReadbackDurationMs,
+                RawSourceCadenceTargetFps: rawSourceRuntimeMetrics.CadenceTargetFps,
+                RawSourceUrgentBypassCount: rawSourceRuntimeMetrics.UrgentBypassCount,
+                RawSourceOutputWidth: rawSourceRuntimeMetrics.OutputWidth,
+                RawSourceOutputHeight: rawSourceRuntimeMetrics.OutputHeight,
+                RawSourceGpuScaleEnabled: rawSourceRuntimeMetrics.GpuScaleEnabled,
+                RawSourceGpuScaleFallbackReason: rawSourceRuntimeMetrics.GpuScaleFallbackReason,
+                RawSourceCaptureActive: rawSourceRuntimeMetrics.CaptureActive,
+                RawSourceBorderRequiredControlSupported: rawSourceRuntimeMetrics.BorderRequiredControlSupported,
+                RawSourceBorderRequiredDesired: rawSourceRuntimeMetrics.BorderRequiredDesired,
+                RawSourceBorderRequired: rawSourceRuntimeMetrics.BorderRequired,
+                RawSourceBorderRequiredApplyStatus: rawSourceRuntimeMetrics.BorderRequiredApplyStatus,
+                RawSourceBorderRequiredFallbackReason: rawSourceRuntimeMetrics.BorderRequiredFallbackReason,
+                RawSourceLastStopDurationMs: rawSourceRuntimeMetrics.LastStopDurationMs,
+                RawSourceLastStopReason: rawSourceRuntimeMetrics.LastStopReason,
+                RawSourceActiveSessionLeaseCount: rawSourceRuntimeMetrics.ActiveSessionLeaseCount,
+                RawSourceLastSessionCloseStatus: rawSourceRuntimeMetrics.LastSessionCloseStatus,
+                RawSourceLastSessionCloseMethod: rawSourceRuntimeMetrics.LastSessionCloseMethod,
+                RawSourceLastSessionCloseHResult: rawSourceRuntimeMetrics.LastSessionCloseHResult,
+                RawSourceForceCloseCount: rawSourceRuntimeMetrics.ForceCloseCount,
+                RawSourceSessionCloseAnomalyCount: rawSourceRuntimeMetrics.SessionCloseAnomalyCount,
+                RawSourceSessionOwnerThreadId: rawSourceRuntimeMetrics.SessionOwnerThreadId,
+                RawSourceLastSessionCloseThreadId: rawSourceRuntimeMetrics.LastSessionCloseThreadId,
+                RawSourceLastSessionCloseOnOwnerThread: rawSourceRuntimeMetrics.LastSessionCloseOnOwnerThread,
+                RawSourceOwnerDispatcherActive: rawSourceRuntimeMetrics.OwnerDispatcherActive,
+                RawSourceOwnerThreadCloseTimeoutCount: rawSourceRuntimeMetrics.OwnerThreadCloseTimeoutCount,
+                ActualEncodedDisplayableFps: Volatile.Read(ref actualEncodedDisplayableFps),
+                EncodeCadenceTargetFps: Volatile.Read(ref activeTargetFramesPerSecond),
+                SenderProcessCpuPercent: Volatile.Read(ref senderProcessCpuPercent),
+                EmittedDisplayableFrames: emittedDisplayableFrameCount,
                 EmittedNonDisplayableUnits: Interlocked.Read(ref emittedNonDisplayableUnits),
                 DisplayableFrameRatio: Volatile.Read(ref displayableFrameRatio),
                 IdrFramesEmitted: Interlocked.Read(ref idrFramesEmitted),
@@ -272,6 +395,10 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
                 FramesDroppedWaitingForRecoveryKeyframe: Interlocked.Read(ref framesDroppedWaitingForRecoveryKeyframe),
                 LastSenderContinuityLossReason: lastSenderContinuityLossReason,
                 LastPreprocessDurationMs: Interlocked.Read(ref lastPreprocessDurationMs),
+                LastPreprocessResizeDurationMs: Interlocked.Read(ref lastPreprocessResizeDurationMs),
+                LastPreprocessColorConvertDurationMs: Interlocked.Read(ref lastPreprocessColorConvertDurationMs),
+                PreprocessResizePath: preprocessResizePath,
+                PreprocessDirectNv12Count: Interlocked.Read(ref preprocessDirectNv12Count),
                 LastTransformEncodeDurationMs: Interlocked.Read(ref lastTransformEncodeDurationMs),
                 LastEncodeTotalDurationMs: Interlocked.Read(ref lastEncodeTotalDurationMs),
                 EncoderPath: activeEncoderPath,
@@ -279,8 +406,108 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
                 ActiveTargetWidth: Volatile.Read(ref activeTargetWidth),
                 ActiveTargetHeight: Volatile.Read(ref activeTargetHeight),
                 ActiveTargetBitrate: checked((uint)Math.Max(0L, Interlocked.Read(ref activeTargetBitrate))),
-                ActiveTargetFramesPerSecond: Volatile.Read(ref activeTargetFramesPerSecond));
+                ActiveTargetFramesPerSecond: Volatile.Read(ref activeTargetFramesPerSecond),
+                MotionIntegrityGuardActive: motionIntegrityGuardActive,
+                MotionIntegritySampledRatio: motionIntegritySampledRatio,
+                MotionIntegrityPeakSampledRatio: motionIntegrityPeakSampledRatio,
+                MotionIntegrityScrollMotionActiveBandCount: motionIntegrityScrollMotionActiveBandCount,
+                MotionIntegrityScrollMotionPeakBandRatio: motionIntegrityScrollMotionPeakBandRatio,
+                MotionIntegrityHighMotionFrameCount: motionIntegrityHighMotionFrameCount,
+                MotionIntegrityScrollTriggerCount: motionIntegrityScrollTriggerCount,
+                MotionIntegrityBurstEnterCount: motionIntegrityBurstEnterCount,
+                MotionIntegrityBurstExitCount: motionIntegrityBurstExitCount,
+                MotionIntegrityForcedKeyFrameCount: motionIntegrityForcedKeyFrameCount,
+                MotionIntegrityLastTriggerKind: motionIntegrityLastTriggerKind,
+                MotionIntegrityLastReason: motionIntegrityLastReason,
+                MotionIntegrityIdrFrameRatio: motionIntegrityIdrFrameRatio,
+                MotionIntegrityForcedIdrRequestedCount: motionIntegrityForcedIdrRequestedCount,
+                MotionIntegrityForcedIdrConfirmedCount: motionIntegrityForcedIdrConfirmedCount,
+                MotionIntegrityForcedIdrMissedCount: motionIntegrityForcedIdrMissedCount,
+                MotionIntegrityForcedIdrPendingCount: motionIntegrityForcedIdrPendingCount,
+                MotionIntegrityForcedIdrConsecutiveMissCount: motionIntegrityForcedIdrConsecutiveMissCount,
+                MotionIntegrityForcedIdrBurstMissCount: motionIntegrityForcedIdrBurstMissCount,
+                MotionIntegrityActiveIdrFrameRatio: motionIntegrityActiveIdrFrameRatio,
+                MotionIntegrityForcedIdrLastMissReason: motionIntegrityForcedIdrLastMissReason,
+                MotionIntegrityEncoderRebuildCount: motionIntegrityEncoderRebuildCount,
+                MotionIntegrityEncoderRebuildSuppressedCount: motionIntegrityEncoderRebuildSuppressedCount,
+                MotionIntegrityEncoderRebuildPending: motionIntegrityEncoderRebuildPending,
+                MotionIntegrityEncoderRebuildLastReason: motionIntegrityEncoderRebuildLastReason,
+                CursorCaptureControlSupported: cursorCaptureControlSupported,
+                CursorCaptureEnabled: cursorCaptureEnabled,
+                CursorCaptureFallbackReason: cursorCaptureFallbackReason,
+                CursorCaptureDesiredEnabled: desiredCursorCaptureEnabled,
+                CursorCaptureApplyStatus: cursorCaptureApplyStatus);
         }
+    }
+
+    public bool TrySetCursorCaptureEnabled(bool enabled, string reason)
+    {
+        IWindowsRawCaptureSource? currentRawSource;
+        lock (sync)
+        {
+            desiredCursorCaptureEnabled = enabled;
+            currentRawSource = rawCaptureSource;
+            if (currentRawSource is null)
+            {
+            cursorCaptureEnabled = enabled;
+            cursorCaptureFallbackReason = "queued_before_start";
+            cursorCaptureApplyStatus = "queued_before_start";
+            LogCursorCaptureMode("queued_before_start", enabled, supported: false, applied: false, reason);
+            return false;
+            }
+        }
+
+        return TryApplyCursorCapturePreferenceToRawSource(currentRawSource, enabled, reason);
+    }
+
+    private bool TryApplyCursorCapturePreferenceToRawSource(
+        IWindowsRawCaptureSource rawSource,
+        bool enabled,
+        string reason)
+    {
+        lock (sync)
+        {
+            return TryApplyCursorCapturePreferenceToRawSource_NoLock(rawSource, enabled, reason);
+        }
+    }
+
+    private bool TryApplyCursorCapturePreferenceToRawSource_NoLock(
+        IWindowsRawCaptureSource rawSource,
+        bool enabled,
+        string reason)
+    {
+        if (rawSource is not IScreenCaptureCursorCaptureControl cursorControl)
+        {
+            cursorCaptureControlSupported = false;
+            cursorCaptureEnabled = true;
+            cursorCaptureFallbackReason = "unsupported_source";
+            cursorCaptureApplyStatus = "unsupported_source";
+            LogCursorCaptureMode("unsupported_source", enabled: true, supported: false, applied: false, reason);
+            return false;
+        }
+
+        var supported = cursorControl.IsCursorCaptureControlSupported;
+        var applied = cursorControl.TrySetCursorCaptureEnabled(enabled, reason);
+        cursorCaptureControlSupported = supported;
+        cursorCaptureEnabled = cursorControl.IsCursorCaptureEnabled;
+        cursorCaptureFallbackReason = applied
+            ? string.Empty
+            : supported ? "apply_failed" : "unsupported";
+        cursorCaptureApplyStatus = applied ? "applied" : cursorCaptureFallbackReason;
+        LogCursorCaptureMode(
+            applied ? "applied" : "fallback",
+            cursorCaptureEnabled,
+            supported,
+            applied,
+            reason);
+        return applied;
+    }
+
+    private void LogCursorCaptureMode(string status, bool enabled, bool supported, bool applied, string reason)
+    {
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_h264_cursor_capture_mode; source_role={sourceRole}; backend={(rawCaptureSource is null ? WindowsRawCaptureBackendKind.Unknown : GetRawCaptureBackendKind(rawCaptureSource))}; cursor_capture_desired_enabled={(desiredCursorCaptureEnabled ? 1 : 0)}; cursor_capture_enabled={(enabled ? 1 : 0)}; cursor_control_supported={(supported ? 1 : 0)}; applied={(applied ? 1 : 0)}; status={Sanitize(status)}; reason={Sanitize(string.IsNullOrWhiteSpace(reason) ? "unspecified" : reason)}");
     }
 
     public int PurgePendingRawFrames()
@@ -325,6 +552,8 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
                 throw new NotSupportedException("Windows H.264 capture infrastructure is not supported on this system.");
             }
 
+            TryApplyCursorCapturePreferenceToRawSource_NoLock(createdRawSource, desiredCursorCaptureEnabled, "start");
+
             createdCaptureCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             createdEncodeCts = CancellationTokenSource.CreateLinkedTokenSource(createdCaptureCts.Token);
             encoder = createdEncoder;
@@ -336,6 +565,8 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
             loggedTerminalEncoderFailure = false;
             ResetFreshnessState_NoLock();
             ResetWgcLifetimeSummary();
+            ApplyRawCaptureCadence_NoLock(createdRawSource, "start");
+            ForceNextRawCapture_NoLock("start_first_frame");
             started = true;
             startTask = StartRawCaptureWithFallbackAsync(createdRawSource, createdCaptureCts.Token);
             pendingStartTask = startTask;
@@ -466,6 +697,9 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
             lock (sync)
             {
                 rawCaptureSource = fallbackSource;
+                ApplyRawCaptureCadence_NoLock(fallbackSource, "startup_fallback");
+                ForceNextRawCapture_NoLock("startup_fallback_first_frame");
+                TryApplyCursorCapturePreferenceToRawSource_NoLock(fallbackSource, desiredCursorCaptureEnabled, "startup_fallback");
             }
 
             try
@@ -556,6 +790,7 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
 
         lock (sync)
         {
+            Interlocked.Increment(ref rawCaptureEventCount);
             if (!started || encoder is null || encodeCts is null)
             {
                 supersededPendingRawFrame = new PendingRawFrame(e.Frame);
@@ -572,6 +807,12 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
                     }
                     else if (incomingRawFrame.StreamEpoch > pendingRawFrame.StreamEpoch &&
                              !ShouldPreserveExistingPendingRawFrameForRecovery_NoLock(incomingRawFrame, pendingRawFrame))
+                    {
+                        supersededPendingRawFrame = ClearPendingRawFrame_NoLock();
+                        pendingRawFrame = incomingRawFrame;
+                        shouldCountRawFrameReplacementBeforeEncodeSlot = supersededPendingRawFrame is not null;
+                    }
+                    else if (!ShouldPreserveExistingPendingRawFrameForRecovery_NoLock(incomingRawFrame, pendingRawFrame))
                     {
                         supersededPendingRawFrame = ClearPendingRawFrame_NoLock();
                         pendingRawFrame = incomingRawFrame;
@@ -613,6 +854,7 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
         if (shouldCountRawFrameReplacementBeforeEncodeSlot)
         {
             Interlocked.Increment(ref rawFramesReplacedBeforeEncodeSlot);
+            Interlocked.Increment(ref rawFramesSkippedBeforeEncode);
         }
 
         if (shouldLogSupersededPendingRawFrame)
@@ -635,7 +877,8 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
             PendingRawFrame? nextPendingFrame;
             IWindowsH264FrameEncoder? currentEncoder;
             CancellationToken cancellationToken;
-            WindowsH264EncodeOptions encodeOptions;
+            WindowsH264EncodeOptions encodeOptions = default;
+            TimeSpan encodeDelay = TimeSpan.Zero;
 
             lock (sync)
             {
@@ -662,13 +905,39 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
                 Interlocked.Exchange(ref activeTargetBitrate, encodeProfile.TargetBitrate);
                 Volatile.Write(ref activeTargetFramesPerSecond, encodeProfile.TargetFramesPerSecond);
                 activeEncoderProfile = encodeProfile.ProfileName;
-                nextPendingFrame = ClearPendingRawFrame_NoLock();
+                ApplyRawCaptureControls_NoLock(rawCaptureSource, encodeProfile, "active_encode_profile");
+                var forceKeyFramePending = Volatile.Read(ref pendingForceKeyFrame) == 1;
+                var nowUtc = DateTimeOffset.UtcNow;
+                if (ShouldDelayTransportEncode_NoLock(nextPendingFrame, encodeProfile, forceKeyFramePending, nowUtc, out encodeDelay))
+                {
+                    Volatile.Write(ref rawSlotCoalescingActive, 1);
+                }
+                else
+                {
+                    Volatile.Write(ref rawSlotCoalescingActive, 0);
+                    nextPendingFrame = ClearPendingRawFrame_NoLock();
+                    Interlocked.Exchange(ref lastTransportEncodeStartedUtcMs, nowUtc.ToUnixTimeMilliseconds());
+                    Interlocked.Exchange(ref lastEncodedStreamEpoch, nextPendingFrame.StreamEpoch);
 
-                encodeOptions = new WindowsH264EncodeOptions(
-                    TargetFramesPerSecond: encodeProfile.TargetFramesPerSecond,
-                    TuningLevel: tuningLevel,
-                    ForceKeyFrame: Interlocked.Exchange(ref pendingForceKeyFrame, 0) == 1,
-                    StreamEpoch: streamEpoch);
+                    encodeOptions = new WindowsH264EncodeOptions(
+                        TargetFramesPerSecond: encodeProfile.TargetFramesPerSecond,
+                        TuningLevel: tuningLevel,
+                        ForceKeyFrame: Interlocked.Exchange(ref pendingForceKeyFrame, 0) == 1,
+                        StreamEpoch: streamEpoch);
+                }
+            }
+
+            if (encodeDelay > TimeSpan.Zero)
+            {
+                try
+                {
+                    await Task.Delay(Min(encodeDelay, EncodeCadenceWakePollInterval), cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+
+                continue;
             }
 
             try
@@ -688,6 +957,10 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
                 {
                     var encoderMetrics = encoderMetricsSource.GetRuntimeMetricsSnapshot();
                     Interlocked.Exchange(ref lastPreprocessDurationMs, encoderMetrics.LastPreprocessDurationMs);
+                    Interlocked.Exchange(ref lastPreprocessResizeDurationMs, encoderMetrics.LastPreprocessResizeDurationMs);
+                    Interlocked.Exchange(ref lastPreprocessColorConvertDurationMs, encoderMetrics.LastPreprocessColorConvertDurationMs);
+                    preprocessResizePath = encoderMetrics.PreprocessResizePath;
+                    Interlocked.Exchange(ref preprocessDirectNv12Count, encoderMetrics.PreprocessDirectNv12Count);
                     Interlocked.Exchange(ref lastTransformEncodeDurationMs, encoderMetrics.LastTransformEncodeDurationMs);
                     if (encoderMetrics.LastEncodeTotalDurationMs >= 0)
                     {
@@ -714,6 +987,35 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
                         senderContinuityLossCount = encoderMetrics.SenderContinuityLossCount;
                         framesDroppedWaitingForRecoveryKeyframe = encoderMetrics.FramesDroppedWaitingForRecoveryKeyframe;
                         lastSenderContinuityLossReason = encoderMetrics.LastSenderContinuityLossReason;
+                        motionIntegrityGuardActive = encoderMetrics.MotionIntegrityGuardActive;
+                        motionIntegritySampledRatio = encoderMetrics.MotionIntegritySampledRatio;
+                        motionIntegrityPeakSampledRatio = encoderMetrics.MotionIntegrityPeakSampledRatio;
+                        motionIntegrityScrollMotionActiveBandCount = encoderMetrics.MotionIntegrityScrollMotionActiveBandCount;
+                        motionIntegrityScrollMotionPeakBandRatio = encoderMetrics.MotionIntegrityScrollMotionPeakBandRatio;
+                        motionIntegrityHighMotionFrameCount = encoderMetrics.MotionIntegrityHighMotionFrameCount;
+                        motionIntegrityScrollTriggerCount = encoderMetrics.MotionIntegrityScrollTriggerCount;
+                        motionIntegrityBurstEnterCount = encoderMetrics.MotionIntegrityBurstEnterCount;
+                        motionIntegrityBurstExitCount = encoderMetrics.MotionIntegrityBurstExitCount;
+                        motionIntegrityForcedKeyFrameCount = encoderMetrics.MotionIntegrityForcedKeyFrameCount;
+                        motionIntegrityLastTriggerKind = encoderMetrics.MotionIntegrityLastTriggerKind;
+                        motionIntegrityLastReason = encoderMetrics.MotionIntegrityLastReason;
+                        motionIntegrityIdrFrameRatio = encoderMetrics.MotionIntegrityIdrFrameRatio;
+                        motionIntegrityForcedIdrRequestedCount = encoderMetrics.MotionIntegrityForcedIdrRequestedCount;
+                        motionIntegrityForcedIdrConfirmedCount = encoderMetrics.MotionIntegrityForcedIdrConfirmedCount;
+                        motionIntegrityForcedIdrMissedCount = encoderMetrics.MotionIntegrityForcedIdrMissedCount;
+                        motionIntegrityForcedIdrPendingCount = encoderMetrics.MotionIntegrityForcedIdrPendingCount;
+                        motionIntegrityForcedIdrConsecutiveMissCount = encoderMetrics.MotionIntegrityForcedIdrConsecutiveMissCount;
+                        motionIntegrityForcedIdrBurstMissCount = encoderMetrics.MotionIntegrityForcedIdrBurstMissCount;
+                        motionIntegrityActiveIdrFrameRatio = encoderMetrics.MotionIntegrityActiveIdrFrameRatio;
+                        motionIntegrityForcedIdrLastMissReason = encoderMetrics.MotionIntegrityForcedIdrLastMissReason;
+                        motionIntegrityEncoderRebuildCount = encoderMetrics.MotionIntegrityEncoderRebuildCount;
+                        motionIntegrityEncoderRebuildSuppressedCount = encoderMetrics.MotionIntegrityEncoderRebuildSuppressedCount;
+                        motionIntegrityEncoderRebuildPending = encoderMetrics.MotionIntegrityEncoderRebuildPending;
+                        motionIntegrityEncoderRebuildLastReason = encoderMetrics.MotionIntegrityEncoderRebuildLastReason;
+                        if (motionIntegrityEncoderRebuildPending)
+                        {
+                            ForceNextRawCapture_NoLock("encoder_rebuild_pending");
+                        }
                     }
                 }
 
@@ -896,6 +1198,9 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
                 encodeCts = CancellationTokenSource.CreateLinkedTokenSource(captureCts?.Token ?? CancellationToken.None);
                 Interlocked.Exchange(ref pendingForceKeyFrame, 1);
                 streamEpoch = Math.Max(1, streamEpoch + 1);
+                ApplyRawCaptureControls_NoLock(fallbackSource, "runtime_fallback");
+                ForceNextRawCapture_NoLock("runtime_fallback_first_frame");
+                TryApplyCursorCapturePreferenceToRawSource_NoLock(fallbackSource, desiredCursorCaptureEnabled, "runtime_fallback");
             }
 
             LocalOperationalLog.Info(
@@ -925,12 +1230,12 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
         }
     }
 
-    private static IWindowsRawCaptureSource CreateDefaultRawSource(ScreenCaptureTargetSelection captureTarget)
+    private static IWindowsRawCaptureSource CreateDefaultRawSource(ScreenCaptureTargetSelection captureTarget, string sourceRole)
     {
         if (WindowsGraphicsCaptureRawSource.IsRuntimeSupported())
         {
             LocalOperationalLog.Info("ScreenShareTransport", "event=screenshare_h264_raw_source_selected; path=wgc");
-            return new WindowsGraphicsCaptureRawSource(captureTarget);
+            return new WindowsGraphicsCaptureRawSource(captureTarget, sourceRole);
         }
 
         if (DesktopDuplicationRawSource.IsRuntimeSupported())
@@ -939,7 +1244,7 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
             return new DesktopDuplicationRawSource(captureTarget);
         }
 
-        return new WindowsGraphicsCaptureRawSource(captureTarget);
+        return new WindowsGraphicsCaptureRawSource(captureTarget, sourceRole);
     }
 
     private IWindowsRawCaptureSource CreateWindowsGraphicsCaptureSource()
@@ -973,6 +1278,77 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
         };
     }
 
+    private void ApplyRawCaptureCadence_NoLock(IWindowsRawCaptureSource? source, string reason)
+        => ApplyRawCaptureControls_NoLock(source, reason);
+
+    private void ApplyRawCaptureControls_NoLock(IWindowsRawCaptureSource? source, string reason)
+    {
+        if (source is not IWindowsRawCaptureCadenceControl cadenceControl)
+        {
+            return;
+        }
+
+        cadenceControl.SetRawCaptureCadence(ResolveRawCaptureCadenceTargetFps_NoLock(), reason);
+        var currentTargetWidth = Volatile.Read(ref activeTargetWidth);
+        var currentTargetHeight = Volatile.Read(ref activeTargetHeight);
+        if (currentTargetWidth > 0 &&
+            currentTargetHeight > 0 &&
+            source is IWindowsRawCaptureOutputControl outputControl)
+        {
+            outputControl.SetRawCaptureOutputSizeHint(currentTargetWidth, currentTargetHeight, reason);
+        }
+    }
+
+    private void ApplyRawCaptureControls_NoLock(
+        IWindowsRawCaptureSource? source,
+        WindowsH264EncodeProfile encodeProfile,
+        string reason)
+    {
+        if (source is not IWindowsRawCaptureCadenceControl cadenceControl)
+        {
+            if (source is IWindowsRawCaptureOutputControl outputOnlyControl)
+            {
+                outputOnlyControl.SetRawCaptureOutputSizeHint(encodeProfile.Width, encodeProfile.Height, reason);
+            }
+
+            return;
+        }
+
+        cadenceControl.SetRawCaptureCadence(encodeProfile.TargetFramesPerSecond, reason);
+        if (source is IWindowsRawCaptureOutputControl outputControl)
+        {
+            outputControl.SetRawCaptureOutputSizeHint(encodeProfile.Width, encodeProfile.Height, reason);
+        }
+    }
+
+    private void ForceNextRawCapture_NoLock(string reason)
+    {
+        if (!IsTransportSourceRole())
+        {
+            return;
+        }
+
+        if (rawCaptureSource is IWindowsRawCaptureCadenceControl cadenceControl)
+        {
+            cadenceControl.ForceNextRawCapture(reason);
+        }
+    }
+
+    private int ResolveRawCaptureCadenceTargetFps_NoLock()
+    {
+        if (!IsTransportSourceRole())
+        {
+            return 0;
+        }
+
+        return WindowsH264EncodePolicy.ResolveProfile(
+            sourceWidth: 2,
+            sourceHeight: 2,
+            targetFramesPerSecond: captureFrameRateHint,
+            tuningLevel,
+            transportIpOnly: true).TargetFramesPerSecond;
+    }
+
     private void ResetWgcLifetimeSummary()
     {
         wgcStartSucceeded = false;
@@ -992,7 +1368,18 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
         supersededPendingRawFrameCount = 0;
         rawFramesDeferredToEncodeSlot = 0;
         rawFramesReplacedBeforeEncodeSlot = 0;
+        rawCaptureEventCount = 0;
+        rawFramesSkippedBeforeEncode = 0;
         rawEncodeSlotEmptyCount = 0;
+        rawSlotCoalescingActive = 0;
+        lastTransportEncodeStartedUtcMs = 0;
+        lastEncodedStreamEpoch = 0;
+        actualEncodedFpsSampleUtcMs = 0;
+        actualEncodedFpsSampleDisplayableFrames = 0;
+        actualEncodedDisplayableFps = 0;
+        lastCpuSampleTimestamp = 0;
+        lastCpuSampleProcessorTicks = 0;
+        senderProcessCpuPercent = -1;
         lastCaptureToEncodeStartAgeMs = -1;
         lastEncodeDurationMs = -1;
         emittedDisplayableFrames = 0;
@@ -1006,6 +1393,10 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
         averageEncodedFrameBytes = 0;
         transportIpOnlyMode = false;
         lastPreprocessDurationMs = -1;
+        lastPreprocessResizeDurationMs = -1;
+        lastPreprocessColorConvertDurationMs = -1;
+        preprocessResizePath = string.Empty;
+        preprocessDirectNv12Count = 0;
         lastTransformEncodeDurationMs = -1;
         lastEncodeTotalDurationMs = -1;
         lastAccessUnitKind = string.Empty;
@@ -1020,6 +1411,31 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
         activeTargetFramesPerSecond = 0;
         activeEncoderPath = string.Empty;
         activeEncoderProfile = string.Empty;
+        motionIntegrityGuardActive = false;
+        motionIntegritySampledRatio = 0;
+        motionIntegrityPeakSampledRatio = 0;
+        motionIntegrityScrollMotionActiveBandCount = 0;
+        motionIntegrityScrollMotionPeakBandRatio = 0;
+        motionIntegrityHighMotionFrameCount = 0;
+        motionIntegrityScrollTriggerCount = 0;
+        motionIntegrityBurstEnterCount = 0;
+        motionIntegrityBurstExitCount = 0;
+        motionIntegrityForcedKeyFrameCount = 0;
+        motionIntegrityLastTriggerKind = string.Empty;
+        motionIntegrityLastReason = string.Empty;
+        motionIntegrityIdrFrameRatio = 0;
+        motionIntegrityForcedIdrRequestedCount = 0;
+        motionIntegrityForcedIdrConfirmedCount = 0;
+        motionIntegrityForcedIdrMissedCount = 0;
+        motionIntegrityForcedIdrPendingCount = 0;
+        motionIntegrityForcedIdrConsecutiveMissCount = 0;
+        motionIntegrityForcedIdrBurstMissCount = 0;
+        motionIntegrityActiveIdrFrameRatio = 0;
+        motionIntegrityForcedIdrLastMissReason = string.Empty;
+        motionIntegrityEncoderRebuildCount = 0;
+        motionIntegrityEncoderRebuildSuppressedCount = 0;
+        motionIntegrityEncoderRebuildPending = false;
+        motionIntegrityEncoderRebuildLastReason = string.Empty;
         lastSupersededPendingRawFrameLogUtc = default;
     }
 
@@ -1055,6 +1471,109 @@ internal sealed class WindowsH264ScreenCaptureSource : IScreenCaptureSource, ISc
 
         return existing.StreamEpoch >= incoming.StreamEpoch;
     }
+
+    private bool ShouldDelayTransportEncode_NoLock(
+        PendingRawFrame pendingFrame,
+        WindowsH264EncodeProfile encodeProfile,
+        bool forceKeyFramePending,
+        DateTimeOffset nowUtc,
+        out TimeSpan delay)
+    {
+        delay = TimeSpan.Zero;
+        if (!IsTransportSourceRole() ||
+            forceKeyFramePending ||
+            senderContinuityRecoveryActive ||
+            motionIntegrityEncoderRebuildPending ||
+            encodeProfile.TargetFramesPerSecond <= 0)
+        {
+            return false;
+        }
+
+        var lastEncodeUtcMs = Interlocked.Read(ref lastTransportEncodeStartedUtcMs);
+        if (lastEncodeUtcMs <= 0 ||
+            pendingFrame.StreamEpoch != Interlocked.Read(ref lastEncodedStreamEpoch))
+        {
+            return false;
+        }
+
+        var minInterval = TimeSpan.FromMilliseconds(1000d / Math.Max(1, encodeProfile.TargetFramesPerSecond));
+        var elapsed = nowUtc - DateTimeOffset.FromUnixTimeMilliseconds(lastEncodeUtcMs);
+        if (elapsed >= minInterval)
+        {
+            return false;
+        }
+
+        delay = minInterval - elapsed;
+        if (delay <= TimeSpan.Zero)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private void UpdateActualEncodedDisplayableFps_NoLock(long nowUtcMs, long emittedDisplayableFrameCount)
+    {
+        var lastSampleUtcMs = Interlocked.Read(ref actualEncodedFpsSampleUtcMs);
+        if (lastSampleUtcMs <= 0 ||
+            emittedDisplayableFrameCount < Interlocked.Read(ref actualEncodedFpsSampleDisplayableFrames))
+        {
+            Interlocked.Exchange(ref actualEncodedFpsSampleUtcMs, nowUtcMs);
+            Interlocked.Exchange(ref actualEncodedFpsSampleDisplayableFrames, emittedDisplayableFrameCount);
+            return;
+        }
+
+        var elapsedMs = nowUtcMs - lastSampleUtcMs;
+        if (elapsedMs < EncodedFpsSampleMinInterval.TotalMilliseconds)
+        {
+            return;
+        }
+
+        var frameDelta = Math.Max(0, emittedDisplayableFrameCount - Interlocked.Read(ref actualEncodedFpsSampleDisplayableFrames));
+        Volatile.Write(ref actualEncodedDisplayableFps, frameDelta * 1000d / elapsedMs);
+        Interlocked.Exchange(ref actualEncodedFpsSampleUtcMs, nowUtcMs);
+        Interlocked.Exchange(ref actualEncodedFpsSampleDisplayableFrames, emittedDisplayableFrameCount);
+    }
+
+    private void UpdateProcessCpuPercent_NoLock()
+    {
+        var nowTimestamp = Stopwatch.GetTimestamp();
+        long processorTicks;
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            processorTicks = process.TotalProcessorTime.Ticks;
+        }
+        catch
+        {
+            return;
+        }
+
+        var previousTimestamp = Interlocked.Read(ref lastCpuSampleTimestamp);
+        var previousProcessorTicks = Interlocked.Read(ref lastCpuSampleProcessorTicks);
+        if (previousTimestamp <= 0 || previousProcessorTicks <= 0)
+        {
+            Interlocked.Exchange(ref lastCpuSampleTimestamp, nowTimestamp);
+            Interlocked.Exchange(ref lastCpuSampleProcessorTicks, processorTicks);
+            return;
+        }
+
+        var elapsed = Stopwatch.GetElapsedTime(previousTimestamp, nowTimestamp);
+        if (elapsed < CpuSampleMinInterval)
+        {
+            return;
+        }
+
+        var processorElapsedMs = TimeSpan.FromTicks(Math.Max(0, processorTicks - previousProcessorTicks)).TotalMilliseconds;
+        var wallElapsedMs = Math.Max(1d, elapsed.TotalMilliseconds);
+        var normalizedCpu = processorElapsedMs / wallElapsedMs / Math.Max(1, Environment.ProcessorCount) * 100d;
+        Volatile.Write(ref senderProcessCpuPercent, Math.Clamp(normalizedCpu, 0d, 100d));
+        Interlocked.Exchange(ref lastCpuSampleTimestamp, nowTimestamp);
+        Interlocked.Exchange(ref lastCpuSampleProcessorTicks, processorTicks);
+    }
+
+    private static TimeSpan Min(TimeSpan left, TimeSpan right)
+        => left <= right ? left : right;
 
     private PendingRawFrame? PurgePendingRawFrameForRecovery_NoLock()
     {

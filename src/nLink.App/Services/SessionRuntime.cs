@@ -362,6 +362,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private long helperRemoteApplyCadenceObserved;
     private long helperRemoteTotalApplyCadenceMs;
     private long helperRemoteViewerStaleDropCount;
+    private long helperRemoteViewerSoftStaleDropCount;
     private int helperRemoteConsecutiveVeryHighAppliedFrames;
     private int helperRemoteConsecutiveStaleDropWindows;
     private long helperRemoteCurrentPressureEpoch;
@@ -373,6 +374,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private long helperRemoteCurrentPressureEpochRecoveryKeyframeApplyCountLocal;
     private long helperRemoteCurrentPressureEpochNeedMoreInputCount;
     private long helperRemoteCurrentPressureEpochStaleDropCount;
+    private long helperRemoteCurrentPressureEpochSoftStaleDropCount;
     private long helperRemoteCurrentPressureEpochLastVisibleApplyFrameId = -1;
     private long helperRemoteCurrentPressureEpochContinuityLossTicks;
     private long helperRemoteCurrentPressureEpochWarmupTicks;
@@ -567,6 +569,8 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             sendDisplayInfoAsync: SendRemoteControlDisplayInfoAsync,
             transportBackpressureProbeResolver: () => transport as IScreenShareTransportBackpressureProbe,
             sendVideoStreamConfigAsync: screenShareActions.SendVideoStreamConfigAsync,
+            sendCursorStateAsync: screenShareActions.SendCursorStateAsync,
+            cursorOverlayEnabledResolver: ShouldUsePassiveScreenShareCursorOverlayForTransport,
             flushTransportQueue: reason =>
             {
                 if (transport is IScreenShareTransportPolicyController policyController)
@@ -732,6 +736,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
 
     internal event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;
     internal event EventHandler? ScreenShareStopped;
+    internal event EventHandler<ScreenShareCursorStateReceivedEventArgs>? ScreenShareCursorStateReceived;
 
     public event EventHandler<ChatMessageEventArgs>? ChatMessageReceived;
 
@@ -1349,6 +1354,15 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             LastFileTransferSavedPath: NormalizeDiagnosticsText(GetLastFileTransferSavedPath(fileTransferSnapshot)),
             PersistenceSummary: persistenceSnapshot.Summary,
             PersistenceWarning: persistenceSnapshot.LastWarning);
+    }
+
+    internal ScreenShareLiveDiagnosticsSnapshot GetScreenShareLiveDiagnosticsSnapshot()
+    {
+        var snapshot = transportScreenShareCoordinator.GetLiveDiagnosticsSnapshot();
+        return snapshot with
+        {
+            RemoteViewerActive = screenShareControlHost.RemoteScreenShareActive,
+        };
     }
 
     public void NotifyLocalEndRequested()
@@ -2260,6 +2274,16 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             ct);
     }
 
+    internal Task SendScreenShareCursorStateCoreAsync(string sessionId, ScreenShareCursorStateV1 message, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        ArgumentNullException.ThrowIfNull(message);
+        return privilegedCommandExecutor.ExecuteAsync(
+            new SessionPrivilegedAction(SessionPrivilegedActionKind.ScreenShareDispatch, "screen_share_cursor_state"),
+            token => SendScreenShareCursorStateAuthorizedCoreAsync(sessionId, message, token),
+            ct);
+    }
+
     private async Task SendScreenSharePayloadAuthorizedCoreAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
     {
         await SendScreenSharePayloadAuthorizedCoreAsync(
@@ -2320,6 +2344,24 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         await screenShareTransport.SendScreenShareVideoStreamConfigAsync(message, ct).ConfigureAwait(false);
     }
 
+    private async Task SendScreenShareCursorStateAuthorizedCoreAsync(string sessionId, ScreenShareCursorStateV1 message, CancellationToken ct)
+    {
+        if (!TryValidateScreenShareSession(sessionId, "screen_share_cursor_state", "cursor_state") ||
+            !TryValidateScreenShareSession(message.SessionId, "screen_share_cursor_state", "cursor_state"))
+        {
+            return;
+        }
+
+        if (!FeatureFlags.EnableScreenShareTransport ||
+            !ShouldUsePassiveScreenShareCursorOverlayForTransport() ||
+            transport is not IScreenShareSignalingTransport screenShareTransport)
+        {
+            return;
+        }
+
+        await screenShareTransport.SendScreenShareCursorStateAsync(message, ct).ConfigureAwait(false);
+    }
+
     private Task StopTransportScreenShareAsync(bool notifyRemoteStop, string reason, CancellationToken ct)
     {
         return transportScreenShareCoordinator.StopAsync(notifyRemoteStop, reason, ct);
@@ -2339,6 +2381,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             return Task.CompletedTask;
         }
 
+        SyncTransportScreenShareCursorCaptureForRemoteControl("screen_share_start");
         return transportScreenShareCoordinator.StartAsync(transportSessionId, sessionCts?.Token ?? ct);
     }
 

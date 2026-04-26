@@ -16,16 +16,21 @@ public sealed class ShareMessageConfig
     public ShareMessageConfig(string? downloadUrl, string? repoUrl)
     {
         DownloadUrl = string.IsNullOrWhiteSpace(downloadUrl) ? null : downloadUrl.Trim();
+        HasConfiguredRepoUrl = !string.IsNullOrWhiteSpace(repoUrl);
         RepoUrl = string.IsNullOrWhiteSpace(repoUrl) ? DefaultRepoUrl : repoUrl.Trim().TrimEnd('/');
     }
 
     public string? DownloadUrl { get; }
 
+    public bool HasConfiguredRepoUrl { get; }
+
     public string RepoUrl { get; }
 
     public string ReleasesUrl => $"{RepoUrl}/releases";
 
-    public string BugReportUrl => $"{RepoUrl}/issues/new?template=bug_report.yml";
+    public string? BugReportUrl => HasConfiguredRepoUrl
+        ? $"{RepoUrl}/issues/new?template=bug_report.yml"
+        : null;
 
     public static ShareMessageConfig Load()
     {

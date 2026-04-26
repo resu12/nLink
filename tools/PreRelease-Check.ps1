@@ -290,7 +290,7 @@ try {
     }
 
     Invoke-Step -Name "Build installer" -Action {
-        & powershell -ExecutionPolicy Bypass -File ".\installer\Build-Installer.ps1" -Runtime $Runtime
+        & powershell -ExecutionPolicy Bypass -File ".\installer\Build-Installer.ps1" -Runtime $Runtime -CopyHelperAlias
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 }

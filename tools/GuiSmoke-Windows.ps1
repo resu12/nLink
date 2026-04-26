@@ -688,7 +688,11 @@ function Set-Text {
         try {
             $vp = $Element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
             ([System.Windows.Automation.ValuePattern]$vp).SetValue($Text)
-            return
+            Start-Sleep -Milliseconds 50
+            $state = Test-ElementValueMatchesText -Element $Element -ExpectedText $Text
+            if ($state.IsMatch) {
+                return
+            }
         }
         catch {}
     }

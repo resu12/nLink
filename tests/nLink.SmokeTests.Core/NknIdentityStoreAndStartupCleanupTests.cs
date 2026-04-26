@@ -84,6 +84,55 @@ public sealed class NknIdentityStoreAndStartupCleanupTests : SessionRuntimeConne
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void NknIdentityStore_OnWindows_ManualRegenerate_ChangesAddressAndKeepsProtectedSeedSidecar()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        PersistenceDiagnostics.ClearForTests();
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-protected-seed-regenerate", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            var options = LoadNknOptionsWithOverrides(keyPath, "protected-seed-regenerate-test");
+            var originalIdentity = NknIdentityStore.LoadOrCreate(options);
+            var regeneratedIdentity = NknIdentityStore.Regenerate(options);
+
+            Assert.False(string.IsNullOrWhiteSpace(regeneratedIdentity.Address));
+            Assert.NotEqual(originalIdentity.Address, regeneratedIdentity.Address);
+            Assert.True(File.Exists(keyPath));
+            Assert.True(File.Exists(NknSecretStore.GetSecretPath(keyPath)));
+
+            using var identityDoc = JsonDocument.Parse(File.ReadAllText(keyPath));
+            var root = identityDoc.RootElement;
+            Assert.Equal(3, root.GetProperty("Version").GetInt32());
+            Assert.Equal("protected-seed-regenerate-test", root.GetProperty("Identifier").GetString());
+            Assert.Equal(regeneratedIdentity.Address, root.GetProperty("Address").GetString());
+            Assert.True(root.TryGetProperty("SeedBase64", out var seedProp));
+            Assert.Equal(JsonValueKind.Null, seedProp.ValueKind);
+
+            var snapshot = PersistenceDiagnostics.Snapshot();
+            Assert.Contains(snapshot.RecentEvents, e => string.Equals(e.Operation, "manual_identity_regeneration", StringComparison.Ordinal));
+        }
+        finally
+        {
+            PersistenceDiagnostics.ClearForTests();
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+                // best effort
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public void NknIdentityStore_OnWindows_MigratesLegacySeedBase64_ToProtectedStore()
     {
         if (!OperatingSystem.IsWindows())

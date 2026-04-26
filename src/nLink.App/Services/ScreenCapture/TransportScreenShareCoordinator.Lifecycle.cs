@@ -198,6 +198,15 @@ internal sealed partial class TransportScreenShareCoordinator
             pendingDisplayInfoNotBeforeUtc = default;
             lastDisplayInfoIssue = string.Empty;
             displayInfoSendCount = 0;
+            cursorOverlayStateSeq = 0;
+            cursorOverlayUpdatesSentCount = 0;
+            cursorOverlaySendFailureCount = 0;
+            cursorOverlayMappingFailureCount = 0;
+            cursorOverlayDeliveryMode = "captured_video";
+            cursorOverlayLastStatus = "starting";
+            lastCursorStateSent = null;
+            lastCursorStateSentUtc = default;
+            cursorTelemetryTickInFlight = 0;
             encodedFramesSent = 0;
             transportPayloadsSent = 0;
             batchedPayloadsSent = 0;
@@ -375,7 +384,9 @@ internal sealed partial class TransportScreenShareCoordinator
                 tunableCaptureSource.SetTransportTuningLevel(ScreenShareTransportTuningLevel.BandwidthReduced);
             }
 
+            ApplyCapturedCursorPreference_NoLock(nextCaptureSource, "screenshare_start");
             nextPipeline.SetMaxFramesPerSecond(captureFpsHint);
+            StartCursorTelemetryTimer_NoLock();
         }
 
         try
@@ -452,6 +463,7 @@ internal sealed partial class TransportScreenShareCoordinator
             OrdinaryNonKeyLegacyPayloadsSent: Interlocked.Read(ref ordinaryNonKeyLegacyPayloadsSent),
             KeyframeOrRecoveryBatchedPayloadsSent: Interlocked.Read(ref keyframeOrRecoveryBatchedPayloadsSent));
         Task? pipelineDisposeTask = null;
+        Task? captureStopTask = null;
         Task? drainTask = null;
         TaskCompletionSource<bool>? drainCompletion = null;
         long recoveryBurstTransportClearToken = 0;
@@ -492,6 +504,7 @@ internal sealed partial class TransportScreenShareCoordinator
             }
 
             StopRecoveryOwnerPendingTimer_NoLock();
+            StopCursorTelemetryTimer_NoLock();
             activeRecoveryBurst = null;
             captureSource = null;
             sendPipeline = null;
@@ -504,6 +517,10 @@ internal sealed partial class TransportScreenShareCoordinator
             pendingDisplayInfoNotBeforeUtc = default;
             lastDisplayInfoIssue = string.Empty;
             lastMetricsSnapshot = oldMetricsSnapshot;
+            cursorOverlayDeliveryMode = "captured_video";
+            cursorOverlayLastStatus = string.IsNullOrWhiteSpace(reason)
+                ? "stopped"
+                : $"stopped:{reason.Trim()}";
             bootstrapStreamConfig = null;
             bootstrapStreamConfigEpoch = 0;
             bootstrapStreamConfigSendCount = 0;
@@ -540,6 +557,18 @@ internal sealed partial class TransportScreenShareCoordinator
             return;
         }
 
+        if (oldCaptureSource is not null)
+        {
+            try
+            {
+                captureStopTask = oldCaptureSource.StopAsync();
+            }
+            catch (Exception ex)
+            {
+                LogDebug($"Capture source stop failed during screenshare shutdown: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
         if (oldPipeline is not null)
         {
             // Cancel queued/in-flight frame work immediately, but do not wait for the
@@ -569,6 +598,18 @@ internal sealed partial class TransportScreenShareCoordinator
             await pipelineDisposeTask.ConfigureAwait(false);
         }
 
+        if (captureStopTask is not null)
+        {
+            try
+            {
+                await captureStopTask.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                LogDebug($"Capture source stop failed during screenshare shutdown: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
         if (drainTask is not null)
         {
             try
@@ -593,15 +634,6 @@ internal sealed partial class TransportScreenShareCoordinator
 
         if (oldCaptureSource is not null)
         {
-            try
-            {
-                await oldCaptureSource.StopAsync().ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                LogDebug($"Capture source stop failed during screenshare shutdown: {ex.GetType().Name}: {ex.Message}");
-            }
-
             if (oldCaptureSource is IAsyncDisposable asyncDisposable)
             {
                 try
@@ -640,6 +672,71 @@ internal sealed partial class TransportScreenShareCoordinator
             this,
             AutoTuneInterval,
             AutoTuneInterval);
+    }
+
+    internal bool TrySetCapturedCursorEnabledForRemoteControl(bool enabled, string reason)
+    {
+        IScreenCaptureSource? currentCaptureSource;
+        lock (gate)
+        {
+            capturedCursorEnabledForTransport = enabled;
+            currentCaptureSource = captureSource;
+            if (currentCaptureSource is null)
+            {
+                LogCapturedCursorPreference("queued_before_start", enabled, supported: false, applied: false, reason);
+                return false;
+            }
+        }
+
+        return TryApplyCapturedCursorPreference(currentCaptureSource, enabled, reason);
+    }
+
+    private bool TryApplyCapturedCursorPreference(
+        IScreenCaptureSource source,
+        bool enabled,
+        string reason)
+    {
+        lock (gate)
+        {
+            return ApplyCapturedCursorPreference_NoLock(source, reason, enabled);
+        }
+    }
+
+    private bool ApplyCapturedCursorPreference_NoLock(IScreenCaptureSource source, string reason)
+        => ApplyCapturedCursorPreference_NoLock(source, reason, capturedCursorEnabledForTransport);
+
+    private bool ApplyCapturedCursorPreference_NoLock(
+        IScreenCaptureSource source,
+        string reason,
+        bool enabled)
+    {
+        if (source is not IScreenCaptureCursorCaptureControl cursorControl)
+        {
+            LogCapturedCursorPreference("unsupported_source", enabled: true, supported: false, applied: false, reason);
+            return false;
+        }
+
+        var supported = cursorControl.IsCursorCaptureControlSupported;
+        var applied = cursorControl.TrySetCursorCaptureEnabled(enabled, reason);
+        LogCapturedCursorPreference(
+            applied ? "applied" : "fallback",
+            cursorControl.IsCursorCaptureEnabled,
+            supported,
+            applied,
+            reason);
+        return applied;
+    }
+
+    private static void LogCapturedCursorPreference(
+        string status,
+        bool enabled,
+        bool supported,
+        bool applied,
+        string reason)
+    {
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_transport_cursor_capture_mode; cursor_capture_enabled={(enabled ? 1 : 0)}; cursor_control_supported={(supported ? 1 : 0)}; applied={(applied ? 1 : 0)}; status={(string.IsNullOrWhiteSpace(status) ? "unknown" : status.Trim())}; reason={(string.IsNullOrWhiteSpace(reason) ? "unspecified" : reason.Trim())}");
     }
 
     private void EnsureRecoveryOwnerPendingTimer_NoLock()

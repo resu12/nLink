@@ -511,13 +511,75 @@ public sealed class ScreenShareOpsScriptsTests
                     "sender_operating_state=normal",
                     "effective_quality_preset=text_first_1x",
                     "capture_scale=1",
+                    "actual_encoded_displayable_fps=7.9",
+                    "encode_cadence_target_fps=8",
+                    "sender_process_cpu_percent=18.4",
+                    "raw_capture_event_count=74",
+                    "raw_frames_skipped_before_encode=11",
                     "helper_surface_interpolation_mode=none",
                     "helper_surface_frame_width=1440",
                     "helper_surface_frame_height=810",
                     "helper_surface_viewport_width=1521",
                     "helper_surface_viewport_height=856",
                     "helper_surface_render_scaling=1.25",
-                    "helper_surface_scale_ratio=1.321"
+                    "helper_surface_scale_ratio=1.321",
+                    "h264_reference_taint_active=1",
+                    "h264_reference_taint_enter_count=3",
+                    "h264_reference_taint_release_count=2",
+                    "h264_reference_taint_last_reason=recovery_runway_overflow",
+                    "h264_reference_taint_dropped_non_key_count=4",
+                    "h264_reference_taint_decoder_reset_count=2",
+                    "h264_reference_taint_stale_visible_stable_enter_count=1",
+                    "stale_normal_non_key_visible_suppress_count=6",
+                    "decoded_stale_visible_suppress_count=5",
+                    "post_quarantine_settle_suppress_count=2",
+                    "h264_reference_quarantine_active=1",
+                    "h264_reference_quarantine_release_blocked_count=2",
+                    "h264_reference_quarantine_last_blocker=quiet_window_recent_visible_stable_stale_p_frame_drop",
+                    "h264_reference_quarantine_quiet_release_count=1",
+                    "motion_integrity_guard_active=1",
+                    "motion_integrity_sampled_ratio=0.427",
+                    "motion_integrity_peak_sampled_ratio=0.511",
+                    "motion_integrity_scroll_active_band_count=7",
+                    "motion_integrity_scroll_peak_band_ratio=0.625",
+                    "motion_integrity_high_motion_frame_count=9",
+                    "motion_integrity_scroll_trigger_count=4",
+                    "motion_integrity_burst_enter_count=2",
+                    "motion_integrity_burst_exit_count=1",
+                    "motion_integrity_forced_keyframe_count=5",
+                    "motion_integrity_last_trigger_kind=strong_scroll_motion",
+                    "motion_integrity_last_reason=motion_keyframe_due",
+                    "motion_integrity_idr_frame_ratio=0.67",
+                    "motion_integrity_forced_idr_requested_count=5",
+                    "motion_integrity_forced_idr_confirmed_count=4",
+                    "motion_integrity_forced_idr_missed_count=1",
+                    "motion_integrity_forced_idr_pending_count=0",
+                    "motion_integrity_forced_idr_consecutive_miss_count=0",
+                    "motion_integrity_forced_idr_burst_miss_count=1",
+                    "motion_integrity_active_idr_frame_ratio=0.71",
+                    "motion_integrity_forced_idr_last_miss_reason=next_displayable_output_was_not_idr",
+                    "motion_integrity_encoder_rebuild_count=1",
+                    "motion_integrity_encoder_rebuild_suppressed_count=2",
+                    "motion_integrity_encoder_rebuild_pending=0",
+                    "motion_integrity_encoder_rebuild_last_reason=encoder_rebuild_due_to_forced_idr_miss",
+                    "cursor_capture_enabled=0",
+                    "cursor_capture_desired_enabled=0",
+                    "cursor_capture_control_supported=1",
+                    "cursor_capture_apply_status=applied",
+                    "cursor_capture_fallback_reason=(none)",
+                    "cursor_delivery_mode=helper_overlay",
+                    "cursor_sender_delivery_mode=helper_overlay",
+                    "cursor_overlay_updates_sent_count=28",
+                    "cursor_overlay_send_failure_count=0",
+                    "cursor_overlay_mapping_failure_count=0",
+                    "cursor_overlay_sender_last_status=captured_cursor_disabled",
+                    "cursor_overlay_visible=1",
+                    "cursor_overlay_updates_received_count=27",
+                    "cursor_overlay_updates_applied_count=27",
+                    "cursor_overlay_update_hz=29.5",
+                    "cursor_overlay_last_age_ms=18",
+                    "cursor_overlay_stale_count=0",
+                    "cursor_overlay_last_status=captured_cursor_disabled"
                 ]);
 
             var result = await RunVerdictOnlyAsync(repoRoot, tempRoot);
@@ -532,8 +594,69 @@ public sealed class ScreenShareOpsScriptsTests
             Assert.Equal("8", report["quality_active_encode_target_fps"]);
             Assert.Equal("normal", report["quality_encoder_profile"]);
             Assert.Equal("text_first_1x", report["quality_effective_quality_preset"]);
+            Assert.Equal("7.9", report["quality_actual_encoded_displayable_fps"]);
+            Assert.Equal("8", report["quality_encode_cadence_target_fps"]);
+            Assert.Equal("18.4", report["quality_sender_process_cpu_percent"]);
+            Assert.Equal("74", report["quality_raw_capture_event_count"]);
+            Assert.Equal("11", report["quality_raw_frames_skipped_before_encode"]);
             Assert.Equal("none", report["quality_helper_surface_interpolation_mode"]);
             Assert.Equal("1.321", report["quality_helper_surface_scale_ratio"]);
+            Assert.Equal("1", report["quality_h264_reference_taint_active"]);
+            Assert.Equal("3", report["quality_h264_reference_taint_enter_count"]);
+            Assert.Equal("2", report["quality_h264_reference_taint_release_count"]);
+            Assert.Equal("recovery_runway_overflow", report["quality_h264_reference_taint_last_reason"]);
+            Assert.Equal("4", report["quality_h264_reference_taint_dropped_non_key_count"]);
+            Assert.Equal("2", report["quality_h264_reference_taint_decoder_reset_count"]);
+            Assert.Equal("1", report["quality_h264_reference_taint_stale_visible_stable_enter_count"]);
+            Assert.Equal("6", report["quality_stale_normal_non_key_visible_suppress_count"]);
+            Assert.Equal("5", report["quality_decoded_stale_visible_suppress_count"]);
+            Assert.Equal("2", report["quality_post_quarantine_settle_suppress_count"]);
+            Assert.Equal("1", report["quality_h264_reference_quarantine_active"]);
+            Assert.Equal("2", report["quality_h264_reference_quarantine_release_blocked_count"]);
+            Assert.Equal("quiet_window_recent_visible_stable_stale_p_frame_drop", report["quality_h264_reference_quarantine_last_blocker"]);
+            Assert.Equal("1", report["quality_h264_reference_quarantine_quiet_release_count"]);
+            Assert.Equal("1", report["quality_motion_integrity_guard_active"]);
+            Assert.Equal("0.427", report["quality_motion_integrity_sampled_ratio"]);
+            Assert.Equal("0.511", report["quality_motion_integrity_peak_sampled_ratio"]);
+            Assert.Equal("7", report["quality_motion_integrity_scroll_active_band_count"]);
+            Assert.Equal("0.625", report["quality_motion_integrity_scroll_peak_band_ratio"]);
+            Assert.Equal("9", report["quality_motion_integrity_high_motion_frame_count"]);
+            Assert.Equal("4", report["quality_motion_integrity_scroll_trigger_count"]);
+            Assert.Equal("2", report["quality_motion_integrity_burst_enter_count"]);
+            Assert.Equal("1", report["quality_motion_integrity_burst_exit_count"]);
+            Assert.Equal("5", report["quality_motion_integrity_forced_keyframe_count"]);
+            Assert.Equal("strong_scroll_motion", report["quality_motion_integrity_last_trigger_kind"]);
+            Assert.Equal("motion_keyframe_due", report["quality_motion_integrity_last_reason"]);
+            Assert.Equal("0.67", report["quality_motion_integrity_idr_frame_ratio"]);
+            Assert.Equal("5", report["quality_motion_integrity_forced_idr_requested_count"]);
+            Assert.Equal("4", report["quality_motion_integrity_forced_idr_confirmed_count"]);
+            Assert.Equal("1", report["quality_motion_integrity_forced_idr_missed_count"]);
+            Assert.Equal("0", report["quality_motion_integrity_forced_idr_pending_count"]);
+            Assert.Equal("0", report["quality_motion_integrity_forced_idr_consecutive_miss_count"]);
+            Assert.Equal("1", report["quality_motion_integrity_forced_idr_burst_miss_count"]);
+            Assert.Equal("0.71", report["quality_motion_integrity_active_idr_frame_ratio"]);
+            Assert.Equal("next_displayable_output_was_not_idr", report["quality_motion_integrity_forced_idr_last_miss_reason"]);
+            Assert.Equal("1", report["quality_motion_integrity_encoder_rebuild_count"]);
+            Assert.Equal("2", report["quality_motion_integrity_encoder_rebuild_suppressed_count"]);
+            Assert.Equal("0", report["quality_motion_integrity_encoder_rebuild_pending"]);
+            Assert.Equal("encoder_rebuild_due_to_forced_idr_miss", report["quality_motion_integrity_encoder_rebuild_last_reason"]);
+            Assert.Equal("0", report["quality_cursor_capture_enabled"]);
+            Assert.Equal("0", report["quality_cursor_capture_desired_enabled"]);
+            Assert.Equal("1", report["quality_cursor_capture_control_supported"]);
+            Assert.Equal("applied", report["quality_cursor_capture_apply_status"]);
+            Assert.Equal("helper_overlay", report["quality_cursor_delivery_mode"]);
+            Assert.Equal("helper_overlay", report["quality_cursor_sender_delivery_mode"]);
+            Assert.Equal("28", report["quality_cursor_overlay_updates_sent_count"]);
+            Assert.Equal("0", report["quality_cursor_overlay_send_failure_count"]);
+            Assert.Equal("0", report["quality_cursor_overlay_mapping_failure_count"]);
+            Assert.Equal("captured_cursor_disabled", report["quality_cursor_overlay_sender_last_status"]);
+            Assert.Equal("1", report["quality_cursor_overlay_visible"]);
+            Assert.Equal("27", report["quality_cursor_overlay_updates_received_count"]);
+            Assert.Equal("27", report["quality_cursor_overlay_updates_applied_count"]);
+            Assert.Equal("29.5", report["quality_cursor_overlay_update_hz"]);
+            Assert.Equal("18", report["quality_cursor_overlay_last_age_ms"]);
+            Assert.Equal("0", report["quality_cursor_overlay_stale_count"]);
+            Assert.Equal("captured_cursor_disabled", report["quality_cursor_overlay_last_status"]);
         }
         finally
         {

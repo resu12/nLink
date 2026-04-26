@@ -53,15 +53,21 @@ internal sealed class ScreenShareViewerFrameAppliedEventArgs : EventArgs
 
 internal sealed class ScreenShareViewerStaleFrameDroppedEventArgs : EventArgs
 {
-    public ScreenShareViewerStaleFrameDroppedEventArgs(long renderedAgeMs, long streamEpoch)
+    public ScreenShareViewerStaleFrameDroppedEventArgs(
+        long renderedAgeMs,
+        long streamEpoch,
+        bool referenceContinuityPreserved = false)
     {
         RenderedAgeMs = renderedAgeMs;
         StreamEpoch = streamEpoch;
+        ReferenceContinuityPreserved = referenceContinuityPreserved;
     }
 
     public long RenderedAgeMs { get; }
 
     public long StreamEpoch { get; }
+
+    public bool ReferenceContinuityPreserved { get; }
 }
 
 internal sealed class ScreenShareViewerDecodeNeedsMoreInputEventArgs : EventArgs
@@ -185,8 +191,12 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
     private const int HelperRemoteNeedMoreInputBurstThreshold = 2;
     private const int HelperRemotePostRecoveryFollowerWindowSize = 2;
     private const int HelperRemotePostRecoveryReservedApplyCount = 2;
+    private const long HelperRemoteH264ReferenceQuarantineQuietWindowMs = 300;
+    private const long HelperRemotePostQuarantineSettleWindowMs = 150;
+    private const long HelperRemotePostQuarantineSettleMaxHoldMs = 350;
+    private const long CursorOverlayStaleTimeoutMs = 750;
+    private static readonly TimeSpan CursorOverlayStaleCheckInterval = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan HelperRemoteStartupCorridorStallTimeout = TimeSpan.FromMilliseconds(400);
-    private static readonly TimeSpan HelperRemoteVisibleProgressDecodeAgeBudgetGrace = TimeSpan.FromMilliseconds(400);
 #if DEBUG
     private static readonly TimeSpan SnapshotInterval = TimeSpan.FromSeconds(10);
 #endif
@@ -202,6 +212,11 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
     private Bitmap? currentFrame;
     private bool isActive;
     private string statusText = string.Empty;
+    private bool cursorOverlayVisible;
+    private double cursorOverlayNx;
+    private double cursorOverlayNy;
+    private string cursorDeliveryMode = "captured_video";
+    private string cursorOverlayLastStatus = "not_started";
     private long lastRenderedFrameAgeMs = -1;
     private int generation;
     private string lastHelperRemoteEpochDetailLogSignature = string.Empty;
@@ -271,6 +286,27 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
     private long protectedRecoveryDeliveryCount;
     private long recoveryRunwayContiguousFollowerBufferCount;
     private long recoveryRunwayContiguousFollowerApplyCount;
+    private long h264ReferenceTaintEnterCount;
+    private long h264ReferenceTaintReleaseCount;
+    private long h264ReferenceTaintDroppedNonKeyCount;
+    private long h264ReferenceTaintDecoderResetCount;
+    private long h264ReferenceTaintStaleVisibleStableEnterCount;
+    private long staleNormalNonKeyVisibleSuppressCount;
+    private long decodedStaleVisibleSuppressCount;
+    private long postQuarantineSettleSuppressCount;
+    private long h264ReferenceQuarantineReleaseBlockedCount;
+    private long h264ReferenceQuarantineQuietReleaseCount;
+    private long h264ReferenceQuarantinePendingReleaseEpoch;
+    private long h264ReferenceQuarantinePendingReleaseFrameId = -1;
+    private long h264ReferenceQuarantineReleaseDueUtcMs = -1;
+    private long h264ReferenceQuarantineLastLossEpoch;
+    private long h264ReferenceQuarantineLastLossUtcMs = -1;
+    private long helperRemotePostQuarantineSettleEpoch;
+    private long helperRemotePostQuarantineSettleStartedUtcMs = -1;
+    private long helperRemotePostQuarantineSettleUntilUtcMs = -1;
+    private long helperRemotePostQuarantineSettleLastContiguousFrameId = -1;
+    private string h264ReferenceQuarantineLastBlocker = "none";
+    private string h264ReferenceQuarantineLastLossReason = "none";
     private readonly long forcedHelperRemoteRecoveryAfterApplies = ReadForcedHelperRemoteRecoveryAfterApplies();
     private bool forcedHelperRemoteRecoveryTriggered;
     private bool disposed;
@@ -280,6 +316,14 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
     private Timer? snapshotTimer;
     private int snapshotTickInFlight;
 #endif
+    private Timer? cursorOverlayStaleTimer;
+    private long cursorOverlayUpdatesReceivedCount;
+    private long cursorOverlayUpdatesAppliedCount;
+    private long cursorOverlayStaleCount;
+    private long cursorOverlayLastAgeMs = -1;
+    private long cursorOverlayFirstUpdateTickMs;
+    private long cursorOverlayLastUpdateTickMs;
+    private long cursorOverlayLastSeq;
 
     public ScreenShareViewerViewModel(
         Func<ReadOnlyMemory<byte>, Bitmap>? decodeFrame = null,
@@ -332,6 +376,30 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
     {
         get => statusText;
         private set => SetProperty(ref statusText, value);
+    }
+
+    public bool CursorOverlayVisible
+    {
+        get => cursorOverlayVisible;
+        private set => SetProperty(ref cursorOverlayVisible, value);
+    }
+
+    public double CursorOverlayNx
+    {
+        get => cursorOverlayNx;
+        private set => SetProperty(ref cursorOverlayNx, value);
+    }
+
+    public double CursorOverlayNy
+    {
+        get => cursorOverlayNy;
+        private set => SetProperty(ref cursorOverlayNy, value);
+    }
+
+    public string CursorDeliveryMode
+    {
+        get => cursorDeliveryMode;
+        private set => SetProperty(ref cursorDeliveryMode, value);
     }
 
     public long LastRenderedFrameAgeMs
@@ -507,7 +575,29 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             LastReservedApplyHoldMs: helperRemoteVisibleProgressState.LastReservedApplyHoldMs,
             LastRecoveryProgressCorridorHoldMs: helperRemoteVisibleProgressState.LastRecoveryProgressCorridorHoldMs,
             LastRecoveryRunwayAbortHoldMs: helperRemoteVisibleProgressState.LastRecoveryRunwayAbortHoldMs,
-            LastRecoveryProgressCorridorAbortReason: helperRemoteVisibleProgressState.LastRecoveryProgressCorridorAbortReason);
+            LastRecoveryProgressCorridorAbortReason: helperRemoteVisibleProgressState.LastRecoveryProgressCorridorAbortReason,
+            H264ReferenceTaintActive: helperRemoteSessionController.ReferenceTaintState.Active,
+            H264ReferenceTaintEnterCount: Interlocked.Read(ref h264ReferenceTaintEnterCount),
+            H264ReferenceTaintReleaseCount: Interlocked.Read(ref h264ReferenceTaintReleaseCount),
+            H264ReferenceTaintLastReason: helperRemoteSessionController.ReferenceTaintState.LastReason,
+            H264ReferenceTaintDroppedNonKeyCount: Interlocked.Read(ref h264ReferenceTaintDroppedNonKeyCount),
+            H264ReferenceTaintDecoderResetCount: Interlocked.Read(ref h264ReferenceTaintDecoderResetCount),
+            H264ReferenceTaintStaleVisibleStableEnterCount: Interlocked.Read(ref h264ReferenceTaintStaleVisibleStableEnterCount),
+            StaleNormalNonKeyVisibleSuppressCount: Interlocked.Read(ref staleNormalNonKeyVisibleSuppressCount),
+            DecodedStaleVisibleSuppressCount: Interlocked.Read(ref decodedStaleVisibleSuppressCount),
+            PostQuarantineSettleSuppressCount: Interlocked.Read(ref postQuarantineSettleSuppressCount),
+            H264ReferenceQuarantineActive: helperRemoteSessionController.ReferenceTaintState.Active,
+            H264ReferenceQuarantineReleaseBlockedCount: Interlocked.Read(ref h264ReferenceQuarantineReleaseBlockedCount),
+            H264ReferenceQuarantineLastBlocker: h264ReferenceQuarantineLastBlocker,
+            H264ReferenceQuarantineQuietReleaseCount: Interlocked.Read(ref h264ReferenceQuarantineQuietReleaseCount),
+            CursorDeliveryMode: CursorDeliveryMode,
+            CursorOverlayVisible: CursorOverlayVisible,
+            CursorOverlayUpdatesReceivedCount: Interlocked.Read(ref cursorOverlayUpdatesReceivedCount),
+            CursorOverlayUpdatesAppliedCount: Interlocked.Read(ref cursorOverlayUpdatesAppliedCount),
+            CursorOverlayUpdateHz: ComputeCursorOverlayUpdateHz(),
+            CursorOverlayLastAgeMs: Interlocked.Read(ref cursorOverlayLastAgeMs),
+            CursorOverlayStaleCount: Interlocked.Read(ref cursorOverlayStaleCount),
+            CursorOverlayLastStatus: cursorOverlayLastStatus);
     }
 
     public void OnEncodedFrame(
@@ -621,6 +711,12 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         var acceptedRecoveryKeyframeForDecode = false;
         if (isHelperRemoteH264)
         {
+            PromoteHelperRemoteReferenceTaintFollowerIfEligible(
+                streamEpoch,
+                frameId,
+                isKeyFrame,
+                ref recoveryDeliveryClass);
+
             var rejectionReason = TryRejectHelperRemoteFrameBeforeDecode(
                     effectiveSessionId,
                     encoding,
@@ -632,6 +728,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             {
                 Interlocked.Increment(ref framesReceived);
                 if (string.Equals(rejectionReason, "waiting_for_recovery_keyframe", StringComparison.Ordinal) ||
+                    string.Equals(rejectionReason, "h264_reference_taint_waiting_for_recovery_keyframe", StringComparison.Ordinal) ||
                     string.Equals(rejectionReason, "blocked_by_reserved_recovery_frame", StringComparison.Ordinal))
                 {
                     LogWaitingForRecoveryKeyframe(streamEpoch);
@@ -649,7 +746,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
                     frameId,
                     isKeyFrame,
                     assumeOwnership,
-                    recoveryDeliveryClass))
+                    ref recoveryDeliveryClass))
             {
                 Interlocked.Increment(ref framesReceived);
                 return;
@@ -687,7 +784,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
                     continuityHandling.Reason,
                     streamEpoch,
                     currentEpochNeedMoreInputCount: Math.Max(0, Interlocked.Read(ref needMoreInputCount)),
-                    shouldRequestRecoveryKeyframe: false);
+                    shouldRequestRecoveryKeyframe: ShouldRequestRecoveryKeyframeForContinuityLoss(continuityHandling.Reason));
             }
             else if (continuityHandling.Kind == ScreenShareViewerContinuityHandlingKind.SoftStaleCleanup)
             {
@@ -705,6 +802,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             {
                 Interlocked.Increment(ref framesReceived);
                 if (string.Equals(rejectionReasonAfterRecovery, "waiting_for_recovery_keyframe", StringComparison.Ordinal) ||
+                    string.Equals(rejectionReasonAfterRecovery, "h264_reference_taint_waiting_for_recovery_keyframe", StringComparison.Ordinal) ||
                     string.Equals(rejectionReasonAfterRecovery, "blocked_by_reserved_recovery_frame", StringComparison.Ordinal))
                 {
                     LogWaitingForRecoveryKeyframe(streamEpoch);
@@ -712,13 +810,21 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
 
                 return;
             }
+            var acceptedByReferenceTaint =
+                helperRemoteSessionController.ShouldTreatKeyframeAsReferenceTaintRecoveryOwner(
+                    streamEpoch,
+                    frameId,
+                    isKeyFrame,
+                    recoveryDeliveryClass);
             acceptedRecoveryKeyframeForDecode =
-                helperRemoteRecoveryState.RecoveryActive &&
                 isKeyFrame &&
-                streamEpoch >= helperRemoteRecoveryState.RecoveryStreamEpoch;
+                ((helperRemoteRecoveryState.RecoveryActive &&
+                  streamEpoch >= helperRemoteRecoveryState.RecoveryStreamEpoch) ||
+                 acceptedByReferenceTaint);
             if (acceptedRecoveryKeyframeForDecode)
             {
                 recoveryDeliveryClass = ScreenShareRecoveryDeliveryClass.RecoveryOwner;
+                ResetHelperRemoteH264DecoderForReferenceTaintIfNeeded(streamEpoch, frameId);
             }
         }
 
@@ -801,25 +907,10 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         ScreenShareRecoveryDeliveryClass recoveryDeliveryClass,
         LatestEncodedFrameEnqueueResult enqueueResult)
     {
-        if (recoveryDeliveryClass != ScreenShareRecoveryDeliveryClass.Normal)
-        {
-            return true;
-        }
-
-        if (isKeyFrame)
-        {
-            return false;
-        }
-
-        var helperSessionSnapshot = GetHelperRemoteSessionSnapshot();
-        return enqueueResult.DroppedByAgeBudget &&
-               helperSessionSnapshot.CurrentEpoch == streamEpoch &&
-               helperSessionSnapshot.Phase == HelperRemoteSessionPhase.VisibleStable &&
-               helperSessionSnapshot.SteadyVisibleProgressActive &&
-               !helperSessionSnapshot.RecoveryActive &&
-               !helperSessionSnapshot.RecoveryCorridorActive &&
-               !helperSessionSnapshot.RunwayCleanupActive &&
-               !helperSessionSnapshot.PostRecoveryStabilizationActive;
+        _ = streamEpoch;
+        _ = isKeyFrame;
+        _ = enqueueResult;
+        return recoveryDeliveryClass != ScreenShareRecoveryDeliveryClass.Normal;
     }
 
     public void Clear()
@@ -830,6 +921,8 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         h264StreamState.Reset();
         ResetLifecycleLoggingState();
         ResetRecoveryProgressCorridor();
+        helperRemoteSessionController.ClearReferenceTaint();
+        ResetCursorOverlayState();
 
         IsActive = false;
         StatusText = string.Empty;
@@ -849,9 +942,145 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
 
         disposed = true;
         Clear();
+        cursorOverlayStaleTimer?.Dispose();
+        cursorOverlayStaleTimer = null;
         decodeWorker.Dispose();
         GC.SuppressFinalize(this);
     }
+
+    public void OnCursorState(ScreenShareCursorStateV1 message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        if (disposed)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref cursorOverlayUpdatesReceivedCount);
+        _ = postStatusToUiAsync(() => ApplyCursorStateOnUi(message));
+    }
+
+    private void ApplyCursorStateOnUi(ScreenShareCursorStateV1 message)
+    {
+        if (disposed || !IsActive)
+        {
+            return;
+        }
+
+        var nowUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var ageMs = message.TsUtcMs > 0 ? Math.Max(0, nowUtcMs - message.TsUtcMs) : -1;
+        Interlocked.Exchange(ref cursorOverlayLastAgeMs, ageMs);
+        cursorOverlayLastStatus = string.IsNullOrWhiteSpace(message.Status)
+            ? "unknown"
+            : message.Status.Trim();
+        cursorOverlayLastSeq = message.Seq;
+
+        if (message.CapturedCursorEnabled || !message.CursorCaptureControlSupported)
+        {
+            CursorDeliveryMode = "fallback_captured";
+            CursorOverlayVisible = false;
+            return;
+        }
+
+        CursorDeliveryMode = "helper_overlay";
+        if (!message.Visible ||
+            ageMs > CursorOverlayStaleTimeoutMs ||
+            !IsValidNormalizedCoordinate(message.Nx) ||
+            !IsValidNormalizedCoordinate(message.Ny))
+        {
+            if (ageMs > CursorOverlayStaleTimeoutMs)
+            {
+                Interlocked.Increment(ref cursorOverlayStaleCount);
+            }
+
+            CursorOverlayVisible = false;
+            ScheduleCursorOverlayStaleCheck();
+            return;
+        }
+
+        CursorOverlayNx = message.Nx;
+        CursorOverlayNy = message.Ny;
+        CursorOverlayVisible = true;
+        var nowTickMs = Environment.TickCount64;
+        if (Interlocked.Read(ref cursorOverlayFirstUpdateTickMs) == 0)
+        {
+            Interlocked.CompareExchange(ref cursorOverlayFirstUpdateTickMs, nowTickMs, 0);
+        }
+
+        Interlocked.Exchange(ref cursorOverlayLastUpdateTickMs, nowTickMs);
+        Interlocked.Increment(ref cursorOverlayUpdatesAppliedCount);
+        ScheduleCursorOverlayStaleCheck();
+    }
+
+    private void ScheduleCursorOverlayStaleCheck()
+    {
+        cursorOverlayStaleTimer ??= new Timer(
+            static state => ((ScreenShareViewerViewModel)state!).OnCursorOverlayStaleTimerTick(),
+            this,
+            Timeout.InfiniteTimeSpan,
+            Timeout.InfiniteTimeSpan);
+        cursorOverlayStaleTimer.Change(CursorOverlayStaleCheckInterval, Timeout.InfiniteTimeSpan);
+    }
+
+    private void OnCursorOverlayStaleTimerTick()
+    {
+        _ = postStatusToUiAsync(() =>
+        {
+            if (disposed || !CursorOverlayVisible)
+            {
+                return;
+            }
+
+            var lastAgeMs = Interlocked.Read(ref cursorOverlayLastAgeMs);
+            var lastUpdateTickMs = Interlocked.Read(ref cursorOverlayLastUpdateTickMs);
+            var elapsedMs = lastUpdateTickMs > 0
+                ? Math.Max(0, Environment.TickCount64 - lastUpdateTickMs)
+                : CursorOverlayStaleTimeoutMs + 1;
+            if (lastAgeMs > CursorOverlayStaleTimeoutMs || elapsedMs > CursorOverlayStaleTimeoutMs)
+            {
+                CursorOverlayVisible = false;
+                Interlocked.Increment(ref cursorOverlayStaleCount);
+                cursorOverlayLastStatus = "telemetry_stale";
+                return;
+            }
+
+            ScheduleCursorOverlayStaleCheck();
+        });
+    }
+
+    private void ResetCursorOverlayState()
+    {
+        CursorOverlayVisible = false;
+        CursorOverlayNx = 0;
+        CursorOverlayNy = 0;
+        CursorDeliveryMode = "captured_video";
+        cursorOverlayLastStatus = "cleared";
+        Interlocked.Exchange(ref cursorOverlayUpdatesReceivedCount, 0);
+        Interlocked.Exchange(ref cursorOverlayUpdatesAppliedCount, 0);
+        Interlocked.Exchange(ref cursorOverlayStaleCount, 0);
+        Interlocked.Exchange(ref cursorOverlayLastAgeMs, -1);
+        Interlocked.Exchange(ref cursorOverlayFirstUpdateTickMs, 0);
+        Interlocked.Exchange(ref cursorOverlayLastUpdateTickMs, 0);
+        Interlocked.Exchange(ref cursorOverlayLastSeq, 0);
+        cursorOverlayStaleTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+    }
+
+    private double ComputeCursorOverlayUpdateHz()
+    {
+        var applied = Interlocked.Read(ref cursorOverlayUpdatesAppliedCount);
+        var firstTick = Interlocked.Read(ref cursorOverlayFirstUpdateTickMs);
+        var lastTick = Interlocked.Read(ref cursorOverlayLastUpdateTickMs);
+        if (applied <= 1 || firstTick <= 0 || lastTick <= firstTick)
+        {
+            return 0d;
+        }
+
+        var seconds = (lastTick - firstTick) / 1000d;
+        return seconds > 0 ? (applied - 1) / seconds : 0d;
+    }
+
+    private static bool IsValidNormalizedCoordinate(double value)
+        => !double.IsNaN(value) && !double.IsInfinity(value) && value is >= 0d and <= 1d;
 
     private async Task OnFrameDecodedAsync(LatestEncodedDecodedFrame decodedFrame)
     {
@@ -890,6 +1119,45 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
                 isPotentialRecoveryApplyFrame;
             var isPostRecoveryGraceFrame = IsHelperRemotePostRecoveryStabilizationFrame(decodedFrame.Request);
             ObserveDecodeSucceeded(decodedFrame.Request, decodedFrame.DecodeCompletedUtcMs);
+            if (isHelperRemoteFrame)
+            {
+                TryReleasePendingHelperRemoteH264ReferenceQuarantine("post_decode");
+            }
+
+            if (isHelperRemoteFrame &&
+                helperRemoteSessionController.ReferenceTaintState.Active &&
+                decodedFrame.Request.RecoveryDeliveryClass == ScreenShareRecoveryDeliveryClass.Normal &&
+                !IsReservedApplyRequest(decodedFrame.Request) &&
+                !IsHelperRemotePostRecoveryStabilizationFrame(decodedFrame.Request) &&
+                !decodedFrame.Request.IsKeyFrame)
+            {
+                Interlocked.Increment(ref h264ReferenceTaintDroppedNonKeyCount);
+                Interlocked.Increment(ref framesDroppedWaitingForRecoveryKeyframe);
+                ObserveDroppedWaitingForRecoveryKeyframe(
+                    decodedFrame.Request.SessionId,
+                    decodedFrame.Request.StreamEpoch,
+                    decodedFrame.Request.FrameId,
+                    decodedFrame.Request.IsKeyFrame);
+                ClearReservedApplyIfMatch(decodedFrame.Request);
+                nextBitmap.Dispose();
+                return;
+            }
+
+            if (currentFrame is not null &&
+                ShouldSuppressHelperRemotePostQuarantineSettleFrame(
+                    decodedFrame.Request,
+                    ageMs,
+                    nowUtcMs))
+            {
+                SuppressDecodedStaleNormalNonKeyVisibleFrame(
+                    decodedFrame.Request,
+                    ageMs,
+                    "post_quarantine_settle_stale_p_frame_suppressed",
+                    incrementVisibleStableCounter: false,
+                    incrementPostQuarantineSettleCounter: true);
+                nextBitmap.Dispose();
+                return;
+            }
 
             if (currentFrame is not null &&
                 ShouldDropHelperRemoteVisibleStableFrameForFreshness(
@@ -897,18 +1165,12 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
                     ageMs,
                     helperSessionSnapshot))
             {
-                Interlocked.Increment(ref staleFrameDropVisibleStableCount);
-                Interlocked.Exchange(ref staleFrameDropVisibleStableLastAgeMs, ageMs);
-                ObserveStaleDroppedAfterDecode(decodedFrame.Request, "stale_frame_drop_visible_stable");
-                ClearReservedApplyIfMatch(decodedFrame.Request);
-                LocalOperationalLog.Info(
-                    "ScreenShare",
-                    $"event=screenshare_viewer_stale_frame_dropped; role={logRole}; stream_epoch={decodedFrame.Request.StreamEpoch}; frame_id={FormatFrameIdForLog(decodedFrame.Request.FrameId)}; rendered_age_ms={ageMs}; threshold_ms={HelperRemoteMaxPendingEncodedFrameAgeMs + (long)HelperRemoteVisibleProgressDecodeAgeBudgetGrace.TotalMilliseconds}; last_rendered_age_ms={(LastRenderedFrameAgeMs >= 0 ? LastRenderedFrameAgeMs.ToString(CultureInfo.InvariantCulture) : "(none)")}; reason=stale_frame_drop_visible_stable");
-                StaleFrameDropped?.Invoke(
-                    this,
-                    new ScreenShareViewerStaleFrameDroppedEventArgs(
-                        ageMs,
-                        decodedFrame.Request.StreamEpoch));
+                SuppressDecodedStaleNormalNonKeyVisibleFrame(
+                    decodedFrame.Request,
+                    ageMs,
+                    "stale_frame_drop_visible_stable",
+                    incrementVisibleStableCounter: true,
+                    incrementPostQuarantineSettleCounter: false);
                 nextBitmap.Dispose();
                 return;
             }
@@ -939,6 +1201,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
                 return;
             }
 
+            MaybeClearHelperRemotePostQuarantineSettleOnFreshFrame(decodedFrame.Request, ageMs, nowUtcMs);
             RecordCaptureToRender(ageMs);
             if (TryMarkEpochLogged(ref lastLoggedDecodeSuccessEpoch, decodedFrame.Request.StreamEpoch))
             {
@@ -1167,11 +1430,29 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
 
         if (H264DecodeStreamState.IsH264Encoding(failure.Request.Encoding))
         {
-            h264StreamState.Reset();
+            if (IsHelperRemoteH264(failure.Request.Encoding))
+            {
+                h264StreamState.ResetDecoderOnly();
+            }
+            else
+            {
+                h264StreamState.Reset();
+            }
         }
 
         Interlocked.Increment(ref decodeErrors);
         ObserveDecodeFailed(failure.Request, failure.Exception);
+        if (IsHelperRemoteH264(failure.Request.Encoding))
+        {
+            ActivateHelperRemoteRecovery(
+                "decode_failed",
+                failure.Request.StreamEpoch,
+                currentEpochNeedMoreInputCount: Math.Max(0, Interlocked.Read(ref needMoreInputCount)),
+                shouldRequestRecoveryKeyframe: true,
+                receivedFrameId: failure.Request.FrameId,
+                lastCleanFrameId: helperRemoteRecoveryState.LastCleanFrameId);
+        }
+
         if (TryMarkEpochLogged(ref lastLoggedDecodeFailureEpoch, failure.Request.StreamEpoch))
         {
             LocalOperationalLog.Info(
@@ -1354,6 +1635,24 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         Interlocked.Exchange(ref staleFrameDropVisibleStableCount, 0);
         Interlocked.Exchange(ref staleFrameDropVisibleStableLastAgeMs, -1);
         Interlocked.Exchange(ref ordinaryNonKeyAgeBudgetBypassCount, 0);
+        Interlocked.Exchange(ref h264ReferenceTaintEnterCount, 0);
+        Interlocked.Exchange(ref h264ReferenceTaintReleaseCount, 0);
+        Interlocked.Exchange(ref h264ReferenceTaintDroppedNonKeyCount, 0);
+        Interlocked.Exchange(ref h264ReferenceTaintDecoderResetCount, 0);
+        Interlocked.Exchange(ref h264ReferenceTaintStaleVisibleStableEnterCount, 0);
+        Interlocked.Exchange(ref staleNormalNonKeyVisibleSuppressCount, 0);
+        Interlocked.Exchange(ref decodedStaleVisibleSuppressCount, 0);
+        Interlocked.Exchange(ref postQuarantineSettleSuppressCount, 0);
+        Interlocked.Exchange(ref h264ReferenceQuarantineReleaseBlockedCount, 0);
+        Interlocked.Exchange(ref h264ReferenceQuarantineQuietReleaseCount, 0);
+        Interlocked.Exchange(ref h264ReferenceQuarantinePendingReleaseEpoch, 0);
+        Interlocked.Exchange(ref h264ReferenceQuarantinePendingReleaseFrameId, -1);
+        Interlocked.Exchange(ref h264ReferenceQuarantineReleaseDueUtcMs, -1);
+        Interlocked.Exchange(ref h264ReferenceQuarantineLastLossEpoch, 0);
+        Interlocked.Exchange(ref h264ReferenceQuarantineLastLossUtcMs, -1);
+        ClearHelperRemotePostQuarantineSettle();
+        h264ReferenceQuarantineLastBlocker = "none";
+        h264ReferenceQuarantineLastLossReason = "none";
         Interlocked.Exchange(ref lastLoggedPreparedEpoch, long.MinValue);
         Interlocked.Exchange(ref lastLoggedDroppedEpoch, long.MinValue);
         Interlocked.Exchange(ref lastLoggedDecodeSuccessEpoch, long.MinValue);
@@ -1469,6 +1768,15 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             frameId,
             isKeyFrame,
             reason);
+        if (!isKeyFrame && IsActionableReferenceTaintLossReason(reason))
+        {
+            ObserveHelperRemoteReferenceQuarantineLoss(streamEpoch, reason);
+        }
+
+        if (ShouldEnterHelperRemoteReferenceTaintForViewerRejection(streamEpoch, frameId, isKeyFrame, reason))
+        {
+            EnterHelperRemoteH264ReferenceTaint(streamEpoch, reason);
+        }
     }
 
     private void ObserveViewerAcceptedForDecode(string sessionId, string encoding, long streamEpoch, long frameId, bool isKeyFrame, long viewerAcceptedUtcMs)
@@ -1618,12 +1926,23 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         ClearReservedApplyIfMatch(request);
         var effectiveSessionId = ResolveFrameSessionId(request.SessionId, streamConfig: null);
         helperRemoteSessionController.SetSessionId(effectiveSessionId);
+        var normalizedReason = NormalizeDecodeWorkerLossReason(reason);
         ScreenShareFrameLossAttributionRegistry.ObserveDecodeWorkerDroppedBeforeDecode(
             effectiveSessionId,
             request.StreamEpoch,
             request.FrameId,
             request.IsKeyFrame,
-            NormalizeDecodeWorkerLossReason(reason));
+            normalizedReason);
+        if (request.RecoveryDeliveryClass == ScreenShareRecoveryDeliveryClass.Normal &&
+            !request.IsKeyFrame &&
+            IsActionableReferenceTaintLossReason(normalizedReason))
+        {
+            ActivateHelperRemoteRecovery(
+                normalizedReason,
+                request.StreamEpoch,
+                currentEpochNeedMoreInputCount: Math.Max(0, Interlocked.Read(ref needMoreInputCount)),
+                shouldRequestRecoveryKeyframe: true);
+        }
     }
 
     private void OnDecodeWorkerFrameDroppedAfterDecode(EncodedFrameDecodeRequest request, string reason)
@@ -1644,6 +1963,16 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             NormalizeDecodeWorkerLossReason(reason));
     }
 
+    private void LogHelperRemoteH264ReferenceTaintSummary(
+        string trigger,
+        string sessionId,
+        ScreenShareMetrics viewerMetrics)
+    {
+        LocalOperationalLog.Info(
+            "ScreenShare",
+            $"event=screenshare_helper_h264_reference_taint_summary; role={logRole}; trigger={trigger}; session_id={sessionId}; h264_reference_taint_active={(viewerMetrics.H264ReferenceTaintActive ? 1 : 0)}; h264_reference_taint_enter_count={viewerMetrics.H264ReferenceTaintEnterCount}; h264_reference_taint_release_count={viewerMetrics.H264ReferenceTaintReleaseCount}; h264_reference_taint_last_reason={viewerMetrics.H264ReferenceTaintLastReason}; h264_reference_taint_dropped_non_key_count={viewerMetrics.H264ReferenceTaintDroppedNonKeyCount}; h264_reference_taint_decoder_reset_count={viewerMetrics.H264ReferenceTaintDecoderResetCount}; h264_reference_taint_stale_visible_stable_enter_count={viewerMetrics.H264ReferenceTaintStaleVisibleStableEnterCount}; stale_normal_non_key_visible_suppress_count={viewerMetrics.StaleNormalNonKeyVisibleSuppressCount}; decoded_stale_visible_suppress_count={viewerMetrics.DecodedStaleVisibleSuppressCount}; post_quarantine_settle_suppress_count={viewerMetrics.PostQuarantineSettleSuppressCount}; h264_reference_quarantine_active={(viewerMetrics.H264ReferenceQuarantineActive ? 1 : 0)}; h264_reference_quarantine_release_blocked_count={viewerMetrics.H264ReferenceQuarantineReleaseBlockedCount}; h264_reference_quarantine_last_blocker={viewerMetrics.H264ReferenceQuarantineLastBlocker}; h264_reference_quarantine_quiet_release_count={viewerMetrics.H264ReferenceQuarantineQuietReleaseCount}");
+    }
+
     private void LogHelperRemoteFrameLossSummary(string trigger, bool includeEpochDetails)
     {
         if (!string.Equals(logRole, "helper_remote", StringComparison.Ordinal))
@@ -1662,6 +1991,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         LocalOperationalLog.Info(
             "ScreenShare",
             $"event=screenshare_helper_frame_loss_summary; role={logRole}; trigger={trigger}; session_id={snapshot.SessionId}; fragment_seen_frames={snapshot.FragmentSeenFrames}; frames_assembled={snapshot.FramesAssembled}; frames_ready={snapshot.FramesReady}; frames_emitted={snapshot.FramesEmitted}; viewer_accepted_frames={snapshot.ViewerAcceptedFrames}; decode_enqueued_frames={snapshot.DecodeEnqueuedFrames}; frames_decoded={snapshot.FramesDecoded}; frames_applied={snapshot.FramesApplied}; helper_session_phase={viewerMetrics.HelperSessionPhase}; helper_recovery_mechanism={viewerMetrics.HelperRecoveryMechanism}; dominant_loss_class={viewerMetrics.DominantLossClass}; reassembler_stale_superseded_loss_count={snapshot.ReassemblerStaleSupersededLossCount}; assembly_evicted_loss_count={snapshot.AssemblyEvictedLossCount}; ready_frame_skipped_replaced_loss_count={snapshot.ReadyFrameSkippedReplacedLossCount}; viewer_rejected_before_enqueue_count={snapshot.ViewerRejectedBeforeEnqueueCount}; waiting_for_recovery_keyframe_reject_count={snapshot.WaitingForRecoveryKeyframeRejectCount}; recovery_wait_reject_before_runway_count={viewerMetrics.RecoveryWaitRejectBeforeRunwayCount}; recovery_runway_overflow_reject_count={viewerMetrics.RecoveryRunwayOverflowRejectCount}; suppressed_emit_during_recovery_wait_count={snapshot.SuppressedEmitDuringRecoveryWaitCount}; stale_superseded_recovery_suppressed_count={viewerMetrics.StaleSupersededRecoverySuppressedCount}; soft_stale_cleanup_count={viewerMetrics.SoftStaleCleanupCount}; pre_candidate_gap_tail_emitted_to_viewer_count={viewerMetrics.PreCandidateGapTailEmittedToViewerCount}; blocked_by_reserved_recovery_frame_reject_count={snapshot.BlockedByReservedRecoveryFrameRejectCount}; older_epoch_ignored_during_recovery_lock_count={snapshot.OlderEpochIgnoredDuringRecoveryLockCount}; newer_epoch_non_key_ignored_during_lock_count={snapshot.NewerEpochNonKeyIgnoredDuringLockCount}; deferred_post_recovery_candidate_replace_count={snapshot.DeferredPostRecoveryCandidateReplaceCount}; decode_worker_dropped_before_decode_count={snapshot.DecodeWorkerDroppedBeforeDecodeCount}; decode_queue_overflow_count={snapshot.DecodeQueueOverflowCount}; decode_age_budget_count={snapshot.DecodeAgeBudgetCount}; decode_generation_changed_count={snapshot.DecodeGenerationChangedCount}; decode_stopped_count={snapshot.DecodeStoppedCount}; decoded_apply_queue_overflow_count={snapshot.DecodedApplyQueueOverflowCount}; decoded_frame_replaced_before_apply_count={snapshot.DecodedFrameReplacedBeforeApplyCount}; decoded_stale_after_recovery_count={snapshot.DecodedStaleAfterRecoveryCount}; decoded_blocked_by_reserved_recovery_frame_count={snapshot.DecodedBlockedByReservedRecoveryFrameCount}; decoded_newer_epoch_ignored_during_lock_count={snapshot.DecodedNewerEpochIgnoredDuringLockCount}; dropped_waiting_for_recovery_keyframe_count={snapshot.DroppedWaitingForRecoveryKeyframeCount}; decode_failed_loss_count={snapshot.DecodeFailedLossCount}; stale_dropped_after_decode_count={snapshot.StaleDroppedAfterDecodeCount}; stale_frame_drop_visible_stable_count={viewerMetrics.StaleFrameDropVisibleStableCount}; stale_frame_drop_visible_stable_last_age_ms={(viewerMetrics.StaleFrameDropVisibleStableLastAgeMs >= 0 ? viewerMetrics.StaleFrameDropVisibleStableLastAgeMs.ToString(CultureInfo.InvariantCulture) : "(none)")}; ordinary_non_key_age_budget_bypass_count={viewerMetrics.OrdinaryNonKeyAgeBudgetBypassCount}; reassembler_loss_count={snapshot.ReassemblerLossCount}; enqueue_reject_count={snapshot.EnqueueRejectCount}; decode_worker_drop_count={snapshot.DecodeWorkerDropCount}; post_decode_drop_count={snapshot.PostDecodeDropCount}; gap_non_key_pruned_count={snapshot.GapNonKeyPrunedCount}; future_tail_quarantined_during_gap_count={snapshot.FutureTailQuarantinedDuringGapCount}; future_tail_quarantined_after_gap_count={snapshot.FutureTailQuarantinedAfterGapCount}; pre_candidate_gap_tail_rejected_count={snapshot.PreCandidateGapTailRejectedCount}; recovery_candidate_present_count={snapshot.RecoveryCandidatePresentCount}; visible_recovery_floor_frame_id={FormatFrameIdForLog(snapshot.VisibleRecoveryFloorFrameId)}; stable_visible_head_frame_id={FormatFrameIdForLog(snapshot.StableVisibleHeadFrameId)}; applied_head_frame_id={FormatFrameIdForLog(snapshot.AppliedHeadFrameId)}; ordered_emit_head_frame_id={FormatFrameIdForLog(snapshot.OrderedEmitHeadFrameId)}; winning_recovery_frame_id={FormatFrameIdForLog(snapshot.WinningRecoveryFrameId)}; visible_head_frame_id={FormatFrameIdForLog(viewerMetrics.VisibleHeadFrameId)}; superseded_recovery_tail_cleanup_count={snapshot.SupersededRecoveryTailCleanupCount}; late_same_epoch_after_head_advanced_drop_count={snapshot.LateSameEpochAfterHeadAdvancedDropCount}; stale_runway_window_abort_count={snapshot.StaleRunwayWindowAbortCount}; runway_candidate_expired_after_head_advance_count={snapshot.RunwayCandidateExpiredAfterHeadAdvanceCount}; runway_followers_emitted_within_actionable_window_count={snapshot.RunwayFollowersEmittedWithinActionableWindowCount}; same_epoch_recovery_owner_suppressed_count={snapshot.RecoveryKeyframeSupersededOrReplacedCount}; recovery_owner_replaced_count={snapshot.RecoveryOwnerReplacedCount}; older_epoch_cleanup_after_epoch_advance_count={snapshot.OlderEpochCleanupAfterEpochAdvanceCount}; late_fragment_after_applied_head_count={snapshot.LateFragmentAfterAppliedHeadCount}; late_fragment_after_ordered_head_count={snapshot.LateFragmentAfterOrderedHeadCount}; late_fragment_after_stable_visible_head_count={snapshot.LateFragmentAfterStableVisibleHeadCount}; late_fragment_after_visible_recovery_count={snapshot.LateFragmentAfterVisibleRecoveryCount}; recovery_runway_contiguous_follower_buffer_count={viewerMetrics.RecoveryRunwayContiguousFollowerBufferCount}; recovery_runway_contiguous_follower_apply_count={viewerMetrics.RecoveryRunwayContiguousFollowerApplyCount}; recovery_runway_abort_count={viewerMetrics.RecoveryRunwayAbortCount}; recovery_follower_window_buffered_count={viewerMetrics.RecoveryFollowerWindowBufferedCount}; recovery_follower_window_applied_count={viewerMetrics.RecoveryFollowerWindowAppliedCount}; recovery_follower_window_trimmed_count={viewerMetrics.RecoveryFollowerWindowTrimmedCount}; protected_recovery_delivery_count={viewerMetrics.ProtectedRecoveryDeliveryCount}; recovery_progress_corridor_count={viewerMetrics.RecoveryProgressCorridorCount}; recovery_progress_corridor_success_count={viewerMetrics.RecoveryProgressCorridorSuccessCount}; recovery_progress_corridor_abort_count={viewerMetrics.RecoveryProgressCorridorAbortCount}; recovery_progress_corridor_applied_count={viewerMetrics.RecoveryProgressCorridorAppliedCount}; recovery_window_active={(viewerMetrics.RecoveryWindowActive ? 1 : 0)}; active_recovery_window_epoch={FormatFrameIdForLog(viewerMetrics.ActiveRecoveryWindowEpoch)}; active_recovery_window_recovery_frame_id={FormatFrameIdForLog(viewerMetrics.ActiveRecoveryWindowRecoveryFrameId)}; recovery_window_contiguous_follower_apply_count={viewerMetrics.RecoveryWindowContiguousFollowerApplyCount}; recovery_keyframe_pending_visible_apply_count={viewerMetrics.RecoveryKeyframePendingVisibleApplyCount}; startup_corridor_buffered_follower_count={viewerMetrics.StartupCorridorBufferedFollowerCount}; startup_corridor_release_count={viewerMetrics.StartupCorridorReleaseCount}; startup_corridor_abort_count={viewerMetrics.StartupCorridorAbortCount}; startup_corridor_abort_reason={viewerMetrics.StartupCorridorAbortReason}; recovery_keyframe_resync_count={snapshot.RecoveryKeyframeResyncCount}; gap_active={(snapshot.GapActive ? 1 : 0)}; gap_expected_frame_id={FormatFrameIdForLog(snapshot.GapExpectedFrameId)}; buffered_recovery_keyframe_frame_id={FormatFrameIdForLog(snapshot.BufferedRecoveryKeyframeFrameId)}; recovery_keyframe_candidate_present={(snapshot.BufferedRecoveryKeyframeFrameId >= 0 ? 1 : 0)}; future_non_key_buffered_count={snapshot.FutureNonKeyBufferedCount}; dominant_helper_admission_reject_reason={dominantHelperAdmissionRejectReason}; post_recovery_visible_generation_reset_count={viewerMetrics.PostRecoveryVisibleGenerationResetCount}; post_recovery_purged_pre_recovery_follower_count={viewerMetrics.PostRecoveryPurgedPreRecoveryFollowerCount}; post_recovery_stale_drop_bypass_count={viewerMetrics.PostRecoveryStaleDropBypassCount}; late_fragment_after_successful_recovery_count={snapshot.LateFragmentAfterSuccessfulRecoveryCount}; actionable_late_fragment_count={viewerMetrics.ActionableLateFragmentCount}; unattributed_loss_count={snapshot.UnattributedLossCount}; last_applied_frame_id={FormatFrameIdForLog(snapshot.LastAppliedFrameId)}; last_clean_frame_id={FormatFrameIdForLog(snapshot.LastCleanFrameId)}; recent_losses={ScreenShareFrameLossAttributionRegistry.FormatRecentLosses(snapshot.RecentLosses)}");
+        LogHelperRemoteH264ReferenceTaintSummary(trigger, snapshot.SessionId, viewerMetrics);
 
         var workerMetrics = decodeWorker.GetMetricsSnapshot();
         LocalOperationalLog.Info(
@@ -1711,7 +2041,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             : 0d;
         LocalOperationalLog.Info(
             "ScreenShare",
-            $"event=screenshare_helper_quality_summary; role={logRole}; trigger={trigger}; session_id={snapshot.SessionId}; frames_emitted={snapshot.FramesEmitted}; viewer_accepted_frames={snapshot.ViewerAcceptedFrames}; frames_decoded={snapshot.FramesDecoded}; frames_applied={snapshot.FramesApplied}; helper_session_phase={viewerMetrics.HelperSessionPhase}; helper_recovery_mechanism={viewerMetrics.HelperRecoveryMechanism}; dominant_loss_class={viewerMetrics.DominantLossClass}; baseline_established={(viewerMetrics.BaselineEstablished ? 1 : 0)}; steady_visible_progress_active={(viewerMetrics.SteadyVisibleProgressActive ? 1 : 0)}; visible_apply_ratio={visibleApplyRatio:F2}; avg_apply_interval_ms={viewerMetrics.AverageApplyIntervalMs:F1}; avg_capture_to_render_ms={viewerMetrics.AverageCaptureToRenderMs:F1}; avg_decode_complete_to_visible_apply_ms={viewerMetrics.AverageDecodeCompleteToVisibleApplyMs:F1}; avg_ui_post_apply_ms={viewerMetrics.AverageUiPostToApplyMs:F1}; avg_visible_head_lag_frames={viewerMetrics.AverageVisibleHeadLagFrames:F1}; avg_stable_head_lag_frames={viewerMetrics.AverageStableHeadLagFrames:F1}; stale_frame_drop_visible_stable_count={viewerMetrics.StaleFrameDropVisibleStableCount}; stale_frame_drop_visible_stable_last_age_ms={(viewerMetrics.StaleFrameDropVisibleStableLastAgeMs >= 0 ? viewerMetrics.StaleFrameDropVisibleStableLastAgeMs.ToString(CultureInfo.InvariantCulture) : "(none)")}; ordinary_non_key_age_budget_bypass_count={viewerMetrics.OrdinaryNonKeyAgeBudgetBypassCount}; last_reserved_apply_hold_ms={viewerMetrics.LastReservedApplyHoldMs}; last_recovery_progress_corridor_hold_ms={viewerMetrics.LastRecoveryProgressCorridorHoldMs}; last_recovery_runway_abort_hold_ms={viewerMetrics.LastRecoveryRunwayAbortHoldMs}; last_recovery_progress_corridor_abort_reason={viewerMetrics.LastRecoveryProgressCorridorAbortReason}; gap_count={totalGapCount}; recovery_keyframe_apply_count={totalRecoveryKeyframeApplyCount}; resync_count={totalResyncCount}; dominant_reassembler_root_cause={snapshot.DominantReassemblerRootCause}; dominant_helper_admission_reject_reason={dominantHelperAdmissionRejectReason}; recovery_wait_reject_before_runway_count={viewerMetrics.RecoveryWaitRejectBeforeRunwayCount}; recovery_runway_overflow_reject_count={viewerMetrics.RecoveryRunwayOverflowRejectCount}; suppressed_emit_during_recovery_wait_count={viewerMetrics.SuppressedEmitDuringRecoveryWaitCount}; stale_superseded_recovery_suppressed_count={viewerMetrics.StaleSupersededRecoverySuppressedCount}; soft_stale_cleanup_count={viewerMetrics.SoftStaleCleanupCount}; pre_candidate_gap_tail_emitted_to_viewer_count={viewerMetrics.PreCandidateGapTailEmittedToViewerCount}; recovery_candidate_present_count={viewerMetrics.RecoveryCandidatePresentCount}; visible_recovery_floor_frame_id={FormatFrameIdForLog(viewerMetrics.VisibleRecoveryFloorFrameId)}; stable_visible_head_frame_id={FormatFrameIdForLog(viewerMetrics.StableVisibleHeadFrameId)}; applied_head_frame_id={FormatFrameIdForLog(viewerMetrics.AppliedHeadFrameId)}; ordered_emit_head_frame_id={FormatFrameIdForLog(snapshot.OrderedEmitHeadFrameId)}; winning_recovery_frame_id={FormatFrameIdForLog(snapshot.WinningRecoveryFrameId)}; visible_head_frame_id={FormatFrameIdForLog(viewerMetrics.VisibleHeadFrameId)}; superseded_recovery_tail_cleanup_count={snapshot.SupersededRecoveryTailCleanupCount}; late_same_epoch_after_head_advanced_drop_count={snapshot.LateSameEpochAfterHeadAdvancedDropCount}; stale_runway_window_abort_count={snapshot.StaleRunwayWindowAbortCount}; runway_candidate_expired_after_head_advance_count={snapshot.RunwayCandidateExpiredAfterHeadAdvanceCount}; runway_followers_emitted_within_actionable_window_count={snapshot.RunwayFollowersEmittedWithinActionableWindowCount}; same_epoch_recovery_owner_suppressed_count={snapshot.RecoveryKeyframeSupersededOrReplacedCount}; recovery_owner_replaced_count={snapshot.RecoveryOwnerReplacedCount}; older_epoch_cleanup_after_epoch_advance_count={snapshot.OlderEpochCleanupAfterEpochAdvanceCount}; future_tail_quarantined_during_gap_count={viewerMetrics.FutureTailQuarantinedDuringGapCount}; future_tail_quarantined_after_gap_count={viewerMetrics.FutureTailQuarantinedAfterGapCount}; pre_candidate_gap_tail_rejected_count={viewerMetrics.PreCandidateGapTailRejectedCount}; late_fragment_after_applied_head_count={viewerMetrics.LateFragmentAfterAppliedHeadCount}; late_fragment_after_ordered_head_count={snapshot.LateFragmentAfterOrderedHeadCount}; late_fragment_after_stable_visible_head_count={viewerMetrics.LateFragmentAfterStableVisibleHeadCount}; late_fragment_after_visible_recovery_count={viewerMetrics.LateFragmentAfterVisibleRecoveryCount}; recovery_runway_contiguous_follower_buffer_count={viewerMetrics.RecoveryRunwayContiguousFollowerBufferCount}; recovery_runway_contiguous_follower_apply_count={viewerMetrics.RecoveryRunwayContiguousFollowerApplyCount}; recovery_runway_abort_count={viewerMetrics.RecoveryRunwayAbortCount}; recovery_follower_window_buffered_count={viewerMetrics.RecoveryFollowerWindowBufferedCount}; recovery_follower_window_applied_count={viewerMetrics.RecoveryFollowerWindowAppliedCount}; recovery_follower_window_trimmed_count={viewerMetrics.RecoveryFollowerWindowTrimmedCount}; protected_recovery_delivery_count={viewerMetrics.ProtectedRecoveryDeliveryCount}; recovery_progress_corridor_count={viewerMetrics.RecoveryProgressCorridorCount}; recovery_progress_corridor_success_count={viewerMetrics.RecoveryProgressCorridorSuccessCount}; recovery_progress_corridor_abort_count={viewerMetrics.RecoveryProgressCorridorAbortCount}; recovery_progress_corridor_applied_count={viewerMetrics.RecoveryProgressCorridorAppliedCount}; recovery_window_active={(viewerMetrics.RecoveryWindowActive ? 1 : 0)}; active_recovery_window_epoch={FormatFrameIdForLog(viewerMetrics.ActiveRecoveryWindowEpoch)}; active_recovery_window_recovery_frame_id={FormatFrameIdForLog(viewerMetrics.ActiveRecoveryWindowRecoveryFrameId)}; recovery_window_contiguous_follower_apply_count={viewerMetrics.RecoveryWindowContiguousFollowerApplyCount}; recovery_keyframe_pending_visible_apply_count={viewerMetrics.RecoveryKeyframePendingVisibleApplyCount}; startup_corridor_buffered_follower_count={viewerMetrics.StartupCorridorBufferedFollowerCount}; startup_corridor_release_count={viewerMetrics.StartupCorridorReleaseCount}; startup_corridor_abort_count={viewerMetrics.StartupCorridorAbortCount}; startup_corridor_abort_reason={viewerMetrics.StartupCorridorAbortReason}; post_recovery_visible_generation_reset_count={viewerMetrics.PostRecoveryVisibleGenerationResetCount}; post_recovery_stale_drop_bypass_count={viewerMetrics.PostRecoveryStaleDropBypassCount}; late_fragment_after_successful_recovery_count={snapshot.LateFragmentAfterSuccessfulRecoveryCount}; actionable_late_fragment_count={viewerMetrics.ActionableLateFragmentCount}");
+            $"event=screenshare_helper_quality_summary; role={logRole}; trigger={trigger}; session_id={snapshot.SessionId}; frames_emitted={snapshot.FramesEmitted}; viewer_accepted_frames={snapshot.ViewerAcceptedFrames}; frames_decoded={snapshot.FramesDecoded}; frames_applied={snapshot.FramesApplied}; helper_session_phase={viewerMetrics.HelperSessionPhase}; helper_recovery_mechanism={viewerMetrics.HelperRecoveryMechanism}; dominant_loss_class={viewerMetrics.DominantLossClass}; baseline_established={(viewerMetrics.BaselineEstablished ? 1 : 0)}; steady_visible_progress_active={(viewerMetrics.SteadyVisibleProgressActive ? 1 : 0)}; visible_apply_ratio={visibleApplyRatio:F2}; avg_apply_interval_ms={viewerMetrics.AverageApplyIntervalMs:F1}; avg_capture_to_render_ms={viewerMetrics.AverageCaptureToRenderMs:F1}; cursor_delivery_mode={viewerMetrics.CursorDeliveryMode}; cursor_overlay_visible={(viewerMetrics.CursorOverlayVisible ? 1 : 0)}; cursor_overlay_updates_received_count={viewerMetrics.CursorOverlayUpdatesReceivedCount}; cursor_overlay_updates_applied_count={viewerMetrics.CursorOverlayUpdatesAppliedCount}; cursor_overlay_update_hz={viewerMetrics.CursorOverlayUpdateHz:F1}; cursor_overlay_last_age_ms={(viewerMetrics.CursorOverlayLastAgeMs >= 0 ? viewerMetrics.CursorOverlayLastAgeMs.ToString(CultureInfo.InvariantCulture) : "(none)")}; cursor_overlay_stale_count={viewerMetrics.CursorOverlayStaleCount}; cursor_overlay_last_status={(string.IsNullOrWhiteSpace(viewerMetrics.CursorOverlayLastStatus) ? "(none)" : viewerMetrics.CursorOverlayLastStatus)}; avg_decode_complete_to_visible_apply_ms={viewerMetrics.AverageDecodeCompleteToVisibleApplyMs:F1}; avg_ui_post_apply_ms={viewerMetrics.AverageUiPostToApplyMs:F1}; avg_visible_head_lag_frames={viewerMetrics.AverageVisibleHeadLagFrames:F1}; avg_stable_head_lag_frames={viewerMetrics.AverageStableHeadLagFrames:F1}; stale_frame_drop_visible_stable_count={viewerMetrics.StaleFrameDropVisibleStableCount}; stale_frame_drop_visible_stable_last_age_ms={(viewerMetrics.StaleFrameDropVisibleStableLastAgeMs >= 0 ? viewerMetrics.StaleFrameDropVisibleStableLastAgeMs.ToString(CultureInfo.InvariantCulture) : "(none)")}; ordinary_non_key_age_budget_bypass_count={viewerMetrics.OrdinaryNonKeyAgeBudgetBypassCount}; last_reserved_apply_hold_ms={viewerMetrics.LastReservedApplyHoldMs}; last_recovery_progress_corridor_hold_ms={viewerMetrics.LastRecoveryProgressCorridorHoldMs}; last_recovery_runway_abort_hold_ms={viewerMetrics.LastRecoveryRunwayAbortHoldMs}; last_recovery_progress_corridor_abort_reason={viewerMetrics.LastRecoveryProgressCorridorAbortReason}; gap_count={totalGapCount}; recovery_keyframe_apply_count={totalRecoveryKeyframeApplyCount}; resync_count={totalResyncCount}; dominant_reassembler_root_cause={snapshot.DominantReassemblerRootCause}; dominant_helper_admission_reject_reason={dominantHelperAdmissionRejectReason}; recovery_wait_reject_before_runway_count={viewerMetrics.RecoveryWaitRejectBeforeRunwayCount}; recovery_runway_overflow_reject_count={viewerMetrics.RecoveryRunwayOverflowRejectCount}; suppressed_emit_during_recovery_wait_count={viewerMetrics.SuppressedEmitDuringRecoveryWaitCount}; stale_superseded_recovery_suppressed_count={viewerMetrics.StaleSupersededRecoverySuppressedCount}; soft_stale_cleanup_count={viewerMetrics.SoftStaleCleanupCount}; pre_candidate_gap_tail_emitted_to_viewer_count={viewerMetrics.PreCandidateGapTailEmittedToViewerCount}; recovery_candidate_present_count={viewerMetrics.RecoveryCandidatePresentCount}; visible_recovery_floor_frame_id={FormatFrameIdForLog(viewerMetrics.VisibleRecoveryFloorFrameId)}; stable_visible_head_frame_id={FormatFrameIdForLog(viewerMetrics.StableVisibleHeadFrameId)}; applied_head_frame_id={FormatFrameIdForLog(viewerMetrics.AppliedHeadFrameId)}; ordered_emit_head_frame_id={FormatFrameIdForLog(snapshot.OrderedEmitHeadFrameId)}; winning_recovery_frame_id={FormatFrameIdForLog(snapshot.WinningRecoveryFrameId)}; visible_head_frame_id={FormatFrameIdForLog(viewerMetrics.VisibleHeadFrameId)}; superseded_recovery_tail_cleanup_count={snapshot.SupersededRecoveryTailCleanupCount}; late_same_epoch_after_head_advanced_drop_count={snapshot.LateSameEpochAfterHeadAdvancedDropCount}; stale_runway_window_abort_count={snapshot.StaleRunwayWindowAbortCount}; runway_candidate_expired_after_head_advance_count={snapshot.RunwayCandidateExpiredAfterHeadAdvanceCount}; runway_followers_emitted_within_actionable_window_count={snapshot.RunwayFollowersEmittedWithinActionableWindowCount}; same_epoch_recovery_owner_suppressed_count={snapshot.RecoveryKeyframeSupersededOrReplacedCount}; recovery_owner_replaced_count={snapshot.RecoveryOwnerReplacedCount}; older_epoch_cleanup_after_epoch_advance_count={snapshot.OlderEpochCleanupAfterEpochAdvanceCount}; future_tail_quarantined_during_gap_count={viewerMetrics.FutureTailQuarantinedDuringGapCount}; future_tail_quarantined_after_gap_count={viewerMetrics.FutureTailQuarantinedAfterGapCount}; pre_candidate_gap_tail_rejected_count={viewerMetrics.PreCandidateGapTailRejectedCount}; late_fragment_after_applied_head_count={viewerMetrics.LateFragmentAfterAppliedHeadCount}; late_fragment_after_ordered_head_count={snapshot.LateFragmentAfterOrderedHeadCount}; late_fragment_after_stable_visible_head_count={viewerMetrics.LateFragmentAfterStableVisibleHeadCount}; late_fragment_after_visible_recovery_count={viewerMetrics.LateFragmentAfterVisibleRecoveryCount}; recovery_runway_contiguous_follower_buffer_count={viewerMetrics.RecoveryRunwayContiguousFollowerBufferCount}; recovery_runway_contiguous_follower_apply_count={viewerMetrics.RecoveryRunwayContiguousFollowerApplyCount}; recovery_runway_abort_count={viewerMetrics.RecoveryRunwayAbortCount}; recovery_follower_window_buffered_count={viewerMetrics.RecoveryFollowerWindowBufferedCount}; recovery_follower_window_applied_count={viewerMetrics.RecoveryFollowerWindowAppliedCount}; recovery_follower_window_trimmed_count={viewerMetrics.RecoveryFollowerWindowTrimmedCount}; protected_recovery_delivery_count={viewerMetrics.ProtectedRecoveryDeliveryCount}; recovery_progress_corridor_count={viewerMetrics.RecoveryProgressCorridorCount}; recovery_progress_corridor_success_count={viewerMetrics.RecoveryProgressCorridorSuccessCount}; recovery_progress_corridor_abort_count={viewerMetrics.RecoveryProgressCorridorAbortCount}; recovery_progress_corridor_applied_count={viewerMetrics.RecoveryProgressCorridorAppliedCount}; recovery_window_active={(viewerMetrics.RecoveryWindowActive ? 1 : 0)}; active_recovery_window_epoch={FormatFrameIdForLog(viewerMetrics.ActiveRecoveryWindowEpoch)}; active_recovery_window_recovery_frame_id={FormatFrameIdForLog(viewerMetrics.ActiveRecoveryWindowRecoveryFrameId)}; recovery_window_contiguous_follower_apply_count={viewerMetrics.RecoveryWindowContiguousFollowerApplyCount}; recovery_keyframe_pending_visible_apply_count={viewerMetrics.RecoveryKeyframePendingVisibleApplyCount}; startup_corridor_buffered_follower_count={viewerMetrics.StartupCorridorBufferedFollowerCount}; startup_corridor_release_count={viewerMetrics.StartupCorridorReleaseCount}; startup_corridor_abort_count={viewerMetrics.StartupCorridorAbortCount}; startup_corridor_abort_reason={viewerMetrics.StartupCorridorAbortReason}; post_recovery_visible_generation_reset_count={viewerMetrics.PostRecoveryVisibleGenerationResetCount}; post_recovery_stale_drop_bypass_count={viewerMetrics.PostRecoveryStaleDropBypassCount}; late_fragment_after_successful_recovery_count={snapshot.LateFragmentAfterSuccessfulRecoveryCount}; actionable_late_fragment_count={viewerMetrics.ActionableLateFragmentCount}");
 
         if (!ShouldLogHelperRemoteEpochDetails(trigger, snapshot, includeEpochDetails))
         {
@@ -1764,7 +2094,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         long frameId,
         bool isKeyFrame,
         bool assumeOwnership,
-        ScreenShareRecoveryDeliveryClass recoveryDeliveryClass)
+        ref ScreenShareRecoveryDeliveryClass recoveryDeliveryClass)
     {
         if (!IsHelperRemoteH264(encoding) ||
             isKeyFrame ||
@@ -1798,6 +2128,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         var maximumActionableFrameId = recoveryFrameId + HelperRemotePostRecoveryFollowerWindowSize;
         if (frameId > maximumActionableFrameId)
         {
+            EnterHelperRemoteH264ReferenceTaint(streamEpoch, "recovery_runway_overflow");
             ObserveViewerRejectedBeforeEnqueue(
                 sessionId,
                 encoding,
@@ -1812,6 +2143,13 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         if (!reservedApplyPending &&
             frameId == expectedNextFrameId)
         {
+            if (recoveryDeliveryClass == ScreenShareRecoveryDeliveryClass.Normal &&
+                helperRemoteSessionController.ReferenceTaintState.Active &&
+                helperRemoteSessionController.ReferenceTaintState.StreamEpoch == streamEpoch)
+            {
+                recoveryDeliveryClass = ScreenShareRecoveryDeliveryClass.ProtectedFollower;
+            }
+
             MarkReservedApplyPending(streamEpoch, frameId);
             return false;
         }
@@ -1926,6 +2264,45 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         Interlocked.Increment(ref recoveryFollowerWindowBufferedCount);
     }
 
+    private void PromoteHelperRemoteReferenceTaintFollowerIfEligible(
+        long streamEpoch,
+        long frameId,
+        bool isKeyFrame,
+        ref ScreenShareRecoveryDeliveryClass recoveryDeliveryClass)
+    {
+        if (recoveryDeliveryClass != ScreenShareRecoveryDeliveryClass.Normal ||
+            isKeyFrame ||
+            streamEpoch <= 0 ||
+            frameId < 0 ||
+            !helperRemoteSessionController.ReferenceTaintState.Active)
+        {
+            return;
+        }
+
+        var taintState = helperRemoteSessionController.ReferenceTaintState;
+        if (taintState.StreamEpoch > 0 && taintState.StreamEpoch != streamEpoch)
+        {
+            return;
+        }
+
+        if (taintState.TrustedRecoveryOwnerFrameId < 0 ||
+            !TryResolveHelperRemotePostRecoveryFollowerWindow(
+                streamEpoch,
+                out var recoveryFrameId,
+                out _,
+                out _))
+        {
+            return;
+        }
+
+        if (recoveryFrameId != taintState.TrustedRecoveryOwnerFrameId)
+        {
+            return;
+        }
+
+        recoveryDeliveryClass = ScreenShareRecoveryDeliveryClass.ProtectedFollower;
+    }
+
     private string? TryRejectHelperRemoteFrameBeforeDecode(
         string sessionId,
         string encoding,
@@ -1934,13 +2311,22 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         bool isKeyFrame,
         ScreenShareRecoveryDeliveryClass recoveryDeliveryClass)
     {
-        return helperRemoteSessionController.TryRejectFrameBeforeDecode(
+        TryReleasePendingHelperRemoteH264ReferenceQuarantine("pre_decode");
+        var rejectionReason = helperRemoteSessionController.TryRejectFrameBeforeDecode(
             sessionId,
             encoding,
             streamEpoch,
             frameId,
             isKeyFrame,
             recoveryDeliveryClass);
+        if (string.Equals(rejectionReason, "h264_reference_taint_waiting_for_recovery_keyframe", StringComparison.Ordinal) ||
+            (string.Equals(rejectionReason, "waiting_for_recovery_keyframe", StringComparison.Ordinal) &&
+             helperRemoteSessionController.ReferenceTaintState.Active))
+        {
+            Interlocked.Increment(ref h264ReferenceTaintDroppedNonKeyCount);
+        }
+
+        return rejectionReason;
     }
 
     private string? ResolveHelperRemotePreDecodeRejectionReason(string? sessionId, long streamEpoch, long frameId, bool isKeyFrame, ScreenShareRecoveryDeliveryClass recoveryDeliveryClass)
@@ -1948,6 +2334,31 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         if (recoveryDeliveryClass != ScreenShareRecoveryDeliveryClass.Normal)
         {
             return null;
+        }
+
+        if (helperRemoteSessionController.ReferenceTaintState.Active)
+        {
+            var taintEpoch = helperRemoteSessionController.ReferenceTaintState.StreamEpoch;
+            if (taintEpoch > 0 && streamEpoch < taintEpoch)
+            {
+                return "older_epoch_ignored_during_recovery_lock";
+            }
+
+            if (!isKeyFrame)
+            {
+                if (taintEpoch > 0 && streamEpoch > taintEpoch)
+                {
+                    return "newer_epoch_non_key_ignored_during_lock";
+                }
+
+                if (helperRemoteRecoveryState.RecoveryActive &&
+                    streamEpoch == helperRemoteRecoveryState.RecoveryStreamEpoch)
+                {
+                    return "waiting_for_recovery_keyframe";
+                }
+
+                return "h264_reference_taint_waiting_for_recovery_keyframe";
+            }
         }
 
         if (!helperRemoteRecoveryState.RecoveryActive)
@@ -1971,6 +2382,410 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         }
 
         return null;
+    }
+
+    private void EnterHelperRemoteH264ReferenceTaint(long streamEpoch, string reason)
+    {
+        if (streamEpoch <= 0)
+        {
+            return;
+        }
+
+        ObserveHelperRemoteReferenceQuarantineLoss(streamEpoch, reason);
+        Interlocked.Exchange(ref h264ReferenceQuarantinePendingReleaseEpoch, 0);
+        Interlocked.Exchange(ref h264ReferenceQuarantinePendingReleaseFrameId, -1);
+        Interlocked.Exchange(ref h264ReferenceQuarantineReleaseDueUtcMs, -1);
+        if (!helperRemoteSessionController.EnterReferenceTaint(
+                streamEpoch,
+                reason,
+                helperRemoteRecoveryState.LastCleanFrameId))
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref h264ReferenceTaintEnterCount);
+        Interlocked.Increment(ref generation);
+        decodeWorker.ClearPending();
+        LocalOperationalLog.Info(
+            "ScreenShare",
+            $"event=screenshare_helper_h264_reference_taint_entered; role={logRole}; stream_epoch={streamEpoch}; reason={reason}; last_clean_frame_id={FormatFrameIdForLog(helperRemoteRecoveryState.LastCleanFrameId)}");
+    }
+
+    private void ReleaseHelperRemoteH264ReferenceTaint(long streamEpoch, long lastContiguousFrameId)
+    {
+        if (HasUnresolvedHelperRemoteReferenceTaintBlocker(streamEpoch, lastContiguousFrameId, out var blockerReason))
+        {
+            RecordHelperRemoteReferenceQuarantineReleaseBlocked(streamEpoch, lastContiguousFrameId, blockerReason);
+            LocalOperationalLog.Info(
+                "ScreenShare",
+                $"event=screenshare_helper_h264_reference_taint_release_blocked; role={logRole}; stream_epoch={streamEpoch}; last_contiguous_frame_id={FormatFrameIdForLog(lastContiguousFrameId)}; blocker={blockerReason}");
+            return;
+        }
+
+        if (TryGetHelperRemoteReferenceQuarantineQuietBlocker(streamEpoch, out blockerReason, out var releaseDueUtcMs))
+        {
+            RecordHelperRemoteReferenceQuarantineReleaseBlocked(streamEpoch, lastContiguousFrameId, blockerReason);
+            Interlocked.Exchange(ref h264ReferenceQuarantinePendingReleaseEpoch, streamEpoch);
+            Interlocked.Exchange(ref h264ReferenceQuarantinePendingReleaseFrameId, lastContiguousFrameId);
+            Interlocked.Exchange(ref h264ReferenceQuarantineReleaseDueUtcMs, releaseDueUtcMs);
+            LocalOperationalLog.Info(
+                "ScreenShare",
+                $"event=screenshare_helper_h264_reference_quarantine_release_deferred; role={logRole}; stream_epoch={streamEpoch}; last_contiguous_frame_id={FormatFrameIdForLog(lastContiguousFrameId)}; blocker={blockerReason}; release_due_utc_ms={releaseDueUtcMs}");
+            return;
+        }
+
+        if (!helperRemoteSessionController.ReleaseReferenceTaintAfterCorridorSuccess(streamEpoch, lastContiguousFrameId))
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref h264ReferenceQuarantinePendingReleaseEpoch, 0);
+        Interlocked.Exchange(ref h264ReferenceQuarantinePendingReleaseFrameId, -1);
+        Interlocked.Exchange(ref h264ReferenceQuarantineReleaseDueUtcMs, -1);
+        Interlocked.Increment(ref h264ReferenceTaintReleaseCount);
+        StartHelperRemotePostQuarantineSettle(streamEpoch, lastContiguousFrameId);
+        LocalOperationalLog.Info(
+            "ScreenShare",
+            $"event=screenshare_helper_h264_reference_taint_released; role={logRole}; stream_epoch={streamEpoch}; last_contiguous_frame_id={FormatFrameIdForLog(lastContiguousFrameId)}");
+    }
+
+    private void ObserveHelperRemoteReferenceQuarantineLoss(long streamEpoch, string reason)
+    {
+        if (streamEpoch <= 0)
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref h264ReferenceQuarantineLastLossEpoch, streamEpoch);
+        Interlocked.Exchange(ref h264ReferenceQuarantineLastLossUtcMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        h264ReferenceQuarantineLastLossReason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
+    }
+
+    private void RecordHelperRemoteReferenceQuarantineReleaseBlocked(long streamEpoch, long lastContiguousFrameId, string blockerReason)
+    {
+        Interlocked.Increment(ref h264ReferenceQuarantineReleaseBlockedCount);
+        h264ReferenceQuarantineLastBlocker = string.IsNullOrWhiteSpace(blockerReason)
+            ? "unknown"
+            : blockerReason.Trim();
+        Interlocked.Exchange(ref h264ReferenceQuarantinePendingReleaseEpoch, streamEpoch);
+        Interlocked.Exchange(ref h264ReferenceQuarantinePendingReleaseFrameId, lastContiguousFrameId);
+    }
+
+    private bool TryGetHelperRemoteReferenceQuarantineQuietBlocker(long streamEpoch, out string blockerReason, out long releaseDueUtcMs)
+    {
+        blockerReason = "none";
+        releaseDueUtcMs = -1;
+        var lastLossEpoch = Interlocked.Read(ref h264ReferenceQuarantineLastLossEpoch);
+        var lastLossUtcMs = Interlocked.Read(ref h264ReferenceQuarantineLastLossUtcMs);
+        if (streamEpoch <= 0 ||
+            lastLossEpoch != streamEpoch ||
+            lastLossUtcMs < 0)
+        {
+            return false;
+        }
+
+        var nowUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        releaseDueUtcMs = lastLossUtcMs + HelperRemoteH264ReferenceQuarantineQuietWindowMs;
+        if (nowUtcMs >= releaseDueUtcMs)
+        {
+            return false;
+        }
+
+        var reason = string.IsNullOrWhiteSpace(h264ReferenceQuarantineLastLossReason)
+            ? "recent_reference_loss"
+            : h264ReferenceQuarantineLastLossReason.Trim();
+        blockerReason = "quiet_window_recent_" + reason;
+        return true;
+    }
+
+    private bool TryReleasePendingHelperRemoteH264ReferenceQuarantine(string trigger)
+    {
+        var streamEpoch = Interlocked.Read(ref h264ReferenceQuarantinePendingReleaseEpoch);
+        var lastContiguousFrameId = Interlocked.Read(ref h264ReferenceQuarantinePendingReleaseFrameId);
+        var dueUtcMs = Interlocked.Read(ref h264ReferenceQuarantineReleaseDueUtcMs);
+        if (streamEpoch <= 0 ||
+            lastContiguousFrameId < 0 ||
+            dueUtcMs < 0 ||
+            DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < dueUtcMs ||
+            !helperRemoteSessionController.ReferenceTaintState.Active)
+        {
+            return false;
+        }
+
+        if (HasUnresolvedHelperRemoteReferenceTaintBlocker(streamEpoch, lastContiguousFrameId, out var blockerReason) ||
+            TryGetHelperRemoteReferenceQuarantineQuietBlocker(streamEpoch, out blockerReason, out _))
+        {
+            h264ReferenceQuarantineLastBlocker = blockerReason;
+            return false;
+        }
+
+        if (!helperRemoteSessionController.ReleaseReferenceTaintAfterCorridorSuccess(streamEpoch, lastContiguousFrameId))
+        {
+            return false;
+        }
+
+        Interlocked.Exchange(ref h264ReferenceQuarantinePendingReleaseEpoch, 0);
+        Interlocked.Exchange(ref h264ReferenceQuarantinePendingReleaseFrameId, -1);
+        Interlocked.Exchange(ref h264ReferenceQuarantineReleaseDueUtcMs, -1);
+        Interlocked.Increment(ref h264ReferenceTaintReleaseCount);
+        Interlocked.Increment(ref h264ReferenceQuarantineQuietReleaseCount);
+        h264ReferenceQuarantineLastBlocker = "none";
+        StartHelperRemotePostQuarantineSettle(streamEpoch, lastContiguousFrameId);
+        LocalOperationalLog.Info(
+            "ScreenShare",
+            $"event=screenshare_helper_h264_reference_quarantine_quiet_released; role={logRole}; trigger={trigger}; stream_epoch={streamEpoch}; last_contiguous_frame_id={FormatFrameIdForLog(lastContiguousFrameId)}");
+        return true;
+    }
+
+    private void StartHelperRemotePostQuarantineSettle(long streamEpoch, long lastContiguousFrameId)
+    {
+        if (streamEpoch <= 0)
+        {
+            return;
+        }
+
+        var nowUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        Interlocked.Exchange(ref helperRemotePostQuarantineSettleEpoch, streamEpoch);
+        Interlocked.Exchange(ref helperRemotePostQuarantineSettleStartedUtcMs, nowUtcMs);
+        Interlocked.Exchange(ref helperRemotePostQuarantineSettleUntilUtcMs, nowUtcMs + HelperRemotePostQuarantineSettleWindowMs);
+        Interlocked.Exchange(ref helperRemotePostQuarantineSettleLastContiguousFrameId, lastContiguousFrameId);
+        LocalOperationalLog.Info(
+            "ScreenShare",
+            $"event=screenshare_helper_h264_reference_post_quarantine_settle_started; role={logRole}; stream_epoch={streamEpoch}; last_contiguous_frame_id={FormatFrameIdForLog(lastContiguousFrameId)}; window_ms={HelperRemotePostQuarantineSettleWindowMs}");
+    }
+
+    private void ClearHelperRemotePostQuarantineSettle()
+    {
+        Interlocked.Exchange(ref helperRemotePostQuarantineSettleEpoch, 0);
+        Interlocked.Exchange(ref helperRemotePostQuarantineSettleStartedUtcMs, -1);
+        Interlocked.Exchange(ref helperRemotePostQuarantineSettleUntilUtcMs, -1);
+        Interlocked.Exchange(ref helperRemotePostQuarantineSettleLastContiguousFrameId, -1);
+    }
+
+    private bool HasUnresolvedHelperRemoteReferenceTaintBlocker(long streamEpoch, long lastContiguousFrameId, out string blockerReason)
+    {
+        blockerReason = "none";
+        if (streamEpoch <= 0)
+        {
+            return false;
+        }
+
+        if (helperRemoteRecoveryState.RecoveryActive &&
+            helperRemoteRecoveryState.RecoveryStreamEpoch == streamEpoch)
+        {
+            blockerReason = "active_recovery";
+            return true;
+        }
+
+        if (helperRemoteFollowerState.RecoveryProgressCorridorActive &&
+            helperRemoteFollowerState.RecoveryProgressCorridorEpoch == streamEpoch)
+        {
+            blockerReason = "recovery_corridor_active";
+            return true;
+        }
+
+        if (helperRemoteFollowerState.ExpiredRecoveryRunwayActive &&
+            helperRemoteFollowerState.ExpiredRecoveryRunwayEpoch == streamEpoch)
+        {
+            blockerReason = "expired_recovery_runway";
+            return true;
+        }
+
+        if (helperRemoteFollowerState.PendingRecoveryRunwayAbortActive &&
+            helperRemoteFollowerState.PendingRecoveryRunwayAbortEpoch == streamEpoch)
+        {
+            blockerReason = string.IsNullOrWhiteSpace(helperRemoteFollowerState.PendingRecoveryRunwayAbortReason)
+                ? "pending_recovery_runway_abort"
+                : helperRemoteFollowerState.PendingRecoveryRunwayAbortReason.Trim();
+            return true;
+        }
+
+        lock (helperRemoteFollowerState.DeferredFollowerGate)
+        {
+            if (helperRemoteFollowerState.DeferredPostRecoveryCandidates.Values.Any(candidate =>
+                    candidate.StreamEpoch == streamEpoch &&
+                    candidate.FrameId > lastContiguousFrameId))
+            {
+                blockerReason = "deferred_post_recovery_candidate";
+                return true;
+            }
+        }
+
+        var resolvedFloor = Math.Max(
+            GetHelperRemoteReferenceProofFloor(streamEpoch),
+            lastContiguousFrameId);
+        if (TryResolveHelperRemoteActionableReferenceLossReason(streamEpoch, resolvedFloor, out var lossReason))
+        {
+            blockerReason = lossReason;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool ShouldRequestRecoveryKeyframeForContinuityLoss(string reason)
+    {
+        return !string.IsNullOrWhiteSpace(reason) &&
+               !string.Equals(reason, "stale_frame_superseded", StringComparison.Ordinal);
+    }
+
+    private bool ShouldEnterHelperRemoteReferenceTaintForViewerRejection(long streamEpoch, long frameId, bool isKeyFrame, string reason)
+    {
+        if (streamEpoch <= 0 || frameId < 0 || isKeyFrame)
+        {
+            return false;
+        }
+
+        if (helperRemoteSessionController.ReferenceTaintState.Active &&
+            helperRemoteSessionController.ReferenceTaintState.StreamEpoch == streamEpoch &&
+            string.Equals(reason, "waiting_for_recovery_keyframe", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return IsActionableReferenceTaintLossReason(reason);
+    }
+
+    private bool ShouldEnterHelperRemoteReferenceTaintForSoftCleanup(long streamEpoch, string reason)
+    {
+        return !string.Equals(reason, "stale_frame_superseded", StringComparison.Ordinal) ||
+               !HasProvenHeadFloorForEpoch(streamEpoch);
+    }
+
+    private bool TryResolveHelperRemoteActionableReferenceLossReason(long streamEpoch, out string reason)
+        => TryResolveHelperRemoteActionableReferenceLossReason(
+            streamEpoch,
+            GetHelperRemoteReferenceProofFloor(streamEpoch),
+            out reason);
+
+    private bool TryResolveHelperRemoteActionableReferenceLossReason(long streamEpoch, long resolvedFrameFloor, out string reason)
+    {
+        reason = string.Empty;
+        if (streamEpoch <= 0 || string.IsNullOrWhiteSpace(helperRemoteRecoveryState.SessionId))
+        {
+            return false;
+        }
+
+        var snapshot = ScreenShareFrameLossAttributionRegistry.GetSnapshot(helperRemoteRecoveryState.SessionId);
+        foreach (var loss in snapshot.RecentLosses.Reverse())
+        {
+            if (loss.StreamEpoch != streamEpoch ||
+                loss.FrameId < 0 ||
+                loss.FrameId <= resolvedFrameFloor)
+            {
+                continue;
+            }
+
+            if (IsActionableReferenceTaintLoss(loss, resolvedFrameFloor))
+            {
+                reason = NormalizeReferenceTaintReason(loss.Reason);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool IsActionableReferenceTaintLoss(ScreenShareFrameLossBreadcrumb loss, long resolvedFrameFloor)
+    {
+        var reason = NormalizeReferenceTaintReason(loss.Reason);
+        if (string.Equals(reason, "late_fragment_after_ordered_head", StringComparison.Ordinal))
+        {
+            return loss.FrameId > resolvedFrameFloor;
+        }
+
+        return IsActionableReferenceTaintLossReason(reason);
+    }
+
+    private static string NormalizeReferenceTaintReason(string reason)
+        => string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
+
+    private static bool IsActionableReferenceTaintLossReason(string reason)
+    {
+        return NormalizeReferenceTaintReason(reason) switch
+        {
+            "assembly_incomplete" => true,
+            "assembly_mismatch" => true,
+            "assembly_oversize" => true,
+            "fragment_oversize" => true,
+            "ready_frame_skipped_replaced" => true,
+            "buffer_budget_pruned" => true,
+            "gap_non_key_pruned" => true,
+            "future_tail_quarantined_during_gap" => true,
+            "future_tail_quarantined_after_gap" => true,
+            "pre_candidate_gap_tail_rejected" => true,
+            "recovery_keyframe_buffered_tail_rejected" => true,
+            "recovery_follower_window_trimmed" => true,
+            "recovery_runway_overflow" => true,
+            "waiting_for_recovery_keyframe" => true,
+            "decode_drop_before_decode" => true,
+            "decode_queue_overflow" => true,
+            "decode_age_budget" => true,
+            _ => false,
+        };
+    }
+
+    private void ActivateHelperRemoteRecoveryForStaleVisibleStablePFrame(EncodedFrameDecodeRequest request)
+    {
+        if (!IsHelperRemoteH264(request.Encoding) ||
+            request.IsKeyFrame ||
+            request.RecoveryDeliveryClass != ScreenShareRecoveryDeliveryClass.Normal)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref staleNormalNonKeyVisibleSuppressCount);
+        var wasTaintedForEpoch =
+            helperRemoteSessionController.ReferenceTaintState.Active &&
+            helperRemoteSessionController.ReferenceTaintState.StreamEpoch == request.StreamEpoch;
+        ActivateHelperRemoteRecovery(
+            "visible_stable_stale_p_frame_drop",
+            request.StreamEpoch,
+            currentEpochNeedMoreInputCount: Math.Max(0, Interlocked.Read(ref needMoreInputCount)),
+            shouldRequestRecoveryKeyframe: true,
+            receivedFrameId: request.FrameId,
+            lastCleanFrameId: helperRemoteRecoveryState.LastCleanFrameId);
+        if (!wasTaintedForEpoch &&
+            helperRemoteSessionController.ReferenceTaintState.Active &&
+            helperRemoteSessionController.ReferenceTaintState.StreamEpoch == request.StreamEpoch)
+        {
+            Interlocked.Increment(ref h264ReferenceTaintStaleVisibleStableEnterCount);
+        }
+    }
+
+    private long GetHelperRemoteReferenceProofFloor(long streamEpoch)
+    {
+        if (streamEpoch <= 0 || string.IsNullOrWhiteSpace(helperRemoteRecoveryState.SessionId))
+        {
+            return helperRemoteRecoveryState.VisibleHeadStreamEpoch == streamEpoch
+                ? helperRemoteRecoveryState.VisibleHeadFrameId
+                : -1;
+        }
+
+        var appliedHeadFrameId = ScreenShareFrameLossAttributionRegistry.GetAppliedHeadFrameId(helperRemoteRecoveryState.SessionId, streamEpoch);
+        var stableVisibleHeadFrameId = ScreenShareFrameLossAttributionRegistry.GetStableVisibleHeadFrameId(helperRemoteRecoveryState.SessionId, streamEpoch);
+        var visibleRecoveryFloorFrameId = ScreenShareFrameLossAttributionRegistry.GetVisibleRecoveryFloorFrameId(helperRemoteRecoveryState.SessionId, streamEpoch);
+        return Math.Max(
+            Math.Max(appliedHeadFrameId, stableVisibleHeadFrameId),
+            Math.Max(
+                visibleRecoveryFloorFrameId,
+                helperRemoteRecoveryState.VisibleHeadStreamEpoch == streamEpoch ? helperRemoteRecoveryState.VisibleHeadFrameId : -1));
+    }
+
+    private void ResetHelperRemoteH264DecoderForReferenceTaintIfNeeded(long streamEpoch, long frameId)
+    {
+        if (!helperRemoteSessionController.ConsumeReferenceTaintDecoderResetPending(streamEpoch))
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref generation);
+        decodeWorker.ClearPending();
+        h264StreamState.ResetDecoderOnly();
+        Interlocked.Increment(ref h264ReferenceTaintDecoderResetCount);
+        LocalOperationalLog.Info(
+            "ScreenShare",
+            $"event=screenshare_helper_h264_reference_taint_decoder_reset; role={logRole}; stream_epoch={streamEpoch}; frame_id={FormatFrameIdForLog(frameId)}");
     }
 
     private string? ResolveHelperRemotePostRecoveryRunwayRejectionReason(string? sessionId, long streamEpoch, long frameId, bool isKeyFrame)
@@ -2234,6 +3049,9 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         {
             Interlocked.Increment(ref recoveryProgressCorridorSuccessCount);
             helperRemoteSessionController.CompletePostRecoveryFollowerWindow(corridorResult.StreamEpoch);
+            ReleaseHelperRemoteH264ReferenceTaint(
+                corridorResult.StreamEpoch,
+                corridorResult.LastContiguousFrameId);
             NotifyRecoveryWindowStateChanged(
                 corridorResult.StreamEpoch,
                 corridorResult.RecoveryFrameId,
@@ -2254,6 +3072,9 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         var recoveryCorridorAbortReason = string.IsNullOrWhiteSpace(abortResult.Reason)
             ? "unknown"
             : abortResult.Reason.Trim();
+        EnterHelperRemoteH264ReferenceTaint(
+            abortResult.StreamEpoch,
+            recoveryCorridorAbortReason);
         NotifyRecoveryWindowStateChanged(
             abortResult.StreamEpoch,
             abortResult.RecoveryFrameId,
@@ -2567,6 +3388,8 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         if (!IsHelperRemoteH264(request.Encoding) ||
             request.IsKeyFrame ||
             request.RecoveryDeliveryClass != ScreenShareRecoveryDeliveryClass.Normal ||
+            IsReservedApplyRequest(request) ||
+            IsHelperRemotePostRecoveryStabilizationFrame(request) ||
             ageMs < 0)
         {
             return false;
@@ -2584,9 +3407,92 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             return false;
         }
 
-        var thresholdMs = HelperRemoteMaxPendingEncodedFrameAgeMs +
-            (long)HelperRemoteVisibleProgressDecodeAgeBudgetGrace.TotalMilliseconds;
-        return ageMs > thresholdMs;
+        return ageMs > HelperRemoteMaxPendingEncodedFrameAgeMs;
+    }
+
+    private bool ShouldSuppressHelperRemotePostQuarantineSettleFrame(
+        EncodedFrameDecodeRequest request,
+        long ageMs,
+        long nowUtcMs)
+    {
+        if (!IsHelperRemoteH264(request.Encoding) ||
+            request.IsKeyFrame ||
+            request.RecoveryDeliveryClass != ScreenShareRecoveryDeliveryClass.Normal ||
+            IsReservedApplyRequest(request) ||
+            IsHelperRemotePostRecoveryStabilizationFrame(request) ||
+            ageMs < 0)
+        {
+            return false;
+        }
+
+        var settleEpoch = Interlocked.Read(ref helperRemotePostQuarantineSettleEpoch);
+        var settleStartedUtcMs = Interlocked.Read(ref helperRemotePostQuarantineSettleStartedUtcMs);
+        var settleUntilUtcMs = Interlocked.Read(ref helperRemotePostQuarantineSettleUntilUtcMs);
+        if (settleEpoch != request.StreamEpoch ||
+            settleStartedUtcMs < 0 ||
+            settleUntilUtcMs < 0 ||
+            nowUtcMs > settleUntilUtcMs ||
+            nowUtcMs - settleStartedUtcMs > HelperRemotePostQuarantineSettleMaxHoldMs)
+        {
+            return false;
+        }
+
+        return ageMs > HelperRemoteMaxPendingEncodedFrameAgeMs;
+    }
+
+    private void MaybeClearHelperRemotePostQuarantineSettleOnFreshFrame(
+        EncodedFrameDecodeRequest request,
+        long ageMs,
+        long nowUtcMs)
+    {
+        var settleEpoch = Interlocked.Read(ref helperRemotePostQuarantineSettleEpoch);
+        if (settleEpoch != request.StreamEpoch ||
+            settleEpoch <= 0 ||
+            nowUtcMs > Interlocked.Read(ref helperRemotePostQuarantineSettleUntilUtcMs))
+        {
+            return;
+        }
+
+        if (request.IsKeyFrame ||
+            (request.RecoveryDeliveryClass == ScreenShareRecoveryDeliveryClass.Normal &&
+             ageMs >= 0 &&
+             ageMs <= HelperRemoteMaxPendingEncodedFrameAgeMs))
+        {
+            ClearHelperRemotePostQuarantineSettle();
+        }
+    }
+
+    private void SuppressDecodedStaleNormalNonKeyVisibleFrame(
+        EncodedFrameDecodeRequest request,
+        long ageMs,
+        string reason,
+        bool incrementVisibleStableCounter,
+        bool incrementPostQuarantineSettleCounter)
+    {
+        if (incrementVisibleStableCounter)
+        {
+            Interlocked.Increment(ref staleFrameDropVisibleStableCount);
+            Interlocked.Exchange(ref staleFrameDropVisibleStableLastAgeMs, ageMs);
+        }
+
+        Interlocked.Increment(ref staleNormalNonKeyVisibleSuppressCount);
+        Interlocked.Increment(ref decodedStaleVisibleSuppressCount);
+        if (incrementPostQuarantineSettleCounter)
+        {
+            Interlocked.Increment(ref postQuarantineSettleSuppressCount);
+        }
+
+        ObserveStaleDroppedAfterDecode(request, reason);
+        ClearReservedApplyIfMatch(request);
+        LocalOperationalLog.Info(
+            "ScreenShare",
+            $"event=screenshare_viewer_stale_frame_dropped; role={logRole}; stream_epoch={request.StreamEpoch}; frame_id={FormatFrameIdForLog(request.FrameId)}; rendered_age_ms={ageMs}; threshold_ms={HelperRemoteMaxPendingEncodedFrameAgeMs}; last_rendered_age_ms={(LastRenderedFrameAgeMs >= 0 ? LastRenderedFrameAgeMs.ToString(CultureInfo.InvariantCulture) : "(none)")}; reason={reason}; decoded_reference_continuity_preserved=1");
+        StaleFrameDropped?.Invoke(
+            this,
+            new ScreenShareViewerStaleFrameDroppedEventArgs(
+                ageMs,
+                request.StreamEpoch,
+                referenceContinuityPreserved: true));
     }
 
     private string ResolveStaleDropReason(EncodedFrameDecodeRequest request)
@@ -2613,6 +3519,8 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         {
             Interlocked.Increment(ref recoveryFollowerWindowAppliedCount);
         }
+
+        TryReleasePendingHelperRemoteH264ReferenceQuarantine("visible_apply");
     }
 
     private HelperRemoteVisibleApplyProgress BuildHelperRemoteVisibleApplyProgress(
@@ -2767,6 +3675,13 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             return ScreenShareViewerContinuityHandlingResult.None;
         }
 
+        if (TryResolveHelperRemoteActionableReferenceLossReason(streamEpoch, out var taintReason))
+        {
+            return new ScreenShareViewerContinuityHandlingResult(
+                ScreenShareViewerContinuityHandlingKind.HardRecovery,
+                taintReason);
+        }
+
         if ((helperRemoteRecoveryState.RecoveryActive && helperRemoteRecoveryState.RecoveryStreamEpoch == streamEpoch) ||
             HasVisibleHeadForEpoch(streamEpoch) ||
             HasProvenHeadFloorForEpoch(streamEpoch))
@@ -2813,6 +3728,11 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
         }
 
         Interlocked.Increment(ref softStaleCleanupCount);
+        if (ShouldEnterHelperRemoteReferenceTaintForSoftCleanup(streamEpoch, reason))
+        {
+            EnterHelperRemoteH264ReferenceTaint(streamEpoch, reason);
+        }
+
         if (string.Equals(reason, "stale_frame_superseded", StringComparison.Ordinal))
         {
             Interlocked.Increment(ref staleSupersededRecoverySuppressedCount);
@@ -2855,6 +3775,7 @@ public sealed partial class ScreenShareViewerViewModel : ViewModelBase, IDisposa
             receivedFrameId,
             lastCleanFrameId);
         AbortRecoveryProgressCorridor();
+        EnterHelperRemoteH264ReferenceTaint(streamEpoch, reason);
         for (var i = 0; i < activation.PurgedDeferredCandidateCount; i++)
         {
             Interlocked.Increment(ref postRecoveryPurgedPreRecoveryFollowerCount);

@@ -704,6 +704,9 @@ public sealed partial class NknSignalingTransport
             case MsgType.ScreenShareRecoveryReceipt:
                 HandleScreenShareRecoveryReceipt(source, env);
                 break;
+            case MsgType.ScreenShareCursorState:
+                HandleScreenShareCursorState(source, env);
+                break;
             default:
                 throw new InvalidOperationException($"Control channel cannot route {env.Type}.");
         }
@@ -2203,6 +2206,41 @@ public sealed partial class NknSignalingTransport
         ScreenShareRecoveryReceiptReceived?.Invoke(this, new ScreenShareRecoveryReceiptReceivedEventArgs(message, source));
     }
 
+    private void HandleScreenShareCursorState(string source, Envelope env)
+    {
+        if (!SessionSupportsScreenShareCursorOverlay)
+        {
+            return;
+        }
+
+        if (!TryDecryptControlPayload(source, env, MsgType.ScreenShareCursorState, out var securePayload))
+        {
+            return;
+        }
+
+        if (!ScreenShareCursorStateCodec.TryDeserialize(securePayload.Plaintext, out var message))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_cursor_state_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("screenshare_cursor_state_payload_invalid");
+            Log($"ScreenShareCursorState payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            return;
+        }
+
+        if (!TryValidateControlSecureMetadata("screenshare_cursor_state", securePayload.Metadata, requestId: null, env.MessageId) ||
+            !TryValidateScreenShareMessageSession(
+                "screenshare_cursor_state",
+                message.SessionId,
+                env.MessageId,
+                requestId: null,
+                source) ||
+            !TryValidateScreenShareSession("cursor_state", message.SessionId))
+        {
+            return;
+        }
+
+        ScreenShareCursorStateReceived?.Invoke(this, new ScreenShareCursorStateReceivedEventArgs(message, source));
+    }
+
     private bool TryValidateControlMessageSession(
         string messageType,
         string? messageSessionId,
@@ -3328,6 +3366,7 @@ public sealed partial class NknSignalingTransport
             MsgType.ScreenShareVideoStreamConfig => "screenshare_video_stream_config",
             MsgType.ScreenShareVideoKeyframeRequest => "screenshare_video_keyframe_request",
             MsgType.ScreenShareRecoveryReceipt => "screenshare_recovery_receipt",
+            MsgType.ScreenShareCursorState => "screenshare_cursor_state",
             _ => throw new ArgumentOutOfRangeException(nameof(messageType), messageType, "Unsupported secure control message type."),
         };
     }

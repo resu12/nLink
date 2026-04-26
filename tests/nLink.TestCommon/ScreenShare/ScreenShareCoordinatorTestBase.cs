@@ -634,13 +634,16 @@ internal sealed class AdaptiveFakeScreenCaptureSource :
         IScreenCaptureKeyFrameRequestSource,
         IScreenCaptureTransportRecoveryResetSource,
         IScreenCaptureFreshnessMetricsSource,
+        IScreenCaptureCursorCaptureControl,
         IAsyncDisposable
     {
         private EventHandler<ScreenCaptureFrameEventArgs>? frameArrived;
         private readonly List<int> captureFrameRateHints = new();
         private readonly List<ScreenShareTransportTuningLevel> transportTuningLevels = new();
         private readonly List<string> keyFrameRequestReasons = new();
+        private readonly List<bool> cursorCaptureEnabledRequests = new();
         private ScreenCaptureFreshnessMetrics freshnessMetrics = new();
+        private bool cursorCaptureEnabled = true;
 
         public bool IsSupported => true;
 
@@ -657,6 +660,12 @@ internal sealed class AdaptiveFakeScreenCaptureSource :
         public int PurgePendingRawFramesCallCount { get; private set; }
 
         public IReadOnlyList<string> KeyFrameRequestReasons => keyFrameRequestReasons;
+
+        public IReadOnlyList<bool> CursorCaptureEnabledRequests => cursorCaptureEnabledRequests;
+
+        public bool IsCursorCaptureControlSupported { get; set; } = true;
+
+        public bool IsCursorCaptureEnabled => cursorCaptureEnabled;
 
         public ScreenCaptureMetadata? CaptureMetadata { get; set; }
 
@@ -684,6 +693,8 @@ internal sealed class AdaptiveFakeScreenCaptureSource :
             IsStarted = false;
             frameArrived = null;
             keyFrameRequestReasons.Clear();
+            cursorCaptureEnabledRequests.Clear();
+            cursorCaptureEnabled = true;
             freshnessMetrics = new ScreenCaptureFreshnessMetrics();
             return ValueTask.CompletedTask;
         }
@@ -726,6 +737,31 @@ internal sealed class AdaptiveFakeScreenCaptureSource :
         public void RequestKeyFrame(string reason)
         {
             keyFrameRequestReasons.Add(string.IsNullOrWhiteSpace(reason) ? "(none)" : reason.Trim());
+        }
+
+        public bool TrySetCursorCaptureEnabled(bool enabled, string reason)
+        {
+            cursorCaptureEnabledRequests.Add(enabled);
+            if (!IsCursorCaptureControlSupported)
+            {
+                cursorCaptureEnabled = true;
+                freshnessMetrics = freshnessMetrics with
+                {
+                    CursorCaptureControlSupported = false,
+                    CursorCaptureEnabled = true,
+                    CursorCaptureFallbackReason = "unsupported",
+                };
+                return false;
+            }
+
+            cursorCaptureEnabled = enabled;
+            freshnessMetrics = freshnessMetrics with
+            {
+                CursorCaptureControlSupported = true,
+                CursorCaptureEnabled = enabled,
+                CursorCaptureFallbackReason = string.Empty,
+            };
+            return true;
         }
 
         public long ForceTransportRecoveryReset(ScreenShareTransportTuningLevel level)

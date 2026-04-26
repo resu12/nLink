@@ -25,7 +25,13 @@ internal sealed record ScreenShareEvidenceSnapshot(
     string NextOperatorAction,
     string MissingRequiredInputs,
     string DeepestTrackBStage,
-    string DeepestTrackBClassification)
+    string DeepestTrackBClassification,
+    string QualityProfileSummary,
+    string PerformanceSummary,
+    string CursorSummary,
+    string VisualSafetySummary,
+    string LowFpsSummary,
+    string ExternalTopologySummary)
 {
     public string ToReportText()
     {
@@ -43,6 +49,12 @@ internal sealed record ScreenShareEvidenceSnapshot(
             $"screenshare_missing_required_inputs: {MissingRequiredInputs}",
             $"screenshare_deepest_stage: {DeepestTrackBStage}",
             $"screenshare_deepest_classification: {DeepestTrackBClassification}",
+            $"screenshare_quality_profile: {QualityProfileSummary}",
+            $"screenshare_performance_summary: {PerformanceSummary}",
+            $"screenshare_cursor_summary: {CursorSummary}",
+            $"screenshare_visual_safety_summary: {VisualSafetySummary}",
+            $"screenshare_low_fps_summary: {LowFpsSummary}",
+            $"screenshare_external_topology_summary: {ExternalTopologySummary}",
         };
 
         return string.Join(Environment.NewLine, lines);
@@ -59,6 +71,12 @@ internal sealed record ScreenShareEvidenceSnapshot(
         "(none)",
         "No screenshare soak artifact was found.",
         "Use ScreenShare-Ops.ps1 -Mode NknSoak when live screenshare evidence is needed, then run -Mode AnalyzeRetained on the artifact.",
+        "(none)",
+        "(none)",
+        "(none)",
+        "(none)",
+        "(none)",
+        "(none)",
         "(none)",
         "(none)",
         "(none)");
@@ -173,11 +191,22 @@ internal sealed class ScreenShareEvidenceLocator
         "Run ScreenShare-Ops.ps1 -Mode AnalyzeRetained for the latest artifact before sharing support evidence.",
         VerdictFileName,
         "(none)",
+        "(none)",
+        "(none)",
+        "(none)",
+        "(none)",
+        "(none)",
+        "(none)",
         "(none)");
 
     private static ScreenShareEvidenceSnapshot BuildVerdictSnapshot(DirectoryInfo artifact, string verdictPath)
     {
         var values = ParseKeyValueFile(verdictPath);
+        MergeMissing(values, ParseOptionalKeyValueFile(artifact, "quality-presentation-summary.txt"));
+        MergeMissing(values, ParseOptionalKeyValueFile(artifact, "helper-quality-summary.txt"));
+        MergeMissing(values, ParseOptionalKeyValueFile(artifact, "external-topology-summary.txt"));
+        MergeMissing(values, ParseOptionalKeyValueFile(artifact, "low-fps-catch-up-summary.txt"));
+
         return new ScreenShareEvidenceSnapshot(
             ScreenShareEvidenceStatus.VerdictAvailable,
             "verdict_available",
@@ -191,7 +220,13 @@ internal sealed class ScreenShareEvidenceLocator
             DiagnosticsExportBuilder.RedactFreeForm(GetValue(values, "next_operator_action", "(none)")),
             GetValue(values, "missing_required_inputs", "(none)"),
             GetValue(values, "deepest_track_b_stage", "(none)"),
-            GetValue(values, "deepest_track_b_classification", "(none)"));
+            GetValue(values, "deepest_track_b_classification", "(none)"),
+            BuildQualityProfileSummary(values),
+            BuildPerformanceSummary(values),
+            BuildCursorSummary(values),
+            BuildVisualSafetySummary(values),
+            BuildLowFpsSummary(values),
+            BuildExternalTopologySummary(values));
     }
 
     private static Dictionary<string, string> ParseKeyValueFile(string path)
@@ -217,11 +252,139 @@ internal sealed class ScreenShareEvidenceLocator
         }
     }
 
+    private static Dictionary<string, string> ParseOptionalKeyValueFile(DirectoryInfo artifact, string fileName)
+    {
+        var path = Path.Combine(artifact.FullName, fileName);
+        return File.Exists(path)
+            ? ParseKeyValueFile(path)
+            : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static void MergeMissing(Dictionary<string, string> target, IReadOnlyDictionary<string, string> fallback)
+    {
+        foreach (var pair in fallback)
+        {
+            if (!target.ContainsKey(pair.Key) && !string.IsNullOrWhiteSpace(pair.Value))
+            {
+                target[pair.Key] = pair.Value;
+            }
+        }
+    }
+
     private static string GetValue(IReadOnlyDictionary<string, string> values, string key, string fallback)
     {
         return values.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value)
             ? value
             : fallback;
+    }
+
+    private static string GetAnyValue(IReadOnlyDictionary<string, string> values, string fallback, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            var value = GetValue(values, key, string.Empty);
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+        }
+
+        return fallback;
+    }
+
+    private static string BuildQualityProfileSummary(IReadOnlyDictionary<string, string> values)
+    {
+        var width = GetAnyValue(values, "(none)", "quality_active_encode_target_width", "active_encode_target_width");
+        var height = GetAnyValue(values, "(none)", "quality_active_encode_target_height", "active_encode_target_height");
+        var fps = GetAnyValue(values, "(none)", "quality_active_encode_target_fps", "active_encode_target_fps");
+        var bitrate = GetAnyValue(values, "(none)", "quality_active_encode_target_bitrate", "active_encode_target_bitrate");
+        var profile = GetAnyValue(values, "(none)", "quality_encoder_profile", "encoder_profile");
+        var mode = GetAnyValue(values, "(none)", "quality_sender_freshness_mode", "sender_freshness_mode");
+        var preset = GetAnyValue(values, "(none)", "quality_effective_quality_preset", "effective_quality_preset");
+
+        if (width == "(none)" && height == "(none)" && fps == "(none)" && profile == "(none)")
+        {
+            return "(none)";
+        }
+
+        return $"profile={profile}; mode={mode}; target={width}x{height}@{fps}fps; bitrate={bitrate}; preset={preset}";
+    }
+
+    private static string BuildPerformanceSummary(IReadOnlyDictionary<string, string> values)
+    {
+        var encodedFps = GetAnyValue(values, "(none)", "actual_encoded_displayable_fps");
+        var readbackFps = GetAnyValue(values, "(none)", "raw_source_readback_fps");
+        var cpu = GetAnyValue(values, "(none)", "sender_process_cpu_percent");
+        var preprocess = GetAnyValue(values, "(none)", "last_preprocess_duration_ms");
+        var gpuScale = GetAnyValue(values, "(none)", "raw_source_gpu_scale_enabled");
+        var resizePath = GetAnyValue(values, "(none)", "preprocess_resize_path");
+
+        if (encodedFps == "(none)" && readbackFps == "(none)" && cpu == "(none)" && preprocess == "(none)")
+        {
+            return "(none)";
+        }
+
+        return $"encoded_fps={encodedFps}; readback_fps={readbackFps}; sender_cpu_pct={cpu}; preprocess_ms={preprocess}; gpu_scale={gpuScale}; resize_path={resizePath}";
+    }
+
+    private static string BuildCursorSummary(IReadOnlyDictionary<string, string> values)
+    {
+        var mode = GetAnyValue(values, "(none)", "cursor_delivery_mode");
+        var desired = GetAnyValue(values, "(none)", "cursor_capture_desired_enabled");
+        var applied = GetAnyValue(values, "(none)", "cursor_capture_enabled");
+        var status = GetAnyValue(values, "(none)", "cursor_capture_apply_status", "cursor_overlay_last_status");
+
+        if (mode == "(none)" && desired == "(none)" && applied == "(none)")
+        {
+            return "(none)";
+        }
+
+        return $"mode={mode}; capture_desired={desired}; capture_enabled={applied}; status={status}";
+    }
+
+    private static string BuildVisualSafetySummary(IReadOnlyDictionary<string, string> values)
+    {
+        var unsafeTail = GetAnyValue(values, "(none)", "pre_candidate_gap_tail_emitted_to_viewer_count");
+        var late = GetAnyValue(values, "(none)", "actionable_late_fragment_count");
+        var taint = GetAnyValue(values, "(none)", "h264_reference_taint_active");
+        var quarantine = GetAnyValue(values, "(none)", "h264_reference_quarantine_active");
+        var taintReason = GetAnyValue(values, "(none)", "h264_reference_taint_last_reason");
+
+        if (unsafeTail == "(none)" && late == "(none)" && taint == "(none)" && quarantine == "(none)")
+        {
+            return "(none)";
+        }
+
+        return $"unsafe_tail={unsafeTail}; actionable_late={late}; h264_taint={taint}; h264_quarantine={quarantine}; taint_reason={taintReason}";
+    }
+
+    private static string BuildLowFpsSummary(IReadOnlyDictionary<string, string> values)
+    {
+        var classification = GetAnyValue(values, "(none)", "low_fps_catch_up_classification", "classification");
+        var applyFps = GetAnyValue(values, "(none)", "low_fps_effective_apply_fps", "effective_apply_fps");
+        var modes = GetAnyValue(values, "(none)", "low_fps_sender_mode_counts", "sender_mode_counts");
+
+        if (classification == "(none)" && applyFps == "(none)" && modes == "(none)")
+        {
+            return "(none)";
+        }
+
+        return $"classification={classification}; apply_fps={applyFps}; modes={modes}";
+    }
+
+    private static string BuildExternalTopologySummary(IReadOnlyDictionary<string, string> values)
+    {
+        var profile = GetAnyValue(values, "(none)", "external_topology_profile");
+        var rpc = GetAnyValue(values, "(none)", "external_topology_selected_rpc_key", "selected_rpc_key");
+        var mediaSubclients = GetAnyValue(values, "(none)", "external_topology_media_subclients", "media_subclients");
+        var classification = GetAnyValue(values, "(none)", "external_topology_classification");
+
+        if (profile == "(none)" && rpc == "(none)" && mediaSubclients == "(none)")
+        {
+            return "(none)";
+        }
+
+        return $"profile={profile}; rpc={rpc}; media_subclients={mediaSubclients}; classification={classification}";
     }
 
     private static string RedactArtifactPath(string path)

@@ -42,4 +42,5 @@ internal enum MsgType
     ScreenShareVideoStreamConfig = 37,
     ScreenShareVideoKeyframeRequest = 38,
     ScreenShareRecoveryReceipt = 39,
+    ScreenShareCursorState = 40,
 }

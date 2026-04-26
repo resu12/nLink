@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Shapes;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
@@ -20,6 +21,9 @@ public partial class ScreenShareSurfaceView : UserControl
     private const int DefaultMouseMoveRateHz = 90;
     private const int MinMouseMoveRateHz = 60;
     private const int MaxMouseMoveRateHz = 120;
+    internal const double CursorOverlayPointerWidthDip = 10d;
+    internal const double CursorOverlayPointerHeightDip = 14d;
+    internal const double CursorOverlayPointerStrokeThicknessDip = 0.8d;
     private static readonly PropertyInfo? PhysicalKeyProperty = typeof(KeyEventArgs).GetProperty("PhysicalKey");
     private static readonly PropertyInfo? IsRepeatProperty = typeof(KeyEventArgs).GetProperty("IsRepeat");
 
@@ -38,9 +42,20 @@ public partial class ScreenShareSurfaceView : UserControl
     public static readonly StyledProperty<string> SurfaceRoleProperty =
         AvaloniaProperty.Register<ScreenShareSurfaceView, string>(nameof(SurfaceRole), "unknown");
 
+    public static readonly StyledProperty<bool> CursorOverlayVisibleProperty =
+        AvaloniaProperty.Register<ScreenShareSurfaceView, bool>(nameof(CursorOverlayVisible), false);
+
+    public static readonly StyledProperty<double> CursorOverlayNxProperty =
+        AvaloniaProperty.Register<ScreenShareSurfaceView, double>(nameof(CursorOverlayNx), 0d);
+
+    public static readonly StyledProperty<double> CursorOverlayNyProperty =
+        AvaloniaProperty.Register<ScreenShareSurfaceView, double>(nameof(CursorOverlayNy), 0d);
+
     private readonly DispatcherTimer mouseMoveThrottleTimer;
     private readonly RemoteControlHeldState heldState = new();
     private readonly Image frameImage;
+    private readonly Canvas cursorOverlayLayer;
+    private readonly Path cursorOverlayPointer;
     private bool hasPendingMouseMove;
     private double pendingMouseMoveNx;
     private double pendingMouseMoveNy;
@@ -72,8 +87,18 @@ public partial class ScreenShareSurfaceView : UserControl
             static (view, _) => view.OnMouseMoveRateHzChanged());
         SurfaceRoleProperty.Changed.AddClassHandler<ScreenShareSurfaceView>(
             static (view, _) => view.UpdateFrameInterpolationMode());
+        CursorOverlayVisibleProperty.Changed.AddClassHandler<ScreenShareSurfaceView>(
+            static (view, _) => view.UpdateCursorOverlayPosition());
+        CursorOverlayNxProperty.Changed.AddClassHandler<ScreenShareSurfaceView>(
+            static (view, _) => view.UpdateCursorOverlayPosition());
+        CursorOverlayNyProperty.Changed.AddClassHandler<ScreenShareSurfaceView>(
+            static (view, _) => view.UpdateCursorOverlayPosition());
         BoundsProperty.Changed.AddClassHandler<ScreenShareSurfaceView>(
-            static (view, _) => view.UpdateFrameInterpolationMode());
+            static (view, _) =>
+            {
+                view.UpdateFrameInterpolationMode();
+                view.UpdateCursorOverlayPosition();
+            });
     }
 
     public ScreenShareSurfaceView()
@@ -81,6 +106,16 @@ public partial class ScreenShareSurfaceView : UserControl
         InitializeComponent();
         frameImage = this.FindControl<Image>("FrameImage")
             ?? throw new InvalidOperationException("FrameImage was not found.");
+        cursorOverlayLayer = this.FindControl<Canvas>("CursorOverlayLayer")
+            ?? throw new InvalidOperationException("CursorOverlayLayer was not found.");
+        cursorOverlayPointer = this.FindControl<Path>("CursorOverlayPointer")
+            ?? throw new InvalidOperationException("CursorOverlayPointer was not found.");
+        cursorOverlayPointer.Width = CursorOverlayPointerWidthDip;
+        cursorOverlayPointer.Height = CursorOverlayPointerHeightDip;
+        cursorOverlayPointer.StrokeThickness = CursorOverlayPointerStrokeThicknessDip;
+        LocalOperationalLog.Info(
+            "ScreenShare",
+            $"event=screenshare_cursor_overlay_visual_configured; width_dip={CursorOverlayPointerWidthDip}; height_dip={CursorOverlayPointerHeightDip}; stroke_thickness_dip={CursorOverlayPointerStrokeThicknessDip}; hot_spot=top_left");
         mouseMoveThrottleTimer = new DispatcherTimer
         {
             Interval = GetMouseMoveThrottleInterval(MouseMoveRateHz),
@@ -127,6 +162,24 @@ public partial class ScreenShareSurfaceView : UserControl
         set => SetValue(SurfaceRoleProperty, value);
     }
 
+    public bool CursorOverlayVisible
+    {
+        get => GetValue(CursorOverlayVisibleProperty);
+        set => SetValue(CursorOverlayVisibleProperty, value);
+    }
+
+    public double CursorOverlayNx
+    {
+        get => GetValue(CursorOverlayNxProperty);
+        set => SetValue(CursorOverlayNxProperty, value);
+    }
+
+    public double CursorOverlayNy
+    {
+        get => GetValue(CursorOverlayNyProperty);
+        set => SetValue(CursorOverlayNyProperty, value);
+    }
+
     public event EventHandler<RemoteControlInputProducedEventArgs>? RemoteControlInputProduced;
     public event EventHandler<RemoteControlHeldStateChangedEventArgs>? RemoteControlHeldStateChanged;
     public event EventHandler? ControlModeExitRequested;
@@ -152,6 +205,7 @@ public partial class ScreenShareSurfaceView : UserControl
         if (Frame is null)
         {
             RemoteControlDebugDiagnostics.SetHelperFrameSize(null);
+            UpdateCursorOverlayPosition();
             return;
         }
 
@@ -160,10 +214,79 @@ public partial class ScreenShareSurfaceView : UserControl
         if (frameWidth <= 0 || frameHeight <= 0)
         {
             RemoteControlDebugDiagnostics.SetHelperFrameSize(null);
+            UpdateCursorOverlayPosition();
             return;
         }
 
         RemoteControlDebugDiagnostics.SetHelperFrameSize(new RemoteControlSizePx(frameWidth, frameHeight));
+        UpdateCursorOverlayPosition();
+    }
+
+    internal static bool TryMapCursorOverlayToSurface(
+        double nx,
+        double ny,
+        int frameWidth,
+        int frameHeight,
+        double viewportWidth,
+        double viewportHeight,
+        out Point point)
+    {
+        point = default;
+        if (frameWidth <= 0 ||
+            frameHeight <= 0 ||
+            viewportWidth <= 0 ||
+            viewportHeight <= 0 ||
+            double.IsNaN(nx) ||
+            double.IsNaN(ny) ||
+            double.IsInfinity(nx) ||
+            double.IsInfinity(ny))
+        {
+            return false;
+        }
+
+        var clampedNx = Math.Clamp(nx, 0d, 1d);
+        var clampedNy = Math.Clamp(ny, 0d, 1d);
+        var scale = Math.Min(viewportWidth / frameWidth, viewportHeight / frameHeight);
+        if (scale <= 0 || double.IsNaN(scale) || double.IsInfinity(scale))
+        {
+            return false;
+        }
+
+        var displayedWidth = frameWidth * scale;
+        var displayedHeight = frameHeight * scale;
+        var offsetX = Math.Max(0d, (viewportWidth - displayedWidth) / 2d);
+        var offsetY = Math.Max(0d, (viewportHeight - displayedHeight) / 2d);
+        point = new Point(
+            offsetX + clampedNx * displayedWidth,
+            offsetY + clampedNy * displayedHeight);
+        return true;
+    }
+
+    private void UpdateCursorOverlayPosition()
+    {
+        if (cursorOverlayLayer is null || cursorOverlayPointer is null)
+        {
+            return;
+        }
+
+        if (!CursorOverlayVisible ||
+            Frame is null ||
+            !TryMapCursorOverlayToSurface(
+                CursorOverlayNx,
+                CursorOverlayNy,
+                Frame.PixelSize.Width,
+                Frame.PixelSize.Height,
+                Bounds.Width,
+                Bounds.Height,
+                out var point))
+        {
+            cursorOverlayLayer.IsVisible = false;
+            return;
+        }
+
+        cursorOverlayLayer.IsVisible = true;
+        Canvas.SetLeft(cursorOverlayPointer, point.X);
+        Canvas.SetTop(cursorOverlayPointer, point.Y);
     }
 
     internal static BitmapInterpolationMode ResolveInterpolationModeForPresentation(

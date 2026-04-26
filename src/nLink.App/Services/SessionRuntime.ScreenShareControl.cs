@@ -138,8 +138,14 @@ public sealed partial class SessionRuntime
             status,
             abortReason);
 
-    void ISessionRuntimeScreenShareControlContext.ReportHelperRemoteScreenShareStaleFrameDropped(long renderedAgeMs, long streamEpoch)
-        => ReportHelperRemoteScreenShareStaleFrameDroppedCore(renderedAgeMs, streamEpoch);
+    void ISessionRuntimeScreenShareControlContext.ReportHelperRemoteScreenShareStaleFrameDropped(
+        long renderedAgeMs,
+        long streamEpoch,
+        bool referenceContinuityPreserved)
+        => ReportHelperRemoteScreenShareStaleFrameDroppedCore(
+            renderedAgeMs,
+            streamEpoch,
+            referenceContinuityPreserved);
 
     void ISessionRuntimeScreenShareControlContext.TrackHelperRemoteScreenShareAcceptedFrame(ScreenShareFrameCompletedEventArgs e)
         => TrackHelperRemoteScreenShareAcceptedFrameCore(e);

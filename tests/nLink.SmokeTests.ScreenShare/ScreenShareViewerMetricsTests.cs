@@ -5,6 +5,7 @@ using Avalonia.Platform;
 using Avalonia.Threading;
 using NLink.App.Services.ScreenCapture;
 using NLink.App.ViewModels;
+using NLink.App.Views;
 using NLink.Core.Logging;
 using NLink.Core.ScreenShare;
 
@@ -47,6 +48,110 @@ public sealed class ScreenShareViewerMetricsTests : ScreenShareViewerViewModelTe
             Assert.Equal(1, metrics.StaleFrameRenders);
             return true;
         }, default);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareViewer_CursorOverlay_AppliesTelemetryAndFallsBackWhenCaptureCursorRemainsEnabled()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            using var vm = new ScreenShareViewerViewModel(
+                decodeFrame: _ => CreateTinyBitmap(),
+                postToUiAsync: action =>
+                {
+                    action();
+                    return Task.CompletedTask;
+                });
+
+            vm.OnEncodedFrame(
+                "jpeg",
+                CreateTinyJpegBytes(),
+                capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            await WaitUntilAsync(() => vm.IsActive && vm.GetMetricsSnapshot().FramesDecoded >= 1, TimeSpan.FromSeconds(2));
+
+            vm.OnCursorState(new ScreenShareCursorStateV1
+            {
+                SessionId = "session",
+                Seq = 1,
+                TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                DisplayId = "display",
+                DisplayInfoRevision = 1,
+                Nx = 0.25,
+                Ny = 0.75,
+                Visible = true,
+                Status = "captured_cursor_disabled",
+                CapturedCursorEnabled = false,
+                CursorCaptureControlSupported = true,
+            });
+
+            Assert.True(vm.CursorOverlayVisible);
+            Assert.Equal(0.25, vm.CursorOverlayNx, precision: 3);
+            Assert.Equal(0.75, vm.CursorOverlayNy, precision: 3);
+            Assert.Equal("helper_overlay", vm.CursorDeliveryMode);
+
+            var overlayMetrics = vm.GetMetricsSnapshot();
+            Assert.True(overlayMetrics.CursorOverlayVisible);
+            Assert.Equal(1, overlayMetrics.CursorOverlayUpdatesReceivedCount);
+            Assert.Equal(1, overlayMetrics.CursorOverlayUpdatesAppliedCount);
+            Assert.Equal("captured_cursor_disabled", overlayMetrics.CursorOverlayLastStatus);
+
+            vm.OnCursorState(new ScreenShareCursorStateV1
+            {
+                SessionId = "session",
+                Seq = 2,
+                TsUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                DisplayId = "display",
+                DisplayInfoRevision = 1,
+                Nx = 0.5,
+                Ny = 0.5,
+                Visible = true,
+                Status = "fallback_captured",
+                CapturedCursorEnabled = true,
+                CursorCaptureControlSupported = true,
+            });
+
+            Assert.False(vm.CursorOverlayVisible);
+            Assert.Equal("fallback_captured", vm.CursorDeliveryMode);
+            Assert.Equal(2, vm.GetMetricsSnapshot().CursorOverlayUpdatesReceivedCount);
+            return true;
+        }, default);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void ScreenShareSurfaceView_CursorOverlayMapping_UsesUniformPresentationTransform()
+    {
+        Assert.True(ScreenShareSurfaceView.TryMapCursorOverlayToSurface(
+            nx: 0.5,
+            ny: 0.5,
+            frameWidth: 1440,
+            frameHeight: 810,
+            viewportWidth: 1600,
+            viewportHeight: 900,
+            out var centeredPoint));
+        Assert.Equal(800, centeredPoint.X, precision: 1);
+        Assert.Equal(450, centeredPoint.Y, precision: 1);
+
+        Assert.True(ScreenShareSurfaceView.TryMapCursorOverlayToSurface(
+            nx: 1,
+            ny: 0.5,
+            frameWidth: 1440,
+            frameHeight: 810,
+            viewportWidth: 1600,
+            viewportHeight: 1000,
+            out var letterboxedPoint));
+        Assert.Equal(1600, letterboxedPoint.X, precision: 1);
+        Assert.Equal(500, letterboxedPoint.Y, precision: 1);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void ScreenShareSurfaceView_CursorOverlayPointer_UsesBalancedStandardSize()
+    {
+        Assert.Equal(10d, ScreenShareSurfaceView.CursorOverlayPointerWidthDip);
+        Assert.Equal(14d, ScreenShareSurfaceView.CursorOverlayPointerHeightDip);
+        Assert.Equal(0.8d, ScreenShareSurfaceView.CursorOverlayPointerStrokeThicknessDip);
     }
 
 [Fact]
@@ -208,7 +313,12 @@ public sealed class ScreenShareViewerMetricsTests : ScreenShareViewerViewModelTe
                 h264Decoder: new FakeH264BitmapDecoder(),
                 logRole: "helper_remote");
             var staleDropCount = 0;
-            vm.StaleFrameDropped += (_, _) => staleDropCount++;
+            ScreenShareViewerStaleFrameDroppedEventArgs? staleDrop = null;
+            vm.StaleFrameDropped += (_, e) =>
+            {
+                staleDropCount++;
+                staleDrop = e;
+            };
 
             var config = new ScreenShareVideoStreamConfigV1
             {
@@ -243,6 +353,13 @@ public sealed class ScreenShareViewerMetricsTests : ScreenShareViewerViewModelTe
             var metrics = vm.GetMetricsSnapshot();
             Assert.True(metrics.StaleFrameDropVisibleStableCount >= 1);
             Assert.True(metrics.StaleFrameDropVisibleStableLastAgeMs >= 700);
+            Assert.False(metrics.H264ReferenceTaintActive);
+            Assert.Equal(0, metrics.H264ReferenceTaintStaleVisibleStableEnterCount);
+            Assert.True(metrics.StaleNormalNonKeyVisibleSuppressCount >= 1);
+            Assert.True(metrics.DecodedStaleVisibleSuppressCount >= 1);
+            Assert.NotNull(staleDrop);
+            Assert.True(staleDrop!.ReferenceContinuityPreserved);
+            Assert.Equal("none", metrics.H264ReferenceTaintLastReason);
 
             var frameLossSnapshot = vm.GetFrameLossSnapshotForDiagnostics();
             Assert.Contains(
@@ -251,11 +368,30 @@ public sealed class ScreenShareViewerMetricsTests : ScreenShareViewerViewModelTe
 
             vm.OnOwnedEncodedFrame("h264", new byte[] { 53 }, capturedTsUtcMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 200, isKeyFrame: false, streamEpoch: 51, frameId: 53);
             await WaitUntilAsync(
-                () => vm.CurrentFrame is Bitmap latest && latest.PixelSize.Width == 53 && vm.IsIdleForDiagnostics,
+                () => vm.CurrentFrame is Bitmap next && next.PixelSize.Width == 53 && vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(5));
 
+            var finalMetrics = vm.GetMetricsSnapshot();
+            Assert.Equal(0, finalMetrics.H264ReferenceTaintDroppedNonKeyCount);
+            Assert.False(finalMetrics.H264ReferenceTaintActive);
             return true;
         }, default);
     }
 
+    private static bool CurrentFrameWidthEquals(ScreenShareViewerViewModel vm, int expectedWidth)
+    {
+        if (vm.CurrentFrame is not Bitmap bitmap)
+        {
+            return false;
+        }
+
+        try
+        {
+            return bitmap.PixelSize.Width == expectedWidth;
+        }
+        catch (NullReferenceException)
+        {
+            return false;
+        }
+    }
 }

@@ -110,6 +110,9 @@ internal sealed partial class TransportScreenShareCoordinator : IAsyncDisposable
     private readonly Func<ReadOnlyMemory<byte>, CancellationToken, Task> sendPayloadAsync;
     private readonly Func<ReadOnlyMemory<byte>, string?, long, CancellationToken, Task>? sendPayloadWithRecoveryMetadataAsync;
     private readonly Func<ScreenShareVideoStreamConfigV1, CancellationToken, Task>? sendVideoStreamConfigAsync;
+    private readonly Func<string, ScreenShareCursorStateV1, CancellationToken, Task>? sendCursorStateAsync;
+    private readonly Func<bool>? cursorOverlayEnabledResolver;
+    private readonly IScreenShareCursorPositionSource cursorPositionSource;
     private readonly Action<string>? flushTransportQueue;
     private readonly Func<IScreenShareTransportBackpressureProbe?>? transportBackpressureProbeResolver;
     private readonly Func<ReadOnlyMemory<byte>, long>? estimateBridgeBytes;
@@ -126,6 +129,7 @@ internal sealed partial class TransportScreenShareCoordinator : IAsyncDisposable
     private ScreenShareFrameSendPipeline? sendPipeline;
     private string sessionId = string.Empty;
     private string lastActiveSessionId = string.Empty;
+    private bool capturedCursorEnabledForTransport = true;
     private ScreenShareDisplayInfoSnapshot? lastSentDisplayInfo;
     private DisplayInfoMappingKey? lastSentDisplayInfoMapping;
     private long lastSentDisplayInfoRevision;
@@ -139,8 +143,10 @@ internal sealed partial class TransportScreenShareCoordinator : IAsyncDisposable
     private TaskCompletionSource<bool>? inFlightDrainedTcs;
     private Timer? autoTuneTimer;
     private Timer? recoveryOwnerPendingTimer;
+    private Timer? cursorTelemetryTimer;
     private int autoTuneTickInFlight;
     private int recoveryOwnerPendingTimerInFlight;
+    private int cursorTelemetryTickInFlight;
     private int captureFpsHint;
     private int captureToSendCatchUpPressureTicks;
     private int remoteObservedCatchUpPressureTicks;
@@ -189,6 +195,14 @@ internal sealed partial class TransportScreenShareCoordinator : IAsyncDisposable
     private long recoveryLockAllowedSameTuningModeChangeCount;
     private string lastRecoveryLockAllowedSameTuningModeChange = string.Empty;
     private long displayInfoSendCount;
+    private long cursorOverlayStateSeq;
+    private long cursorOverlayUpdatesSentCount;
+    private long cursorOverlaySendFailureCount;
+    private long cursorOverlayMappingFailureCount;
+    private string cursorOverlayDeliveryMode = "captured_video";
+    private string cursorOverlayLastStatus = "not_started";
+    private ScreenShareCursorStateV1? lastCursorStateSent;
+    private DateTimeOffset lastCursorStateSentUtc;
     private long encodedFramesSent;
     private long transportPayloadsSent;
     private long batchedPayloadsSent;
@@ -274,6 +288,9 @@ internal sealed partial class TransportScreenShareCoordinator : IAsyncDisposable
         Func<ReadOnlyMemory<byte>, long>? estimateBridgeBytes = null,
         Func<IScreenShareTransportBackpressureProbe?>? transportBackpressureProbeResolver = null,
         Func<ScreenShareVideoStreamConfigV1, CancellationToken, Task>? sendVideoStreamConfigAsync = null,
+        Func<string, ScreenShareCursorStateV1, CancellationToken, Task>? sendCursorStateAsync = null,
+        Func<bool>? cursorOverlayEnabledResolver = null,
+        IScreenShareCursorPositionSource? cursorPositionSource = null,
         Func<ReadOnlyMemory<byte>, string?, long, CancellationToken, Task>? sendPayloadWithRecoveryMetadataAsync = null,
         Action<string>? flushTransportQueue = null,
         Action<string, long, long, long>? armRecoveryBurstTransportFallback = null,
@@ -287,6 +304,9 @@ internal sealed partial class TransportScreenShareCoordinator : IAsyncDisposable
         this.estimateBridgeBytes = estimateBridgeBytes;
         this.transportBackpressureProbeResolver = transportBackpressureProbeResolver;
         this.sendVideoStreamConfigAsync = sendVideoStreamConfigAsync;
+        this.sendCursorStateAsync = sendCursorStateAsync;
+        this.cursorOverlayEnabledResolver = cursorOverlayEnabledResolver;
+        this.cursorPositionSource = cursorPositionSource ?? new WindowsScreenShareCursorPositionSource();
         this.sendPayloadWithRecoveryMetadataAsync = sendPayloadWithRecoveryMetadataAsync;
         this.flushTransportQueue = flushTransportQueue;
         this.armRecoveryBurstTransportFallback = armRecoveryBurstTransportFallback;

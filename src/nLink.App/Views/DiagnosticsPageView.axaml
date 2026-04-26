@@ -37,74 +37,89 @@
                     </StackPanel>
                 </Border>
 
-                <!-- Section 1: Status -->
+                <Grid ColumnDefinitions="*,*,*,*"
+                      ColumnSpacing="10"
+                      MaxWidth="820">
+                    <Button Grid.Column="0"
+                            AutomationProperties.AutomationId="Diag.Copy"
+                            Classes="appButton secondaryButton"
+                            Content="Copy diagnostics"
+                            Command="{Binding CopyReliabilityLogCommand}"
+                            Height="48"
+                            FontSize="16"
+                            HorizontalAlignment="Stretch"/>
+
+                    <Button Grid.Column="1"
+                            Classes="appButton secondaryButton"
+                            Content="Save Hang Report"
+                            Command="{Binding SaveHangReportCommand}"
+                            Height="48"
+                            FontSize="16"
+                            HorizontalAlignment="Stretch"/>
+
+                    <Button Grid.Column="2"
+                            AutomationProperties.AutomationId="Diag.OpenLogs"
+                            Classes="appButton secondaryButton"
+                            Content="Open logs folder"
+                            Command="{Binding OpenLogsFolderCommand}"
+                            Height="48"
+                            FontSize="16"
+                            HorizontalAlignment="Stretch"/>
+
+                    <Button Grid.Column="3"
+                            Classes="appButton secondaryButton"
+                            Content="Back"
+                            Command="{Binding BackCommand}"
+                            Height="48"
+                            FontSize="16"
+                            HorizontalAlignment="Stretch"/>
+                </Grid>
+
+                <TextBlock Classes="appMuted"
+                           Text="{Binding CopyFeedback.Text}"
+                           FontSize="13"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center"
+                           IsVisible="{Binding CopyFeedback.IsVisible}"/>
+
                 <Border Classes="appCard" Padding="20">
                     <StackPanel Spacing="14">
-                        <TextBlock Text="Status"
+                        <TextBlock Text="Health"
                                    Foreground="{StaticResource AppTextBrush}"
                                    FontSize="22"
                                    FontWeight="SemiBold"/>
 
-                        <Grid ColumnDefinitions="220,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="8" ColumnSpacing="12">
+                        <Grid ColumnDefinitions="220,*"
+                              RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                              RowSpacing="8"
+                              ColumnSpacing="12">
                             <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Version"/>
                             <TextBlock Grid.Row="0" Grid.Column="1" Classes="appBody" Text="{Binding AppVersion}" FontSize="16"/>
 
-                            <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="Transport"/>
-                            <TextBlock Grid.Row="1" Grid.Column="1" Classes="appBody" Text="{Binding TransportSummary}" FontSize="16"/>
+                            <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="Connection"/>
+                            <TextBlock Grid.Row="1" Grid.Column="1" Classes="appBody" Text="{Binding ConnectionStateSummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                            <TextBlock Grid.Row="2" Grid.Column="0" Classes="appLabel" Text="Connection method"/>
-                            <TextBlock Grid.Row="2" Grid.Column="1" Classes="appBody" Text="{Binding ActiveTransport}" FontSize="16"/>
+                            <TextBlock Grid.Row="2" Grid.Column="0" Classes="appLabel" Text="Authorization"/>
+                            <TextBlock Grid.Row="2" Grid.Column="1" Classes="appBody" Text="{Binding AuthorizationSummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                            <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="Build type"/>
-                            <TextBlock Grid.Row="3" Grid.Column="1" Classes="appBody" Text="{Binding BuildMode}" FontSize="16"/>
+                            <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="Screen share"/>
+                            <TextBlock Grid.Row="3" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareSummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                            <TextBlock Grid.Row="4" Grid.Column="0" Classes="appLabel" Text="Bridge PID"/>
-                            <TextBlock Grid.Row="4" Grid.Column="1" Classes="appBody" Text="{Binding BridgePid}" FontSize="16"/>
+                            <TextBlock Grid.Row="4" Grid.Column="0" Classes="appLabel" Text="Remote control"/>
+                            <TextBlock Grid.Row="4" Grid.Column="1" Classes="appBody" Text="{Binding RemoteControlSummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                            <TextBlock Grid.Row="5" Grid.Column="0" Classes="appLabel" Text="Node/SDK"/>
-                            <TextBlock Grid.Row="5" Grid.Column="1" Classes="appBody" Text="{Binding NodeSdk}" FontSize="16"/>
+                            <TextBlock Grid.Row="5" Grid.Column="0" Classes="appLabel" Text="File transfer"/>
+                            <TextBlock Grid.Row="5" Grid.Column="1" Classes="appBody" Text="{Binding FileTransferSummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                            <TextBlock Grid.Row="6" Grid.Column="0" Classes="appLabel" Text="Last heartbeat"/>
-                            <TextBlock Grid.Row="6" Grid.Column="1" Classes="appBody" Text="{Binding LastHeartbeat}" FontSize="16"/>
-
-                            <TextBlock Grid.Row="7" Grid.Column="0" Classes="appLabel" Text="Bridge restarts"/>
-                            <TextBlock Grid.Row="7" Grid.Column="1" Classes="appBody" Text="{Binding BridgeRestarts}" FontSize="16"/>
-
-                            <TextBlock Grid.Row="8" Grid.Column="0" Classes="appLabel" Text="Last bridge exit"/>
-                            <TextBlock Grid.Row="8" Grid.Column="1" Classes="appBody" Text="{Binding LastBridgeExit}" FontSize="16"/>
-
-                            <TextBlock Grid.Row="9" Grid.Column="0" Classes="appLabel" Text="Last disconnect reason"/>
-                            <TextBlock Grid.Row="9" Grid.Column="1" Classes="appBody" Text="{Binding LastDisconnectReason}" FontSize="16"/>
-
-                            <TextBlock Grid.Row="10" Grid.Column="0" Classes="appLabel" Text="NKN address"/>
-                            <TextBlock Grid.Row="10" Grid.Column="1" Classes="appBody" Text="{Binding NknAddress}" FontSize="15" TextWrapping="Wrap"/>
-
-                            <TextBlock Grid.Row="11" Grid.Column="0" Classes="appLabel" Text="Selection"/>
-                            <StackPanel Grid.Row="11" Grid.Column="1" Spacing="2">
-                                <TextBlock Classes="appMuted" Text="Auto-selected: {Binding AutoSelected}" FontSize="13"/>
-                                <TextBlock Classes="appMuted" Text="Forced by environment: {Binding ForcedByEnvironment}" FontSize="13"/>
-                                <TextBlock Classes="appMuted" Text="{Binding SelectionReason}" FontSize="13" TextWrapping="Wrap"/>
-                            </StackPanel>
-
-                            <TextBlock Grid.Row="12" Grid.Column="0" Classes="appLabel" Text="Invite security"/>
-                            <StackPanel Grid.Row="12" Grid.Column="1" Spacing="2">
-                                <TextBlock Classes="appBody" Text="{Binding InviteSecurityMode}" FontSize="16"/>
-                                <TextBlock Classes="appMuted" Text="Release ready: {Binding InviteSecurityReleaseReady}" FontSize="13"/>
-                                <TextBlock Classes="appMuted" Text="{Binding InviteSecurityWarning}" FontSize="13" TextWrapping="Wrap"/>
-                            </StackPanel>
-
-                            <TextBlock Grid.Row="13" Grid.Column="0" Classes="appLabel" Text="Invite signing"/>
-                            <TextBlock Grid.Row="13" Grid.Column="1" Classes="appBody" Text="{Binding InviteSigningConfiguration}" FontSize="16" TextWrapping="Wrap"/>
-
-                            <TextBlock Grid.Row="14" Grid.Column="0" Classes="appLabel" Text="Public invite flow"/>
-                            <TextBlock Grid.Row="14" Grid.Column="1" Classes="appBody" Text="{Binding InvitePublicFlow}" FontSize="16" TextWrapping="Wrap"/>
+                            <TextBlock Grid.Row="6" Grid.Column="0" Classes="appLabel" Text="Persistence"/>
+                            <TextBlock Grid.Row="6" Grid.Column="1" Classes="appBody" Text="{Binding PersistenceSummary}" FontSize="16" TextWrapping="Wrap"/>
                         </Grid>
 
                         <TextBlock Classes="appLabel" Text="Last error"/>
                         <Border Classes="appPanel"
                                 Background="{StaticResource AppMutedPanelBrush}"
                                 Padding="12">
-                            <TextBlock Text="{Binding LastError}"
+                            <TextBlock Text="{Binding ConnectionErrorSummary}"
                                        Foreground="{StaticResource AppBodyTextBrush}"
                                        FontFamily="Cascadia Mono,Consolas,Monaco,monospace"
                                        FontSize="13"
@@ -115,7 +130,36 @@
 
                 <Border Classes="appCard" Padding="20">
                     <StackPanel Spacing="14">
-                        <TextBlock Text="Troubleshooting Summary"
+                        <TextBlock Text="Connection &amp; identity"
+                                   Foreground="{StaticResource AppTextBrush}"
+                                   FontSize="22"
+                                   FontWeight="SemiBold"/>
+
+                        <Grid ColumnDefinitions="220,*"
+                              RowDefinitions="Auto,Auto,Auto,Auto,Auto"
+                              RowSpacing="8"
+                              ColumnSpacing="12">
+                            <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Transport"/>
+                            <TextBlock Grid.Row="0" Grid.Column="1" Classes="appBody" Text="{Binding ActiveTransport}" FontSize="16"/>
+
+                            <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="Helper identity"/>
+                            <TextBlock Grid.Row="1" Grid.Column="1" Classes="appBody" Text="{Binding HelperIdentitySummary}" FontSize="16" TextWrapping="Wrap"/>
+
+                            <TextBlock Grid.Row="2" Grid.Column="0" Classes="appLabel" Text="Authoritative address"/>
+                            <TextBlock Grid.Row="2" Grid.Column="1" Classes="appBody" Text="{Binding AuthoritativeConnectedAddress}" FontSize="16"/>
+
+                            <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="External topology"/>
+                            <TextBlock Grid.Row="3" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceExternalTopologySummary}" FontSize="16" TextWrapping="Wrap"/>
+
+                            <TextBlock Grid.Row="4" Grid.Column="0" Classes="appLabel" Text="Last rejected message"/>
+                            <TextBlock Grid.Row="4" Grid.Column="1" Classes="appBody" Text="{Binding LastRejectedMessageSummary}" FontSize="16" TextWrapping="Wrap"/>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border Classes="appCard" Padding="20">
+                    <StackPanel Spacing="14">
+                        <TextBlock Text="Screen share health"
                                    Foreground="{StaticResource AppTextBrush}"
                                    FontSize="22"
                                    FontWeight="SemiBold"/>
@@ -124,267 +168,35 @@
                               RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
                               RowSpacing="8"
                               ColumnSpacing="12">
-                            <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Session UI state"/>
-                            <TextBlock Grid.Row="0" Grid.Column="1" Classes="appBody" Text="{Binding SessionUiState}" FontSize="16"/>
+                            <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Live state"/>
+                            <TextBlock Grid.Row="0" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareLiveState}" FontSize="16"/>
 
-                            <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="Authorization"/>
-                            <TextBlock Grid.Row="1" Grid.Column="1" Classes="appBody" Text="{Binding AuthorizationSummary}" FontSize="16" TextWrapping="Wrap"/>
+                            <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="Live profile"/>
+                            <TextBlock Grid.Row="1" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareLiveProfileSummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                            <TextBlock Grid.Row="2" Grid.Column="0" Classes="appLabel" Text="Session security"/>
-                            <TextBlock Grid.Row="2" Grid.Column="1" Classes="appBody" Text="{Binding SessionSecuritySummary}" FontSize="16" TextWrapping="Wrap"/>
+                            <TextBlock Grid.Row="2" Grid.Column="0" Classes="appLabel" Text="Live performance"/>
+                            <TextBlock Grid.Row="2" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareLivePerformanceSummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                            <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="Remote control"/>
-                            <TextBlock Grid.Row="3" Grid.Column="1" Classes="appBody" Text="{Binding RemoteControlSummary}" FontSize="16" TextWrapping="Wrap"/>
+                            <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="CPU / preprocess"/>
+                            <TextBlock Grid.Row="3" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareLiveCpuSummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                            <TextBlock Grid.Row="4" Grid.Column="0" Classes="appLabel" Text="Screen share"/>
-                            <TextBlock Grid.Row="4" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareSummary}" FontSize="16" TextWrapping="Wrap"/>
+                            <TextBlock Grid.Row="4" Grid.Column="0" Classes="appLabel" Text="Cursor"/>
+                            <TextBlock Grid.Row="4" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareLiveCursorSummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                            <TextBlock Grid.Row="5" Grid.Column="0" Classes="appLabel" Text="File transfer"/>
-                            <TextBlock Grid.Row="5" Grid.Column="1" Classes="appBody" Text="{Binding FileTransferSummary}" FontSize="16" TextWrapping="Wrap"/>
+                            <TextBlock Grid.Row="5" Grid.Column="0" Classes="appLabel" Text="Visual safety"/>
+                            <TextBlock Grid.Row="5" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareLiveVisualSafetySummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                            <TextBlock Grid.Row="6" Grid.Column="0" Classes="appLabel" Text="Authoritative address"/>
-                            <TextBlock Grid.Row="6" Grid.Column="1" Classes="appBody" Text="{Binding AuthoritativeConnectedAddress}" FontSize="16"/>
+                            <TextBlock Grid.Row="6" Grid.Column="0" Classes="appLabel" Text="Latest artifact"/>
+                            <TextBlock Grid.Row="6" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceArtifactName}" FontSize="16"/>
 
-                            <TextBlock Grid.Row="7" Grid.Column="0" Classes="appLabel" Text="Last rejected message"/>
-                            <TextBlock Grid.Row="7" Grid.Column="1" Classes="appBody" Text="{Binding LastRejectedMessageSummary}" FontSize="16" TextWrapping="Wrap"/>
+                            <TextBlock Grid.Row="7" Grid.Column="0" Classes="appLabel" Text="Latest quality"/>
+                            <TextBlock Grid.Row="7" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceQualitySummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                            <TextBlock Grid.Row="8" Grid.Column="0" Classes="appLabel" Text="Persistence health"/>
-                            <TextBlock Grid.Row="8" Grid.Column="1" Classes="appBody" Text="{Binding PersistenceSummary}" FontSize="16" TextWrapping="Wrap"/>
+                            <TextBlock Grid.Row="8" Grid.Column="0" Classes="appLabel" Text="Latest low-FPS"/>
+                            <TextBlock Grid.Row="8" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceLowFpsSummary}" FontSize="16" TextWrapping="Wrap"/>
 
-                            <TextBlock Grid.Row="9" Grid.Column="0" Classes="appLabel" Text="Persistence warning"/>
-                            <TextBlock Grid.Row="9" Grid.Column="1" Classes="appBody" Text="{Binding PersistenceWarning}" FontSize="16" TextWrapping="Wrap"/>
-                        </Grid>
-                    </StackPanel>
-                </Border>
-
-                <!-- Section 2: Counters -->
-                <Border Classes="appCard" Padding="20">
-                    <StackPanel Spacing="14">
-                        <TextBlock Text="Counters"
-                                   Foreground="{StaticResource AppTextBrush}"
-                                   FontSize="22"
-                                   FontWeight="SemiBold"/>
-
-                        <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="12" RowSpacing="10">
-                            <Border Grid.Row="0" Grid.Column="0" Classes="appPanel">
-                                <StackPanel Spacing="4">
-                                    <TextBlock Classes="appLabel" Text="Messages sent"/>
-                                    <TextBlock Classes="appBody" Text="{Binding MessagesSent}" FontSize="20" Foreground="{StaticResource AppTextBrush}"/>
-                                </StackPanel>
-                            </Border>
-                            <Border Grid.Row="0" Grid.Column="1" Classes="appPanel">
-                                <StackPanel Spacing="4">
-                                    <TextBlock Classes="appLabel" Text="Messages received"/>
-                                    <TextBlock Classes="appBody" Text="{Binding MessagesReceived}" FontSize="20" Foreground="{StaticResource AppTextBrush}"/>
-                                </StackPanel>
-                            </Border>
-
-                            <Border Grid.Row="1" Grid.Column="0" Classes="appPanel">
-                                <StackPanel Spacing="4">
-                                    <TextBlock Classes="appLabel" Text="Chat sent"/>
-                                    <TextBlock Classes="appBody" Text="{Binding ChatSent}" FontSize="20" Foreground="{StaticResource AppTextBrush}"/>
-                                </StackPanel>
-                            </Border>
-                            <Border Grid.Row="1" Grid.Column="1" Classes="appPanel">
-                                <StackPanel Spacing="4">
-                                    <TextBlock Classes="appLabel" Text="Chat received"/>
-                                    <TextBlock Classes="appBody" Text="{Binding ChatReceived}" FontSize="20" Foreground="{StaticResource AppTextBrush}"/>
-                                </StackPanel>
-                            </Border>
-
-                            <Border Grid.Row="2" Grid.Column="0" Classes="appPanel">
-                                <StackPanel Spacing="4">
-                                    <TextBlock Classes="appLabel" Text="Decrypt failed"/>
-                                    <TextBlock Classes="appBody" Text="{Binding DecryptFailed}" FontSize="20" Foreground="{StaticResource AppTextBrush}"/>
-                                </StackPanel>
-                            </Border>
-
-                            <Border Grid.Row="3" Grid.ColumnSpan="2" Classes="appPanel">
-                                <Grid ColumnDefinitions="*,*" ColumnSpacing="12">
-                                    <StackPanel Grid.Column="0" Spacing="4">
-                                        <TextBlock Classes="appLabel" Text="Bridge raw messages"/>
-                                        <TextBlock Classes="appBody" Text="{Binding BridgeRawMessagesReceived}" FontSize="16"/>
-                                    </StackPanel>
-                                    <StackPanel Grid.Column="1" Spacing="4">
-                                        <TextBlock Classes="appLabel" Text="Join requests received"/>
-                                        <TextBlock Classes="appBody" Text="{Binding JoinRequestsReceived}" FontSize="16"/>
-                                    </StackPanel>
-                                </Grid>
-                            </Border>
-
-                            <Border Grid.Row="4" Grid.ColumnSpan="2" Classes="appPanel">
-                                <Grid ColumnDefinitions="*,*" ColumnSpacing="12">
-                                    <StackPanel Grid.Column="0" Spacing="4">
-                                        <TextBlock Classes="appLabel" Text="Incoming join UI raised"/>
-                                        <TextBlock Classes="appBody" Text="{Binding IncomingJoinRequestRaisedCount}" FontSize="16"/>
-                                    </StackPanel>
-                                    <StackPanel Grid.Column="1" Spacing="4">
-                                        <TextBlock Classes="appLabel" Text="ACKs received"/>
-                                        <TextBlock Classes="appBody" Text="{Binding AcksReceived}" FontSize="16"/>
-                                    </StackPanel>
-                                </Grid>
-                            </Border>
-
-                            <Border Grid.Row="5" Grid.ColumnSpan="2" Classes="appPanel">
-                                <Grid ColumnDefinitions="*,*" ColumnSpacing="12">
-                                    <StackPanel Grid.Column="0" Spacing="4">
-                                        <TextBlock Classes="appLabel" Text="ACK source mismatch"/>
-                                        <TextBlock Classes="appBody" Text="{Binding AcksIgnoredSourceMismatch}" FontSize="16"/>
-                                    </StackPanel>
-                                    <StackPanel Grid.Column="1" Spacing="4">
-                                        <TextBlock Classes="appLabel" Text="Last envelope"/>
-                                        <TextBlock Classes="appBody" Text="{Binding LastEnvelopeType}" FontSize="16"/>
-                                    </StackPanel>
-                                </Grid>
-                            </Border>
-                        </Grid>
-                    </StackPanel>
-                </Border>
-
-                <!-- Section 3: Recent attempts -->
-                <Border Classes="appCard" Padding="20">
-                    <StackPanel Spacing="12">
-                        <TextBlock Text="Recent connection attempts"
-                                   Foreground="{StaticResource AppTextBrush}"
-                                   FontSize="22"
-                                   FontWeight="SemiBold"/>
-
-                        <Border Classes="appPanel"
-                                Background="{StaticResource AppMutedPanelBrush}"
-                                Padding="10">
-                            <ScrollViewer MaxHeight="220"
-                                          VerticalScrollBarVisibility="Auto"
-                                          HorizontalScrollBarVisibility="Disabled">
-                                <TextBlock Text="{Binding RecentConnectionAttemptsText}"
-                                           Foreground="{StaticResource AppTextBrush}"
-                                           FontFamily="Cascadia Mono,Consolas,Monaco,monospace"
-                                           FontSize="13"
-                                           TextWrapping="Wrap"/>
-                            </ScrollViewer>
-                        </Border>
-                    </StackPanel>
-                </Border>
-
-                <Border Classes="appCard" Padding="20">
-                    <StackPanel Spacing="12">
-                        <TextBlock Text="Feature Flags"
-                                   Foreground="{StaticResource AppTextBrush}"
-                                   FontSize="22"
-                                   FontWeight="SemiBold"/>
-
-                        <Grid ColumnDefinitions="220,*"
-                              RowDefinitions="Auto,Auto"
-                              RowSpacing="8"
-                              ColumnSpacing="12">
-                            <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="ScreenShareScaffold"/>
-                            <TextBlock Grid.Row="0" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareScaffold}" FontSize="16"/>
-
-                            <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="SessionHeader"/>
-                            <TextBlock Grid.Row="1" Grid.Column="1" Classes="appBody" Text="{Binding SessionHeader}" FontSize="16"/>
-                        </Grid>
-                    </StackPanel>
-                </Border>
-
-                <Border Classes="appCard" Padding="20">
-                    <StackPanel Spacing="12">
-                        <TextBlock Text="ScreenShare Capture Tuning"
-                                   Foreground="{StaticResource AppTextBrush}"
-                                   FontSize="22"
-                                   FontWeight="SemiBold"/>
-
-                        <Grid ColumnDefinitions="220,*"
-                              RowDefinitions="Auto,Auto,Auto,Auto,Auto"
-                              RowSpacing="8"
-                              ColumnSpacing="12">
-                            <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Current max FPS"/>
-                            <TextBlock Grid.Row="0" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareCaptureMaxFps}" FontSize="16"/>
-
-                            <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="Transport max FPS"/>
-                            <TextBlock Grid.Row="1" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareTransportMaxFps}" FontSize="16"/>
-
-                            <TextBlock Grid.Row="2" Grid.Column="0" Classes="appLabel" Text="Current scale"/>
-                            <TextBlock Grid.Row="2" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareCaptureScale}" FontSize="16"/>
-
-                            <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="Effective preset"/>
-                            <TextBlock Grid.Row="3" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEffectivePresetName}" FontSize="16"/>
-
-                            <TextBlock Grid.Row="4" Grid.Column="0" Classes="appLabel" Text="Legacy preset migrated"/>
-                            <TextBlock Grid.Row="4" Grid.Column="1" Classes="appBody" Text="{Binding ScreenSharePresetMigrationStatus}" FontSize="16"/>
-                        </Grid>
-
-                        <Border Classes="appPanel"
-                                Background="{StaticResource AppMutedPanelBrush}"
-                                Padding="12">
-                            <StackPanel Spacing="6">
-                                <TextBlock Classes="appLabel" Text="Presets"/>
-                                <TextBlock Classes="appBody"
-                                           Text="{Binding ScreenSharePresetBalanced, StringFormat='Balanced default: {0}'}"
-                                           FontSize="14"/>
-                                <TextBlock Classes="appBody"
-                                           Text="{Binding ScreenSharePresetLowEnd, StringFormat='Low-end CPU/network: {0}'}"
-                                           FontSize="14"/>
-                                <TextBlock Classes="appBody"
-                                           Text="{Binding ScreenSharePresetSharperText, StringFormat='Sharper text: {0}'}"
-                                           FontSize="14"/>
-                                <Grid ColumnDefinitions="*,*,*"
-                                      ColumnSpacing="8"
-                                      Margin="0,4,0,2">
-                                    <Button Grid.Column="0"
-                                            Classes="appButton secondaryButton"
-                                            Content="Apply balanced"
-                                            Command="{Binding ApplyBalancedScreenSharePresetCommand}"
-                                            Height="40"
-                                            FontSize="14"/>
-                                    <Button Grid.Column="1"
-                                            Classes="appButton secondaryButton"
-                                            Content="Apply low-end"
-                                            Command="{Binding ApplyLowEndScreenSharePresetCommand}"
-                                            Height="40"
-                                            FontSize="14"/>
-                                    <Button Grid.Column="2"
-                                            Classes="appButton secondaryButton"
-                                            Content="Apply sharper text"
-                                            Command="{Binding ApplySharperTextScreenSharePresetCommand}"
-                                            Height="40"
-                                            FontSize="14"/>
-                                </Grid>
-                                <TextBlock Classes="appMuted"
-                                           Text="{Binding ScreenShareCaptureEnvHint}"
-                                           FontSize="12"
-                                           TextWrapping="Wrap"/>
-                            </StackPanel>
-                        </Border>
-                    </StackPanel>
-                </Border>
-
-                <Border Classes="appPanel"
-                        MaxWidth="820">
-                    <StackPanel Spacing="10">
-                        <TextBlock Classes="appSectionTitle"
-                                   Text="Screenshare evidence"/>
-                        <TextBlock Classes="appMuted"
-                                   Text="Latest operator verdict from existing screenshare soak evidence. Diagnostics never runs analyzers or attaches full soak artifacts automatically."
-                                   FontSize="13"
-                                   TextWrapping="Wrap"/>
-
-                        <Grid ColumnDefinitions="220,*"
-                              RowDefinitions="Auto,Auto,Auto,Auto,Auto"
-                              ColumnSpacing="14"
-                              RowSpacing="8">
-                            <TextBlock Grid.Row="0" Grid.Column="0" Classes="appLabel" Text="Status"/>
-                            <TextBlock Grid.Row="0" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceStatus}" FontSize="15"/>
-
-                            <TextBlock Grid.Row="1" Grid.Column="0" Classes="appLabel" Text="Artifact"/>
-                            <TextBlock Grid.Row="1" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceArtifactName}" FontSize="15"/>
-
-                            <TextBlock Grid.Row="2" Grid.Column="0" Classes="appLabel" Text="Verdict"/>
-                            <TextBlock Grid.Row="2" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceVerdict}" FontSize="15"/>
-
-                            <TextBlock Grid.Row="3" Grid.Column="0" Classes="appLabel" Text="Deepest classification"/>
-                            <TextBlock Grid.Row="3" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceDeepestClassification}" FontSize="15"/>
-
-                            <TextBlock Grid.Row="4" Grid.Column="0" Classes="appLabel" Text="Next action"/>
-                            <TextBlock Grid.Row="4" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceNextAction}" FontSize="15" TextWrapping="Wrap"/>
+                            <TextBlock Grid.Row="9" Grid.Column="0" Classes="appLabel" Text="Latest verdict"/>
+                            <TextBlock Grid.Row="9" Grid.Column="1" Classes="appBody" Text="{Binding ScreenShareEvidenceVerdict}" FontSize="16" TextWrapping="Wrap"/>
                         </Grid>
 
                         <TextBlock Classes="appMuted"
@@ -394,93 +206,120 @@
                     </StackPanel>
                 </Border>
 
-                <StackPanel Spacing="8"
-                            MaxWidth="820">
-                    <Grid ColumnDefinitions="*,*,*"
-                          RowDefinitions="Auto,Auto"
-                          ColumnSpacing="12"
-                          RowSpacing="12"
-                          HorizontalAlignment="Center"
-                          MaxWidth="780">
-                        <Button Grid.Row="0"
-                                Grid.Column="0"
-                                AutomationProperties.AutomationId="Diag.Copy"
-                                Classes="appButton secondaryButton"
-                                Content="Copy diagnostics"
-                                Command="{Binding CopyReliabilityLogCommand}"
-                                Height="52"
-                                FontSize="18"
-                                HorizontalAlignment="Stretch"/>
+                <Expander Header="Advanced diagnostics"
+                          MaxWidth="820">
+                    <Border Classes="appPanel"
+                            Padding="14"
+                            Margin="0,6,0,0">
+                        <StackPanel Spacing="16">
+                            <StackPanel Spacing="8">
+                                <TextBlock Classes="appSectionTitle" Text="Raw counters"/>
+                                <Grid ColumnDefinitions="*,*"
+                                      RowDefinitions="Auto,Auto,Auto,Auto"
+                                      RowSpacing="8"
+                                      ColumnSpacing="12">
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Classes="appMuted" Text="Messages sent"/>
+                                    <TextBlock Grid.Row="0" Grid.Column="1" Classes="appMuted" Text="{Binding MessagesSent}"/>
 
-                        <Button Grid.Row="0"
-                                Grid.Column="1"
-                                Classes="appButton secondaryButton"
-                                Content="Export metrics JSON"
-                                Command="{Binding ExportMetricsJsonCommand}"
-                                Height="52"
-                                FontSize="18"
-                                HorizontalAlignment="Stretch"/>
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Classes="appMuted" Text="Messages received"/>
+                                    <TextBlock Grid.Row="1" Grid.Column="1" Classes="appMuted" Text="{Binding MessagesReceived}"/>
 
-                        <Button Grid.Row="0"
-                                Grid.Column="2"
-                                Classes="appButton secondaryButton"
-                                Content="Save Hang Report"
-                                Command="{Binding SaveHangReportCommand}"
-                                Height="52"
-                                FontSize="18"
-                                HorizontalAlignment="Stretch"/>
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Classes="appMuted" Text="Screen share lane"/>
+                                    <TextBlock Grid.Row="2" Grid.Column="1" Classes="appMuted" Text="{Binding ScreenShareMessagesSent, StringFormat='messages={0}'}"/>
 
-                        <Button Grid.Row="1"
-                                Grid.Column="0"
-                                Classes="appButton secondaryButton"
-                                Content="Report a bug"
-                                Command="{Binding ReportBugCommand}"
-                                Height="52"
-                                FontSize="18"
-                                HorizontalAlignment="Stretch"/>
+                                    <TextBlock Grid.Row="3" Grid.Column="0" Classes="appMuted" Text="High-priority queue"/>
+                                    <TextBlock Grid.Row="3" Grid.Column="1" Classes="appMuted" Text="{Binding HighPriorityControlQueueOverflows, StringFormat='overflows={0}'}"/>
+                                </Grid>
+                            </StackPanel>
 
-                        <Button Grid.Row="1"
-                                Grid.Column="1"
-                                AutomationProperties.AutomationId="Diag.OpenLogs"
-                                Classes="appButton secondaryButton"
-                                Content="Open logs folder"
-                                Command="{Binding OpenLogsFolderCommand}"
-                                Height="52"
-                                FontSize="18"
-                                HorizontalAlignment="Stretch"/>
+                            <StackPanel Spacing="8">
+                                <TextBlock Classes="appSectionTitle" Text="Bridge"/>
+                                <TextBlock Classes="appMuted" Text="{Binding BridgePid, StringFormat='PID: {0}'}"/>
+                                <TextBlock Classes="appMuted" Text="{Binding NodeSdk, StringFormat='Node/SDK: {0}'}"/>
+                                <TextBlock Classes="appMuted" Text="{Binding LastHeartbeat, StringFormat='Last heartbeat: {0}'}"/>
+                                <TextBlock Classes="appMuted" Text="{Binding LastBridgeExit, StringFormat='Last exit: {0}'}" TextWrapping="Wrap"/>
+                            </StackPanel>
 
-                        <Button Grid.Row="1"
-                                Grid.Column="2"
-                                Classes="appButton secondaryButton"
-                                Content="Back"
-                                Command="{Binding BackCommand}"
-                                Height="52"
-                                FontSize="18"
-                                HorizontalAlignment="Stretch"/>
-                    </Grid>
+                            <StackPanel Spacing="8">
+                                <TextBlock Classes="appSectionTitle" Text="Screen share settings"/>
+                                <TextBlock Classes="appMuted" Text="{Binding AdvancedScreenShareSettingsSummary}" TextWrapping="Wrap"/>
+                                <TextBlock Classes="appMuted"
+                                           Text="A custom or migrated screen share preset is active. Apply Balanced to return to the default support baseline."
+                                           IsVisible="{Binding ShowScreenShareResetHint}"
+                                           TextWrapping="Wrap"/>
+                                <Grid ColumnDefinitions="*,*"
+                                      ColumnSpacing="8"
+                                      Margin="0,4,0,0">
+                                    <Button Grid.Column="0"
+                                            Classes="appButton secondaryButton"
+                                            Content="Apply balanced"
+                                            Command="{Binding ApplyBalancedScreenSharePresetCommand}"
+                                            Height="40"
+                                            FontSize="14"/>
+                                    <Button Grid.Column="1"
+                                            Classes="appButton secondaryButton"
+                                            Content="Apply CPU saver"
+                                            Command="{Binding ApplyLowEndScreenSharePresetCommand}"
+                                            Height="40"
+                                            FontSize="14"/>
+                                </Grid>
+                                <TextBlock Classes="appMuted"
+                                           Text="{Binding ScreenShareCaptureEnvHint}"
+                                           FontSize="12"
+                                           TextWrapping="Wrap"/>
+                            </StackPanel>
 
+                            <StackPanel Spacing="8">
+                                <TextBlock Classes="appSectionTitle" Text="Recent connection attempts"/>
+                                <Border Classes="appPanel"
+                                        Background="{StaticResource AppMutedPanelBrush}"
+                                        Padding="10">
+                                    <ScrollViewer MaxHeight="180"
+                                                  VerticalScrollBarVisibility="Auto"
+                                                  HorizontalScrollBarVisibility="Disabled">
+                                        <TextBlock Text="{Binding RecentConnectionAttemptsText}"
+                                                   Foreground="{StaticResource AppTextBrush}"
+                                                   FontFamily="Cascadia Mono,Consolas,Monaco,monospace"
+                                                   FontSize="13"
+                                                   TextWrapping="Wrap"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </StackPanel>
+
+                            <Grid ColumnDefinitions="*,*"
+                                  ColumnSpacing="10">
+                                <Button Grid.Column="0"
+                                        Classes="appButton secondaryButton"
+                                        Content="Export metrics JSON"
+                                        Command="{Binding ExportMetricsJsonCommand}"
+                                        Height="44"
+                                        FontSize="15"/>
+                                <Button Grid.Column="1"
+                                        Classes="appButton secondaryButton"
+                                        Content="Report a bug"
+                                        Command="{Binding ReportBugCommand}"
+                                        IsVisible="{Binding ShowReportBug}"
+                                        Height="44"
+                                        FontSize="15"/>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+                </Expander>
+
+                <StackPanel Orientation="Horizontal"
+                            Spacing="4"
+                            HorizontalAlignment="Center"
+                            Margin="0,4,0,0">
                     <TextBlock Classes="appMuted"
-                               Text="{Binding CopyFeedback.Text}"
-                               FontSize="13"
-                               HorizontalAlignment="Center"
-                               TextAlignment="Center"
-                               IsVisible="{Binding CopyFeedback.IsVisible}"/>
-
-                    <StackPanel Orientation="Horizontal"
-                                Spacing="4"
-                                HorizontalAlignment="Center"
-                                Margin="0,4,0,0">
-                        <TextBlock Classes="appMuted"
-                                   Text="Powered by"
-                                   FontSize="12"
-                                   VerticalAlignment="Center"/>
-                        <Button Classes="linkButton"
-                                Content="NKN"
-                                Click="PoweredByNknLink_Click"
-                                FontSize="12"
-                                Padding="4,0"
-                                VerticalAlignment="Center"/>
-                    </StackPanel>
+                               Text="Powered by"
+                               FontSize="12"
+                               VerticalAlignment="Center"/>
+                    <Button Classes="linkButton"
+                            Content="NKN"
+                            Click="PoweredByNknLink_Click"
+                            FontSize="12"
+                            Padding="4,0"
+                            VerticalAlignment="Center"/>
                 </StackPanel>
             </StackPanel>
         </ScrollViewer>

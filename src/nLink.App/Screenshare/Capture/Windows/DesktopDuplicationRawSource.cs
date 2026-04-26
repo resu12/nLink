@@ -13,7 +13,7 @@ using NLink.Core.Logging;
 namespace NLink.App.Services.ScreenCapture;
 
 [SupportedOSPlatform("windows")]
-internal sealed class DesktopDuplicationRawSource : IWindowsRawCaptureSource, IWindowsRawCaptureBackendDescriptor
+internal sealed class DesktopDuplicationRawSource : IWindowsRawCaptureSource, IWindowsRawCaptureBackendDescriptor, IWindowsRawCaptureCadenceControl, IWindowsRawCaptureOutputControl
 {
     private const uint D3D11SdkVersion = 7;
     private const uint D3D11CreateDeviceBgraSupport = 0x20;
@@ -39,10 +39,15 @@ internal sealed class DesktopDuplicationRawSource : IWindowsRawCaptureSource, IW
     private CancellationTokenSource? captureCts;
     private bool started;
     private bool disposed;
+    private bool hasDeliveredFrame;
     private int frameProcessing;
     private int fatalFailureRaised;
+    private readonly WindowsRawCaptureCadenceGate cadenceGate = new();
     private int duplicationBindingLogged;
     private int duplicationIdentityLogged;
+    private int targetOutputWidth;
+    private int targetOutputHeight;
+    private int outputFallbackLogged;
 
     public DesktopDuplicationRawSource(ScreenCaptureTargetSelection captureTarget)
     {
@@ -57,6 +62,24 @@ internal sealed class DesktopDuplicationRawSource : IWindowsRawCaptureSource, IW
 
     public event EventHandler<WindowsRawCaptureFrameEventArgs>? FrameArrived;
     public event EventHandler<WindowsRawCaptureFailureEventArgs>? CaptureFailed;
+
+    public void SetRawCaptureCadence(int targetFramesPerSecond, string reason)
+    {
+        cadenceGate.SetCadence(targetFramesPerSecond);
+    }
+
+    public void ForceNextRawCapture(string reason)
+    {
+        cadenceGate.ForceNext();
+    }
+
+    public WindowsRawCaptureRuntimeMetrics GetRawCaptureRuntimeMetricsSnapshot() => cadenceGate.GetSnapshot();
+
+    public void SetRawCaptureOutputSizeHint(int targetWidth, int targetHeight, string reason)
+    {
+        Volatile.Write(ref targetOutputWidth, Math.Max(0, targetWidth));
+        Volatile.Write(ref targetOutputHeight, Math.Max(0, targetHeight));
+    }
 
     public static bool IsRuntimeSupported()
     {
@@ -138,6 +161,7 @@ internal sealed class DesktopDuplicationRawSource : IWindowsRawCaptureSource, IW
         lock (sync)
         {
             started = true;
+            hasDeliveredFrame = false;
         }
 
         LogLifecycle("screenshare_duplication_started", $"target={CaptureTarget.Describe()}");
@@ -169,6 +193,7 @@ internal sealed class DesktopDuplicationRawSource : IWindowsRawCaptureSource, IW
             captureCts = null;
             outputDuplication = null;
             stagingTexture = IntPtr.Zero;
+            hasDeliveredFrame = false;
         }
 
         oldCts?.Cancel();
@@ -319,6 +344,12 @@ internal sealed class DesktopDuplicationRawSource : IWindowsRawCaptureSource, IW
                 return false;
             }
 
+            cadenceGate.RecordFrameArrived();
+            if (cadenceGate.ShouldSkipBeforeReadback(DateTimeOffset.UtcNow, hasDeliveredFrame))
+            {
+                return false;
+            }
+
             stage = "query_dxgi_resource";
             using var resource = QueryInterface<IDXGIResource>(desktopResource);
             textureIdentityValidated = true;
@@ -328,10 +359,14 @@ internal sealed class DesktopDuplicationRawSource : IWindowsRawCaptureSource, IW
             stage = "copy_to_staging";
             CopyToStagingTexture(desktopResource);
             stage = "read_staging";
+            var readbackStartedAt = Stopwatch.GetTimestamp();
             frame = ReadStagingTexture(frameInfo.LastPresentTime);
+            UpdateOutputDiagnostics(frame.Bitmap.Width, frame.Bitmap.Height);
+            cadenceGate.RecordReadback(Stopwatch.GetElapsedTime(readbackStartedAt), DateTimeOffset.UtcNow);
             if (frame is not null)
             {
                 FrameArrived?.Invoke(this, new WindowsRawCaptureFrameEventArgs(frame));
+                hasDeliveredFrame = true;
                 frame = null;
                 return true;
             }
@@ -363,6 +398,28 @@ internal sealed class DesktopDuplicationRawSource : IWindowsRawCaptureSource, IW
                 Marshal.Release(desktopResource);
             }
             Interlocked.Exchange(ref frameProcessing, 0);
+        }
+    }
+
+    private void UpdateOutputDiagnostics(int outputWidth, int outputHeight)
+    {
+        var desiredWidth = Volatile.Read(ref targetOutputWidth);
+        var desiredHeight = Volatile.Read(ref targetOutputHeight);
+        var scaleRequested = desiredWidth > 0 &&
+            desiredHeight > 0 &&
+            (desiredWidth != outputWidth || desiredHeight != outputHeight);
+        var fallbackReason = scaleRequested ? "duplication_fullsize_readback" : "(none)";
+        cadenceGate.SetOutputDiagnostics(
+            outputWidth,
+            outputHeight,
+            gpuScaleEnabledValue: false,
+            fallbackReason);
+
+        if (scaleRequested && Interlocked.Exchange(ref outputFallbackLogged, 1) == 0)
+        {
+            LogLifecycle(
+                "screenshare_duplication_output_size_fallback",
+                $"target={CaptureTarget.Describe()}; desired_width={desiredWidth}; desired_height={desiredHeight}; output_width={outputWidth}; output_height={outputHeight}; reason={fallbackReason}");
         }
     }
 
@@ -485,6 +542,8 @@ internal sealed class DesktopDuplicationRawSource : IWindowsRawCaptureSource, IW
                 this,
                 new WindowsRawCaptureFrameEventArgs(
                     new WindowsRawCaptureFrame(bitmap, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())));
+            UpdateOutputDiagnostics(bitmap.Width, bitmap.Height);
+            hasDeliveredFrame = true;
 
             LogLifecycle(
                 "screenshare_duplication_initial_snapshot_emitted",

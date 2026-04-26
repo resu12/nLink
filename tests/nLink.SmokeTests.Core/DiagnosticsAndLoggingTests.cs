@@ -134,6 +134,11 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
             Assert.Contains("high_priority_control_dropped_for_stop:", copied!, StringComparison.Ordinal);
             Assert.Contains("authoritative_connected_address:", copied!, StringComparison.Ordinal);
             Assert.Contains("last_rejected_message:", copied!, StringComparison.Ordinal);
+            Assert.Contains("helper_address_source:", copied!, StringComparison.Ordinal);
+            Assert.Contains("helper_address_authoritative:", copied!, StringComparison.Ordinal);
+            Assert.Contains("helper_verification_code_visible:", copied!, StringComparison.Ordinal);
+            Assert.Contains("helper_identity_regenerated_count:", copied!, StringComparison.Ordinal);
+            Assert.Contains("helper_identity_last_regenerated_utc:", copied!, StringComparison.Ordinal);
             Assert.Contains("last_connect_duration_ms:", copied!, StringComparison.Ordinal);
             Assert.Contains("last_handshake_duration_ms:", copied!, StringComparison.Ordinal);
             Assert.Contains("last_bridge_start_ms:", copied!, StringComparison.Ordinal);
@@ -334,6 +339,106 @@ public void DiagnosticsCopy_IncludesScreenshareEvidenceSnapshot_AndRedactsArtifa
     {
         TryDeleteDirectory(tempRoot);
     }
+}
+
+[Fact]
+public void ScreenShareEvidenceLocator_BuildsCompactSupportSummaries_FromRetainedFiles()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-evidence-compact-" + Guid.NewGuid().ToString("N"));
+    var artifactDir = Path.Combine(tempRoot, "20260423-050505");
+    Directory.CreateDirectory(artifactDir);
+    WriteScreenShareVerdict(
+        artifactDir,
+        "pass",
+        "Screenshare evidence is available.",
+        "Continue support triage.",
+        "external_transport_health",
+        "steady_external_delivery_latency");
+    File.WriteAllLines(
+        Path.Combine(artifactDir, "quality-presentation-summary.txt"),
+        [
+            "active_encode_target_width=1440",
+            "active_encode_target_height=810",
+            "active_encode_target_bitrate=6000000",
+            "active_encode_target_fps=8",
+            "encoder_profile=normal",
+            "sender_freshness_mode=normal",
+            "effective_quality_preset=text_first_1x",
+            "actual_encoded_displayable_fps=7.50",
+            "raw_source_readback_fps=8.00",
+            "sender_process_cpu_percent=15.2",
+            "last_preprocess_duration_ms=37",
+            "raw_source_gpu_scale_enabled=1",
+            "preprocess_resize_path=direct_nv12",
+            "cursor_delivery_mode=helper_overlay",
+            "cursor_capture_desired_enabled=0",
+            "cursor_capture_enabled=0",
+            "cursor_capture_apply_status=applied",
+        ]);
+    File.WriteAllLines(
+        Path.Combine(artifactDir, "helper-quality-summary.txt"),
+        [
+            "pre_candidate_gap_tail_emitted_to_viewer_count=0",
+            "actionable_late_fragment_count=0",
+            "h264_reference_taint_active=0",
+            "h264_reference_quarantine_active=0",
+        ]);
+    File.WriteAllLines(
+        Path.Combine(artifactDir, "external-topology-summary.txt"),
+        [
+            "external_topology_profile=Default",
+            "selected_rpc_key=bb9d9798",
+            "media_subclients=8",
+            "external_topology_classification=external_delivery_candidate",
+        ]);
+
+    try
+    {
+        var snapshot = new ScreenShareEvidenceLocator([tempRoot]).ReadLatest();
+
+        Assert.Contains("target=1440x810@8fps", snapshot.QualityProfileSummary, StringComparison.Ordinal);
+        Assert.Contains("sender_cpu_pct=15.2", snapshot.PerformanceSummary, StringComparison.Ordinal);
+        Assert.Contains("mode=helper_overlay", snapshot.CursorSummary, StringComparison.Ordinal);
+        Assert.Contains("unsafe_tail=0", snapshot.VisualSafetySummary, StringComparison.Ordinal);
+        Assert.Contains("media_subclients=8", snapshot.ExternalTopologySummary, StringComparison.Ordinal);
+        Assert.Contains("screenshare_quality_profile:", snapshot.ToReportText(), StringComparison.Ordinal);
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+[Fact]
+public void DiagnosticsPageViewModel_UsesSupportFirstLabels_AndHidesEmptyBugReport()
+{
+    var config = CreateDevLocalTestConfig();
+    using var vm = new DiagnosticsPageViewModel(static () => { }, config, linksConfig: new ShareMessageConfig(null));
+    using var bugVm = new DiagnosticsPageViewModel(static () => { }, config, linksConfig: new ShareMessageConfig(null, "https://example.test/repo"));
+
+    Assert.Equal("Diagnostics", vm.PageTitle);
+    Assert.Contains("Support status", vm.PageSubtitle, StringComparison.Ordinal);
+    Assert.False(vm.ShowReportBug);
+    Assert.True(bugVm.ShowReportBug);
+    Assert.Equal("(none)", vm.ScreenShareLiveProfileSummary);
+    Assert.Contains("sender_cpu_pct=(none)", vm.ScreenShareLiveCpuSummary, StringComparison.Ordinal);
+}
+
+[Fact]
+public void DiagnosticsPageView_KeepsPrimarySurfaceSupportFocused()
+{
+    var viewPath = FindFileUpwards(Path.Combine("src", "nLink.App", "Views", "DiagnosticsPageView.axaml"));
+    var xaml = File.ReadAllText(viewPath);
+
+    Assert.Contains("Copy diagnostics", xaml, StringComparison.Ordinal);
+    Assert.Contains("Save Hang Report", xaml, StringComparison.Ordinal);
+    Assert.Contains("Open logs folder", xaml, StringComparison.Ordinal);
+    Assert.Contains("Screen share health", xaml, StringComparison.Ordinal);
+    Assert.Contains("Advanced diagnostics", xaml, StringComparison.Ordinal);
+    Assert.Contains("Apply CPU saver", xaml, StringComparison.Ordinal);
+    Assert.DoesNotContain("Feature Flags", xaml, StringComparison.Ordinal);
+    Assert.DoesNotContain("ScreenShare Capture Tuning", xaml, StringComparison.Ordinal);
+    Assert.DoesNotContain("Apply sharper text", xaml, StringComparison.Ordinal);
 }
 
 [Fact]

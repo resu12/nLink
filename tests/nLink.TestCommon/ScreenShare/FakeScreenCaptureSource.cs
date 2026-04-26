@@ -3,12 +3,20 @@ using NLink.Core.ScreenShare;
 
 namespace NLink.SmokeTests.Fakes;
 
-internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IScreenCaptureMetadataSource, IScreenCaptureKeyFrameRequestSource, IAsyncDisposable
+internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IScreenCaptureMetadataSource, IScreenCaptureKeyFrameRequestSource, IScreenCaptureCursorCaptureControl, IAsyncDisposable
 {
     private EventHandler<ScreenCaptureFrameEventArgs>? frameArrived;
     private readonly List<string> keyFrameRequestReasons = new();
+    private readonly List<bool> cursorCaptureEnabledRequests = new();
+    private bool cursorCaptureEnabled = true;
 
     public bool IsSupported => true;
+
+    public bool IsCursorCaptureControlSupported { get; set; } = true;
+
+    public bool IsCursorCaptureEnabled => cursorCaptureEnabled;
+
+    public IReadOnlyList<bool> CursorCaptureEnabledRequests => cursorCaptureEnabledRequests;
 
     public bool IsStarted { get; private set; }
 
@@ -70,6 +78,19 @@ internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IScreenCap
         keyFrameRequestReasons.Add(string.IsNullOrWhiteSpace(reason) ? "(none)" : reason.Trim());
     }
 
+    public bool TrySetCursorCaptureEnabled(bool enabled, string reason)
+    {
+        cursorCaptureEnabledRequests.Add(enabled);
+        if (!IsCursorCaptureControlSupported)
+        {
+            cursorCaptureEnabled = true;
+            return false;
+        }
+
+        cursorCaptureEnabled = enabled;
+        return true;
+    }
+
     public void RaiseFrame(ScreenCaptureFrameEventArgs frame)
     {
         frameArrived?.Invoke(this, frame);
@@ -105,6 +126,8 @@ internal sealed class FakeScreenCaptureSource : IScreenCaptureSource, IScreenCap
         frameArrived = null;
         FrameSubscriberCount = 0;
         keyFrameRequestReasons.Clear();
+        cursorCaptureEnabledRequests.Clear();
+        cursorCaptureEnabled = true;
         return ValueTask.CompletedTask;
     }
 

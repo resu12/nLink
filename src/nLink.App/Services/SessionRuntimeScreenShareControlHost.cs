@@ -301,9 +301,15 @@ internal sealed class SessionRuntimeScreenShareControlHost
             abortReason);
     }
 
-    public void ReportHelperRemoteScreenShareStaleFrameDropped(long renderedAgeMs, long streamEpoch)
+    public void ReportHelperRemoteScreenShareStaleFrameDropped(
+        long renderedAgeMs,
+        long streamEpoch,
+        bool referenceContinuityPreserved)
     {
-        context.ReportHelperRemoteScreenShareStaleFrameDropped(renderedAgeMs, streamEpoch);
+        context.ReportHelperRemoteScreenShareStaleFrameDropped(
+            renderedAgeMs,
+            streamEpoch,
+            referenceContinuityPreserved);
     }
 
     public void ObserveAcceptedFrame(ScreenShareFrameCompletedEventArgs e)

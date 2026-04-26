@@ -22,6 +22,7 @@ public sealed partial class NknSignalingTransport
             return messageType switch
             {
                 MsgType.ControlInput when isLowPriorityMouseMove => ControlOutboundLane.Low,
+                MsgType.ScreenShareCursorState => ControlOutboundLane.Low,
                 MsgType.ControlDisplayInfo => ControlOutboundLane.High,
                 MsgType.ControlRequest or
                     MsgType.ControlResponse or
@@ -39,10 +40,17 @@ public sealed partial class NknSignalingTransport
             Envelope envelope,
             ControlOutboundLane lane,
             CancellationToken ct,
-            bool isLowPriorityMouseMove = false)
+            bool isLowPriorityMouseMove = false,
+            bool isLowPriorityScreenShareCursorState = false)
         {
             var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var queued = new QueuedControlEnvelope(destination, envelope, completion, ct, isLowPriorityMouseMove);
+            var queued = new QueuedControlEnvelope(
+                destination,
+                envelope,
+                completion,
+                ct,
+                isLowPriorityMouseMove,
+                isLowPriorityScreenShareCursorState);
             var logBootstrapScreenShareControl = TryGetStartupScreenShareControlMetadata(envelope, out var startupScreenShareMetadata);
             List<TaskCompletionSource<bool>>? droppedCompletions = null;
             var shouldStartDrainer = false;
@@ -60,13 +68,23 @@ public sealed partial class NknSignalingTransport
                         Interlocked.Increment(ref owner.lowLaneEnqueuedMoves);
                     }
 
-                    if (isLowPriorityMouseMove && owner.queuedLowPriorityMouseMoveNode is not null)
+                    var existingLatestNode = isLowPriorityMouseMove
+                        ? owner.queuedLowPriorityMouseMoveNode
+                        : isLowPriorityScreenShareCursorState
+                            ? owner.queuedLowPriorityScreenShareCursorNode
+                            : null;
+
+                    if (existingLatestNode is not null)
                     {
                         droppedCompletions ??= [];
-                        droppedCompletions.Add(owner.queuedLowPriorityMouseMoveNode.Value.Completion);
-                        Interlocked.Increment(ref owner.lowLaneDroppedMoves);
+                        droppedCompletions.Add(existingLatestNode.Value.Completion);
+                        if (isLowPriorityMouseMove)
+                        {
+                            Interlocked.Increment(ref owner.lowLaneDroppedMoves);
+                        }
+
                         lowLaneDroppedCount++;
-                        owner.queuedLowPriorityMouseMoveNode.Value = queued;
+                        existingLatestNode.Value = queued;
                     }
                     else
                     {
@@ -83,6 +101,10 @@ public sealed partial class NknSignalingTransport
                             {
                                 owner.queuedLowPriorityMouseMoveNode = null;
                             }
+                            else if (ReferenceEquals(droppedNode, owner.queuedLowPriorityScreenShareCursorNode))
+                            {
+                                owner.queuedLowPriorityScreenShareCursorNode = null;
+                            }
 
                             droppedCompletions ??= [];
                             droppedCompletions.Add(droppedNode.Value.Completion);
@@ -98,6 +120,10 @@ public sealed partial class NknSignalingTransport
                         if (isLowPriorityMouseMove)
                         {
                             owner.queuedLowPriorityMouseMoveNode = inserted;
+                        }
+                        else if (isLowPriorityScreenShareCursorState)
+                        {
+                            owner.queuedLowPriorityScreenShareCursorNode = inserted;
                         }
                     }
 
@@ -216,6 +242,7 @@ public sealed partial class NknSignalingTransport
                 }
 
                 owner.queuedLowPriorityMouseMoveNode = null;
+                owner.queuedLowPriorityScreenShareCursorNode = null;
             }
 
             if (droppedCompletions is null)
@@ -254,6 +281,7 @@ public sealed partial class NknSignalingTransport
                 }
 
                 owner.queuedLowPriorityMouseMoveNode = null;
+                owner.queuedLowPriorityScreenShareCursorNode = null;
             }
 
             if (droppedCompletions is null)
@@ -336,6 +364,10 @@ public sealed partial class NknSignalingTransport
                         if (ReferenceEquals(nextNode, owner.queuedLowPriorityMouseMoveNode))
                         {
                             owner.queuedLowPriorityMouseMoveNode = null;
+                        }
+                        else if (ReferenceEquals(nextNode, owner.queuedLowPriorityScreenShareCursorNode))
+                        {
+                            owner.queuedLowPriorityScreenShareCursorNode = null;
                         }
                     }
                     else

@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
@@ -11,6 +12,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Threading.Channels;
+using FFmpeg.AutoGen;
 using NLink.App.Configuration;
 using NLink.Core.Logging;
 using NLink.Core.ScreenShare;
@@ -103,6 +105,10 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
     private long lastSampleTimeHns;
     private string encoderPath = "uninitialized";
     private long lastPreprocessDurationMs = -1;
+    private long lastPreprocessResizeDurationMs = -1;
+    private long lastPreprocessColorConvertDurationMs = -1;
+    private string preprocessResizePath = string.Empty;
+    private long preprocessDirectNv12Count;
     private long lastTransformEncodeDurationMs = -1;
     private long lastEncodeTotalDurationMs = -1;
     private long emittedDisplayableFrames;
@@ -123,6 +129,10 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
     private bool loggedPromotedStrategyUse;
     private bool loggedTerminalRootCauseSummary;
     private bool loggedTerminalEncodeFailure;
+    private readonly ScreenShareMotionIntegrityGuard motionIntegrityGuard = new();
+    private readonly ScreenShareMotionIdrProofTracker motionIdrProofTracker = new();
+    private long motionIntegrityGuardActiveDisplayableFrames;
+    private long motionIntegrityGuardActiveIdrFrames;
 
     private MediaFoundationH264FrameEncoder(bool selectedHardwarePath, bool mediaFoundationLeaseHeld, string sourceRole)
     {
@@ -268,6 +278,8 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
             var averageEncodedFrameBytes = emittedDisplayableFrames > 0
                 ? totalEncodedFrameBytes / (double)emittedDisplayableFrames
                 : 0d;
+            var motionSnapshot = motionIntegrityGuard.GetSnapshot();
+            var motionIdrProofSnapshot = motionIdrProofTracker.GetSnapshot();
             return new WindowsH264FrameEncoderRuntimeMetrics(
                 EncoderPath: encoderPath,
                 EmittedDisplayableFrames: emittedDisplayableFrames,
@@ -287,8 +299,39 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
                 FramesDroppedWaitingForRecoveryKeyframe: framesDroppedWaitingForRecoveryKeyframe,
                 LastSenderContinuityLossReason: lastSenderContinuityLossReason,
                 LastPreprocessDurationMs: lastPreprocessDurationMs,
+                LastPreprocessResizeDurationMs: lastPreprocessResizeDurationMs,
+                LastPreprocessColorConvertDurationMs: lastPreprocessColorConvertDurationMs,
+                PreprocessResizePath: preprocessResizePath,
+                PreprocessDirectNv12Count: preprocessDirectNv12Count,
                 LastTransformEncodeDurationMs: lastTransformEncodeDurationMs,
-                LastEncodeTotalDurationMs: lastEncodeTotalDurationMs);
+                LastEncodeTotalDurationMs: lastEncodeTotalDurationMs,
+                MotionIntegrityGuardActive: motionSnapshot.Active,
+                MotionIntegritySampledRatio: motionSnapshot.SampledMotionRatio,
+                MotionIntegrityPeakSampledRatio: motionSnapshot.PeakSampledMotionRatio,
+                MotionIntegrityScrollMotionActiveBandCount: motionSnapshot.ScrollMotionActiveBandCount,
+                MotionIntegrityScrollMotionPeakBandRatio: motionSnapshot.ScrollMotionPeakBandRatio,
+                MotionIntegrityHighMotionFrameCount: motionSnapshot.HighMotionFrameCount,
+                MotionIntegrityScrollTriggerCount: motionSnapshot.ScrollTriggerCount,
+                MotionIntegrityBurstEnterCount: motionSnapshot.BurstEnterCount,
+                MotionIntegrityBurstExitCount: motionSnapshot.BurstExitCount,
+                MotionIntegrityForcedKeyFrameCount: motionSnapshot.ForcedKeyFrameCount,
+                MotionIntegrityLastTriggerKind: motionSnapshot.LastTriggerKind,
+                MotionIntegrityLastReason: motionSnapshot.LastReason,
+                MotionIntegrityIdrFrameRatio: motionIntegrityGuardActiveDisplayableFrames > 0
+                    ? motionIntegrityGuardActiveIdrFrames / (double)motionIntegrityGuardActiveDisplayableFrames
+                    : 0d,
+                MotionIntegrityForcedIdrRequestedCount: motionIdrProofSnapshot.RequestedCount,
+                MotionIntegrityForcedIdrConfirmedCount: motionIdrProofSnapshot.ConfirmedCount,
+                MotionIntegrityForcedIdrMissedCount: motionIdrProofSnapshot.MissedCount,
+                MotionIntegrityForcedIdrPendingCount: motionIdrProofSnapshot.PendingCount,
+                MotionIntegrityForcedIdrConsecutiveMissCount: motionIdrProofSnapshot.ConsecutiveMissCount,
+                MotionIntegrityForcedIdrBurstMissCount: motionIdrProofSnapshot.BurstMissCount,
+                MotionIntegrityActiveIdrFrameRatio: motionIdrProofSnapshot.ActiveMotionIdrFrameRatio,
+                MotionIntegrityForcedIdrLastMissReason: motionIdrProofSnapshot.LastMissReason,
+                MotionIntegrityEncoderRebuildCount: motionIdrProofSnapshot.EncoderRebuildCount,
+                MotionIntegrityEncoderRebuildSuppressedCount: motionIdrProofSnapshot.EncoderRebuildSuppressedCount,
+                MotionIntegrityEncoderRebuildPending: motionIdrProofSnapshot.EncoderRebuildPending,
+                MotionIntegrityEncoderRebuildLastReason: motionIdrProofSnapshot.LastRebuildReason);
         }
     }
 
@@ -368,7 +411,13 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
                 options.TargetFramesPerSecond,
                 options.TuningLevel,
                 transportIpOnly);
-            var effectiveForceKeyFrame = options.ForceKeyFrame || (transportIpOnly && senderContinuityRecoveryActive);
+            var recoveryForceKeyFrame = options.ForceKeyFrame || (transportIpOnly && senderContinuityRecoveryActive);
+            var motionGuardEligible =
+                encodeProfile.TransportIpOnly &&
+                options.TuningLevel == ScreenShareTransportTuningLevel.Normal &&
+                string.Equals(encodeProfile.ProfileName, "normal", StringComparison.OrdinalIgnoreCase);
+            var nowUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var motionSafetyRebuild = motionIdrProofTracker.TryConsumeEncoderRebuild(nowUtcMs, motionGuardEligible);
             stage = "compute_bitrate";
             var nextBitrate = encodeProfile.TargetBitrate;
             stage = "evaluate_rebuild";
@@ -380,12 +429,19 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
                 configuration.TargetFramesPerSecond != encodeProfile.TargetFramesPerSecond ||
                 configuration.TargetBitrate != nextBitrate ||
                 !string.Equals(configuration.ProfileName, encodeProfile.ProfileName, StringComparison.Ordinal) ||
-                currentStreamEpoch != options.StreamEpoch;
+                currentStreamEpoch != options.StreamEpoch ||
+                motionSafetyRebuild;
 
             if (mustRebuild)
             {
                 stage = "rebuild_encoder";
-                RebuildEncoder(encodeProfile, options, effectiveForceKeyFrame);
+                RebuildEncoder(encodeProfile, options, recoveryForceKeyFrame || motionSafetyRebuild);
+                if (motionSafetyRebuild)
+                {
+                    LogInstanceLifecycle(
+                        "screenshare_h264_motion_integrity_encoder_rebuilt",
+                        $"epoch={options.StreamEpoch}; profile={Sanitize(encodeProfile.ProfileName)}; width={encodeProfile.Width}; height={encodeProfile.Height}; fps={encodeProfile.TargetFramesPerSecond}; bitrate={encodeProfile.TargetBitrate}; reason=forced_idr_miss");
+                }
             }
 
             var activeConfiguration = configuration ?? throw new InvalidOperationException("H.264 encoder configuration is not initialized.");
@@ -397,6 +453,24 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
             stage = "prepare_nv12";
             var nv12Bytes = PrepareNv12Bytes(frame.Bitmap, activeConfiguration.Width, activeConfiguration.Height, options.TuningLevel);
             var preprocessDurationMs = (long)Stopwatch.GetElapsedTime(preprocessStartedAt).TotalMilliseconds;
+            stage = "evaluate_motion_integrity";
+            var motionDecision = motionIntegrityGuard.Evaluate(
+                nv12Bytes,
+                activeConfiguration.Width,
+                activeConfiguration.Height,
+                nowUtcMs,
+                motionGuardEligible,
+                recoveryForceKeyFrame);
+            var effectiveForceKeyFrame = recoveryForceKeyFrame || motionSafetyRebuild || motionDecision.ShouldForceKeyFrame;
+            var motionGuardActiveForFrame = motionDecision.Snapshot.Active;
+            if (motionDecision.ShouldForceKeyFrame)
+            {
+                motionIdrProofTracker.ObserveMotionForcedKeyFrameRequested(nowUtcMs);
+                LogInstanceLifecycle(
+                    "screenshare_h264_motion_integrity_keyframe_forced",
+                    $"epoch={options.StreamEpoch}; profile={Sanitize(activeConfiguration.ProfileName)}; sampled_motion_ratio={motionDecision.Snapshot.SampledMotionRatio.ToString("F3", CultureInfo.InvariantCulture)}; peak_sampled_motion_ratio={motionDecision.Snapshot.PeakSampledMotionRatio.ToString("F3", CultureInfo.InvariantCulture)}; scroll_active_band_count={motionDecision.Snapshot.ScrollMotionActiveBandCount}; scroll_peak_band_ratio={motionDecision.Snapshot.ScrollMotionPeakBandRatio.ToString("F3", CultureInfo.InvariantCulture)}; last_trigger_kind={Sanitize(motionDecision.Snapshot.LastTriggerKind)}; burst_enter_count={motionDecision.Snapshot.BurstEnterCount}; forced_motion_keyframe_count={motionDecision.Snapshot.ForcedKeyFrameCount}");
+            }
+
             stage = "compute_sample_time";
             var sampleTimeHns = ComputeSampleTimeHns(frame.CapturedTsUtcMs);
             var sampleDurationHns = ComputeSampleDurationHns(activeConfiguration.TargetFramesPerSecond);
@@ -581,14 +655,29 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
             var isKeyFrame = accessUnitClassification.HasIdr;
             activeConfiguration.PendingFirstFrame = false;
             emittedDisplayableFrames++;
+            if (motionGuardActiveForFrame)
+            {
+                motionIntegrityGuardActiveDisplayableFrames++;
+            }
+
             if (accessUnitClassification.HasIdr)
             {
                 idrFramesEmitted++;
+                if (motionGuardActiveForFrame)
+                {
+                    motionIntegrityGuardActiveIdrFrames++;
+                }
             }
             else if (accessUnitClassification.PictureKind == AccessUnitPictureKind.P)
             {
                 pFramesEmitted++;
             }
+
+            motionIdrProofTracker.ObserveDisplayableOutput(
+                accessUnitClassification.HasIdr,
+                motionGuardActiveForFrame,
+                motionGuardEligible,
+                nowUtcMs);
 
             totalEncodedFrameBytes += encodedBytes.Length;
 
@@ -659,6 +748,10 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
         firstCapturedTsUtcMs = null;
         lastSampleTimeHns = 0;
         lastPreprocessDurationMs = -1;
+        lastPreprocessResizeDurationMs = -1;
+        lastPreprocessColorConvertDurationMs = -1;
+        preprocessResizePath = string.Empty;
+        preprocessDirectNv12Count = 0;
         lastTransformEncodeDurationMs = -1;
         lastEncodeTotalDurationMs = -1;
         emittedDisplayableFrames = 0;
@@ -697,7 +790,16 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
             reusablePreprocessState = new ReusablePreprocessState(targetWidth, targetHeight);
         }
 
-        return reusablePreprocessState.PrepareNv12(source, tuningLevel);
+        var result = reusablePreprocessState.PrepareNv12(source, tuningLevel);
+        lastPreprocessResizeDurationMs = result.ResizeDurationMs;
+        lastPreprocessColorConvertDurationMs = result.ColorConvertDurationMs;
+        preprocessResizePath = result.ResizePath;
+        if (result.DirectNv12)
+        {
+            preprocessDirectNv12Count++;
+        }
+
+        return result.Nv12Bytes;
     }
 
     private EncoderConfiguration? TryCreatePersistentTransformSession(
@@ -921,6 +1023,10 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
         terminalInputBufferFailureSummary = null;
         encoderPath = "uninitialized";
         lastPreprocessDurationMs = -1;
+        lastPreprocessResizeDurationMs = -1;
+        lastPreprocessColorConvertDurationMs = -1;
+        preprocessResizePath = string.Empty;
+        preprocessDirectNv12Count = 0;
         lastTransformEncodeDurationMs = -1;
         lastEncodeTotalDurationMs = -1;
         emittedDisplayableFrames = 0;
@@ -930,6 +1036,10 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
         droppedBFrames = 0;
         droppedMultiPictureUnits = 0;
         totalEncodedFrameBytes = 0;
+        motionIntegrityGuardActiveDisplayableFrames = 0;
+        motionIntegrityGuardActiveIdrFrames = 0;
+        motionIntegrityGuard.Reset("encoder_reset");
+        motionIdrProofTracker.Reset("encoder_reset");
         transportIpOnlyMode = false;
         lastAccessUnitKind = string.Empty;
         lowDelayConfigApplied = string.Empty;
@@ -4031,6 +4141,124 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
         }
     }
 
+    internal static byte[] ConvertBgraBufferToNv12LegacyForTesting(byte[] bgraBytes, int absStride, int targetWidth, int targetHeight)
+    {
+        ArgumentNullException.ThrowIfNull(bgraBytes);
+        if (absStride <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(absStride));
+        }
+
+        if (targetWidth <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetWidth));
+        }
+
+        if (targetHeight <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetHeight));
+        }
+
+        var nv12 = new byte[targetWidth * targetHeight * 3 / 2];
+        FillNv12FromBgraBuffer(bgraBytes, absStride, nv12, targetWidth, targetHeight);
+        return nv12;
+    }
+
+    internal static byte[] ConvertBgraBufferToNv12OptimizedForTesting(byte[] bgraBytes, int absStride, int targetWidth, int targetHeight)
+    {
+        ArgumentNullException.ThrowIfNull(bgraBytes);
+        if (absStride <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(absStride));
+        }
+
+        if (targetWidth <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetWidth));
+        }
+
+        if (targetHeight <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetHeight));
+        }
+
+        var nv12 = new byte[targetWidth * targetHeight * 3 / 2];
+        unsafe
+        {
+            fixed (byte* bgraPtr = bgraBytes)
+            {
+                FillNv12FromBgraPointer(bgraPtr, absStride, nv12, targetWidth, targetHeight);
+            }
+        }
+
+        return nv12;
+    }
+
+    internal static bool CanUseDirectNv12PreprocessForTesting(
+        int sourceWidth,
+        int sourceHeight,
+        PixelFormat sourcePixelFormat,
+        int targetWidth,
+        int targetHeight)
+        => sourceWidth > 0 &&
+           sourceHeight > 0 &&
+           sourceWidth == targetWidth &&
+           sourceHeight == targetHeight &&
+           IsSupportedDirectBgraPixelFormat(sourcePixelFormat);
+
+    private static bool IsSupportedDirectBgraPixelFormat(PixelFormat pixelFormat)
+        => pixelFormat is PixelFormat.Format32bppArgb or PixelFormat.Format32bppPArgb;
+
+    private static unsafe void FillNv12FromBgraPointer(byte* bgraBytes, int absStride, byte[] nv12, int targetWidth, int targetHeight)
+    {
+        fixed (byte* nv12Bytes = nv12)
+        {
+            var yPlaneSize = targetWidth * targetHeight;
+
+            for (var y = 0; y < targetHeight; y++)
+            {
+                var row = bgraBytes + (y * absStride);
+                var yPlane = nv12Bytes + (y * targetWidth);
+                for (var x = 0; x < targetWidth; x++)
+                {
+                    var pixel = row + (x * 4);
+                    var b = pixel[0];
+                    var g = pixel[1];
+                    var r = pixel[2];
+                    yPlane[x] = ClampToByte(((66 * r) + (129 * g) + (25 * b) + 128 >> 8) + 16);
+                }
+            }
+
+            for (var y = 0; y < targetHeight; y += 2)
+            {
+                var row0 = bgraBytes + (y * absStride);
+                var row1 = bgraBytes + (Math.Min(y + 1, targetHeight - 1) * absStride);
+                var uvPlane = nv12Bytes + yPlaneSize + ((y / 2) * targetWidth);
+                for (var x = 0; x < targetWidth; x += 2)
+                {
+                    var avgR = 0;
+                    var avgG = 0;
+                    var avgB = 0;
+
+                    AccumulatePixel(row0, x, ref avgR, ref avgG, ref avgB);
+                    AccumulatePixel(row0, Math.Min(x + 1, targetWidth - 1), ref avgR, ref avgG, ref avgB);
+                    AccumulatePixel(row1, x, ref avgR, ref avgG, ref avgB);
+                    AccumulatePixel(row1, Math.Min(x + 1, targetWidth - 1), ref avgR, ref avgG, ref avgB);
+
+                    avgR /= 4;
+                    avgG /= 4;
+                    avgB /= 4;
+
+                    uvPlane[x] = ClampToByte(((-38 * avgR) - (74 * avgG) + (112 * avgB) + 128 >> 8) + 128);
+                    if (x + 1 < targetWidth)
+                    {
+                        uvPlane[x + 1] = ClampToByte(((112 * avgR) - (94 * avgG) - (18 * avgB) + 128 >> 8) + 128);
+                    }
+                }
+            }
+        }
+    }
+
     private static byte[] TryReadSequenceHeader(IMFMediaType mediaType)
     {
         var sequenceHeaderKey = MfMtMpegSequenceHeader;
@@ -4578,6 +4806,14 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
         avgR += bgraBytes[pixelOffset + 2];
     }
 
+    private static unsafe void AccumulatePixel(byte* row, int x, ref int avgR, ref int avgG, ref int avgB)
+    {
+        var pixel = row + (x * 4);
+        avgB += pixel[0];
+        avgG += pixel[1];
+        avgR += pixel[2];
+    }
+
     private static byte ClampToByte(int value)
     {
         return (byte)Math.Clamp(value, 0, 255);
@@ -5011,8 +5247,9 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
     {
         private readonly Bitmap bgraBitmap;
         private readonly Graphics graphics;
-        private readonly byte[] bgraBytes;
         private readonly byte[] nv12Bytes;
+        private unsafe SwsContext* swsContext;
+        private bool ffmpegUnavailableLogged;
 
         public ReusablePreprocessState(int width, int height)
         {
@@ -5020,7 +5257,6 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
             Height = height;
             bgraBitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
             graphics = Graphics.FromImage(bgraBitmap);
-            bgraBytes = new byte[Math.Abs(width * 4) * height];
             nv12Bytes = new byte[width * height * 3 / 2];
         }
 
@@ -5028,8 +5264,34 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
 
         public int Height { get; }
 
-        public byte[] PrepareNv12(Bitmap source, ScreenShareTransportTuningLevel tuningLevel)
+        public PreprocessResult PrepareNv12(Bitmap source, ScreenShareTransportTuningLevel tuningLevel)
         {
+            if (CanDirectConvertSource(source) &&
+                source.Width == Width &&
+                source.Height == Height)
+            {
+                return PrepareNv12Direct(source);
+            }
+
+            if (CanDirectConvertSource(source) &&
+                WindowsFfmpegRuntime.TryInitialize())
+            {
+                try
+                {
+                    return PrepareNv12WithFfmpegScale(source, tuningLevel);
+                }
+                catch (Exception ex)
+                {
+                    if (!ffmpegUnavailableLogged)
+                    {
+                        ffmpegUnavailableLogged = true;
+                        LogLifecycle(
+                            "screenshare_h264_preprocess_swscale_failed",
+                            $"reason={ex.GetType().Name}; hresult=0x{ex.HResult:X8}; message={Sanitize(ex.Message)}");
+                    }
+                }
+            }
+
             graphics.InterpolationMode = tuningLevel == ScreenShareTransportTuningLevel.BandwidthReduced
                 ? System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear
                 : System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
@@ -5039,30 +5301,149 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
             graphics.CompositingQuality = tuningLevel == ScreenShareTransportTuningLevel.BandwidthReduced
                 ? System.Drawing.Drawing2D.CompositingQuality.HighQuality
                 : System.Drawing.Drawing2D.CompositingQuality.AssumeLinear;
+            var resizeStartedAt = Stopwatch.GetTimestamp();
             graphics.DrawImage(source, 0, 0, Width, Height);
+            var resizeDurationMs = (long)Stopwatch.GetElapsedTime(resizeStartedAt).TotalMilliseconds;
 
             var rect = new Rectangle(0, 0, Width, Height);
             var data = bgraBitmap.LockBits(rect, ImageLockMode.ReadOnly, bgraBitmap.PixelFormat);
             try
             {
                 var absStride = Math.Abs(data.Stride);
-                Marshal.Copy(data.Scan0, bgraBytes, 0, absStride * Height);
-                FillNv12FromBgraBuffer(bgraBytes, absStride, nv12Bytes, Width, Height);
+                unsafe
+                {
+                    var convertStartedAt = Stopwatch.GetTimestamp();
+                    FillNv12FromBgraPointer((byte*)data.Scan0, absStride, nv12Bytes, Width, Height);
+                    return new PreprocessResult(
+                        nv12Bytes,
+                        resizeDurationMs,
+                        (long)Stopwatch.GetElapsedTime(convertStartedAt).TotalMilliseconds,
+                        tuningLevel == ScreenShareTransportTuningLevel.BandwidthReduced
+                            ? "gdi_high_quality_bilinear"
+                            : "gdi_high_quality_bicubic",
+                        DirectNv12: false);
+                }
             }
             finally
             {
                 bgraBitmap.UnlockBits(data);
             }
-
-            return nv12Bytes;
         }
 
         public void Dispose()
         {
+            unsafe
+            {
+                if (swsContext is not null)
+                {
+                    ffmpeg.sws_freeContext(swsContext);
+                    swsContext = null;
+                }
+            }
+
             graphics.Dispose();
             bgraBitmap.Dispose();
         }
+
+        private static bool CanDirectConvertSource(Bitmap source)
+        {
+            return IsSupportedDirectBgraPixelFormat(source.PixelFormat);
+        }
+
+        private PreprocessResult PrepareNv12Direct(Bitmap source)
+        {
+            var rect = new Rectangle(0, 0, Width, Height);
+            var data = source.LockBits(rect, ImageLockMode.ReadOnly, source.PixelFormat);
+            try
+            {
+                unsafe
+                {
+                    var convertStartedAt = Stopwatch.GetTimestamp();
+                    FillNv12FromBgraPointer((byte*)data.Scan0, Math.Abs(data.Stride), nv12Bytes, Width, Height);
+                    return new PreprocessResult(
+                        nv12Bytes,
+                        ResizeDurationMs: 0,
+                        ColorConvertDurationMs: (long)Stopwatch.GetElapsedTime(convertStartedAt).TotalMilliseconds,
+                        ResizePath: "direct_same_size",
+                        DirectNv12: true);
+                }
+            }
+            finally
+            {
+                source.UnlockBits(data);
+            }
+        }
+
+        private unsafe PreprocessResult PrepareNv12WithFfmpegScale(Bitmap source, ScreenShareTransportTuningLevel tuningLevel)
+        {
+            var rect = new Rectangle(0, 0, source.Width, source.Height);
+            var data = source.LockBits(rect, ImageLockMode.ReadOnly, source.PixelFormat);
+            try
+            {
+                var flags = tuningLevel == ScreenShareTransportTuningLevel.BandwidthReduced
+                    ? ffmpeg.SWS_BILINEAR
+                    : ffmpeg.SWS_BICUBIC;
+                var resizeStartedAt = Stopwatch.GetTimestamp();
+                swsContext = ffmpeg.sws_getCachedContext(
+                    swsContext,
+                    source.Width,
+                    source.Height,
+                    AVPixelFormat.AV_PIX_FMT_BGRA,
+                    Width,
+                    Height,
+                    AVPixelFormat.AV_PIX_FMT_NV12,
+                    flags,
+                    null,
+                    null,
+                    null);
+                if (swsContext is null)
+                {
+                    throw new InvalidOperationException("FFmpeg swscale context could not be created.");
+                }
+
+                fixed (byte* nv12 = nv12Bytes)
+                {
+                    var srcData = new byte_ptrArray4();
+                    var srcLinesize = new int_array4();
+                    srcData[0] = (byte*)data.Scan0;
+                    srcLinesize[0] = data.Stride;
+
+                    var dstData = new byte_ptrArray4();
+                    var dstLinesize = new int_array4();
+                    dstData[0] = nv12;
+                    dstData[1] = nv12 + (Width * Height);
+                    dstLinesize[0] = Width;
+                    dstLinesize[1] = Width;
+
+                    var scaled = ffmpeg.sws_scale(swsContext, srcData, srcLinesize, 0, source.Height, dstData, dstLinesize);
+                    if (scaled != Height)
+                    {
+                        throw new InvalidOperationException($"FFmpeg swscale converted {scaled} rows, expected {Height}.");
+                    }
+                }
+
+                return new PreprocessResult(
+                    nv12Bytes,
+                    ResizeDurationMs: (long)Stopwatch.GetElapsedTime(resizeStartedAt).TotalMilliseconds,
+                    ColorConvertDurationMs: 0,
+                    ResizePath: tuningLevel == ScreenShareTransportTuningLevel.BandwidthReduced
+                        ? "swscale_bilinear_nv12"
+                        : "swscale_bicubic_nv12",
+                    DirectNv12: false);
+            }
+            finally
+            {
+                source.UnlockBits(data);
+            }
+        }
     }
+
+    private readonly record struct PreprocessResult(
+        byte[] Nv12Bytes,
+        long ResizeDurationMs,
+        long ColorConvertDurationMs,
+        string ResizePath,
+        bool DirectNv12);
 
     internal sealed class RawInputBufferStrategyUnavailableException : InvalidOperationException
     {

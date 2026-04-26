@@ -530,7 +530,7 @@ try {
             if ($LASTEXITCODE -ne 0) { throw "Build-Portable.ps1 failed (exit $LASTEXITCODE)" }
         }
         Invoke-Step "Build installer" {
-            & powershell -ExecutionPolicy Bypass -File ".\installer\Build-Installer.ps1" -Runtime $Runtime
+            & powershell -ExecutionPolicy Bypass -File ".\installer\Build-Installer.ps1" -Runtime $Runtime -CopyHelperAlias
             if ($LASTEXITCODE -ne 0) { throw "Build-Installer.ps1 failed (exit $LASTEXITCODE)" }
         }
 

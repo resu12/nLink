@@ -190,4 +190,7 @@ internal sealed class SessionRuntimeScreenShareActions
 
     public Task SendVideoStreamConfigAsync(ScreenShareVideoStreamConfigV1 message, CancellationToken ct)
         => owner.SendScreenShareVideoStreamConfigCoreAsync(message, ct);
+
+    public Task SendCursorStateAsync(string sessionId, ScreenShareCursorStateV1 message, CancellationToken ct)
+        => owner.SendScreenShareCursorStateCoreAsync(sessionId, message, ct);
 }

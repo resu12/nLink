@@ -110,6 +110,11 @@ public static class NknRuntimeDiagnostics
     private static double firstColdStartMs = -1d;
     private static long firstColdStartUtcTicks;
     private static int firstColdStartObserved;
+    private static string helperAddressSource = "(none)";
+    private static int helperAddressAuthoritative;
+    private static int helperVerificationCodeVisible;
+    private static long helperIdentityRegeneratedCount;
+    private static long helperIdentityLastRegeneratedUtcTicks;
 
     public static void SetIdentity(string address, string identifier, string keyPath, string? seedRpc)
     {
@@ -130,6 +135,25 @@ public static class NknRuntimeDiagnostics
         {
             authoritativeConnectedAddressResolved = resolved;
         }
+    }
+
+    public static void SetHelperBootstrapDiagnostics(
+        string source,
+        bool authoritative,
+        bool verificationCodeVisible)
+    {
+        lock (Gate)
+        {
+            helperAddressSource = string.IsNullOrWhiteSpace(source) ? "(none)" : SanitizeDiagnosticText(source);
+            helperAddressAuthoritative = authoritative ? 1 : 0;
+            helperVerificationCodeVisible = verificationCodeVisible ? 1 : 0;
+        }
+    }
+
+    public static void RecordIdentityRegenerated(DateTimeOffset regeneratedUtc)
+    {
+        Interlocked.Increment(ref helperIdentityRegeneratedCount);
+        Interlocked.Exchange(ref helperIdentityLastRegeneratedUtcTicks, regeneratedUtc.UtcTicks);
     }
 
     public static void EnsureInitialized()
@@ -760,7 +784,12 @@ public static class NknRuntimeDiagnostics
                 LastDisconnectReason: string.IsNullOrWhiteSpace(lastDisconnectReason) ? "(none)" : lastDisconnectReason,
                 FirstColdStartObserved: Interlocked.CompareExchange(ref firstColdStartObserved, 0, 0) != 0,
                 FirstColdStartMs: firstColdStartMs,
-                FirstColdStartUtcTicks: Interlocked.Read(ref firstColdStartUtcTicks));
+                FirstColdStartUtcTicks: Interlocked.Read(ref firstColdStartUtcTicks),
+                HelperAddressSource: string.IsNullOrWhiteSpace(helperAddressSource) ? "(none)" : helperAddressSource,
+                HelperAddressAuthoritative: helperAddressAuthoritative != 0,
+                HelperVerificationCodeVisible: helperVerificationCodeVisible != 0,
+                HelperIdentityRegeneratedCount: Interlocked.Read(ref helperIdentityRegeneratedCount),
+                HelperIdentityLastRegeneratedUtcTicks: Interlocked.Read(ref helperIdentityLastRegeneratedUtcTicks));
         }
     }
 
@@ -911,4 +940,9 @@ public readonly record struct NknRuntimeDiagnosticsSnapshot(
     string LastDisconnectReason,
     bool FirstColdStartObserved,
     double FirstColdStartMs,
-    long FirstColdStartUtcTicks);
+    long FirstColdStartUtcTicks,
+    string HelperAddressSource,
+    bool HelperAddressAuthoritative,
+    bool HelperVerificationCodeVisible,
+    long HelperIdentityRegeneratedCount,
+    long HelperIdentityLastRegeneratedUtcTicks);

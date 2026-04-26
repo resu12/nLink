@@ -1288,6 +1288,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         StopPreviewSnapshotTimer();
 #endif
         RunBoundedSynchronousCleanup(screenShareCoordinator.StopAsync, TimeSpan.FromSeconds(2));
+        ForceCloseWindowsGraphicsCaptureLeases("helpee_viewmodel_dispose");
         copyFeedback.Dispose();
         CancelIncomingRequestTimeout();
         RunSynchronousCleanup(() => sessionRuntime.ResetAsync());
@@ -1855,6 +1856,9 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         localEndCommandInFlight = true;
+        IsChatInputEnabled = false;
+        CanEndSession = false;
+        CanSendFiles = false;
         EndSessionCommand.NotifyCanExecuteChanged();
         uiRecoveryTransientDismissed = true;
         ClearUiRecoveryTransient();
@@ -3302,7 +3306,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         if (flow.ShouldClearConversationUi)
         {
-            RequestStopScreenSharePreview();
+            RequestStopScreenSharePreview("runtime_flow_clear_conversation");
         }
 
         SessionUxContext? phaseContext = null;
@@ -3358,7 +3362,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         if (flow.ShouldClearConversationUi)
         {
             ClearSessionConversationUi();
-            RequestStopScreenSharePreview();
+            RequestStopScreenSharePreview("terminal_flow_clear_conversation");
         }
 
         ShowTransientBanner = false;
@@ -4325,7 +4329,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void PrepareForNewSession()
     {
-        RequestStopScreenSharePreview();
+        RequestStopScreenSharePreview("prepare_new_session");
 
         if (!localEndCommandInFlight)
         {
@@ -4355,14 +4359,14 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowNoMessagesPlaceholder));
     }
 
-    private void RequestStopScreenSharePreview()
+    private void RequestStopScreenSharePreview(string reason)
     {
         if (Interlocked.Exchange(ref screenSharePreviewStopInFlight, 1) == 1)
         {
             return;
         }
 
-        _ = StopScreenSharePreviewAsync();
+        _ = StopScreenSharePreviewAsync(reason);
     }
 
     private static bool IsProtectedSeedStorageReadFailure(string? message)
@@ -4383,7 +4387,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         UpdateShareInviteStatusText(sessionRuntime.StatusText);
     }
 
-    private async Task StopScreenSharePreviewAsync()
+    private async Task StopScreenSharePreviewAsync(string reason)
     {
         try
         {
@@ -4396,13 +4400,36 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         finally
         {
             Interlocked.Exchange(ref screenSharePreviewStopInFlight, 0);
+            ForceCloseWindowsGraphicsCaptureLeases($"preview_stop:{reason}");
         }
     }
 
     private void StopLocalScreenSharePreviewUiImmediately(string reason)
     {
         ApplyImmediateScreenSharePreviewStopState(reason);
-        RequestStopScreenSharePreview();
+        RequestTransportScreenShareSync(false, reason);
+        RequestStopScreenSharePreview(reason);
+    }
+
+    private static void ForceCloseWindowsGraphicsCaptureLeases(string reason)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var safeReason = SensitiveDataRedactor.Redact(
+            string.IsNullOrWhiteSpace(reason) ? "unspecified" : reason.Trim());
+        try
+        {
+            WindowsGraphicsCaptureRawSource.ForceCloseAllScreenShareLeases(safeReason);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Info(
+                "HelpeeUi",
+                $"event=screenshare_wgc_force_close_all_failed; reason={safeReason}; ex={ex.GetType().Name}");
+        }
     }
 
     private void ApplyImmediateScreenSharePreviewStopState(string reason)

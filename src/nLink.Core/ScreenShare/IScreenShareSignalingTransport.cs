@@ -8,12 +8,14 @@ public interface IScreenShareSignalingTransport
     event EventHandler<ScreenShareRecoveryReceiptReceivedEventArgs>? ScreenShareRecoveryReceiptReceived;
     event EventHandler<ScreenShareVideoStreamConfigReceivedEventArgs>? ScreenShareVideoStreamConfigReceived;
     event EventHandler<ScreenShareVideoKeyframeRequestReceivedEventArgs>? ScreenShareVideoKeyframeRequestReceived;
+    event EventHandler<ScreenShareCursorStateReceivedEventArgs>? ScreenShareCursorStateReceived;
 
     Task SendScreenSharePayloadAsync(ReadOnlyMemory<byte> payload, CancellationToken ct);
     Task SendScreenSharePressureStateAsync(ScreenSharePressureStateV1 message, CancellationToken ct);
     Task SendScreenShareRecoveryReceiptAsync(ScreenShareRecoveryReceiptV1 message, CancellationToken ct);
     Task SendScreenShareVideoStreamConfigAsync(ScreenShareVideoStreamConfigV1 message, CancellationToken ct);
     Task SendScreenShareVideoKeyframeRequestAsync(ScreenShareVideoKeyframeRequestV1 message, CancellationToken ct);
+    Task SendScreenShareCursorStateAsync(ScreenShareCursorStateV1 message, CancellationToken ct);
 }
 
 public interface IScreenShareTransportBackpressureProbe
@@ -98,6 +100,19 @@ public sealed class ScreenShareVideoKeyframeRequestReceivedEventArgs : EventArgs
     }
 
     public ScreenShareVideoKeyframeRequestV1 Message { get; }
+
+    public string? PeerId { get; }
+}
+
+public sealed class ScreenShareCursorStateReceivedEventArgs : EventArgs
+{
+    public ScreenShareCursorStateReceivedEventArgs(ScreenShareCursorStateV1 message, string? peerId)
+    {
+        Message = message ?? throw new ArgumentNullException(nameof(message));
+        PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
+    }
+
+    public ScreenShareCursorStateV1 Message { get; }
 
     public string? PeerId { get; }
 }

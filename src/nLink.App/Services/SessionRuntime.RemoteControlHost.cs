@@ -83,12 +83,14 @@ public sealed partial class SessionRuntime
         long LastApplyCadenceMs,
         double AverageApplyCadenceMs,
         long ViewerStaleDropCount,
+        long ViewerSoftStaleDropCount,
         long CurrentEpoch,
         bool CurrentEpochFirstApplySeen,
         bool CurrentEpochWarmupActive,
         int CurrentEpochApplyCount,
         long CurrentEpochNeedMoreInputCount,
         long CurrentEpochStaleDropCount,
+        long CurrentEpochSoftStaleDropCount,
         long LastVisibleApplyFrameId,
         long VisibleHeadFrameId,
         long VisibleRecoveryFloorFrameId,
@@ -322,6 +324,8 @@ public sealed partial class SessionRuntime
         {
             ClearRemoteControlAdminRestartWarning("control_not_active");
         }
+
+        SyncTransportScreenShareCursorCaptureForRemoteControl(reducerEvent.Reason);
 
         if (!notifyStateChanged)
         {
@@ -2271,7 +2275,17 @@ public sealed partial class SessionRuntime
         allowTransportScreenShareAutoStart = false;
         RefreshRemoteControlCapabilitiesFromTransport();
         RunCountedBackgroundTask(
-            () => transportScreenShareCoordinator.HandleDisconnectedAsync(),
+            async () =>
+            {
+                try
+                {
+                    await transportScreenShareCoordinator.HandleDisconnectedAsync().ConfigureAwait(false);
+                }
+                finally
+                {
+                    ForceCloseWindowsGraphicsCaptureLeases("transport_disconnected");
+                }
+            },
             countAsTransportTask: false);
         try
         {
@@ -2286,7 +2300,17 @@ public sealed partial class SessionRuntime
     {
         allowTransportScreenShareAutoStart = false;
         RunCountedBackgroundTask(
-            () => transportScreenShareCoordinator.HandleDisconnectedAsync(),
+            async () =>
+            {
+                try
+                {
+                    await transportScreenShareCoordinator.HandleDisconnectedAsync().ConfigureAwait(false);
+                }
+                finally
+                {
+                    ForceCloseWindowsGraphicsCaptureLeases("remote_session_ended");
+                }
+            },
             countAsTransportTask: false);
         try
         {
@@ -2937,6 +2961,34 @@ public sealed partial class SessionRuntime
         }
     }
 
+    private void OnTransportScreenShareCursorStateReceived(object? sender, ScreenShareCursorStateReceivedEventArgs e)
+    {
+        if (!IsFromCurrentTransport(sender) ||
+            remoteSessionEndHandling ||
+            lastDisconnectWasRemoteEnd ||
+            resetInProgress ||
+            state is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected)
+        {
+            return;
+        }
+
+        if (role != SessionRuntimeRole.Helper ||
+            !FeatureFlags.EnableScreenShareTransport ||
+            !TryValidateScreenShareSession(e.Message.SessionId, "screen_share_cursor_state_received", "cursor_state") ||
+            !RequireCapability(SessionCapability.ScreenShare, "screen_share_cursor_state_received"))
+        {
+            return;
+        }
+
+        if (transport is not IScreenShareCursorOverlayCapabilityProvider cursorOverlayProvider ||
+            !cursorOverlayProvider.SessionSupportsScreenShareCursorOverlay)
+        {
+            return;
+        }
+
+        ScreenShareCursorStateReceived?.Invoke(this, e);
+    }
+
     private void TrackHelperRemoteScreenShareAcceptedFrame(ScreenShareFrameCompletedEventArgs e)
     {
         screenShareControlHost.ObserveAcceptedFrame(e);
@@ -3321,7 +3373,9 @@ public sealed partial class SessionRuntime
         if (streamEpoch <= 0 ||
             helperPressureSnapshot.CurrentEpoch != streamEpoch ||
             helperPressureSnapshot.CurrentEpochRecoveryActive ||
-            helperPressureSnapshot.CurrentEpochStaleDropCount > 0)
+            GetActionableStaleDropCount(
+                helperPressureSnapshot.CurrentEpochStaleDropCount,
+                helperPressureSnapshot.CurrentEpochSoftStaleDropCount) > 0)
         {
             return false;
         }
@@ -3356,6 +3410,11 @@ public sealed partial class SessionRuntime
         return recoveryFloorSatisfied &&
                reportedContinuityBoundary >= 0 &&
                visibleProofHead >= reportedContinuityBoundary;
+    }
+
+    private static long GetActionableStaleDropCount(long totalStaleDropCount, long softStaleDropCount)
+    {
+        return Math.Max(0L, Math.Max(0L, totalStaleDropCount) - Math.Max(0L, softStaleDropCount));
     }
 
     internal void ReportHelperRemoteScreenShareRecoveryKeyframeApplied(long ageMs, long streamEpoch)
@@ -4296,12 +4355,21 @@ public sealed partial class SessionRuntime
         helperRemoteCurrentPressureEpochBaselineSampleCount++;
     }
 
-    internal void ReportHelperRemoteScreenShareStaleFrameDropped(long renderedAgeMs, long streamEpoch)
+    internal void ReportHelperRemoteScreenShareStaleFrameDropped(
+        long renderedAgeMs,
+        long streamEpoch,
+        bool referenceContinuityPreserved = false)
     {
-        screenShareControlHost.ReportHelperRemoteScreenShareStaleFrameDropped(renderedAgeMs, streamEpoch);
+        screenShareControlHost.ReportHelperRemoteScreenShareStaleFrameDropped(
+            renderedAgeMs,
+            streamEpoch,
+            referenceContinuityPreserved);
     }
 
-    private void ReportHelperRemoteScreenShareStaleFrameDroppedCore(long renderedAgeMs, long streamEpoch)
+    private void ReportHelperRemoteScreenShareStaleFrameDroppedCore(
+        long renderedAgeMs,
+        long streamEpoch,
+        bool referenceContinuityPreserved = false)
     {
         if (disposed || role != SessionRuntimeRole.Helper)
         {
@@ -4314,6 +4382,11 @@ public sealed partial class SessionRuntime
             EnsureHelperRemoteScreenSharePressureEpoch_NoLock(streamEpoch, nowUtc);
             helperRemoteViewerStaleDropCount++;
             helperRemoteCurrentPressureEpochStaleDropCount++;
+            if (referenceContinuityPreserved)
+            {
+                helperRemoteViewerSoftStaleDropCount++;
+                helperRemoteCurrentPressureEpochSoftStaleDropCount++;
+            }
         }
 
         MaybeSendScreenSharePressureState();
@@ -4425,12 +4498,14 @@ public sealed partial class SessionRuntime
                     ? (double)helperRemoteTotalApplyCadenceMs / helperRemoteApplyCadenceObserved
                     : 0d,
                 ViewerStaleDropCount: helperRemoteViewerStaleDropCount,
+                ViewerSoftStaleDropCount: helperRemoteViewerSoftStaleDropCount,
                 CurrentEpoch: currentEpoch,
                 CurrentEpochFirstApplySeen: helperRemoteCurrentPressureEpochFirstApplySeen,
                 CurrentEpochWarmupActive: currentEpochWarmupActive,
                 CurrentEpochApplyCount: helperRemoteCurrentPressureEpochApplyCount,
                 CurrentEpochNeedMoreInputCount: helperRemoteCurrentPressureEpochNeedMoreInputCount,
                 CurrentEpochStaleDropCount: helperRemoteCurrentPressureEpochStaleDropCount,
+                CurrentEpochSoftStaleDropCount: helperRemoteCurrentPressureEpochSoftStaleDropCount,
                 LastVisibleApplyFrameId: lastVisibleApplyFrameId,
                 VisibleHeadFrameId: visibleHeadFrameId,
                 VisibleRecoveryFloorFrameId: visibleRecoveryFloorFrameId,
@@ -4554,6 +4629,7 @@ public sealed partial class SessionRuntime
         helperRemoteApplyCadenceObserved = 0;
         helperRemoteTotalApplyCadenceMs = 0;
         helperRemoteViewerStaleDropCount = 0;
+        helperRemoteViewerSoftStaleDropCount = 0;
         helperRemoteConsecutiveVeryHighAppliedFrames = 0;
         helperRemoteConsecutiveStaleDropWindows = 0;
         helperRemoteCurrentPressureEpoch = streamEpoch;
@@ -4565,6 +4641,7 @@ public sealed partial class SessionRuntime
         helperRemoteCurrentPressureEpochRecoveryKeyframeApplyCountLocal = 0;
         helperRemoteCurrentPressureEpochNeedMoreInputCount = 0;
         helperRemoteCurrentPressureEpochStaleDropCount = 0;
+        helperRemoteCurrentPressureEpochSoftStaleDropCount = 0;
         helperRemoteCurrentPressureEpochLastVisibleApplyFrameId = -1;
         helperRemoteCurrentPressureEpochContinuityLossTicks = 0;
         helperRemoteCurrentPressureEpochWarmupTicks = 0;
@@ -4655,6 +4732,7 @@ public sealed partial class SessionRuntime
         helperRemoteApplyCadenceObserved = 0;
         helperRemoteTotalApplyCadenceMs = 0;
         helperRemoteViewerStaleDropCount = 0;
+        helperRemoteViewerSoftStaleDropCount = 0;
         helperRemoteConsecutiveVeryHighAppliedFrames = 0;
         helperRemoteConsecutiveStaleDropWindows = 0;
         helperRemoteCurrentPressureEpoch = streamEpoch;
@@ -4669,6 +4747,7 @@ public sealed partial class SessionRuntime
         helperRemoteCurrentPressureEpochRecoveryKeyframeApplyCountLocal = 0;
         helperRemoteCurrentPressureEpochNeedMoreInputCount = 0;
         helperRemoteCurrentPressureEpochStaleDropCount = 0;
+        helperRemoteCurrentPressureEpochSoftStaleDropCount = 0;
         helperRemoteCurrentPressureEpochLastVisibleApplyFrameId = -1;
         helperRemoteCurrentPressureEpochContinuityLossTicks = 0;
         helperRemoteCurrentPressureEpochWarmupTicks = 0;
@@ -4780,6 +4859,7 @@ public sealed partial class SessionRuntime
             helperRemoteApplyCadenceObserved = 0;
             helperRemoteTotalApplyCadenceMs = 0;
             helperRemoteViewerStaleDropCount = 0;
+            helperRemoteViewerSoftStaleDropCount = 0;
             helperRemoteConsecutiveVeryHighAppliedFrames = 0;
             helperRemoteConsecutiveStaleDropWindows = 0;
             helperRemoteCurrentPressureEpoch = 0;
@@ -4791,6 +4871,7 @@ public sealed partial class SessionRuntime
             helperRemoteCurrentPressureEpochRecoveryKeyframeApplyCountLocal = 0;
             helperRemoteCurrentPressureEpochNeedMoreInputCount = 0;
             helperRemoteCurrentPressureEpochStaleDropCount = 0;
+            helperRemoteCurrentPressureEpochSoftStaleDropCount = 0;
             helperRemoteCurrentPressureEpochLastVisibleApplyFrameId = -1;
             helperRemoteCurrentPressureEpochContinuityLossTicks = 0;
             helperRemoteCurrentPressureEpochWarmupTicks = 0;
@@ -4887,7 +4968,7 @@ public sealed partial class SessionRuntime
         var activeSessionId = currentSessionGrant?.SessionId.Value ?? sessionSecurityState.SessionId?.Value ?? sessionId;
         LocalOperationalLog.Info(
             "ScreenShareTransport",
-            $"event=screenshare_helper_pressure_epoch_summary; role=helper_remote; reason={reason}; session_id={(string.IsNullOrWhiteSpace(activeSessionId) ? "(none)" : activeSessionId)}; stream_epoch={snapshot.StreamEpoch}; last_visible_apply_frame_id={FormatFrameIdForPressureLog(snapshot.LastVisibleApplyFrameId)}; visible_head_frame_id={FormatFrameIdForPressureLog(snapshot.VisibleHeadFrameId)}; visible_recovery_floor_frame_id={FormatFrameIdForPressureLog(snapshot.VisibleRecoveryFloorFrameId)}; applied_head_frame_id={FormatFrameIdForPressureLog(snapshot.AppliedHeadFrameId)}; frames_applied_since_last_gap={snapshot.FramesAppliedSinceLastGap}; stable_visible_head_frame_id={FormatFrameIdForPressureLog(snapshot.StableVisibleHeadFrameId)}; helper_session_phase={ScreenShareConceptualModelFormatter.FormatHelperSessionPhase(snapshot.HelperSessionPhase)}; helper_recovery_mechanism={ScreenShareConceptualModelFormatter.FormatHelperRecoveryMechanism(snapshot.HelperRecoveryMechanism)}; helper_baseline_established={(snapshot.HelperBaselineEstablished ? 1 : 0)}; current_epoch_progress_proven={(snapshot.CurrentEpochProgressProven ? 1 : 0)}; current_epoch_progress_proof_source={FormatPressureTextValue(snapshot.CurrentEpochProgressProofSource)}; current_epoch_proven_head_frame_id={FormatFrameIdForPressureLog(snapshot.CurrentEpochProvenHeadFrameId)}; derived_post_recovery_healthy_active={(snapshot.DerivedPostRecoveryHealthyActive ? 1 : 0)}; derived_post_recovery_healthy_source={FormatPressureTextValue(snapshot.DerivedPostRecoveryHealthySource)}; derived_post_recovery_proof_frame_id={FormatFrameIdForPressureLog(snapshot.DerivedPostRecoveryProofFrameId)}; steady_visible_progress_active={(snapshot.SteadyVisibleProgressActive ? 1 : 0)}; steady_visible_progress_activation_frame_id={FormatFrameIdForPressureLog(snapshot.SteadyVisibleProgressActivationFrameId)}; applied_head_advanced_since_last_evaluation={(snapshot.AppliedHeadAdvancedSinceLastEvaluation ? 1 : 0)}; stable_visible_head_advanced_since_last_evaluation={(snapshot.StableVisibleHeadAdvancedSinceLastEvaluation ? 1 : 0)}; helper_healthy_state_established_by={FormatPressureTextValue(snapshot.HelperHealthyStateEstablishedBy)}; non_healthy_clear_suppressed_due_to_progress_count={snapshot.NonHealthyClearSuppressedDueToProgressCount}; last_sent_visible_head_frame_id={FormatFrameIdForPressureLog(snapshot.LastSentVisibleHeadFrameId)}; last_sent_stable_visible_head_frame_id={FormatFrameIdForPressureLog(snapshot.LastSentStableVisibleHeadFrameId)}; pressure_send_bypassed_for_visible_progress_count={snapshot.PressureSendBypassedForVisibleProgressCount}; helper_proof_keepalive_send_count={snapshot.ProofKeepaliveSendCount}; helper_proof_keepalive_timer_driven_send_count={snapshot.ProofKeepaliveTimerDrivenSendCount}; helper_proof_keepalive_last_head_frame_id={FormatFrameIdForPressureLog(snapshot.ProofKeepaliveLastHeadFrameId)}; helper_proof_keepalive_last_send_age_ms={(snapshot.ProofKeepaliveLastSendAgeMs >= 0 ? snapshot.ProofKeepaliveLastSendAgeMs.ToString(CultureInfo.InvariantCulture) : "(none)")}; steady_visible_progress_cleared_count={snapshot.SteadyVisibleProgressClearedCount}; steady_visible_progress_cleared_reason={FormatPressureTextValue(snapshot.SteadyVisibleProgressClearedReason)}; post_recovery_healthy_latch_count={snapshot.PostRecoveryHealthyLatchCount}; post_recovery_healthy_latch_clear_count={snapshot.PostRecoveryHealthyLatchClearCount}; post_recovery_healthy_latch_clear_reason={FormatPressureTextValue(snapshot.PostRecoveryHealthyLatchClearReason)}; current_epoch_gap_count={snapshot.CurrentEpochGapCount}; current_epoch_recovery_keyframe_apply_count={snapshot.CurrentEpochRecoveryKeyframeApplyCount}; current_epoch_resync_count={snapshot.CurrentEpochResyncCount}; recovery_window_active={(snapshot.RecoveryWindowActive ? 1 : 0)}; recovery_window_progressed={(snapshot.RecoveryWindowProgressed ? 1 : 0)}; recovery_window_succeeded={(snapshot.RecoveryWindowSucceeded ? 1 : 0)}; recovery_window_progressed_count={snapshot.RecoveryWindowProgressedCount}; recovery_window_success_count={snapshot.RecoveryWindowSuccessCount}; active_recovery_window_epoch={FormatFrameIdForPressureLog(snapshot.ActiveRecoveryWindowEpoch)}; active_recovery_window_recovery_frame_id={FormatFrameIdForPressureLog(snapshot.ActiveRecoveryWindowRecoveryFrameId)}; recovery_window_contiguous_follower_apply_count={snapshot.RecoveryWindowContiguousFollowerApplyCount}; continuity_loss_ticks={snapshot.ContinuityLossTicks}; warmup_ticks={snapshot.WarmupTicks}; before_first_visible_apply_ticks={snapshot.BeforeFirstVisibleApplyTicks}; after_visible_recovery_frame_ticks={snapshot.AfterVisibleRecoveryFrameTicks}; after_visible_recovery_frame_suppressed_due_to_success_count={snapshot.AfterVisibleRecoveryFrameSuppressedDueToSuccessCount}; slow_apply_cadence_ticks={snapshot.SlowApplyCadenceTicks}; high_frame_age_ticks={snapshot.HighFrameAgeTicks}; high_frame_age_suppressed_due_to_visible_progress_count={snapshot.HighFrameAgeSuppressedDueToVisibleProgressCount}; high_frame_age_suppressed_due_to_head_advance_count={snapshot.HighFrameAgeSuppressedDueToHeadAdvanceCount}; actionable_high_frame_age_count={snapshot.ActionableHighFrameAgeCount}; post_recovery_age_grace_active={(snapshot.PostRecoveryAgeGraceActive ? 1 : 0)}; post_recovery_age_grace_suppressed_count={snapshot.PostRecoveryAgeGraceSuppressedCount}; post_recovery_high_frame_age_suppressed_ticks={snapshot.PostRecoveryHighFrameAgeSuppressedTicks}; repeated_stale_drops_ticks={snapshot.RepeatedStaleDropsTicks}; bridge_health_ticks={snapshot.BridgeHealthTicks}; bridge_health_advisory_count={snapshot.BridgeHealthAdvisoryCount}; bridge_health_actionable_count={snapshot.BridgeHealthActionableCount}; bridge_health_quarantine_suppressed_count={snapshot.BridgeHealthQuarantineSuppressedCount}; bridge_health_became_actionable_without_queue_or_drop_count={snapshot.BridgeHealthActionableWithoutQueueOrDropCount}; baseline_established={(snapshot.BaselineEstablished ? 1 : 0)}; baseline_capture_to_render_ms={snapshot.BaselineCaptureToRenderMs}; age_excess_ms={snapshot.AgeExcessMs}; progress_stall_ms={snapshot.ProgressStallMs}; baseline_reseed_in_progress={(snapshot.BaselineReseedInProgress ? 1 : 0)}; age_pressure_consecutive_count={snapshot.AgePressureConsecutiveCount}; cadence_pressure_consecutive_count={snapshot.CadencePressureConsecutiveCount}; catch_up_suppressed_due_to_progress_count={snapshot.CatchUpSuppressedDueToProgressCount}; baseline_frozen_due_to_stall_count={snapshot.BaselineFrozenDueToStallCount}; baseline_reseed_after_recovery_count={snapshot.BaselineReseedAfterRecoveryCount}; cadence_stall_window_count={snapshot.CadenceStallWindowCount}; cadence_stall_trigger_count={snapshot.CadenceStallTriggerCount}; time_spent_in_helper_warmup_ms={snapshot.TimeSpentInHelperWarmupMs}; visible_applies_during_settle_count={snapshot.VisibleAppliesDuringSettleCount}; post_recovery_settle_window_count={snapshot.PostRecoverySettleWindowCount}; post_recovery_settle_window_success_count={snapshot.PostRecoverySettleWindowSuccessCount}; post_recovery_settle_window_timeout_count={snapshot.PostRecoverySettleWindowTimeoutCount}; visible_applies_before_pressure_reenabled={snapshot.VisibleAppliesBeforePressureReenabled}; dominant_pressure_blocker={snapshot.DominantPressureBlocker}");
+            $"event=screenshare_helper_pressure_epoch_summary; role=helper_remote; reason={reason}; session_id={(string.IsNullOrWhiteSpace(activeSessionId) ? "(none)" : activeSessionId)}; stream_epoch={snapshot.StreamEpoch}; last_visible_apply_frame_id={FormatFrameIdForPressureLog(snapshot.LastVisibleApplyFrameId)}; visible_head_frame_id={FormatFrameIdForPressureLog(snapshot.VisibleHeadFrameId)}; visible_recovery_floor_frame_id={FormatFrameIdForPressureLog(snapshot.VisibleRecoveryFloorFrameId)}; applied_head_frame_id={FormatFrameIdForPressureLog(snapshot.AppliedHeadFrameId)}; frames_applied_since_last_gap={snapshot.FramesAppliedSinceLastGap}; stable_visible_head_frame_id={FormatFrameIdForPressureLog(snapshot.StableVisibleHeadFrameId)}; helper_session_phase={ScreenShareConceptualModelFormatter.FormatHelperSessionPhase(snapshot.HelperSessionPhase)}; helper_recovery_mechanism={ScreenShareConceptualModelFormatter.FormatHelperRecoveryMechanism(snapshot.HelperRecoveryMechanism)}; helper_baseline_established={(snapshot.HelperBaselineEstablished ? 1 : 0)}; current_epoch_progress_proven={(snapshot.CurrentEpochProgressProven ? 1 : 0)}; current_epoch_progress_proof_source={FormatPressureTextValue(snapshot.CurrentEpochProgressProofSource)}; current_epoch_proven_head_frame_id={FormatFrameIdForPressureLog(snapshot.CurrentEpochProvenHeadFrameId)}; derived_post_recovery_healthy_active={(snapshot.DerivedPostRecoveryHealthyActive ? 1 : 0)}; derived_post_recovery_healthy_source={FormatPressureTextValue(snapshot.DerivedPostRecoveryHealthySource)}; derived_post_recovery_proof_frame_id={FormatFrameIdForPressureLog(snapshot.DerivedPostRecoveryProofFrameId)}; steady_visible_progress_active={(snapshot.SteadyVisibleProgressActive ? 1 : 0)}; steady_visible_progress_activation_frame_id={FormatFrameIdForPressureLog(snapshot.SteadyVisibleProgressActivationFrameId)}; applied_head_advanced_since_last_evaluation={(snapshot.AppliedHeadAdvancedSinceLastEvaluation ? 1 : 0)}; stable_visible_head_advanced_since_last_evaluation={(snapshot.StableVisibleHeadAdvancedSinceLastEvaluation ? 1 : 0)}; helper_healthy_state_established_by={FormatPressureTextValue(snapshot.HelperHealthyStateEstablishedBy)}; non_healthy_clear_suppressed_due_to_progress_count={snapshot.NonHealthyClearSuppressedDueToProgressCount}; last_sent_visible_head_frame_id={FormatFrameIdForPressureLog(snapshot.LastSentVisibleHeadFrameId)}; last_sent_stable_visible_head_frame_id={FormatFrameIdForPressureLog(snapshot.LastSentStableVisibleHeadFrameId)}; pressure_send_bypassed_for_visible_progress_count={snapshot.PressureSendBypassedForVisibleProgressCount}; helper_proof_keepalive_send_count={snapshot.ProofKeepaliveSendCount}; helper_proof_keepalive_timer_driven_send_count={snapshot.ProofKeepaliveTimerDrivenSendCount}; helper_proof_keepalive_last_head_frame_id={FormatFrameIdForPressureLog(snapshot.ProofKeepaliveLastHeadFrameId)}; helper_proof_keepalive_last_send_age_ms={(snapshot.ProofKeepaliveLastSendAgeMs >= 0 ? snapshot.ProofKeepaliveLastSendAgeMs.ToString(CultureInfo.InvariantCulture) : "(none)")}; steady_visible_progress_cleared_count={snapshot.SteadyVisibleProgressClearedCount}; steady_visible_progress_cleared_reason={FormatPressureTextValue(snapshot.SteadyVisibleProgressClearedReason)}; post_recovery_healthy_latch_count={snapshot.PostRecoveryHealthyLatchCount}; post_recovery_healthy_latch_clear_count={snapshot.PostRecoveryHealthyLatchClearCount}; post_recovery_healthy_latch_clear_reason={FormatPressureTextValue(snapshot.PostRecoveryHealthyLatchClearReason)}; current_epoch_gap_count={snapshot.CurrentEpochGapCount}; current_epoch_recovery_keyframe_apply_count={snapshot.CurrentEpochRecoveryKeyframeApplyCount}; current_epoch_resync_count={snapshot.CurrentEpochResyncCount}; recovery_window_active={(snapshot.RecoveryWindowActive ? 1 : 0)}; recovery_window_progressed={(snapshot.RecoveryWindowProgressed ? 1 : 0)}; recovery_window_succeeded={(snapshot.RecoveryWindowSucceeded ? 1 : 0)}; recovery_window_progressed_count={snapshot.RecoveryWindowProgressedCount}; recovery_window_success_count={snapshot.RecoveryWindowSuccessCount}; active_recovery_window_epoch={FormatFrameIdForPressureLog(snapshot.ActiveRecoveryWindowEpoch)}; active_recovery_window_recovery_frame_id={FormatFrameIdForPressureLog(snapshot.ActiveRecoveryWindowRecoveryFrameId)}; recovery_window_contiguous_follower_apply_count={snapshot.RecoveryWindowContiguousFollowerApplyCount}; continuity_loss_ticks={snapshot.ContinuityLossTicks}; warmup_ticks={snapshot.WarmupTicks}; before_first_visible_apply_ticks={snapshot.BeforeFirstVisibleApplyTicks}; after_visible_recovery_frame_ticks={snapshot.AfterVisibleRecoveryFrameTicks}; after_visible_recovery_frame_suppressed_due_to_success_count={snapshot.AfterVisibleRecoveryFrameSuppressedDueToSuccessCount}; slow_apply_cadence_ticks={snapshot.SlowApplyCadenceTicks}; high_frame_age_ticks={snapshot.HighFrameAgeTicks}; high_frame_age_suppressed_due_to_visible_progress_count={snapshot.HighFrameAgeSuppressedDueToVisibleProgressCount}; high_frame_age_suppressed_due_to_head_advance_count={snapshot.HighFrameAgeSuppressedDueToHeadAdvanceCount}; actionable_high_frame_age_count={snapshot.ActionableHighFrameAgeCount}; post_recovery_age_grace_active={(snapshot.PostRecoveryAgeGraceActive ? 1 : 0)}; post_recovery_age_grace_suppressed_count={snapshot.PostRecoveryAgeGraceSuppressedCount}; post_recovery_high_frame_age_suppressed_ticks={snapshot.PostRecoveryHighFrameAgeSuppressedTicks}; repeated_stale_drops_ticks={snapshot.RepeatedStaleDropsTicks}; viewer_stale_drops={helperRemoteViewerStaleDropCount}; viewer_soft_stale_drops={helperRemoteViewerSoftStaleDropCount}; viewer_actionable_stale_drops={GetActionableStaleDropCount(helperRemoteViewerStaleDropCount, helperRemoteViewerSoftStaleDropCount)}; current_epoch_stale_drops={helperRemoteCurrentPressureEpochStaleDropCount}; current_epoch_soft_stale_drops={helperRemoteCurrentPressureEpochSoftStaleDropCount}; current_epoch_actionable_stale_drops={GetActionableStaleDropCount(helperRemoteCurrentPressureEpochStaleDropCount, helperRemoteCurrentPressureEpochSoftStaleDropCount)}; bridge_health_ticks={snapshot.BridgeHealthTicks}; bridge_health_advisory_count={snapshot.BridgeHealthAdvisoryCount}; bridge_health_actionable_count={snapshot.BridgeHealthActionableCount}; bridge_health_quarantine_suppressed_count={snapshot.BridgeHealthQuarantineSuppressedCount}; bridge_health_became_actionable_without_queue_or_drop_count={snapshot.BridgeHealthActionableWithoutQueueOrDropCount}; baseline_established={(snapshot.BaselineEstablished ? 1 : 0)}; baseline_capture_to_render_ms={snapshot.BaselineCaptureToRenderMs}; age_excess_ms={snapshot.AgeExcessMs}; progress_stall_ms={snapshot.ProgressStallMs}; baseline_reseed_in_progress={(snapshot.BaselineReseedInProgress ? 1 : 0)}; age_pressure_consecutive_count={snapshot.AgePressureConsecutiveCount}; cadence_pressure_consecutive_count={snapshot.CadencePressureConsecutiveCount}; catch_up_suppressed_due_to_progress_count={snapshot.CatchUpSuppressedDueToProgressCount}; baseline_frozen_due_to_stall_count={snapshot.BaselineFrozenDueToStallCount}; baseline_reseed_after_recovery_count={snapshot.BaselineReseedAfterRecoveryCount}; cadence_stall_window_count={snapshot.CadenceStallWindowCount}; cadence_stall_trigger_count={snapshot.CadenceStallTriggerCount}; time_spent_in_helper_warmup_ms={snapshot.TimeSpentInHelperWarmupMs}; visible_applies_during_settle_count={snapshot.VisibleAppliesDuringSettleCount}; post_recovery_settle_window_count={snapshot.PostRecoverySettleWindowCount}; post_recovery_settle_window_success_count={snapshot.PostRecoverySettleWindowSuccessCount}; post_recovery_settle_window_timeout_count={snapshot.PostRecoverySettleWindowTimeoutCount}; visible_applies_before_pressure_reenabled={snapshot.VisibleAppliesBeforePressureReenabled}; dominant_pressure_blocker={snapshot.DominantPressureBlocker}");
     }
 
     private HelperRemoteScreenSharePressureDiagnosticsSnapshot BuildHelperRemoteScreenSharePressureDiagnosticsSnapshot_NoLock()
@@ -5326,6 +5407,27 @@ public sealed partial class SessionRuntime
     private void NotifyLocalScreenShareStoppedForTeardown(string reason, object? sender)
     {
         screenShareControlHost.NotifyRemoteScreenShareStopped(reason, sender, localStop: true);
+    }
+
+    private static void ForceCloseWindowsGraphicsCaptureLeases(string reason)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var safeReason = SensitiveDataRedactor.Redact(
+            string.IsNullOrWhiteSpace(reason) ? "unspecified" : reason.Trim());
+        try
+        {
+            WindowsGraphicsCaptureRawSource.ForceCloseAllScreenShareLeases(safeReason);
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Info(
+                "ScreenShareTransport",
+                $"event=screenshare_wgc_force_close_all_failed; reason={safeReason}; ex={ex.GetType().Name}");
+        }
     }
 
     private void NotifyRemoteScreenShareStoppedCore(string reason, object? sender, bool localStop)
@@ -8557,6 +8659,8 @@ public sealed partial class SessionRuntime
         {
             EnsureRemoteControlStoppedForAuthorizationLoss("capability_lost");
         }
+
+        SyncTransportScreenShareCursorCaptureForRemoteControl("refresh_capabilities");
     }
 
     private static void EnsureSessionSecurityTransport(ISignalingTransport signalingTransport)
@@ -8641,9 +8745,44 @@ public sealed partial class SessionRuntime
                 reason));
         remoteControlSessionState = transition.NextState;
         UpdateRemoteControlStatusHint(reason, remoteControlSessionState.ControlState);
+        SyncTransportScreenShareCursorCaptureForRemoteControl(reason);
 
         LogRemoteControlTransition(transition.PreviousState, remoteControlSessionState, reason);
         NotifyRemoteControlStateChanged();
+    }
+
+    private void SyncTransportScreenShareCursorCaptureForRemoteControl(string? reason)
+    {
+        if (role != SessionRuntimeRole.Helpee)
+        {
+            return;
+        }
+
+        var passiveOverlayActive = ShouldUsePassiveScreenShareCursorOverlayForTransport();
+        var shouldEnableCapturedCursor =
+            remoteControlSessionState.ControlState != ControlState.Active &&
+            !passiveOverlayActive;
+        var normalizedReason = string.IsNullOrWhiteSpace(reason)
+            ? "remote_control_state"
+            : reason.Trim();
+        var applied = transportScreenShareCoordinator.TrySetCapturedCursorEnabledForRemoteControl(
+            shouldEnableCapturedCursor,
+            normalizedReason);
+        LocalOperationalLog.Info(
+            "RemoteControl",
+            $"event=screen_share_cursor_capture_sync; role={role}; state={remoteControlSessionState.ControlState}; passive_cursor_overlay_active={(passiveOverlayActive ? 1 : 0)}; captured_cursor_enabled={(shouldEnableCapturedCursor ? 1 : 0)}; applied={(applied ? 1 : 0)}; reason={normalizedReason}");
+    }
+
+    private bool ShouldUsePassiveScreenShareCursorOverlayForTransport()
+    {
+        return role == SessionRuntimeRole.Helpee &&
+               state == SessionRuntimeState.Connected &&
+               remoteControlSessionState.ControlState != ControlState.Active &&
+               FeatureFlags.EnableScreenShareTransport &&
+               FeatureFlags.EnableScreenShareCapture &&
+               CanPerform(SessionCapability.ScreenShare) &&
+               transport is IScreenShareCursorOverlayCapabilityProvider cursorOverlayProvider &&
+               cursorOverlayProvider.SessionSupportsScreenShareCursorOverlay;
     }
 
     private void ResetRemoteControlRequestScopedTracking(string reason)

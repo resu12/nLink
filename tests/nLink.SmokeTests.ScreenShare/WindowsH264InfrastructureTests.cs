@@ -102,6 +102,144 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void WindowsGraphicsCaptureRawSource_TargetSizeHint_RequestsGpuScaleReadbackWithoutFramePoolResize()
+    {
+        var target = WindowsGraphicsCaptureRawSource.ResolveFramePoolTargetForTesting(
+            sourceWidth: 1920,
+            sourceHeight: 1080,
+            targetWidth: 1440,
+            targetHeight: 810,
+            disabledAfterFailure: false);
+
+        Assert.Equal(1440, target.Width);
+        Assert.Equal(810, target.Height);
+        Assert.True(target.GpuScaleRequested);
+        Assert.True(target.UsesGpuScaleReadback);
+        Assert.False(target.UsesTargetSizedFramePool);
+        Assert.Equal("(none)", target.FallbackReason);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void WindowsGraphicsCaptureRawSource_TargetSizeHint_FallsBackWithSafeStatus()
+    {
+        var target = WindowsGraphicsCaptureRawSource.ResolveFramePoolTargetForTesting(
+            sourceWidth: 1920,
+            sourceHeight: 1080,
+            targetWidth: 2560,
+            targetHeight: 1440,
+            disabledAfterFailure: false);
+
+        Assert.Equal(1920, target.Width);
+        Assert.Equal(1080, target.Height);
+        Assert.True(target.GpuScaleRequested);
+        Assert.False(target.UsesTargetSizedFramePool);
+        Assert.Equal("target_not_smaller", target.FallbackReason);
+        Assert.DoesNotContain("[redacted]", NLink.Core.Logging.SensitiveDataRedactor.Redact($"raw_source_gpu_scale_fallback_reason={target.FallbackReason}"), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void WindowsGraphicsCaptureRawSource_TargetSizeRecreateFailure_FallsBackToFullSizeTarget()
+    {
+        var target = WindowsGraphicsCaptureRawSource.ResolveFramePoolTargetAfterGpuScaleFallbackForTesting(
+            sourceWidth: 2560,
+            sourceHeight: 1440,
+            targetWidth: 1280,
+            targetHeight: 720,
+            fallbackReason: "framepool_recreate_failed");
+
+        Assert.Equal(2560, target.Width);
+        Assert.Equal(1440, target.Height);
+        Assert.True(target.GpuScaleRequested);
+        Assert.False(target.UsesTargetSizedFramePool);
+        Assert.Equal("framepool_recreate_failed", target.FallbackReason);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void WindowsGraphicsCaptureRawSource_TargetSizeRecreateFailure_ReusesExistingFullSizePool()
+    {
+        Assert.True(WindowsGraphicsCaptureRawSource.CanReuseExistingFullSizeFramePoolForTesting(
+            contentWidth: 2560,
+            contentHeight: 1440,
+            currentPoolWidth: 2560,
+            currentPoolHeight: 1440));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void WindowsGraphicsCaptureRawSource_ContentSizeChange_DoesNotReuseStaleFullSizePool()
+    {
+        Assert.False(WindowsGraphicsCaptureRawSource.CanReuseExistingFullSizeFramePoolForTesting(
+            contentWidth: 1920,
+            contentHeight: 1080,
+            currentPoolWidth: 2560,
+            currentPoolHeight: 1440));
+
+        Assert.False(WindowsGraphicsCaptureRawSource.CanReuseExistingFullSizeFramePoolForTesting(
+            contentWidth: 2560,
+            contentHeight: 1440,
+            currentPoolWidth: 1280,
+            currentPoolHeight: 720));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void WindowsGraphicsCaptureRawSource_TargetSizeFallbackReason_IsSafeForDiagnostics()
+    {
+        var target = WindowsGraphicsCaptureRawSource.ResolveFramePoolTargetAfterGpuScaleFallbackForTesting(
+            sourceWidth: 1920,
+            sourceHeight: 1080,
+            targetWidth: 1440,
+            targetHeight: 810,
+            fallbackReason: "Object name: 'ObjectReference'.");
+
+        Assert.Equal(1920, target.Width);
+        Assert.Equal(1080, target.Height);
+        Assert.Equal("scale_pipeline_failed", target.FallbackReason);
+        Assert.DoesNotContain("[redacted]", NLink.Core.Logging.SensitiveDataRedactor.Redact($"raw_source_gpu_scale_fallback_reason={target.FallbackReason}"), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void WindowsGraphicsCaptureRawSource_ForceCloseAllScreenShareLeases_IsIdempotentWhenEmpty()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        WindowsGraphicsCaptureRawSource.ForceCloseAllScreenShareLeases("test_cleanup_before");
+        var before = WindowsGraphicsCaptureRawSource.GetSessionLeaseDiagnosticsForTesting();
+
+        var closed = WindowsGraphicsCaptureRawSource.ForceCloseAllScreenShareLeases("test_empty_force_close");
+        var after = WindowsGraphicsCaptureRawSource.GetSessionLeaseDiagnosticsForTesting();
+
+        Assert.Equal(0, closed);
+        Assert.Equal(0, after.ActiveSessionLeaseCount);
+        Assert.True(after.ForceCloseCount >= before.ForceCloseCount + 1);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void WindowsGraphicsCaptureRawSource_OwnerDispatcher_RunsLifecycleWorkOnDedicatedThread()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var diagnostics = WindowsGraphicsCaptureRawSource.RunOwnerDispatcherRoundTripForTesting();
+
+        Assert.True(diagnostics.OwnerThreadId > 0);
+        Assert.Equal(diagnostics.OwnerThreadId, diagnostics.WorkThreadId);
+        Assert.True(diagnostics.WorkRanOnOwnerThread);
+        Assert.True(diagnostics.OwnerThreadIsDedicated);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void DesktopDuplicationRawSource_IsSupported_OnlyForDisplayTargets()
     {
         if (!OperatingSystem.IsWindows())
@@ -415,6 +553,65 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void MediaFoundationH264FrameEncoder_OptimizedNv12Conversion_MatchesLegacyForPattern()
+    {
+        const int width = 6;
+        const int height = 4;
+        const int stride = (width * 4) + 8;
+        var bgra = new byte[stride * height];
+
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                var offset = (y * stride) + (x * 4);
+                bgra[offset] = (byte)((x * 17 + y * 29) & 0xFF);
+                bgra[offset + 1] = (byte)((x * 31 + y * 11 + 7) & 0xFF);
+                bgra[offset + 2] = (byte)((x * 13 + y * 23 + 19) & 0xFF);
+                bgra[offset + 3] = 0xFF;
+            }
+
+            for (var padding = width * 4; padding < stride; padding++)
+            {
+                bgra[(y * stride) + padding] = 0xCD;
+            }
+        }
+
+        var legacy = MediaFoundationH264FrameEncoder.ConvertBgraBufferToNv12LegacyForTesting(
+            bgra,
+            stride,
+            width,
+            height);
+        var optimized = MediaFoundationH264FrameEncoder.ConvertBgraBufferToNv12OptimizedForTesting(
+            bgra,
+            stride,
+            width,
+            height);
+
+        Assert.Equal(legacy, optimized);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void MediaFoundationH264FrameEncoder_SameSizeBgra_UsesDirectNv12Preprocess()
+    {
+        Assert.True(MediaFoundationH264FrameEncoder.CanUseDirectNv12PreprocessForTesting(
+            sourceWidth: 1440,
+            sourceHeight: 810,
+            System.Drawing.Imaging.PixelFormat.Format32bppPArgb,
+            targetWidth: 1440,
+            targetHeight: 810));
+
+        Assert.False(MediaFoundationH264FrameEncoder.CanUseDirectNv12PreprocessForTesting(
+            sourceWidth: 1920,
+            sourceHeight: 1080,
+            System.Drawing.Imaging.PixelFormat.Format32bppPArgb,
+            targetWidth: 1440,
+            targetHeight: 810));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task WindowsH264ScreenCaptureSource_PreviewLatestOnlyRawFrameGate_EncodesFirstAndNewestPendingFrame()
     {
         await using var rawSource = new FakeWindowsRawCaptureSource();
@@ -450,7 +647,7 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task WindowsH264ScreenCaptureSource_TransportRawCapture_StartsEncodingWithoutWaitingForTransportPacingSlot()
+    public async Task WindowsH264ScreenCaptureSource_TransportRawCapture_CoalescesOrdinaryFramesBeforeEncodeCadenceSlot()
     {
         await using var rawSource = new FakeWindowsRawCaptureSource();
         await using var encoder = new FakeWindowsH264FrameEncoder();
@@ -473,21 +670,30 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
         var startedAt = Stopwatch.StartNew();
         rawSource.RaiseFrame(new WindowsRawCaptureFrame(new DrawingBitmap(2, 1), capturedTsUtcMs: 101));
 
+        await Task.Delay(200);
+        Assert.Single(received);
+
+        var freshnessSource = Assert.IsAssignableFrom<IScreenCaptureFreshnessMetricsSource>(source);
+        var pendingMetrics = freshnessSource.GetFreshnessMetricsSnapshot();
+        Assert.Equal(1, pendingMetrics.PendingRawFrameCount);
+        Assert.True(pendingMetrics.RawSlotCoalescingActive);
+
         await WaitUntilAsync(() => received.Count == 2, TimeSpan.FromSeconds(2));
         startedAt.Stop();
 
-        var freshnessSource = Assert.IsAssignableFrom<IScreenCaptureFreshnessMetricsSource>(source);
         var metrics = freshnessSource.GetFreshnessMetricsSnapshot();
 
         Assert.True(
-            startedAt.Elapsed < TimeSpan.FromMilliseconds(600),
-            $"Expected transport raw capture to encode immediately without a transport pacing wait, but elapsed {startedAt.Elapsed.TotalMilliseconds:F0} ms.");
+            startedAt.Elapsed >= TimeSpan.FromMilliseconds(700),
+            $"Expected transport raw capture to wait for the encode cadence slot, but elapsed {startedAt.Elapsed.TotalMilliseconds:F0} ms.");
         Assert.Equal(new[] { 1, 2 }, received.Select(static frame => frame.Width).ToArray());
         Assert.Equal(new[] { 1, 2 }, encoder.EncodedWidths.ToArray());
         Assert.Equal(0, metrics.PendingRawFrameCount);
         Assert.Equal(0, metrics.SupersededPendingRawFrameCount);
         Assert.Equal(0, metrics.RawFramesDeferredToEncodeSlot);
         Assert.Equal(0, metrics.RawFramesReplacedBeforeEncodeSlot);
+        Assert.Equal(2, metrics.RawCaptureEventCount);
+        Assert.Equal(1, metrics.EncodeCadenceTargetFps);
         Assert.False(metrics.RawSlotCoalescingActive);
     }
 
@@ -518,7 +724,153 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task WindowsH264ScreenCaptureSource_TransportRawCapture_PreservesFirstPendingOrdinaryCandidateWhileEncodeIsInFlight()
+    public async Task WindowsH264ScreenCaptureSource_TransportRawCapture_AppliesUpstreamRawCadenceTarget()
+    {
+        await using var rawSource = new FakeWindowsRawCaptureSource();
+        await using var encoder = new FakeWindowsH264FrameEncoder();
+        await using var source = new WindowsH264ScreenCaptureSource(
+            ScreenCaptureTargetSelection.PrimaryDisplay,
+            rawCaptureSourceFactory: () => rawSource,
+            encoderFactory: () => encoder,
+            sourceRole: "transport");
+
+        source.SetCaptureFrameRateHint(30);
+        await source.StartAsync(CancellationToken.None);
+
+        Assert.Equal(8, rawSource.RawCadenceTargetFps);
+
+        source.SetCaptureFrameRateHint(3);
+        source.SetTransportTuningLevel(ScreenShareTransportTuningLevel.BandwidthReduced);
+
+        Assert.Equal(3, rawSource.RawCadenceTargetFps);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task WindowsH264ScreenCaptureSource_TransportRawCapture_AppliesUpstreamRawOutputSizeHint()
+    {
+        await using var rawSource = new FakeWindowsRawCaptureSource();
+        await using var encoder = new FakeWindowsH264FrameEncoder();
+        await using var source = new WindowsH264ScreenCaptureSource(
+            ScreenCaptureTargetSelection.PrimaryDisplay,
+            rawCaptureSourceFactory: () => rawSource,
+            encoderFactory: () => encoder,
+            sourceRole: "transport");
+
+        await source.StartAsync(CancellationToken.None);
+        Assert.Equal(-1, rawSource.OutputWidth);
+        Assert.Equal(-1, rawSource.OutputHeight);
+
+        rawSource.RaiseFrame(new WindowsRawCaptureFrame(new DrawingBitmap(1920, 1080), capturedTsUtcMs: 150));
+
+        await WaitUntilAsync(
+            () => rawSource.OutputWidth == 1440 && rawSource.OutputHeight == 810,
+            TimeSpan.FromSeconds(2));
+
+        Assert.Equal("active_encode_profile", rawSource.OutputSizeHintReason);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task WindowsH264ScreenCaptureSource_TransportRawCapture_KeyFrameUrgencyForcesNextRawCapture()
+    {
+        await using var rawSource = new FakeWindowsRawCaptureSource();
+        await using var encoder = new FakeWindowsH264FrameEncoder();
+        await using var source = new WindowsH264ScreenCaptureSource(
+            ScreenCaptureTargetSelection.PrimaryDisplay,
+            rawCaptureSourceFactory: () => rawSource,
+            encoderFactory: () => encoder,
+            sourceRole: "transport");
+
+        await source.StartAsync(CancellationToken.None);
+        var initialForceCount = rawSource.ForceNextRawCaptureCount;
+
+        source.RequestKeyFrame(ScreenSharePressureProtocol.PressureReasonContinuityLoss);
+
+        Assert.True(rawSource.ForceNextRawCaptureCount > initialForceCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task WindowsH264ScreenCaptureSource_TransportRawCapture_ReportsRawSourceReadbackMetrics()
+    {
+        await using var rawSource = new FakeWindowsRawCaptureSource
+        {
+            RawSourceFrameArrivedCount = 10,
+            RawSourceFramesSkippedBeforeReadback = 6,
+            RawSourceFramesReadbackCount = 4,
+            RawSourceReadbackFps = 7.5,
+            RawSourceLastReadbackDurationMs = 12,
+            RawSourceAverageReadbackDurationMs = 9.5,
+            RawSourceUrgentBypassCount = 2,
+        };
+        rawSource.SetRawCaptureOutputSizeHint(1440, 810, "test");
+        await using var encoder = new FakeWindowsH264FrameEncoder();
+        await using var source = new WindowsH264ScreenCaptureSource(
+            ScreenCaptureTargetSelection.PrimaryDisplay,
+            rawCaptureSourceFactory: () => rawSource,
+            encoderFactory: () => encoder,
+            sourceRole: "transport");
+
+        await source.StartAsync(CancellationToken.None);
+
+        var metrics = Assert.IsAssignableFrom<IScreenCaptureFreshnessMetricsSource>(source).GetFreshnessMetricsSnapshot();
+
+        Assert.Equal(10, metrics.RawSourceFrameArrivedCount);
+        Assert.Equal(6, metrics.RawSourceFramesSkippedBeforeReadback);
+        Assert.Equal(4, metrics.RawSourceFramesReadbackCount);
+        Assert.Equal(7.5, metrics.RawSourceReadbackFps);
+        Assert.Equal(12, metrics.RawSourceLastReadbackDurationMs);
+        Assert.Equal(9.5, metrics.RawSourceAverageReadbackDurationMs);
+        Assert.Equal(rawSource.RawCadenceTargetFps, metrics.RawSourceCadenceTargetFps);
+        Assert.Equal(2, metrics.RawSourceUrgentBypassCount);
+        Assert.Equal(1440, metrics.RawSourceOutputWidth);
+        Assert.Equal(810, metrics.RawSourceOutputHeight);
+        Assert.False(metrics.RawSourceGpuScaleEnabled);
+        Assert.Equal("fake", metrics.RawSourceGpuScaleFallbackReason);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void WindowsRawCaptureCadenceGate_SkipsBeforeReadbackUntilTargetInterval()
+    {
+        var gate = new WindowsRawCaptureCadenceGate();
+        gate.SetCadence(8);
+        var now = DateTimeOffset.FromUnixTimeMilliseconds(10_000);
+
+        Assert.False(gate.ShouldSkipBeforeReadback(now, hasDeliveredFrame: false));
+        gate.RecordReadback(TimeSpan.FromMilliseconds(4), now);
+        gate.RecordFrameArrived();
+
+        Assert.True(gate.ShouldSkipBeforeReadback(now.AddMilliseconds(50), hasDeliveredFrame: true));
+        Assert.False(gate.ShouldSkipBeforeReadback(now.AddMilliseconds(130), hasDeliveredFrame: true));
+
+        var metrics = gate.GetSnapshot();
+        Assert.Equal(1, metrics.FramesSkippedBeforeReadback);
+        Assert.Equal(8, metrics.CadenceTargetFps);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void WindowsRawCaptureCadenceGate_UrgentFrameBypassesCadence()
+    {
+        var gate = new WindowsRawCaptureCadenceGate();
+        gate.SetCadence(8);
+        var now = DateTimeOffset.FromUnixTimeMilliseconds(20_000);
+
+        Assert.False(gate.ShouldSkipBeforeReadback(now, hasDeliveredFrame: false));
+        gate.RecordReadback(TimeSpan.FromMilliseconds(4), now);
+        gate.ForceNext();
+
+        Assert.False(gate.ShouldSkipBeforeReadback(now.AddMilliseconds(20), hasDeliveredFrame: true));
+
+        var metrics = gate.GetSnapshot();
+        Assert.Equal(1, metrics.UrgentBypassCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task WindowsH264ScreenCaptureSource_TransportRawCapture_UsesNewestPendingOrdinaryCandidateBeforeEncode()
     {
         await using var rawSource = new FakeWindowsRawCaptureSource();
         await using var encoder = new BlockingWindowsH264FrameEncoder();
@@ -549,10 +901,90 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
         var freshnessSource = Assert.IsAssignableFrom<IScreenCaptureFreshnessMetricsSource>(source);
         var metrics = freshnessSource.GetFreshnessMetricsSnapshot();
 
-        Assert.Equal(new[] { 1, 2 }, received.Select(static frame => frame.Width).ToArray());
-        Assert.Equal(new[] { 1, 2 }, encoder.EncodedWidths.ToArray());
+        Assert.Equal(new[] { 1, 3 }, received.Select(static frame => frame.Width).ToArray());
+        Assert.Equal(new[] { 1, 3 }, encoder.EncodedWidths.ToArray());
         Assert.True(metrics.RawFramesDeferredToEncodeSlot >= 1);
-        Assert.Equal(0, metrics.RawFramesReplacedBeforeEncodeSlot);
+        Assert.True(metrics.RawFramesReplacedBeforeEncodeSlot >= 1);
+        Assert.True(metrics.RawFramesSkippedBeforeEncode >= 1);
+        Assert.False(metrics.RawSlotCoalescingActive);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task WindowsH264ScreenCaptureSource_TransportRawCapture_KeyFrameUrgencyBypassesEncodeCadenceGate()
+    {
+        await using var rawSource = new FakeWindowsRawCaptureSource();
+        await using var encoder = new FakeWindowsH264FrameEncoder();
+        await using var source = new WindowsH264ScreenCaptureSource(
+            ScreenCaptureTargetSelection.PrimaryDisplay,
+            rawCaptureSourceFactory: () => rawSource,
+            encoderFactory: () => encoder,
+            sourceRole: "transport");
+
+        source.SetCaptureFrameRateHint(1);
+        source.SetTransportTuningLevel(ScreenShareTransportTuningLevel.BandwidthReduced);
+
+        var received = new List<ScreenCaptureFrameEventArgs>();
+        source.FrameArrived += (_, frame) => received.Add(frame);
+
+        await source.StartAsync(CancellationToken.None);
+        rawSource.RaiseFrame(new WindowsRawCaptureFrame(new DrawingBitmap(1, 1), capturedTsUtcMs: 150));
+        await WaitUntilAsync(() => received.Count == 1, TimeSpan.FromSeconds(2));
+
+        var startedAt = Stopwatch.StartNew();
+        source.RequestKeyFrame(ScreenSharePressureProtocol.PressureReasonContinuityLoss);
+        rawSource.RaiseFrame(new WindowsRawCaptureFrame(new DrawingBitmap(2, 1), capturedTsUtcMs: 151));
+        await WaitUntilAsync(() => received.Count == 2, TimeSpan.FromSeconds(2));
+        startedAt.Stop();
+
+        var metrics = Assert.IsAssignableFrom<IScreenCaptureFreshnessMetricsSource>(source).GetFreshnessMetricsSnapshot();
+
+        Assert.True(
+            startedAt.Elapsed < TimeSpan.FromMilliseconds(600),
+            $"Expected recovery/keyframe urgency to bypass the encode cadence gate, but elapsed {startedAt.Elapsed.TotalMilliseconds:F0} ms.");
+        Assert.Equal(new[] { 1, 2 }, received.Select(static frame => frame.Width).ToArray());
+        Assert.Equal(new[] { true, true }, encoder.ForceKeyFrameFlags.ToArray());
+        Assert.False(metrics.RawSlotCoalescingActive);
+        Assert.True(metrics.SenderContinuityRecoveryActive);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task WindowsH264ScreenCaptureSource_TransportRawCapture_EncoderRebuildUrgencyBypassesEncodeCadenceGate()
+    {
+        await using var rawSource = new FakeWindowsRawCaptureSource();
+        await using var encoder = new FakeWindowsH264FrameEncoder
+        {
+            RuntimeMotionIntegrityEncoderRebuildPending = true,
+        };
+        await using var source = new WindowsH264ScreenCaptureSource(
+            ScreenCaptureTargetSelection.PrimaryDisplay,
+            rawCaptureSourceFactory: () => rawSource,
+            encoderFactory: () => encoder,
+            sourceRole: "transport");
+
+        source.SetCaptureFrameRateHint(1);
+        source.SetTransportTuningLevel(ScreenShareTransportTuningLevel.BandwidthReduced);
+
+        var received = new List<ScreenCaptureFrameEventArgs>();
+        source.FrameArrived += (_, frame) => received.Add(frame);
+
+        await source.StartAsync(CancellationToken.None);
+        rawSource.RaiseFrame(new WindowsRawCaptureFrame(new DrawingBitmap(1, 1), capturedTsUtcMs: 160));
+        await WaitUntilAsync(() => received.Count == 1, TimeSpan.FromSeconds(2));
+
+        var startedAt = Stopwatch.StartNew();
+        rawSource.RaiseFrame(new WindowsRawCaptureFrame(new DrawingBitmap(2, 1), capturedTsUtcMs: 161));
+        await WaitUntilAsync(() => received.Count == 2, TimeSpan.FromSeconds(2));
+        startedAt.Stop();
+
+        var metrics = Assert.IsAssignableFrom<IScreenCaptureFreshnessMetricsSource>(source).GetFreshnessMetricsSnapshot();
+
+        Assert.True(
+            startedAt.Elapsed < TimeSpan.FromMilliseconds(600),
+            $"Expected pending encoder rebuild/config emission to bypass the encode cadence gate, but elapsed {startedAt.Elapsed.TotalMilliseconds:F0} ms.");
+        Assert.Equal(new[] { 1, 2 }, received.Select(static frame => frame.Width).ToArray());
+        Assert.True(metrics.MotionIntegrityEncoderRebuildPending);
         Assert.False(metrics.RawSlotCoalescingActive);
     }
 
@@ -1277,7 +1709,7 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
         }
     }
 
-    private sealed class FakeWindowsRawCaptureSource : IWindowsRawCaptureSource, IWindowsRawCaptureBackendDescriptor
+    private sealed class FakeWindowsRawCaptureSource : IWindowsRawCaptureSource, IWindowsRawCaptureBackendDescriptor, IWindowsRawCaptureCadenceControl, IWindowsRawCaptureOutputControl
     {
         public FakeWindowsRawCaptureSource(WindowsRawCaptureBackendKind backendKind = WindowsRawCaptureBackendKind.Unknown)
         {
@@ -1295,6 +1727,30 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
         public int DisposeCallCount { get; private set; }
 
         public Exception? StartException { get; set; }
+
+        public int RawCadenceTargetFps { get; private set; }
+
+        public int ForceNextRawCaptureCount { get; private set; }
+
+        public long RawSourceFrameArrivedCount { get; set; }
+
+        public long RawSourceFramesSkippedBeforeReadback { get; set; }
+
+        public long RawSourceFramesReadbackCount { get; set; }
+
+        public double RawSourceReadbackFps { get; set; }
+
+        public long RawSourceLastReadbackDurationMs { get; set; } = -1;
+
+        public double RawSourceAverageReadbackDurationMs { get; set; } = -1;
+
+        public long RawSourceUrgentBypassCount { get; set; }
+
+        public int OutputWidth { get; private set; } = -1;
+
+        public int OutputHeight { get; private set; } = -1;
+
+        public string OutputSizeHintReason { get; private set; } = string.Empty;
 
         public event EventHandler<WindowsRawCaptureFrameEventArgs>? FrameArrived;
         public event EventHandler<WindowsRawCaptureFailureEventArgs>? CaptureFailed;
@@ -1323,6 +1779,40 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
             return false;
         }
 
+        public void SetRawCaptureCadence(int targetFramesPerSecond, string reason)
+        {
+            RawCadenceTargetFps = Math.Max(0, targetFramesPerSecond);
+        }
+
+        public void ForceNextRawCapture(string reason)
+        {
+            ForceNextRawCaptureCount++;
+        }
+
+        public void SetRawCaptureOutputSizeHint(int targetWidth, int targetHeight, string reason)
+        {
+            OutputWidth = targetWidth;
+            OutputHeight = targetHeight;
+            OutputSizeHintReason = reason;
+        }
+
+        public WindowsRawCaptureRuntimeMetrics GetRawCaptureRuntimeMetricsSnapshot()
+        {
+            return new WindowsRawCaptureRuntimeMetrics(
+                FrameArrivedCount: RawSourceFrameArrivedCount,
+                FramesSkippedBeforeReadback: RawSourceFramesSkippedBeforeReadback,
+                FramesReadbackCount: RawSourceFramesReadbackCount,
+                ReadbackFps: RawSourceReadbackFps,
+                LastReadbackDurationMs: RawSourceLastReadbackDurationMs,
+                AverageReadbackDurationMs: RawSourceAverageReadbackDurationMs,
+                CadenceTargetFps: RawCadenceTargetFps,
+                UrgentBypassCount: RawSourceUrgentBypassCount,
+                OutputWidth: OutputWidth,
+                OutputHeight: OutputHeight,
+                GpuScaleEnabled: false,
+                GpuScaleFallbackReason: "fake");
+        }
+
         public void RaiseFrame(WindowsRawCaptureFrame frame)
         {
             FrameArrived?.Invoke(this, new WindowsRawCaptureFrameEventArgs(frame));
@@ -1340,11 +1830,13 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
         }
     }
 
-    private sealed class FakeWindowsH264FrameEncoder : IWindowsH264FrameEncoder
+    private sealed class FakeWindowsH264FrameEncoder : IWindowsH264FrameEncoder, IWindowsH264FrameEncoderMetricsSource
     {
         private readonly List<int> encodedWidths = new();
         private readonly List<long> encodedStreamEpochs = new();
         private readonly List<bool> forceKeyFrameFlags = new();
+        private bool runtimeSenderContinuityRecoveryActive;
+        private string runtimeSenderContinuityLossReason = string.Empty;
 
         public bool IsSupported => true;
 
@@ -1359,6 +1851,8 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
         public string LastRecoveryBurstReason { get; private set; } = string.Empty;
 
         public long LastRecoveryBurstEpoch { get; private set; }
+
+        public bool RuntimeMotionIntegrityEncoderRebuildPending { get; set; }
 
         public ValueTask<WindowsH264EncodedFrame?> EncodeAsync(
             WindowsRawCaptureFrame frame,
@@ -1396,6 +1890,25 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
             RecoveryBurstStartCount++;
             LastRecoveryBurstReason = reason;
             LastRecoveryBurstEpoch = streamEpoch > 0 ? streamEpoch : 1;
+            runtimeSenderContinuityRecoveryActive = true;
+            runtimeSenderContinuityLossReason = reason;
+        }
+
+        public WindowsH264FrameEncoderRuntimeMetrics GetRuntimeMetricsSnapshot()
+        {
+            return new WindowsH264FrameEncoderRuntimeMetrics(
+                EncoderPath: "fake",
+                EmittedDisplayableFrames: encodedWidths.Count,
+                DisplayableFrameRatio: encodedWidths.Count > 0 ? 1 : 0,
+                IdrFramesEmitted: encodedWidths.Count,
+                AverageEncodedFrameBytes: 3,
+                TransportIpOnlyMode: true,
+                LastAccessUnitKind: "idr",
+                SenderContinuityRecoveryActive: runtimeSenderContinuityRecoveryActive,
+                SenderContinuityLossCount: runtimeSenderContinuityRecoveryActive ? 1 : 0,
+                LastSenderContinuityLossReason: runtimeSenderContinuityLossReason,
+                LastEncodeTotalDurationMs: 0,
+                MotionIntegrityEncoderRebuildPending: RuntimeMotionIntegrityEncoderRebuildPending);
         }
     }
 

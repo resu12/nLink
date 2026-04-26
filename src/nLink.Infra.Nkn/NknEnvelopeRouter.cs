@@ -49,6 +49,7 @@ internal sealed class NknEnvelopeRouter
             case MsgType.ScreenShareVideoStreamConfig:
             case MsgType.ScreenShareVideoKeyframeRequest:
             case MsgType.ScreenShareRecoveryReceipt:
+            case MsgType.ScreenShareCursorState:
                 controlChannel.Handle(inboundContext);
                 break;
             case MsgType.ScreenShareFrame:

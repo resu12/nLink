@@ -232,9 +232,18 @@ internal static void ReportHelperRemoteRecoveryWindowStateChanged(
             abortReason);
     }
 
-internal static void ReportHelperRemoteStaleDrop(SessionRuntime runtime, long renderedAgeMs, long streamEpoch)
+internal static void ReportHelperRemoteStaleDrop(
+    SessionRuntime runtime,
+    long renderedAgeMs,
+    long streamEpoch,
+    bool referenceContinuityPreserved = false)
     {
-        InvokePrivateMethod(runtime, "ReportHelperRemoteScreenShareStaleFrameDropped", renderedAgeMs, streamEpoch);
+        InvokePrivateMethod(
+            runtime,
+            "ReportHelperRemoteScreenShareStaleFrameDropped",
+            renderedAgeMs,
+            streamEpoch,
+            referenceContinuityPreserved);
     }
 
 internal static ScreenSharePressureStateV1 WaitForSinglePressureState(List<ScreenSharePressureStateV1> sentMessages)
@@ -371,6 +380,7 @@ internal sealed class ScreenShareSignalingTransportDouble : ISignalingTransport,
         public List<ScreenShareRecoveryReceiptV1> SentRecoveryReceipts { get; } = new();
         public List<ScreenShareVideoStreamConfigV1> SentVideoStreamConfigs { get; } = new();
         public List<ScreenShareVideoKeyframeRequestV1> SentVideoKeyframeRequests { get; } = new();
+        public List<ScreenShareCursorStateV1> SentCursorStates { get; } = new();
 
         public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
         public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
@@ -385,6 +395,7 @@ internal sealed class ScreenShareSignalingTransportDouble : ISignalingTransport,
         public event EventHandler<ScreenShareRecoveryReceiptReceivedEventArgs>? ScreenShareRecoveryReceiptReceived;
         public event EventHandler<ScreenShareVideoStreamConfigReceivedEventArgs>? ScreenShareVideoStreamConfigReceived;
         public event EventHandler<ScreenShareVideoKeyframeRequestReceivedEventArgs>? ScreenShareVideoKeyframeRequestReceived;
+        public event EventHandler<ScreenShareCursorStateReceivedEventArgs>? ScreenShareCursorStateReceived;
 
         public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
 
@@ -424,6 +435,12 @@ internal sealed class ScreenShareSignalingTransportDouble : ISignalingTransport,
             return Task.CompletedTask;
         }
 
+        public Task SendScreenShareCursorStateAsync(ScreenShareCursorStateV1 message, CancellationToken ct)
+        {
+            SentCursorStates.Add(message);
+            return Task.CompletedTask;
+        }
+
         public void RaiseScreenShareFrameCompleted(ScreenShareFrameCompletedEventArgs e)
         {
             ScreenShareFrameCompleted?.Invoke(this, e);
@@ -456,6 +473,7 @@ internal class ScreenShareAwareSignalingTransportDouble : ISignalingTransport, I
         public List<ScreenShareRecoveryReceiptV1> SentRecoveryReceipts { get; } = new();
         public List<ScreenShareVideoStreamConfigV1> SentVideoStreamConfigs { get; } = new();
         public List<ScreenShareVideoKeyframeRequestV1> SentVideoKeyframeRequests { get; } = new();
+        public List<ScreenShareCursorStateV1> SentCursorStates { get; } = new();
         public long RecentHealthIssueCount { get; set; }
         public bool IsHealthSeverelyDegraded { get; set; }
         public bool IsCongested { get; set; }
@@ -486,6 +504,7 @@ internal class ScreenShareAwareSignalingTransportDouble : ISignalingTransport, I
         public event EventHandler<ScreenShareRecoveryReceiptReceivedEventArgs>? ScreenShareRecoveryReceiptReceived;
         public event EventHandler<ScreenShareVideoStreamConfigReceivedEventArgs>? ScreenShareVideoStreamConfigReceived;
         public event EventHandler<ScreenShareVideoKeyframeRequestReceivedEventArgs>? ScreenShareVideoKeyframeRequestReceived;
+        public event EventHandler<ScreenShareCursorStateReceivedEventArgs>? ScreenShareCursorStateReceived;
 
         public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
         public bool IsScreenShareTransportCongested => IsCongested;
@@ -530,6 +549,12 @@ internal class ScreenShareAwareSignalingTransportDouble : ISignalingTransport, I
         public Task SendScreenShareVideoKeyframeRequestAsync(ScreenShareVideoKeyframeRequestV1 message, CancellationToken ct)
         {
             SentVideoKeyframeRequests.Add(message);
+            return Task.CompletedTask;
+        }
+
+        public Task SendScreenShareCursorStateAsync(ScreenShareCursorStateV1 message, CancellationToken ct)
+        {
+            SentCursorStates.Add(message);
             return Task.CompletedTask;
         }
 

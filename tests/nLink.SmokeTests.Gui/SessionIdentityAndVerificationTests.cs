@@ -251,6 +251,79 @@ public sealed class SessionIdentityAndVerificationTests : SessionHeaderAndBanner
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public void HelperFirstPillVerificationCode_Shows_WhenActiveListenerAddressIsAuthoritative()
+    {
+        using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+        var transportConfig = CreateNknTestConfig();
+        var listenerAddress = new PeerAddress("nlink-runtime.authoritative.listener");
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(cancelAction: static () =>
+        {
+        }, transportConfig, helperRuntime, qrCodeService: new NoOpQrCodeService());
+
+        SetPrivateField(helperRuntime, "role", SessionRuntimeRole.Helper);
+        SetPrivateField(helperRuntime, "state", SessionRuntimeState.Waiting);
+        SetPrivateField(helperRuntime, "transport", new ScriptedSignalingTransport(localPeerAddress: listenerAddress.Value));
+        SetPrivateField(helper, "bootstrapHelperIdentity", new PeerAddress("nlink-bootstrap.persisted.identity"));
+        SetPrivateField(helper, "bootstrapHelperIdentityIsAuthoritative", false);
+        SetPrivateField(helper, "effectivePhase", SessionUiPhase.Waiting);
+        InvokePrivateMethod(helper, "NotifyHelperIdentityBootstrapChanged");
+
+        var expected = HelperVerificationCodeFormatter.Format(listenerAddress);
+        Assert.Equal(expected, helper.FirstPillVerificationCodeText);
+        Assert.True(helper.HasHelperIdentityBootstrapVerificationCode);
+        Assert.True(HelperBootstrapQrPayload.TryParse(helper.HelperIdentityBootstrapText, out var parsedBootstrap));
+        Assert.NotNull(parsedBootstrap);
+        Assert.Equal(listenerAddress, parsedBootstrap!.HelperAddress);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task HelperRegenerateIdentityCommand_RequiresConfirmation_AndUsesInjectedRegenerator()
+    {
+        using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+        var transportConfig = CreateNknTestConfig();
+        var regeneratedAddress = new PeerAddress("nlink-runtime.regenerated.identity");
+        var regenerateCalls = 0;
+        using var helperRuntime = new SessionRuntime(() => new ScriptedSignalingTransport(localPeerAddress: regeneratedAddress.Value));
+        using var helper = new HelperPageViewModel(cancelAction: static () =>
+        {
+        }, transportConfig, helperRuntime, bootstrapHelperIdentityResolver: null, regenerateHelperIdentityAsync: _ =>
+        {
+            regenerateCalls++;
+            return Task.FromResult<PeerAddress?>(regeneratedAddress);
+        }, qrCodeService: new NoOpQrCodeService());
+
+        SetPrivateField(helperRuntime, "role", SessionRuntimeRole.Helper);
+        SetPrivateField(helperRuntime, "state", SessionRuntimeState.Waiting);
+        SetPrivateField(helperRuntime, "transport", new ScriptedSignalingTransport(localPeerAddress: "nlink-runtime.old.identity"));
+        SetPrivateField(helper, "effectivePhase", SessionUiPhase.Waiting);
+        InvokePrivateMethod(helper, "NotifyHelperIdentityBootstrapChanged");
+
+        Assert.True(helper.CanRegenerateHelperIdentity);
+        await helper.RegenerateHelperIdentityCommand.ExecuteAsync(null);
+        Assert.Equal(0, regenerateCalls);
+        Assert.Equal("Confirm regenerate", helper.RegenerateHelperIdentityButtonText);
+
+        await helper.RegenerateHelperIdentityCommand.ExecuteAsync(null);
+        Assert.Equal(1, regenerateCalls);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void HelperRegenerateIdentity_PrivacyExplanation_IsNotRenderedPersistently()
+    {
+        var viewPath = FindFileUpwards(Path.Combine("src", "nLink.App", "Views", "HelperPageView.axaml"));
+        Assert.False(string.IsNullOrWhiteSpace(viewPath), "Expected HelperPageView.axaml to exist.");
+        var xaml = File.ReadAllText(viewPath!);
+
+        Assert.Contains("Helper.RegenerateHelperIdentity", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("Helper.HelperIdentityBootstrapPrivacyHint", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("This helper address stays saved on this PC", xaml, StringComparison.Ordinal);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task HelperFirstPillVerificationCode_RemainsHidden_WhenLateBootstrapResolutionReturnsNonAuthoritativeIdentity()
     {
         using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);

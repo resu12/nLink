@@ -223,6 +223,21 @@ internal sealed class HelperRemoteVisibleProgressState
     public string LastRecoveryProgressCorridorAbortReason { get; set; } = "none";
 }
 
+internal sealed class HelperRemoteH264ReferenceTaintState
+{
+    public bool Active { get; set; }
+
+    public long StreamEpoch { get; set; }
+
+    public string LastReason { get; set; } = "none";
+
+    public long LastCleanFrameId { get; set; } = -1;
+
+    public long TrustedRecoveryOwnerFrameId { get; set; } = -1;
+
+    public bool DecoderResetPending { get; set; }
+}
+
 internal sealed class HelperRemoteScreenShareSessionController
 {
     private const int HelperRemoteNeedMoreInputStallThreshold = 2;
@@ -238,6 +253,8 @@ internal sealed class HelperRemoteScreenShareSessionController
     internal HelperRemoteFollowerState FollowerState { get; } = new();
 
     internal HelperRemoteVisibleProgressState VisibleProgressState { get; } = new();
+
+    internal HelperRemoteH264ReferenceTaintState ReferenceTaintState { get; } = new();
 
     public string SessionId => RecoveryState.SessionId;
 
@@ -447,6 +464,99 @@ internal sealed class HelperRemoteScreenShareSessionController
 
             return clearedDeferredCandidateCount;
         }
+    }
+
+    public bool EnterReferenceTaint(long streamEpoch, string reason, long lastCleanFrameId)
+    {
+        if (streamEpoch <= 0)
+        {
+            return false;
+        }
+
+        var normalizedReason = string.IsNullOrWhiteSpace(reason)
+            ? "unknown"
+            : reason.Trim();
+        var newlyActive =
+            !ReferenceTaintState.Active ||
+            ReferenceTaintState.StreamEpoch != streamEpoch;
+
+        ReferenceTaintState.Active = true;
+        ReferenceTaintState.StreamEpoch = streamEpoch;
+        ReferenceTaintState.LastReason = normalizedReason;
+        ReferenceTaintState.LastCleanFrameId = lastCleanFrameId >= 0
+            ? lastCleanFrameId
+            : ReferenceTaintState.LastCleanFrameId;
+        ReferenceTaintState.TrustedRecoveryOwnerFrameId = -1;
+        ReferenceTaintState.DecoderResetPending = true;
+        return newlyActive;
+    }
+
+    public bool ShouldTreatKeyframeAsReferenceTaintRecoveryOwner(
+        long streamEpoch,
+        long frameId,
+        bool isKeyFrame,
+        ScreenShareRecoveryDeliveryClass recoveryDeliveryClass)
+    {
+        if (!ReferenceTaintState.Active ||
+            !isKeyFrame ||
+            streamEpoch <= 0 ||
+            frameId < 0 ||
+            recoveryDeliveryClass != ScreenShareRecoveryDeliveryClass.Normal)
+        {
+            return false;
+        }
+
+        if (ReferenceTaintState.StreamEpoch > 0 && streamEpoch < ReferenceTaintState.StreamEpoch)
+        {
+            return false;
+        }
+
+        ReferenceTaintState.StreamEpoch = streamEpoch;
+        ReferenceTaintState.TrustedRecoveryOwnerFrameId = frameId;
+        return true;
+    }
+
+    public bool ConsumeReferenceTaintDecoderResetPending(long streamEpoch)
+    {
+        if (!ReferenceTaintState.Active ||
+            !ReferenceTaintState.DecoderResetPending ||
+            streamEpoch <= 0 ||
+            (ReferenceTaintState.StreamEpoch > 0 && ReferenceTaintState.StreamEpoch != streamEpoch))
+        {
+            return false;
+        }
+
+        ReferenceTaintState.DecoderResetPending = false;
+        return true;
+    }
+
+    public bool ReleaseReferenceTaintAfterCorridorSuccess(long streamEpoch, long lastContiguousFrameId)
+    {
+        if (!ReferenceTaintState.Active ||
+            streamEpoch <= 0 ||
+            (ReferenceTaintState.StreamEpoch > 0 && ReferenceTaintState.StreamEpoch != streamEpoch))
+        {
+            return false;
+        }
+
+        ReferenceTaintState.Active = false;
+        ReferenceTaintState.StreamEpoch = 0;
+        ReferenceTaintState.TrustedRecoveryOwnerFrameId = -1;
+        ReferenceTaintState.LastCleanFrameId = lastContiguousFrameId >= 0
+            ? lastContiguousFrameId
+            : ReferenceTaintState.LastCleanFrameId;
+        ReferenceTaintState.DecoderResetPending = false;
+        return true;
+    }
+
+    public void ClearReferenceTaint()
+    {
+        ReferenceTaintState.Active = false;
+        ReferenceTaintState.StreamEpoch = 0;
+        ReferenceTaintState.LastReason = "none";
+        ReferenceTaintState.LastCleanFrameId = -1;
+        ReferenceTaintState.TrustedRecoveryOwnerFrameId = -1;
+        ReferenceTaintState.DecoderResetPending = false;
     }
 
     public HelperRemoteDeferredCandidateReleaseResult ReleaseDeferredPostRecoveryCandidateIfMatch(
@@ -875,6 +985,8 @@ internal sealed class HelperRemoteScreenShareSessionController
             FollowerState.DeferredPostRecoveryCandidates.Clear();
         }
 
+        ClearReferenceTaint();
+
         VisibleProgressState.LastReservedApplyHoldMs = 0;
         VisibleProgressState.LastRecoveryProgressCorridorHoldMs = 0;
         VisibleProgressState.LastRecoveryRunwayAbortHoldMs = 0;
@@ -1076,12 +1188,14 @@ internal sealed class HelperRemoteScreenShareSessionController
             return null;
         }
 
-        if (string.Equals(rejectionReason, "waiting_for_recovery_keyframe", StringComparison.Ordinal))
+        if (string.Equals(rejectionReason, "waiting_for_recovery_keyframe", StringComparison.Ordinal) ||
+            string.Equals(rejectionReason, "h264_reference_taint_waiting_for_recovery_keyframe", StringComparison.Ordinal))
         {
             context.IncrementFramesDroppedWaitingForRecoveryKeyframe();
         }
 
-        if (string.Equals(rejectionReason, "waiting_for_recovery_keyframe", StringComparison.Ordinal) &&
+        if ((string.Equals(rejectionReason, "waiting_for_recovery_keyframe", StringComparison.Ordinal) ||
+             string.Equals(rejectionReason, "h264_reference_taint_waiting_for_recovery_keyframe", StringComparison.Ordinal)) &&
             string.Equals(RecoveryState.RecoveryReason, "frame_gap", StringComparison.Ordinal) &&
             streamEpoch == RecoveryState.RecoveryStreamEpoch)
         {
@@ -1204,6 +1318,9 @@ internal sealed class HelperRemoteScreenShareSessionController
             FollowerState.PostRecoveryStabilizationEpoch > 0 &&
             FollowerState.PostRecoveryStabilizationEpoch == currentEpoch &&
             (FollowerState.PostRecoveryReservedAppliesRemaining > 0 || GetDeferredPostRecoveryCandidateCount() > 0);
+        var referenceTaintActive =
+            ReferenceTaintState.Active &&
+            (ReferenceTaintState.StreamEpoch <= 0 || ReferenceTaintState.StreamEpoch == currentEpoch);
         var currentEpochProgressProof = ComputeCurrentEpochProgressProof(
             visibleHeadFrameId,
             appliedHeadFrameId,
@@ -1219,6 +1336,7 @@ internal sealed class HelperRemoteScreenShareSessionController
             recoveryActive ||
             recoveryCorridorActive ||
             runwayCleanupActive ||
+            referenceTaintActive ||
             recoveryMechanism != HelperRemoteRecoveryMechanism.None;
         var steadyVisibleProgressActive =
             baselineEstablished &&
@@ -1278,6 +1396,11 @@ internal sealed class HelperRemoteScreenShareSessionController
         if (FollowerState.PostRecoveryStabilizationEpoch > 0 || FollowerState.DeferredPostRecoveryCandidates.Count > 0)
         {
             return HelperRemoteRecoveryMechanism.FollowerWindow;
+        }
+
+        if (ReferenceTaintState.Active)
+        {
+            return HelperRemoteRecoveryMechanism.WaitingForRecoveryKeyframe;
         }
 
         if (RecoveryState.RecoveryActive)
@@ -1343,6 +1466,9 @@ internal sealed class HelperRemoteScreenShareSessionController
         currentEpoch = Math.Max(
             currentEpoch,
             FollowerState.PendingRecoveryRunwayAbortActive ? FollowerState.PendingRecoveryRunwayAbortEpoch : 0L);
+        currentEpoch = Math.Max(
+            currentEpoch,
+            ReferenceTaintState.Active ? ReferenceTaintState.StreamEpoch : 0L);
         return currentEpoch;
     }
 

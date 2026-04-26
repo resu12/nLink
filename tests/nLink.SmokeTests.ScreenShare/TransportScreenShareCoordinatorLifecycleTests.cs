@@ -79,6 +79,47 @@ public sealed class TransportScreenShareCoordinatorLifecycleTests : ScreenShareC
 
 [Fact]
     [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_CapturedCursorPreference_AppliesOnStartAndToggles()
+    {
+        var fakeSource = new FakeScreenCaptureSource();
+
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: (_, _) => Task.CompletedTask);
+
+        Assert.False(coordinator.TrySetCapturedCursorEnabledForRemoteControl(false, "control_active_before_start"));
+        await coordinator.StartAsync("session-live", CancellationToken.None);
+
+        Assert.False(fakeSource.IsCursorCaptureEnabled);
+        Assert.Equal(new[] { false }, fakeSource.CursorCaptureEnabledRequests);
+
+        Assert.True(coordinator.TrySetCapturedCursorEnabledForRemoteControl(true, "control_stopped"));
+        Assert.True(fakeSource.IsCursorCaptureEnabled);
+        Assert.Equal(new[] { false, true }, fakeSource.CursorCaptureEnabledRequests);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TransportScreenShareCoordinator_CapturedCursorPreference_UnsupportedSourceFallsBackEnabled()
+    {
+        var fakeSource = new FakeScreenCaptureSource
+        {
+            IsCursorCaptureControlSupported = false,
+        };
+
+        await using var coordinator = new TransportScreenShareCoordinator(
+            captureSourceFactory: () => fakeSource,
+            sendPayloadAsync: (_, _) => Task.CompletedTask);
+
+        await coordinator.StartAsync("session-live", CancellationToken.None);
+        Assert.False(coordinator.TrySetCapturedCursorEnabledForRemoteControl(false, "control_active"));
+
+        Assert.True(fakeSource.IsCursorCaptureEnabled);
+        Assert.Equal(new[] { true, false }, fakeSource.CursorCaptureEnabledRequests);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportScreenShareCoordinator_StampsSessionIdOntoVideoStreamConfigBeforeSending()
     {
         var fakeSource = new FakeScreenCaptureSource();

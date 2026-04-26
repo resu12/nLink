@@ -150,6 +150,11 @@ internal sealed partial class TransportScreenShareCoordinator
         long currentRecoveryPostAckHoldStartedCount;
         long currentRecoveryPostAckHoldExpiredCount;
         long currentRecoveryPostAckHoldSuppressedReopenCount;
+        string currentCursorDeliveryMode;
+        string currentCursorOverlayStatus;
+        long currentCursorOverlayUpdatesSentCount;
+        long currentCursorOverlaySendFailureCount;
+        long currentCursorOverlayMappingFailureCount;
         lock (gate)
         {
             if (lastFreshnessSummaryUtc != default &&
@@ -304,6 +309,11 @@ internal sealed partial class TransportScreenShareCoordinator
             currentRecoveryPostAckHoldStartedCount = recoveryPostAckHoldStartedCount;
             currentRecoveryPostAckHoldExpiredCount = recoveryPostAckHoldExpiredCount;
             currentRecoveryPostAckHoldSuppressedReopenCount = recoveryPostAckHoldSuppressedReopenCount;
+            currentCursorDeliveryMode = cursorOverlayDeliveryMode;
+            currentCursorOverlayStatus = cursorOverlayLastStatus;
+            currentCursorOverlayUpdatesSentCount = cursorOverlayUpdatesSentCount;
+            currentCursorOverlaySendFailureCount = cursorOverlaySendFailureCount;
+            currentCursorOverlayMappingFailureCount = cursorOverlayMappingFailureCount;
         }
 
         var nknSnapshot = NknRuntimeDiagnostics.Snapshot();
@@ -327,8 +337,11 @@ internal sealed partial class TransportScreenShareCoordinator
             $"stream_epoch={sourceFreshnessMetrics.CurrentStreamEpoch}",
             $"source_pending_raw_frames={sourceFreshnessMetrics.PendingRawFrameCount}",
             $"source_oldest_pending_age_ms={sourceFreshnessMetrics.OldestPendingRawFrameAgeMs}",
+            $"sender_process_cpu_percent={sourceFreshnessMetrics.SenderProcessCpuPercent.ToString("F1", CultureInfo.InvariantCulture)}",
             $"capture_to_encode_start_age_ms={sourceFreshnessMetrics.LastCaptureToEncodeStartAgeMs}",
             $"last_encode_duration_ms={sourceFreshnessMetrics.LastEncodeDurationMs}",
+            $"actual_encoded_displayable_fps={sourceFreshnessMetrics.ActualEncodedDisplayableFps.ToString("F2", CultureInfo.InvariantCulture)}",
+            $"encode_cadence_target_fps={sourceFreshnessMetrics.EncodeCadenceTargetFps}",
             $"emitted_displayable_frames={sourceFreshnessMetrics.EmittedDisplayableFrames}",
             $"emitted_non_displayable_units={sourceFreshnessMetrics.EmittedNonDisplayableUnits}",
             $"emitted_idr_frames={sourceFreshnessMetrics.IdrFramesEmitted}",
@@ -337,11 +350,50 @@ internal sealed partial class TransportScreenShareCoordinator
             $"dropped_multi_picture_units={sourceFreshnessMetrics.DroppedMultiPictureUnits}",
             $"displayable_frame_ratio={sourceFreshnessMetrics.DisplayableFrameRatio.ToString("F2", CultureInfo.InvariantCulture)}",
             $"idr_frame_ratio={sourceFreshnessMetrics.IdrFrameRatio.ToString("F2", CultureInfo.InvariantCulture)}",
+            $"motion_integrity_guard_active={(sourceFreshnessMetrics.MotionIntegrityGuardActive ? 1 : 0)}",
+            $"motion_integrity_sampled_ratio={sourceFreshnessMetrics.MotionIntegritySampledRatio.ToString("F3", CultureInfo.InvariantCulture)}",
+            $"motion_integrity_peak_sampled_ratio={sourceFreshnessMetrics.MotionIntegrityPeakSampledRatio.ToString("F3", CultureInfo.InvariantCulture)}",
+            $"motion_integrity_scroll_active_band_count={sourceFreshnessMetrics.MotionIntegrityScrollMotionActiveBandCount}",
+            $"motion_integrity_scroll_peak_band_ratio={sourceFreshnessMetrics.MotionIntegrityScrollMotionPeakBandRatio.ToString("F3", CultureInfo.InvariantCulture)}",
+            $"motion_integrity_high_motion_frame_count={sourceFreshnessMetrics.MotionIntegrityHighMotionFrameCount}",
+            $"motion_integrity_scroll_trigger_count={sourceFreshnessMetrics.MotionIntegrityScrollTriggerCount}",
+            $"motion_integrity_burst_enter_count={sourceFreshnessMetrics.MotionIntegrityBurstEnterCount}",
+            $"motion_integrity_burst_exit_count={sourceFreshnessMetrics.MotionIntegrityBurstExitCount}",
+            $"motion_integrity_forced_keyframe_count={sourceFreshnessMetrics.MotionIntegrityForcedKeyFrameCount}",
+            $"motion_integrity_last_trigger_kind={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.MotionIntegrityLastTriggerKind) ? "(none)" : sourceFreshnessMetrics.MotionIntegrityLastTriggerKind)}",
+            $"motion_integrity_last_reason={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.MotionIntegrityLastReason) ? "(none)" : sourceFreshnessMetrics.MotionIntegrityLastReason)}",
+            $"motion_integrity_idr_frame_ratio={sourceFreshnessMetrics.MotionIntegrityIdrFrameRatio.ToString("F2", CultureInfo.InvariantCulture)}",
+            $"motion_integrity_forced_idr_requested_count={sourceFreshnessMetrics.MotionIntegrityForcedIdrRequestedCount}",
+            $"motion_integrity_forced_idr_confirmed_count={sourceFreshnessMetrics.MotionIntegrityForcedIdrConfirmedCount}",
+            $"motion_integrity_forced_idr_missed_count={sourceFreshnessMetrics.MotionIntegrityForcedIdrMissedCount}",
+            $"motion_integrity_forced_idr_pending_count={sourceFreshnessMetrics.MotionIntegrityForcedIdrPendingCount}",
+            $"motion_integrity_forced_idr_consecutive_miss_count={sourceFreshnessMetrics.MotionIntegrityForcedIdrConsecutiveMissCount}",
+            $"motion_integrity_forced_idr_burst_miss_count={sourceFreshnessMetrics.MotionIntegrityForcedIdrBurstMissCount}",
+            $"motion_integrity_active_idr_frame_ratio={sourceFreshnessMetrics.MotionIntegrityActiveIdrFrameRatio.ToString("F2", CultureInfo.InvariantCulture)}",
+            $"motion_integrity_forced_idr_last_miss_reason={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.MotionIntegrityForcedIdrLastMissReason) ? "(none)" : sourceFreshnessMetrics.MotionIntegrityForcedIdrLastMissReason)}",
+            $"motion_integrity_encoder_rebuild_count={sourceFreshnessMetrics.MotionIntegrityEncoderRebuildCount}",
+            $"motion_integrity_encoder_rebuild_suppressed_count={sourceFreshnessMetrics.MotionIntegrityEncoderRebuildSuppressedCount}",
+            $"motion_integrity_encoder_rebuild_pending={(sourceFreshnessMetrics.MotionIntegrityEncoderRebuildPending ? 1 : 0)}",
+            $"motion_integrity_encoder_rebuild_last_reason={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.MotionIntegrityEncoderRebuildLastReason) ? "(none)" : sourceFreshnessMetrics.MotionIntegrityEncoderRebuildLastReason)}",
+            $"cursor_capture_enabled={(sourceFreshnessMetrics.CursorCaptureEnabled ? 1 : 0)}",
+            $"cursor_capture_desired_enabled={(sourceFreshnessMetrics.CursorCaptureDesiredEnabled ? 1 : 0)}",
+            $"cursor_capture_control_supported={(sourceFreshnessMetrics.CursorCaptureControlSupported ? 1 : 0)}",
+            $"cursor_capture_apply_status={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.CursorCaptureApplyStatus) ? "(none)" : sourceFreshnessMetrics.CursorCaptureApplyStatus)}",
+            $"cursor_capture_fallback_reason={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.CursorCaptureFallbackReason) ? "(none)" : sourceFreshnessMetrics.CursorCaptureFallbackReason)}",
+            $"cursor_delivery_mode={(string.IsNullOrWhiteSpace(currentCursorDeliveryMode) ? "captured_video" : currentCursorDeliveryMode)}",
+            $"cursor_overlay_updates_sent_count={Math.Max(0, currentCursorOverlayUpdatesSentCount)}",
+            $"cursor_overlay_send_failure_count={Math.Max(0, currentCursorOverlaySendFailureCount)}",
+            $"cursor_overlay_mapping_failure_count={Math.Max(0, currentCursorOverlayMappingFailureCount)}",
+            $"cursor_overlay_last_status={(string.IsNullOrWhiteSpace(currentCursorOverlayStatus) ? "(none)" : currentCursorOverlayStatus)}",
             $"avg_encoded_frame_bytes={sourceFreshnessMetrics.AverageEncodedFrameBytes.ToString("F1", CultureInfo.InvariantCulture)}",
             $"transport_ip_only_mode={(sourceFreshnessMetrics.TransportIpOnlyMode ? 1 : 0)}",
             $"last_access_unit_kind={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.LastAccessUnitKind) ? "(none)" : sourceFreshnessMetrics.LastAccessUnitKind)}",
             $"low_delay_config_applied={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.LowDelayConfigApplied) ? "(none)" : sourceFreshnessMetrics.LowDelayConfigApplied)}",
             $"last_preprocess_duration_ms={sourceFreshnessMetrics.LastPreprocessDurationMs}",
+            $"last_preprocess_resize_duration_ms={sourceFreshnessMetrics.LastPreprocessResizeDurationMs}",
+            $"last_preprocess_color_convert_duration_ms={sourceFreshnessMetrics.LastPreprocessColorConvertDurationMs}",
+            $"preprocess_resize_path={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.PreprocessResizePath) ? "(none)" : sourceFreshnessMetrics.PreprocessResizePath)}",
+            $"preprocess_direct_nv12_count={sourceFreshnessMetrics.PreprocessDirectNv12Count}",
             $"last_transform_encode_duration_ms={sourceFreshnessMetrics.LastTransformEncodeDurationMs}",
             $"last_encode_total_duration_ms={sourceFreshnessMetrics.LastEncodeTotalDurationMs}",
             $"promotion_capture_to_send_budget_ms={promotionCaptureToSendBudgetMs}",
@@ -353,10 +405,43 @@ internal sealed partial class TransportScreenShareCoordinator
             $"effective_quality_preset={(string.IsNullOrWhiteSpace(qualityState.EffectivePresetKey) ? "(none)" : qualityState.EffectivePresetKey)}",
             $"legacy_preset_migrated={(qualityState.LegacyHigherClarityPresetMigrated ? 1 : 0)}",
             $"source_superseded_pending_frames={sourceFreshnessMetrics.SupersededPendingRawFrameCount}",
+            $"raw_capture_event_count={sourceFreshnessMetrics.RawCaptureEventCount}",
             $"raw_frames_deferred_to_encode_slot={sourceFreshnessMetrics.RawFramesDeferredToEncodeSlot}",
             $"raw_frames_replaced_before_encode_slot={sourceFreshnessMetrics.RawFramesReplacedBeforeEncodeSlot}",
+            $"raw_frames_skipped_before_encode={sourceFreshnessMetrics.RawFramesSkippedBeforeEncode}",
             $"raw_encode_slot_empty_count={sourceFreshnessMetrics.RawEncodeSlotEmptyCount}",
             $"raw_slot_coalescing_active={(sourceFreshnessMetrics.RawSlotCoalescingActive ? 1 : 0)}",
+            $"raw_source_frame_arrived_count={sourceFreshnessMetrics.RawSourceFrameArrivedCount}",
+            $"raw_source_frames_skipped_before_readback={sourceFreshnessMetrics.RawSourceFramesSkippedBeforeReadback}",
+            $"raw_source_frames_readback_count={sourceFreshnessMetrics.RawSourceFramesReadbackCount}",
+            $"raw_source_readback_fps={sourceFreshnessMetrics.RawSourceReadbackFps.ToString("F2", CultureInfo.InvariantCulture)}",
+            $"raw_source_last_readback_duration_ms={sourceFreshnessMetrics.RawSourceLastReadbackDurationMs}",
+            $"raw_source_avg_readback_duration_ms={sourceFreshnessMetrics.RawSourceAverageReadbackDurationMs.ToString("F1", CultureInfo.InvariantCulture)}",
+            $"raw_source_cadence_target_fps={sourceFreshnessMetrics.RawSourceCadenceTargetFps}",
+            $"raw_source_urgent_bypass_count={sourceFreshnessMetrics.RawSourceUrgentBypassCount}",
+            $"raw_source_output_width={sourceFreshnessMetrics.RawSourceOutputWidth}",
+            $"raw_source_output_height={sourceFreshnessMetrics.RawSourceOutputHeight}",
+            $"raw_source_gpu_scale_enabled={(sourceFreshnessMetrics.RawSourceGpuScaleEnabled ? 1 : 0)}",
+            $"raw_source_gpu_scale_fallback_reason={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.RawSourceGpuScaleFallbackReason) ? "(none)" : sourceFreshnessMetrics.RawSourceGpuScaleFallbackReason)}",
+            $"raw_source_capture_active={(sourceFreshnessMetrics.RawSourceCaptureActive ? 1 : 0)}",
+            $"wgc_border_required_control_supported={(sourceFreshnessMetrics.RawSourceBorderRequiredControlSupported ? 1 : 0)}",
+            $"wgc_border_required_desired={(sourceFreshnessMetrics.RawSourceBorderRequiredDesired ? 1 : 0)}",
+            $"wgc_border_required={(sourceFreshnessMetrics.RawSourceBorderRequired ? 1 : 0)}",
+            $"wgc_border_required_apply_status={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.RawSourceBorderRequiredApplyStatus) ? "(none)" : sourceFreshnessMetrics.RawSourceBorderRequiredApplyStatus)}",
+            $"wgc_border_required_fallback_reason={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.RawSourceBorderRequiredFallbackReason) ? "(none)" : sourceFreshnessMetrics.RawSourceBorderRequiredFallbackReason)}",
+            $"wgc_last_stop_duration_ms={sourceFreshnessMetrics.RawSourceLastStopDurationMs}",
+            $"wgc_last_stop_reason={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.RawSourceLastStopReason) ? "(none)" : sourceFreshnessMetrics.RawSourceLastStopReason)}",
+            $"wgc_active_session_lease_count={sourceFreshnessMetrics.RawSourceActiveSessionLeaseCount}",
+            $"wgc_last_session_close_status={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.RawSourceLastSessionCloseStatus) ? "(none)" : sourceFreshnessMetrics.RawSourceLastSessionCloseStatus)}",
+            $"wgc_last_session_close_method={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.RawSourceLastSessionCloseMethod) ? "(none)" : sourceFreshnessMetrics.RawSourceLastSessionCloseMethod)}",
+            $"wgc_last_session_close_hresult={(string.IsNullOrWhiteSpace(sourceFreshnessMetrics.RawSourceLastSessionCloseHResult) ? "(none)" : sourceFreshnessMetrics.RawSourceLastSessionCloseHResult)}",
+            $"wgc_force_close_count={sourceFreshnessMetrics.RawSourceForceCloseCount}",
+            $"wgc_session_close_anomaly_count={sourceFreshnessMetrics.RawSourceSessionCloseAnomalyCount}",
+            $"wgc_session_owner_thread_id={sourceFreshnessMetrics.RawSourceSessionOwnerThreadId}",
+            $"wgc_session_close_thread_id={sourceFreshnessMetrics.RawSourceLastSessionCloseThreadId}",
+            $"wgc_close_on_owner_thread={(sourceFreshnessMetrics.RawSourceLastSessionCloseOnOwnerThread ? 1 : 0)}",
+            $"wgc_owner_dispatcher_active={(sourceFreshnessMetrics.RawSourceOwnerDispatcherActive ? 1 : 0)}",
+            $"wgc_owner_thread_close_timeout_count={sourceFreshnessMetrics.RawSourceOwnerThreadCloseTimeoutCount}",
             $"active_encode_target_width={sourceFreshnessMetrics.ActiveTargetWidth}",
             $"active_encode_target_height={sourceFreshnessMetrics.ActiveTargetHeight}",
             $"active_encode_target_bitrate={sourceFreshnessMetrics.ActiveTargetBitrate}",

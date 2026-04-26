@@ -14,6 +14,7 @@ internal sealed class H264DecodeStreamState
 {
     private readonly EncodedFrameBitmapDecoder encodedFrameDecoder;
     private long configuredStreamEpoch;
+    private ScreenShareVideoStreamConfigV1? lastStreamConfig;
 
     public H264DecodeStreamState(EncodedFrameBitmapDecoder encodedFrameDecoder)
     {
@@ -48,6 +49,7 @@ internal sealed class H264DecodeStreamState
             }
 
             encodedFrameDecoder.ConfigureH264Stream(streamConfig);
+            lastStreamConfig = streamConfig;
             if (nextEpoch > 0)
             {
                 Interlocked.Exchange(ref configuredStreamEpoch, nextEpoch);
@@ -81,7 +83,17 @@ internal sealed class H264DecodeStreamState
     public void Reset()
     {
         Interlocked.Exchange(ref configuredStreamEpoch, 0);
+        lastStreamConfig = null;
         encodedFrameDecoder.ResetH264Stream();
+    }
+
+    public void ResetDecoderOnly()
+    {
+        encodedFrameDecoder.ResetH264Stream();
+        if (lastStreamConfig is not null)
+        {
+            encodedFrameDecoder.ConfigureH264Stream(lastStreamConfig);
+        }
     }
 
     public static bool IsH264Encoding(string? encoding)

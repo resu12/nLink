@@ -303,6 +303,58 @@ public sealed class SessionRuntimeScreenSharePressureSendPathTests : ScreenShare
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void SessionRuntime_HelperScreenSharePressureFeedback_SoftDecodedStaleDrops_DoNotEmitRepeatedStalePressure()
+    {
+        DateTimeOffset now = new DateTimeOffset(2026, 4, 25, 16, 40, 0, TimeSpan.Zero);
+        ScreenShareAwareSignalingTransportDouble transport = new ScreenShareAwareSignalingTransportDouble();
+        try
+        {
+            using SessionRuntime sessionRuntime = new SessionRuntime(() => transport, SessionRuntimeWatchdogOptions.Default, null, null, null, null, null, null, () => now);
+            sessionRuntime.SetRoleForTests(SessionRuntimeRole.Helper);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "transport", transport);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "state", SessionRuntimeState.Connected);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "statusText", "Connected");
+            ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "WireTransport", transport);
+            transport.SetSessionSecurityStateForTests(ScreenShareTransportBoundaryTestBase.CreateApprovedSecurityState(new PeerAddress("pressure.helpee"), new PeerAddress("pressure.helper"), CapabilityGrant.ScreenShare));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpoch", 1L);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochStartedUtc", now.AddSeconds(-10.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochFirstApplySeen", true);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochApplyCount", 5);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochWarmupStartedUtc", now.AddSeconds(-10.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "helperRemoteCurrentPressureEpochWarmupEndedUtc", now.AddSeconds(-9.0));
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureMode", ScreenSharePressureMode.Normal);
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureReason", "healthy");
+            ScreenShareTransportBoundaryTestBase.SetPrivateField(sessionRuntime, "lastSentScreenSharePressureUtc", now.AddSeconds(-2.0));
+
+            ScreenShareTransportBoundaryTestBase.ReportHelperRemoteStaleDrop(
+                sessionRuntime,
+                1510L,
+                1L,
+                referenceContinuityPreserved: true);
+            Thread.Sleep(50);
+            ScreenShareTransportBoundaryTestBase.ReportHelperRemoteStaleDrop(
+                sessionRuntime,
+                1550L,
+                1L,
+                referenceContinuityPreserved: true);
+            Thread.Sleep(100);
+
+            Assert.Empty(transport.SentPressureStates);
+            Assert.Equal(2L, ScreenShareTransportBoundaryTestBase.GetPrivateLongField(sessionRuntime, "helperRemoteCurrentPressureEpochStaleDropCount"));
+            Assert.Equal(2L, ScreenShareTransportBoundaryTestBase.GetPrivateLongField(sessionRuntime, "helperRemoteCurrentPressureEpochSoftStaleDropCount"));
+            Assert.Equal(0, Assert.IsType<int>(ScreenShareTransportBoundaryTestBase.GetPrivateField(sessionRuntime, "helperRemoteConsecutiveStaleDropWindows")));
+        }
+        finally
+        {
+            if (transport != null)
+            {
+                ((IDisposable)transport).Dispose();
+            }
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public void SessionRuntime_HelperScreenSharePressureFeedback_SingleStaleDropAfterHealthyApply_DoesNotEscalateToCatchUpOnly()
     {
         DateTimeOffset now = new DateTimeOffset(2026, 4, 2, 8, 25, 0, TimeSpan.Zero);

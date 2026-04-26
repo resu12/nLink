@@ -206,6 +206,7 @@ public sealed partial class NknSignalingTransport
                 helperIdentifier = identity.Identifier,
                 helperEcdhPublicKey = Convert.ToBase64String(helperKeyPair.PublicKey),
                 remoteControlSupported = LocalSupportsRemoteControl,
+                screenShareCursorOverlaySupported = LocalSupportsScreenShareCursorOverlay,
             };
 
             var joinEnvelope = CreateEnvelope(
@@ -573,6 +574,7 @@ public sealed partial class NknSignalingTransport
             : join.helperBulkEndpoint;
         lastPeerAddress = string.IsNullOrWhiteSpace(source) ? join.helperEndpoint : source;
         remoteSupportsRemoteControl = join.remoteControlSupported == true;
+        remoteSupportsScreenShareCursorOverlay = join.screenShareCursorOverlaySupported == true;
         transportRemoteControlState = transportRemoteControlState with
         {
             SupportsRemoteControl = LocalSupportsRemoteControl,
@@ -1140,6 +1142,7 @@ public sealed partial class NknSignalingTransport
             }
 
             remoteSupportsRemoteControl = secureApprove.remoteControlSupported == true;
+            remoteSupportsScreenShareCursorOverlay = secureApprove.screenShareCursorOverlaySupported == true;
             remoteMediaEndpoint = string.IsNullOrWhiteSpace(secureApprove.helpeeMediaEndpoint)
                 ? remoteEndpoint
                 : secureApprove.helpeeMediaEndpoint;
@@ -1815,6 +1818,7 @@ public sealed partial class NknSignalingTransport
                 JsonSerializer.SerializeToUtf8Bytes(new ApproveSecurePayload
                 {
                     remoteControlSupported = LocalSupportsRemoteControl,
+                    screenShareCursorOverlaySupported = LocalSupportsScreenShareCursorOverlay,
                     helpeeMediaEndpoint = client.MediaAddress,
                     helpeeBulkEndpoint = client.BulkAddress,
                     approvalDecisionBase64 = Convert.ToBase64String(SessionHandshakeProtocol.Serialize(decision)),
@@ -2128,6 +2132,7 @@ public sealed partial class NknSignalingTransport
         helperJoinRequestMessageId = null;
         pendingOutboundHandshake = null;
         remoteSupportsRemoteControl = false;
+        remoteSupportsScreenShareCursorOverlay = false;
         transportRemoteControlState = RemoteControlSessionState.Default;
 
         DisposeEphemeralKeyState();
@@ -2172,6 +2177,7 @@ public sealed partial class NknSignalingTransport
         helperJoinRequestMessageId = null;
         pendingOutboundHandshake = null;
         remoteSupportsRemoteControl = false;
+        remoteSupportsScreenShareCursorOverlay = false;
         transportRemoteControlState = RemoteControlSessionState.Default;
         DisposeEphemeralKeyState(preserveHelpeeHostKeyPair);
     }
@@ -3197,7 +3203,8 @@ public sealed partial class NknSignalingTransport
         Envelope Envelope,
         TaskCompletionSource<bool> Completion,
         CancellationToken CancellationToken,
-        bool IsLowPriorityMouseMove);
+        bool IsLowPriorityMouseMove,
+        bool IsLowPriorityScreenShareCursorState);
 
     private sealed class JoinRequestPayload
     {
@@ -3207,6 +3214,7 @@ public sealed partial class NknSignalingTransport
         public string? helperIdentifier { get; set; }
         public string? helperEcdhPublicKey { get; set; }
         public bool? remoteControlSupported { get; set; }
+        public bool? screenShareCursorOverlaySupported { get; set; }
     }
 
     private sealed class HelpRequestPayload
@@ -3236,6 +3244,7 @@ public sealed partial class NknSignalingTransport
     private sealed class ApproveSecurePayload
     {
         public bool? remoteControlSupported { get; set; }
+        public bool? screenShareCursorOverlaySupported { get; set; }
         public string? helpeeMediaEndpoint { get; set; }
         public string? helpeeBulkEndpoint { get; set; }
         public string? approvalDecisionBase64 { get; set; }

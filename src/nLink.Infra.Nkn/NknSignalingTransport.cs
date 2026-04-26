@@ -15,7 +15,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, IHostReadySignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IAuthoritativeConnectedAddressSource
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IAuthoritativeConnectedAddressSource
 {
     private sealed class RecoveryBurstLease
     {
@@ -104,6 +104,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly NknEnvelopeRouter envelopeRouter;
     private readonly ControlOutboundQueue controlOutboundQueue;
     private const bool LocalRemoteControlSupported = true;
+    private const bool LocalScreenShareCursorOverlaySupported = true;
     private const int ScreenShareInboundReplayWindowSize = 4096;
     private const long ScreenShareInboundReplayMaxForwardAdvance = 32768;
     private const int FileTransferInboundReplayWindowSize = 32768;
@@ -127,11 +128,13 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private Timer? pendingInboundHandshakeTimeoutTimer;
     private long pendingInboundHandshakeTimeoutGeneration;
     private bool remoteSupportsRemoteControl;
+    private bool remoteSupportsScreenShareCursorOverlay;
     private RemoteControlSessionState transportRemoteControlState = RemoteControlSessionState.Default;
     private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
     private SessionId? activeApprovedSessionId;
     private PeerAddress? activeApprovedHelperAddress;
     private LinkedListNode<QueuedControlEnvelope>? queuedLowPriorityMouseMoveNode;
+    private LinkedListNode<QueuedControlEnvelope>? queuedLowPriorityScreenShareCursorNode;
     private bool controlOutboundDrainerActive;
     private bool screenShareOutboundDrainerActive;
     private int screenShareOutboundQueuedBytes;
@@ -267,6 +270,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     public event EventHandler<ScreenShareRecoveryReceiptReceivedEventArgs>? ScreenShareRecoveryReceiptReceived;
     public event EventHandler<ScreenShareVideoStreamConfigReceivedEventArgs>? ScreenShareVideoStreamConfigReceived;
     public event EventHandler<ScreenShareVideoKeyframeRequestReceivedEventArgs>? ScreenShareVideoKeyframeRequestReceived;
+    public event EventHandler<ScreenShareCursorStateReceivedEventArgs>? ScreenShareCursorStateReceived;
 
     public string LocalPeerAddress => string.IsNullOrWhiteSpace(client.Address) ? identity.Address : client.Address;
     bool IAuthoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress =>
@@ -292,6 +296,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     public bool LocalSupportsRemoteControl => LocalRemoteControlSupported;
     public bool RemoteSupportsRemoteControl => remoteSupportsRemoteControl;
     public bool SessionSupportsRemoteControl => LocalSupportsRemoteControl && RemoteSupportsRemoteControl;
+    public bool LocalSupportsScreenShareCursorOverlay => LocalScreenShareCursorOverlaySupported;
+    public bool RemoteSupportsScreenShareCursorOverlay => remoteSupportsScreenShareCursorOverlay;
+    public bool SessionSupportsScreenShareCursorOverlay => LocalSupportsScreenShareCursorOverlay && RemoteSupportsScreenShareCursorOverlay;
     internal long LowLaneDroppedMoves => Interlocked.Read(ref lowLaneDroppedMoves);
     internal long LowLaneEnqueuedMoves => Interlocked.Read(ref lowLaneEnqueuedMoves);
     internal int LowLaneMaxDepthSeen => Volatile.Read(ref lowLaneMaxDepthSeen);
@@ -713,6 +720,42 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             envelope,
             ResolveControlOutboundLane(MsgType.ScreenShareVideoKeyframeRequest),
             ct).ConfigureAwait(false);
+    }
+
+    public async Task SendScreenShareCursorStateAsync(ScreenShareCursorStateV1 message, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ThrowIfDisposed();
+
+        if (!SessionSupportsScreenShareCursorOverlay)
+        {
+            return;
+        }
+
+        var normalizedMessage = EnsureScreenShareCursorStateSessionId(message);
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_cursor_state_no_remote_endpoint");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("screenshare_cursor_state_session_context_unavailable");
+            throw new InvalidOperationException("Session context is not known yet.");
+        }
+
+        var payload = CreateSecureControlPayload(
+            MsgType.ScreenShareCursorState,
+            requestId: null,
+            ScreenShareCursorStateCodec.Serialize(normalizedMessage));
+        var envelope = CreateEnvelope(envelopeCode, MsgType.ScreenShareCursorState, payload, replyTo: null);
+        await QueueControlEnvelopeAsync(
+            remoteEndpoint,
+            envelope,
+            ResolveControlOutboundLane(MsgType.ScreenShareCursorState),
+            ct,
+            isLowPriorityScreenShareCursorState: true).ConfigureAwait(false);
     }
 
     public async Task SendScreenShareRecoveryReceiptAsync(ScreenShareRecoveryReceiptV1 message, CancellationToken ct)
@@ -2090,8 +2133,15 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         Envelope envelope,
         ControlOutboundLane lane,
         CancellationToken ct,
-        bool isLowPriorityMouseMove = false)
-        => controlOutboundQueue.QueueEnvelopeAsync(destination, envelope, lane, ct, isLowPriorityMouseMove);
+        bool isLowPriorityMouseMove = false,
+        bool isLowPriorityScreenShareCursorState = false)
+        => controlOutboundQueue.QueueEnvelopeAsync(
+            destination,
+            envelope,
+            lane,
+            ct,
+            isLowPriorityMouseMove,
+            isLowPriorityScreenShareCursorState);
 
     private void FlushLowPriorityControlOutboundQueue(string reason)
         => controlOutboundQueue.FlushLowPriority(reason);
@@ -2375,6 +2425,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         => message with { SessionId = ResolveControlSessionId(message.SessionId) };
 
     private ScreenShareRecoveryReceiptV1 EnsureScreenShareRecoveryReceiptSessionId(ScreenShareRecoveryReceiptV1 message)
+        => message with { SessionId = ResolveControlSessionId(message.SessionId) };
+
+    private ScreenShareCursorStateV1 EnsureScreenShareCursorStateSessionId(ScreenShareCursorStateV1 message)
         => message with { SessionId = ResolveControlSessionId(message.SessionId) };
 
 

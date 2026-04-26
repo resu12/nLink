@@ -178,6 +178,7 @@ public sealed partial class SessionRuntime
                 screenShareTransport.ScreenSharePressureStateReceived += owner.OnTransportScreenSharePressureStateReceived;
                 screenShareTransport.ScreenShareRecoveryReceiptReceived += owner.OnTransportScreenShareRecoveryReceiptReceived;
                 screenShareTransport.ScreenShareVideoKeyframeRequestReceived += owner.OnTransportScreenShareVideoKeyframeRequestReceived;
+                screenShareTransport.ScreenShareCursorStateReceived += owner.OnTransportScreenShareCursorStateReceived;
             }
 
             if (nextTransport is NknSignalingTransport nknTransport)
@@ -222,6 +223,7 @@ public sealed partial class SessionRuntime
                 screenShareTransport.ScreenSharePressureStateReceived -= owner.OnTransportScreenSharePressureStateReceived;
                 screenShareTransport.ScreenShareRecoveryReceiptReceived -= owner.OnTransportScreenShareRecoveryReceiptReceived;
                 screenShareTransport.ScreenShareVideoKeyframeRequestReceived -= owner.OnTransportScreenShareVideoKeyframeRequestReceived;
+                screenShareTransport.ScreenShareCursorStateReceived -= owner.OnTransportScreenShareCursorStateReceived;
             }
 
             if (nextTransport is NknSignalingTransport nknTransport)

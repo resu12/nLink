@@ -266,10 +266,14 @@ public sealed class SessionRuntimeScreenShareControlHostTests
             _ = abortReason;
         }
 
-        public void ReportHelperRemoteScreenShareStaleFrameDropped(long renderedAgeMs, long streamEpoch)
+        public void ReportHelperRemoteScreenShareStaleFrameDropped(
+            long renderedAgeMs,
+            long streamEpoch,
+            bool referenceContinuityPreserved)
         {
             _ = renderedAgeMs;
             _ = streamEpoch;
+            _ = referenceContinuityPreserved;
         }
 
         public void TrackHelperRemoteScreenShareAcceptedFrame(ScreenShareFrameCompletedEventArgs e)

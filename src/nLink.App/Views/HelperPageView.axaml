@@ -125,6 +125,9 @@
                             <views:ScreenShareSurfaceView x:Name="RemoteScreenShareSurface"
                                                           Frame="{Binding RemoteScreenShareFrame}"
                                                           SurfaceRole="helper_remote"
+                                                          CursorOverlayVisible="{Binding ScreenShareViewer.CursorOverlayVisible}"
+                                                          CursorOverlayNx="{Binding ScreenShareViewer.CursorOverlayNx}"
+                                                          CursorOverlayNy="{Binding ScreenShareViewer.CursorOverlayNy}"
                                                           CaptureEnabled="{Binding IsRemoteControlInputCaptureEnabled}"
                                                           KeyboardCaptureEnabled="{Binding IsRemoteControlKeyboardCaptureEnabled}"
                                                           MouseMoveRateHz="{Binding RemoteControlMouseMoveRateHz}"
@@ -335,13 +338,21 @@
                                                                        HorizontalAlignment="Left"
                                                                        TextAlignment="Left"
                                                                        VerticalAlignment="Center"/>
-                                                            <Border Grid.Column="1"
-                                                                    Classes="inlineBadge"
-                                                                    IsVisible="{Binding ShowFirstPillVerificationCode}">
-                                                                <TextBlock Classes="inlineBadgeText"
-                                                                           AutomationProperties.AutomationId="Helper.FirstPillVerificationCode"
-                                                                           Text="{Binding FirstPillVerificationCodeText}"/>
-                                                            </Border>
+                                                            <StackPanel Grid.Column="1"
+                                                                        Orientation="Horizontal"
+                                                                        Spacing="8"
+                                                                        VerticalAlignment="Center"
+                                                                        IsVisible="{Binding ShowFirstPillVerificationCode}">
+                                                                <TextBlock Text="Verification code"
+                                                                           Classes="appMuted"
+                                                                           FontSize="12"
+                                                                           VerticalAlignment="Center"/>
+                                                                <Border Classes="inlineBadge">
+                                                                    <TextBlock Classes="inlineBadgeText"
+                                                                               AutomationProperties.AutomationId="Helper.FirstPillVerificationCode"
+                                                                               Text="{Binding FirstPillVerificationCodeText}"/>
+                                                                </Border>
+                                                            </StackPanel>
                                                         </Grid>
 
                                                         <TextBlock AutomationProperties.AutomationId="Helper.HelperIdentityBootstrapHint"
@@ -349,7 +360,6 @@
                                                                    Classes="appMuted"
                                                                    TextWrapping="Wrap"
                                                                    HorizontalAlignment="Left"/>
-
                                                         <TextBox Classes="highContrastInput helperConnectInput"
                                                                  AutomationProperties.AutomationId="Helper.HelperIdentityBootstrapTextBox"
                                                                  Text="{Binding HelperIdentityBootstrapText}"
@@ -380,6 +390,15 @@
                                                                     HorizontalAlignment="Stretch"
                                                                     MinWidth="0"/>
                                                         </Grid>
+
+                                                        <Button Classes="appButton compactSecondaryAction"
+                                                                AutomationProperties.AutomationId="Helper.RegenerateHelperIdentity"
+                                                                Content="{Binding RegenerateHelperIdentityButtonText}"
+                                                                Command="{Binding RegenerateHelperIdentityCommand}"
+                                                                IsVisible="{Binding ShowRegenerateHelperIdentityAction}"
+                                                                IsEnabled="{Binding CanRegenerateHelperIdentity}"
+                                                                HorizontalAlignment="Center"
+                                                                MinWidth="220"/>
 
                                                         <Border Background="{StaticResource AppSurfaceBrush}"
                                                                 CornerRadius="20"
