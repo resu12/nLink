@@ -85,7 +85,27 @@ jobs:
             throw "Bridge runtime directory not found: $env:NLINK_BRIDGE_RUNTIME_DIR"
           }
           Get-ChildItem -Path $env:NLINK_BRIDGE_RUNTIME_DIR -Force
-          Get-ChildItem -Path (Join-Path $env:NLINK_BRIDGE_RUNTIME_DIR "node_modules") -Force | Select-Object -First 20
+
+          $requiredFiles = @(
+            "bridge-manifest.json",
+            "index.js",
+            "node.exe",
+            "package.json"
+          )
+
+          foreach ($fileName in $requiredFiles) {
+            $path = Join-Path $env:NLINK_BRIDGE_RUNTIME_DIR $fileName
+            if (-not (Test-Path $path)) {
+              throw "Required bridge bundle file not found: $path"
+            }
+          }
+
+          $nodeModules = Join-Path $env:NLINK_BRIDGE_RUNTIME_DIR "node_modules"
+          if (Test-Path $nodeModules) {
+            Get-ChildItem -Path $nodeModules -Force | Select-Object -First 20
+          } else {
+            Write-Host "Bridge bundle is self-contained; node_modules is not staged."
+          }
 
       - name: Smoke tests
         shell: powershell
