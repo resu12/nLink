@@ -3733,7 +3733,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         OutboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(fileTransferSnapshot.Outbound);
         var hasActiveOutboundTransfer = fileTransferSnapshot.Outbound is { IsTerminal: false };
         var phase = GetEffectivePhase();
-        var suppressConnectedControlsDuringLocalEnd = flow.SuppressConnectedControls;
+        var suppressConnectedControlsDuringLocalEnd = localEndCommandInFlight || flow.SuppressConnectedControls;
         var connectedForChat = flow.CanUseChatControls;
         EffectivePhase = phase;
         nextCanEndSession = !suppressConnectedControlsDuringLocalEnd && CanEndForPhase(phase);
