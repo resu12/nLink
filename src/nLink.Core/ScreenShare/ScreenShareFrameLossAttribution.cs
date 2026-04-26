@@ -738,6 +738,7 @@ internal sealed record ScreenShareHelperSocketReceiveSessionSnapshot(
 internal static class ScreenShareFrameLossAttributionRegistry
 {
     private const int MaxTrackedSessions = 8;
+    private const int MaxTrackedFramesPerSession = 1024;
     private const int MaxRecentLossesPerSession = 96;
     private const long UnattributedInFlightAgeThresholdMs = 1500;
     private static readonly object Gate = new();
@@ -2361,7 +2362,34 @@ internal static class ScreenShareFrameLossAttributionRegistry
 
         frame = new FrameState(streamEpoch, frameId, isKeyFrame);
         session.Frames.Add(key, frame);
+        TrimTrackedFrames(session);
         return frame;
+    }
+
+    private static void TrimTrackedFrames(SessionState session)
+    {
+        while (session.Frames.Count > MaxTrackedFramesPerSession)
+        {
+            FrameKey oldestKey = default;
+            var foundOldest = false;
+            foreach (var key in session.Frames.Keys)
+            {
+                if (!foundOldest ||
+                    key.StreamEpoch < oldestKey.StreamEpoch ||
+                    key.StreamEpoch == oldestKey.StreamEpoch && key.FrameId < oldestKey.FrameId)
+                {
+                    oldestKey = key;
+                    foundOldest = true;
+                }
+            }
+
+            if (!foundOldest)
+            {
+                break;
+            }
+
+            session.Frames.Remove(oldestKey);
+        }
     }
 
     private static void EnqueueRecentLoss(SessionState session, ScreenShareFrameLossBreadcrumb breadcrumb)

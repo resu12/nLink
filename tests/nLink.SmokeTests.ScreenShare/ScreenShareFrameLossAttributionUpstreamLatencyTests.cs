@@ -30,4 +30,27 @@ public sealed class ScreenShareFrameLossAttributionUpstreamLatencyTests
         Assert.Equal(1, snapshot.WorstEpochByCaptureToDecodeStart);
         Assert.Equal(340, snapshot.WorstEpochCaptureToDecodeStartAvgMs);
     }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void FrameLossAttribution_BoundsPerSessionFrameState()
+    {
+        const string sessionId = "frame-retention-test";
+        ScreenShareFrameLossAttributionRegistry.ResetAllForTests();
+
+        for (var frameId = 1; frameId <= 1300; frameId++)
+        {
+            ScreenShareFrameLossAttributionRegistry.ObserveFragmentSeen(
+                sessionId,
+                streamEpoch: 1,
+                frameId: frameId,
+                isKeyFrame: frameId == 1);
+        }
+
+        var snapshot = ScreenShareFrameLossAttributionRegistry.GetSnapshot(sessionId);
+        var epochSnapshot = Assert.Single(snapshot.EpochSnapshots);
+
+        Assert.Equal(1024, snapshot.FragmentSeenFrames);
+        Assert.Equal(1024, epochSnapshot.FragmentSeenFrames);
+    }
 }
