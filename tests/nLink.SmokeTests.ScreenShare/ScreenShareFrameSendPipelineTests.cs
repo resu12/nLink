@@ -326,6 +326,46 @@ public sealed class ScreenShareFrameSendPipelineTests : CoreSmokeTestsBase
         Assert.Equal(0, metrics.FramesDroppedByRateGate);
     }
 
+[Trait("Category", "Smoke")]
+    [Fact]
+    public async Task ScreenShareFrameSendPipeline_PrunesFrameIdKeysForOlderEpochsWhenStreamEpochAdvances()
+    {
+        var clock = new FakeScreenShareClock(new DateTimeOffset(2026, 4, 14, 18, 12, 0, TimeSpan.Zero));
+        var delayScheduler = new ControlledDelayScheduler();
+        var sentPackets = new ConcurrentQueue<ScreenShareEncodedFramePacket>();
+
+        await using var pipeline = CreateControlledScreenShareFrameSendPipeline(
+            sendFrameAsync: (packet, _) =>
+            {
+                sentPackets.Enqueue(packet);
+                return Task.FromResult(1);
+            },
+            clock,
+            delayScheduler,
+            maxFramesPerSecond: 5);
+
+        await EnqueueEpochKeyframeAsync(pipeline, "session-epoch-prune", streamEpoch: 1, timestampUnixMilliseconds: 5000);
+        await WaitUntilAsync(() => sentPackets.Count >= 1, TimeSpan.FromSeconds(1));
+        Assert.Equal(1, pipeline.FrameSequenceKeyCount);
+
+        await EnqueueEpochKeyframeAsync(pipeline, "session-epoch-prune", streamEpoch: 2, timestampUnixMilliseconds: 5100);
+        await WaitUntilAsync(() => delayScheduler.PendingCount >= 1, TimeSpan.FromSeconds(1));
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        delayScheduler.CompleteLatest();
+        await WaitUntilAsync(() => sentPackets.Count >= 2, TimeSpan.FromSeconds(1));
+        Assert.Equal(1, pipeline.FrameSequenceKeyCount);
+
+        await EnqueueEpochKeyframeAsync(pipeline, "session-epoch-prune", streamEpoch: 3, timestampUnixMilliseconds: 5200);
+        await WaitUntilAsync(() => delayScheduler.PendingCount >= 1, TimeSpan.FromSeconds(1));
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        delayScheduler.CompleteLatest();
+        await WaitUntilAsync(() => sentPackets.Count >= 3, TimeSpan.FromSeconds(1));
+
+        Assert.Equal(1, pipeline.FrameSequenceKeyCount);
+        Assert.Equal(new long[] { 1, 2, 3 }, sentPackets.Select(packet => packet.StreamEpoch));
+        Assert.Equal(new long[] { 0, 0, 0 }, sentPackets.Select(packet => packet.FrameId));
+    }
+
 [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task ScreenShareFrameSendPipeline_OrdinaryFrame_CannotEvictOrDelayQueuedRecoveryOwnerAndFollowers()
@@ -469,4 +509,27 @@ public sealed class ScreenShareFrameSendPipelineTests : CoreSmokeTestsBase
         Assert.True(metrics.FramesDropped >= 1);
     }
 
+    private static Task EnqueueEpochKeyframeAsync(
+        ScreenShareFrameSendPipeline pipeline,
+        string sessionId,
+        long streamEpoch,
+        long timestampUnixMilliseconds)
+        => pipeline.EnqueueFrameAsync(
+            sessionId,
+            width: 1280,
+            height: 720,
+            encoding: "h264",
+            encodedFrameBytes: new byte[] { checked((byte)streamEpoch), 1, 1 },
+            timestampUnixMilliseconds,
+            isKeyFrame: true,
+            streamEpoch,
+            streamConfig: new ScreenShareVideoStreamConfigV1
+            {
+                SessionId = sessionId,
+                StreamEpoch = streamEpoch,
+                Encoding = "h264",
+                CodecProfile = "baseline",
+                DecoderConfigData = new byte[] { 1, 2, 3 },
+            },
+            cancellationToken: CancellationToken.None);
 }

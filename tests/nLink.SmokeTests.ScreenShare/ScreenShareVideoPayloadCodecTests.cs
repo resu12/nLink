@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using NLink.Core.ScreenShare;
 
 namespace NLink.SmokeTests;
@@ -122,6 +123,18 @@ public sealed class ScreenShareVideoPayloadCodecTests
         var second = ScreenShareVideoPayloadCodec.SerializeFragment(CreateFragment(frameId: 12, fragmentIndex: 1, fragmentCount: 2, data: new byte[] { 0x02 }));
 
         Assert.Throws<InvalidOperationException>(() => ScreenShareVideoPayloadCodec.SerializeFragmentBatch(new[] { first, second }));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void ScreenShareVideoPayloadCodec_FragmentBatch_NonContiguousIndexes_AreRejectedOnDeserialize()
+    {
+        var first = ScreenShareVideoPayloadCodec.SerializeFragment(CreateFragment(fragmentIndex: 0, fragmentCount: 3, data: new byte[] { 0x01 }));
+        var third = ScreenShareVideoPayloadCodec.SerializeFragment(CreateFragment(fragmentIndex: 2, fragmentCount: 3, data: new byte[] { 0x03 }));
+        var payload = SerializeUncheckedFragmentBatch(first, third);
+
+        Assert.False(ScreenShareVideoPayloadCodec.TryDeserializeFragmentBatch(payload, out _));
+        Assert.False(ScreenShareVideoPayloadCodec.TryDeserializeFragmentEnvelope(payload, out _, out _));
     }
 
     [Fact]
@@ -284,5 +297,35 @@ public sealed class ScreenShareVideoPayloadCodecTests
             FragmentCount = fragmentCount,
             Data = data ?? new byte[] { 0x11, 0x22, 0x33 },
         };
+    }
+
+    private static byte[] SerializeUncheckedFragmentBatch(params byte[][] serializedFragments)
+    {
+        var totalLength = sizeof(uint) + sizeof(byte) + sizeof(byte) + sizeof(byte) + sizeof(ushort);
+        foreach (var fragment in serializedFragments)
+        {
+            totalLength += sizeof(int) + fragment.Length;
+        }
+
+        var payload = new byte[totalLength];
+        var span = payload.AsSpan();
+        var offset = 0;
+        BinaryPrimitives.WriteUInt32LittleEndian(span[offset..], 0x3156534E);
+        offset += sizeof(uint);
+        span[offset++] = 1;
+        span[offset++] = 3;
+        span[offset++] = 0;
+        BinaryPrimitives.WriteUInt16LittleEndian(span[offset..], checked((ushort)serializedFragments.Length));
+        offset += sizeof(ushort);
+
+        foreach (var fragment in serializedFragments)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(span[offset..], fragment.Length);
+            offset += sizeof(int);
+            fragment.CopyTo(payload, offset);
+            offset += fragment.Length;
+        }
+
+        return payload;
     }
 }

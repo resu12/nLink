@@ -294,7 +294,7 @@ public static class ScreenShareVideoPayloadCodec
                      !string.Equals(encoding, fragment.Encoding, StringComparison.Ordinal) ||
                      fragmentCount != fragment.FragmentCount ||
                      isKeyFrame != fragment.IsKeyFrame ||
-                     fragment.FragmentIndex <= previousFragmentIndex)
+                     fragment.FragmentIndex != previousFragmentIndex + 1)
             {
                 fragments = Array.Empty<ScreenShareVideoFragmentV1>();
                 return false;

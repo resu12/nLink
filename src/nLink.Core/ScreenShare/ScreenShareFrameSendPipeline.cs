@@ -162,6 +162,8 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
         }
     }
 
+    internal int FrameSequenceKeyCount => nextFrameIds.Count;
+
     internal int FlushPendingFrames()
     {
         lock (gate)
@@ -459,6 +461,7 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
                         break;
                     }
 
+                    PruneFrameIdsForOlderEpochs(frame.SessionId, frame.StreamEpoch);
                     var frameId = nextFrameIds.AddOrUpdate(
                         new FrameSequenceKey(frame.SessionId, frame.StreamEpoch),
                         addValueFactory: static _ => 0,
@@ -522,6 +525,18 @@ public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
         catch (ChannelClosedException ex)
         {
             LogDebug($"Send loop stopped because the signal channel closed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private void PruneFrameIdsForOlderEpochs(string sessionId, long streamEpoch)
+    {
+        foreach (var key in nextFrameIds.Keys)
+        {
+            if (key.StreamEpoch < streamEpoch &&
+                string.Equals(key.SessionId, sessionId, StringComparison.Ordinal))
+            {
+                nextFrameIds.TryRemove(key, out _);
+            }
         }
     }
 
