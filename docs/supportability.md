@@ -13,7 +13,7 @@ Diagnostics and hang reports are best-effort redacted. Review them before sharin
 
 ## What To Include In Issues
 
-- nLink version, for example `v0.5.3`.
+- nLink version, for example `v0.6.0`.
 - Install type: Installer or Portable.
 - Your role: Helper, Helpee, or both.
 - Area affected: Connection, chat, file transfer, screen share, remote control, install/update, or diagnostics.

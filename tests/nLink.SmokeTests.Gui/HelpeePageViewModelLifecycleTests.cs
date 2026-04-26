@@ -85,9 +85,28 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
             helpeeRuntime);
 
         SetPrivateField(helpee, "connectionState", "Connected");
+        SetPrivateField(helpee, "wasConnected", true);
         SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
-        SetPrivateField(helpee, "canEndSession", true);
         SetPrivateField(helpee, "isChatInputEnabled", true);
+        SetPrivateField(helpeeRuntime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(helpeeRuntime, "transportState", TransportState.Connected);
+        SetPrivateField(
+            helpeeRuntime,
+            "currentFlowSnapshot",
+            helpeeRuntime.FlowSnapshot with
+            {
+                Phase = SessionFlowPhase.ActiveSession,
+                UiPhase = SessionUiPhase.Connected,
+                Role = SessionRuntimeRole.Helpee,
+                RuntimeState = SessionRuntimeState.Connected,
+                TransportState = TransportState.Connected,
+                ApprovalActive = true,
+                DisplayStatusText = "Connected",
+                DisplayConnectionState = "Connected",
+            });
+        InvokePrivateMethod(helpee, "UpdateUiFromSnapshot");
+        Assert.True(helpee.CanEndSession);
+        Assert.True(helpee.EndSessionCommand.CanExecute(null));
 
         helpee.EndSessionCommand.Execute(null);
 

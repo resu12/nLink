@@ -192,7 +192,13 @@ public sealed class SessionRuntimeScreenSharePressureRecoveryAwareTests : Screen
             transport.SentPressureStates.Clear();
             now = now.AddMilliseconds(900.0);
             ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "MaybeSendScreenSharePressureState");
-            Assert.Equal(0, transport.SentPressureStates.Count);
+            Assert.DoesNotContain(transport.SentPressureStates, (ScreenSharePressureStateV1 sent) => sent.Mode == ScreenSharePressureMode.CatchUpOnly);
+            Assert.DoesNotContain(transport.SentPressureStates, (ScreenSharePressureStateV1 sent) => string.Equals(sent.Reason, "high_frame_age", StringComparison.Ordinal) || string.Equals(sent.Reason, "slow_apply_cadence", StringComparison.Ordinal));
+            foreach (ScreenSharePressureStateV1 sentPressureState in transport.SentPressureStates)
+            {
+                Assert.Equal(ScreenSharePressureMode.Normal, sentPressureState.Mode);
+                Assert.Equal("healthy", sentPressureState.Reason);
+            }
             now = now.AddMilliseconds(120.0);
             ScreenShareTransportBoundaryTestBase.ReportHelperRemoteFrameApplied(sessionRuntime, 570L, 1L, 44L);
             now = now.AddMilliseconds(120.0);

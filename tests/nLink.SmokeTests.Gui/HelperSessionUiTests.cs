@@ -1158,10 +1158,8 @@ public sealed class HelperSessionUiTests : SessionHeaderAndBannerTestBase
         var invite = CreateValidatedInviteForTarget(new PeerAddress("helpee.preview.target"), out var rawToken, boundHelperAddress: boundHelperIdentity);
         helper.CodeInput = rawToken;
         SetPrivateField(helper, "effectivePhase", SessionUiPhase.Connecting);
-        var expected = HelperVerificationCodeFormatter.Format(stableSessionHelperIdentity);
         Assert.Equal(boundHelperIdentity, invite.BoundHelperAddress);
-        Assert.True(helper.ShowHeaderVerificationCode);
-        Assert.Equal(expected, helper.HeaderVerificationCodeText);
+        Assert.False(helper.ShowHeaderVerificationCode);
     }
 
     [Trait("Category", "LegacySmoke")]

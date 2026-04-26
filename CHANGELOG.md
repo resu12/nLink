@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.6.0] - 2026-04-26
+
+### Added
+
+- Final `0.6.0` release notes under `docs/releases/`.
+- H.264 screenshare transport as the default screen-sharing path, replacing the legacy JPEG frame-update model for normal screen sharing.
+- Helper-side cursor overlay telemetry so cursor motion can remain smooth even when video frames briefly hold.
+- Screenshare operator and Diagnostics evidence for H.264 visual integrity, cursor delivery, WGC GPU scaling, CPU cadence, packaging size, and WGC teardown state.
+- Explicit helper address regeneration for privacy resets while keeping the normal helper address stable across restarts.
+- Packaging cleanup and size-reporting tools, including download-size versus installed-size packaging modes.
+
+### Changed
+
+- Release version sources and packaging defaults now resolve to `0.6.0`.
+- README and release-facing documentation now reflect `0.6.0` as the current release.
+- Screenshare capture now uses upstream raw-capture cadence, WGC GPU scaling, and same-size direct preprocessing to lower helpee CPU cost without reducing the normal quality target.
+- Helper screenshare presentation now uses high-quality interpolation for meaningful upscaling and downscaling.
+- Diagnostics was reorganized around support-first connection, identity, and screen-share health details, with noisier counters moved into advanced diagnostics or copied reports.
+- Default packaging is optimized again for smaller download artifacts while keeping installed-size optimization available as an explicit build option.
+
+### Fixed
+
+- H.264 recovery, keyframe/IDR motion handling, reference-chain quarantine, and helper visual gating reduce broken text bands and corrupted inter-frame artifacts during scrolling and fast motion.
+- Helper-side cursor overlay reduces captured-cursor tail and improves perceived cursor fluency.
+- Helper reduced/catch-up recovery and visible-progress accounting were tightened so healthy periods can return to normal screenshare mode more reliably.
+- Win10 Windows Graphics Capture teardown now closes WGC lifecycle objects on the owning apartment to prevent the yellow capture border from lingering after sharing stops.
+- Helper closure and remote-end paths were hardened so helpee sharing stops immediately and late capture frames or queued restarts cannot revive sharing.
+- Failed/no-session screenshare soaks are classified as setup failures instead of being mistaken for quality evidence.
+
+### Packaging
+
+- Windows installer and portable release assets for `0.6.0` are prepared together with `SHA256SUMS.txt`.
+
 ## [0.5.3] - 2026-03-25
 
 ### Added

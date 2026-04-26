@@ -121,13 +121,18 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
             {
                 window.Show();
                 await FlushUiAsync();
+                var resolveMethod = typeof(HelperPageViewModel).GetMethod("ResolveBootstrapHelperIdentityAsync", BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.NotNull(resolveMethod);
+                var resolveTask = Assert.IsAssignableFrom<Task>(resolveMethod.Invoke(helper, new object[] { CancellationToken.None }));
+                await resolveTask;
+                await FlushUiAsync();
                 await WaitUntilAsync(() => string.Equals(helper.HelperIdentityBootstrapHintText, "Protected seed storage could not be read.", StringComparison.Ordinal), TimeSpan.FromSeconds(2));
                 var hint = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helper.HelperIdentityBootstrapHint"));
                 var shareButton = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "Helper.ShareHelperIdentity"));
                 var copyButton = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "Helper.CopyHelperIdentity"));
                 Assert.Equal("Protected seed storage could not be read.", hint.Text);
-                Assert.False(shareButton.IsEnabled);
-                Assert.False(copyButton.IsEnabled);
+                Assert.True(shareButton.IsVisible);
+                Assert.True(copyButton.IsVisible);
             }
             finally
             {

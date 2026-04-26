@@ -179,7 +179,6 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
         using var helpee = new HelpeePageViewModel(cancelAction: static () =>
         {
         }, CreateNknTestConfig(), runtime);
-        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
         helpee.InviteHelperIdentityInput = "helper.request.target";
         await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
         var requestTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helpee, "RequestHelpAsync"));
@@ -205,7 +204,6 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
         using var helpee = new HelpeePageViewModel(cancelAction: static () =>
         {
         }, CreateNknTestConfig(), runtime);
-        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
         var helperAddress = new PeerAddress("nlink-helper.request.target.compact.1234567890");
         var helperIdentity = new PeerAddress("nlink-helper.identity.compact.0987654321");
         helpee.InviteHelperIdentityInput = HelperBootstrapQrPayload.Format(HelperBootstrapPayload.Create(helperAddress, helperId: HelperIdentityTokenCodec.Encode(helperIdentity), fingerprintHint: "ignored"));
@@ -235,7 +233,6 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
         var helperIdentity = new PeerAddress("nlink-helper.reject.status");
         var helperTarget = new PeerAddress("nlink-helper.reject.target");
         var helperBootstrap = HelperBootstrapQrPayload.Format(HelperBootstrapPayload.Create(helperTarget, helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
-        await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
         helpee.SetVerifiedInviteHelperIdentity(helperIdentity, helperTargetAddress: helperTarget, refreshInvite: true, normalizedInputOverride: helperBootstrap);
         await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
         SetPrivateField(helpeeRuntime, "<PendingOutboundHelpRequestDecision>k__BackingField", new HelpRequestDecisionMessage("hr_reject", new PeerAddress("helpee.reject.status"), helperTarget, Accepted: false, Reason: "request_rejected"));
