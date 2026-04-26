@@ -278,6 +278,14 @@ internal static ScreenShareRecoveryReceiptV1 WaitForSingleRecoveryReceipt(List<S
         return Assert.Single(sentMessages);
     }
 
+internal static T[] SnapshotList<T>(List<T> messages)
+    {
+        lock (messages)
+        {
+            return messages.ToArray();
+        }
+    }
+
 internal static void SetPrivateField(object target, string fieldName, object? value)
     {
         var field = target.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
@@ -413,7 +421,11 @@ internal sealed class ScreenShareSignalingTransportDouble : ISignalingTransport,
 
         public Task SendScreenSharePressureStateAsync(ScreenSharePressureStateV1 message, CancellationToken ct)
         {
-            SentPressureStates.Add(message);
+            lock (SentPressureStates)
+            {
+                SentPressureStates.Add(message);
+            }
+
             return Task.CompletedTask;
         }
 
@@ -530,7 +542,11 @@ internal class ScreenShareAwareSignalingTransportDouble : ISignalingTransport, I
 
         public Task SendScreenSharePressureStateAsync(ScreenSharePressureStateV1 message, CancellationToken ct)
         {
-            SentPressureStates.Add(message);
+            lock (SentPressureStates)
+            {
+                SentPressureStates.Add(message);
+            }
+
             return Task.CompletedTask;
         }
 

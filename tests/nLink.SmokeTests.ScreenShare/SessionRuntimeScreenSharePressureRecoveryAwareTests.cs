@@ -121,9 +121,10 @@ public sealed class SessionRuntimeScreenSharePressureRecoveryAwareTests : Screen
             now = now.AddMilliseconds(150.0);
             ScreenShareTransportBoundaryTestBase.ReportHelperRemoteFrameApplied(sessionRuntime, 790L, 1L, 43L);
             SessionRuntime.HelperRemoteScreenSharePressureDiagnosticsSnapshot helperRemoteScreenSharePressureDiagnosticsSnapshotForTests = sessionRuntime.GetHelperRemoteScreenSharePressureDiagnosticsSnapshotForTests();
-            Assert.DoesNotContain(transport.SentPressureStates, (ScreenSharePressureStateV1 sent) => sent.Mode == ScreenSharePressureMode.CatchUpOnly);
-            Assert.DoesNotContain(transport.SentPressureStates, (ScreenSharePressureStateV1 sent) => string.Equals(sent.Reason, "high_frame_age", StringComparison.Ordinal) || string.Equals(sent.Reason, "slow_apply_cadence", StringComparison.Ordinal));
-            foreach (ScreenSharePressureStateV1 sentPressureState in transport.SentPressureStates)
+            ScreenSharePressureStateV1[] sentPressureStates = SnapshotList(transport.SentPressureStates);
+            Assert.DoesNotContain(sentPressureStates, (ScreenSharePressureStateV1 sent) => sent.Mode == ScreenSharePressureMode.CatchUpOnly);
+            Assert.DoesNotContain(sentPressureStates, (ScreenSharePressureStateV1 sent) => string.Equals(sent.Reason, "high_frame_age", StringComparison.Ordinal) || string.Equals(sent.Reason, "slow_apply_cadence", StringComparison.Ordinal));
+            foreach (ScreenSharePressureStateV1 sentPressureState in sentPressureStates)
             {
                 Assert.Equal(ScreenSharePressureMode.Normal, sentPressureState.Mode);
                 Assert.Equal("healthy", sentPressureState.Reason);
@@ -192,9 +193,10 @@ public sealed class SessionRuntimeScreenSharePressureRecoveryAwareTests : Screen
             transport.SentPressureStates.Clear();
             now = now.AddMilliseconds(900.0);
             ScreenShareTransportBoundaryTestBase.InvokePrivateMethod(sessionRuntime, "MaybeSendScreenSharePressureState");
-            Assert.DoesNotContain(transport.SentPressureStates, (ScreenSharePressureStateV1 sent) => sent.Mode == ScreenSharePressureMode.CatchUpOnly);
-            Assert.DoesNotContain(transport.SentPressureStates, (ScreenSharePressureStateV1 sent) => string.Equals(sent.Reason, "high_frame_age", StringComparison.Ordinal) || string.Equals(sent.Reason, "slow_apply_cadence", StringComparison.Ordinal));
-            foreach (ScreenSharePressureStateV1 sentPressureState in transport.SentPressureStates)
+            ScreenSharePressureStateV1[] sentPressureStates = SnapshotList(transport.SentPressureStates);
+            Assert.DoesNotContain(sentPressureStates, (ScreenSharePressureStateV1 sent) => sent.Mode == ScreenSharePressureMode.CatchUpOnly);
+            Assert.DoesNotContain(sentPressureStates, (ScreenSharePressureStateV1 sent) => string.Equals(sent.Reason, "high_frame_age", StringComparison.Ordinal) || string.Equals(sent.Reason, "slow_apply_cadence", StringComparison.Ordinal));
+            foreach (ScreenSharePressureStateV1 sentPressureState in sentPressureStates)
             {
                 Assert.Equal(ScreenSharePressureMode.Normal, sentPressureState.Mode);
                 Assert.Equal("healthy", sentPressureState.Reason);
