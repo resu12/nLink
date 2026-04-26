@@ -132,7 +132,7 @@ jobs:
           Write-Host "Packaging nLink version: $env:NLINK_VERSION"
           Start-Transcript -Path $transcriptPath | Out-Null
           try {
-            pwsh .\installer\Build-Installer.ps1 -Configuration Release -Runtime win-x64 -AppVersion $env:NLINK_VERSION
+            pwsh .\installer\Build-Installer.ps1 -Configuration Release -Runtime win-x64 -AppVersion $env:NLINK_VERSION -CopyHelperAlias
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           finally {
