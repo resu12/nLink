@@ -147,6 +147,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool isChatInputEnabled;
     private SessionUiPhase effectivePhase;
     private bool localEndCommandInFlight;
+    private bool suppressConnectedControlsAfterLocalEnd;
     private string lastAppliedPostTerminalActionKey = string.Empty;
     private SessionUiPhase lastObservedUiPhase;
     private readonly HelpeeScreenShareCoordinator screenShareCoordinator;
@@ -1482,7 +1483,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private bool CanTriggerEndSession()
     {
-        return CanEndSession && !localEndCommandInFlight;
+        return CanEndSession && !localEndCommandInFlight && !suppressConnectedControlsAfterLocalEnd;
     }
 
 #if DEBUG
@@ -1801,6 +1802,9 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             return;
         }
+
+        suppressConnectedControlsAfterLocalEnd = false;
+
         LogReliability(SessionReliabilityStage.Approved);
         LogReliability(SessionReliabilityStage.Completed);
 
@@ -1856,6 +1860,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         localEndCommandInFlight = true;
+        suppressConnectedControlsAfterLocalEnd = true;
         IsChatInputEnabled = false;
         CanEndSession = false;
         CanSendFiles = false;
@@ -2458,6 +2463,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         ClearFailurePresentation();
+        suppressConnectedControlsAfterLocalEnd = false;
         ConnectionState = "Waiting";
 
         try
@@ -3733,7 +3739,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         OutboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(fileTransferSnapshot.Outbound);
         var hasActiveOutboundTransfer = fileTransferSnapshot.Outbound is { IsTerminal: false };
         var phase = GetEffectivePhase();
-        var suppressConnectedControlsDuringLocalEnd = localEndCommandInFlight || flow.SuppressConnectedControls;
+        var suppressConnectedControlsDuringLocalEnd =
+            localEndCommandInFlight ||
+            suppressConnectedControlsAfterLocalEnd ||
+            flow.SuppressConnectedControls;
         var connectedForChat = flow.CanUseChatControls;
         EffectivePhase = phase;
         nextCanEndSession = !suppressConnectedControlsDuringLocalEnd && CanEndForPhase(phase);
@@ -4209,7 +4218,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             throw new InvalidOperationException("Helpee UI invariant failed: chat input requires connected phase or runtime state.");
         }
 
-        if (localEndCommandInFlight && ShowTransientBanner)
+        if ((localEndCommandInFlight || suppressConnectedControlsAfterLocalEnd) && ShowTransientBanner)
         {
             throw new InvalidOperationException("Helpee UI invariant failed: end-invoked state must not show transient banner.");
         }
@@ -4229,6 +4238,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         if (!localEndCommandInFlight &&
+            !suppressConnectedControlsAfterLocalEnd &&
             HeaderStatusText.StartsWith("Connected", StringComparison.Ordinal) &&
             sessionRuntime.FlowSnapshot.IsConnectedShellVisible &&
             sessionRuntime.CanPerform(SessionCapability.Chat) &&
