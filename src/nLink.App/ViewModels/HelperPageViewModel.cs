@@ -262,6 +262,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         AcceptIncomingFileCommand = new AsyncRelayCommand<string?>(AcceptIncomingFileAsync, CanAcceptIncomingFile);
         DeclineIncomingFileCommand = new AsyncRelayCommand<string?>(DeclineIncomingFileAsync, CanDeclineIncomingFile);
         CancelFileTransferCommand = new AsyncRelayCommand<string?>(CancelFileTransferAsync, CanCancelFileTransfer);
+        PauseFileTransferCommand = new AsyncRelayCommand<string?>(PauseFileTransferAsync, CanPauseFileTransfer);
+        ResumeFileTransferCommand = new AsyncRelayCommand<string?>(ResumeFileTransferAsync, CanResumeFileTransfer);
         RetryCommand = new AsyncRelayCommand(RetryAsync, CanRetry);
         CancelTransientCommand = new AsyncRelayCommand(CancelTransientAsync, CanCancelTransientOperation);
         OpenDiagnosticsCommand = new RelayCommand(OpenDiagnostics, CanOpenDiagnosticsCommand);
@@ -882,6 +884,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public IAsyncRelayCommand<string?> DeclineIncomingFileCommand { get; }
 
     public IAsyncRelayCommand<string?> CancelFileTransferCommand { get; }
+
+    public IAsyncRelayCommand<string?> PauseFileTransferCommand { get; }
+
+    public IAsyncRelayCommand<string?> ResumeFileTransferCommand { get; }
 
     public IAsyncRelayCommand RetryCommand { get; }
     public IAsyncRelayCommand CancelTransientCommand { get; }
@@ -1926,13 +1932,16 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void RequestSendFileWindow()
     {
+        LogSendFileActionUi("file_transfer_send_ui_requested", "(entry)");
         if (!CanExecuteSendFileAction())
         {
+            LogSendFileActionUi("file_transfer_send_ui_ignored", "can_execute_false");
             return;
         }
 
         if (!sessionRuntime.TryAuthorizeFileTransferSend())
         {
+            LogSendFileActionUi("file_transfer_send_ui_ignored", "authorize_false");
             CanSendFiles = false;
             OnPropertyChanged(nameof(CanSendFileAction));
             SendFileCommand.NotifyCanExecuteChanged();
@@ -1950,8 +1959,16 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private async Task AcceptIncomingFileAsync(string? transferId)
     {
         var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferActionUi(
+            "file_transfer_accept_ui_requested",
+            normalizedTransferId,
+            includeDecline: false);
         if (!CanAcceptIncomingFile(normalizedTransferId))
         {
+            LogFileTransferActionUi(
+                "file_transfer_accept_ui_ignored",
+                normalizedTransferId,
+                includeDecline: false);
             return;
         }
 
@@ -1969,6 +1986,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private async Task DeclineIncomingFileAsync(string? transferId)
     {
         var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferActionUi(
+            "file_transfer_decline_ui_requested",
+            normalizedTransferId,
+            includeDecline: true);
         if (!CanDeclineIncomingFile(normalizedTransferId))
         {
             return;
@@ -1988,8 +2009,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private async Task CancelFileTransferAsync(string? transferId)
     {
         var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferCancelUi("file_transfer_cancel_ui_requested", normalizedTransferId);
         if (!CanCancelFileTransfer(normalizedTransferId))
         {
+            LogFileTransferCancelUi("file_transfer_cancel_ui_ignored", normalizedTransferId);
             return;
         }
 
@@ -2007,6 +2030,60 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         return (InboundFileTransfer is { ShowCancel: true } inbound &&
                 string.Equals(inbound.TransferId, normalizedTransferId, StringComparison.Ordinal)) ||
                (OutboundFileTransfer is { ShowCancel: true } outbound &&
+                string.Equals(outbound.TransferId, normalizedTransferId, StringComparison.Ordinal));
+    }
+
+    private async Task PauseFileTransferAsync(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferPauseResumeUi("file_transfer_pause_ui_requested", normalizedTransferId);
+        if (!CanPauseFileTransfer(normalizedTransferId))
+        {
+            LogFileTransferPauseResumeUi("file_transfer_pause_ui_ignored", normalizedTransferId);
+            return;
+        }
+
+        await sessionRuntime.PauseTransferAsync(normalizedTransferId!, "ui_pause", CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private bool CanPauseFileTransfer(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        if (normalizedTransferId is null)
+        {
+            return false;
+        }
+
+        return (InboundFileTransfer is { ShowPause: true } inbound &&
+                string.Equals(inbound.TransferId, normalizedTransferId, StringComparison.Ordinal)) ||
+               (OutboundFileTransfer is { ShowPause: true } outbound &&
+                string.Equals(outbound.TransferId, normalizedTransferId, StringComparison.Ordinal));
+    }
+
+    private async Task ResumeFileTransferAsync(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferPauseResumeUi("file_transfer_resume_ui_requested", normalizedTransferId);
+        if (!CanResumeFileTransfer(normalizedTransferId))
+        {
+            LogFileTransferPauseResumeUi("file_transfer_resume_ui_ignored", normalizedTransferId);
+            return;
+        }
+
+        await sessionRuntime.ResumeTransferAsync(normalizedTransferId!, "ui_resume", CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private bool CanResumeFileTransfer(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        if (normalizedTransferId is null)
+        {
+            return false;
+        }
+
+        return (InboundFileTransfer is { ShowResume: true } inbound &&
+                string.Equals(inbound.TransferId, normalizedTransferId, StringComparison.Ordinal)) ||
+               (OutboundFileTransfer is { ShowResume: true } outbound &&
                 string.Equals(outbound.TransferId, normalizedTransferId, StringComparison.Ordinal));
     }
 
@@ -3609,8 +3686,18 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         bool nextCanOpenDiagnostics;
         var flow = sessionRuntime.FlowSnapshot;
         var fileTransferSnapshot = sessionRuntime.FileTransferSnapshot;
-        InboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(fileTransferSnapshot.Inbound);
-        OutboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(fileTransferSnapshot.Outbound);
+        InboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(
+            fileTransferSnapshot.Inbound,
+            AcceptIncomingFileCommand,
+            DeclineIncomingFileCommand,
+            CancelFileTransferCommand,
+            PauseFileTransferCommand,
+            ResumeFileTransferCommand);
+        OutboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(
+            fileTransferSnapshot.Outbound,
+            cancelCommand: CancelFileTransferCommand,
+            pauseCommand: PauseFileTransferCommand,
+            resumeCommand: ResumeFileTransferCommand);
         var hasActiveOutboundTransfer = fileTransferSnapshot.Outbound is { IsTerminal: false };
         var phase = GetEffectivePhase();
         var suppressConnectedControlsDuringLocalEnd = flow.SuppressConnectedControls;
@@ -3678,6 +3765,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         AcceptIncomingFileCommand.NotifyCanExecuteChanged();
         DeclineIncomingFileCommand.NotifyCanExecuteChanged();
         CancelFileTransferCommand.NotifyCanExecuteChanged();
+        PauseFileTransferCommand.NotifyCanExecuteChanged();
+        ResumeFileTransferCommand.NotifyCanExecuteChanged();
         OpenDiagnosticsCommand.NotifyCanExecuteChanged();
         EndSessionCommand.NotifyCanExecuteChanged();
         LogCurrentChatPanelState(source);
@@ -3703,6 +3792,58 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         lastChatPanelStateLog = payload;
         WriteDebugTrace($"[HelperUi] {payload}");
+    }
+
+    private void LogFileTransferActionUi(
+        string eventName,
+        string? normalizedTransferId,
+        bool includeDecline)
+    {
+        var inbound = InboundFileTransfer;
+        var payload =
+            $"event={eventName}; role=Helper; transfer_id_present={(normalizedTransferId is null ? 0 : 1)}; " +
+            $"inbound_state={inbound?.State.ToString() ?? "(none)"}; " +
+            $"inbound_show_accept={(inbound?.ShowAccept == true ? 1 : 0)}; " +
+            $"effective_phase={EffectivePhase}; runtime_state={sessionRuntime.State}";
+        if (includeDecline)
+        {
+            payload += $"; inbound_show_decline={(inbound?.ShowDecline == true ? 1 : 0)}";
+        }
+
+        LocalOperationalLog.Info("HelperUi", payload);
+    }
+
+    private void LogSendFileActionUi(string eventName, string reason)
+    {
+        LocalOperationalLog.Info(
+            "HelperUi",
+            $"event={eventName}; role=Helper; reason={reason}; " +
+            $"can_send_files={(CanSendFiles ? 1 : 0)}; can_send_file_action={(CanExecuteSendFileAction() ? 1 : 0)}; " +
+            $"effective_phase={EffectivePhase}; runtime_state={sessionRuntime.State}");
+    }
+
+    private void LogFileTransferCancelUi(string eventName, string? normalizedTransferId)
+    {
+        var inbound = InboundFileTransfer;
+        var outbound = OutboundFileTransfer;
+        LocalOperationalLog.Info(
+            "HelperUi",
+            $"event={eventName}; role=Helper; transfer_id_present={(normalizedTransferId is null ? 0 : 1)}; " +
+            $"inbound_state={inbound?.State.ToString() ?? "(none)"}; inbound_show_cancel={(inbound?.ShowCancel == true ? 1 : 0)}; " +
+            $"outbound_state={outbound?.State.ToString() ?? "(none)"}; outbound_show_cancel={(outbound?.ShowCancel == true ? 1 : 0)}; " +
+            $"effective_phase={EffectivePhase}; runtime_state={sessionRuntime.State}");
+    }
+
+    private void LogFileTransferPauseResumeUi(string eventName, string? normalizedTransferId)
+    {
+        var inbound = InboundFileTransfer;
+        var outbound = OutboundFileTransfer;
+        LocalOperationalLog.Info(
+            "HelperUi",
+            $"event={eventName}; role=Helper; transfer_id_present={(normalizedTransferId is null ? 0 : 1)}; " +
+            $"inbound_state={inbound?.State.ToString() ?? "(none)"}; inbound_show_pause={(inbound?.ShowPause == true ? 1 : 0)}; inbound_show_resume={(inbound?.ShowResume == true ? 1 : 0)}; " +
+            $"outbound_state={outbound?.State.ToString() ?? "(none)"}; outbound_show_pause={(outbound?.ShowPause == true ? 1 : 0)}; outbound_show_resume={(outbound?.ShowResume == true ? 1 : 0)}; " +
+            $"effective_phase={EffectivePhase}; runtime_state={sessionRuntime.State}");
     }
 
     [Conditional("DEBUG")]

@@ -91,9 +91,9 @@ internal static class FileTransferSoakRunner
         long TotalPayloadBytes,
         double AverageGoodputBytesPerSecond,
         double MinimumGoodputBytesPerSecond,
-        int V3BatchFrameCount,
-        int V3ChunkFrameCount,
-        double? V3BatchRatio,
+        int DataProtocolVersion,
+        int V4ChunkBatchFrameCount,
+        int V4MixedEnabledCount,
         int ReorderEventCount,
         int RequestTimeoutCount,
         int RetryRequestedCount,
@@ -902,8 +902,9 @@ internal static class FileTransferSoakRunner
         var screenShareFramesEmitted = cycles.Sum(static c => c.ScreenShareFramesEmitted);
         var screenShareMediaFramesDelayed = cycles.Sum(static c => c.ScreenShareMediaFramesDelayed);
         var screenShareMediaFramesDropped = cycles.Sum(static c => c.ScreenShareMediaFramesDropped);
-        var denominator = logMetrics.V3BatchFrameCount + logMetrics.V3ChunkFrameCount;
-        var ratio = denominator > 0 ? (double)logMetrics.V3BatchFrameCount / denominator : (double?)null;
+        var dataProtocolVersion = logMetrics.V4NegotiatedCount > 0 || logMetrics.V4ChunkBatchFrameCount > 0
+            ? FileTransferProtocol.ProtocolVersionV4
+            : 0;
         var hardLogFailure = logMetrics.PayloadRejectedCount > 0 ||
                              logMetrics.DecodeFailureCount > 0 ||
                              logMetrics.MessageRejectedCount > 0 ||
@@ -926,9 +927,9 @@ internal static class FileTransferSoakRunner
             totalBytes,
             avgGoodput,
             minGoodput,
-            logMetrics.V3BatchFrameCount,
-            logMetrics.V3ChunkFrameCount,
-            ratio,
+            dataProtocolVersion,
+            logMetrics.V4ChunkBatchFrameCount,
+            logMetrics.V4MixedEnabledCount,
             logMetrics.ReorderEventCount,
             logMetrics.RequestTimeoutCount,
             logMetrics.RetryRequestedCount,
@@ -981,9 +982,6 @@ internal static class FileTransferSoakRunner
     private static string[] BuildLocalSummaryLines(FileTransferSoakOutput output, string logSlicePath)
     {
         var aggregate = output.Aggregate;
-        var ratio = aggregate.V3BatchRatio.HasValue
-            ? aggregate.V3BatchRatio.Value.ToString("F3", CultureInfo.InvariantCulture)
-            : "(none)";
         return
         [
             $"verdict={aggregate.Verdict}",
@@ -996,9 +994,9 @@ internal static class FileTransferSoakRunner
             $"total_payload_bytes={aggregate.TotalPayloadBytes}",
             $"average_goodput_bytes_per_second={aggregate.AverageGoodputBytesPerSecond.ToString("F3", CultureInfo.InvariantCulture)}",
             $"min_goodput_bytes_per_second={aggregate.MinimumGoodputBytesPerSecond.ToString("F3", CultureInfo.InvariantCulture)}",
-            $"v3_batch_frame_count={aggregate.V3BatchFrameCount}",
-            $"v3_chunk_frame_count={aggregate.V3ChunkFrameCount}",
-            $"v3_batch_ratio={ratio}",
+            $"data_protocol_version={(aggregate.DataProtocolVersion == 0 ? "(unknown)" : aggregate.DataProtocolVersion.ToString(CultureInfo.InvariantCulture))}",
+            $"v4_chunk_batch_frame_count={aggregate.V4ChunkBatchFrameCount}",
+            $"v4_mixed_enabled_count={aggregate.V4MixedEnabledCount}",
             $"reorder_event_count={aggregate.ReorderEventCount}",
             $"request_timeout_count={aggregate.RequestTimeoutCount}",
             $"retry_requested_count={aggregate.RetryRequestedCount}",
@@ -1046,6 +1044,9 @@ internal static class FileTransferSoakRunner
             $"screen_share_frames_emitted={aggregate.ScreenShareFramesEmitted}",
             $"screen_share_media_delayed_count={aggregate.ScreenShareMediaFramesDelayed}",
             $"screen_share_media_dropped_count={aggregate.ScreenShareMediaFramesDropped}",
+            $"data_protocol_version={(aggregate.DataProtocolVersion == 0 ? "(unknown)" : aggregate.DataProtocolVersion.ToString(CultureInfo.InvariantCulture))}",
+            $"v4_chunk_batch_frame_count={aggregate.V4ChunkBatchFrameCount}",
+            $"v4_mixed_enabled_count={aggregate.V4MixedEnabledCount}",
             $"cycles_completed={aggregate.CyclesCompleted}",
             $"cycles_requested={aggregate.CyclesRequested}",
             $"verdict={aggregate.Verdict}",
@@ -1152,16 +1153,17 @@ internal static class FileTransferSoakRunner
         using var reader = new StringReader(logText);
         while (reader.ReadLine() is { } line)
         {
-            if (line.Contains("event=filetransfer_binary_frame_sent", StringComparison.Ordinal))
+            if (line.Contains("event=filetransfer_v4_negotiated", StringComparison.Ordinal))
             {
-                if (line.Contains("frame_type=filetransfer.chunk_batch.v3", StringComparison.Ordinal))
-                {
-                    metrics.V3BatchFrameCount++;
-                }
-                else if (line.Contains("frame_type=filetransfer.chunk_data.v3", StringComparison.Ordinal))
-                {
-                    metrics.V3ChunkFrameCount++;
-                }
+                metrics.V4NegotiatedCount++;
+            }
+            if (line.Contains("event=filetransfer_v4_chunk_batch_sent", StringComparison.Ordinal))
+            {
+                metrics.V4ChunkBatchFrameCount++;
+            }
+            if (line.Contains("event=filetransfer_v4_mixed_enabled", StringComparison.Ordinal))
+            {
+                metrics.V4MixedEnabledCount++;
             }
 
             if (line.Contains("event=filetransfer_reorder_pressure", StringComparison.Ordinal))
@@ -1263,8 +1265,9 @@ internal static class FileTransferSoakRunner
 
     private sealed class LogMetrics
     {
-        public int V3BatchFrameCount { get; set; }
-        public int V3ChunkFrameCount { get; set; }
+        public int V4NegotiatedCount { get; set; }
+        public int V4ChunkBatchFrameCount { get; set; }
+        public int V4MixedEnabledCount { get; set; }
         public int ReorderEventCount { get; set; }
         public int RequestTimeoutCount { get; set; }
         public int RetryRequestedCount { get; set; }

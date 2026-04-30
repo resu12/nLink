@@ -40,7 +40,239 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains(senderTransport.SentDataFrames, static frame => frame is FileTransferChunkBatchFrameV4);
         Assert.Contains(receiverTransport.SentDataFrames, static frame => frame is FileTransferStateFrameV4);
         Assert.Contains(receiverTransport.SentDataFrames, static frame => frame is FileTransferCompleteFrameV4);
-        Assert.DoesNotContain(receiverTransport.SentDataFrames, static frame => frame is FileTransferRequestChunksFrameV2);
+        Assert.DoesNotContain(receiverTransport.SentDataFrames, static frame => frame is not FileTransferStateFrameV4 and not FileTransferCompleteFrameV4);
+    }
+
+    [Fact]
+    public async Task V4Sender_WithScreenshare_FailsCleanlyWhenMixedDisabledByEnvironment()
+    {
+        const string transferId = "transfer_v4_sender_mixed_disabled";
+        const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
+        var previousValue = Environment.GetEnvironmentVariable(envName);
+        Environment.SetEnvironmentVariable(envName, "0");
+        try
+        {
+            var payload = Enumerable.Range(0, 64_000).Select(static index => (byte)(index % 251)).ToArray();
+            using var senderTransport = new LoopbackFileTransferTransport("session_v4_sender_mixed_disabled");
+            using var receiverTransport = new LoopbackFileTransferTransport("session_v4_sender_mixed_disabled");
+            senderTransport.Connect(receiverTransport);
+            using var sender = new SessionFileTransferService();
+            sender.AttachTransport(senderTransport);
+            sender.SetSessionScreenShareActive(true);
+
+            await sender.TryStartSendAsync(
+                new FileTransferSendDescriptor("v4-mixed-disabled.bin", payload.Length, transferId),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+                CancellationToken.None);
+            await WaitUntilAsync(() => senderTransport.SentOffers.TryPeek(out _), timeoutMs: 5000);
+            var offer = senderTransport.SentOffers.Single();
+            await receiverTransport.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = offer.SessionId,
+                    TransferId = transferId,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                },
+                CancellationToken.None);
+
+            await WaitUntilAsync(() => sender.Snapshot.Outbound?.State == FileTransferTransferState.Failed, timeoutMs: 5000);
+            Assert.Equal(FileTransferResultCodes.V4FileOnlyRequired, sender.Snapshot.Outbound?.ErrorCode);
+            Assert.DoesNotContain(senderTransport.SentDataFrames, static frame => frame is FileTransferManifestFrameV4);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envName, previousValue);
+        }
+    }
+
+    [Fact]
+    public async Task V4Sender_WithScreenshareAndMixedFlag_CompletesWithTwoChunkNormalBatches()
+    {
+        const string transferId = "transfer_v4_sender_mixed_flag_on";
+        const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
+        var previousValue = Environment.GetEnvironmentVariable(envName);
+        Environment.SetEnvironmentVariable(envName, "1");
+        try
+        {
+            var logStart = ReadOperationalLogText().Length;
+            var payload = Enumerable.Range(0, 192_000).Select(static index => (byte)(index % 251)).ToArray();
+            using var senderTransport = new LoopbackFileTransferTransport("session_v4_sender_mixed_flag_on");
+            using var receiverTransport = new LoopbackFileTransferTransport("session_v4_sender_mixed_flag_on");
+            senderTransport.DataSessionSendDelayMs = 25;
+            senderTransport.Connect(receiverTransport);
+            using var sender = new SessionFileTransferService();
+            using var receiver = new SessionFileTransferService();
+            sender.AttachTransport(senderTransport);
+            receiver.AttachTransport(receiverTransport);
+            sender.SetSessionScreenShareActive(true);
+            receiver.SetSessionScreenShareActive(true);
+            using var destination = new NonDisposingMemoryStream();
+
+            await sender.TryStartSendAsync(
+                new FileTransferSendDescriptor("v4-mixed-flag-on.bin", payload.Length, transferId),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+                CancellationToken.None);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+            await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
+            await WaitUntilAsync(
+                () => sender.IsV4MixedScreenShareTransferActive &&
+                      receiver.IsV4MixedScreenShareTransferActive,
+                timeoutMs: 5000);
+
+            await WaitUntilAsync(
+                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+                timeoutMs: 15000);
+
+            Assert.Equal(payload, destination.ToArray()[..payload.Length]);
+            var normalBatches = senderTransport.SentDataFrames
+                .OfType<FileTransferChunkBatchFrameV4>()
+                .Where(static batch => batch.BatchProfile != "v4_repair_21k")
+                .ToArray();
+            Assert.NotEmpty(normalBatches);
+            Assert.All(normalBatches, static batch =>
+            {
+                Assert.InRange(batch.DataSegments.Count, 1, 2);
+                Assert.Equal("v4_default_21k_2x", batch.BatchProfile);
+            });
+            Assert.Contains(normalBatches, static batch => batch.DataSegments.Count == 2);
+            Assert.Contains(
+                normalBatches,
+                static batch => batch.DataSegments.Count == 2 &&
+                    batch.DataSegments[0].Length == 21 * 1024 &&
+                    batch.DataSegments[1].Length == 21 * 1024);
+
+            var log = ReadOperationalLogTail(logStart);
+            Assert.Contains($"event=filetransfer_v4_mixed_enabled; transfer_id={transferId}", log, StringComparison.Ordinal);
+            Assert.Contains("normal_batch_segments=2", log, StringComparison.Ordinal);
+            Assert.Contains("mixed_screenshare=1", log, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envName, previousValue);
+        }
+    }
+
+    [Fact]
+    public async Task V4Sender_WithMixedFlag_LatchesMixedPacingAfterScreenshareWasObserved()
+    {
+        const string transferId = "transfer_v4_sender_mixed_latched";
+        const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
+        var previousValue = Environment.GetEnvironmentVariable(envName);
+        Environment.SetEnvironmentVariable(envName, "1");
+        try
+        {
+            var logStart = ReadOperationalLogText().Length;
+            var payload = Enumerable.Range(0, 128_000).Select(static index => (byte)(index % 251)).ToArray();
+            using var senderTransport = new LoopbackFileTransferTransport("session_v4_sender_mixed_latched");
+            using var receiverTransport = new LoopbackFileTransferTransport("session_v4_sender_mixed_latched");
+            senderTransport.Connect(receiverTransport);
+            using var sender = new SessionFileTransferService();
+            using var receiver = new SessionFileTransferService();
+            sender.AttachTransport(senderTransport);
+            receiver.AttachTransport(receiverTransport);
+            sender.SetSessionScreenShareActive(true);
+            receiver.SetSessionScreenShareActive(true);
+            sender.SetSessionScreenShareActive(false);
+            receiver.SetSessionScreenShareActive(false);
+            using var destination = new NonDisposingMemoryStream();
+
+            await sender.TryStartSendAsync(
+                new FileTransferSendDescriptor("v4-mixed-latched.bin", payload.Length, transferId),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+                CancellationToken.None);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+            await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
+
+            await WaitUntilAsync(
+                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+                timeoutMs: 15000);
+
+            Assert.Equal(payload, destination.ToArray()[..payload.Length]);
+            var normalBatches = senderTransport.SentDataFrames
+                .OfType<FileTransferChunkBatchFrameV4>()
+                .Where(static batch => batch.BatchProfile != "v4_repair_21k")
+                .ToArray();
+            Assert.NotEmpty(normalBatches);
+            Assert.All(normalBatches, static batch =>
+            {
+                Assert.InRange(batch.DataSegments.Count, 1, 2);
+                Assert.Equal("v4_default_21k_2x", batch.BatchProfile);
+            });
+            Assert.Contains(normalBatches, static batch => batch.DataSegments.Count == 2);
+
+            var log = ReadOperationalLogTail(logStart);
+            Assert.Contains($"event=filetransfer_v4_mixed_enabled; transfer_id={transferId}", log, StringComparison.Ordinal);
+            Assert.Contains("screen_share_active=0", log, StringComparison.Ordinal);
+            Assert.Contains("screen_share_observed=1", log, StringComparison.Ordinal);
+            Assert.Contains("normal_batch_segments=2", log, StringComparison.Ordinal);
+            Assert.Contains("mixed_screenshare=1", log, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envName, previousValue);
+        }
+    }
+
+    [Fact]
+    public async Task V4Sender_WithDegradedScreenshareAndMixedFlag_UsesTwoChunkNormalBatches()
+    {
+        const string transferId = "transfer_v4_sender_mixed_degraded";
+        const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
+        var previousValue = Environment.GetEnvironmentVariable(envName);
+        Environment.SetEnvironmentVariable(envName, "1");
+        try
+        {
+            var logStart = ReadOperationalLogText().Length;
+            var payload = Enumerable.Range(0, 128_000).Select(static index => (byte)(index % 251)).ToArray();
+            using var senderTransport = new LoopbackFileTransferTransport("session_v4_sender_mixed_degraded");
+            using var receiverTransport = new LoopbackFileTransferTransport("session_v4_sender_mixed_degraded");
+            senderTransport.Connect(receiverTransport);
+            using var sender = new SessionFileTransferService();
+            using var receiver = new SessionFileTransferService();
+            sender.AttachTransport(senderTransport);
+            receiver.AttachTransport(receiverTransport);
+            sender.SetSessionScreenShareActive(true);
+            receiver.SetSessionScreenShareActive(true);
+            sender.SetSessionScreenShareDegraded(true);
+            receiver.SetSessionScreenShareDegraded(true);
+            using var destination = new NonDisposingMemoryStream();
+
+            await sender.TryStartSendAsync(
+                new FileTransferSendDescriptor("v4-mixed-degraded.bin", payload.Length, transferId),
+                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+                CancellationToken.None);
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+            await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
+            await WaitUntilAsync(
+                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+                timeoutMs: 15000);
+
+            Assert.Equal(payload, destination.ToArray()[..payload.Length]);
+            var normalBatches = senderTransport.SentDataFrames
+                .OfType<FileTransferChunkBatchFrameV4>()
+                .Where(static batch => batch.BatchProfile != "v4_repair_21k")
+                .ToArray();
+            Assert.NotEmpty(normalBatches);
+            Assert.All(normalBatches, static batch =>
+            {
+                Assert.InRange(batch.DataSegments.Count, 1, 2);
+                Assert.Equal("v4_default_21k_2x", batch.BatchProfile);
+            });
+            Assert.Contains(normalBatches, static batch => batch.DataSegments.Count == 2);
+
+            var log = ReadOperationalLogTail(logStart);
+            Assert.Contains($"event=filetransfer_v4_mixed_enabled; transfer_id={transferId}", log, StringComparison.Ordinal);
+            Assert.Contains("screen_share_degraded=1", log, StringComparison.Ordinal);
+            Assert.Contains("normal_batch_segments=2", log, StringComparison.Ordinal);
+            Assert.Contains("mixed_screenshare=1", log, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envName, previousValue);
+        }
     }
 
     [Fact]

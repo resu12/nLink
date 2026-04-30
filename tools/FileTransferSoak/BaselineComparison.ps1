@@ -72,11 +72,6 @@ function Get-FileTransferBaselineProtocolVersion {
         }
     }
 
-    if ($Values.ContainsKey('v3_batch_ratio') -or
-        $Values.ContainsKey('legacy_v2_request_frame_during_v3_count')) {
-        return '3'
-    }
-
     return '(unknown)'
 }
 
@@ -96,11 +91,7 @@ function Test-FileTransferBaselineProtocolMismatch {
 function Get-FileTransferProtocolBatchRatioKey {
     param([string]$ProtocolVersion)
 
-    if ($ProtocolVersion -eq '4') {
-        return 'v4_batch_ratio'
-    }
-
-    return 'v3_batch_ratio'
+    return 'v4_batch_ratio'
 }
 
 function Add-FileTransferRegressionFinding {
@@ -150,7 +141,7 @@ function Compare-FileTransferSafeBaseline {
     $currentBatchRatio = ConvertTo-FileTransferDouble -Values $Current -Name $batchRatioKey -Default -1
     $baselineBatchRatio = ConvertTo-FileTransferDouble -Values $Baseline -Name $batchRatioKey -Default -1
     if ($baselineBatchRatio -gt 0 -and $currentBatchRatio -ge 0 -and $currentBatchRatio -lt ($baselineBatchRatio * 0.80)) {
-        $batchRatioLabel = if ($currentProtocol -eq '4') { 'V4' } else { 'V3' }
+        $batchRatioLabel = if ($currentProtocol -eq '4') { 'V4' } else { 'V4' }
         Add-FileTransferRegressionFinding -List $findings -Finding (
             '{0} batch ratio regressed below 80% of safe baseline: current={1:F3}; baseline={2:F3}' -f $batchRatioLabel, $currentBatchRatio, $baselineBatchRatio)
     }
@@ -196,7 +187,6 @@ function Compare-FileTransferSafeBaseline {
         'v4_feedback_both_failed_count',
         'v4_sender_failed_count',
         'v4_receiver_failed_count',
-        'v4_runtime_not_implemented_count',
         'legacy_data_protocol_started_count',
         'unexpected_legacy_data_frame_during_v4_count')) {
         $currentHard = ConvertTo-FileTransferDouble -Values $Current -Name $hardCounter
@@ -246,7 +236,6 @@ function New-FileTransferBaselineComparisonLines {
     $lines.Add(("current_data_protocol_version={0}" -f $currentProtocol)) | Out-Null
     $lines.Add(("current_average_goodput_bytes_per_second={0}" -f (ConvertTo-FileTransferDouble -Values $Current -Name 'average_goodput_bytes_per_second'))) | Out-Null
     $lines.Add(("current_min_goodput_bytes_per_second={0}" -f (ConvertTo-FileTransferDouble -Values $Current -Name 'min_goodput_bytes_per_second'))) | Out-Null
-    $lines.Add(("current_v3_batch_ratio={0}" -f ($(if ($Current.ContainsKey('v3_batch_ratio')) { $Current['v3_batch_ratio'] } else { '(none)' })))) | Out-Null
     $lines.Add(("current_v4_batch_ratio={0}" -f ($(if ($Current.ContainsKey('v4_batch_ratio')) { $Current['v4_batch_ratio'] } else { '(none)' })))) | Out-Null
     $lines.Add(("current_v4_average_bridge_payload_fill_percent={0}" -f ($(if ($Current.ContainsKey('v4_average_bridge_payload_fill_percent')) { $Current['v4_average_bridge_payload_fill_percent'] } else { '(none)' })))) | Out-Null
     foreach ($counterName in @('reorder_event_count', 'request_timeout_count', 'retry_requested_count', 'bridge_bulk_queue_waiting_count', 'bridge_bulk_queue_severe_count', 'media_queue_drop_count', 'media_send_failure_count', 'media_queue_severe_count')) {
@@ -257,7 +246,6 @@ function New-FileTransferBaselineComparisonLines {
         $lines.Add(("safe_data_protocol_version={0}" -f $safeProtocol)) | Out-Null
         $lines.Add(("safe_average_goodput_bytes_per_second={0}" -f (ConvertTo-FileTransferDouble -Values $SafeBaseline -Name 'average_goodput_bytes_per_second'))) | Out-Null
         $lines.Add(("safe_min_goodput_bytes_per_second={0}" -f (ConvertTo-FileTransferDouble -Values $SafeBaseline -Name 'min_goodput_bytes_per_second'))) | Out-Null
-        $lines.Add(("safe_v3_batch_ratio={0}" -f ($(if ($SafeBaseline.ContainsKey('v3_batch_ratio')) { $SafeBaseline['v3_batch_ratio'] } else { '(none)' })))) | Out-Null
         $lines.Add(("safe_v4_batch_ratio={0}" -f ($(if ($SafeBaseline.ContainsKey('v4_batch_ratio')) { $SafeBaseline['v4_batch_ratio'] } else { '(none)' })))) | Out-Null
         $lines.Add(("safe_v4_average_bridge_payload_fill_percent={0}" -f ($(if ($SafeBaseline.ContainsKey('v4_average_bridge_payload_fill_percent')) { $SafeBaseline['v4_average_bridge_payload_fill_percent'] } else { '(none)' })))) | Out-Null
         foreach ($counterName in @('reorder_event_count', 'request_timeout_count', 'retry_requested_count', 'bridge_bulk_queue_waiting_count', 'bridge_bulk_queue_severe_count', 'media_queue_drop_count', 'media_send_failure_count', 'media_queue_severe_count')) {
@@ -269,7 +257,6 @@ function New-FileTransferBaselineComparisonLines {
         $lines.Add(("strong_data_protocol_version={0}" -f $strongProtocol)) | Out-Null
         $lines.Add(("strong_average_goodput_bytes_per_second={0}" -f (ConvertTo-FileTransferDouble -Values $StrongBaseline -Name 'average_goodput_bytes_per_second'))) | Out-Null
         $lines.Add(("strong_min_goodput_bytes_per_second={0}" -f (ConvertTo-FileTransferDouble -Values $StrongBaseline -Name 'min_goodput_bytes_per_second'))) | Out-Null
-        $lines.Add(("strong_v3_batch_ratio={0}" -f ($(if ($StrongBaseline.ContainsKey('v3_batch_ratio')) { $StrongBaseline['v3_batch_ratio'] } else { '(none)' })))) | Out-Null
         $lines.Add(("strong_v4_batch_ratio={0}" -f ($(if ($StrongBaseline.ContainsKey('v4_batch_ratio')) { $StrongBaseline['v4_batch_ratio'] } else { '(none)' })))) | Out-Null
         $lines.Add(("strong_v4_average_bridge_payload_fill_percent={0}" -f ($(if ($StrongBaseline.ContainsKey('v4_average_bridge_payload_fill_percent')) { $StrongBaseline['v4_average_bridge_payload_fill_percent'] } else { '(none)' })))) | Out-Null
         foreach ($counterName in @('reorder_event_count', 'request_timeout_count', 'retry_requested_count', 'bridge_bulk_queue_waiting_count', 'bridge_bulk_queue_severe_count', 'media_queue_drop_count', 'media_send_failure_count', 'media_queue_severe_count')) {

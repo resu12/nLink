@@ -87,8 +87,8 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
 
     [Theory]
     [InlineData(null)]
-    [InlineData(FileTransferProtocol.ProtocolVersionV2)]
-    [InlineData(FileTransferProtocol.ProtocolVersionV3)]
+    [InlineData(2)]
+    [InlineData(3)]
     public async Task InboundOffer_WithLegacyOrMissingProtocol_IsDeclinedWithoutPendingTransfer(int? preferredVersion)
     {
         const string transferId = "transfer_protocol_legacy_offer";
@@ -119,8 +119,8 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
 
     [Theory]
     [InlineData(null)]
-    [InlineData(FileTransferProtocol.ProtocolVersionV2)]
-    [InlineData(FileTransferProtocol.ProtocolVersionV3)]
+    [InlineData(2)]
+    [InlineData(3)]
     public async Task OutboundAccept_WithLegacyOrMissingProtocol_FailsTransfer(int? acceptedVersion)
     {
         const string transferId = "transfer_protocol_legacy_accept";
@@ -190,12 +190,11 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_v4_negotiated", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v4_sender_started", logTail, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=filetransfer_v4_runtime_not_implemented", logTail, StringComparison.Ordinal);
     }
 
     [Theory]
-    [InlineData(FileTransferProtocol.ProtocolVersionV2)]
-    [InlineData(FileTransferProtocol.ProtocolVersionV3)]
+    [InlineData(2)]
+    [InlineData(3)]
     public async Task InboundSessionOpen_WithNonV4Protocol_DoesNotStartDataSession(int protocolVersion)
     {
         const string transferId = "transfer_protocol_non_v4_session_open";
@@ -294,6 +293,5 @@ public sealed class SessionFileTransferProtocolNegotiationTests : SessionFileTra
         Assert.Contains("event=filetransfer_session_opened", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v4_negotiated", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_v4_session_open_rejected", logTail, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=filetransfer_v4_runtime_not_implemented", logTail, StringComparison.Ordinal);
     }
 }

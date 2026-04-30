@@ -156,7 +156,6 @@ $cases = New-Object System.Collections.Generic.List[hashtable]
 $cases.Add(@{ Name = "nkn-fast-current"; Mode = "NknFast"; PayloadEfficiencyProfile = "Current"; Env = @{} }) | Out-Null
 $cases.Add(@{ Name = "nkn-mixed-current"; Mode = "NknMixed"; PayloadEfficiencyProfile = "Current"; Env = @{} }) | Out-Null
 $cases.Add(@{ Name = "nkn-mixed-current-bulk-serial"; Mode = "NknMixed"; PayloadEfficiencyProfile = "Current"; Env = @{ "NLINK_NKN_BULK_SEND_CONCURRENCY" = "1" } }) | Out-Null
-$cases.Add(@{ Name = "nkn-mixed-current-no-control-bulk-redundancy"; Mode = "NknMixed"; PayloadEfficiencyProfile = "Current"; Env = @{ "NLINK_FILETRANSFER_V3_CONTROL_BULK_REDUNDANCY" = "0" } }) | Out-Null
 
 if ($IncludeUnsafePackedMixed) {
     Write-Warning "Including unsafe packed mixed payload case. Use only for controlled receive-stall reproduction."

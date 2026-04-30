@@ -363,7 +363,7 @@ function New-FileTransferRetainedSummary {
                     $_.EventName -eq 'nkn_inbound_envelope_drop' -or
                     $_.EventName -like 'nkn_bridge_receive_stall_*' -or
                     $_.EventName -like 'nkn_bridge_control_receive_*' -or
-                    $_.EventName -eq 'filetransfer_v3_receive_liveness_summary' -or
+                    $_.EventName -eq 'filetransfer_v4_receive_liveness_summary' -or
                     $_.EventName -eq 'screenshare_bridge_media_send_summary' -or
                     $_.EventName -eq 'screenshare_bridge_queue_state' -or
                     $_.EventName -eq 'screenshare_bridge_transport_health_summary'
@@ -387,12 +387,12 @@ function New-FileTransferRetainedSummary {
     }
 
     $frameTypeCounts = Get-FileTransferFrameTypeCounts -Events $transferEvents
-    $senderThroughputEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v3_sender_throughput_summary'))
-    $senderPipelineEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v3_sender_pipeline_summary'))
-    $senderFeedEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v3_sender_feed_summary'))
+    $senderThroughputEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v4_sender_throughput_summary'))
+    $senderPipelineEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v4_sender_pipeline_summary'))
+    $senderFeedEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v4_sender_feed_summary'))
     $senderCacheEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_sender_repair_cache_policy', 'filetransfer_sender_repair_cache_summary', 'filetransfer_sender_repair_cache_pressure_entered', 'filetransfer_sender_repair_cache_pressure_exited', 'filetransfer_sender_cache_exhausted', 'filetransfer_sender_repair_unavailable'))
-    $receiverFeedbackEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v3_receiver_feedback_pump_started', 'filetransfer_v3_receiver_feedback_enqueued', 'filetransfer_v3_receiver_feedback_coalesced', 'filetransfer_v3_receiver_feedback_sent', 'filetransfer_v3_receiver_feedback_summary', 'filetransfer_v3_receiver_feedback_failed'))
-    $receiverFeedbackPumpStartedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_v3_receiver_feedback_pump_started'
+    $receiverFeedbackEvents = @(Get-FileTransferEventsByName -Events $transferEvents -Names @('filetransfer_v4_receiver_feedback_pump_started', 'filetransfer_v4_receiver_feedback_enqueued', 'filetransfer_v4_receiver_feedback_coalesced', 'filetransfer_v4_receiver_feedback_sent', 'filetransfer_v4_receiver_feedback_summary', 'filetransfer_v4_receiver_feedback_failed'))
+    $receiverFeedbackPumpStartedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_v4_receiver_feedback_pump_started'
     $receiverFeedbackPumpModeEventCount = @(
         $receiverFeedbackEvents |
             Where-Object { (Get-FileTransferEventField -Event $_ -Name 'mode' -Default '') -eq 'pump' }
@@ -525,11 +525,11 @@ function New-FileTransferRetainedSummary {
         ReceiverFeedbackPumpStartedCount = $receiverFeedbackPumpStartedCount
         ReceiverFeedbackPumpActiveCount = $receiverFeedbackPumpActiveCount
         ReceiverFeedbackSliceStartedAfterPumpStart = $receiverFeedbackSliceStartedAfterPumpStart
-        ReceiverFeedbackEnqueuedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_v3_receiver_feedback_enqueued'
-        ReceiverFeedbackSentCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_v3_receiver_feedback_sent'
-        ReceiverFeedbackCoalescedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_v3_receiver_feedback_coalesced'
-        ReceiverFeedbackSummaryCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_v3_receiver_feedback_summary'
-        ReceiverFeedbackFailedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_v3_receiver_feedback_failed'
+        ReceiverFeedbackEnqueuedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_v4_receiver_feedback_enqueued'
+        ReceiverFeedbackSentCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_v4_receiver_feedback_sent'
+        ReceiverFeedbackCoalescedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_v4_receiver_feedback_coalesced'
+        ReceiverFeedbackSummaryCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_v4_receiver_feedback_summary'
+        ReceiverFeedbackFailedCount = Get-FileTransferEventCount -Events $transferEvents -Name 'filetransfer_v4_receiver_feedback_failed'
         MaxReceiverFeedbackQueueDepth = Get-FileTransferMaxField -Events $receiverFeedbackEvents -FieldName 'queue_depth'
         MaxReceiverFeedbackSummaryQueueDepth = Get-FileTransferMaxField -Events $receiverFeedbackEvents -FieldName 'max_queue_depth'
         MaxReceiverFeedbackEnqueueToSendAgeMs = Get-FileTransferMaxField -Events $receiverFeedbackEvents -FieldName 'enqueue_to_send_age_ms'

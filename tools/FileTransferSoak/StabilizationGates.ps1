@@ -64,7 +64,7 @@ function Get-FileTransferUnexpectedLegacyFrameEventsDuringV4 {
             } |
             Where-Object {
                 $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
-                $frameType -like 'filetransfer.*.v2' -or $frameType -like 'filetransfer.*.v3'
+                $frameType -like 'filetransfer.*' -and $frameType -notlike 'filetransfer.*.v4'
             }
     )
 }
@@ -80,16 +80,14 @@ function Get-FileTransferHardFailureEvents {
                 $_.EventName -eq 'filetransfer_chunk_rejected' -or
                 $_.EventName -eq 'filetransfer_message_rejected' -or
                 $_.EventName -eq 'filetransfer_local_soak_cycle_failed' -or
-                $_.EventName -eq 'filetransfer_v3_required_transport_incompatible' -or
                 $_.EventName -eq 'filetransfer_v4_required_transport_incompatible' -or
-                $_.EventName -eq 'filetransfer_v4_runtime_not_implemented' -or
                 $_.EventName -eq 'filetransfer_v4_receiver_failed' -or
                 $_.EventName -eq 'filetransfer_v4_sender_failed' -or
                 $_.EventName -eq 'filetransfer_v4_feedback_both_failed' -or
                 $_.EventName -eq 'filetransfer_receiver_buffer_exhausted' -or
                 $_.EventName -eq 'filetransfer_sender_cache_exhausted' -or
                 $_.EventName -eq 'filetransfer_sender_repair_unavailable' -or
-                $_.EventName -eq 'filetransfer_v3_receiver_feedback_failed' -or
+                $_.EventName -eq 'filetransfer_v4_receiver_feedback_failed' -or
                 ($_.EventName -eq 'filetransfer_data_frame_ignored' -and (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -like '*session_id_mismatch*')
             }
     )
@@ -107,7 +105,6 @@ function Get-FileTransferLegacyProtocolStartedEvents {
 
                 $protocolVersion = Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default ''
                 return -not [string]::IsNullOrWhiteSpace($protocolVersion) -and
-                    $protocolVersion -ne '3' -and
                     $protocolVersion -ne '4'
             }
     )
@@ -197,7 +194,7 @@ function Get-FileTransferRecoveredPressureWarningEvents {
         }
     }
 
-    $reorderPolicyEvents = @($Summary.TransferEvents | Where-Object { $_.EventName -eq 'filetransfer_v3_reorder_policy_decision' })
+    $reorderPolicyEvents = @($Summary.TransferEvents | Where-Object { $_.EventName -eq 'filetransfer_v4_reorder_policy_decision' })
     $fileOnlySparseReorderLimited = @(
         $reorderPolicyEvents |
             Where-Object {

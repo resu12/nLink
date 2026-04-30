@@ -75,6 +75,72 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
     }
 
     [Fact]
+    public async Task V4SparseReceiver_TerminalReadyStateSendStall_DoesNotBlockCompleteFrame()
+    {
+        const string transferId = "transfer_v4_terminal_state_stall";
+        const string sessionId = "session_v4_terminal_state_stall";
+        var payload = Enumerable.Range(1, 12).Select(static value => (byte)value).ToArray();
+        var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
+        using var destination = new NonDisposingMemoryStream();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        var terminalStateSendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        receiverTransport.OutboundDataFrameDeliveryOverrideWithLaneAsync = async (_, frame, _, ct) =>
+        {
+            if (frame is FileTransferStateFrameV4 { TerminalReady: true })
+            {
+                terminalStateSendStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct).ConfigureAwait(false);
+                return true;
+            }
+
+            return false;
+        };
+        senderTransport.Connect(receiverTransport);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(receiverTransport);
+
+        var senderSession = await StartInboundV4ReceiverAsync(
+            senderTransport,
+            receiver,
+            transferId,
+            sessionId,
+            "v4-terminal-state-stall.bin",
+            payload.Length,
+            sha256,
+            (_, _) => Task.FromResult<Stream>(destination)).ConfigureAwait(false);
+
+        await senderSession.SendAsync(CreateManifest(sessionId, transferId, "v4-terminal-state-stall.bin", payload.Length, chunkSizeBytes: payload.Length, sha256), CancellationToken.None);
+        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Any(static frame => frame.ContiguousCommittedChunkIndex == 0));
+
+        await senderSession.SendAsync(
+            new FileTransferChunkBatchFrameV4
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                StartChunkIndex = 0,
+                ChunkCount = 1,
+                DataSegments = [payload],
+            },
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => terminalStateSendStarted.Task.IsCompleted, timeoutMs: 5000);
+        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferCompleteFrameV4>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed, timeoutMs: 5000);
+
+        Assert.Contains(receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>(), static frame => frame.TerminalReady);
+        Assert.Contains(receiverTransport.SentDataFrames, static frame => frame is FileTransferCompleteFrameV4);
+        var log = ReadOperationalLogText();
+        Assert.Contains("event=filetransfer_v4_receiver_completed_chunks;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v4_finalize_started;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v4_sparse_hash_started;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v4_sparse_hash_completed;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v4_complete_send_started;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v4_complete_sent;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v4_terminal_ready_state_send_deferred;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task V4SparseReceiver_InitialCreditUses64MiBFileOnlySparseWindow()
     {
         const string transferId = "transfer_v4_sparse_receiver_credit_64m";
@@ -115,6 +181,109 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         Assert.Equal(expectedCreditChunkCount, initialState.CreditUntilChunkIndexExclusive);
         Assert.Equal(0, initialState.ContiguousCommittedChunkIndex);
         Assert.Equal(-1, initialState.DurableReceivedHighestChunkIndex);
+    }
+
+    [Fact]
+    public async Task V4SparseReceiver_WithScreenshareMixedFlag_InitialCreditUsesMixedWindow()
+    {
+        const string transferId = "transfer_v4_sparse_receiver_guard_credit";
+        const string sessionId = "session_v4_sparse_receiver_guard_credit";
+        const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
+        const int fileSizeBytes = 8 * 1024 * 1024;
+        const int chunkSizeBytes = 21 * 1024;
+        var previousValue = Environment.GetEnvironmentVariable(envName);
+        Environment.SetEnvironmentVariable(envName, "1");
+        try
+        {
+            var sha256 = Convert.ToBase64String(new byte[32]);
+            using var destination = new NonDisposingMemoryStream();
+            using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+            using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+            senderTransport.Connect(receiverTransport);
+            using var receiver = new SessionFileTransferService();
+            receiver.AttachTransport(receiverTransport);
+            receiver.SetSessionScreenShareActive(true);
+
+            var senderSession = await StartInboundV4ReceiverAsync(
+                senderTransport,
+                receiver,
+                transferId,
+                sessionId,
+                "v4-guard-credit.bin",
+                fileSizeBytes,
+                sha256,
+                (_, _) => Task.FromResult<Stream>(destination)).ConfigureAwait(false);
+
+            await senderSession.SendAsync(
+                CreateManifest(sessionId, transferId, "v4-guard-credit.bin", fileSizeBytes, chunkSizeBytes, sha256),
+                CancellationToken.None);
+
+            await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0));
+
+            var initialState = receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>()
+                .First(frame => frame.CreditUntilChunkIndexExclusive > 0);
+            Assert.Equal(96, initialState.CreditUntilChunkIndexExclusive);
+
+            var log = ReadOperationalLogText();
+            Assert.Contains("event=filetransfer_v4_mixed_enabled;", log, StringComparison.Ordinal);
+            Assert.Contains("credit_window_chunks=96", log, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envName, previousValue);
+        }
+    }
+
+    [Fact]
+    public async Task V4SparseReceiver_WithDegradedScreenshareMixedFlag_InitialCreditUsesDegradedMixedWindow()
+    {
+        const string transferId = "transfer_v4_sparse_receiver_guard_degraded";
+        const string sessionId = "session_v4_sparse_receiver_guard_degraded";
+        const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
+        const int fileSizeBytes = 8 * 1024 * 1024;
+        const int chunkSizeBytes = 21 * 1024;
+        var previousValue = Environment.GetEnvironmentVariable(envName);
+        Environment.SetEnvironmentVariable(envName, "1");
+        try
+        {
+            var sha256 = Convert.ToBase64String(new byte[32]);
+            using var destination = new NonDisposingMemoryStream();
+            using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+            using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+            senderTransport.Connect(receiverTransport);
+            using var receiver = new SessionFileTransferService();
+            receiver.AttachTransport(receiverTransport);
+            receiver.SetSessionScreenShareActive(true);
+            receiver.SetSessionScreenShareDegraded(true);
+
+            var senderSession = await StartInboundV4ReceiverAsync(
+                senderTransport,
+                receiver,
+                transferId,
+                sessionId,
+                "v4-guard-degraded.bin",
+                fileSizeBytes,
+                sha256,
+                (_, _) => Task.FromResult<Stream>(destination)).ConfigureAwait(false);
+
+            await senderSession.SendAsync(
+                CreateManifest(sessionId, transferId, "v4-guard-degraded.bin", fileSizeBytes, chunkSizeBytes, sha256),
+                CancellationToken.None);
+
+            await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0));
+
+            var initialState = receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>()
+                .First(frame => frame.CreditUntilChunkIndexExclusive > 0);
+            Assert.Equal(24, initialState.CreditUntilChunkIndexExclusive);
+
+            var log = ReadOperationalLogText();
+            Assert.Contains("event=filetransfer_v4_mixed_enabled;", log, StringComparison.Ordinal);
+            Assert.Contains("credit_window_chunks=24", log, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envName, previousValue);
+        }
     }
 
     [Fact]
@@ -591,6 +760,124 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
     }
 
     [Fact]
+    public async Task V4SparseReceiver_WithMixedTransfer_FirstKnownFrontierRepairUsesWiderBatchThenRetryNarrows()
+    {
+        const string transferId = "transfer_v4_mixed_repair_wide_then_narrow";
+        const string sessionId = "session_v4_mixed_repair_wide_then_narrow";
+        const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
+        const int chunkSize = 4;
+        const int chunkCount = 80;
+        var previousValue = Environment.GetEnvironmentVariable(envName);
+        Environment.SetEnvironmentVariable(envName, "1");
+        try
+        {
+            var payload = Enumerable.Range(0, chunkSize * chunkCount).Select(static value => (byte)(value % 251)).ToArray();
+            var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
+            using var destination = new NonDisposingMemoryStream();
+            using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+            using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+            senderTransport.Connect(receiverTransport);
+            using var receiver = new SessionFileTransferService();
+            receiver.AttachTransport(receiverTransport);
+            receiver.SetSessionScreenShareActive(true);
+
+            var senderSession = await StartInboundV4ReceiverAsync(
+                senderTransport,
+                receiver,
+                transferId,
+                sessionId,
+                "v4-mixed-repair-wide-then-narrow.bin",
+                payload.Length,
+                sha256,
+                (_, _) => Task.FromResult<Stream>(destination)).ConfigureAwait(false);
+
+            await senderSession.SendAsync(CreateManifest(sessionId, transferId, "v4-mixed-repair-wide-then-narrow.bin", payload.Length, chunkSize, sha256), CancellationToken.None);
+            await senderSession.SendAsync(
+                new FileTransferChunkBatchFrameV4
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    StartChunkIndex = 12,
+                    ChunkCount = 1,
+                    DataSegments = [payload.Skip(12 * chunkSize).Take(chunkSize).ToArray()],
+                },
+                CancellationToken.None);
+
+            await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Any(static frame =>
+                frame.MissingRanges.Any(range => range.StartChunkIndex == 0 && range.ChunkCount == 12)), timeoutMs: 5000);
+
+            await Task.Delay(850);
+            await senderSession.SendAsync(
+                new FileTransferChunkBatchFrameV4
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    StartChunkIndex = 13,
+                    ChunkCount = 1,
+                    DataSegments = [payload.Skip(13 * chunkSize).Take(chunkSize).ToArray()],
+                },
+                CancellationToken.None);
+
+            await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Any(static frame =>
+                frame.MissingRanges.Any(range => range.StartChunkIndex == 0 && range.ChunkCount == 3)), timeoutMs: 5000);
+
+            var log = ReadOperationalLogText();
+            Assert.Contains("event=filetransfer_v4_repair_retry_narrowed", log, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envName, previousValue);
+        }
+    }
+
+    [Fact]
+    public async Task V4SparseReceiver_WithMixedTransfer_FirstFrontierTailRepairUsesWiderBatch()
+    {
+        const string transferId = "transfer_v4_mixed_tail_repair_wide";
+        const string sessionId = "session_v4_mixed_tail_repair_wide";
+        const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
+        const int chunkSize = 4;
+        const int chunkCount = 80;
+        var previousValue = Environment.GetEnvironmentVariable(envName);
+        Environment.SetEnvironmentVariable(envName, "1");
+        try
+        {
+            var payload = Enumerable.Range(0, chunkSize * chunkCount).Select(static value => (byte)(value % 251)).ToArray();
+            var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
+            using var destination = new NonDisposingMemoryStream();
+            using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+            using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+            senderTransport.Connect(receiverTransport);
+            using var receiver = new SessionFileTransferService();
+            receiver.AttachTransport(receiverTransport);
+            receiver.SetSessionScreenShareActive(true);
+
+            var senderSession = await StartInboundV4ReceiverAsync(
+                senderTransport,
+                receiver,
+                transferId,
+                sessionId,
+                "v4-mixed-tail-repair-wide.bin",
+                payload.Length,
+                sha256,
+                (_, _) => Task.FromResult<Stream>(destination)).ConfigureAwait(false);
+
+            await senderSession.SendAsync(CreateManifest(sessionId, transferId, "v4-mixed-tail-repair-wide.bin", payload.Length, chunkSize, sha256), CancellationToken.None);
+
+            await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Any(static frame =>
+                frame.MissingRanges.Any(range => range.StartChunkIndex == 0 && range.ChunkCount == 12)), timeoutMs: 5000);
+
+            var state = receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().First(frame =>
+                frame.MissingRanges.Any(range => range.StartChunkIndex == 0 && range.ChunkCount == 12));
+            Assert.Equal(12, state.MissingRanges.Sum(static range => range.ChunkCount));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envName, previousValue);
+        }
+    }
+
+    [Fact]
     public async Task V4SparseReceiver_RejectsNonSparseDestination()
     {
         const string transferId = "transfer_v4_sparse_required";
@@ -743,6 +1030,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         await receiver.AcceptIncomingTransferAsync(transferId, openWriteStreamAsync, CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.AwaitingMetadata);
 
+        var logStart = ReadOperationalLogText().Length;
         await senderTransport.SendFileTransferSessionOpenAsync(
             new FileTransferSessionOpenV2
             {
@@ -754,7 +1042,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
                 InitialPipelineDepth = 1,
             },
             CancellationToken.None);
-        await WaitUntilAsync(() => ReadOperationalLogText().Contains($"event=filetransfer_v4_receiver_started; transfer_id={transferId};", StringComparison.Ordinal), timeoutMs: 5000);
+        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v4_receiver_started;", StringComparison.Ordinal), timeoutMs: 5000);
         return await senderTransport.OpenFileTransferDataSessionAsync(sessionId, transferId, CancellationToken.None).ConfigureAwait(false);
     }
 

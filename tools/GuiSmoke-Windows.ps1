@@ -574,7 +574,20 @@ function Wait-BannerGone {
 function Click-Element {
     param([Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Element)
     if (-not $Element.Current.IsEnabled) {
-        throw "Element disabled (Id='$($Element.Current.AutomationId)', Name='$($Element.Current.Name)')"
+        $deadline = [DateTime]::UtcNow.AddSeconds(5)
+        do {
+            Start-Sleep -Milliseconds 100
+            try {
+                if ($Element.Current.IsEnabled) {
+                    break
+                }
+            }
+            catch {}
+        } while ([DateTime]::UtcNow -lt $deadline)
+
+        if (-not $Element.Current.IsEnabled) {
+            throw "Element disabled (Id='$($Element.Current.AutomationId)', Name='$($Element.Current.Name)')"
+        }
     }
     try {
         $pattern = $Element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
@@ -599,8 +612,52 @@ function Click-Element {
     }
     catch {}
 
+    try {
+        $clickablePoint = [System.Windows.Point]::new()
+        if ($Element.TryGetClickablePoint([ref]$clickablePoint)) {
+            [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point([int]$clickablePoint.X, [int]$clickablePoint.Y)
+            [Win32GuiSmoke]::mouse_event([Win32GuiSmoke]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+            [Win32GuiSmoke]::mouse_event([Win32GuiSmoke]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+            return
+        }
+    }
+    catch {}
+
+    try {
+        $legacyPattern = $Element.GetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern)
+        ([System.Windows.Automation.LegacyIAccessiblePattern]$legacyPattern).DoDefaultAction()
+        return
+    }
+    catch {}
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+        try {
+            $clickablePoint = [System.Windows.Point]::new()
+            if ($Element.TryGetClickablePoint([ref]$clickablePoint)) {
+                [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point([int]$clickablePoint.X, [int]$clickablePoint.Y)
+                [Win32GuiSmoke]::mouse_event([Win32GuiSmoke]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+                [Win32GuiSmoke]::mouse_event([Win32GuiSmoke]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+                return
+            }
+        }
+        catch {}
+
+        $rect = $Element.Current.BoundingRectangle
+        if (-not $rect.IsEmpty) {
+            [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point([int]($rect.Left + $rect.Width/2), [int]($rect.Top + $rect.Height/2))
+            [Win32GuiSmoke]::mouse_event([Win32GuiSmoke]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
+            [Win32GuiSmoke]::mouse_event([Win32GuiSmoke]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+            return
+        }
+
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+
     $rect = $Element.Current.BoundingRectangle
-    if ($rect.IsEmpty) { throw "Cannot click element without bounds." }
+    if ($rect.IsEmpty) {
+        throw "Cannot click element without bounds (Id='$($Element.Current.AutomationId)', Name='$($Element.Current.Name)', ControlType='$($Element.Current.ControlType.ProgrammaticName)')."
+    }
     [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point([int]($rect.Left + $rect.Width/2), [int]($rect.Top + $rect.Height/2))
     [Win32GuiSmoke]::mouse_event([Win32GuiSmoke]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
     [Win32GuiSmoke]::mouse_event([Win32GuiSmoke]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
@@ -1653,7 +1710,7 @@ function Resolve-FileTransferLiveReceivedFilePath {
         $LoggedPath.IndexOf('[redacted]', [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
         (Test-Path -LiteralPath $LoggedPath -PathType Leaf)) {
         $loggedItem = Get-Item -LiteralPath $LoggedPath -ErrorAction SilentlyContinue
-        $minimumWriteUtc = $NotBeforeUtc.AddSeconds(-5)
+        $minimumWriteUtc = $NotBeforeUtc.AddMilliseconds(-500)
         if ($null -ne $loggedItem -and
             $loggedItem.Name -eq $ExpectedFileName -and
             $loggedItem.Length -eq $ExpectedSizeBytes -and
@@ -1667,7 +1724,7 @@ function Resolve-FileTransferLiveReceivedFilePath {
         return ''
     }
 
-    $minimumWriteUtc = $NotBeforeUtc.AddSeconds(-5)
+    $minimumWriteUtc = $NotBeforeUtc.AddMilliseconds(-500)
     $matches = @(
         Get-ChildItem -LiteralPath $incomingRoot -Recurse -File -Filter $ExpectedFileName -ErrorAction SilentlyContinue |
             Where-Object { $_.Length -eq $ExpectedSizeBytes -and $_.LastWriteTimeUtc -ge $minimumWriteUtc } |
@@ -1694,7 +1751,7 @@ function Find-FileTransferLiveReceivedFileByHash {
         return ''
     }
 
-    $minimumWriteUtc = $NotBeforeUtc.AddSeconds(-5)
+    $minimumWriteUtc = $NotBeforeUtc.AddMilliseconds(-500)
     foreach ($candidate in @(Get-ChildItem -LiteralPath $incomingRoot -Recurse -File -Filter $ExpectedFileName -ErrorAction SilentlyContinue |
             Where-Object { $_.Length -eq $ExpectedSizeBytes -and $_.LastWriteTimeUtc -ge $minimumWriteUtc } |
             Sort-Object LastWriteTimeUtc -Descending)) {
@@ -1752,11 +1809,11 @@ function Get-FileTransferLiveProgressScore {
                 $score += [Math]::Max(1L, (Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'raw_chunk_bytes'))
             }
         }
-        'filetransfer_v3_sender_throughput_summary' {
+        'filetransfer_v4_sender_throughput_summary' {
             $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'raw_bytes_sent'
             $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'chunk_count_sent'
         }
-        'filetransfer_v3_receiver_throughput_summary' {
+        'filetransfer_v4_receiver_throughput_summary' {
             $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'raw_bytes_received'
             $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'contiguous_bytes_committed'
             $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'write_batch_bytes'
@@ -1784,6 +1841,38 @@ function Get-FileTransferLiveProgressScore {
         'filetransfer_receiver_write_batch_committed' {
             $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'write_batch_bytes'
             $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'write_batch_chunk_count'
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'batch_bytes'
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'batch_chunk_count'
+        }
+        'filetransfer_v4_chunk_batch_received' {
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'raw_bytes'
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'accepted_chunk_count'
+        }
+        'filetransfer_v4_state_sent' {
+            $nextChunk = Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'contiguous_committed_chunk_index'
+            if ($nextChunk -gt [int64]$MaxReceiverNextChunkIndex.Value) {
+                $score += $nextChunk - [int64]$MaxReceiverNextChunkIndex.Value
+                $MaxReceiverNextChunkIndex.Value = $nextChunk
+            }
+
+            $highestChunk = Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'durable_received_highest_chunk_index'
+            if ($highestChunk -gt [int64]$MaxReceiverHighestChunkIndex.Value) {
+                $score += $highestChunk - [int64]$MaxReceiverHighestChunkIndex.Value
+                $MaxReceiverHighestChunkIndex.Value = $highestChunk
+            }
+        }
+        'filetransfer_v4_state_received' {
+            $nextChunk = Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'contiguous_committed_chunk_index'
+            if ($nextChunk -gt [int64]$MaxReceiverNextChunkIndex.Value) {
+                $score += $nextChunk - [int64]$MaxReceiverNextChunkIndex.Value
+                $MaxReceiverNextChunkIndex.Value = $nextChunk
+            }
+
+            $highestChunk = Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'durable_received_highest_chunk_index'
+            if ($highestChunk -gt [int64]$MaxReceiverHighestChunkIndex.Value) {
+                $score += $highestChunk - [int64]$MaxReceiverHighestChunkIndex.Value
+                $MaxReceiverHighestChunkIndex.Value = $highestChunk
+            }
         }
     }
 

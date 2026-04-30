@@ -248,7 +248,7 @@ public sealed class FileTransferSecurityGuardTests
     }
 
     [Fact]
-    public async Task OpenReceiveWriteStream_CreatesFileWithinAllowedRoot_AndBlocksOverwrite()
+    public async Task OpenReceiveWriteStream_CreatesFileWithinAllowedRoot_AndNumbersDuplicateName()
     {
         var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_200_000_000);
         var guard = new SessionFileTransferGuard(() => nowUtc);
@@ -304,8 +304,19 @@ public sealed class FileTransferSecurityGuardTests
                     5),
                 storagePolicy: new FileTransferStoragePolicy(tempRoot));
 
-            Assert.False(second.IsAllowed);
-            Assert.Equal(FileTransferValidationFailure.OverwriteBlocked, second.Access.Failure);
+            Assert.True(second.IsAllowed);
+            Assert.NotNull(second.Plan);
+            Assert.NotNull(second.Handle);
+            Assert.Equal("report (1).txt", second.Plan!.SafeFileName);
+
+            await using (second.Handle!)
+            {
+                await second.Handle.Stream.WriteAsync("world"u8.ToArray());
+                await second.Handle.FinalizeAsync(CancellationToken.None);
+            }
+
+            Assert.True(File.Exists(Path.Combine(tempRoot, "report.txt")));
+            Assert.True(File.Exists(Path.Combine(tempRoot, "report (1).txt")));
         }
         finally
         {

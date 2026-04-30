@@ -81,7 +81,9 @@
         <DataTemplate x:Key="FileTransferCardTemplate"
                       x:DataType="vm:FileTransferPanelItemViewModel">
             <Border Classes="transferCard"
-                    Margin="0,0,0,10">
+                    Margin="0,0,0,10"
+                    AutomationProperties.AutomationId="Chat.FileTransfer.Card"
+                    PointerReleased="FileTransferCard_PointerReleased">
                 <StackPanel Spacing="8">
                     <Grid Grid.Row="0"
                           ColumnDefinitions="*,Auto"
@@ -125,29 +127,47 @@
                         <Button AutomationProperties.AutomationId="Chat.FileTransfer.Accept"
                                 Classes="appButton positiveButton"
                                 Content="Accept"
-                                Command="{Binding #Root.DataContext.AcceptIncomingFileCommand}"
+                                Click="AcceptFileTransferButton_Click"
                                 CommandParameter="{Binding TransferId}"
                                 IsVisible="{Binding ShowAccept}"
-                                Height="34"
-                                MinWidth="96"/>
+                                Height="40"
+                                MinWidth="104"/>
 
                         <Button AutomationProperties.AutomationId="Chat.FileTransfer.Decline"
                                 Classes="appButton secondaryButton"
                                 Content="Decline"
-                                Command="{Binding #Root.DataContext.DeclineIncomingFileCommand}"
+                                Click="DeclineFileTransferButton_Click"
                                 CommandParameter="{Binding TransferId}"
                                 IsVisible="{Binding ShowDecline}"
-                                Height="34"
-                                MinWidth="96"/>
+                                Height="40"
+                                MinWidth="104"/>
+
+                        <Button AutomationProperties.AutomationId="Chat.FileTransfer.Pause"
+                                Classes="appButton secondaryButton"
+                                Content="Pause"
+                                Click="PauseFileTransferButton_Click"
+                                CommandParameter="{Binding TransferId}"
+                                IsVisible="{Binding ShowPause}"
+                                Height="40"
+                                MinWidth="104"/>
+
+                        <Button AutomationProperties.AutomationId="Chat.FileTransfer.Resume"
+                                Classes="appButton positiveButton"
+                                Content="Resume"
+                                Click="ResumeFileTransferButton_Click"
+                                CommandParameter="{Binding TransferId}"
+                                IsVisible="{Binding ShowResume}"
+                                Height="40"
+                                MinWidth="104"/>
 
                         <Button AutomationProperties.AutomationId="Chat.FileTransfer.Cancel"
                                 Classes="appButton secondaryButton"
                                 Content="Cancel"
-                                Command="{Binding #Root.DataContext.CancelFileTransferCommand}"
+                                Click="CancelFileTransferButton_Click"
                                 CommandParameter="{Binding TransferId}"
                                 IsVisible="{Binding ShowCancel}"
-                                Height="34"
-                                MinWidth="96"/>
+                                Height="40"
+                                MinWidth="104"/>
                     </StackPanel>
                 </StackPanel>
             </Border>
@@ -190,6 +210,7 @@
                                Text="{Binding ChatNoticeText}"
                                FontSize="14"
                                Margin="0,0,0,12"
+                               TextWrapping="Wrap"
                                IsVisible="{Binding ShowChatNotice}"/>
 
                     <ContentControl Content="{Binding InboundFileTransfer}"
@@ -243,11 +264,11 @@
                     AutomationProperties.AutomationId="Chat.SendFile"
                     AutomationProperties.Name="Send file"
                     Classes="appButton secondaryButton"
-                    Command="{Binding SendFileCommand}"
+                    Click="SendFileButton_Click"
                     IsVisible="{Binding ShowSendFileAction}"
                     IsEnabled="{Binding CanSendFileAction}"
-                    Height="48"
-                    Width="48"
+                    Height="52"
+                    Width="52"
                     Padding="0"
                     ToolTip.Tip="Send file">
                 <Grid Width="18"

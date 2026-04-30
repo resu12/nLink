@@ -171,7 +171,11 @@ public sealed record FileTransferTransferSnapshot(
     string? SavedDirectoryPath = null,
     string? SavedFileName = null,
     long? BytesAcceptedForTransport = null,
-    long? BytesAcknowledgedByReceiver = null)
+    long? BytesAcknowledgedByReceiver = null,
+    bool IsPaused = false,
+    string? PauseReason = null,
+    bool IsPeerPaused = false,
+    string? PeerPauseReason = null)
 {
     public bool IsTerminal
         => State is FileTransferTransferState.Completed or

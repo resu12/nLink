@@ -90,7 +90,6 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private SessionId? activeApprovedSessionId;
     private PeerAddress? activeApprovedHelperAddress;
 
-    public bool SupportsFileTransferV3Streaming => true;
     public bool SupportsFileTransferV4Streaming => true;
     public FileTransferTransportProfileKind FileTransferTransportProfileKind => FileTransferTransportProfileKind.Default;
     private byte[]? controlSessionSharedKey;
@@ -152,11 +151,6 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     public event EventHandler<FileTransferAcceptReceivedEventArgs>? FileTransferAcceptReceived;
     public event EventHandler<FileTransferDeclineReceivedEventArgs>? FileTransferDeclineReceived;
     public event EventHandler<FileTransferSessionOpenReceivedEventArgs>? FileTransferSessionOpenReceived;
-    public event EventHandler<FileTransferStartReceivedEventArgs>? FileTransferStartReceived;
-    public event EventHandler<FileTransferChunkReceivedEventArgs>? FileTransferChunkReceived;
-    public event EventHandler<FileTransferWindowUpdateReceivedEventArgs>? FileTransferWindowUpdateReceived;
-    public event EventHandler<FileTransferMissingRangeReceivedEventArgs>? FileTransferMissingRangeReceived;
-    public event EventHandler<FileTransferPressureStateReceivedEventArgs>? FileTransferPressureStateReceived;
     public event EventHandler<FileTransferCancelReceivedEventArgs>? FileTransferCancelReceived;
     public event EventHandler<FileTransferErrorReceivedEventArgs>? FileTransferErrorReceived;
     public event EventHandler<FileTransferCompleteReceivedEventArgs>? FileTransferCompleteReceived;
@@ -648,41 +642,6 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         }
     }
 
-    public Task SendFileTransferStartAsync(FileTransferStartV2 message, CancellationToken ct)
-    {
-        ArgumentNullException.ThrowIfNull(message);
-        var normalizedMessage = EnsureFileTransferSessionId(message);
-        return SendFileTransferFrameAsync(FileTransferStartFrameType, FileTransferPayloadCodec.Serialize(normalizedMessage), normalizedMessage.TransferId, ct);
-    }
-
-    public Task SendFileTransferChunkAsync(FileTransferChunkV1 message, CancellationToken ct)
-    {
-        ArgumentNullException.ThrowIfNull(message);
-        var normalizedMessage = EnsureFileTransferSessionId(message);
-        return SendFileTransferFrameAsync(FileTransferChunkFrameType, FileTransferPayloadCodec.Serialize(normalizedMessage), normalizedMessage.TransferId, ct);
-    }
-
-    public Task SendFileTransferWindowUpdateAsync(FileTransferWindowUpdateV1 message, CancellationToken ct)
-    {
-        ArgumentNullException.ThrowIfNull(message);
-        var normalizedMessage = EnsureFileTransferSessionId(message);
-        return SendFileTransferFrameAsync(FileTransferWindowUpdateFrameType, FileTransferPayloadCodec.Serialize(normalizedMessage), normalizedMessage.TransferId, ct);
-    }
-
-    public Task SendFileTransferMissingRangeAsync(FileTransferMissingRangeV1 message, CancellationToken ct)
-    {
-        ArgumentNullException.ThrowIfNull(message);
-        var normalizedMessage = EnsureFileTransferSessionId(message);
-        return SendFileTransferFrameAsync(FileTransferMissingRangeFrameType, FileTransferPayloadCodec.Serialize(normalizedMessage), normalizedMessage.TransferId, ct);
-    }
-
-    public Task SendFileTransferPressureStateAsync(FileTransferPressureStateV1 message, CancellationToken ct)
-    {
-        ArgumentNullException.ThrowIfNull(message);
-        var normalizedMessage = EnsureFileTransferSessionId(message);
-        return SendFileTransferFrameAsync(FileTransferPressureStateFrameType, FileTransferPayloadCodec.Serialize(normalizedMessage), normalizedMessage.TransferId, ct);
-    }
-
     public Task SendFileTransferCancelAsync(FileTransferCancelV1 message, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -800,7 +759,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         LogFileTransferFrameEvent("sent", frameType, transferId);
     }
 
-    private async Task SendFileTransferDataFrameAsync(FileTransferDataFrameV2 frame, string transferId, CancellationToken ct)
+    private async Task SendFileTransferDataFrameAsync(FileTransferDataFrame frame, string transferId, CancellationToken ct)
     {
         if (impairmentPolicy is not null)
         {
@@ -2226,65 +2185,6 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         }
     }
 
-    private void SafeRaiseFileTransferStartReceived(FileTransferStartV2 message)
-    {
-        LogFileTransferFrameEvent("received", FileTransferStartFrameType, message.TransferId);
-        try
-        {
-            FileTransferStartReceived?.Invoke(this, new FileTransferStartReceivedEventArgs(message, peerId: "devlocal-peer"));
-        }
-        catch
-        {
-        }
-    }
-
-    private void SafeRaiseFileTransferChunkReceived(FileTransferChunkV1 message)
-    {
-        try
-        {
-            FileTransferChunkReceived?.Invoke(this, new FileTransferChunkReceivedEventArgs(message, peerId: "devlocal-peer"));
-        }
-        catch
-        {
-        }
-    }
-
-    private void SafeRaiseFileTransferWindowUpdateReceived(FileTransferWindowUpdateV1 message)
-    {
-        LogFileTransferFrameEvent("received", FileTransferWindowUpdateFrameType, message.TransferId);
-        try
-        {
-            FileTransferWindowUpdateReceived?.Invoke(this, new FileTransferWindowUpdateReceivedEventArgs(message, peerId: "devlocal-peer"));
-        }
-        catch
-        {
-        }
-    }
-
-    private void SafeRaiseFileTransferMissingRangeReceived(FileTransferMissingRangeV1 message)
-    {
-        LogFileTransferFrameEvent("received", FileTransferMissingRangeFrameType, message.TransferId);
-        try
-        {
-            FileTransferMissingRangeReceived?.Invoke(this, new FileTransferMissingRangeReceivedEventArgs(message, peerId: "devlocal-peer"));
-        }
-        catch
-        {
-        }
-    }
-
-    private void SafeRaiseFileTransferPressureStateReceived(FileTransferPressureStateV1 message)
-    {
-        LogFileTransferFrameEvent("received", FileTransferPressureStateFrameType, message.TransferId);
-        try
-        {
-            FileTransferPressureStateReceived?.Invoke(this, new FileTransferPressureStateReceivedEventArgs(message, peerId: "devlocal-peer"));
-        }
-        catch
-        {
-        }
-    }
-
     private void SafeRaiseFileTransferCancelReceived(FileTransferCancelV1 message)
     {
         LogFileTransferFrameEvent("received", FileTransferCancelFrameType, message.TransferId);
@@ -2378,29 +2278,13 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
         if (string.Equals(frame.Type, FileTransferStartFrameType, StringComparison.Ordinal))
         {
-            if (TryDecryptFileTransferPayload(payloadBytes, FileTransferStartFrameType, expectedSender, out var securePayload) &&
-                FileTransferPayloadCodec.TryDeserializeStart(securePayload.Plaintext, out var message) &&
-                TryValidateFileTransferSecureMetadata(FileTransferStartFrameType, securePayload.Metadata, message.TransferId) &&
-                TryValidateFileTransferMessageSession("start", message.SessionId, message.TransferId) &&
-                TryValidateAndTrackFileTransferMessage(FileTransferStartFrameType, message.TransferId, inbound: true, applyStateChange: true, out _))
-            {
-                SafeRaiseFileTransferStartReceived(message);
-            }
-
+            LogUnsupportedLegacyFileTransferFrame(FileTransferStartFrameType);
             return true;
         }
 
         if (string.Equals(frame.Type, FileTransferChunkFrameType, StringComparison.Ordinal))
         {
-            if (TryDecryptFileTransferPayload(payloadBytes, FileTransferChunkFrameType, expectedSender, out var securePayload) &&
-                FileTransferPayloadCodec.TryDeserializeChunk(securePayload.Plaintext, out var message) &&
-                TryValidateFileTransferSecureMetadata(FileTransferChunkFrameType, securePayload.Metadata, message.TransferId) &&
-                TryValidateFileTransferMessageSession("chunk", message.SessionId, message.TransferId) &&
-                TryValidateAndTrackFileTransferMessage(FileTransferChunkFrameType, message.TransferId, inbound: true, applyStateChange: true, out _))
-            {
-                SafeRaiseFileTransferChunkReceived(message);
-            }
-
+            LogUnsupportedLegacyFileTransferFrame(FileTransferChunkFrameType);
             return true;
         }
 
@@ -2420,43 +2304,19 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
         if (string.Equals(frame.Type, FileTransferWindowUpdateFrameType, StringComparison.Ordinal))
         {
-            if (TryDecryptFileTransferPayload(payloadBytes, FileTransferWindowUpdateFrameType, expectedSender, out var securePayload) &&
-                FileTransferPayloadCodec.TryDeserializeWindowUpdate(securePayload.Plaintext, out var message) &&
-                TryValidateFileTransferSecureMetadata(FileTransferWindowUpdateFrameType, securePayload.Metadata, message.TransferId) &&
-                TryValidateFileTransferMessageSession("window_update", message.SessionId, message.TransferId) &&
-                TryValidateAndTrackFileTransferMessage(FileTransferWindowUpdateFrameType, message.TransferId, inbound: true, applyStateChange: true, out _))
-            {
-                SafeRaiseFileTransferWindowUpdateReceived(message);
-            }
-
+            LogUnsupportedLegacyFileTransferFrame(FileTransferWindowUpdateFrameType);
             return true;
         }
 
         if (string.Equals(frame.Type, FileTransferMissingRangeFrameType, StringComparison.Ordinal))
         {
-            if (TryDecryptFileTransferPayload(payloadBytes, FileTransferMissingRangeFrameType, expectedSender, out var securePayload) &&
-                FileTransferPayloadCodec.TryDeserializeMissingRange(securePayload.Plaintext, out var message) &&
-                TryValidateFileTransferSecureMetadata(FileTransferMissingRangeFrameType, securePayload.Metadata, message.TransferId) &&
-                TryValidateFileTransferMessageSession("missing_range", message.SessionId, message.TransferId) &&
-                TryValidateAndTrackFileTransferMessage(FileTransferMissingRangeFrameType, message.TransferId, inbound: true, applyStateChange: true, out _))
-            {
-                SafeRaiseFileTransferMissingRangeReceived(message);
-            }
-
+            LogUnsupportedLegacyFileTransferFrame(FileTransferMissingRangeFrameType);
             return true;
         }
 
         if (string.Equals(frame.Type, FileTransferPressureStateFrameType, StringComparison.Ordinal))
         {
-            if (TryDecryptFileTransferPayload(payloadBytes, FileTransferPressureStateFrameType, expectedSender, out var securePayload) &&
-                FileTransferPayloadCodec.TryDeserializePressureState(securePayload.Plaintext, out var message) &&
-                TryValidateFileTransferSecureMetadata(FileTransferPressureStateFrameType, securePayload.Metadata, message.TransferId) &&
-                TryValidateFileTransferMessageSession("pressure_state", message.SessionId, message.TransferId) &&
-                TryValidateAndTrackFileTransferMessage(FileTransferPressureStateFrameType, message.TransferId, inbound: true, applyStateChange: true, out _))
-            {
-                SafeRaiseFileTransferPressureStateReceived(message);
-            }
-
+            LogUnsupportedLegacyFileTransferFrame(FileTransferPressureStateFrameType);
             return true;
         }
 
@@ -3008,7 +2868,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     }
 
     private bool TryValidateAndTrackFileTransferDataFrame(
-        FileTransferDataFrameV2 frame,
+        FileTransferDataFrame frame,
         bool inbound,
         bool applyStateChange,
         out string failureReason)
@@ -3345,7 +3205,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     }
 
     private bool TryGetNextFileTransferDataFrameState(
-        FileTransferDataFrameV2 frame,
+        FileTransferDataFrame frame,
         string transferId,
         bool inbound,
         out FileTransferTransportState nextState,
@@ -3367,6 +3227,20 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             return false;
         }
 
+        if (frame is FileTransferPauseControlFrameV4)
+        {
+            if (currentState.Phase is not FileTransferTransportPhase.Accepted
+                and not FileTransferTransportPhase.Started
+                and not FileTransferTransportPhase.Transferring)
+            {
+                failureReason = "pause_control_requires_start";
+                return false;
+            }
+
+            nextState = currentState with { Phase = FileTransferTransportPhase.Transferring };
+            return true;
+        }
+
         if (IsSenderDataFrame(frame))
         {
             if (currentState.Phase is not FileTransferTransportPhase.Accepted
@@ -3380,6 +3254,20 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             if (currentState.InitiatedLocally != !inbound)
             {
                 failureReason = inbound ? "unexpected_inbound_data_frame_for_local_sender" : "unexpected_outbound_data_frame_for_local_receiver";
+                return false;
+            }
+
+            nextState = currentState with { Phase = FileTransferTransportPhase.Transferring };
+            return true;
+        }
+
+        if (IsSenderStateControlDataFrame(frame, currentState, inbound))
+        {
+            if (currentState.Phase is not FileTransferTransportPhase.Accepted
+                and not FileTransferTransportPhase.Started
+                and not FileTransferTransportPhase.Transferring)
+            {
+                failureReason = "state_control_requires_start";
                 return false;
             }
 
@@ -3407,7 +3295,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             return true;
         }
 
-        if (frame is FileTransferCompleteFrameV2 or FileTransferCompleteFrameV4)
+        if (frame is FileTransferCompleteFrameV4)
         {
             if (currentState.Phase is not FileTransferTransportPhase.Accepted
                 and not FileTransferTransportPhase.Started
@@ -3455,28 +3343,29 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         return false;
     }
 
-    private static bool IsSenderDataFrame(FileTransferDataFrameV2 frame)
-        => frame is FileTransferManifestFrameV2
-            or FileTransferManifestFrameV4
-            or FileTransferChunkDataFrameV2
-            or FileTransferChunkBatchFrameV2;
+    private static bool IsSenderDataFrame(FileTransferDataFrame frame)
+        => frame is FileTransferManifestFrameV4
+            or FileTransferChunkBatchFrameV4;
 
-    private static bool IsReceiverFeedbackDataFrame(FileTransferDataFrameV2 frame)
-        => frame is FileTransferGrantWindowFrameV3
-            or FileTransferAckProgressFrameV3
-            or FileTransferRepairRequestFrameV3
-            or FileTransferRepairRequestSetFrameV3
-            or FileTransferStateFrameV4;
+    private static bool IsReceiverFeedbackDataFrame(FileTransferDataFrame frame)
+        => frame is FileTransferStateFrameV4;
 
-    private static bool IsTerminalDataFrame(FileTransferDataFrameV2 frame)
-        => frame is FileTransferCompleteFrameV2
-            or FileTransferCompleteFrameV4
+    private static bool IsSenderStateControlDataFrame(
+        FileTransferDataFrame frame,
+        FileTransferTransportState currentState,
+        bool inbound)
+        => frame is FileTransferStateFrameV4 state &&
+           currentState.InitiatedLocally == !inbound &&
+           (state.TransferPaused || !string.IsNullOrWhiteSpace(state.TransferPauseReason));
+
+    private static bool IsTerminalDataFrame(FileTransferDataFrame frame)
+        => frame is FileTransferCompleteFrameV4
             or FileTransferCancelFrameV4
             or FileTransferErrorFrameV4;
 
-    private static bool IsBenignLateFileTransferDataFrameRejection(FileTransferDataFrameV2 frame, string failureReason)
+    private static bool IsBenignLateFileTransferDataFrameRejection(FileTransferDataFrame frame, string failureReason)
         => ((failureReason is "unknown_transfer_id" or "transfer_already_terminal") &&
-            (IsReceiverFeedbackDataFrame(frame) || IsTerminalDataFrame(frame))) ||
+            (IsReceiverFeedbackDataFrame(frame) || IsTerminalDataFrame(frame) || frame is FileTransferPauseControlFrameV4)) ||
            (failureReason == "transfer_already_terminal" && IsSenderDataFrame(frame));
 
     private static void LogFileTransferFrameEvent(string direction, string frameType, string transferId)
@@ -3489,6 +3378,13 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         LocalOperationalLog.Info(
             "SessionSecurity",
             $"event=filetransfer_frame_{direction}; transport=devlocal; message_type={frameType}; transfer_id={transferId}");
+    }
+
+    private static void LogUnsupportedLegacyFileTransferFrame(string frameType)
+    {
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=filetransfer_legacy_frame_ignored; transport=devlocal; message_type={frameType}; reason=v4_only");
     }
 
     private bool HasActiveFileTransferLocked(bool initiatedLocally)
@@ -3708,41 +3604,6 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             TransferId = NormalizeRequiredFileTransferId(message.TransferId),
         };
 
-    private FileTransferStartV2 EnsureFileTransferSessionId(FileTransferStartV2 message)
-        => message with
-        {
-            SessionId = ResolveControlSessionId(message.SessionId),
-            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
-        };
-
-    private FileTransferChunkV1 EnsureFileTransferSessionId(FileTransferChunkV1 message)
-        => message with
-        {
-            SessionId = ResolveControlSessionId(message.SessionId),
-            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
-        };
-
-    private FileTransferWindowUpdateV1 EnsureFileTransferSessionId(FileTransferWindowUpdateV1 message)
-        => message with
-        {
-            SessionId = ResolveControlSessionId(message.SessionId),
-            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
-        };
-
-    private FileTransferMissingRangeV1 EnsureFileTransferSessionId(FileTransferMissingRangeV1 message)
-        => message with
-        {
-            SessionId = ResolveControlSessionId(message.SessionId),
-            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
-        };
-
-    private FileTransferPressureStateV1 EnsureFileTransferSessionId(FileTransferPressureStateV1 message)
-        => message with
-        {
-            SessionId = ResolveControlSessionId(message.SessionId),
-            TransferId = NormalizeRequiredFileTransferId(message.TransferId),
-        };
-
     private FileTransferCancelV1 EnsureFileTransferSessionId(FileTransferCancelV1 message)
         => message with
         {
@@ -3787,7 +3648,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         return normalized;
     }
 
-    private void DeliverFileTransferDataFrame(FileTransferDataFrameV2 frame)
+    private void DeliverFileTransferDataFrame(FileTransferDataFrame frame)
     {
         if (!fileTransferDataSessions.TryGetValue(frame.TransferId, out var session))
         {
@@ -3808,7 +3669,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private sealed class TransportFileTransferDataSession : IFileTransferDataSession
     {
         private readonly DevLocalTransport owner;
-        private readonly Channel<FileTransferDataFrameV2> frames = Channel.CreateUnbounded<FileTransferDataFrameV2>(
+        private readonly Channel<FileTransferDataFrame> frames = Channel.CreateUnbounded<FileTransferDataFrame>(
             new UnboundedChannelOptions
             {
                 SingleReader = true,
@@ -3835,7 +3696,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged;
 #pragma warning restore CS0067
 
-        public async ValueTask<FileTransferDataFrameV2> ReceiveAsync(CancellationToken ct)
+        public async ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct)
         {
             if (Interlocked.CompareExchange(ref activeReader, 1, 0) != 0)
             {
@@ -3854,14 +3715,14 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             }
         }
 
-        public Task SendAsync(FileTransferDataFrameV2 frame, CancellationToken ct)
+        public Task SendAsync(FileTransferDataFrame frame, CancellationToken ct)
         {
             ObjectDisposedException.ThrowIf(disposed != 0, this);
             ArgumentNullException.ThrowIfNull(frame);
             return owner.SendFileTransferDataFrameAsync(frame, TransferId, ct);
         }
 
-        public void Deliver(FileTransferDataFrameV2 frame)
+        public void Deliver(FileTransferDataFrame frame)
         {
             if (disposed != 0)
             {
@@ -3885,11 +3746,10 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
         }
     }
 
-    private static string GetFileTransferDataFrameChunkIndex(FileTransferDataFrameV2 frame)
+    private static string GetFileTransferDataFrameChunkIndex(FileTransferDataFrame frame)
         => frame switch
         {
-            FileTransferChunkDataFrameV2 chunk => chunk.ChunkIndex.ToString(),
-            FileTransferChunkBatchFrameV2 batch => $"{batch.StartChunkIndex}-{batch.StartChunkIndex + batch.DataBase64Segments.Count - 1}",
+            FileTransferChunkBatchFrameV4 batch => $"{batch.StartChunkIndex}-{batch.StartChunkIndex + batch.DataSegments.Count - 1}",
             _ => "(none)",
         };
 

@@ -323,7 +323,8 @@ public sealed class SessionFileTransferRuntimeTests : CoreSmokeTestsBase
                 await CoreSmokeTestsBase.WaitUntilAsync(() => (object)helpeeRuntime.PendingApprovalRequest != null, TimeSpan.FromSeconds(2.0));
                 await helpeeRuntime.ApproveAsync(CapabilityGrant.Chat | CapabilityGrant.FileTransfer, cts.Token);
                 await CoreSmokeTestsBase.WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.Connected && helperRuntime.State == SessionRuntimeState.Connected, TimeSpan.FromSeconds(3.0));
-                await helperRuntime.StartSendAsync(new FileTransferSendDescriptor("runtime-note.txt", payload.Length), (CancellationToken ct) => Task.FromResult((Stream)new MemoryStream(payload, writable: false)), cts.Token);
+                var receivedFileName = $"runtime-note-{Guid.NewGuid():N}.txt";
+                await helperRuntime.StartSendAsync(new FileTransferSendDescriptor(receivedFileName, payload.Length), (CancellationToken ct) => Task.FromResult((Stream)new MemoryStream(payload, writable: false)), cts.Token);
                 await CoreSmokeTestsBase.WaitUntilAsync(() => helpeeRuntime.FileTransferSnapshot.InboundState == FileTransferTransferState.PendingDecision, TimeSpan.FromSeconds(2.0));
                 FileTransferTransferSnapshot pendingInbound = helpeeRuntime.FileTransferSnapshot.Inbound;
                 Assert.NotNull(pendingInbound);
@@ -335,7 +336,7 @@ public sealed class SessionFileTransferRuntimeTests : CoreSmokeTestsBase
                 Assert.True(helpeeFileTransferChanged > 0);
                 Assert.Equal(FileTransferTransferState.Completed, helperRuntime.FileTransferSnapshot.OutboundState);
                 Assert.Equal(FileTransferTransferState.Completed, inboundSnapshot.State);
-                string receivedFilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "nLink", "transfers", "incoming", inboundSnapshot.SessionId, inboundSnapshot.TransferId, inboundSnapshot.FileName);
+                string receivedFilePath = Path.Combine(SessionRuntime.GetDefaultInboundFileTransferRootDirectory(), inboundSnapshot.FileName);
                 try
                 {
                     Assert.True(File.Exists(receivedFilePath));
@@ -343,12 +344,250 @@ public sealed class SessionFileTransferRuntimeTests : CoreSmokeTestsBase
                 }
                 finally
                 {
-                    string transferDirectory = Path.GetDirectoryName(receivedFilePath);
-                    if (!string.IsNullOrWhiteSpace(transferDirectory) && Directory.Exists(transferDirectory))
+                    if (File.Exists(receivedFilePath))
                     {
-                        Directory.Delete(transferDirectory, recursive: true);
+                        File.Delete(receivedFilePath);
                     }
                 }
+            }
+            finally
+            {
+                if (helperRuntime != null)
+                {
+                    ((IDisposable)helperRuntime).Dispose();
+                }
+            }
+        }
+        finally
+        {
+            if (helpeeRuntime != null)
+            {
+                ((IDisposable)helpeeRuntime).Dispose();
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task SessionRuntime_FileTransferPauseResume_RequiresGrantedCapability()
+    {
+        string hostAddress = CoreSmokeTestsBase.CreateTestPeerAddress();
+        string helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
+        byte[] payload = Encoding.UTF8.GetBytes("runtime pause authorization payload");
+        using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+        SessionRuntime helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        try
+        {
+            SessionRuntime helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
+            try
+            {
+                await ConnectFileTransferRuntimePairAsync(helpeeRuntime, helperRuntime, hostAddress, helperAddress, cts.Token);
+                await helperRuntime.StartSendAsync(
+                    new FileTransferSendDescriptor("pause-auth.txt", payload.Length),
+                    (CancellationToken ct) => Task.FromResult((Stream)new MemoryStream(payload, writable: false)),
+                    cts.Token);
+                await CoreSmokeTestsBase.WaitUntilAsync(
+                    () => helperRuntime.FileTransferSnapshot.OutboundState == FileTransferTransferState.AwaitingAcceptance &&
+                          helpeeRuntime.FileTransferSnapshot.InboundState == FileTransferTransferState.PendingDecision,
+                    TimeSpan.FromSeconds(3.0));
+                string transferId = helperRuntime.FileTransferSnapshot.Outbound!.TransferId;
+
+                SetRuntimeGrantForTests(helperRuntime, CapabilityGrant.Chat);
+                Assert.Null(await helperRuntime.PauseTransferAsync(transferId, "blocked_pause", cts.Token));
+                Assert.False(helperRuntime.FileTransferSnapshot.Outbound!.IsPaused);
+
+                SetRuntimeGrantForTests(helperRuntime, CapabilityGrant.Chat | CapabilityGrant.FileTransfer);
+                FileTransferTransferSnapshot? paused = await helperRuntime.PauseTransferAsync(transferId, "allowed_pause", cts.Token);
+                Assert.NotNull(paused);
+                Assert.True(paused!.IsPaused);
+
+                SetRuntimeGrantForTests(helperRuntime, CapabilityGrant.Chat);
+                Assert.Null(await helperRuntime.ResumeTransferAsync(transferId, "blocked_resume", cts.Token));
+                Assert.True(helperRuntime.FileTransferSnapshot.Outbound!.IsPaused);
+            }
+            finally
+            {
+                if (helperRuntime != null)
+                {
+                    ((IDisposable)helperRuntime).Dispose();
+                }
+            }
+        }
+        finally
+        {
+            if (helpeeRuntime != null)
+            {
+                ((IDisposable)helpeeRuntime).Dispose();
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task SessionRuntime_FileTransferPauseResume_AuthorizedOutbound_PreservesTransferId()
+    {
+        string hostAddress = CoreSmokeTestsBase.CreateTestPeerAddress();
+        string helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
+        byte[] payload = Encoding.UTF8.GetBytes("runtime outbound pause payload");
+        using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+        SessionRuntime helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        try
+        {
+            SessionRuntime helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
+            try
+            {
+                await ConnectFileTransferRuntimePairAsync(helpeeRuntime, helperRuntime, hostAddress, helperAddress, cts.Token);
+                await helperRuntime.StartSendAsync(
+                    new FileTransferSendDescriptor("runtime-outbound-pause.txt", payload.Length),
+                    (CancellationToken ct) => Task.FromResult((Stream)new MemoryStream(payload, writable: false)),
+                    cts.Token);
+                await CoreSmokeTestsBase.WaitUntilAsync(
+                    () => helperRuntime.FileTransferSnapshot.OutboundState == FileTransferTransferState.AwaitingAcceptance,
+                    TimeSpan.FromSeconds(3.0));
+                string transferId = helperRuntime.FileTransferSnapshot.Outbound!.TransferId;
+
+                FileTransferTransferSnapshot? paused = await helperRuntime.PauseTransferAsync(transferId, "runtime_pause", cts.Token);
+                Assert.NotNull(paused);
+                Assert.Equal(transferId, paused!.TransferId);
+                Assert.True(paused.IsPaused);
+
+                FileTransferTransferSnapshot? resumed = await helperRuntime.ResumeTransferAsync(transferId, "runtime_resume", cts.Token);
+                Assert.NotNull(resumed);
+                Assert.Equal(transferId, resumed!.TransferId);
+                Assert.False(resumed.IsPaused);
+            }
+            finally
+            {
+                if (helperRuntime != null)
+                {
+                    ((IDisposable)helperRuntime).Dispose();
+                }
+            }
+        }
+        finally
+        {
+            if (helpeeRuntime != null)
+            {
+                ((IDisposable)helpeeRuntime).Dispose();
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task SessionRuntime_FileTransferPauseResume_AuthorizedInboundAfterAccept()
+    {
+        string hostAddress = CoreSmokeTestsBase.CreateTestPeerAddress();
+        string helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
+        byte[] payload = new byte[262144];
+        RandomNumberGenerator.Fill(payload);
+        using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(10.0));
+        TaskCompletionSource allowRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        SessionRuntime helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        try
+        {
+            SessionRuntime helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
+            try
+            {
+                await ConnectFileTransferRuntimePairAsync(helpeeRuntime, helperRuntime, hostAddress, helperAddress, cts.Token);
+                var receivedFileName = $"runtime-inbound-pause-{Guid.NewGuid():N}.bin";
+                await helperRuntime.StartSendAsync(
+                    new FileTransferSendDescriptor(receivedFileName, payload.Length),
+                    (CancellationToken ct) => Task.FromResult((Stream)new GateReadStream(payload, allowRead.Task)),
+                    cts.Token);
+                await CoreSmokeTestsBase.WaitUntilAsync(
+                    () => helpeeRuntime.FileTransferSnapshot.InboundState == FileTransferTransferState.PendingDecision,
+                    TimeSpan.FromSeconds(3.0));
+                string transferId = helpeeRuntime.FileTransferSnapshot.Inbound!.TransferId;
+
+                await helpeeRuntime.AcceptIncomingAsync(transferId, cts.Token);
+                await CoreSmokeTestsBase.WaitUntilAsync(
+                    () => helpeeRuntime.FileTransferSnapshot.InboundState is FileTransferTransferState.AwaitingMetadata
+                        or FileTransferTransferState.AwaitingStart
+                        or FileTransferTransferState.Receiving,
+                    TimeSpan.FromSeconds(3.0));
+
+                FileTransferTransferSnapshot? paused = await helpeeRuntime.PauseTransferAsync(transferId, "runtime_inbound_pause", cts.Token);
+                Assert.NotNull(paused);
+                Assert.Equal(transferId, paused!.TransferId);
+                Assert.True(paused.IsPaused);
+
+                FileTransferTransferSnapshot? resumed = await helpeeRuntime.ResumeTransferAsync(transferId, "runtime_inbound_resume", cts.Token);
+                Assert.NotNull(resumed);
+                Assert.Equal(transferId, resumed!.TransferId);
+                Assert.False(resumed.IsPaused);
+                allowRead.SetResult();
+                await CoreSmokeTestsBase.WaitUntilAsync(
+                    () => helperRuntime.FileTransferSnapshot.OutboundState == FileTransferTransferState.Completed &&
+                          helpeeRuntime.FileTransferSnapshot.InboundState == FileTransferTransferState.Completed,
+                    TimeSpan.FromSeconds(10.0));
+                FileTransferTransferSnapshot inboundCompleted = helpeeRuntime.FileTransferSnapshot.Inbound!;
+                if (!string.IsNullOrWhiteSpace(inboundCompleted.SavedFilePath) &&
+                    File.Exists(inboundCompleted.SavedFilePath))
+                {
+                    File.Delete(inboundCompleted.SavedFilePath);
+                }
+            }
+            finally
+            {
+                allowRead.TrySetResult();
+                if (helperRuntime != null)
+                {
+                    ((IDisposable)helperRuntime).Dispose();
+                }
+            }
+        }
+        finally
+        {
+            if (helpeeRuntime != null)
+            {
+                ((IDisposable)helpeeRuntime).Dispose();
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task SessionRuntime_FileTransferPauseResume_IgnoredPathsReturnNull()
+    {
+        string hostAddress = CoreSmokeTestsBase.CreateTestPeerAddress();
+        string helperAddress = $"devlocal.helper.{Guid.NewGuid():N}";
+        byte[] payload = Encoding.UTF8.GetBytes("runtime ignored pause payload");
+        using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+        SessionRuntime helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
+        try
+        {
+            SessionRuntime helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
+            try
+            {
+                await ConnectFileTransferRuntimePairAsync(helpeeRuntime, helperRuntime, hostAddress, helperAddress, cts.Token);
+                await helperRuntime.StartSendAsync(
+                    new FileTransferSendDescriptor("runtime-pause-ignored.txt", payload.Length),
+                    (CancellationToken ct) => Task.FromResult((Stream)new MemoryStream(payload, writable: false)),
+                    cts.Token);
+                await CoreSmokeTestsBase.WaitUntilAsync(
+                    () => helperRuntime.FileTransferSnapshot.OutboundState == FileTransferTransferState.AwaitingAcceptance &&
+                          helpeeRuntime.FileTransferSnapshot.InboundState == FileTransferTransferState.PendingDecision,
+                    TimeSpan.FromSeconds(3.0));
+                string transferId = helperRuntime.FileTransferSnapshot.Outbound!.TransferId;
+
+                Assert.Null(await helpeeRuntime.PauseTransferAsync(transferId, "pending_decision", cts.Token));
+                Assert.False(helpeeRuntime.FileTransferSnapshot.Inbound!.IsPaused);
+                Assert.Null(await helperRuntime.ResumeTransferAsync(transferId, "not_paused", cts.Token));
+                Assert.Null(await helperRuntime.PauseTransferAsync("missing-transfer", "missing", cts.Token));
+
+                Assert.NotNull(await helperRuntime.PauseTransferAsync(transferId, "first_pause", cts.Token));
+                Assert.Null(await helperRuntime.PauseTransferAsync(transferId, "already_paused", cts.Token));
+                Assert.True(helperRuntime.FileTransferSnapshot.Outbound!.IsPaused);
+
+                Assert.NotNull(await helperRuntime.ResumeTransferAsync(transferId, "resume", cts.Token));
+                await helpeeRuntime.DeclineIncomingAsync(transferId, "test_decline", cts.Token);
+                await CoreSmokeTestsBase.WaitUntilAsync(
+                    () => helperRuntime.FileTransferSnapshot.OutboundState == FileTransferTransferState.Declined &&
+                          helpeeRuntime.FileTransferSnapshot.InboundState == FileTransferTransferState.Declined,
+                    TimeSpan.FromSeconds(3.0));
+                Assert.Null(await helperRuntime.PauseTransferAsync(transferId, "terminal", cts.Token));
+                Assert.Null(await helperRuntime.ResumeTransferAsync(transferId, "terminal", cts.Token));
             }
             finally
             {
@@ -514,7 +753,8 @@ public sealed class SessionFileTransferRuntimeTests : CoreSmokeTestsBase
                         helpee.AllowCommand.Execute(null);
                         await connectTask;
                         await CoreSmokeTestsBase.WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.Connected && helperRuntime.State == SessionRuntimeState.Connected, TimeSpan.FromSeconds(5.0));
-                        await helper.StartSendFileAsync(new FileTransferSendDescriptor("progress.bin", payload.Length), (CancellationToken ct) => Task.FromResult((Stream)new MemoryStream(payload, writable: false)), cts.Token);
+                        var progressFileName = $"progress-{Guid.NewGuid():N}.bin";
+                        await helper.StartSendFileAsync(new FileTransferSendDescriptor(progressFileName, payload.Length), (CancellationToken ct) => Task.FromResult((Stream)new MemoryStream(payload, writable: false)), cts.Token);
                         await CoreSmokeTestsBase.WaitUntilAsync(delegate
                         {
                             FileTransferPanelItemViewModel inboundFileTransfer = helpee.InboundFileTransfer;
@@ -564,6 +804,11 @@ public sealed class SessionFileTransferRuntimeTests : CoreSmokeTestsBase
                         Assert.Contains("complete", inboundCompleted.StatusText, StringComparison.OrdinalIgnoreCase);
                         Assert.True(helper.CanSendFileAction);
                         Assert.True(helper.SendFileCommand.CanExecute(null));
+                        string? savedPath = helpeeRuntime.FileTransferSnapshot.Inbound?.SavedFilePath;
+                        if (!string.IsNullOrWhiteSpace(savedPath) && File.Exists(savedPath))
+                        {
+                            File.Delete(savedPath);
+                        }
                     }
                     finally
                     {
@@ -612,6 +857,73 @@ public sealed class SessionFileTransferRuntimeTests : CoreSmokeTestsBase
         Assert.DoesNotContain("SendFileWindow", actualString2, StringComparison.Ordinal);
         Assert.Contains("NativeFileTransferPicker.PickSingleFileAsync", actualString, StringComparison.Ordinal);
         Assert.Contains("NativeFileTransferPicker.PickSingleFileAsync", actualString2, StringComparison.Ordinal);
+    }
+
+    private static async Task ConnectFileTransferRuntimePairAsync(
+        SessionRuntime helpeeRuntime,
+        SessionRuntime helperRuntime,
+        string hostAddress,
+        string helperAddress,
+        CancellationToken ct)
+    {
+        await helpeeRuntime.StartHelpeeAsync(ct);
+        PeerAddress targetAddress = new PeerAddress(hostAddress);
+        PeerAddress? boundHelperAddress = new PeerAddress(helperAddress);
+        string rawToken;
+        ValidatedInviteV1 invite = CoreSmokeTestsBase.CreateValidatedInviteForTarget(
+            targetAddress,
+            out rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.FileTransfer,
+            null,
+            boundHelperAddress);
+        await helperRuntime.StartHelperAsync(rawToken, invite, ct);
+        await CoreSmokeTestsBase.WaitUntilAsync(
+            () => helpeeRuntime.PendingApprovalRequest is not null,
+            TimeSpan.FromSeconds(3.0));
+        await helpeeRuntime.ApproveAsync(CapabilityGrant.Chat | CapabilityGrant.FileTransfer, ct);
+        await CoreSmokeTestsBase.WaitUntilAsync(
+            () => helpeeRuntime.State == SessionRuntimeState.Connected &&
+                  helperRuntime.State == SessionRuntimeState.Connected &&
+                  helpeeRuntime.CanPerform(SessionCapability.FileTransfer) &&
+                  helperRuntime.CanPerform(SessionCapability.FileTransfer),
+            TimeSpan.FromSeconds(5.0));
+    }
+
+    private static void SetRuntimeGrantForTests(SessionRuntime runtime, CapabilityGrant capabilities)
+    {
+        SessionSecurityState current = runtime.SecurityState;
+        Assert.NotNull(current.SessionId);
+        Assert.NotNull(current.HelperAddress);
+        var grant = new SessionGrant(
+            current.HelperAddress.Value,
+            capabilities,
+            current.SessionId.Value,
+            DateTimeOffset.UtcNow.Add(SessionSecurityDefaults.GrantLifetime));
+        CoreSmokeTestsBase.SetPrivateField(runtime, "currentSessionGrant", grant);
+        CoreSmokeTestsBase.SetPrivateField(runtime, "sessionSecurityState", current.WithApproval(grant));
+    }
+
+    private sealed class GateReadStream : MemoryStream
+    {
+        private readonly Task gate;
+
+        public GateReadStream(byte[] buffer, Task gate)
+            : base(buffer, writable: false)
+        {
+            this.gate = gate;
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return await base.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+        }
+
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return await base.ReadAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
+        }
     }
 
 }

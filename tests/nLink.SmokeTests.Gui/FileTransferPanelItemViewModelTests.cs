@@ -1,3 +1,4 @@
+using CommunityToolkit.Mvvm.Input;
 using NLink.App.ViewModels;
 using NLink.Core.FileTransfer;
 
@@ -29,9 +30,47 @@ public sealed class FileTransferPanelItemViewModelTests
         Assert.True(item!.ShowAccept);
         Assert.True(item.ShowDecline);
         Assert.False(item.ShowCancel);
+        Assert.False(item.ShowPause);
+        Assert.False(item.ShowResume);
         Assert.True(item.ShowActions);
         Assert.False(item.ShowProgress);
         Assert.False(item.IsTerminal);
+    }
+
+    [Fact]
+    public void InboundPendingDecision_ExposesItemActionCommands()
+    {
+        var acceptCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+        var declineCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+        var cancelCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-a",
+                Direction: FileTransferDirection.Inbound,
+                State: FileTransferTransferState.PendingDecision,
+                FileName: "report.pdf",
+                FileSizeBytes: 2048,
+                Sha256Base64: null,
+                BytesTransferred: 0,
+                ChunksTransferred: 0,
+                ChunkCount: 0,
+                ChunkSizeBytes: 0,
+                ErrorCode: null,
+                StatusMessage: null),
+            acceptCommand,
+            declineCommand,
+            cancelCommand);
+
+        Assert.NotNull(item);
+        Assert.True(item!.ShowAccept);
+        Assert.True(item.ShowDecline);
+        Assert.Same(acceptCommand, item.AcceptCommand);
+        Assert.Same(declineCommand, item.DeclineCommand);
+        Assert.Null(item.CancelCommand);
+        Assert.Null(item.PauseCommand);
+        Assert.Null(item.ResumeCommand);
     }
 
     [Fact]
@@ -57,9 +96,114 @@ public sealed class FileTransferPanelItemViewModelTests
         Assert.False(item!.ShowAccept);
         Assert.False(item.ShowDecline);
         Assert.True(item.ShowCancel);
+        Assert.True(item.ShowPause);
+        Assert.False(item.ShowResume);
         Assert.True(item.ShowActions);
         Assert.True(item.ShowProgress);
         Assert.False(item.IsTerminal);
+    }
+
+    [Fact]
+    public void ActiveInboundTransfer_ShowsPauseCommand()
+    {
+        var pauseCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+        var resumeCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-a",
+                Direction: FileTransferDirection.Inbound,
+                State: FileTransferTransferState.Receiving,
+                FileName: "archive.bin",
+                FileSizeBytes: 4096,
+                Sha256Base64: null,
+                BytesTransferred: 1024,
+                ChunksTransferred: 1,
+                ChunkCount: 4,
+                ChunkSizeBytes: 1024,
+                ErrorCode: null,
+                StatusMessage: null),
+            pauseCommand: pauseCommand,
+            resumeCommand: resumeCommand);
+
+        Assert.NotNull(item);
+        Assert.True(item!.ShowPause);
+        Assert.False(item.ShowResume);
+        Assert.True(item.ShowCancel);
+        Assert.Same(pauseCommand, item.PauseCommand);
+        Assert.Null(item.ResumeCommand);
+    }
+
+    [Fact]
+    public void PausedTransfer_ShowsResumeCommand_AndCancel()
+    {
+        var pauseCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+        var resumeCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-a",
+                Direction: FileTransferDirection.Outbound,
+                State: FileTransferTransferState.Sending,
+                FileName: "archive.bin",
+                FileSizeBytes: 4096,
+                Sha256Base64: null,
+                BytesTransferred: 1024,
+                ChunksTransferred: 1,
+                ChunkCount: 4,
+                ChunkSizeBytes: 1024,
+                ErrorCode: null,
+                StatusMessage: "Transfer paused.",
+                IsPaused: true,
+                PauseReason: "ui_pause"),
+            pauseCommand: pauseCommand,
+            resumeCommand: resumeCommand);
+
+        Assert.NotNull(item);
+        Assert.False(item!.ShowPause);
+        Assert.True(item.ShowResume);
+        Assert.True(item.ShowCancel);
+        Assert.Equal("Paused", item.StatusText);
+        Assert.Null(item.PauseCommand);
+        Assert.Same(resumeCommand, item.ResumeCommand);
+    }
+
+    [Fact]
+    public void PeerPausedTransfer_ShowsPeerPausedStatus_WithoutPauseOrResume()
+    {
+        var pauseCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+        var resumeCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-a",
+                Direction: FileTransferDirection.Inbound,
+                State: FileTransferTransferState.Receiving,
+                FileName: "archive.bin",
+                FileSizeBytes: 4096,
+                Sha256Base64: null,
+                BytesTransferred: 1024,
+                ChunksTransferred: 1,
+                ChunkCount: 4,
+                ChunkSizeBytes: 1024,
+                ErrorCode: null,
+                StatusMessage: "Peer paused transfer.",
+                IsPeerPaused: true,
+                PeerPauseReason: "sender_pause"),
+            pauseCommand: pauseCommand,
+            resumeCommand: resumeCommand);
+
+        Assert.NotNull(item);
+        Assert.False(item!.ShowPause);
+        Assert.False(item.ShowResume);
+        Assert.True(item.ShowCancel);
+        Assert.True(item.ShowActions);
+        Assert.Equal("Paused by peer", item.StatusText);
+        Assert.Null(item.PauseCommand);
+        Assert.Null(item.ResumeCommand);
     }
 
     [Fact]
@@ -88,11 +232,52 @@ public sealed class FileTransferPanelItemViewModelTests
         Assert.False(item!.ShowAccept);
         Assert.False(item.ShowDecline);
         Assert.False(item.ShowCancel);
+        Assert.False(item.ShowPause);
+        Assert.False(item.ShowResume);
         Assert.False(item.ShowActions);
         Assert.False(item.ShowProgress);
         Assert.True(item.IsTerminal);
         Assert.True(item.ShowSavedLocation);
         Assert.Equal(@"Saved to C:\temp", item.SavedLocationText);
+    }
+
+    [Fact]
+    public void TerminalTransfer_DoesNotExposeOfferActionCommands()
+    {
+        var acceptCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+        var declineCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+        var cancelCommand = new AsyncRelayCommand<string?>(_ => Task.CompletedTask);
+
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-a",
+                Direction: FileTransferDirection.Inbound,
+                State: FileTransferTransferState.Completed,
+                FileName: "done.txt",
+                FileSizeBytes: 128,
+                Sha256Base64: null,
+                BytesTransferred: 128,
+                ChunksTransferred: 1,
+                ChunkCount: 1,
+                ChunkSizeBytes: 128,
+                ErrorCode: null,
+                StatusMessage: null),
+            acceptCommand,
+            declineCommand,
+            cancelCommand);
+
+        Assert.NotNull(item);
+        Assert.False(item!.ShowAccept);
+        Assert.False(item.ShowDecline);
+        Assert.False(item.ShowCancel);
+        Assert.False(item.ShowPause);
+        Assert.False(item.ShowResume);
+        Assert.Null(item.AcceptCommand);
+        Assert.Null(item.DeclineCommand);
+        Assert.Null(item.CancelCommand);
+        Assert.Null(item.PauseCommand);
+        Assert.Null(item.ResumeCommand);
     }
 
     [Fact]

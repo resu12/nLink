@@ -45,6 +45,8 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
     private const int RpcEChangedMode = unchecked((int)0x80010106);
     private const string H264Encoding = "h264";
     private const string DefaultProfile = "main";
+    private const string UnsafeDirectNv12EnvironmentVariableName = "NLINK_SCREENSHARE_UNSAFE_DIRECT_NV12";
+    private const string UnsafeFfmpegSwscaleEnvironmentVariableName = "NLINK_SCREENSHARE_UNSAFE_FFMPEG_SWSCALE";
     private static readonly Guid IidImfSinkWriter = new("3137f1cd-fe5e-4805-a5d8-fb477448cb3d");
     private static readonly Guid MftCategoryVideoEncoder = new("f79eac7d-e545-4387-bdee-d647d7bde42a");
     private static readonly Guid ClsidCmsH264EncoderMft = new("6ca50344-051a-4ded-9779-a43305165e35");
@@ -4244,6 +4246,18 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
     private static bool IsSupportedDirectBgraPixelFormat(PixelFormat pixelFormat)
         => pixelFormat is PixelFormat.Format32bppArgb or PixelFormat.Format32bppPArgb;
 
+    private static bool IsUnsafeDirectNv12PreprocessEnabled()
+        => string.Equals(
+            Environment.GetEnvironmentVariable(UnsafeDirectNv12EnvironmentVariableName),
+            "1",
+            StringComparison.Ordinal);
+
+    private static bool IsUnsafeFfmpegSwscalePreprocessEnabled()
+        => string.Equals(
+            Environment.GetEnvironmentVariable(UnsafeFfmpegSwscaleEnvironmentVariableName),
+            "1",
+            StringComparison.Ordinal);
+
     private static unsafe void FillNv12FromBgraPointer(byte* bgraBytes, int stride, byte[] nv12, int targetWidth, int targetHeight)
     {
         ArgumentNullException.ThrowIfNull(nv12);
@@ -5330,14 +5344,16 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
 
         public PreprocessResult PrepareNv12(Bitmap source, ScreenShareTransportTuningLevel tuningLevel)
         {
-            if (CanDirectConvertSource(source) &&
+            if (IsUnsafeDirectNv12PreprocessEnabled() &&
+                CanDirectConvertSource(source) &&
                 source.Width == Width &&
                 source.Height == Height)
             {
                 return PrepareNv12Direct(source);
             }
 
-            if (CanDirectConvertSource(source) &&
+            if (IsUnsafeFfmpegSwscalePreprocessEnabled() &&
+                CanDirectConvertSource(source) &&
                 WindowsFfmpegRuntime.TryInitialize())
             {
                 try

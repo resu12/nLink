@@ -8,6 +8,7 @@ using NLink.Infra.DevLocal;
 namespace NLink.SmokeTests;
 
 [Trait("Area", "Core")]
+[Collection(FakeNknNetworkCollection.Name)]
 public sealed class FileTransferSoakRunnerTests
 {
     [Fact]
@@ -182,7 +183,7 @@ public sealed class FileTransferSoakRunnerTests
     public void DevLocalImpairmentPolicy_ScreenSharePressure_DoesNotAffectFileTransferControlFrames()
     {
         var policy = new DevLocalImpairmentPolicy(new DevLocalImpairmentOptions(DevLocalImpairmentProfile.ScreenSharePressure, 42));
-        var manifest = new FileTransferManifestFrameV3
+        var manifest = new FileTransferManifestFrameV4
         {
             SessionId = "sess",
             TransferId = "transfer_manifest",
@@ -329,10 +330,13 @@ public sealed class FileTransferSoakRunnerTests
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task FileTransferSoakRunner_LocalMixed_FailsAsV4FileOnlyUnsupportedAfterSyntheticScreenShareStarts()
+    public async Task FileTransferSoakRunner_LocalMixed_FailsAsV4FileOnlyUnsupportedWhenMixedDisabledByEnvironment()
     {
         var artifactDir = Path.Combine(Path.GetTempPath(), "nlink-filetransfer-localmixed", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(artifactDir);
+        const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
+        var previousValue = Environment.GetEnvironmentVariable(envName);
+        Environment.SetEnvironmentVariable(envName, "0");
 
         try
         {
@@ -366,13 +370,66 @@ public sealed class FileTransferSoakRunnerTests
 
             var mixed = ReadArtifactReport(artifactDir, "mixed-screenshare-summary.txt");
             Assert.Equal("1", mixed["mixed_screenshare_exercised"]);
-
-            var logSlice = await File.ReadAllTextAsync(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log"), Encoding.UTF8);
-            Assert.Contains("event=filetransfer_local_mixed_screenshare_started", logSlice, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_local_mixed_screenshare_summary", logSlice, StringComparison.Ordinal);
         }
         finally
         {
+            Environment.SetEnvironmentVariable(envName, previousValue);
+            TryDeleteDirectory(artifactDir);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task FileTransferSoakRunner_LocalMixed_WithV4MixedDefault_CompletesWithScreenShareEvidence()
+    {
+        var artifactDir = Path.Combine(Path.GetTempPath(), "nlink-filetransfer-localmixed-enabled", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(artifactDir);
+        const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
+        var previousValue = Environment.GetEnvironmentVariable(envName);
+        Environment.SetEnvironmentVariable(envName, null);
+
+        try
+        {
+            using var output = new StringWriter();
+            using var error = new StringWriter();
+            var exitCode = await FileTransferSoakRunner.RunAsync(
+                new[]
+                {
+                    "--filetransfer-soak",
+                    "local-mixed",
+                    "--payload-sizes",
+                    "128KiB",
+                    "--cycles",
+                    "1",
+                    "--artifact-dir",
+                    artifactDir,
+                    "--cycle-timeout-seconds",
+                    "60"
+                },
+                output,
+                error,
+                CancellationToken.None);
+
+            await AssertLocalV4SoakSuccessAsync(artifactDir, exitCode, "local-mixed", "ScreenSharePressure");
+            var summary = ReadArtifactReport(artifactDir, "filetransfer-local-soak-summary.txt");
+            Assert.Equal("4", summary["data_protocol_version"]);
+            Assert.True(long.Parse(summary["v4_mixed_enabled_count"]) > 0);
+            Assert.True(long.Parse(summary["v4_chunk_batch_frame_count"]) > 0);
+
+            var mixed = ReadArtifactReport(artifactDir, "mixed-screenshare-summary.txt");
+            Assert.Equal("1", mixed["mixed_screenshare_exercised"]);
+            Assert.Equal("4", mixed["data_protocol_version"]);
+            Assert.True(long.Parse(mixed["v4_mixed_enabled_count"]) > 0);
+            Assert.True(long.Parse(mixed["screen_share_frames_emitted"]) > 0);
+
+            var logSlice = await File.ReadAllTextAsync(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log"), Encoding.UTF8);
+            Assert.Contains("event=filetransfer_v4_mixed_enabled", logSlice, StringComparison.Ordinal);
+            Assert.Contains("mixed_screenshare=1", logSlice, StringComparison.Ordinal);
+            Assert.DoesNotContain("v4_file_only_required", logSlice, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envName, previousValue);
             TryDeleteDirectory(artifactDir);
         }
     }
@@ -464,7 +521,6 @@ public sealed class FileTransferSoakRunnerTests
         var logSlice = await File.ReadAllTextAsync(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log"), Encoding.UTF8);
         Assert.Contains("event=filetransfer_v4_sender_started", logSlice, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v4_complete_received", logSlice, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=filetransfer_v4_runtime_not_implemented", logSlice, StringComparison.Ordinal);
     }
 
     private static async Task AssertV4FileOnlyUnsupportedSoakFailureAsync(
@@ -491,20 +547,22 @@ public sealed class FileTransferSoakRunnerTests
 
         var verdict = ReadArtifactReport(artifactDir, "filetransfer-operator-verdict.txt");
         Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.True(
+            summary.Values.Any(static value => value.Contains("v4_file_only_required", StringComparison.Ordinal)),
+            "Expected the soak summary to include v4_file_only_required.");
 
         var logSlice = await File.ReadAllTextAsync(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log"), Encoding.UTF8);
-        Assert.Contains("v4_file_only_required", logSlice, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=filetransfer_v4_runtime_not_implemented", logSlice, StringComparison.Ordinal);
     }
 
-    private static FileTransferChunkDataFrameV3 CreateChunkFrame(string transferId, int chunkIndex)
+    private static FileTransferChunkBatchFrameV4 CreateChunkFrame(string transferId, int chunkIndex)
         => new()
         {
             SessionId = "sess",
             TransferId = transferId,
-            ChunkIndex = chunkIndex,
-            ChunkCount = 4,
-            Data = Enumerable.Repeat((byte)(chunkIndex + 1), 1024).ToArray(),
+            StartChunkIndex = chunkIndex,
+            ChunkCount = 1,
+            DataSegments = new[] { Enumerable.Repeat((byte)(chunkIndex + 1), 1024).ToArray() },
+            BatchProfile = "v4_default_21k",
         };
 
     private static async Task<ScriptResult> RunFileTransferOpsAsync(string repoRoot, IReadOnlyList<string> arguments)

@@ -349,7 +349,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     internal void RegisterActiveFileTransferDataSession(string transferId)
     {
         var activeCount = Interlocked.Increment(ref activeFileTransferDataSessions);
-        Log($"event=filetransfer_v3_receive_liveness_summary; reason=data_session_opened; transfer_id={SanitizeLogToken(transferId)}; active_file_transfer_sessions={activeCount}");
+        Log($"event=filetransfer_v4_receive_liveness_summary; reason=data_session_opened; transfer_id={SanitizeLogToken(transferId)}; active_file_transfer_sessions={activeCount}");
     }
 
     internal void UnregisterActiveFileTransferDataSession(string transferId)
@@ -361,7 +361,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             Interlocked.Exchange(ref activeFileTransferDataSessions, 0);
         }
 
-        Log($"event=filetransfer_v3_receive_liveness_summary; reason=data_session_closed; transfer_id={SanitizeLogToken(transferId)}; active_file_transfer_sessions={activeCount}");
+        Log($"event=filetransfer_v4_receive_liveness_summary; reason=data_session_closed; transfer_id={SanitizeLogToken(transferId)}; active_file_transfer_sessions={activeCount}");
     }
 
     internal void SetConnectReadyTimeoutForTests(TimeSpan timeout)
@@ -1168,7 +1168,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var bulkReceiveActiveThisWindow = bulkMessagesReceivedSinceLast > 0;
 
         Log(
-            "event=filetransfer_v3_receive_liveness_summary; " +
+            "event=filetransfer_v4_receive_liveness_summary; " +
             $"reason=sample; active_file_transfer_sessions={fileTransferActiveSessionCount}; ready_emitted={readyEmitted}; control_ready={controlReady}; media_ready={mediaReady}; bulk_ready={bulkReady}; frames_sent_since_last={framesSentSinceLast}; " +
             $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; total_messages_received_since_last={totalMessagesReceivedSinceLast}; " +
             $"control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}; all_zero_receive_consecutive_windows={consecutiveWindows}; bulk_zero_receive_consecutive_windows={bulkConsecutiveWindows}; control_zero_receive_consecutive_windows={controlConsecutiveWindows}; " +

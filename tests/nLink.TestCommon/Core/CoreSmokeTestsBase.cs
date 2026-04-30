@@ -722,15 +722,8 @@ internal static Envelope BuildSecureFileTransferEnvelope<TMessage>(
         var plaintext = message switch
         {
             FileTransferOfferV2 offer => FileTransferPayloadCodec.Serialize(offer),
-            FileTransferOfferV1 offer => FileTransferPayloadCodec.Serialize(offer),
             FileTransferAcceptV1 accept => FileTransferPayloadCodec.Serialize(accept),
             FileTransferDeclineV1 decline => FileTransferPayloadCodec.Serialize(decline),
-            FileTransferStartV2 start => FileTransferPayloadCodec.Serialize(start),
-            FileTransferStartV1 start => FileTransferPayloadCodec.Serialize(start),
-            FileTransferChunkV1 chunk => FileTransferPayloadCodec.Serialize(chunk),
-            FileTransferWindowUpdateV1 windowUpdate => FileTransferPayloadCodec.Serialize(windowUpdate),
-            FileTransferMissingRangeV1 missingRange => FileTransferPayloadCodec.Serialize(missingRange),
-            FileTransferPressureStateV1 pressureState => FileTransferPayloadCodec.Serialize(pressureState),
             FileTransferCancelV1 cancel => FileTransferPayloadCodec.Serialize(cancel),
             FileTransferErrorV1 error => FileTransferPayloadCodec.Serialize(error),
             FileTransferCompleteV1 complete => FileTransferPayloadCodec.Serialize(complete),
@@ -875,7 +868,7 @@ internal static Envelope BuildSecureLifecycleEnvelope(
 
 internal static Envelope BuildSecureFileTransferDataFrameEnvelope(
         NknSignalingTransport senderTransport,
-        FileTransferDataFrameV2 frame,
+        FileTransferDataFrame frame,
         long sequence)
     {
         var key = Assert.IsType<byte[]>(GetPrivateField(senderTransport, "fileTransferSessionSharedKey")).AsSpan().ToArray();

@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using CommunityToolkit.Mvvm.Input;
 using NLink.Core.FileTransfer;
 
 namespace NLink.App.ViewModels;
@@ -23,10 +24,23 @@ public sealed record FileTransferPanelItemViewModel(
     bool ShowAccept,
     bool ShowDecline,
     bool ShowCancel,
+    bool ShowPause,
+    bool ShowResume,
     bool ShowActions,
+    IAsyncRelayCommand<string?>? AcceptCommand,
+    IAsyncRelayCommand<string?>? DeclineCommand,
+    IAsyncRelayCommand<string?>? CancelCommand,
+    IAsyncRelayCommand<string?>? PauseCommand,
+    IAsyncRelayCommand<string?>? ResumeCommand,
     bool IsTerminal)
 {
-    public static FileTransferPanelItemViewModel? FromSnapshot(FileTransferTransferSnapshot? snapshot)
+    public static FileTransferPanelItemViewModel? FromSnapshot(
+        FileTransferTransferSnapshot? snapshot,
+        IAsyncRelayCommand<string?>? acceptCommand = null,
+        IAsyncRelayCommand<string?>? declineCommand = null,
+        IAsyncRelayCommand<string?>? cancelCommand = null,
+        IAsyncRelayCommand<string?>? pauseCommand = null,
+        IAsyncRelayCommand<string?>? resumeCommand = null)
     {
         if (snapshot is null)
         {
@@ -55,6 +69,10 @@ public sealed record FileTransferPanelItemViewModel(
             or FileTransferTransferState.AwaitingCompletion
             or FileTransferTransferState.Receiving
             or FileTransferTransferState.Verifying;
+        var canPauseResume = CanPauseResume(snapshot);
+        var effectivePaused = snapshot.IsPaused || snapshot.IsPeerPaused;
+        var showPause = canPauseResume && !effectivePaused;
+        var showResume = canPauseResume && snapshot.IsPaused;
 
         return new FileTransferPanelItemViewModel(
             snapshot.TransferId,
@@ -77,7 +95,14 @@ public sealed record FileTransferPanelItemViewModel(
             showAccept,
             showDecline,
             showCancel,
-            ShowActions: showAccept || showDecline || showCancel,
+            showPause,
+            showResume,
+            ShowActions: showAccept || showDecline || showCancel || showPause || showResume,
+            AcceptCommand: showAccept ? acceptCommand : null,
+            DeclineCommand: showDecline ? declineCommand : null,
+            CancelCommand: showCancel ? cancelCommand : null,
+            PauseCommand: showPause ? pauseCommand : null,
+            ResumeCommand: showResume ? resumeCommand : null,
             IsTerminal: snapshot.IsTerminal);
     }
 
@@ -87,6 +112,16 @@ public sealed record FileTransferPanelItemViewModel(
         if (!string.IsNullOrWhiteSpace(mappedTerminalStatus))
         {
             return mappedTerminalStatus;
+        }
+
+        if (snapshot.IsPaused && !snapshot.IsTerminal)
+        {
+            return "Paused";
+        }
+
+        if (snapshot.IsPeerPaused && !snapshot.IsTerminal)
+        {
+            return "Paused by peer";
         }
 
         var stateText = snapshot.State switch
@@ -120,6 +155,20 @@ public sealed record FileTransferPanelItemViewModel(
 
         return "Ready";
     }
+
+    private static bool CanPauseResume(FileTransferTransferSnapshot snapshot)
+        => !snapshot.IsTerminal &&
+           snapshot.Direction switch
+           {
+               FileTransferDirection.Outbound => snapshot.State is FileTransferTransferState.AwaitingAcceptance
+                   or FileTransferTransferState.PreparingMetadata
+                   or FileTransferTransferState.AwaitingStart
+                   or FileTransferTransferState.Sending,
+               FileTransferDirection.Inbound => snapshot.State is FileTransferTransferState.AwaitingMetadata
+                   or FileTransferTransferState.AwaitingStart
+                   or FileTransferTransferState.Receiving,
+               _ => false,
+           };
 
     private static string? TryMapTerminalStatusText(FileTransferTransferSnapshot snapshot)
     {

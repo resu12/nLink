@@ -43,5 +43,9 @@ public interface IChatPanelBindings
 
     IAsyncRelayCommand<string?> CancelFileTransferCommand { get; }
 
+    IAsyncRelayCommand<string?> PauseFileTransferCommand { get; }
+
+    IAsyncRelayCommand<string?> ResumeFileTransferCommand { get; }
+
     IRelayCommand EndSessionCommand { get; }
 }

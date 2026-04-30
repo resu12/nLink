@@ -2,7 +2,7 @@ using System.Text.Json.Serialization;
 
 namespace NLink.Core.FileTransfer;
 
-public sealed record FileTransferManifestFrameV4 : FileTransferDataFrameV2
+public sealed record FileTransferManifestFrameV4 : FileTransferDataFrame
 {
     public FileTransferManifestFrameV4()
     {
@@ -33,7 +33,7 @@ public enum FileTransferV4RepairDeliveryMode
     ControlBulkRedundant = 1,
 }
 
-public sealed record FileTransferStateFrameV4 : FileTransferDataFrameV2
+public sealed record FileTransferStateFrameV4 : FileTransferDataFrame
 {
     public FileTransferStateFrameV4()
     {
@@ -57,9 +57,13 @@ public sealed record FileTransferStateFrameV4 : FileTransferDataFrameV2
     public bool ReceiverDiskPressure { get; init; }
 
     public bool TerminalReady { get; init; }
+
+    public bool TransferPaused { get; init; }
+
+    public string? TransferPauseReason { get; init; }
 }
 
-public sealed record FileTransferChunkBatchFrameV4 : FileTransferChunkBatchFrameV2
+public sealed record FileTransferChunkBatchFrameV4 : FileTransferChunkBatchFrame
 {
     public FileTransferChunkBatchFrameV4()
     {
@@ -73,7 +77,7 @@ public sealed record FileTransferChunkBatchFrameV4 : FileTransferChunkBatchFrame
     public FileTransferV4RepairDeliveryMode RepairDeliveryMode { get; init; } = FileTransferV4RepairDeliveryMode.BulkOnly;
 }
 
-public sealed record FileTransferCompleteFrameV4 : FileTransferDataFrameV2
+public sealed record FileTransferCompleteFrameV4 : FileTransferDataFrame
 {
     public FileTransferCompleteFrameV4()
     {
@@ -85,7 +89,7 @@ public sealed record FileTransferCompleteFrameV4 : FileTransferDataFrameV2
     public string Sha256Base64 { get; init; } = string.Empty;
 }
 
-public sealed record FileTransferCancelFrameV4 : FileTransferDataFrameV2
+public sealed record FileTransferCancelFrameV4 : FileTransferDataFrame
 {
     public FileTransferCancelFrameV4()
     {
@@ -95,7 +99,7 @@ public sealed record FileTransferCancelFrameV4 : FileTransferDataFrameV2
     public string? Reason { get; init; }
 }
 
-public sealed record FileTransferErrorFrameV4 : FileTransferDataFrameV2
+public sealed record FileTransferErrorFrameV4 : FileTransferDataFrame
 {
     public FileTransferErrorFrameV4()
     {
@@ -105,4 +109,18 @@ public sealed record FileTransferErrorFrameV4 : FileTransferDataFrameV2
     public string ErrorCode { get; init; } = string.Empty;
 
     public string? Message { get; init; }
+}
+
+public sealed record FileTransferPauseControlFrameV4 : FileTransferDataFrame
+{
+    public FileTransferPauseControlFrameV4()
+    {
+        Type = FileTransferProtocol.PauseControlFrameTypeV4;
+    }
+
+    public int Epoch { get; init; }
+
+    public bool Paused { get; init; }
+
+    public string? Reason { get; init; }
 }

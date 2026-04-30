@@ -24,8 +24,6 @@ public interface IFileTransferTransportProfileProvider
 
 public interface IFileTransferProtocolCapabilities
 {
-    bool SupportsFileTransferV3Streaming { get; }
-
     bool SupportsFileTransferV4Streaming { get; }
 }
 
@@ -35,11 +33,6 @@ public interface IFileTransferSignalingTransport
     event EventHandler<FileTransferAcceptReceivedEventArgs>? FileTransferAcceptReceived;
     event EventHandler<FileTransferDeclineReceivedEventArgs>? FileTransferDeclineReceived;
     event EventHandler<FileTransferSessionOpenReceivedEventArgs>? FileTransferSessionOpenReceived;
-    event EventHandler<FileTransferStartReceivedEventArgs>? FileTransferStartReceived;
-    event EventHandler<FileTransferChunkReceivedEventArgs>? FileTransferChunkReceived;
-    event EventHandler<FileTransferWindowUpdateReceivedEventArgs>? FileTransferWindowUpdateReceived;
-    event EventHandler<FileTransferMissingRangeReceivedEventArgs>? FileTransferMissingRangeReceived;
-    event EventHandler<FileTransferPressureStateReceivedEventArgs>? FileTransferPressureStateReceived;
     event EventHandler<FileTransferCancelReceivedEventArgs>? FileTransferCancelReceived;
     event EventHandler<FileTransferErrorReceivedEventArgs>? FileTransferErrorReceived;
     event EventHandler<FileTransferCompleteReceivedEventArgs>? FileTransferCompleteReceived;
@@ -48,11 +41,6 @@ public interface IFileTransferSignalingTransport
     Task SendFileTransferAcceptAsync(FileTransferAcceptV1 message, CancellationToken ct);
     Task SendFileTransferDeclineAsync(FileTransferDeclineV1 message, CancellationToken ct);
     Task SendFileTransferSessionOpenAsync(FileTransferSessionOpenV2 message, CancellationToken ct);
-    Task SendFileTransferStartAsync(FileTransferStartV2 message, CancellationToken ct);
-    Task SendFileTransferChunkAsync(FileTransferChunkV1 message, CancellationToken ct);
-    Task SendFileTransferWindowUpdateAsync(FileTransferWindowUpdateV1 message, CancellationToken ct);
-    Task SendFileTransferMissingRangeAsync(FileTransferMissingRangeV1 message, CancellationToken ct);
-    Task SendFileTransferPressureStateAsync(FileTransferPressureStateV1 message, CancellationToken ct);
     Task SendFileTransferCancelAsync(FileTransferCancelV1 message, CancellationToken ct);
     Task SendFileTransferErrorAsync(FileTransferErrorV1 message, CancellationToken ct);
     Task SendFileTransferCompleteAsync(FileTransferCompleteV1 message, CancellationToken ct);
@@ -69,9 +57,9 @@ public interface IFileTransferDataSession : IDisposable
 
     event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged;
 
-    ValueTask<FileTransferDataFrameV2> ReceiveAsync(CancellationToken ct);
+    ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct);
 
-    Task SendAsync(FileTransferDataFrameV2 frame, CancellationToken ct);
+    Task SendAsync(FileTransferDataFrame frame, CancellationToken ct);
 }
 
 public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventArgs
@@ -129,32 +117,6 @@ public sealed class FileTransferDeclineReceivedEventArgs : EventArgs
     public string? PeerId { get; }
 }
 
-public sealed class FileTransferStartReceivedEventArgs : EventArgs
-{
-    public FileTransferStartReceivedEventArgs(FileTransferStartV2 message, string? peerId)
-    {
-        Message = message ?? throw new ArgumentNullException(nameof(message));
-        PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
-    }
-
-    public FileTransferStartV2 Message { get; }
-
-    public string? PeerId { get; }
-}
-
-public sealed class FileTransferChunkReceivedEventArgs : EventArgs
-{
-    public FileTransferChunkReceivedEventArgs(FileTransferChunkV1 message, string? peerId)
-    {
-        Message = message ?? throw new ArgumentNullException(nameof(message));
-        PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
-    }
-
-    public FileTransferChunkV1 Message { get; }
-
-    public string? PeerId { get; }
-}
-
 public sealed class FileTransferCancelReceivedEventArgs : EventArgs
 {
     public FileTransferCancelReceivedEventArgs(FileTransferCancelV1 message, string? peerId)
@@ -168,19 +130,6 @@ public sealed class FileTransferCancelReceivedEventArgs : EventArgs
     public string? PeerId { get; }
 }
 
-public sealed class FileTransferWindowUpdateReceivedEventArgs : EventArgs
-{
-    public FileTransferWindowUpdateReceivedEventArgs(FileTransferWindowUpdateV1 message, string? peerId)
-    {
-        Message = message ?? throw new ArgumentNullException(nameof(message));
-        PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
-    }
-
-    public FileTransferWindowUpdateV1 Message { get; }
-
-    public string? PeerId { get; }
-}
-
 public sealed class FileTransferSessionOpenReceivedEventArgs : EventArgs
 {
     public FileTransferSessionOpenReceivedEventArgs(FileTransferSessionOpenV2 message, string? peerId)
@@ -190,32 +139,6 @@ public sealed class FileTransferSessionOpenReceivedEventArgs : EventArgs
     }
 
     public FileTransferSessionOpenV2 Message { get; }
-
-    public string? PeerId { get; }
-}
-
-public sealed class FileTransferMissingRangeReceivedEventArgs : EventArgs
-{
-    public FileTransferMissingRangeReceivedEventArgs(FileTransferMissingRangeV1 message, string? peerId)
-    {
-        Message = message ?? throw new ArgumentNullException(nameof(message));
-        PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
-    }
-
-    public FileTransferMissingRangeV1 Message { get; }
-
-    public string? PeerId { get; }
-}
-
-public sealed class FileTransferPressureStateReceivedEventArgs : EventArgs
-{
-    public FileTransferPressureStateReceivedEventArgs(FileTransferPressureStateV1 message, string? peerId)
-    {
-        Message = message ?? throw new ArgumentNullException(nameof(message));
-        PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
-    }
-
-    public FileTransferPressureStateV1 Message { get; }
 
     public string? PeerId { get; }
 }

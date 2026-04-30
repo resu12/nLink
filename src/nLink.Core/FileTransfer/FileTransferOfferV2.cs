@@ -24,16 +24,4 @@ public sealed record FileTransferOfferV2
 
     [JsonPropertyName("preferredDataProtocolVersion")]
     public int? PreferredDataProtocolVersion { get; init; }
-
-    public static implicit operator FileTransferOfferV1(FileTransferOfferV2 value)
-        => new()
-        {
-            Kind = FileTransferProtocol.Kind,
-            Type = FileTransferProtocol.OfferTypeV1,
-            SessionId = value.SessionId,
-            TransferId = value.TransferId,
-            FileName = value.FileName,
-            FileSizeBytes = value.FileSizeBytes,
-            Sha256Base64 = string.Empty,
-        };
 }

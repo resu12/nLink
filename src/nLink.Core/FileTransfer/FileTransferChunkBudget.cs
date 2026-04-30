@@ -3,9 +3,9 @@ namespace NLink.Core.FileTransfer;
 public static class FileTransferChunkBudget
 {
     public const int MaxRawChunkBytes = 48 * 1024;
-    public const int MaxRawBatchBytesV3 = 64 * 1024;
+    public const int MaxRawBatchBytes = 64 * 1024;
     public const int MaxSerializedChunkPayloadBytes = 50 * 1024;
-    public const int MaxSerializedChunkBatchPayloadBytesV3 = 64 * 1024;
+    public const int MaxSerializedChunkBatchPayloadBytes = 64 * 1024;
 
     public static int ClampRequestedRawChunkSize(int requestedMaxChunkSize)
         => Math.Min(requestedMaxChunkSize, MaxRawChunkBytes);

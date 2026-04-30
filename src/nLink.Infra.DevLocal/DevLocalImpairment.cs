@@ -81,7 +81,7 @@ public sealed class DevLocalImpairmentPolicy
 
     public DevLocalImpairmentOptions Options { get; }
 
-    public DevLocalImpairmentDecision ObserveFileTransferDataFrame(FileTransferDataFrameV2 frame, string transferId)
+    public DevLocalImpairmentDecision ObserveFileTransferDataFrame(FileTransferDataFrame frame, string transferId)
     {
         ArgumentNullException.ThrowIfNull(frame);
 
@@ -252,7 +252,7 @@ public sealed class DevLocalImpairmentPolicy
             ChunkIndex: chunkIndex,
             PayloadBytes: payloadBytes);
 
-    private bool ShouldDropLossBurstFrame(FileTransferDataFrameV2 frame, string transferId, long currentSequence)
+    private bool ShouldDropLossBurstFrame(FileTransferDataFrame frame, string transferId, long currentSequence)
     {
         var chunkIndices = EnumerateFileTransferChunkIndices(frame).ToArray();
         if (chunkIndices.Length == 0)
@@ -357,7 +357,7 @@ public sealed class DevLocalImpairmentPolicy
         return (int)(((mixed % modulo) + modulo) % modulo);
     }
 
-    private bool IsReorderBurstCandidate(long currentSequence, FileTransferDataFrameV2 frame)
+    private bool IsReorderBurstCandidate(long currentSequence, FileTransferDataFrame frame)
     {
         var chunkIndices = EnumerateFileTransferChunkIndices(frame).ToArray();
         if (chunkIndices.Length == 0)
@@ -385,26 +385,24 @@ public sealed class DevLocalImpairmentPolicy
         return false;
     }
 
-    private static bool IsFileTransferChunkPayload(FileTransferDataFrameV2 frame)
-        => frame is FileTransferChunkDataFrameV2 or FileTransferChunkBatchFrameV2;
+    private static bool IsFileTransferChunkPayload(FileTransferDataFrame frame)
+        => frame is FileTransferChunkBatchFrameV4;
 
-    private static int EstimateFileTransferPayloadBytes(FileTransferDataFrameV2 frame)
+    private static int EstimateFileTransferPayloadBytes(FileTransferDataFrame frame)
         => frame switch
         {
-            FileTransferChunkDataFrameV2 chunk => chunk.Data.Length,
-            FileTransferChunkBatchFrameV2 batch => batch.DataSegments.Sum(static segment => segment.Length),
+            FileTransferChunkBatchFrameV4 batch => batch.DataSegments.Sum(static segment => segment.Length),
             _ => 0,
         };
 
-    private static string FormatFileTransferChunkIndex(FileTransferDataFrameV2 frame)
+    private static string FormatFileTransferChunkIndex(FileTransferDataFrame frame)
         => frame switch
         {
-            FileTransferChunkDataFrameV2 chunk => chunk.ChunkIndex.ToString(CultureInfo.InvariantCulture),
-            FileTransferChunkBatchFrameV2 batch => FormatBatchChunkRange(batch),
+            FileTransferChunkBatchFrameV4 batch => FormatBatchChunkRange(batch),
             _ => "(none)",
         };
 
-    private static string FormatBatchChunkRange(FileTransferChunkBatchFrameV2 batch)
+    private static string FormatBatchChunkRange(FileTransferChunkBatchFrameV4 batch)
     {
         var segmentCount = batch.DataSegments.Count;
         return segmentCount <= 0
@@ -414,14 +412,11 @@ public sealed class DevLocalImpairmentPolicy
                 $"{batch.StartChunkIndex}-{batch.StartChunkIndex + segmentCount - 1}");
     }
 
-    private static IEnumerable<int> EnumerateFileTransferChunkIndices(FileTransferDataFrameV2 frame)
+    private static IEnumerable<int> EnumerateFileTransferChunkIndices(FileTransferDataFrame frame)
     {
         switch (frame)
         {
-            case FileTransferChunkDataFrameV2 chunk:
-                yield return chunk.ChunkIndex;
-                break;
-            case FileTransferChunkBatchFrameV2 batch:
+            case FileTransferChunkBatchFrameV4 batch:
                 for (var offset = 0; offset < batch.DataSegments.Count; offset++)
                 {
                     yield return batch.StartChunkIndex + offset;

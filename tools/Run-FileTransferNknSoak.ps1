@@ -431,11 +431,32 @@ function Add-FileTransferLiveNknSyntheticEvidence {
     $completedCycles = @($liveCycles | Where-Object { $_.completed -eq $true -and $_.integrity_ok -eq $true })
     $effectiveCyclesRequested = if ($CyclesRequested -gt 0) { $CyclesRequested } else { $liveCycles.Count }
     $requestedMatrixIncomplete = $effectiveCyclesRequested -gt 0 -and $completedCycles.Count -lt $effectiveCyclesRequested
+    $observedFailedCycles = @($liveCycles | Where-Object { $_.completed -ne $true -or $_.integrity_ok -ne $true })
     $existingText = Get-Content -LiteralPath $logSlicePath -Raw -ErrorAction SilentlyContinue
     $timestamp = [datetime]::UtcNow.ToString("yyyy-MM-dd HH:mm:ss'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
     $linesToAppend = New-Object System.Collections.Generic.List[string]
     $startReason = if ($progressTimeout.Count -gt 0) { 'live_soak_failure_context' } else { 'live_soak_retained_slice' }
     $endReason = if ($progressTimeout.Count -gt 0) { 'gui_progress_timeout' } else { 'soak_completed_or_harness_exit' }
+
+    if ($liveCycles.Count -gt 0 -and
+        ([string]::IsNullOrWhiteSpace($existingText) -or $existingText.IndexOf('source=harness_cycle_artifact', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) -and
+        ([string]::IsNullOrWhiteSpace($existingText) -or
+            $existingText.IndexOf('event=file_transfer_inbound_terminal', [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+            $existingText.IndexOf('event=file_transfer_outbound_terminal', [System.StringComparison]::OrdinalIgnoreCase) -lt 0)) {
+        foreach ($cycle in @($liveCycles)) {
+            $transferId = if ([string]::IsNullOrWhiteSpace([string]$cycle.transfer_id)) { '(unknown)' } else { [string]$cycle.transfer_id }
+            $inboundRole = if ([string]::IsNullOrWhiteSpace([string]$cycle.expected_inbound_role)) { '(unknown)' } else { [string]$cycle.expected_inbound_role }
+            $outboundRole = if ([string]::IsNullOrWhiteSpace([string]$cycle.expected_outbound_role)) { '(unknown)' } else { [string]$cycle.expected_outbound_role }
+            $inboundState = if ([string]::IsNullOrWhiteSpace([string]$cycle.inbound_state)) { '(unknown)' } else { [string]$cycle.inbound_state }
+            $outboundState = if ([string]::IsNullOrWhiteSpace([string]$cycle.outbound_state)) { '(unknown)' } else { [string]$cycle.outbound_state }
+            $inboundError = if ([string]::IsNullOrWhiteSpace([string]$cycle.inbound_error_code)) { '(none)' } else { [string]$cycle.inbound_error_code }
+            $outboundError = if ([string]::IsNullOrWhiteSpace([string]$cycle.outbound_error_code)) { '(none)' } else { [string]$cycle.outbound_error_code }
+            $savedPath = if ([string]::IsNullOrWhiteSpace([string]$cycle.saved_path)) { '(none)' } else { [string]$cycle.saved_path }
+            $bytesTransferred = if ([string]::IsNullOrWhiteSpace([string]$cycle.payload_bytes)) { 0 } else { [int64]$cycle.payload_bytes }
+            $linesToAppend.Add(('[{0}] [INFO] [FileTransferNknSoak] event=file_transfer_inbound_terminal; source=harness_cycle_artifact; role={1}; session_id=(harness); transfer_id={2}; state={3}; error_code={4}; bytes_transferred={5}; reason=Harness terminal verifier.; saved_path={6}; integrity_ok={7}' -f $timestamp, $inboundRole, $transferId, $inboundState, $inboundError, $bytesTransferred, $savedPath, ($(if ($cycle.integrity_ok -eq $true) { 1 } else { 0 })))) | Out-Null
+            $linesToAppend.Add(('[{0}] [INFO] [FileTransferNknSoak] event=file_transfer_outbound_terminal; source=harness_cycle_artifact; role={1}; session_id=(harness); transfer_id={2}; state={3}; error_code={4}; bytes_transferred={5}; reason=Harness terminal verifier.; integrity_ok={6}' -f $timestamp, $outboundRole, $transferId, $outboundState, $outboundError, $bytesTransferred, ($(if ($cycle.integrity_ok -eq $true) { 1 } else { 0 })))) | Out-Null
+        }
+    }
 
     $hasAnySliceSummary = -not [string]::IsNullOrWhiteSpace($existingText) -and
         $existingText.IndexOf('event=filetransfer_artifact_slice_summary', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
@@ -454,6 +475,16 @@ function Add-FileTransferLiveNknSyntheticEvidence {
     if ($progressTimeout.Count -gt 0 -and $requestedMatrixIncomplete -and
         ([string]::IsNullOrWhiteSpace($existingText) -or $existingText.IndexOf('event=filetransfer_live_matrix_incomplete', [System.StringComparison]::OrdinalIgnoreCase) -lt 0)) {
         $linesToAppend.Add(('[{0}] [WARN] [FileTransferNknSoak] event=filetransfer_live_matrix_incomplete; transfer_id=(all); reason=progress_timeout_incomplete_matrix; cycles_requested={1}; cycles_completed={2}; cycles_observed={3}; gui_progress_timeout=1' -f $timestamp, $effectiveCyclesRequested, $completedCycles.Count, $liveCycles.Count)) | Out-Null
+    }
+
+    if ($observedFailedCycles.Count -gt 0 -and
+        ([string]::IsNullOrWhiteSpace($existingText) -or $existingText.IndexOf('event=filetransfer_live_cycle_integrity_failed', [System.StringComparison]::OrdinalIgnoreCase) -lt 0)) {
+        $linesToAppend.Add(('[{0}] [WARN] [FileTransferNknSoak] event=filetransfer_live_cycle_integrity_failed; transfer_id=(all); reason=cycle_integrity_or_terminal_failure; failed_cycle_count={1}; cycles_requested={2}; cycles_completed={3}; cycles_observed={4}' -f $timestamp, $observedFailedCycles.Count, $effectiveCyclesRequested, $completedCycles.Count, $liveCycles.Count)) | Out-Null
+    }
+
+    if ($progressTimeout.Count -eq 0 -and $requestedMatrixIncomplete -and
+        ([string]::IsNullOrWhiteSpace($existingText) -or $existingText.IndexOf('event=filetransfer_live_matrix_incomplete', [System.StringComparison]::OrdinalIgnoreCase) -lt 0)) {
+        $linesToAppend.Add(('[{0}] [WARN] [FileTransferNknSoak] event=filetransfer_live_matrix_incomplete; transfer_id=(all); reason=cycle_integrity_or_terminal_failure; cycles_requested={1}; cycles_completed={2}; cycles_observed={3}; gui_progress_timeout=0' -f $timestamp, $effectiveCyclesRequested, $completedCycles.Count, $liveCycles.Count)) | Out-Null
     }
 
     if ($linesToAppend.Count -gt 0) {
@@ -478,6 +509,7 @@ function Write-FileTransferLiveNknSummary {
     $completedCycles = @($liveCycles | Where-Object { $_.completed -eq $true -and $_.integrity_ok -eq $true })
     $effectiveCyclesRequested = if ($CyclesRequested -gt 0) { $CyclesRequested } else { $liveCycles.Count }
     $requestedMatrixIncomplete = $effectiveCyclesRequested -gt 0 -and $completedCycles.Count -lt $effectiveCyclesRequested
+    $observedFailedCycles = @($liveCycles | Where-Object { $_.completed -ne $true -or $_.integrity_ok -ne $true })
     $goodputs = @($completedCycles | ForEach-Object { [double]$_.goodput_bytes_per_second })
     $averageGoodput = if ($goodputs.Count -gt 0) { ($goodputs | Measure-Object -Average).Average } else { 0.0 }
     $minimumGoodput = if ($goodputs.Count -gt 0) { ($goodputs | Measure-Object -Minimum).Minimum } else { 0.0 }
@@ -489,7 +521,6 @@ function Write-FileTransferLiveNknSummary {
     $batchAsBatch = [int64]$Analysis.Summary.BatchSentAsBatchCount
     $batchSplit = [int64]$Analysis.Summary.BatchSplitCount
     $batchDenominator = $batchAsBatch + $batchSplit
-    $v3BatchRatio = if ($batchDenominator -gt 0) { $batchAsBatch / [double]$batchDenominator } else { 0.0 }
     $v4BatchEvents = @($Analysis.Summary.TransferEvents | Where-Object {
             $_.EventName -eq 'filetransfer_chunk_batch_sent_as_batch' -and
             ((Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v4' -or
@@ -514,10 +545,7 @@ function Write-FileTransferLiveNknSummary {
         4
     }
     else {
-        3
-    }
-    if ($dataProtocolVersion -eq 4) {
-        $v3BatchRatio = 0.0
+        0
     }
     $v4FillValues = @(
         foreach ($event in @($v4PayloadShapeEvents)) {
@@ -531,7 +559,6 @@ function Write-FileTransferLiveNknSummary {
     $legacyDataProtocolStartedCount = @($Analysis.Summary.TransferEvents | Where-Object {
             $_.EventName -eq 'filetransfer_session_opened' -and
             -not [string]::IsNullOrWhiteSpace((Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '')) -and
-            (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -ne '3' -and
             (Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default '') -ne '4'
         }).Count
     $unexpectedLegacyDataFrameDuringV4Count = 0
@@ -541,8 +568,8 @@ function Write-FileTransferLiveNknSummary {
                  $_.EventName -eq 'filetransfer_binary_frame_received' -or
                  $_.EventName -eq 'filetransfer_data_frame_dispatched') -and
                 (
-                    (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -like 'filetransfer.*.v2' -or
-                    (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -like 'filetransfer.*.v3'
+                    (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -like 'filetransfer.*' -and
+                    (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -notlike 'filetransfer.*.v4'
                 )
             }).Count
     }
@@ -551,6 +578,18 @@ function Write-FileTransferLiveNknSummary {
     }
     else {
         $PayloadEfficiencyProfile
+    }
+    $effectiveVerdict = $Analysis.GateResult.Verdict
+    $effectiveGateStatus = $Analysis.GateResult.GateStatus
+    if ($requestedMatrixIncomplete -or $observedFailedCycles.Count -gt 0) {
+        if ($progressTimeout.Count -gt 0) {
+            $effectiveVerdict = 'INCONCLUSIVE_PROGRESS_TIMEOUT'
+            $effectiveGateStatus = 'fail'
+        }
+        else {
+            $effectiveVerdict = 'FAIL_PROTOCOL_OR_INTEGRITY'
+            $effectiveGateStatus = 'fail'
+        }
     }
 
     $bridgeBulkSendFailures = Get-FileTransferGlobalSumField -Summary $Analysis.Summary -EventName 'nkn_bridge_bulk_send_summary' -FieldName 'send_failures'
@@ -567,12 +606,15 @@ function Write-FileTransferLiveNknSummary {
             ((Get-FileTransferEventInt64Field -Event $_ -Name 'severe' -Default 0) -gt 0 -or
              (Get-FileTransferEventField -Event $_ -Name 'queue_mode' -Default 'normal') -eq 'severe')
         }).Count
+    $v4MixedEnabledEvidenceCount =
+        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_mixed_enabled') +
+        (Get-FileTransferEventFieldValueCount -Events $Analysis.Summary.TransferEvents -FieldName 'mixed_screenshare' -Value '1')
 
     $summary = [ordered]@{
         artifact_kind = 'live-nkn'
         mode = $Mode
-        verdict = $Analysis.GateResult.Verdict
-        gate_status = $Analysis.GateResult.GateStatus
+        verdict = $effectiveVerdict
+        gate_status = $effectiveGateStatus
         external_topology_profile = $ExternalTopologyProfile
         payload_efficiency_profile = $resolvedPayloadEfficiencyProfile
         app_version = ($(try { (Get-Content -Path (Join-Path (Resolve-RepoRoot) 'VERSION') -TotalCount 1).Trim() } catch { '(unknown)' }))
@@ -585,7 +627,6 @@ function Write-FileTransferLiveNknSummary {
         average_goodput_bytes_per_second = ('{0:F3}' -f $averageGoodput)
         min_goodput_bytes_per_second = ('{0:F3}' -f $minimumGoodput)
         data_protocol_version = $dataProtocolVersion
-        v3_batch_ratio = ('{0:F6}' -f $v3BatchRatio)
         v4_batch_ratio = ('{0:F6}' -f $v4BatchRatio)
         v4_average_bridge_payload_fill_percent = ('{0:F3}' -f $v4AverageBridgePayloadFillPercent)
         v4_state_feedback_count = Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_state_sent'
@@ -593,7 +634,7 @@ function Write-FileTransferLiveNknSummary {
         v4_feedback_both_failed_count = Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_feedback_both_failed'
         v4_sender_failed_count = Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_sender_failed'
         v4_receiver_failed_count = Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_receiver_failed'
-        v4_runtime_not_implemented_count = Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v4_runtime_not_implemented'
+        v4_mixed_enabled_count = $v4MixedEnabledEvidenceCount
         legacy_data_protocol_started_count = $legacyDataProtocolStartedCount
         unexpected_legacy_data_frame_during_v4_count = $unexpectedLegacyDataFrameDuringV4Count
         chunk_batch_sent_as_batch_count = $batchAsBatch
@@ -775,25 +816,25 @@ function Write-FileTransferNknFakeArtifacts {
         $stdoutPath = Join-Path $ArtifactDir 'gui-smoke-stdout.log'
 
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp -Message (
-                    'event=filetransfer_profile_selected; transport=nkn; transfer_id={0}; session_id={1}; protocol_version=3; profile=v3_live; target_window_bytes=16777216; granted_window_bytes=16777216' -f $transferId, $sessionId))) | Out-Null
+                    'event=filetransfer_profile_selected; transport=nkn; transfer_id={0}; session_id={1}; protocol_version=4; profile=v4_live; target_window_bytes=16777216; granted_window_bytes=16777216' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(50) -Message (
-                    'event=filetransfer_binary_frame_received; transfer_id={0}; session_id={1}; frame_type=filetransfer.chunk_batch.v3; chunk_index=0-2; raw_chunk_bytes=64512; chunk_count=3' -f $transferId, $sessionId))) | Out-Null
+                    'event=filetransfer_binary_frame_received; transfer_id={0}; session_id={1}; frame_type=filetransfer.chunk_batch.v4; chunk_index=0-2; raw_chunk_bytes=64512; chunk_count=3' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(100) -Message (
                     'event=filetransfer_receiver_sparse_mode_selected; transfer_id={0}; session_id={1}; reason=seekable_readwrite_destination; can_read=1; can_write=1; can_seek=1' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddSeconds(1) -Message (
-                    'event=filetransfer_v3_sender_throughput_summary; transfer_id={0}; session_id={1}; sample_window_ms=2000; raw_bytes_sent=516096; raw_bytes_per_second=258048; chunk_frames_sent=0; batch_frames_sent=8; chunk_count_sent=24; chunks_accepted_for_transport=2860; remote_next_expected_chunk_index=2507; remote_granted_until_chunk_index_exclusive=2890; remote_granted_window_bytes=8232960; sent_cache_chunk_count=400; sent_cache_bytes=8601600; send_wait_count=12; repair_send_count=2' -f $transferId, $sessionId))) | Out-Null
+                    'event=filetransfer_v4_sender_throughput_summary; transfer_id={0}; session_id={1}; sample_window_ms=2000; raw_bytes_sent=516096; raw_bytes_per_second=258048; chunk_frames_sent=0; batch_frames_sent=8; chunk_count_sent=24; chunks_accepted_for_transport=2860; remote_next_expected_chunk_index=2507; remote_granted_until_chunk_index_exclusive=2890; remote_granted_window_bytes=8232960; sent_cache_chunk_count=400; sent_cache_bytes=8601600; send_wait_count=12; repair_send_count=2' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddSeconds(2) -Message (
-                    'event=filetransfer_v3_receiver_throughput_summary; transfer_id={0}; session_id={1}; sample_window_ms=2000; raw_bytes_received=516096; raw_bytes_received_per_second=258048; contiguous_bytes_committed=516096; contiguous_bytes_committed_per_second=258048; pending_chunk_count=0; pending_bytes=0; next_chunk_index=2507; highest_received_chunk_index=2860; late_arrival_distance=353; oldest_gap_age_ms=42000; granted_until_chunk_index_exclusive=2890; granted_window_bytes=8232960; write_batch_count=8; write_batch_bytes=516096; write_duration_ms=0; sparse_mode=1; sparse_write_bytes_per_second=258048; sparse_written_ahead_bytes=7587072; sparse_gap_count=1' -f $transferId, $sessionId))) | Out-Null
+                    'event=filetransfer_v4_receiver_throughput_summary; transfer_id={0}; session_id={1}; sample_window_ms=2000; raw_bytes_received=516096; raw_bytes_received_per_second=258048; contiguous_bytes_committed=516096; contiguous_bytes_committed_per_second=258048; pending_chunk_count=0; pending_bytes=0; next_chunk_index=2507; highest_received_chunk_index=2860; late_arrival_distance=353; oldest_gap_age_ms=42000; granted_until_chunk_index_exclusive=2890; granted_window_bytes=8232960; write_batch_count=8; write_batch_bytes=516096; write_duration_ms=0; sparse_mode=1; sparse_write_bytes_per_second=258048; sparse_written_ahead_bytes=7587072; sparse_gap_count=1' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddSeconds(3) -Message (
-                    'event=filetransfer_v3_gap_stall_summary; transfer_id={0}; session_id={1}; sample_window_ms=2000; gap_start_chunk_index=2507; highest_received_chunk_index=2860; late_arrival_distance=353; stall_duration_ms=42294; pending_bytes=0; granted_window_bytes=8232960' -f $transferId, $sessionId))) | Out-Null
+                    'event=filetransfer_v4_gap_stall_summary; transfer_id={0}; session_id={1}; sample_window_ms=2000; gap_start_chunk_index=2507; highest_received_chunk_index=2860; late_arrival_distance=353; stall_duration_ms=42294; pending_bytes=0; granted_window_bytes=8232960' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddSeconds(4) -Message (
                     'event=filetransfer_frontier_gap_repair_requested; transfer_id={0}; session_id={1}; start_chunk_index=2507; requested_chunk_count=32; gap_stall_age_ms=12000; late_arrival_distance=353; highest_received_chunk_index=2860; granted_until_chunk_index_exclusive=2890; granted_window_bytes=8232960; reason=proactive_frontier_gap' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddSeconds(5) -Message (
                     'event=filetransfer_frontier_gap_repair_requested; transfer_id={0}; session_id={1}; start_chunk_index=2507; requested_chunk_count=32; gap_stall_age_ms=18000; late_arrival_distance=353; highest_received_chunk_index=2860; granted_until_chunk_index_exclusive=2890; granted_window_bytes=8232960; reason=proactive_frontier_gap' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddSeconds(6) -Message (
-                    'event=filetransfer_v3_receiver_feedback_enqueued; transfer_id={0}; session_id={1}; mode=pump; frame_type=filetransfer.grant_window.v3; queue_depth=2; coalesced_count=1' -f $transferId, $sessionId))) | Out-Null
+                    'event=filetransfer_v4_receiver_feedback_enqueued; transfer_id={0}; session_id={1}; mode=pump; frame_type=filetransfer.state.v4; queue_depth=2; coalesced_count=1' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddSeconds(7) -Message (
-                    'event=filetransfer_v3_receiver_feedback_sent; transfer_id={0}; session_id={1}; mode=pump; frame_type=filetransfer.grant_window.v3; queue_depth=1; enqueue_to_send_age_ms=900; send_duration_ms=120' -f $transferId, $sessionId))) | Out-Null
+                    'event=filetransfer_v4_receiver_feedback_sent; transfer_id={0}; session_id={1}; mode=pump; frame_type=filetransfer.state.v4; queue_depth=1; enqueue_to_send_age_ms=900; send_duration_ms=120' -f $transferId, $sessionId))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddSeconds(8) -Message 'event=nkn_bridge_bulk_send_summary; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; frames_sent=200; send_failures=0; queue_clears=0; payload_bytes_sent=65536000; payload_bytes_per_second=3276800; send_p95_ms=4; configured_concurrency=4; effective_concurrency=4; in_flight_max=3')) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddSeconds(9) -Message (
                     'event=filetransfer_live_progress_timeout; transfer_id=(all); reason=no useful data progress for 120s; total_wait_s=379; progress_timeout_seconds=120; receiver_next_chunk=-1; receiver_highest_chunk=-1; progress_events=4729'))) | Out-Null
@@ -1068,11 +1109,18 @@ try {
         exit $guiHarnessExitCode
     }
 
+    $liveCyclesForGate = @(Read-FileTransferLiveCycles -ArtifactDir $resolvedArtifactDir)
+    $completedLiveCyclesForGate = @($liveCyclesForGate | Where-Object { $_.completed -eq $true -and $_.integrity_ok -eq $true })
+    $observedFailedLiveCyclesForGate = @($liveCyclesForGate | Where-Object { $_.completed -ne $true -or $_.integrity_ok -ne $true })
+    $liveMatrixIncompleteForGate = $effectiveLiveCycles -gt 0 -and $completedLiveCyclesForGate.Count -lt $effectiveLiveCycles
+
     if ($FailOnGate -and (
             $analysis.GateResult.Verdict -eq 'FAIL_PROTOCOL_OR_INTEGRITY' -or
             $analysis.GateResult.Verdict -eq 'INCONCLUSIVE' -or
             $analysis.GateResult.Verdict -eq 'INCONCLUSIVE_PROGRESS_TIMEOUT' -or
             $analysis.GateResult.Verdict -eq 'INVALID_SETUP' -or
+            $liveMatrixIncompleteForGate -or
+            $observedFailedLiveCyclesForGate.Count -gt 0 -or
             $baseline.RegressionFailed)) {
         exit 1
     }
