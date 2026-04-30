@@ -755,6 +755,114 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task Bridge_FakeRuntime_BulkTransientClientNotReady_IsRetried()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        var bridgePath = FindFileUpwards(Path.Combine("tools", "nkn-bridge", "index.js"));
+        if (!File.Exists(nodePath) || bridgePath is null || !File.Exists(bridgePath))
+        {
+            return;
+        }
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = nodePath,
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            },
+            EnableRaisingEvents = true,
+        };
+        process.StartInfo.ArgumentList.Add(bridgePath);
+        process.StartInfo.Environment["NLINK_BRIDGE_FAKE_NKN_RUNTIME"] = "1";
+        process.StartInfo.Environment["NLINK_BRIDGE_FAKE_BULK_SEND_CLIENT_NOT_READY_COUNT"] = "1";
+
+        var stdoutLines = new ConcurrentQueue<string>();
+        var stderrLines = new ConcurrentQueue<string>();
+        Assert.True(process.Start());
+        var stdoutTask = Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                var line = await process.StandardOutput.ReadLineAsync(cts.Token);
+                if (line is null)
+                {
+                    break;
+                }
+
+                stdoutLines.Enqueue(line);
+            }
+        }, CancellationToken.None);
+        var stderrTask = Task.Run(async () =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                var line = await process.StandardError.ReadLineAsync(cts.Token);
+                if (line is null)
+                {
+                    break;
+                }
+
+                stderrLines.Enqueue(line);
+            }
+        }, CancellationToken.None);
+
+        try
+        {
+            using var writer = new BridgeStdioWriter(process.StandardInput.BaseStream, leaveOpen: true);
+            await writer.WriteJsonLineAsync("{\"cmd\":\"hello\",\"id\":\"hello\",\"protocol\":2}", cts.Token);
+            await WaitUntilAsync(() => stdoutLines.Any(line => line.Contains("\"event\":\"hello_ok\"", StringComparison.Ordinal)), TimeSpan.FromSeconds(2));
+            await writer.WriteJsonLineAsync("{\"cmd\":\"connect\",\"id\":\"connect\",\"identifier\":\"fake-bridge-bulk-transient\"}", cts.Token);
+            await WaitUntilAsync(() => stdoutLines.Any(line => line.Contains("\"event\":\"ready\"", StringComparison.Ordinal)), TimeSpan.FromSeconds(2));
+
+            await writer.WriteSendFrameAsync("peer.bulk.fake", new byte[] { 1, 2, 3 }, NknBridgeChannel.Bulk, cts.Token);
+
+            await WaitUntilAsync(
+                () => TryGetMaxJsonLong(stdoutLines, "bridge_bulk_send_summary", "frames_sent") >= 1,
+                TimeSpan.FromSeconds(4));
+            Assert.Equal(0, TryGetMaxJsonLong(stdoutLines, "bridge_bulk_send_summary", "send_failures"));
+            Assert.Contains(stderrLines, line => line.Contains("Bulk queue transient send retry scheduled", StringComparison.Ordinal));
+
+            await writer.WriteJsonLineAsync("{\"cmd\":\"shutdown\",\"id\":\"shutdown\"}", cts.Token);
+            await WaitUntilAsync(() => process.HasExited, TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+            }
+
+            await Task.WhenAny(Task.WhenAll(stdoutTask, stderrTask), Task.Delay(TimeSpan.FromSeconds(1), CancellationToken.None));
+        }
+
+        Assert.DoesNotContain(stderrLines, line => line.Contains("Bulk queue send failed", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public void Bridge_Source_DefaultBulkSendMode_IsFanout()
     {
         var bridgePath = FindFileUpwards(Path.Combine("tools", "nkn-bridge", "index.js"));

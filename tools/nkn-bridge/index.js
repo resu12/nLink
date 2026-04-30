@@ -68,6 +68,8 @@ const BULK_QUEUE_CONGESTED_AGE_MS = 250;
 const BULK_QUEUE_SEVERE_MESSAGES = 192;
 const BULK_QUEUE_SEVERE_BYTES = 12 * 1024 * 1024;
 const BULK_QUEUE_SEVERE_AGE_MS = 1000;
+const BULK_QUEUE_TRANSIENT_RETRY_MAX_ATTEMPTS = 4;
+const BULK_QUEUE_TRANSIENT_RETRY_DELAY_MS = 150;
 const DEFAULT_BULK_SEND_CONCURRENCY = 4;
 const MIN_BULK_SEND_CONCURRENCY = 1;
 const MAX_BULK_SEND_CONCURRENCY = 8;
@@ -240,6 +242,10 @@ function getControlSendTimeoutMs() {
 }
 
 function createFakeNknRuntime() {
+  let fakeBulkClientNotReadyFailuresRemaining = parseNonNegativeEnvInt(
+    'NLINK_BRIDGE_FAKE_BULK_SEND_CLIENT_NOT_READY_COUNT',
+    0);
+
   class FakeClient {
     constructor(options = {}) {
       this.identifier = typeof options.identifier === 'string' && options.identifier.length > 0
@@ -313,6 +319,12 @@ function createFakeNknRuntime() {
       return new Promise((resolve, reject) => setTimeout(() => {
         if (this.channel === 'bulk' && process.env.NLINK_BRIDGE_FAKE_BULK_SEND_FAIL === '1') {
           reject(new Error('fake bulk send failure'));
+          return;
+        }
+
+        if (this.channel === 'bulk' && fakeBulkClientNotReadyFailuresRemaining > 0) {
+          fakeBulkClientNotReadyFailuresRemaining -= 1;
+          reject(new Error('client not ready'));
           return;
         }
 
@@ -1486,6 +1498,7 @@ function enqueueControlSend(destination, payload, binarySendFrameObservedUtcMs =
     payload: normalizedPayload,
     queuedAtMs: queueEnqueuedUtcMs,
     queueEnqueuedUtcMs,
+    transientRetryAttempt: 0,
     binarySendFrameObservedUtcMs: Number.isFinite(binarySendFrameObservedUtcMs)
       ? Math.max(0, Math.round(binarySendFrameObservedUtcMs))
       : 0
@@ -1913,6 +1926,37 @@ async function sendBulkPayload(destination, payload) {
   state.bridgeBulkSendSummaryWindow.sendModeFanoutFrames += 1;
 }
 
+function isTransientBulkSendError(error) {
+  const message = safeErrorMessage(error).toLowerCase();
+  return message.includes('client not ready') ||
+    message.includes('no ready bulk subclients') ||
+    message.includes('not connected') ||
+    message.includes('not ready');
+}
+
+function scheduleBulkSendRetry(item, error) {
+  const nextAttempt = Math.max(0, Number(item.transientRetryAttempt) || 0) + 1;
+  if (nextAttempt > BULK_QUEUE_TRANSIENT_RETRY_MAX_ATTEMPTS || state.shuttingDown) {
+    return false;
+  }
+
+  item.transientRetryAttempt = nextAttempt;
+  logStderr(
+    `Bulk queue transient send retry scheduled ` +
+    `(attempt=${nextAttempt}, delay_ms=${BULK_QUEUE_TRANSIENT_RETRY_DELAY_MS}, reason=${safeErrorMessage(error)})`);
+  setTimeout(() => {
+    if (state.shuttingDown) {
+      return;
+    }
+
+    state.bulkSendQueue.unshift(item);
+    state.bulkQueuedBytes += item.payload.length;
+    emitBulkQueueState(true);
+    scheduleBulkQueueDrain();
+  }, BULK_QUEUE_TRANSIENT_RETRY_DELAY_MS);
+  return true;
+}
+
 function recordBulkInFlightSnapshot() {
   const window = state.bridgeBulkSendSummaryWindow;
   const inFlight = Math.max(0, state.bulkQueueInFlight);
@@ -2072,6 +2116,10 @@ async function sendBulkQueueItem(item) {
     state.bridgeBulkSendSummaryWindow.payloadBytesSent += item.payload.length;
     state.bridgeTransportHealthSummaryWindow.framesSentSinceLast += 1;
   } catch (error) {
+    if (isTransientBulkSendError(error) && scheduleBulkSendRetry(item, error)) {
+      return;
+    }
+
     state.bridgeBulkSendSummaryWindow.sendFailures += 1;
     logStderr(`Bulk queue send failed: ${safeErrorMessage(error)}`);
   } finally {
