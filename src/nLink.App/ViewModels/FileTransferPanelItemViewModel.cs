@@ -63,7 +63,7 @@ public sealed record FileTransferPanelItemViewModel(
             snapshot.FileName,
             snapshot.FileSizeBytes,
             fileSizeText,
-            snapshot.ProgressFraction,
+            BuildVisibleProgressFraction(snapshot),
             progressText,
             BuildStatusText(snapshot),
             snapshot.SavedFilePath,
@@ -171,7 +171,7 @@ public sealed record FileTransferPanelItemViewModel(
 
         if (snapshot.Direction == FileTransferDirection.Outbound)
         {
-            var sent = FormatByteSize(snapshot.BytesAcceptedForTransport ?? snapshot.BytesTransferred);
+            var sent = FormatByteSize(GetVisibleProgressBytes(snapshot));
             return string.Create(
                 CultureInfo.InvariantCulture,
                 $"{sent} / {fileSizeText}");
@@ -182,6 +182,21 @@ public sealed record FileTransferPanelItemViewModel(
             CultureInfo.InvariantCulture,
             $"{transferred} / {fileSizeText}");
     }
+
+    private static double BuildVisibleProgressFraction(FileTransferTransferSnapshot snapshot)
+    {
+        if (snapshot.FileSizeBytes <= 0)
+        {
+            return 0d;
+        }
+
+        return Math.Clamp((double)GetVisibleProgressBytes(snapshot) / snapshot.FileSizeBytes, 0d, 1d);
+    }
+
+    private static long GetVisibleProgressBytes(FileTransferTransferSnapshot snapshot)
+        => snapshot.Direction == FileTransferDirection.Outbound
+            ? Math.Max(0L, snapshot.BytesAcknowledgedByReceiver ?? snapshot.BytesTransferred)
+            : Math.Max(0L, snapshot.BytesTransferred);
 
     private static string? BuildSavedLocationText(FileTransferTransferSnapshot snapshot)
     {

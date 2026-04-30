@@ -257,7 +257,7 @@ public sealed class FileTransferPanelItemViewModelTests
     }
 
     [Fact]
-    public void OutboundTransfer_ShowsSimpleTransferredProgressText()
+    public void OutboundTransfer_ShowsReceiverAcknowledgedProgress()
     {
         var item = FileTransferPanelItemViewModel.FromSnapshot(
             new FileTransferTransferSnapshot(
@@ -278,8 +278,8 @@ public sealed class FileTransferPanelItemViewModelTests
                 BytesAcknowledgedByReceiver: 11_800_000));
 
         Assert.NotNull(item);
-        Assert.Equal("12.6 MB / 54.7 MB", item!.ProgressText);
-        Assert.Equal(13_200_000d / 57_400_000d, item.ProgressFraction, 6);
+        Assert.Equal("11.3 MB / 54.7 MB", item!.ProgressText);
+        Assert.Equal(11_800_000d / 57_400_000d, item.ProgressFraction, 6);
     }
 
     [Fact]
