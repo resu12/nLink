@@ -214,7 +214,8 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V4StateCreditGrantQuantumBytes = 1 * 1024 * 1024;
     private const int V4StateProgressCreditMinChunks = 48;
     private const int V4StateProgressMaxDelayMs = 250;
-    private const int V4KnownFrontierRepairChunks = V4MaxBatchSegmentsDefault;
+    private const int V4InitialFrontierRepairChunks = 12;
+    private const int V4KnownFrontierRepairChunks = V4InitialFrontierRepairChunks;
     private const int V4FrontierTailRetryChunks = V4MaxBatchSegmentsDefault;
     private const string V3FileOnlyReorderPolicyEnvironmentVariableName = "NLINK_FILETRANSFER_V3_FILE_ONLY_REORDER_POLICY";
     private const string V3ProactiveGapRepairEnvironmentVariableName = "NLINK_FILETRANSFER_V3_PROACTIVE_GAP_REPAIR";
