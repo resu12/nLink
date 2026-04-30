@@ -1016,7 +1016,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var workerIdleSlotSamples = TryGetInt64(root, "worker_idle_slot_samples", out var workerIdleSlotSamplesValue) ? Math.Max(0, workerIdleSlotSamplesValue) : 0;
         var workerSaturationPercent = TryGetInt64(root, "worker_saturation_percent", out var workerSaturationValue) ? Math.Clamp(workerSaturationValue, 0, 100) : 0;
         var drainWakeCount = TryGetInt64(root, "drain_wake_count", out var drainWakeCountValue) ? Math.Max(0, drainWakeCountValue) : 0;
-        var sendMode = TryGetString(root, "send_mode", out var sendModeValue) ? SanitizeLogToken(sendModeValue) : "single";
+        var sendMode = TryGetString(root, "send_mode", out var sendModeValue) ? SanitizeLogToken(sendModeValue) : "fanout";
         var sendModeFanoutFrames = TryGetInt64(root, "send_mode_fanout_frames", out var sendModeFanoutFramesValue) ? Math.Max(0, sendModeFanoutFramesValue) : 0;
         var sendModeRoundRobinFrames = TryGetInt64(root, "send_mode_round_robin_frames", out var sendModeRoundRobinFramesValue) ? Math.Max(0, sendModeRoundRobinFramesValue) : 0;
         var sendModeSingleFrames = TryGetInt64(root, "send_mode_single_frames", out var sendModeSingleFramesValue) ? Math.Max(0, sendModeSingleFramesValue) : 0;

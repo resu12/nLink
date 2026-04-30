@@ -755,13 +755,13 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public void Bridge_Source_DefaultBulkSendMode_IsSingle()
+    public void Bridge_Source_DefaultBulkSendMode_IsFanout()
     {
         var bridgePath = FindFileUpwards(Path.Combine("tools", "nkn-bridge", "index.js"));
         Assert.True(bridgePath is not null && File.Exists(bridgePath), "Bridge script not found.");
 
         var bridgeScript = File.ReadAllText(bridgePath);
-        Assert.Contains("const DEFAULT_BULK_SEND_MODE = 'single';", bridgeScript, StringComparison.Ordinal);
+        Assert.Contains("const DEFAULT_BULK_SEND_MODE = 'fanout';", bridgeScript, StringComparison.Ordinal);
     }
 
     [Trait("Category", "LegacySmoke")]
