@@ -878,17 +878,25 @@ function Clear-AppLogsIfPresent {
 }
 
 function Get-AppLogBookmark {
-    $logPath = Join-Path $env:LOCALAPPDATA 'nLink\logs\nlink.log'
-    if (-not (Test-Path $logPath)) {
-        return 0
-    }
-
     try {
-        return (Read-AppLogLinesSafe -Path $logPath).Length
+        return (Read-AppLogLinesSnapshot).Length
     }
     catch {
         return 0
     }
+}
+
+function Get-AppLogPaths {
+    $logsDir = Join-Path $env:LOCALAPPDATA 'nLink\logs'
+    if (-not (Test-Path -LiteralPath $logsDir -PathType Container)) {
+        return @()
+    }
+
+    return @(
+        Get-ChildItem -LiteralPath $logsDir -File -Filter 'nlink*.log' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTimeUtc, Name |
+            ForEach-Object { $_.FullName }
+    )
 }
 
 function Get-HelperIdentityArtifactPath {
@@ -1005,8 +1013,7 @@ function Get-AppLogLinesAfterBookmark {
         [Parameter(Mandatory = $true)][int]$Bookmark
     )
 
-    $logPath = Join-Path $env:LOCALAPPDATA 'nLink\logs\nlink.log'
-    $lines = Read-AppLogLinesSafe -Path $logPath
+    $lines = Read-AppLogLinesSnapshot
     if ($lines.Length -eq 0) {
         return @()
     }
@@ -1027,9 +1034,8 @@ function Wait-AppLogRegexAfterBookmark {
         [string]$OnTimeoutMessage = 'Timed out waiting for matching app log entry.'
     )
 
-    $logPath = Join-Path $env:LOCALAPPDATA 'nLink\logs\nlink.log'
     return Wait-Until -TimeoutMs $TimeoutMs -PollMs 250 -OnTimeoutMessage $OnTimeoutMessage -Condition {
-        $lines = Read-AppLogLinesSafe -Path $logPath
+        $lines = Read-AppLogLinesSnapshot
         if ($lines.Length -eq 0) {
             return $null
         }
@@ -1044,6 +1050,17 @@ function Wait-AppLogRegexAfterBookmark {
 
         return $null
     }
+}
+
+function Read-AppLogLinesSnapshot {
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($path in @(Get-AppLogPaths)) {
+        foreach ($line in @(Read-AppLogLinesSafe -Path $path)) {
+            $lines.Add([string]$line) | Out-Null
+        }
+    }
+
+    return $lines.ToArray()
 }
 
 function Read-AppLogLinesSafe {
@@ -1402,6 +1419,846 @@ function Wait-ScreenShareRemoteSoak {
         $finalMetrics.BridgeHealthActionableSummaryCount) -ForegroundColor DarkGray
 
     return $finalMetrics
+}
+
+function ConvertFrom-GuiSmokeSemicolonFields {
+    param([AllowNull()][string]$Message)
+
+    $fields = @{}
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        return $fields
+    }
+
+    $payload = $Message
+    $prefixMatch = [regex]::Match($Message, '^\[[^\]]+\]\s+\[[^\]]+\]\s+\[[^\]]+\]\s+(?<message>.*)$')
+    if ($prefixMatch.Success) {
+        $payload = $prefixMatch.Groups['message'].Value
+    }
+
+    foreach ($part in ($payload -split ';')) {
+        $segment = $part.Trim()
+        if ([string]::IsNullOrWhiteSpace($segment)) { continue }
+        $separator = $segment.IndexOf('=')
+        if ($separator -le 0) { continue }
+        $key = $segment.Substring(0, $separator).Trim()
+        $value = $segment.Substring($separator + 1).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($key)) {
+            $fields[$key] = $value
+        }
+    }
+
+    return $fields
+}
+
+function Get-GuiSmokeFieldValue {
+    param(
+        $Fields,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string]$Default = ''
+    )
+
+    if ($null -ne $Fields -and $Fields.ContainsKey($Name)) {
+        return [string]$Fields[$Name]
+    }
+
+    return $Default
+}
+
+function ConvertFrom-FileTransferSoakPayloadSize {
+    param([Parameter(Mandatory = $true)][string]$Text)
+
+    $value = $Text.Trim()
+    if ($value -match '^(?<number>\d+)(?<unit>KiB|MiB|GiB|KB|MB|GB|B)?$') {
+        $number = [int64]$Matches['number']
+        $unit = [string]$Matches['unit']
+        switch -Regex ($unit) {
+            '^KiB$|^KB$' { return $number * 1024L }
+            '^MiB$|^MB$' { return $number * 1024L * 1024L }
+            '^GiB$|^GB$' { return $number * 1024L * 1024L * 1024L }
+            default { return $number }
+        }
+    }
+
+    throw "Invalid file-transfer soak payload size '$Text'."
+}
+
+function Get-FileTransferSoakPayloadSizes {
+    $raw = [string]$env:NLINK_FILETRANSFER_SOAK_PAYLOAD_SIZES
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        $raw = '1MiB,16MiB,64MiB'
+    }
+
+    $sizes = New-Object System.Collections.Generic.List[long]
+    foreach ($part in $raw.Split(',', [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        $sizes.Add((ConvertFrom-FileTransferSoakPayloadSize -Text $part)) | Out-Null
+    }
+
+    if ($sizes.Count -eq 0) {
+        throw 'No file-transfer payload sizes were configured.'
+    }
+
+    return $sizes.ToArray()
+}
+
+function Get-FileTransferSoakCycleCount {
+    param([Parameter(Mandatory = $true)][long[]]$PayloadSizes)
+
+    $raw = [string]$env:NLINK_FILETRANSFER_SOAK_CYCLES
+    $parsed = 0
+    if (-not [string]::IsNullOrWhiteSpace($raw) -and [int]::TryParse($raw, [ref]$parsed) -and $parsed -gt 0) {
+        return $parsed
+    }
+
+    return $PayloadSizes.Count
+}
+
+function Get-FileTransferSoakDirection {
+    $value = [string]$env:NLINK_FILETRANSFER_SOAK_DIRECTION
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return 'alternate'
+    }
+
+    $normalized = $value.Trim().ToLowerInvariant()
+    if ($normalized -in @('alternate', 'helper-to-helpee', 'helpee-to-helper')) {
+        return $normalized
+    }
+
+    throw "Invalid NLINK_FILETRANSFER_SOAK_DIRECTION value '$value'."
+}
+
+function Get-FileTransferSoakSeed {
+    $value = [string]$env:NLINK_FILETRANSFER_SOAK_SEED
+    $parsed = 0
+    if (-not [string]::IsNullOrWhiteSpace($value) -and [int]::TryParse($value, [ref]$parsed)) {
+        return $parsed
+    }
+
+    return 1313625684
+}
+
+function Get-FileTransferSoakCycleTimeoutMs {
+    $value = [string]$env:NLINK_FILETRANSFER_SOAK_CYCLE_TIMEOUT_SECONDS
+    $parsed = 0
+    if (-not [string]::IsNullOrWhiteSpace($value) -and [int]::TryParse($value, [ref]$parsed) -and $parsed -gt 0) {
+        return $parsed * 1000
+    }
+
+    return 120000
+}
+
+function Get-FileTransferSoakStartupTimeoutMs {
+    $value = [string]$env:NLINK_FILETRANSFER_SOAK_STARTUP_TIMEOUT_SECONDS
+    $parsed = 0
+    if (-not [string]::IsNullOrWhiteSpace($value) -and [int]::TryParse($value, [ref]$parsed) -and $parsed -gt 0) {
+        return $parsed * 1000
+    }
+
+    return 90000
+}
+
+function Get-FileTransferSoakProgressTimeoutMs {
+    $value = [string]$env:NLINK_FILETRANSFER_SOAK_PROGRESS_TIMEOUT_SECONDS
+    $parsed = 0
+    if (-not [string]::IsNullOrWhiteSpace($value) -and [int]::TryParse($value, [ref]$parsed) -and $parsed -gt 0) {
+        return $parsed * 1000
+    }
+
+    return 120000
+}
+
+function Get-FileTransferMixedScreenShareWarmupTimeoutMs {
+    $value = [string]$env:NLINK_FILETRANSFER_MIXED_SCREENSHARE_WARMUP_TIMEOUT_SECONDS
+    $parsed = 0
+    if (-not [string]::IsNullOrWhiteSpace($value) -and [int]::TryParse($value, [ref]$parsed) -and $parsed -gt 0) {
+        return $parsed * 1000
+    }
+
+    return 120000
+}
+
+function Get-FileTransferSoakArtifactDir {
+    $value = [string]$env:NLINK_FILETRANSFER_SOAK_ARTIFACT_DIR
+    if (-not [string]::IsNullOrWhiteSpace($value)) {
+        New-Item -ItemType Directory -Force -Path $value | Out-Null
+        return [System.IO.Path]::GetFullPath($value)
+    }
+
+    return New-FailureArtifactDir
+}
+
+function Get-FileTransferCycleDirection {
+    param(
+        [Parameter(Mandatory = $true)][string]$Direction,
+        [Parameter(Mandatory = $true)][int]$CycleIndex
+    )
+
+    if ($Direction -eq 'helper-to-helpee') { return 'helper-to-helpee' }
+    if ($Direction -eq 'helpee-to-helper') { return 'helpee-to-helper' }
+    if (($CycleIndex % 2) -eq 0) { return 'helper-to-helpee' }
+    return 'helpee-to-helper'
+}
+
+function Get-FileSha256Hex {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        $hash = $sha.ComputeHash($stream)
+        return ([System.BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        if ($stream) { $stream.Dispose() }
+        $sha.Dispose()
+    }
+}
+
+function Write-DeterministicFileTransferPayload {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][long]$SizeBytes,
+        [Parameter(Mandatory = $true)][int]$Seed,
+        [Parameter(Mandatory = $true)][int]$CycleIndex
+    )
+
+    $rng = [System.Random]::new($Seed + ($CycleIndex * 7919))
+    $buffer = New-Object byte[] 65536
+    $stream = $null
+    try {
+        $stream = [System.IO.FileStream]::new($Path, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+        $remaining = [int64]$SizeBytes
+        while ($remaining -gt 0) {
+            $rng.NextBytes($buffer)
+            $count = [int][Math]::Min($buffer.Length, $remaining)
+            $stream.Write($buffer, 0, $count)
+            $remaining -= $count
+        }
+    }
+    finally {
+        if ($stream) { $stream.Dispose() }
+    }
+}
+
+function Resolve-FileTransferLiveReceivedFilePath {
+    param(
+        [string]$LoggedPath = '',
+        [Parameter(Mandatory = $true)][string]$ExpectedFileName,
+        [Parameter(Mandatory = $true)][long]$ExpectedSizeBytes,
+        [Parameter(Mandatory = $true)][datetime]$NotBeforeUtc
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($LoggedPath) -and
+        $LoggedPath -ne '(none)' -and
+        $LoggedPath.IndexOf('[redacted]', [System.StringComparison]::OrdinalIgnoreCase) -lt 0 -and
+        (Test-Path -LiteralPath $LoggedPath -PathType Leaf)) {
+        $loggedItem = Get-Item -LiteralPath $LoggedPath -ErrorAction SilentlyContinue
+        $minimumWriteUtc = $NotBeforeUtc.AddSeconds(-5)
+        if ($null -ne $loggedItem -and
+            $loggedItem.Name -eq $ExpectedFileName -and
+            $loggedItem.Length -eq $ExpectedSizeBytes -and
+            $loggedItem.LastWriteTimeUtc -ge $minimumWriteUtc) {
+            return (Resolve-Path -LiteralPath $LoggedPath).Path
+        }
+    }
+
+    $incomingRoot = Join-Path $env:LOCALAPPDATA 'nLink\transfers\incoming'
+    if (-not (Test-Path -LiteralPath $incomingRoot -PathType Container)) {
+        return ''
+    }
+
+    $minimumWriteUtc = $NotBeforeUtc.AddSeconds(-5)
+    $matches = @(
+        Get-ChildItem -LiteralPath $incomingRoot -Recurse -File -Filter $ExpectedFileName -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -eq $ExpectedSizeBytes -and $_.LastWriteTimeUtc -ge $minimumWriteUtc } |
+            Sort-Object LastWriteTimeUtc -Descending
+    )
+
+    if ($matches.Count -gt 0) {
+        return $matches[0].FullName
+    }
+
+    return ''
+}
+
+function Find-FileTransferLiveReceivedFileByHash {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedFileName,
+        [Parameter(Mandatory = $true)][long]$ExpectedSizeBytes,
+        [Parameter(Mandatory = $true)][datetime]$NotBeforeUtc,
+        [Parameter(Mandatory = $true)][string]$ExpectedHash
+    )
+
+    $incomingRoot = Join-Path $env:LOCALAPPDATA 'nLink\transfers\incoming'
+    if (-not (Test-Path -LiteralPath $incomingRoot -PathType Container)) {
+        return ''
+    }
+
+    $minimumWriteUtc = $NotBeforeUtc.AddSeconds(-5)
+    foreach ($candidate in @(Get-ChildItem -LiteralPath $incomingRoot -Recurse -File -Filter $ExpectedFileName -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -eq $ExpectedSizeBytes -and $_.LastWriteTimeUtc -ge $minimumWriteUtc } |
+            Sort-Object LastWriteTimeUtc -Descending)) {
+        try {
+            $hash = Get-FileSha256Hex -Path $candidate.FullName
+            if ($hash -eq $ExpectedHash) {
+                return $candidate.FullName
+            }
+        }
+        catch {
+        }
+    }
+
+    return ''
+}
+
+function Append-FileTransferLiveHarnessDiagnostic {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)]$Diagnostic
+    )
+
+    $path = Join-Path $ArtifactDir 'filetransfer-live-nkn-harness-diagnostics.jsonl'
+    ($Diagnostic | ConvertTo-Json -Compress -Depth 6) | Add-Content -LiteralPath $path -Encoding UTF8
+}
+
+function Get-FileTransferLiveProgressScore {
+    param(
+        $Fields,
+        [ref]$MaxReceiverNextChunkIndex,
+        [ref]$MaxReceiverHighestChunkIndex
+    )
+
+    $eventName = Get-GuiSmokeFieldValue -Fields $Fields -Name 'event'
+    if ([string]::IsNullOrWhiteSpace($eventName)) {
+        return 0L
+    }
+
+    $score = 0L
+    switch ($eventName) {
+        'filetransfer_chunk_batch_sent_as_batch' {
+            $score += [Math]::Max(1L, (Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'raw_bytes'))
+        }
+        'filetransfer_binary_frame_sent' {
+            $frameType = Get-GuiSmokeFieldValue -Fields $Fields -Name 'frame_type'
+            if ($frameType.IndexOf('chunk_data', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $frameType.IndexOf('chunk_batch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $score += [Math]::Max(1L, (Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'raw_chunk_bytes'))
+            }
+        }
+        'filetransfer_binary_frame_received' {
+            $frameType = Get-GuiSmokeFieldValue -Fields $Fields -Name 'frame_type'
+            if ($frameType.IndexOf('chunk_data', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                $frameType.IndexOf('chunk_batch', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $score += [Math]::Max(1L, (Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'raw_chunk_bytes'))
+            }
+        }
+        'filetransfer_v3_sender_throughput_summary' {
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'raw_bytes_sent'
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'chunk_count_sent'
+        }
+        'filetransfer_v3_receiver_throughput_summary' {
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'raw_bytes_received'
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'contiguous_bytes_committed'
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'write_batch_bytes'
+
+            $nextChunk = Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'next_chunk_index'
+            if ($nextChunk -gt [int64]$MaxReceiverNextChunkIndex.Value) {
+                $score += $nextChunk - [int64]$MaxReceiverNextChunkIndex.Value
+                $MaxReceiverNextChunkIndex.Value = $nextChunk
+            }
+
+            $highestChunk = Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'highest_received_chunk_index'
+            if ($highestChunk -gt [int64]$MaxReceiverHighestChunkIndex.Value) {
+                $score += $highestChunk - [int64]$MaxReceiverHighestChunkIndex.Value
+                $MaxReceiverHighestChunkIndex.Value = $highestChunk
+            }
+        }
+        'filetransfer_receiver_sparse_write_summary' {
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'written_chunk_count'
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'written_bytes'
+        }
+        'filetransfer_receiver_sparse_commit_summary' {
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'contiguous_chunks_committed'
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'contiguous_bytes_committed'
+        }
+        'filetransfer_receiver_write_batch_committed' {
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'write_batch_bytes'
+            $score += Get-GuiSmokeInt64FieldValue -Fields $Fields -Name 'write_batch_chunk_count'
+        }
+    }
+
+    return $score
+}
+
+function Get-GuiSmokeInt64FieldValue {
+    param(
+        $Fields,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $value = Get-GuiSmokeFieldValue -Fields $Fields -Name $Name
+    $parsed = 0L
+    if (-not [string]::IsNullOrWhiteSpace($value) -and
+        [int64]::TryParse($value, [System.Globalization.NumberStyles]::Integer, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
+        return $parsed
+    }
+
+    return 0L
+}
+
+function Get-GuiSmokeFileTransferTerminalDirection {
+    param(
+        [string]$EventName,
+        $Fields
+    )
+
+    if ($EventName -eq 'file_transfer_inbound_terminal') {
+        return 'inbound'
+    }
+
+    if ($EventName -eq 'file_transfer_outbound_terminal') {
+        return 'outbound'
+    }
+
+    if ($EventName -eq 'transfer_terminal') {
+        $direction = Get-GuiSmokeFieldValue -Fields $Fields -Name 'direction' -Default ''
+        if ([string]::Equals($direction, 'inbound', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return 'inbound'
+        }
+
+        if ([string]::Equals($direction, 'outbound', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return 'outbound'
+        }
+    }
+
+    return ''
+}
+
+function Set-GuiSmokeFileTransferTerminalDefaults {
+    param($Fields)
+
+    $state = Get-GuiSmokeFieldValue -Fields $Fields -Name 'state' -Default ''
+    if ([string]::IsNullOrWhiteSpace($state)) {
+        $errorCode = Get-GuiSmokeFieldValue -Fields $Fields -Name 'error_code' -Default '(none)'
+        $reason = Get-GuiSmokeFieldValue -Fields $Fields -Name 'reason' -Default ''
+        if ($errorCode -eq '(none)' -and
+            ([string]::IsNullOrWhiteSpace($reason) -or $reason.IndexOf('complete', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
+            $Fields['state'] = 'Completed'
+        }
+        else {
+            $Fields['state'] = 'Failed'
+        }
+    }
+}
+
+function Wait-FileTransferTerminalPairAfterBookmark {
+    param(
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [Parameter(Mandatory = $true)][int]$TimeoutMs,
+        [Parameter(Mandatory = $true)][int]$ProgressTimeoutMs,
+        [string]$ExpectedFileName = '',
+        [long]$ExpectedSizeBytes = 0,
+        [string]$ExpectedInboundRole = '',
+        [string]$ExpectedOutboundRole = '',
+        [datetime]$NotBeforeUtc = [datetime]::MinValue
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastProgressMs = 0L
+    $lastProgressEventCount = 0
+    $maxReceiverNextChunkIndex = [ref](-1L)
+    $maxReceiverHighestChunkIndex = [ref](-1L)
+
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        $byTransfer = @{}
+        $progressEventCount = 0
+        foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
+            if ($line.IndexOf('event=', [System.StringComparison]::Ordinal) -lt 0) {
+                continue
+            }
+
+            $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
+            $eventName = Get-GuiSmokeFieldValue -Fields $fields -Name 'event'
+
+            if ((Get-FileTransferLiveProgressScore -Fields $fields -MaxReceiverNextChunkIndex $maxReceiverNextChunkIndex -MaxReceiverHighestChunkIndex $maxReceiverHighestChunkIndex) -gt 0) {
+                $progressEventCount++
+            }
+
+            $terminalDirection = Get-GuiSmokeFileTransferTerminalDirection -EventName $eventName -Fields $fields
+            if ([string]::IsNullOrWhiteSpace($terminalDirection)) {
+                continue
+            }
+
+            Set-GuiSmokeFileTransferTerminalDefaults -Fields $fields
+
+            $transferId = Get-GuiSmokeFieldValue -Fields $fields -Name 'transfer_id'
+            if ([string]::IsNullOrWhiteSpace($transferId)) {
+                continue
+            }
+
+            if (-not $byTransfer.ContainsKey($transferId)) {
+                $byTransfer[$transferId] = [ordered]@{
+                    TransferId = $transferId
+                    Inbound = $null
+                    Outbound = $null
+                    ResolvedSavedPath = ''
+                }
+            }
+
+            if ($terminalDirection -eq 'inbound') {
+                $role = Get-GuiSmokeFieldValue -Fields $fields -Name 'role' -Default ''
+                if (-not [string]::IsNullOrWhiteSpace($ExpectedInboundRole) -and
+                    -not [string]::IsNullOrWhiteSpace($role) -and
+                    -not [string]::Equals($role, $ExpectedInboundRole, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    continue
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace($ExpectedFileName) -and $ExpectedSizeBytes -gt 0) {
+                    $savedPath = Get-GuiSmokeFieldValue -Fields $fields -Name 'saved_path' -Default '(none)'
+                    $resolvedSavedPath = Resolve-FileTransferLiveReceivedFilePath `
+                        -LoggedPath $savedPath `
+                        -ExpectedFileName $ExpectedFileName `
+                        -ExpectedSizeBytes $ExpectedSizeBytes `
+                        -NotBeforeUtc $NotBeforeUtc
+                    if ([string]::IsNullOrWhiteSpace($resolvedSavedPath)) {
+                        continue
+                    }
+
+                    $byTransfer[$transferId]['ResolvedSavedPath'] = $resolvedSavedPath
+                }
+
+                $byTransfer[$transferId]['Inbound'] = $fields
+            }
+            else {
+                $role = Get-GuiSmokeFieldValue -Fields $fields -Name 'role' -Default ''
+                if (-not [string]::IsNullOrWhiteSpace($ExpectedOutboundRole) -and
+                    -not [string]::IsNullOrWhiteSpace($role) -and
+                    -not [string]::Equals($role, $ExpectedOutboundRole, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    continue
+                }
+
+                $byTransfer[$transferId]['Outbound'] = $fields
+            }
+
+            if ($null -ne $byTransfer[$transferId]['Inbound'] -and $null -ne $byTransfer[$transferId]['Outbound']) {
+                return [pscustomobject]@{
+                    TransferId = $transferId
+                    Inbound = $byTransfer[$transferId]['Inbound']
+                    Outbound = $byTransfer[$transferId]['Outbound']
+                    ResolvedSavedPath = $byTransfer[$transferId]['ResolvedSavedPath']
+                }
+            }
+        }
+
+        if ($progressEventCount -gt $lastProgressEventCount) {
+            $lastProgressEventCount = $progressEventCount
+            $lastProgressMs = $sw.ElapsedMilliseconds
+        }
+
+        if (($sw.ElapsedMilliseconds - $lastProgressMs) -ge $ProgressTimeoutMs) {
+            throw ("Timed out waiting for live file-transfer progress: no useful data progress for {0:N0}s; total_wait_s={1:N0}; receiver_next_chunk={2}; receiver_highest_chunk={3}; progress_events={4}." -f `
+                ($ProgressTimeoutMs / 1000),
+                ($sw.ElapsedMilliseconds / 1000),
+                $maxReceiverNextChunkIndex.Value,
+                $maxReceiverHighestChunkIndex.Value,
+                $lastProgressEventCount)
+        }
+
+        Start-Sleep -Milliseconds 500
+    }
+
+    throw 'Timed out waiting for live file-transfer terminal evidence.'
+}
+
+function Append-FileTransferLiveCycleArtifact {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)]$Cycle
+    )
+
+    $path = Join-Path $ArtifactDir 'filetransfer-live-nkn-cycles.jsonl'
+    ($Cycle | ConvertTo-Json -Compress -Depth 8) | Add-Content -LiteralPath $path -Encoding UTF8
+}
+
+function Copy-FileTransferLiveLogSlice {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][int]$Bookmark
+    )
+
+    $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
+    $path = Join-Path $ArtifactDir 'filetransfer-retained-log-slice.log'
+    if ($lines.Count -gt 0) {
+        [System.IO.File]::WriteAllText($path, ($lines -join [Environment]::NewLine), [System.Text.Encoding]::UTF8)
+    }
+    else {
+        [System.IO.File]::WriteAllText($path, '', [System.Text.Encoding]::UTF8)
+    }
+}
+
+function Invoke-FileTransferLiveCycle {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$AutopickPath,
+        [Parameter(Mandatory = $true)][int]$CycleIndex,
+        [Parameter(Mandatory = $true)][long]$PayloadSizeBytes,
+        [Parameter(Mandatory = $true)][string]$Direction,
+        [Parameter(Mandatory = $true)][int]$Seed,
+        [Parameter(Mandatory = $true)][int]$TimeoutMs,
+        [Parameter(Mandatory = $true)][int]$StartupTimeoutMs,
+        [Parameter(Mandatory = $true)][int]$ProgressTimeoutMs
+    )
+
+    Write-DeterministicFileTransferPayload -Path $AutopickPath -SizeBytes $PayloadSizeBytes -Seed $Seed -CycleIndex $CycleIndex
+    $expectedHash = Get-FileSha256Hex -Path $AutopickPath
+    $senderWindow = if ($Direction -eq 'helper-to-helpee') { $Context.HelperWindow } else { $Context.HelpeeWindow }
+    $receiverWindow = if ($Direction -eq 'helper-to-helpee') { $Context.HelpeeWindow } else { $Context.HelperWindow }
+    $cycleStartedUtc = [datetime]::UtcNow
+
+    $bookmark = Get-AppLogBookmark
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $sendButton = Wait-ControlEnabledStateByAutomationId -Window $senderWindow -AutomationId 'Chat.SendFile' -IsEnabled $true -TimeoutMs ([Math]::Min(15000, $StartupTimeoutMs))
+    Click-Element $sendButton
+
+    $acceptButton = Wait-ControlEnabledStateByAutomationId -Window $receiverWindow -AutomationId 'Chat.FileTransfer.Accept' -IsEnabled $true -TimeoutMs $StartupTimeoutMs
+    Click-Element $acceptButton
+
+    $expectedInboundRole = if ($Direction -eq 'helper-to-helpee') { 'helpee' } else { 'helper' }
+    $expectedOutboundRole = if ($Direction -eq 'helper-to-helpee') { 'helper' } else { 'helpee' }
+    $terminal = Wait-FileTransferTerminalPairAfterBookmark `
+        -Bookmark $bookmark `
+        -TimeoutMs $TimeoutMs `
+        -ProgressTimeoutMs $ProgressTimeoutMs `
+        -ExpectedFileName ([System.IO.Path]::GetFileName($AutopickPath)) `
+        -ExpectedSizeBytes $PayloadSizeBytes `
+        -ExpectedInboundRole $expectedInboundRole `
+        -ExpectedOutboundRole $expectedOutboundRole `
+        -NotBeforeUtc $cycleStartedUtc
+    $sw.Stop()
+
+    $inbound = $terminal.Inbound
+    $outbound = $terminal.Outbound
+    $savedPath = Get-GuiSmokeFieldValue -Fields $inbound -Name 'saved_path' -Default '(none)'
+    $resolvedSavedPath = [string]$terminal.ResolvedSavedPath
+    if ([string]::IsNullOrWhiteSpace($resolvedSavedPath)) {
+        $resolvedSavedPath = Resolve-FileTransferLiveReceivedFilePath `
+            -LoggedPath $savedPath `
+            -ExpectedFileName ([System.IO.Path]::GetFileName($AutopickPath)) `
+            -ExpectedSizeBytes $PayloadSizeBytes `
+            -NotBeforeUtc $cycleStartedUtc
+    }
+    $actualHash = '(none)'
+    $savedSize = -1L
+    if (-not [string]::IsNullOrWhiteSpace($resolvedSavedPath) -and (Test-Path -LiteralPath $resolvedSavedPath -PathType Leaf)) {
+        $actualHash = Get-FileSha256Hex -Path $resolvedSavedPath
+        $savedSize = (Get-Item -LiteralPath $resolvedSavedPath).Length
+    }
+
+    $inboundState = Get-GuiSmokeFieldValue -Fields $inbound -Name 'state' -Default '(unknown)'
+    $outboundState = Get-GuiSmokeFieldValue -Fields $outbound -Name 'state' -Default '(unknown)'
+    $inboundError = Get-GuiSmokeFieldValue -Fields $inbound -Name 'error_code' -Default '(none)'
+    $outboundError = Get-GuiSmokeFieldValue -Fields $outbound -Name 'error_code' -Default '(none)'
+    $completed = $inboundState -eq 'Completed' -and $outboundState -eq 'Completed' -and $inboundError -eq '(none)' -and $outboundError -eq '(none)'
+    $integrityOk = $completed -and $savedSize -eq $PayloadSizeBytes -and $actualHash -eq $expectedHash
+    $alternateMatchingPath = ''
+    $harnessVerifierWarning = ''
+    if ($completed -and -not $integrityOk) {
+        $alternateMatchingPath = Find-FileTransferLiveReceivedFileByHash `
+            -ExpectedFileName ([System.IO.Path]::GetFileName($AutopickPath)) `
+            -ExpectedSizeBytes $PayloadSizeBytes `
+            -NotBeforeUtc $cycleStartedUtc `
+            -ExpectedHash $expectedHash
+        if (-not [string]::IsNullOrWhiteSpace($alternateMatchingPath) -and
+            -not [string]::Equals($alternateMatchingPath, $resolvedSavedPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $harnessVerifierWarning = 'terminal_clean_but_selected_saved_path_hash_mismatch'
+            Append-FileTransferLiveHarnessDiagnostic -ArtifactDir $ArtifactDir -Diagnostic ([ordered]@{
+                    event = 'filetransfer_live_soak_saved_path_verifier_mismatch'
+                    cycle_index = $CycleIndex
+                    direction = $Direction
+                    transfer_id = $terminal.TransferId
+                    selected_saved_path = $resolvedSavedPath
+                    alternate_matching_path = $alternateMatchingPath
+                    expected_sha256 = $expectedHash
+                    selected_sha256 = $actualHash
+                    expected_inbound_role = $expectedInboundRole
+                    expected_outbound_role = $expectedOutboundRole
+                })
+            Write-Warning ("[GUI Smoke][filetransfer_nkn] terminal completion is clean but selected saved path hash mismatched; alternate matching file found for transfer_id={0}" -f $terminal.TransferId)
+        }
+    }
+    $goodput = if ($sw.Elapsed.TotalSeconds -gt 0) { $PayloadSizeBytes / $sw.Elapsed.TotalSeconds } else { 0.0 }
+
+    $cycle = [ordered]@{
+        cycle_index = $CycleIndex
+        direction = $Direction
+        transfer_id = $terminal.TransferId
+        payload_bytes = $PayloadSizeBytes
+        duration_ms = [Math]::Round($sw.Elapsed.TotalMilliseconds, 3)
+        goodput_bytes_per_second = [Math]::Round($goodput, 3)
+        completed = $completed
+        integrity_ok = $integrityOk
+        expected_sha256 = $expectedHash
+        received_sha256 = $actualHash
+        saved_file_size_bytes = $savedSize
+        saved_path = $savedPath
+        resolved_saved_path = $resolvedSavedPath
+        inbound_state = $inboundState
+        outbound_state = $outboundState
+        inbound_error_code = $inboundError
+        outbound_error_code = $outboundError
+        expected_inbound_role = $expectedInboundRole
+        expected_outbound_role = $expectedOutboundRole
+        harness_verifier_warning = $harnessVerifierWarning
+        alternate_matching_path = $alternateMatchingPath
+    }
+    Append-FileTransferLiveCycleArtifact -ArtifactDir $ArtifactDir -Cycle $cycle
+
+    if (-not $integrityOk) {
+        throw ("File-transfer live cycle failed integrity or terminal check: cycle={0}; direction={1}; transfer_id={2}; inbound_state={3}; outbound_state={4}; inbound_error={5}; outbound_error={6}; saved_size={7}; expected_size={8}" -f `
+            $CycleIndex,
+            $Direction,
+            $terminal.TransferId,
+            $inboundState,
+            $outboundState,
+            $inboundError,
+            $outboundError,
+            $savedSize,
+            $PayloadSizeBytes)
+    }
+
+    Write-Host ("[GUI Smoke][filetransfer_nkn] cycle={0} direction={1} bytes={2} goodput_bps={3:F0} transfer_id={4}" -f `
+        $CycleIndex,
+        $Direction,
+        $PayloadSizeBytes,
+        $goodput,
+        $terminal.TransferId) -ForegroundColor Green
+}
+
+function Start-FileTransferMixedScreenShare {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][int]$WarmupTimeoutMs
+    )
+
+    $shareButton = Wait-Until -TimeoutMs 15000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for helpee Share screen button for file-transfer mixed NKN soak.' -Condition {
+        $button = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'SessionHeader.ShareScreen'
+        if ($button -and $button.Current.IsEnabled) { return $button }
+        return $null
+    }
+
+    $logBookmark = Get-AppLogBookmark
+    Click-Element $shareButton
+    $shareButton = Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage 'Timed out waiting for screenshare start during file-transfer mixed NKN soak.' -Condition {
+        $error = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'ScreenShare.ViewerMessage'
+        if ($error) {
+            $message = (Get-ElementTextSafe -Element $error).Trim()
+            throw "Screen sharing failed to start: $message"
+        }
+
+        $button = Find-VisibleByAutomationId -Root $Context.HelpeeWindow -AutomationId 'SessionHeader.ShareScreen'
+        if ($button -and $button.Current.IsEnabled) {
+            $text = (Get-ElementTextSafe -Element $button).Trim()
+            if ([string]::Equals($text, 'Stop sharing', [System.StringComparison]::Ordinal)) {
+                return $button
+            }
+        }
+
+        return $null
+    }
+
+    [void](Wait-HelpeeRenderedScreenSharePreview -Context $Context -LogBookmark $logBookmark -TimeoutMs ([Math]::Min(15000, $WarmupTimeoutMs)))
+    [void](Wait-HelperRenderedScreenShareFrame -Context $Context -LogBookmark $logBookmark -TimeoutMs $WarmupTimeoutMs)
+    Start-Sleep -Seconds 3
+
+    return $shareButton
+}
+
+function Run-FileTransferNknSoakCore {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][bool]$Mixed
+    )
+
+    Reset-ScenarioContext -Context $Context
+
+    $artifactDir = Get-FileTransferSoakArtifactDir
+    $autopickPath = [string]$env:NLINK_FILETRANSFER_SOAK_AUTOPICK_FILE
+    if ([string]::IsNullOrWhiteSpace($autopickPath)) {
+        $autopickPath = Join-Path $artifactDir 'filetransfer-live-autopick-payload.bin'
+        $env:NLINK_FILETRANSFER_SOAK_AUTOPICK_FILE = $autopickPath
+    }
+
+    $payloadSizes = @(Get-FileTransferSoakPayloadSizes)
+    $cycleCount = Get-FileTransferSoakCycleCount -PayloadSizes $payloadSizes
+    $directionMode = Get-FileTransferSoakDirection
+    $seed = Get-FileTransferSoakSeed
+    $cycleTimeoutMs = Get-FileTransferSoakCycleTimeoutMs
+    $startupTimeoutMs = Get-FileTransferSoakStartupTimeoutMs
+    $progressTimeoutMs = Get-FileTransferSoakProgressTimeoutMs
+    $mixedScreenShareWarmupTimeoutMs = Get-FileTransferMixedScreenShareWarmupTimeoutMs
+    $runBookmark = Get-AppLogBookmark
+
+    $previousScaffold = $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD
+    $shareButton = $null
+    try {
+        if ($Mixed) {
+            $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD = '1'
+        }
+
+        Start-HelpeeFlow -Context $Context
+        Start-HelperFlow -Context $Context
+        [void](Connect-HelperAndHelpee -Context $Context)
+
+        if ($Mixed) {
+            $shareButton = Start-FileTransferMixedScreenShare -Context $Context -WarmupTimeoutMs $mixedScreenShareWarmupTimeoutMs
+        }
+
+        for ($cycleIndex = 0; $cycleIndex -lt $cycleCount; $cycleIndex++) {
+            $direction = Get-FileTransferCycleDirection -Direction $directionMode -CycleIndex $cycleIndex
+            $payloadSize = [long]$payloadSizes[$cycleIndex % $payloadSizes.Count]
+            Invoke-FileTransferLiveCycle `
+                -Context $Context `
+                -ArtifactDir $artifactDir `
+                -AutopickPath $autopickPath `
+                -CycleIndex $cycleIndex `
+                -PayloadSizeBytes $payloadSize `
+                -Direction $direction `
+                -Seed $seed `
+                -TimeoutMs $cycleTimeoutMs `
+                -StartupTimeoutMs $startupTimeoutMs `
+                -ProgressTimeoutMs $progressTimeoutMs
+        }
+    }
+    finally {
+        if ($shareButton) {
+            try {
+                Click-Element $shareButton
+                [void](Wait-ScreenShareButtonText -Window $Context.HelpeeWindow -ExpectedText 'Share screen' -TimeoutMs 10000)
+            }
+            catch {
+                Write-Host "[GUI Smoke][filetransfer_nkn_mixed] Screen-share stop after file-transfer cycle was not clean: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+
+        Copy-FileTransferLiveLogSlice -ArtifactDir $artifactDir -Bookmark $runBookmark
+        if ($null -eq $previousScaffold) {
+            Remove-Item Env:NLINK_FEATURE_SCREENCAP_SCAFFOLD -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD = $previousScaffold
+        }
+    }
+}
+
+function Run-ScenarioFileTransferNknSoak {
+    param([Parameter(Mandatory = $true)]$Context)
+    Run-FileTransferNknSoakCore -Context $Context -Mixed:$false
+}
+
+function Run-ScenarioFileTransferNknMixedSoak {
+    param([Parameter(Mandatory = $true)]$Context)
+    Run-FileTransferNknSoakCore -Context $Context -Mixed:$true
 }
 
 function Suspend-ProcessForRecoveryWindow {
@@ -3862,8 +4719,10 @@ try {
             'SCREENSHARE_NKN_SOAK' { Invoke-Scenario -Name 'screenshare_nkn_soak' -TimeoutSec ([Math]::Min($TimeoutSeconds, 180)) -Action { Run-ScenarioScreenShareNknSoak -Context $ctx } }
             'SCREENSHARE_CHAT_COEXISTENCE' { Invoke-Scenario -Name 'screenshare_chat_coexistence' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioScreenShareChatCoexistence -Context $ctx } }
             'SCREENSHARE_STOP_PENDING_APPROVAL' { Invoke-Scenario -Name 'screenshare_stop_pending_approval' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioScreenShareStopWhileControlApprovalPending -Context $ctx } }
+            'FILETRANSFER_NKN_SOAK' { Invoke-Scenario -Name 'filetransfer_nkn_soak' -TimeoutSec $TimeoutSeconds -Action { Run-ScenarioFileTransferNknSoak -Context $ctx } }
+            'FILETRANSFER_NKN_MIXED_SOAK' { Invoke-Scenario -Name 'filetransfer_nkn_mixed_soak' -TimeoutSec $TimeoutSeconds -Action { Run-ScenarioFileTransferNknMixedSoak -Context $ctx } }
             'STATUS_TEXT_GUARDRAILS' { Invoke-Scenario -Name 'status_text_guardrails' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioStatusTextGuardrails -Context $ctx } }
-            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M,NKN_DIRECT_CONNECT,HEADER_CHAT_COHERENCE,END_SESSION_DISABLES_CHAT,SCREENSHARE_BUTTON_VISIBILITY,SCREENSHARE_VIEWER_TOGGLE,SCREENSHARE_RECOVERY_RECEIPT_DEVLOCAL,SCREENSHARE_NKN_SOAK,SCREENSHARE_CHAT_COEXISTENCE,STATUS_TEXT_GUARDRAILS." }
+            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M,NKN_DIRECT_CONNECT,HEADER_CHAT_COHERENCE,END_SESSION_DISABLES_CHAT,SCREENSHARE_BUTTON_VISIBILITY,SCREENSHARE_VIEWER_TOGGLE,SCREENSHARE_RECOVERY_RECEIPT_DEVLOCAL,SCREENSHARE_NKN_SOAK,SCREENSHARE_CHAT_COEXISTENCE,FILETRANSFER_NKN_SOAK,FILETRANSFER_NKN_MIXED_SOAK,STATUS_TEXT_GUARDRAILS." }
         }
     }
 

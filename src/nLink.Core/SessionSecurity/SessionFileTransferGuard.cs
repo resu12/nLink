@@ -350,10 +350,10 @@ public sealed class SessionFileTransferGuard
 
             var options = new FileStreamOptions
             {
-                Access = FileAccess.Write,
+                Access = FileAccess.ReadWrite,
                 Mode = FileMode.Create,
                 Share = FileShare.None,
-                Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
+                Options = FileOptions.Asynchronous | FileOptions.RandomAccess,
                 BufferSize = Math.Clamp(storagePolicy.MaxChunkSizeBytes, 4096, 64 * 1024),
             };
             var stream = new FileStream(plan.TempPath, options);

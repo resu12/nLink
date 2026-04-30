@@ -25,6 +25,8 @@ public interface IFileTransferTransportProfileProvider
 public interface IFileTransferProtocolCapabilities
 {
     bool SupportsFileTransferV3Streaming { get; }
+
+    bool SupportsFileTransferV4Streaming { get; }
 }
 
 public interface IFileTransferSignalingTransport

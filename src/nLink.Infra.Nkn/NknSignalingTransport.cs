@@ -111,6 +111,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private const long FileTransferInboundReplayMaxForwardAdvance = 131072;
 
     public bool SupportsFileTransferV3Streaming => true;
+    public bool SupportsFileTransferV4Streaming => true;
 
     public FileTransferTransportProfileKind FileTransferTransportProfileKind => FileTransferTransportProfileKind.ConservativeNknStartup;
 

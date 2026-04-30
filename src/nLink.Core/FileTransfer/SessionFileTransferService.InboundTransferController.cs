@@ -842,6 +842,7 @@ public sealed partial class SessionFileTransferService
             {
                 "degraded" => PullV3PressureStateDegradedProgressDeltaChunks,
                 "balanced_screenshare" => PullV3PressureStateBalancedProgressDeltaChunks,
+                _ when owner.IsFileOnlySparseReorderPolicyCandidateLocked(context) => PullV3PressureStateFileOnlySparseProgressDeltaChunks,
                 _ => PullV3PressureStateHealthyProgressDeltaChunks,
             };
             return recentEnough && progressDeltaChunks < suppressionThreshold;
@@ -862,6 +863,12 @@ public sealed partial class SessionFileTransferService
 
         public void RefreshHighestBufferedChunkIndexLocked(InboundTransferContext context)
         {
+            if (context.ReceiverSparseWriteActive)
+            {
+                context.HighestBufferedChunkIndex = Math.Max(context.NextChunkIndex - 1, context.HighestBufferedChunkIndex);
+                return;
+            }
+
             context.HighestBufferedChunkIndex = context.PendingChunks.Count == 0
                 ? context.NextChunkIndex - 1
                 : Math.Max(context.NextChunkIndex - 1, context.PendingChunks.Keys.Max());
@@ -944,6 +951,11 @@ public sealed partial class SessionFileTransferService
 
         public int GetCurrentHighestBufferedChunkIndexLocked(InboundTransferContext context)
         {
+            if (context.ReceiverSparseWriteActive)
+            {
+                return Math.Max(context.NextChunkIndex - 1, context.HighestBufferedChunkIndex);
+            }
+
             return context.PendingChunks.Count == 0
                 ? context.NextChunkIndex - 1
                 : Math.Max(context.NextChunkIndex - 1, context.HighestBufferedChunkIndex);

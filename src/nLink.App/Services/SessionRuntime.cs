@@ -530,7 +530,8 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         Func<TimeSpan, CancellationToken, Task>? bridgeIdleDelayAsync = null,
         IRemoteInputInjector? remoteInputInjector = null,
         IRemoteCoordinateMapper? remoteCoordinateMapper = null,
-        Func<DateTimeOffset>? nowProvider = null)
+        Func<DateTimeOffset>? nowProvider = null,
+        Func<IScreenCaptureSource>? transportScreenCaptureSourceFactory = null)
     {
         this.createTransport = createTransport ?? throw new ArgumentNullException(nameof(createTransport));
         this.watchdogOptions = watchdogOptions ?? SessionRuntimeWatchdogOptions.Default;
@@ -563,7 +564,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         watchdogRetryPolicy.EventEmitted += OnWatchdogRetryPolicyEvent;
         transportStateEntryTimestamps[transportState] = Stopwatch.GetTimestamp();
         transportScreenShareCoordinator = new TransportScreenShareCoordinator(
-            ScreenCaptureFactory.CreateForTransport,
+            transportScreenCaptureSourceFactory ?? ScreenCaptureFactory.CreateForTransport,
             screenShareActions.SendPayloadAsync,
             sendPayloadWithRecoveryMetadataAsync: screenShareActions.SendPayloadWithRecoveryMetadataAsync,
             sendDisplayInfoAsync: SendRemoteControlDisplayInfoAsync,
@@ -2367,7 +2368,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         return transportScreenShareCoordinator.StopAsync(notifyRemoteStop, reason, ct);
     }
 
-    internal Task StartTransportScreenShareAsync(CancellationToken ct = default)
+    internal async Task StartTransportScreenShareAsync(CancellationToken ct = default)
     {
         var transportSessionId = currentSessionGrant?.SessionId.Value ?? sessionSecurityState.SessionId?.Value ?? sessionId;
         if (disposed ||
@@ -2378,16 +2379,18 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             !FeatureFlags.EnableScreenShareCapture ||
             string.IsNullOrWhiteSpace(transportSessionId))
         {
-            return Task.CompletedTask;
+            return;
         }
 
         SyncTransportScreenShareCursorCaptureForRemoteControl("screen_share_start");
-        return transportScreenShareCoordinator.StartAsync(transportSessionId, sessionCts?.Token ?? ct);
+        await transportScreenShareCoordinator.StartAsync(transportSessionId, sessionCts?.Token ?? ct).ConfigureAwait(false);
+        SyncFileTransferFlowControlMode();
     }
 
-    internal Task StopTransportScreenShareAsync(string reason, CancellationToken ct = default)
+    internal async Task StopTransportScreenShareAsync(string reason, CancellationToken ct = default)
     {
-        return transportScreenShareCoordinator.StopAsync(sendStopMessage: true, reason, ct);
+        await transportScreenShareCoordinator.StopAsync(sendStopMessage: true, reason, ct).ConfigureAwait(false);
+        SyncFileTransferFlowControlMode();
     }
 
     private static string SanitizeStatusForLog(string? text)

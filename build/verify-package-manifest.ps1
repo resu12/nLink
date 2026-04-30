@@ -36,6 +36,27 @@ function Assert-BridgeSupportsBulkChannel {
     }
 }
 
+function Get-Sha256FileHash {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hashBytes = $sha256.ComputeHash($stream)
+            return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 function Assert-BridgeManifestMatchesBundle {
     param(
         [Parameter(Mandatory = $true)][string]$BridgeDir,
@@ -57,7 +78,7 @@ function Assert-BridgeManifestMatchesBundle {
     }
 
     $stagedBridgePath = Join-Path $BridgeDir 'index.js'
-    $actualHash = (Get-FileHash -Path $stagedBridgePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualHash = Get-Sha256FileHash -Path $stagedBridgePath
     $expectedHash = ([string]$manifest.bridgeScriptSha256).ToLowerInvariant()
     if ($actualHash -ne $expectedHash) {
         throw "Packaged bridge script hash does not match bridge manifest for runtime '$Runtime'."

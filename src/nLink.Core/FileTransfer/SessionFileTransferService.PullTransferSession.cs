@@ -1,5 +1,6 @@
-using System.Buffers;
 using System.IO;
+using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using NLink.Core.Logging;
 
@@ -7,331 +8,88 @@ namespace NLink.Core.FileTransfer;
 
 public sealed partial class SessionFileTransferService
 {
-    private async Task RunOutboundPullSendLoopAsync(OutboundTransferContext context)
-    {
-        try
-        {
-            var currentTransport = GetTransportOrThrow();
-            var initialPipelineDepth = ResolveOutboundInitialPipelineDepth();
-            var startMessage = new FileTransferStartV2
-            {
-                SessionId = context.SessionId,
-                TransferId = context.TransferId,
-                FileName = context.FileName,
-                FileSizeBytes = context.FileSizeBytes,
-                Sha256Base64 = context.Sha256Base64!,
-                ChunkCount = context.ChunkCount,
-                ChunkSizeBytes = context.ChunkSizeBytes,
-            };
-            var sessionOpen = new FileTransferSessionOpenV2
-            {
-                SessionId = context.SessionId,
-                TransferId = context.TransferId,
-                ProtocolVersion = FileTransferProtocol.ProtocolVersionV2,
-                SessionRole = FileTransferProtocol.SessionRoleSender,
-                ChunkSizeBytes = context.ChunkSizeBytes,
-                InitialPipelineDepth = initialPipelineDepth,
-            };
-
-            var dataSession = await currentTransport
-                .OpenFileTransferDataSessionAsync(context.SessionId, context.TransferId, context.LifetimeCts.Token)
-                .ConfigureAwait(false);
-
-            lock (gate)
-            {
-                if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
-                {
-                    dataSession.Dispose();
-                    return;
-                }
-
-                ReplaceOutboundDataSessionLocked(context, dataSession);
-                context.PullSessionActive = true;
-                context.PullCurrentPipelineDepth = initialPipelineDepth;
-                context.RequestedButUnsent.Clear();
-                context.GrantedOutstandingChunks.Clear();
-                context.PullSentChunkCache.Clear();
-            }
-
-            UpdateOutboundState(context, FileTransferTransferState.AwaitingStart, 0, 0, "Starting file transfer.");
-            await currentTransport.SendFileTransferStartAsync(startMessage, context.LifetimeCts.Token).ConfigureAwait(false);
-            LogTransferInfo(
-                "start_sent",
-                FileTransferDirection.Outbound,
-                context.TransferId,
-                sessionId: context.SessionId,
-                fileName: context.FileName,
-                fileSizeBytes: context.FileSizeBytes,
-                reason: $"chunk_count={context.ChunkCount}; chunk_size_bytes={context.ChunkSizeBytes}");
-
-            await currentTransport.SendFileTransferSessionOpenAsync(sessionOpen, context.LifetimeCts.Token).ConfigureAwait(false);
-            LogTransferInfo(
-                "filetransfer_session_opened",
-                FileTransferDirection.Outbound,
-                context.TransferId,
-                sessionId: context.SessionId,
-                reason: $"role={sessionOpen.SessionRole}; chunk_size_bytes={sessionOpen.ChunkSizeBytes}; pipeline_depth={sessionOpen.InitialPipelineDepth}");
-            LogPullPipelineChanged(context.TransferId, context.SessionId, FileTransferDirection.Outbound, initialPipelineDepth, degraded: sessionScreenShareDegraded);
-
-            using var stream = await context.OpenReadStreamAsync(context.LifetimeCts.Token).ConfigureAwait(false);
-            ValidateReadableStream(stream);
-
-            await dataSession.SendAsync(
-                    new FileTransferManifestFrameV2
-                    {
-                        SessionId = context.SessionId,
-                        TransferId = context.TransferId,
-                        FileName = context.FileName,
-                        FileSizeBytes = context.FileSizeBytes,
-                        ChunkSizeBytes = context.ChunkSizeBytes,
-                        ChunkCount = context.ChunkCount,
-                        Sha256Base64 = context.Sha256Base64!,
-                    },
-                    context.LifetimeCts.Token)
-                .ConfigureAwait(false);
-            LogPullBinaryFrameSent(
-                context.TransferId,
-                context.SessionId,
-                new FileTransferManifestFrameV2
-                {
-                    SessionId = context.SessionId,
-                    TransferId = context.TransferId,
-                    FileName = context.FileName,
-                    FileSizeBytes = context.FileSizeBytes,
-                    ChunkSizeBytes = context.ChunkSizeBytes,
-                    ChunkCount = context.ChunkCount,
-                    Sha256Base64 = context.Sha256Base64!,
-                },
-                payloadBytes: 0);
-
-            UpdateOutboundState(context, FileTransferTransferState.Sending, 0, 0, "Waiting for receiver requests.");
-
-            Task<FileTransferDataFrameV2>? pendingReceiveTask = null;
-            while (true)
-            {
-                context.LifetimeCts.Token.ThrowIfCancellationRequested();
-                if (pendingReceiveTask is null)
-                {
-                    pendingReceiveTask = dataSession.ReceiveAsync(context.LifetimeCts.Token).AsTask();
-                }
-
-                var completed = await Task.WhenAny(
-                        pendingReceiveTask,
-                        Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token))
-                    .ConfigureAwait(false);
-                if (completed != pendingReceiveTask)
-                {
-                    if (await HandlePausedOutboundTransportAsync(context).ConfigureAwait(false))
-                    {
-                        return;
-                    }
-
-                    continue;
-                }
-
-                var frame = await pendingReceiveTask.ConfigureAwait(false);
-                pendingReceiveTask = null;
-                LogPullDataFrameReceived(context.TransferId, context.SessionId, frame);
-                switch (frame)
-                {
-                    case FileTransferRequestChunksFrameV2 request:
-                        await SendRequestedChunksAsync(context, stream, dataSession, request).ConfigureAwait(false);
-                        break;
-                    case FileTransferAckProgressFrameV2 ack:
-                        ApplyOutboundAckProgress(context, ack);
-                        await SendPendingRequestedChunksAsync(context, stream, dataSession).ConfigureAwait(false);
-                        break;
-                    case FileTransferCancelFrameV2 cancel:
-                        await TransitionOutboundToTerminalAsync(
-                            context,
-                            FileTransferTransferState.Canceled,
-                            errorCode: CanceledReason,
-                            statusMessage: cancel.Reason ?? "Transfer canceled by receiver.",
-                            notifyPeer: false,
-                            cancelReason: null,
-                            ct: CancellationToken.None).ConfigureAwait(false);
-                        return;
-                    case FileTransferCompleteFrameV2:
-                        await TransitionOutboundToTerminalAsync(
-                            context,
-                            FileTransferTransferState.Completed,
-                            errorCode: null,
-                            statusMessage: "Transfer complete.",
-                            notifyPeer: false,
-                            cancelReason: null,
-                            ct: CancellationToken.None).ConfigureAwait(false);
-                        return;
-                    default:
-                        LogPullDataFrameIgnored(context.TransferId, context.SessionId, frame, "unexpected_outbound_frame");
-                        break;
-                }
-            }
-        }
-        catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
-        {
-        }
-        catch (Exception ex)
-        {
-            await TransitionOutboundToTerminalAsync(
-                context,
-                FileTransferTransferState.Failed,
-                errorCode: ClassifyOutboundFailureErrorCode(ex, StreamReadFailedErrorCode),
-                statusMessage: ex.Message,
-                notifyPeer: true,
-                cancelReason: null,
-                ct: CancellationToken.None).ConfigureAwait(false);
-        }
-    }
-
-    private async Task RunInboundPullReceiveLoopAsync(InboundTransferContext context, FileTransferSessionOpenV2 sessionOpen)
-    {
-        try
-        {
-            var dataSession = context.DataSession ?? await GetTransportOrThrow()
-                .OpenFileTransferDataSessionAsync(sessionOpen.SessionId, sessionOpen.TransferId, context.LifetimeCts.Token)
-                .ConfigureAwait(false);
-
-            if (!ReferenceEquals(context.DataSession, dataSession))
-            {
-                lock (gate)
-                {
-                    if (ReferenceEquals(inboundTransfer, context) && !context.IsTerminal)
-                    {
-                        ReplaceInboundDataSessionLocked(context, dataSession);
-                    }
-                }
-            }
-
-            FileTransferManifestFrameV2? manifest = null;
-            Task<FileTransferDataFrameV2>? pendingReceiveTask = null;
-            while (manifest is null)
-            {
-                context.LifetimeCts.Token.ThrowIfCancellationRequested();
-                if (pendingReceiveTask is null)
-                {
-                    pendingReceiveTask = dataSession.ReceiveAsync(context.LifetimeCts.Token).AsTask();
-                }
-
-                var completed = await Task.WhenAny(
-                        pendingReceiveTask,
-                        Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token))
-                    .ConfigureAwait(false);
-                if (completed != pendingReceiveTask)
-                {
-                    if (await HandlePausedInboundTransportAsync(context).ConfigureAwait(false))
-                    {
-                        return;
-                    }
-
-                    continue;
-                }
-
-                var frame = await pendingReceiveTask.ConfigureAwait(false);
-                pendingReceiveTask = null;
-                LogPullDataFrameReceived(context.TransferId, context.SessionId, frame);
-                if (frame is FileTransferManifestFrameV2 receivedManifest)
-                {
-                    manifest = receivedManifest;
-                }
-                else if (frame is FileTransferCancelFrameV2 cancel)
-                {
-                    await TransitionInboundToTerminalAsync(
-                        context,
-                        FileTransferTransferState.Canceled,
-                        errorCode: CanceledReason,
-                        statusMessage: cancel.Reason ?? "Transfer canceled by sender.",
-                        sendError: false,
-                        errorMessage: null,
-                        cancelReason: null,
-                        ct: CancellationToken.None).ConfigureAwait(false);
-                    return;
-                }
-                else
-                {
-                    LogPullDataFrameIgnored(context.TransferId, context.SessionId, frame, "waiting_for_manifest");
-                }
-            }
-
-            await InitializeInboundPullManifestAsync(context, manifest).ConfigureAwait(false);
-            await MaybeSendNextChunkRequestAsync(context, forceResendOldestOutstanding: false).ConfigureAwait(false);
-
-            pendingReceiveTask = null;
-            while (true)
-            {
-                context.LifetimeCts.Token.ThrowIfCancellationRequested();
-                if (pendingReceiveTask is null)
-                {
-                    pendingReceiveTask = dataSession.ReceiveAsync(context.LifetimeCts.Token).AsTask();
-                }
-                else if (pendingReceiveTask.IsCompleted)
-                {
-                    LocalOperationalLog.Warn(
-                        "FileTransferService",
-                        $"event=filetransfer_receive_loop_overlap_detected; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=completed_receive_task_reused");
-                }
-
-                var completed = await Task.WhenAny(
-                        pendingReceiveTask,
-                        Task.Delay(PullSessionReceivePollDelayMs, context.LifetimeCts.Token))
-                    .ConfigureAwait(false);
-                if (completed != pendingReceiveTask)
-                {
-                    if (await HandlePausedInboundTransportAsync(context).ConfigureAwait(false))
-                    {
-                        return;
-                    }
-
-                    await MaybeHandlePullRequestTimeoutAsync(context).ConfigureAwait(false);
-                    continue;
-                }
-
-                var frame = await pendingReceiveTask.ConfigureAwait(false);
-                pendingReceiveTask = null;
-                LogPullDataFrameReceived(context.TransferId, context.SessionId, frame);
-                switch (frame)
-                {
-                    case FileTransferChunkDataFrameV2 chunk:
-                        await HandleInboundPullChunkAsync(context, chunk).ConfigureAwait(false);
-                        break;
-                    case FileTransferChunkBatchFrameV2 batch:
-                        await HandleInboundPullChunkBatchAsync(context, batch).ConfigureAwait(false);
-                        break;
-                    case FileTransferCancelFrameV2 cancel:
-                        await TransitionInboundToTerminalAsync(
-                            context,
-                            FileTransferTransferState.Canceled,
-                            errorCode: CanceledReason,
-                            statusMessage: cancel.Reason ?? "Transfer canceled by sender.",
-                            sendError: false,
-                            errorMessage: null,
-                            cancelReason: null,
-                            ct: CancellationToken.None).ConfigureAwait(false);
-                        return;
-                    default:
-                        LogPullDataFrameIgnored(context.TransferId, context.SessionId, frame, "unexpected_inbound_frame");
-                        break;
-                }
-            }
-        }
-        catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
-        {
-        }
-        catch (Exception ex)
-        {
-            await TransitionInboundToTerminalAsync(
-                context,
-                FileTransferTransferState.Failed,
-                errorCode: StreamWriteFailedErrorCode,
-                statusMessage: ex.Message,
-                sendError: true,
-                errorMessage: ex.Message,
-                cancelReason: null,
-                ct: CancellationToken.None).ConfigureAwait(false);
-        }
-    }
-
     private int ResolveOutboundInitialPipelineDepth(OutboundTransferContext? context = null)
         => ResolveOutboundPipelineDepth(context);
+
+    private int ResolveV3SenderTransportPipelineDepth(OutboundTransferContext context, out int configuredDepth)
+    {
+        configuredDepth = ResolveConfiguredV3SenderTransportPipelineDepth(context);
+        if (context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV3 ||
+            sessionScreenShareActive ||
+            sessionScreenShareDegraded)
+        {
+            return V3SendPipelineMinDepth;
+        }
+
+        return configuredDepth;
+    }
+
+    private int ResolveConfiguredV3SenderTransportPipelineDepth(OutboundTransferContext context)
+    {
+        var value = Environment.GetEnvironmentVariable(V3SendPipelineDepthEnvironmentVariableName);
+        if (!string.IsNullOrWhiteSpace(value) &&
+            int.TryParse(value.Trim(), CultureInfo.InvariantCulture, out var parsed))
+        {
+            return Math.Clamp(parsed, V3SendPipelineMinDepth, V3SendPipelineMaxDepth);
+        }
+
+        return UsesConservativeNknStartup(transport, context.NegotiatedDataProtocolVersion)
+            ? V3SendPipelineDefaultNknFileOnlyDepth
+            : V3SendPipelineDefaultOtherDepth;
+    }
+
+    private long ResolveV3SenderTransportPipelinePendingBytesLimit(OutboundTransferContext context)
+    {
+        var value = Environment.GetEnvironmentVariable(V3SendPipelinePendingBytesEnvironmentVariableName);
+        if (!string.IsNullOrWhiteSpace(value) &&
+            long.TryParse(value.Trim(), CultureInfo.InvariantCulture, out var parsed))
+        {
+            return Math.Clamp(parsed, V3SendPipelinePendingBytesMinLimit, V3SendPipelinePendingBytesMaxLimit);
+        }
+
+        return UsesConservativeNknStartup(transport, context.NegotiatedDataProtocolVersion) &&
+               !sessionScreenShareActive &&
+               !sessionScreenShareDegraded
+            ? V3SendPipelinePendingBytesDefaultNknFileOnlyLimit
+            : V3SendPipelinePendingBytesDefaultOtherLimit;
+    }
+
+    private bool ShouldUseAsyncOutboundV3SenderPump(OutboundTransferContext context)
+    {
+        if (context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV3 ||
+            sessionScreenShareActive ||
+            sessionScreenShareDegraded ||
+            !UsesConservativeNknStartup(transport, context.NegotiatedDataProtocolVersion))
+        {
+            return false;
+        }
+
+        var value = Environment.GetEnvironmentVariable(V3AsyncSenderPumpEnvironmentVariableName);
+        return !string.Equals(value?.Trim(), "0", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(value?.Trim(), "false", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(value?.Trim(), "off", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsV3CreditKeepaliveGrantEnabled()
+    {
+        var value = Environment.GetEnvironmentVariable(V3CreditKeepaliveGrantsEnvironmentVariableName);
+        return string.Equals(value?.Trim(), "1", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value?.Trim(), "true", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(value?.Trim(), "on", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool ShouldUseInboundV3ReceiverFeedbackPumpLocked(InboundTransferContext context)
+    {
+        if (!IsFileOnlySparseReorderPolicyCandidateLocked(context))
+        {
+            return false;
+        }
+
+        var value = Environment.GetEnvironmentVariable(V3ReceiverFeedbackPumpEnvironmentVariableName);
+        return !string.Equals(value?.Trim(), "0", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(value?.Trim(), "false", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(value?.Trim(), "off", StringComparison.OrdinalIgnoreCase);
+    }
 
     private int ResolveOutboundPipelineDepth(OutboundTransferContext? context = null)
     {
@@ -711,6 +469,188 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_batch_commit; transfer_id={transferId}; session_id={sessionId}; contiguous_chunk_count={contiguousChunkCount}; next_expected_chunk={nextExpectedChunkIndex}; bytes_committed={bytesCommitted}");
     }
 
+    private static void LogReceiverBufferPressureEntered(InboundTransferContext context, string reason)
+    {
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_receiver_buffer_pressure_entered; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={reason}; pending_chunk_count={GetReceiverPendingChunkCountLocked(context)}; pending_bytes={context.BufferedBytes}; soft_limit_bytes={ReceiverBufferSoftLimitBytes}; severe_limit_bytes={ReceiverBufferSevereLimitBytes}; emergency_limit_bytes={ReceiverBufferEmergencyLimitBytes}; next_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; late_arrival_distance={context.PullLateArrivalDistance}; granted_window_bytes={GetInboundV3GrantedWindowBytesLocked(context)}");
+    }
+
+    private static void LogReceiverBufferPressureExited(InboundTransferContext context, long durationMs)
+    {
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_receiver_buffer_pressure_exited; transfer_id={context.TransferId}; session_id={context.SessionId}; pending_chunk_count={GetReceiverPendingChunkCountLocked(context)}; pending_bytes={context.BufferedBytes}; duration_ms={durationMs}; exit_limit_bytes={ReceiverBufferExitLimitBytes}; next_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; late_arrival_distance={context.PullLateArrivalDistance}; granted_window_bytes={GetInboundV3GrantedWindowBytesLocked(context)}");
+    }
+
+    private static void LogReceiverWriteBatchCommitted(InboundTransferContext context, InboundWriteBatch batch, long writeDurationMs)
+    {
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_receiver_write_batch_committed; transfer_id={context.TransferId}; session_id={context.SessionId}; batch_chunk_count={batch.ChunkCount}; batch_bytes={batch.ByteCount}; write_duration_ms={writeDurationMs}; pending_chunk_count={batch.PendingChunkCountAfterDequeue}; pending_bytes={batch.PendingBytesAfterDequeue}; next_chunk_index={batch.NextChunkIndexAfterDequeue}; highest_received_chunk_index={batch.HighestReceivedChunkIndex}; late_arrival_distance={batch.LateArrivalDistance}; granted_window_bytes={batch.GrantedWindowBytes}");
+    }
+
+    private static long GetInboundV3GrantedWindowBytesLocked(InboundTransferContext context)
+        => Math.Max(0, context.PullV3GrantedUntilExclusive - context.NextChunkIndex) * (long)Math.Max(1, context.ChunkSizeBytes);
+
+    private static int GetExpectedInboundChunkLength(InboundTransferContext context, int chunkIndex)
+    {
+        if (chunkIndex < 0 || chunkIndex >= context.ChunkCount || context.ChunkSizeBytes <= 0)
+        {
+            return 0;
+        }
+
+        var offset = (long)chunkIndex * context.ChunkSizeBytes;
+        var remaining = Math.Max(0, context.FileSizeBytes - offset);
+        return (int)Math.Min(context.ChunkSizeBytes, remaining);
+    }
+
+    private static bool IsInboundV3ChunkPresentOrPendingLocked(InboundTransferContext context, int chunkIndex)
+    {
+        if (chunkIndex < context.NextChunkIndex)
+        {
+            return true;
+        }
+
+        if (!context.ReceiverSparseWriteActive)
+        {
+            return context.PendingChunks.ContainsKey(chunkIndex);
+        }
+
+        return context.ReceiverSparseChunksPendingWrite.Contains(chunkIndex) ||
+               context.ReceiverSparseChunksWritten is not null &&
+               chunkIndex >= 0 &&
+               chunkIndex < context.ReceiverSparseChunksWritten.Length &&
+               context.ReceiverSparseChunksWritten[chunkIndex];
+    }
+
+    private static int GetReceiverPendingChunkCountLocked(InboundTransferContext context)
+        => context.ReceiverSparseWriteActive
+            ? context.ReceiverSparseChunksPendingWrite.Count
+            : context.PendingChunks.Count;
+
+    private static bool HasAnyInboundV3ChunkPresentOrPendingAheadLocked(InboundTransferContext context)
+    {
+        if (!context.ReceiverSparseWriteActive)
+        {
+            return context.PendingChunks.Count > 0;
+        }
+
+        if (context.ReceiverSparseChunksPendingWrite.Count > 0)
+        {
+            return true;
+        }
+
+        if (context.ReceiverSparseChunksWritten is null)
+        {
+            return false;
+        }
+
+        for (var chunkIndex = context.NextChunkIndex; chunkIndex < context.ReceiverSparseChunksWritten.Length; chunkIndex++)
+        {
+            if (context.ReceiverSparseChunksWritten[chunkIndex])
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static int GetSparseWrittenAheadChunkCountLocked(InboundTransferContext context)
+    {
+        if (!context.ReceiverSparseWriteActive || context.ReceiverSparseChunksWritten is null)
+        {
+            return 0;
+        }
+
+        var count = 0;
+        for (var chunkIndex = context.NextChunkIndex; chunkIndex < context.ReceiverSparseChunksWritten.Length; chunkIndex++)
+        {
+            if (context.ReceiverSparseChunksWritten[chunkIndex])
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private static long GetSparseWrittenAheadBytesLocked(InboundTransferContext context)
+    {
+        if (!context.ReceiverSparseWriteActive || context.ReceiverSparseChunksWritten is null)
+        {
+            return 0;
+        }
+
+        var bytes = 0L;
+        for (var chunkIndex = context.NextChunkIndex; chunkIndex < context.ReceiverSparseChunksWritten.Length; chunkIndex++)
+        {
+            if (context.ReceiverSparseChunksWritten[chunkIndex])
+            {
+                bytes += GetExpectedInboundChunkLength(context, chunkIndex);
+            }
+        }
+
+        return bytes;
+    }
+
+    private static int GetSparseGapCountLocked(InboundTransferContext context)
+    {
+        if (!context.ReceiverSparseWriteActive || context.ReceiverSparseChunksWritten is null)
+        {
+            return 0;
+        }
+
+        var gaps = 0;
+        var inGap = false;
+        var sawWrittenAhead = false;
+        for (var chunkIndex = context.NextChunkIndex; chunkIndex <= context.PullHighestReceivedChunkIndex && chunkIndex < context.ReceiverSparseChunksWritten.Length; chunkIndex++)
+        {
+            if (context.ReceiverSparseChunksWritten[chunkIndex])
+            {
+                sawWrittenAhead = true;
+                inGap = false;
+                continue;
+            }
+
+            if (!inGap && sawWrittenAhead)
+            {
+                gaps++;
+                inGap = true;
+            }
+        }
+
+        return gaps;
+    }
+
+    private static long GetOutboundV3SentCacheBytesLocked(OutboundTransferContext context)
+        => context.PullSentChunkCacheBytes;
+
+    private static long GetWindowBytesPerSecond(long bytes)
+        => (long)Math.Round(bytes / (PullControlChatterWindowMs / 1000D));
+
+    private static long GetRecentPercentile(IReadOnlyList<long> values, double percentile)
+    {
+        if (values.Count == 0)
+        {
+            return 0;
+        }
+
+        var sorted = values
+            .Where(static value => value >= 0)
+            .OrderBy(static value => value)
+            .ToArray();
+        if (sorted.Length == 0)
+        {
+            return 0;
+        }
+
+        var index = (int)Math.Ceiling((percentile / 100D) * sorted.Length) - 1;
+        index = Math.Clamp(index, 0, sorted.Length - 1);
+        return sorted[index];
+    }
+
     private static void TrimRecentEvents(Queue<DateTimeOffset> events, DateTimeOffset now)
     {
         while (events.Count > 0 && now - events.Peek() > TimeSpan.FromMilliseconds(PullControlChatterWindowMs))
@@ -719,11 +659,106 @@ public sealed partial class SessionFileTransferService
         }
     }
 
+    private static long UpdateInboundGapStallTrackingLocked(InboundTransferContext context, DateTimeOffset now)
+    {
+        if (context.PullHighestReceivedChunkIndex <= context.NextChunkIndex)
+        {
+            context.PullV3GapStallSinceUtc = null;
+            context.PullV3GapStallStartChunkIndex = -1;
+            return 0;
+        }
+
+        if (context.PullV3GapStallSinceUtc is null ||
+            context.PullV3GapStallStartChunkIndex != context.NextChunkIndex)
+        {
+            context.PullV3GapStallSinceUtc = now;
+            context.PullV3GapStallStartChunkIndex = context.NextChunkIndex;
+            return 0;
+        }
+
+        return (long)Math.Max(0, (now - context.PullV3GapStallSinceUtc.Value).TotalMilliseconds);
+    }
+
+    private void MaybeLogOutboundV3SenderThroughputWindowLocked(OutboundTransferContext context, DateTimeOffset now, bool force = false)
+    {
+        if (!ReferenceEquals(outboundTransfer, context) ||
+            context.IsTerminal ||
+            context.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV3)
+        {
+            return;
+        }
+
+        if (!force &&
+            context.LastSenderThroughputLogUtc is not null &&
+            now - context.LastSenderThroughputLogUtc.Value < TimeSpan.FromMilliseconds(PullControlChatterWindowMs))
+        {
+            return;
+        }
+
+        context.LastSenderThroughputLogUtc = now;
+        var rawBytesPerSecond = GetWindowBytesPerSecond(context.PullSenderRawBytesRecent);
+        var remoteNextExpectedChunkIndex = Math.Max(0, context.ChunksTransferred);
+        var remoteGrantedUntilChunkIndexExclusive = Math.Max(remoteNextExpectedChunkIndex, Math.Min(context.ChunkCount, context.PullV3GrantedUntilExclusive));
+        var remoteGrantedWindowBytes = Math.Max(0, remoteGrantedUntilChunkIndexExclusive - remoteNextExpectedChunkIndex) * (long)Math.Max(1, context.ChunkSizeBytes);
+        var sentCacheBytes = GetOutboundV3SentCacheBytesLocked(context);
+        var sourceCanSeek = context.PullSourceCanSeek ? 1 : 0;
+        var cacheHardLimitBytes = GetSenderRepairCacheHardLimitBytes(context.PullSourceCanSeek);
+        var pendingBytesLimit = ResolveV3SenderTransportPipelinePendingBytesLimit(context);
+        var interScheduleGapP95Ms = GetRecentPercentile(context.PullSenderFeedInterScheduleGapMsRecent, 95D);
+        var interScheduleGapMaxMs = context.PullSenderFeedInterScheduleGapMsRecent.Count == 0
+            ? 0
+            : context.PullSenderFeedInterScheduleGapMsRecent.Max();
+
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v3_sender_throughput_summary; transfer_id={context.TransferId}; session_id={context.SessionId}; sample_window_ms={PullControlChatterWindowMs}; raw_bytes_sent={context.PullSenderRawBytesRecent}; raw_bytes_per_second={rawBytesPerSecond}; chunk_frames_sent={context.PullSenderChunkFramesRecent}; batch_frames_sent={context.PullSenderBatchFramesRecent}; chunk_count_sent={context.PullSenderChunkCountRecent}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; remote_next_expected_chunk_index={remoteNextExpectedChunkIndex}; remote_granted_until_chunk_index_exclusive={remoteGrantedUntilChunkIndexExclusive}; remote_granted_window_bytes={remoteGrantedWindowBytes}; sent_cache_chunk_count={context.PullSentChunkCache.Count}; sent_cache_bytes={sentCacheBytes}; source_can_seek={sourceCanSeek}; cache_hard_limit_bytes={cacheHardLimitBytes}; cache_hit_count={context.PullSenderCacheHitCountRecent}; cache_miss_count={context.PullSenderCacheMissCountRecent}; source_reread_count={context.PullSenderSourceRereadCountRecent}; cache_eviction_count={context.PullSenderCacheEvictionCountRecent}; repair_chunk_skipped_count={context.PullSenderRepairChunkSkippedCountRecent}; send_wait_count={context.PullSenderSendWaitCountRecent}; repair_send_count={context.PullSenderRepairSendCountRecent}");
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v3_sender_pipeline_summary; transfer_id={context.TransferId}; session_id={context.SessionId}; sample_window_ms={PullControlChatterWindowMs}; configured_depth={context.PullSenderPipelineConfiguredDepthRecent}; effective_depth={context.PullSenderPipelineEffectiveDepthRecent}; in_flight_frames={context.PullSenderPipelineCurrentInFlightFrames}; in_flight_bytes={context.PullSenderPipelineCurrentInFlightBytes}; in_flight_frames_max={context.PullSenderPipelineMaxInFlightFramesRecent}; in_flight_bytes_max={context.PullSenderPipelineMaxInFlightBytesRecent}; scheduled_frames={context.PullSenderPipelineScheduledFramesRecent}; completed_frames={context.PullSenderPipelineCompletedFramesRecent}; failed_frames={context.PullSenderPipelineFailedFramesRecent}; fifo_wait_ms={context.PullSenderPipelineFifoWaitMsRecent}; fifo_wait_max_ms={context.PullSenderPipelineMaxFifoWaitMsRecent}; accepted_progress_lag_bytes_max={context.PullSenderPipelineMaxAcceptedProgressLagBytesRecent}; pending_bytes_limit={pendingBytesLimit}");
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v3_sender_feed_summary; transfer_id={context.TransferId}; session_id={context.SessionId}; sample_window_ms={PullControlChatterWindowMs}; chunk_frames_prepared={context.PullSenderFeedChunkFramesPreparedRecent}; batch_frames_prepared={context.PullSenderFeedBatchFramesPreparedRecent}; chunk_count_prepared={context.PullSenderFeedChunkCountPreparedRecent}; raw_bytes_prepared={context.PullSenderFeedRawBytesPreparedRecent}; read_duration_ms={context.PullSenderFeedReadDurationMsRecent}; batch_prepare_duration_ms={context.PullSenderFeedBatchPrepareDurationMsRecent}; send_async_schedule_duration_ms={context.PullSenderFeedScheduleDurationMsRecent}; inter_schedule_gap_p95_ms={interScheduleGapP95Ms}; inter_schedule_gap_max_ms={interScheduleGapMaxMs}; credit_wait_duration_ms={context.PullSenderFeedCreditWaitMsRecent}; pipeline_slot_wait_duration_ms={context.PullSenderFeedPipelineSlotWaitMsRecent}; effective_depth={context.PullSenderPipelineEffectiveDepthRecent}; pending_bytes={context.PullSenderPipelineCurrentInFlightBytes}; pending_bytes_limit={pendingBytesLimit}; source_read_error_count={context.PullSenderFeedSourceReadErrorCountRecent}");
+
+        context.PullSenderRawBytesRecent = 0;
+        context.PullSenderChunkFramesRecent = 0;
+        context.PullSenderBatchFramesRecent = 0;
+        context.PullSenderChunkCountRecent = 0;
+        context.PullSenderSendWaitCountRecent = 0;
+        context.PullSenderRepairSendCountRecent = 0;
+        context.PullSenderCacheHitCountRecent = 0;
+        context.PullSenderCacheMissCountRecent = 0;
+        context.PullSenderSourceRereadCountRecent = 0;
+        context.PullSenderCacheEvictionCountRecent = 0;
+        context.PullSenderRepairChunkSkippedCountRecent = 0;
+        context.PullSenderPipelineScheduledFramesRecent = 0;
+        context.PullSenderPipelineCompletedFramesRecent = 0;
+        context.PullSenderPipelineFailedFramesRecent = 0;
+        context.PullSenderPipelineFifoWaitMsRecent = 0;
+        context.PullSenderPipelineMaxFifoWaitMsRecent = 0;
+        context.PullSenderPipelineMaxInFlightFramesRecent = context.PullSenderPipelineCurrentInFlightFrames;
+        context.PullSenderPipelineMaxInFlightBytesRecent = context.PullSenderPipelineCurrentInFlightBytes;
+        context.PullSenderPipelineMaxAcceptedProgressLagBytesRecent = 0;
+        context.PullSenderFeedChunkFramesPreparedRecent = 0;
+        context.PullSenderFeedBatchFramesPreparedRecent = 0;
+        context.PullSenderFeedChunkCountPreparedRecent = 0;
+        context.PullSenderFeedRawBytesPreparedRecent = 0;
+        context.PullSenderFeedReadDurationMsRecent = 0;
+        context.PullSenderFeedBatchPrepareDurationMsRecent = 0;
+        context.PullSenderFeedScheduleDurationMsRecent = 0;
+        context.PullSenderFeedCreditWaitMsRecent = 0;
+        context.PullSenderFeedPipelineSlotWaitMsRecent = 0;
+        context.PullSenderFeedSourceReadErrorCountRecent = 0;
+        context.PullSenderFeedInterScheduleGapMsRecent.Clear();
+    }
+
     private void MaybeLogPullControlChatterWindow(InboundTransferContext context, string transferId, string sessionId, DateTimeOffset now)
     {
         TrimRecentEvents(context.RecentPullAckSentUtc, now);
         TrimRecentEvents(context.RecentPullRequestSentUtc, now);
         TrimRecentEvents(context.RecentPullChunkSentUtc, now);
+        var oldestGapAgeMs = context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV3
+            ? UpdateInboundGapStallTrackingLocked(context, now)
+            : 0L;
         if (context.LastPullControlChatterLogUtc is not null &&
             now - context.LastPullControlChatterLogUtc.Value < TimeSpan.FromMilliseconds(PullControlChatterWindowMs))
         {
@@ -740,465 +775,74 @@ public sealed partial class SessionFileTransferService
         if (context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV3)
         {
             var controlFrameCount = context.RecentPullAckSentUtc.Count + context.RecentPullRequestSentUtc.Count;
-            var usefulPayloadBytesPerSecond = (long)Math.Round(context.PullUsefulPayloadBytesRecent / (PullControlChatterWindowMs / 1000D));
+            var usefulPayloadBytesPerSecond = GetWindowBytesPerSecond(context.PullUsefulPayloadBytesRecent);
             var controlFramesPerMiB = context.PullUsefulPayloadBytesRecent <= 0
                 ? 0D
                 : controlFrameCount / (context.PullUsefulPayloadBytesRecent / 1048576D);
             var grantedWindowBytes = Math.Max(0, context.PullV3GrantedUntilExclusive - context.NextChunkIndex) * Math.Max(1, context.ChunkSizeBytes);
+            var conservativeStartupDurationMs = GetConservativeStartupDurationMs(context, DateTimeOffset.UtcNow);
+            var bytesBeforeStartupExit = GetConservativeStartupBytesBeforeExit(context);
+            var startupProbeWindowBytes = context.PullV3ConservativeStartupProbeActive ? PullV3ConservativeStartupProbeTargetInFlightBytes : 0;
+            var firstRepairOrTimeoutBeforeStartupExit = context.PullV3FirstRepairOrTimeoutBeforeStartupExit ? 1 : 0;
+            var rawBytesReceivedPerSecond = GetWindowBytesPerSecond(context.PullReceiverRawBytesRecent);
+            var contiguousBytesCommittedPerSecond = GetWindowBytesPerSecond(context.PullReceiverContiguousBytesCommittedRecent);
+            var sparseWriteBytesPerSecond = GetWindowBytesPerSecond(context.PullReceiverSparseWriteBytesRecent);
+            var sparseWrittenAheadBytes = GetSparseWrittenAheadBytesLocked(context);
+            var sparseGapCount = GetSparseGapCountLocked(context);
+            var sparseMode = context.ReceiverSparseWriteActive ? 1 : 0;
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v3_throughput_summary; transfer_id={transferId}; session_id={sessionId}; useful_payload_bytes_per_second={usefulPayloadBytesPerSecond}; control_frames_per_mib={controlFramesPerMiB:F2}; granted_window_bytes={grantedWindowBytes}; chunk_size_bytes={context.ChunkSizeBytes}; profile={ResolveInboundV3ProfileName(context)}");
+                $"event=filetransfer_v3_throughput_summary; transfer_id={transferId}; session_id={sessionId}; useful_payload_bytes_per_second={usefulPayloadBytesPerSecond}; control_frames_per_mib={controlFramesPerMiB:F2}; granted_window_bytes={grantedWindowBytes}; chunk_size_bytes={context.ChunkSizeBytes}; profile={ResolveInboundV3ProfileName(context)}; conservative_startup_duration_ms={conservativeStartupDurationMs}; bytes_before_startup_exit={bytesBeforeStartupExit}; startup_exit_reason={GetConservativeStartupExitReason(context)}; startup_probe_window_bytes={startupProbeWindowBytes}; first_repair_or_timeout_before_startup_exit={firstRepairOrTimeoutBeforeStartupExit}");
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v3_receiver_throughput_summary; transfer_id={transferId}; session_id={sessionId}; sample_window_ms={PullControlChatterWindowMs}; raw_bytes_received={context.PullReceiverRawBytesRecent}; raw_bytes_received_per_second={rawBytesReceivedPerSecond}; contiguous_bytes_committed={context.PullReceiverContiguousBytesCommittedRecent}; contiguous_bytes_committed_per_second={contiguousBytesCommittedPerSecond}; pending_chunk_count={GetReceiverPendingChunkCountLocked(context)}; pending_bytes={context.BufferedBytes}; next_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; late_arrival_distance={context.PullLateArrivalDistance}; oldest_gap_age_ms={oldestGapAgeMs}; granted_until_chunk_index_exclusive={context.PullV3GrantedUntilExclusive}; granted_window_bytes={grantedWindowBytes}; write_batch_count={context.PullReceiverWriteBatchCountRecent}; write_batch_bytes={context.PullReceiverWriteBatchBytesRecent}; write_duration_ms={context.PullReceiverWriteDurationMsRecent}; sparse_mode={sparseMode}; sparse_write_bytes_per_second={sparseWriteBytesPerSecond}; sparse_written_ahead_bytes={sparseWrittenAheadBytes}; sparse_gap_count={sparseGapCount}");
+            if (oldestGapAgeMs >= PullControlChatterWindowMs)
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_v3_gap_stall_summary; transfer_id={transferId}; session_id={sessionId}; sample_window_ms={PullControlChatterWindowMs}; gap_start_chunk_index={context.PullV3GapStallStartChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; late_arrival_distance={context.PullLateArrivalDistance}; stall_duration_ms={oldestGapAgeMs}; pending_bytes={context.BufferedBytes}; granted_window_bytes={grantedWindowBytes}; sparse_mode={sparseMode}; sparse_written_ahead_bytes={sparseWrittenAheadBytes}; sparse_gap_count={sparseGapCount}");
+            }
+
+            if (context.ReceiverSparseWriteActive && context.PullReceiverSparseWriteBatchCountRecent > 0)
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_receiver_sparse_write_summary; transfer_id={transferId}; session_id={sessionId}; written_chunk_count={context.PullReceiverSparseChunksWrittenRecent}; written_bytes={context.PullReceiverSparseWriteBytesRecent}; sparse_write_bytes_per_second={sparseWriteBytesPerSecond}; write_duration_ms={context.PullReceiverSparseWriteDurationMsRecent}; pending_chunk_count={GetReceiverPendingChunkCountLocked(context)}; pending_bytes={context.BufferedBytes}; queued_memory_bytes={context.BufferedBytes}; sparse_written_ahead_chunks={GetSparseWrittenAheadChunkCountLocked(context)}; sparse_written_ahead_bytes={sparseWrittenAheadBytes}; sparse_gap_count={sparseGapCount}; next_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; late_arrival_distance={context.PullLateArrivalDistance}; granted_window_bytes={grantedWindowBytes}");
+                if (context.PullReceiverSparseContiguousChunksCommittedRecent > 0)
+                {
+                    LocalOperationalLog.Info(
+                        "FileTransferService",
+                        $"event=filetransfer_receiver_sparse_commit_summary; transfer_id={transferId}; session_id={sessionId}; contiguous_chunks_committed={context.PullReceiverSparseContiguousChunksCommittedRecent}; contiguous_bytes_committed={context.PullReceiverContiguousBytesCommittedRecent}; next_chunk_index={context.NextChunkIndex}; bytes_committed={context.BytesTransferred}; sparse_written_ahead_chunks={GetSparseWrittenAheadChunkCountLocked(context)}; sparse_written_ahead_bytes={sparseWrittenAheadBytes}; sparse_gap_count={sparseGapCount}; pending_chunk_count={GetReceiverPendingChunkCountLocked(context)}; pending_bytes={context.BufferedBytes}; queued_memory_bytes={context.BufferedBytes}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; late_arrival_distance={context.PullLateArrivalDistance}; granted_window_bytes={grantedWindowBytes}");
+                }
+            }
         }
         context.PullDuplicateRequestIgnoredCountRecent = 0;
         context.PullResendSuppressedCountRecent = 0;
         context.PullUsefulPayloadBytesRecent = 0;
+        context.PullReceiverRawBytesRecent = 0;
+        context.PullReceiverContiguousBytesCommittedRecent = 0;
+        context.PullReceiverWriteBatchCountRecent = 0;
+        context.PullReceiverWriteBatchBytesRecent = 0;
+        context.PullReceiverWriteDurationMsRecent = 0;
+        context.PullReceiverSparseWriteBytesRecent = 0;
+        context.PullReceiverSparseWriteBatchCountRecent = 0;
+        context.PullReceiverSparseWriteDurationMsRecent = 0;
+        context.PullReceiverSparseChunksWrittenRecent = 0;
+        context.PullReceiverSparseContiguousChunksCommittedRecent = 0;
     }
 
-    private async Task SendRequestedChunksAsync(
-        OutboundTransferContext context,
-        Stream stream,
-        IFileTransferDataSession dataSession,
-        FileTransferRequestChunksFrameV2 request)
-    {
-        List<int> chunkIndicesToSend;
-        var now = DateTimeOffset.UtcNow;
-        lock (gate)
-        {
-            if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
-            {
-                if (request.RequestedChunkCount == 1)
-                {
-                    LocalOperationalLog.Info(
-                        "FileTransferService",
-                        $"event=filetransfer_chunk_retry_abandoned_terminal; transfer_id={request.TransferId}; session_id={request.SessionId}; chunk_index={request.StartChunkIndex}");
-                }
-                return;
-            }
-
-            context.PullCurrentPipelineDepth = ResolveOutboundPipelineDepth(context);
-            var startChunkIndex = Math.Max(0, request.StartChunkIndex);
-            var maxChunkIndexExclusive = Math.Min(context.ChunkCount, startChunkIndex + Math.Max(1, request.RequestedChunkCount));
-            for (var chunkIndex = startChunkIndex; chunkIndex < maxChunkIndexExclusive; chunkIndex++)
-            {
-                var isExplicitRetryRequest =
-                    request.RequestedChunkCount == 1 &&
-                    context.GrantedOutstandingChunks.Contains(chunkIndex) &&
-                    context.LastChunkSentUtc.ContainsKey(chunkIndex);
-
-                if (chunkIndex < context.ChunksTransferred)
-                {
-                    LocalOperationalLog.Info(
-                        "FileTransferService",
-                        $"event=filetransfer_request_ignored_obsolete; transfer_id={context.TransferId}; session_id={context.SessionId}; chunk_index={chunkIndex}; next_expected_chunk={context.ChunksTransferred}");
-                    continue;
-                }
-
-                if (isExplicitRetryRequest)
-                {
-                    var resendGateMs = GetPullSessionRetryResendGateMsForOutbound(context);
-                    var lastSentUtc = context.LastChunkSentUtc[chunkIndex];
-                    var millisecondsSinceLastSend = Math.Max(0, (int)(now - lastSentUtc).TotalMilliseconds);
-                    var resendCountSinceAck = context.ChunkResendCountSinceAck.TryGetValue(chunkIndex, out var resendCount)
-                        ? resendCount
-                        : 0;
-                    LocalOperationalLog.Info(
-                        "FileTransferService",
-                        $"event=filetransfer_chunk_retry_requested; transfer_id={context.TransferId}; session_id={context.SessionId}; chunk_index={chunkIndex}; milliseconds_since_last_send={millisecondsSinceLastSend}; resend_gate_ms={resendGateMs}; resend_count_since_ack={resendCountSinceAck}; screenshare_active={(sessionScreenShareActive ? "yes" : "no")}; screenshare_degraded={(sessionScreenShareDegraded ? "yes" : "no")}");
-
-                    if (now - lastSentUtc < TimeSpan.FromMilliseconds(resendGateMs))
-                    {
-                        context.PullResendSuppressedCountRecent++;
-                        LocalOperationalLog.Info(
-                            "FileTransferService",
-                            $"event=filetransfer_chunk_retry_gate_blocked; transfer_id={context.TransferId}; session_id={context.SessionId}; chunk_index={chunkIndex}; milliseconds_since_last_send={millisecondsSinceLastSend}; resend_gate_ms={resendGateMs}; resend_count_since_ack={resendCountSinceAck}; screenshare_active={(sessionScreenShareActive ? "yes" : "no")}; screenshare_degraded={(sessionScreenShareDegraded ? "yes" : "no")}");
-                        continue;
-                    }
-
-                    context.RequestedButUnsent.Add(chunkIndex);
-                    context.GrantedOutstandingChunks.Add(chunkIndex);
-                    continue;
-                }
-
-                if (context.GrantedOutstandingChunks.Contains(chunkIndex))
-                {
-                    if (context.SentAwaitingAck.TryGetValue(chunkIndex, out var sentAtUtc) &&
-                        now - sentAtUtc < TimeSpan.FromMilliseconds(GetPullSessionRequestTimeoutMsForOutbound(context)))
-                    {
-                        context.PullDuplicateRequestIgnoredCountRecent++;
-                        LocalOperationalLog.Info(
-                            "FileTransferService",
-                            $"event=filetransfer_request_duplicate_ignored; transfer_id={context.TransferId}; session_id={context.SessionId}; chunk_index={chunkIndex}");
-                        continue;
-                    }
-
-                    if (context.RequestedButUnsent.Contains(chunkIndex))
-                    {
-                        context.PullResendSuppressedCountRecent++;
-                        LocalOperationalLog.Info(
-                            "FileTransferService",
-                            $"event=filetransfer_chunk_resend_suppressed; transfer_id={context.TransferId}; session_id={context.SessionId}; chunk_index={chunkIndex}");
-                        continue;
-                    }
-                }
-
-                context.RequestedButUnsent.Add(chunkIndex);
-                context.GrantedOutstandingChunks.Add(chunkIndex);
-            }
-            chunkIndicesToSend = GetSendableRequestedChunksLocked(context);
-        }
-
-        if (chunkIndicesToSend.Count == 0)
-        {
-            return;
-        }
-
-        LocalOperationalLog.Info(
-            "FileTransferService",
-            $"event=filetransfer_sender_grant_drain; transfer_id={context.TransferId}; session_id={context.SessionId}; sendable_chunk_count={chunkIndicesToSend.Count}; first_chunk_index={chunkIndicesToSend[0]}; last_chunk_index={chunkIndicesToSend[^1]}; sender_sendability_source=grant_only");
-
-        await SendQueuedChunkIndicesAsync(context, stream, dataSession, chunkIndicesToSend).ConfigureAwait(false);
-    }
-
-    private List<int> GetSendableRequestedChunksLocked(OutboundTransferContext context)
-        => context.RequestedButUnsent.ToList();
-
-    private async Task SendPendingRequestedChunksAsync(
-        OutboundTransferContext context,
-        Stream stream,
-        IFileTransferDataSession dataSession)
-    {
-        List<int> chunkIndicesToSend;
-        lock (gate)
-        {
-            if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
-            {
-                return;
-            }
-
-            context.PullCurrentPipelineDepth = ResolveOutboundPipelineDepth(context);
-            chunkIndicesToSend = GetSendableRequestedChunksLocked(context);
-        }
-
-        if (chunkIndicesToSend.Count == 0)
-        {
-            return;
-        }
-
-        LocalOperationalLog.Info(
-            "FileTransferService",
-            $"event=filetransfer_sender_grant_drain_after_ack; transfer_id={context.TransferId}; session_id={context.SessionId}; sendable_chunk_count={chunkIndicesToSend.Count}; first_chunk_index={chunkIndicesToSend[0]}; last_chunk_index={chunkIndicesToSend[^1]}; sender_sendability_source=grant_only");
-
-        await SendQueuedChunkIndicesAsync(context, stream, dataSession, chunkIndicesToSend).ConfigureAwait(false);
-    }
-
-    private async Task SendQueuedChunkIndicesAsync(
-        OutboundTransferContext context,
-        Stream stream,
-        IFileTransferDataSession dataSession,
-        List<int> chunkIndicesToSend)
-    {
-        var buffer = ArrayPool<byte>.Shared.Rent(context.ChunkSizeBytes);
-        try
-        {
-            for (var chunkListIndex = 0; chunkListIndex < chunkIndicesToSend.Count; chunkListIndex++)
-            {
-                context.LifetimeCts.Token.ThrowIfCancellationRequested();
-                var chunkIndex = chunkIndicesToSend[chunkListIndex];
-                if (TryBuildBundledChunkFrame(
-                        context,
-                        stream,
-                        buffer,
-                        chunkIndicesToSend,
-                        chunkListIndex,
-                        out var bundledFrame,
-                        out var bundledChunkIndexes))
-                {
-                    await dataSession.SendAsync(bundledFrame, context.LifetimeCts.Token).ConfigureAwait(false);
-                    LogPullBinaryFrameSent(
-                        context.TransferId,
-                        context.SessionId,
-                        bundledFrame,
-                        bundledFrame.DataSegments.Sum(static segment => segment.Length));
-
-                    foreach (var bundledChunkIndex in bundledChunkIndexes)
-                    {
-                        LocalOperationalLog.Info(
-                            "FileTransferService",
-                            $"event=filetransfer_chunk_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; chunk_index={bundledChunkIndex}; chunk_bytes={bundledFrame.DataSegments[bundledChunkIndex - bundledFrame.StartChunkIndex].Length}");
-                    }
-
-                    lock (gate)
-                    {
-                        if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
-                        {
-                            return;
-                        }
-
-                        var sentUtc = DateTimeOffset.UtcNow;
-                        foreach (var bundledChunkIndex in bundledChunkIndexes)
-                        {
-                            context.RequestedButUnsent.Remove(bundledChunkIndex);
-                            context.SentAwaitingAck[bundledChunkIndex] = sentUtc;
-                            context.LastChunkSentUtc[bundledChunkIndex] = sentUtc;
-                            context.ChunksAcceptedForTransport = Math.Max(context.ChunksAcceptedForTransport, bundledChunkIndex + 1);
-                        }
-
-                        context.BytesAcceptedForTransport = context.ChunksAcceptedForTransport >= context.ChunkCount
-                            ? context.FileSizeBytes
-                            : Math.Min(context.FileSizeBytes, (long)context.ChunksAcceptedForTransport * context.ChunkSizeBytes);
-                        context.StatusMessage = "Streaming requested chunks.";
-                        foreach (var _ in bundledChunkIndexes)
-                        {
-                            context.RecentPullChunkSentUtc.Enqueue(sentUtc);
-                        }
-                        TrimRecentEvents(context.RecentPullChunkSentUtc, sentUtc);
-                        context.PullUsefulPayloadBytesRecent += bundledFrame.DataSegments.Sum(static segment => segment.Length);
-                    }
-
-                    chunkListIndex += bundledChunkIndexes.Count - 1;
-                    continue;
-                }
-
-                byte[]? cachedChunkBytes = null;
-                lock (gate)
-                {
-                    if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
-                    {
-                        return;
-                    }
-
-                    context.PullSentChunkCache.TryGetValue(chunkIndex, out cachedChunkBytes);
-                }
-
-                byte[] chunkBytes;
-                if (cachedChunkBytes is null)
-                {
-                    var fileOffset = (long)chunkIndex * context.ChunkSizeBytes;
-                    if (stream.CanSeek && stream.Position != fileOffset)
-                    {
-                        stream.Seek(fileOffset, SeekOrigin.Begin);
-                    }
-
-                    var remaining = context.FileSizeBytes - fileOffset;
-                    var targetReadSize = (int)Math.Min(context.ChunkSizeBytes, remaining);
-                    var read = await stream.ReadAsync(buffer.AsMemory(0, targetReadSize), context.LifetimeCts.Token).ConfigureAwait(false);
-                    if (read <= 0)
-                    {
-                        throw new InvalidOperationException("Source stream did not match the declared file size.");
-                    }
-
-                    chunkBytes = new byte[read];
-                    Buffer.BlockCopy(buffer, 0, chunkBytes, 0, read);
-
-                    lock (gate)
-                    {
-                        if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
-                        {
-                            return;
-                        }
-
-                        context.PullSentChunkCache[chunkIndex] = chunkBytes;
-                    }
-                }
-                else
-                {
-                    chunkBytes = cachedChunkBytes;
-                }
-
-                var frameToSend = CreatePullChunkDataFrame(
-                    context.NegotiatedDataProtocolVersion,
-                    context.SessionId,
-                    context.TransferId,
-                    chunkIndex,
-                    context.ChunkCount,
-                    chunkBytes);
-
-                await dataSession.SendAsync(
-                        frameToSend,
-                        context.LifetimeCts.Token)
-                    .ConfigureAwait(false);
-                LogPullBinaryFrameSent(context.TransferId, context.SessionId, frameToSend, frameToSend.Data.Length);
-                LocalOperationalLog.Info(
-                    "FileTransferService",
-                    $"event=filetransfer_chunk_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; chunk_index={chunkIndex}; chunk_bytes={chunkBytes.Length}");
-
-                lock (gate)
-                {
-                    if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
-                    {
-                        return;
-                    }
-
-                    context.RequestedButUnsent.Remove(chunkIndex);
-                    var sentUtc = DateTimeOffset.UtcNow;
-                    var isRetrySend = context.LastChunkSentUtc.ContainsKey(chunkIndex);
-                    context.SentAwaitingAck[chunkIndex] = sentUtc;
-                    context.LastChunkSentUtc[chunkIndex] = sentUtc;
-                    if (isRetrySend)
-                    {
-                        context.LastChunkResentUtc[chunkIndex] = sentUtc;
-                        context.ChunkResendCountSinceAck[chunkIndex] = context.ChunkResendCountSinceAck.TryGetValue(chunkIndex, out var resendCount)
-                            ? resendCount + 1
-                            : 1;
-                        LocalOperationalLog.Info(
-                            "FileTransferService",
-                            $"event=filetransfer_chunk_retry_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; chunk_index={chunkIndex}; resend_count_since_ack={context.ChunkResendCountSinceAck[chunkIndex]}; screenshare_active={(sessionScreenShareActive ? "yes" : "no")}; screenshare_degraded={(sessionScreenShareDegraded ? "yes" : "no")}");
-                    }
-                    context.ChunksAcceptedForTransport = Math.Max(context.ChunksAcceptedForTransport, chunkIndex + 1);
-                    context.BytesAcceptedForTransport = context.ChunksAcceptedForTransport >= context.ChunkCount
-                        ? context.FileSizeBytes
-                        : Math.Min(context.FileSizeBytes, (long)context.ChunksAcceptedForTransport * context.ChunkSizeBytes);
-                    context.StatusMessage = "Streaming requested chunks.";
-                    context.RecentPullChunkSentUtc.Enqueue(sentUtc);
-                    TrimRecentEvents(context.RecentPullChunkSentUtc, sentUtc);
-                    context.PullUsefulPayloadBytesRecent += chunkBytes.Length;
-                }
-            }
-        }
-        finally
-        {
-            Array.Clear(buffer, 0, buffer.Length);
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
-    }
-
-    private bool TryBuildBundledChunkFrame(
-        OutboundTransferContext context,
-        Stream stream,
-        byte[] buffer,
-        IReadOnlyList<int> chunkIndicesToSend,
-        int chunkListIndex,
-        out FileTransferChunkBatchFrameV2 bundledFrame,
-        out List<int> bundledChunkIndexes)
-    {
-        bundledFrame = null!;
-        bundledChunkIndexes = [];
-        var bundledChunkFrameCount = ResolveHealthyBundledChunkFrameCount(context.ChunkSizeBytes);
-
-        if (!CanBundleOutboundChunkFrames(context) ||
-            bundledChunkFrameCount <= 1 ||
-            chunkListIndex + bundledChunkFrameCount - 1 >= chunkIndicesToSend.Count)
-        {
-            return false;
-        }
-
-        var firstChunkIndex = chunkIndicesToSend[chunkListIndex];
-        lock (gate)
-        {
-            for (var segmentOffset = 0; segmentOffset < bundledChunkFrameCount; segmentOffset++)
-            {
-                var chunkIndex = chunkIndicesToSend[chunkListIndex + segmentOffset];
-                if (chunkIndex != firstChunkIndex + segmentOffset ||
-                    context.LastChunkSentUtc.ContainsKey(chunkIndex))
-                {
-                    return false;
-                }
-            }
-        }
-
-        var segments = new byte[bundledChunkFrameCount][];
-        var totalBytes = 0;
-        for (var segmentOffset = 0; segmentOffset < bundledChunkFrameCount; segmentOffset++)
-        {
-            var chunkIndex = chunkIndicesToSend[chunkListIndex + segmentOffset];
-            var fileOffset = (long)chunkIndex * context.ChunkSizeBytes;
-            if (stream.CanSeek && stream.Position != fileOffset)
-            {
-                stream.Seek(fileOffset, SeekOrigin.Begin);
-            }
-
-            var remaining = context.FileSizeBytes - fileOffset;
-            var targetReadSize = (int)Math.Min(context.ChunkSizeBytes, remaining);
-            var read = stream.Read(buffer, 0, targetReadSize);
-            if (read <= 0)
-            {
-                throw new InvalidOperationException("Source stream did not match the declared file size.");
-            }
-
-            var chunkBytes = new byte[read];
-            Buffer.BlockCopy(buffer, 0, chunkBytes, 0, read);
-            totalBytes += read;
-            if (totalBytes > PullHealthyBundledRawBytesCap)
-            {
-                return false;
-            }
-
-            segments[segmentOffset] = chunkBytes;
-        }
-
-        var candidateFrame = new FileTransferChunkBatchFrameV2
-        {
-            SessionId = context.SessionId,
-            TransferId = context.TransferId,
-            StartChunkIndex = firstChunkIndex,
-            ChunkCount = context.ChunkCount,
-            DataSegments = segments,
-        };
-
-        _ = FileTransferDataFrameCodec.Serialize(candidateFrame);
-        bundledFrame = candidateFrame;
-        bundledChunkIndexes = Enumerable.Range(firstChunkIndex, bundledChunkFrameCount).ToList();
-        return true;
-    }
-
-    private bool CanBundleOutboundChunkFrames(OutboundTransferContext context)
-        => !sessionScreenShareActive &&
-           !sessionScreenShareDegraded &&
-           !context.PullSessionDegraded &&
-           context.ChunkSizeBytes == PullHealthyDefaultChunkSizeBytes;
-
-    private void ApplyOutboundAckProgress(OutboundTransferContext context, FileTransferAckProgressFrameV2 ack)
+    private Task InitializeInboundPullManifestAsync(InboundTransferContext context, FileTransferManifestFrameV2 manifest)
     {
         SessionFileTransferSnapshot? snapshot = null;
-        lock (gate)
-        {
-            if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
-            {
-                return;
-            }
-
-            context.ChunksTransferred = Math.Max(context.ChunksTransferred, Math.Min(ack.NextExpectedChunkIndex, context.ChunkCount));
-            context.BytesTransferred = Math.Max(context.BytesTransferred, Math.Min(ack.BytesCommitted, context.FileSizeBytes));
-            context.RequestedButUnsent.RemoveWhere(chunkIndex => chunkIndex < ack.NextExpectedChunkIndex);
-            context.GrantedOutstandingChunks.RemoveWhere(chunkIndex => chunkIndex < ack.NextExpectedChunkIndex);
-            foreach (var chunkIndex in context.SentAwaitingAck.Keys.Where(chunkIndex => chunkIndex < ack.NextExpectedChunkIndex).ToArray())
-            {
-                context.SentAwaitingAck.Remove(chunkIndex);
-            }
-            foreach (var chunkIndex in context.LastChunkSentUtc.Keys.Where(chunkIndex => chunkIndex < ack.NextExpectedChunkIndex).ToArray())
-            {
-                context.LastChunkSentUtc.Remove(chunkIndex);
-            }
-            foreach (var chunkIndex in context.LastChunkResentUtc.Keys.Where(chunkIndex => chunkIndex < ack.NextExpectedChunkIndex).ToArray())
-            {
-                context.LastChunkResentUtc.Remove(chunkIndex);
-            }
-            foreach (var chunkIndex in context.ChunkResendCountSinceAck.Keys.Where(chunkIndex => chunkIndex < ack.NextExpectedChunkIndex).ToArray())
-            {
-                context.ChunkResendCountSinceAck.Remove(chunkIndex);
-            }
-            TrimOutboundPullSentChunkCache(context, ack.NextExpectedChunkIndex);
-            context.StatusMessage = context.ChunksTransferred >= context.ChunkCount
-                ? "Waiting for receiver verification."
-                : "Receiver is acknowledging requested chunks.";
-            snapshot = CreateSnapshotLocked();
-        }
-
-        if (snapshot is not null)
-        {
-            RaiseTransferChanged(snapshot);
-            MaybeLogProgressMilestone(context, FileTransferDirection.Outbound);
-        }
-    }
-
-    private async Task InitializeInboundPullManifestAsync(InboundTransferContext context, FileTransferManifestFrameV2 manifest)
-    {
-        SessionFileTransferSnapshot? snapshot = null;
+        bool sparseModeSelected = false;
+        bool streamCanRead = false;
+        bool streamCanSeek = false;
+        bool streamCanWrite = false;
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
             {
-                return;
+                return Task.CompletedTask;
             }
 
             if (!string.Equals(context.FileName, manifest.FileName, StringComparison.Ordinal) ||
@@ -1210,6 +854,28 @@ public sealed partial class SessionFileTransferService
 
             context.ChunkCount = manifest.ChunkCount;
             context.ChunkSizeBytes = manifest.ChunkSizeBytes;
+            streamCanRead = context.WriteStream?.CanRead == true;
+            streamCanSeek = context.WriteStream?.CanSeek == true;
+            streamCanWrite = context.WriteStream?.CanWrite == true;
+            sparseModeSelected =
+                context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV3 &&
+                streamCanWrite &&
+                streamCanSeek &&
+                streamCanRead &&
+                manifest.ChunkCount > 0;
+            context.ReceiverSparseWriteActive = sparseModeSelected;
+            context.ReceiverSparseChunksWritten = sparseModeSelected
+                ? new System.Collections.BitArray(manifest.ChunkCount)
+                : null;
+            context.ReceiverSparseChunksPendingWrite.Clear();
+            context.ReceiverSparseBytesWritten = 0;
+            context.PullReceiverSparseWriteBytesRecent = 0;
+            context.PullReceiverSparseWriteBatchCountRecent = 0;
+            context.PullReceiverSparseWriteDurationMsRecent = 0;
+            context.PullReceiverSparseChunksWrittenRecent = 0;
+            context.PullReceiverSparseContiguousChunksCommittedRecent = 0;
+            context.PullV3LastSparseCreditEligibleUtc = null;
+            context.PullV3LastSparseCreditBaseChunkIndex = 0;
             context.State = FileTransferTransferState.Receiving;
             context.StatusMessage = "Receiving requested chunks.";
             context.PullManifestReceived = true;
@@ -1225,21 +891,19 @@ public sealed partial class SessionFileTransferService
             RaiseTransferChanged(snapshot);
         }
 
+        if (sparseModeSelected)
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_receiver_sparse_mode_selected; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=seekable_readable_destination; stream_can_read={(streamCanRead ? 1 : 0)}; stream_can_seek={(streamCanSeek ? 1 : 0)}; stream_can_write={(streamCanWrite ? 1 : 0)}; file_size_bytes={context.FileSizeBytes}; chunk_count={context.ChunkCount}; chunk_size_bytes={context.ChunkSizeBytes}");
+        }
+
         LogPullPipelineChanged(context.TransferId, context.SessionId, FileTransferDirection.Inbound, context.PullCurrentPipelineDepth, context.PullSessionDegraded || sessionScreenShareDegraded);
+        return Task.CompletedTask;
     }
 
-    private async Task<bool> MaybeSendNextChunkRequestAsync(InboundTransferContext context, bool forceResendOldestOutstanding)
+    private Task<bool> MaybeSendNextChunkRequestAsync(InboundTransferContext context, bool forceResendOldestOutstanding)
     {
-        FileTransferRequestChunksFrameV2? request = null;
-        int? blockedOldestOutstandingChunk = null;
-        int blockedRequestedUntilExclusive = 0;
-        int batchExtensionCount = 0;
-        bool retryingOldestOutstanding = false;
-        int retryAttemptCount = 0;
-        int previousPipelineDepth = 0;
-        int updatedPipelineDepth = 0;
-        bool pipelineDepthChanged = false;
-        DateTimeOffset requestSentUtc = default;
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) ||
@@ -1248,194 +912,14 @@ public sealed partial class SessionFileTransferService
                 !context.PullManifestReceived ||
                 context.ChunkCount <= 0)
             {
-                return false;
+                return Task.FromResult(false);
             }
 
-            pipelineDepthChanged = RefreshInboundPullPipelineDepthLocked(context, allowRecoveryIncrease: true, out previousPipelineDepth, out updatedPipelineDepth);
-            var outstandingCount = context.OutstandingChunkRequests.Count;
-            if (forceResendOldestOutstanding && context.OutstandingChunkRequests.Count > 0)
-            {
-                var oldest = context.OutstandingChunkRequests.Keys.Min();
-                request = new FileTransferRequestChunksFrameV2
-                {
-                    SessionId = context.SessionId,
-                    TransferId = context.TransferId,
-                    StartChunkIndex = oldest,
-                    RequestedChunkCount = 1,
-                    PipelineDepth = context.PullCurrentPipelineDepth,
-                };
-                context.OutstandingChunkRequests[oldest] = DateTimeOffset.UtcNow;
-                context.RequestedChunks.Add(oldest);
-                context.ChunkAttemptCounts[oldest] = context.ChunkAttemptCounts.TryGetValue(oldest, out var attempts)
-                    ? attempts + 1
-                    : 1;
-                context.PullLastRequestSentUtc = DateTimeOffset.UtcNow;
-                retryingOldestOutstanding = true;
-                retryAttemptCount = context.ChunkAttemptCounts[oldest];
-            }
-            else
-            {
-                if (outstandingCount > 0)
-                {
-                    var oldestOutstanding = context.OutstandingChunkRequests.Keys.Min();
-                    var lowWatermark = ResolveInboundRequestLowWatermarkLocked(context);
-                    var desiredOutstanding = context.PullCurrentPipelineDepth;
-                    var canExtendBatch =
-                        !context.PullGapFocusActive &&
-                        !sessionScreenShareDegraded &&
-                        oldestOutstanding == context.NextChunkIndex &&
-                        context.PendingChunks.Count == 0 &&
-                        outstandingCount <= lowWatermark &&
-                        context.PullRequestedFrontierExclusive < context.ChunkCount;
-
-                    if (canExtendBatch)
-                    {
-                        var missingTailCount = desiredOutstanding - outstandingCount;
-                        var requestCount = Math.Min(missingTailCount, context.ChunkCount - context.PullRequestedFrontierExclusive);
-                        if (requestCount > 0)
-                        {
-                            var startChunkIndex = context.PullRequestedFrontierExclusive;
-                            request = new FileTransferRequestChunksFrameV2
-                            {
-                                SessionId = context.SessionId,
-                                TransferId = context.TransferId,
-                                StartChunkIndex = startChunkIndex,
-                                RequestedChunkCount = requestCount,
-                                PipelineDepth = context.PullCurrentPipelineDepth,
-                            };
-                            requestSentUtc = DateTimeOffset.UtcNow;
-                            for (var chunkIndex = startChunkIndex; chunkIndex < startChunkIndex + requestCount; chunkIndex++)
-                            {
-                                context.OutstandingChunkRequests[chunkIndex] = requestSentUtc;
-                                context.RequestedChunks.Add(chunkIndex);
-                                context.ChunkAttemptCounts[chunkIndex] = 1;
-                            }
-
-                            context.PullRequestedFrontierExclusive = startChunkIndex + requestCount;
-                            context.PullLastRequestSentUtc = requestSentUtc;
-                            batchExtensionCount = requestCount;
-                        }
-                    }
-
-                    if (request is null)
-                    {
-                        blockedOldestOutstandingChunk = oldestOutstanding;
-                        blockedRequestedUntilExclusive = context.PullRequestedFrontierExclusive;
-                    }
-                }
-                else
-                {
-                    var desiredOutstanding = context.PullCurrentPipelineDepth;
-                    var requestCount = desiredOutstanding;
-                    if (requestCount <= 0)
-                    {
-                        return false;
-                    }
-
-                    var startChunkIndex = context.NextChunkIndex;
-                    if (startChunkIndex >= context.ChunkCount)
-                    {
-                        return false;
-                    }
-
-                    requestCount = Math.Min(requestCount, context.ChunkCount - startChunkIndex);
-                    if (requestCount <= 0)
-                    {
-                        return false;
-                    }
-
-                    request = new FileTransferRequestChunksFrameV2
-                    {
-                        SessionId = context.SessionId,
-                        TransferId = context.TransferId,
-                        StartChunkIndex = startChunkIndex,
-                        RequestedChunkCount = requestCount,
-                        PipelineDepth = context.PullCurrentPipelineDepth,
-                    };
-                    requestSentUtc = DateTimeOffset.UtcNow;
-                    for (var chunkIndex = startChunkIndex; chunkIndex < startChunkIndex + requestCount; chunkIndex++)
-                    {
-                        context.OutstandingChunkRequests[chunkIndex] = requestSentUtc;
-                        context.RequestedChunks.Add(chunkIndex);
-                        context.ChunkAttemptCounts[chunkIndex] = 1;
-                    }
-
-                    context.PullRequestedFrontierExclusive = startChunkIndex + requestCount;
-                    context.PullLastRequestSentUtc = requestSentUtc;
-                }
-            }
-        }
-
-        if (blockedOldestOutstandingChunk is not null)
-        {
-            if (blockedOldestOutstandingChunk.Value == context.NextChunkIndex)
-            {
-                LocalOperationalLog.Info(
-                    "FileTransferService",
-                    $"event=filetransfer_request_window_blocked_by_oldest_gap; transfer_id={context.TransferId}; session_id={context.SessionId}; next_expected_chunk={context.NextChunkIndex}; oldest_outstanding_chunk={blockedOldestOutstandingChunk.Value}; requested_until_exclusive={blockedRequestedUntilExclusive}");
-            }
-            else
-            {
-                LocalOperationalLog.Info(
-                    "FileTransferService",
-                    $"event=filetransfer_refill_skipped_above_low_watermark; transfer_id={context.TransferId}; session_id={context.SessionId}; next_expected_chunk={context.NextChunkIndex}; oldest_outstanding_chunk={blockedOldestOutstandingChunk.Value}; requested_until_exclusive={blockedRequestedUntilExclusive}");
-            }
-            return false;
-        }
-
-        if (pipelineDepthChanged)
-        {
-            if (updatedPipelineDepth > previousPipelineDepth)
-            {
-                LogPullProfileStepUp(context.TransferId, context.SessionId, previousPipelineDepth, updatedPipelineDepth, context.ChunkSizeBytes, context.PullSessionDegraded || sessionScreenShareDegraded);
-            }
-            LogPullPipelineChanged(context.TransferId, context.SessionId, FileTransferDirection.Inbound, updatedPipelineDepth, context.PullSessionDegraded || sessionScreenShareDegraded);
-        }
-
-        if (request is null || context.DataSession is null)
-        {
-            return false;
-        }
-
-        await context.DataSession.SendAsync(request, context.LifetimeCts.Token).ConfigureAwait(false);
-        LogPullBinaryFrameSent(context.TransferId, context.SessionId, request, payloadBytes: 0);
-        lock (gate)
-        {
-            if (ReferenceEquals(inboundTransfer, context) && !context.IsTerminal)
-            {
-                context.RecentPullRequestSentUtc.Enqueue(requestSentUtc == default ? DateTimeOffset.UtcNow : requestSentUtc);
-                MaybeLogPullControlChatterWindow(context, context.TransferId, context.SessionId, DateTimeOffset.UtcNow);
-            }
-        }
-
-        if (retryingOldestOutstanding)
-        {
-            LocalOperationalLog.Info(
+            LocalOperationalLog.Warn(
                 "FileTransferService",
-                $"event=filetransfer_request_retry_oldest_chunk; transfer_id={context.TransferId}; session_id={context.SessionId}; chunk_index={request.StartChunkIndex}; attempt_count={retryAttemptCount}; pipeline_depth={request.PipelineDepth}");
+                $"event=filetransfer_legacy_request_suppressed_in_v3; transfer_id={context.TransferId}; session_id={context.SessionId}; next_expected_chunk={context.NextChunkIndex}; requested_until_exclusive={context.PullRequestedFrontierExclusive}; force_resend_oldest_outstanding={forceResendOldestOutstanding}; reason=legacy_request_path_invoked");
+            return Task.FromResult(false);
         }
-        else if (batchExtensionCount > 0)
-        {
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_grant_window_refilled; transfer_id={context.TransferId}; session_id={context.SessionId}; start_chunk={request.StartChunkIndex}; requested_chunk_count={request.RequestedChunkCount}; pipeline_depth={request.PipelineDepth}");
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_request_batch_extended; transfer_id={context.TransferId}; session_id={context.SessionId}; start_chunk={request.StartChunkIndex}; requested_chunk_count={request.RequestedChunkCount}; pipeline_depth={request.PipelineDepth}");
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_request_refill; transfer_id={context.TransferId}; session_id={context.SessionId}; start_chunk={request.StartChunkIndex}; requested_chunk_count={request.RequestedChunkCount}; pipeline_depth={request.PipelineDepth}");
-        }
-        else
-        {
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_grant_window_opened; transfer_id={context.TransferId}; session_id={context.SessionId}; start_chunk={request.StartChunkIndex}; requested_chunk_count={request.RequestedChunkCount}; pipeline_depth={request.PipelineDepth}");
-        }
-        LocalOperationalLog.Info(
-            "FileTransferService",
-            $"event=filetransfer_request_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; start_chunk={request.StartChunkIndex}; requested_chunk_count={request.RequestedChunkCount}; pipeline_depth={request.PipelineDepth}");
-        return true;
     }
 
     private bool TryPauseOutboundTransportLocked(OutboundTransferContext context, string reason, bool requiresResumeRequest)
@@ -1629,227 +1113,18 @@ public sealed partial class SessionFileTransferService
         session.AvailabilityChanged += OnDataSessionAvailabilityChanged;
     }
 
-    private async Task MaybeHandlePullRequestTimeoutAsync(InboundTransferContext context)
-    {
-        if (await HandlePausedInboundTransportAsync(context).ConfigureAwait(false))
-        {
-            return;
-        }
-
-        bool shouldResend = false;
-        bool degradedChanged = false;
-        bool failStalledFirstChunk = false;
-        bool pipelineDepthChanged = false;
-        bool gapFocusChanged = false;
-        int oldestOutstandingChunkIndex = -1;
-        int timeoutStreak = 0;
-        int outstandingCount = 0;
-        int pipelineDepth = 0;
-        int highestReceivedChunkIndex = -1;
-        int lateArrivalDistance = 0;
-        bool screenshareDegraded = false;
-        lock (gate)
-        {
-            if (!ReferenceEquals(inboundTransfer, context) ||
-                context.IsTerminal ||
-                context.OutstandingChunkRequests.Count == 0)
-            {
-                return;
-            }
-
-            oldestOutstandingChunkIndex = context.OutstandingChunkRequests.Keys.Min();
-            var oldest = context.OutstandingChunkRequests[oldestOutstandingChunkIndex];
-            var timeoutMs = GetPullSessionRequestTimeoutMs(context);
-            if (DateTimeOffset.UtcNow - oldest < TimeSpan.FromMilliseconds(timeoutMs))
-            {
-                TryRecoverInboundPullSessionLocked(context);
-                return;
-            }
-
-            shouldResend = true;
-            if (context.PullTimeoutOldestChunkIndex == oldestOutstandingChunkIndex)
-            {
-                context.PullTimeoutStreak++;
-            }
-            else
-            {
-                context.PullTimeoutOldestChunkIndex = oldestOutstandingChunkIndex;
-                context.PullTimeoutStreak = 1;
-            }
-
-            timeoutStreak = context.PullTimeoutStreak;
-            outstandingCount = context.OutstandingChunkRequests.Count;
-            pipelineDepth = context.PullCurrentPipelineDepth;
-            screenshareDegraded = sessionScreenShareDegraded;
-            highestReceivedChunkIndex = context.PullHighestReceivedChunkIndex;
-            lateArrivalDistance = context.PullLateArrivalDistance;
-
-            if (outstandingCount > PullTimeoutOutstandingStepDownThreshold)
-            {
-                pipelineDepthChanged = TryStepDownInboundPipelineLocked(context, "oldest_chunk_timeout", outstandingCount, out _, out pipelineDepth);
-            }
-
-            var shouldEnterDegraded = sessionScreenShareDegraded || context.PullTimeoutStreak >= PullSessionDegradedEntryTimeoutStreakThreshold;
-            degradedChanged = shouldEnterDegraded && !context.PullSessionDegraded;
-            if (shouldEnterDegraded)
-            {
-                context.PullSessionDegraded = true;
-                context.PullDegradedSinceUtc ??= DateTimeOffset.UtcNow;
-            }
-
-            pipelineDepthChanged = RefreshInboundPullPipelineDepthLocked(context, allowRecoveryIncrease: false, out _, out pipelineDepth) || pipelineDepthChanged;
-
-            context.PullRecoverySinceUtc = null;
-            if (!context.PullGapFocusActive &&
-                (context.PullLateArrivalDistance >= PullGapFocusBufferedThreshold ||
-                 context.PendingChunks.Count >= PullGapFocusBufferedThreshold))
-            {
-                context.PullGapFocusActive = true;
-                gapFocusChanged = true;
-            }
-            if (context.NextChunkIndex == 0 && oldestOutstandingChunkIndex == 0)
-            {
-                context.PullFirstChunkTimeoutCount++;
-                failStalledFirstChunk = context.PullFirstChunkTimeoutCount >= PullSessionFirstChunkStallTimeouts;
-            }
-            else
-            {
-                context.PullFirstChunkTimeoutCount = 0;
-            }
-        }
-
-        LocalOperationalLog.Info(
-            "FileTransferService",
-            $"event=filetransfer_request_timeout_detected; transfer_id={context.TransferId}; session_id={context.SessionId}; oldest_chunk={oldestOutstandingChunkIndex}; timeout_streak={timeoutStreak}; outstanding_count={outstandingCount}; pipeline_depth={pipelineDepth}; screenshare_degraded={(screenshareDegraded ? "yes" : "no")}");
-
-        LogPullReorderPressure(
-            context.TransferId,
-            context.SessionId,
-            context.NextChunkIndex,
-            highestReceivedChunkIndex,
-            lateArrivalDistance,
-            outstandingCount,
-            pipelineDepth,
-            context.ChunkSizeBytes);
-
-        if (degradedChanged)
-        {
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_session_degraded_entered; transfer_id={context.TransferId}; session_id={context.SessionId}");
-        }
-
-        if (gapFocusChanged)
-        {
-            LogGapFocusChanged(context.TransferId, context.SessionId, active: true, context.NextChunkIndex, highestReceivedChunkIndex, lateArrivalDistance);
-        }
-
-        if (pipelineDepthChanged)
-        {
-            LogPullPipelineChanged(context.TransferId, context.SessionId, FileTransferDirection.Inbound, pipelineDepth, degraded: context.PullSessionDegraded || screenshareDegraded);
-        }
-
-        if (failStalledFirstChunk)
-        {
-            LocalOperationalLog.Warn(
-                "FileTransferService",
-                $"event=filetransfer_pull_session_stalled_at_first_chunk; transfer_id={context.TransferId}; session_id={context.SessionId}");
-            await TransitionInboundToTerminalAsync(
-                context,
-                FileTransferTransferState.Failed,
-                errorCode: PullSessionStalledErrorCode,
-                statusMessage: PullSessionStalledErrorCode,
-                sendError: true,
-                errorMessage: PullSessionStalledErrorCode,
-                cancelReason: null,
-                ct: CancellationToken.None).ConfigureAwait(false);
-            return;
-        }
-
-        if (shouldResend)
-        {
-            await MaybeSendNextChunkRequestAsync(context, forceResendOldestOutstanding: true).ConfigureAwait(false);
-        }
-    }
-
-    private bool ShouldSendPullAckLocked(InboundTransferContext context, int contiguousChunkCount, bool completed, bool sentRequestImmediately)
-    {
-        if (context.PullAckDebtChunks <= 0 || contiguousChunkCount <= 0)
-        {
-            return false;
-        }
-
-        if (completed)
-        {
-            return true;
-        }
-
-        if (context.PullAckDebtChunks >= ResolveInboundAckThresholdLocked(context))
-        {
-            return true;
-        }
-
-        if (context.OutstandingChunkRequests.Count == 0)
-        {
-            return true;
-        }
-
-        if (context.PullLastAckSentUtc is null)
-        {
-            return false;
-        }
-
-        if (sentRequestImmediately)
-        {
-            return false;
-        }
-
-        return DateTimeOffset.UtcNow - context.PullLastAckSentUtc.Value >= TimeSpan.FromMilliseconds(ResolveInboundAckCoalesceDelayMsLocked(context));
-    }
-
-    private async Task HandleInboundPullChunkAsync(InboundTransferContext context, FileTransferChunkDataFrameV2 chunk)
-    {
-        byte[] chunkBytes;
-        if (chunk.Data.Length == 0 || chunk.Data.Length > FileTransferProtocol.MaxChunkRawBytes)
-        {
-            throw new InvalidOperationException("Chunk payload exceeded the V2 raw payload budget.");
-        }
-        chunkBytes = chunk.Data;
-
-        await HandleInboundPullChunksAsync(
-            context,
-            [(chunk.ChunkIndex, chunkBytes)]).ConfigureAwait(false);
-    }
-
-    private async Task HandleInboundPullChunkBatchAsync(InboundTransferContext context, FileTransferChunkBatchFrameV2 batch)
-    {
-        var chunks = new List<(int ChunkIndex, byte[] ChunkBytes)>(batch.DataSegments.Count);
-        for (var segmentOffset = 0; segmentOffset < batch.DataSegments.Count; segmentOffset++)
-        {
-            var chunkBytes = batch.DataSegments[segmentOffset];
-            if (chunkBytes.Length == 0 || chunkBytes.Length > FileTransferProtocol.MaxChunkRawBytes)
-            {
-                throw new InvalidOperationException("Chunk batch payload exceeded the V2 raw payload budget.");
-            }
-
-            chunks.Add((batch.StartChunkIndex + segmentOffset, chunkBytes));
-        }
-
-        await HandleInboundPullChunksAsync(context, chunks).ConfigureAwait(false);
-    }
-
     private async Task HandleInboundPullChunksAsync(InboundTransferContext context, IReadOnlyList<(int ChunkIndex, byte[] ChunkBytes)> chunks)
     {
         var isV3 = context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV3;
-        List<byte[]> contiguousChunkBytes = [];
-        int ackDebtChunks = 0;
-        long ackDebtBytes = 0;
-        bool completed = false;
-        bool shouldLogStartupCompleted = false;
-        long startupCompletedBytesReceived = 0;
-        int startupCompletedNextExpectedChunk = 0;
-        int startupCompletedHighestBufferedChunk = -1;
-        SessionFileTransferSnapshot? snapshot = null;
+        if (isV3 && context.ReceiverSparseWriteActive)
+        {
+            await HandleInboundSparsePullChunksAsync(context, chunks).ConfigureAwait(false);
+            return;
+        }
+
+        var shouldSendGrantAfterBuffering = false;
+        string? failureCode = null;
+        string? failureMessage = null;
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) ||
@@ -1872,31 +1147,393 @@ public sealed partial class SessionFileTransferService
                 if (!context.PendingChunks.ContainsKey(chunkIndex))
                 {
                     context.PendingChunks[chunkIndex] = chunkBytes;
+                    context.BufferedBytes += chunkBytes.Length;
                     context.PullHighestReceivedChunkIndex = Math.Max(context.PullHighestReceivedChunkIndex, chunkIndex);
                     var now = DateTimeOffset.UtcNow;
                     context.RecentPullChunkSentUtc.Enqueue(now);
                     TrimRecentEvents(context.RecentPullChunkSentUtc, now);
                     context.PullUsefulPayloadBytesRecent += chunkBytes.Length;
+                    context.PullReceiverRawBytesRecent += chunkBytes.Length;
                     LocalOperationalLog.Info(
                         "FileTransferService",
                         $"event=filetransfer_chunk_received; transfer_id={context.TransferId}; session_id={context.SessionId}; chunk_index={chunkIndex}; chunk_bytes={chunkBytes.Length}");
                 }
             }
 
-            while (context.PendingChunks.Remove(context.NextChunkIndex, out var contiguous))
+            UpdateReceiverBufferPressureLocked(context, DateTimeOffset.UtcNow);
+            if (context.BufferedBytes >= ReceiverBufferEmergencyLimitBytes)
             {
-                contiguousChunkBytes.Add(contiguous);
+                failureCode = ReceiverBufferExhaustedErrorCode;
+                failureMessage = "Receiver buffer exceeded the emergency safety limit.";
+                LocalOperationalLog.Warn(
+                    "FileTransferService",
+                    $"event=filetransfer_receiver_buffer_exhausted; transfer_id={context.TransferId}; session_id={context.SessionId}; pending_chunk_count={context.PendingChunks.Count}; pending_bytes={context.BufferedBytes}; emergency_limit_bytes={ReceiverBufferEmergencyLimitBytes}; next_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; late_arrival_distance={context.PullLateArrivalDistance}; granted_window_bytes={GetInboundV3GrantedWindowBytesLocked(context)}");
+            }
+
+            shouldSendGrantAfterBuffering = isV3 && failureCode is null;
+        }
+
+        if (failureCode is not null)
+        {
+            await TransitionInboundToTerminalAsync(
+                context,
+                FileTransferTransferState.Failed,
+                errorCode: failureCode,
+                statusMessage: failureMessage ?? "Inbound transfer failed.",
+                sendError: true,
+                errorMessage: failureMessage,
+                cancelReason: null,
+                ct: CancellationToken.None).ConfigureAwait(false);
+            return;
+        }
+
+        while (true)
+        {
+            InboundWriteBatch? batch = null;
+            bool completed = false;
+            bool shouldLogStartupCompleted = false;
+            long startupCompletedBytesReceived = 0;
+            int startupCompletedNextExpectedChunk = 0;
+            int startupCompletedHighestBufferedChunk = -1;
+            SessionFileTransferSnapshot? snapshot = null;
+            lock (gate)
+            {
+                if (!ReferenceEquals(inboundTransfer, context) ||
+                    context.IsTerminal ||
+                    context.WriteStream is null ||
+                    context.Hash is null)
+                {
+                    return;
+                }
+
+                batch = TryDequeueInboundWriteBatchLocked(context);
+
+                context.PullLateArrivalDistance = Math.Max(0, context.PullHighestReceivedChunkIndex - context.NextChunkIndex);
+                UpdateReceiverBufferPressureLocked(context, DateTimeOffset.UtcNow);
+
+                if (batch is not null && batch.ChunkCount > 0)
+                {
+                    context.PullLastProgressUtc = DateTimeOffset.UtcNow;
+                    context.PullRecoverySinceUtc ??= DateTimeOffset.UtcNow;
+                    context.PullFirstChunkTimeoutCount = 0;
+                    context.PullTimeoutOldestChunkIndex = null;
+                    context.PullTimeoutStreak = 0;
+                    context.PullCommittedFrontier = context.NextChunkIndex;
+                    if (context.PullGapFocusActive && batch.ChunkCount >= 2)
+                    {
+                        context.PullGapFocusActive = false;
+                        LogGapFocusChanged(context.TransferId, context.SessionId, active: false, context.NextChunkIndex, context.PullHighestReceivedChunkIndex, context.PullLateArrivalDistance);
+                    }
+
+                    context.PullAckDebtChunks += batch.ChunkCount;
+                    context.PullAckDebtBytes += batch.ByteCount;
+                    if (!context.StartupPhaseCompleted && context.NextChunkIndex > 0)
+                    {
+                        context.StartupPhaseCompleted = true;
+                        context.LastForcedWindowUpdateSentUtc = null;
+                        shouldLogStartupCompleted = true;
+                        startupCompletedBytesReceived = context.BytesTransferred;
+                        startupCompletedNextExpectedChunk = context.NextChunkIndex;
+                        startupCompletedHighestBufferedChunk = GetCurrentHighestBufferedChunkIndexLocked(context);
+                    }
+                }
+
+                if (context.PullLateArrivalDistance < PullLateArrivalDistanceThreshold)
+                {
+                    ClearPendingInboundReorderStepDownLocked(context);
+                }
+
+                if (context.PullLateArrivalDistance >= PullLateArrivalDistanceThreshold)
+                {
+                    var outstandingCount = context.OutstandingChunkRequests.Count;
+                    var now = DateTimeOffset.UtcNow;
+                    if (!ShouldDelayHealthyReorderStepDownLocked(context, now) &&
+                        TryStepDownInboundPipelineLocked(context, "late_arrival_distance", outstandingCount, out _, out _))
+                    {
+                        LogPullPipelineChanged(context.TransferId, context.SessionId, FileTransferDirection.Inbound, context.PullCurrentPipelineDepth, context.PullSessionDegraded || sessionScreenShareDegraded);
+                    }
+                }
+
+                if (context.PullLateArrivalDistance > 0)
+                {
+                    LogPullReorderPressure(
+                        context.TransferId,
+                        context.SessionId,
+                        context.NextChunkIndex,
+                        context.PullHighestReceivedChunkIndex,
+                        context.PullLateArrivalDistance,
+                        context.OutstandingChunkRequests.Count,
+                        context.PullCurrentPipelineDepth,
+                        context.ChunkSizeBytes);
+                }
+
+                completed = context.NextChunkIndex >= context.ChunkCount && context.ChunkCount > 0;
+                snapshot = CreateSnapshotLocked();
+            }
+
+            if (batch is null || batch.ChunkCount == 0)
+            {
+                if (snapshot is not null)
+                {
+                    RaiseTransferChanged(snapshot);
+                }
+
+                if (shouldSendGrantAfterBuffering)
+                {
+                    await SendInboundGrantWindowV3Async(context, forceGrant: false).ConfigureAwait(false);
+                }
+
+                return;
+            }
+
+            var writeStopwatch = Stopwatch.StartNew();
+            foreach (var bytes in batch.Chunks)
+            {
+                await context.WriteStream!.WriteAsync(bytes, context.LifetimeCts.Token).ConfigureAwait(false);
+                context.Hash!.AppendData(bytes);
+            }
+            writeStopwatch.Stop();
+            lock (gate)
+            {
+                if (ReferenceEquals(inboundTransfer, context) && !context.IsTerminal)
+                {
+                    context.PullReceiverContiguousBytesCommittedRecent += batch.ByteCount;
+                    context.PullReceiverWriteBatchCountRecent++;
+                    context.PullReceiverWriteBatchBytesRecent += batch.ByteCount;
+                    context.PullReceiverWriteDurationMsRecent += writeStopwatch.ElapsedMilliseconds;
+                    MaybeLogPullControlChatterWindow(context, context.TransferId, context.SessionId, DateTimeOffset.UtcNow);
+                }
+            }
+            LogReceiverWriteBatchCommitted(context, batch, writeStopwatch.ElapsedMilliseconds);
+
+            if (snapshot is not null)
+            {
+                RaiseTransferChanged(snapshot);
+                MaybeLogProgressMilestone(context, FileTransferDirection.Inbound);
+            }
+
+            if (shouldLogStartupCompleted)
+            {
+                LogWindowStartupCompleted(
+                    context.TransferId,
+                    context.SessionId,
+                    startupCompletedNextExpectedChunk,
+                    startupCompletedHighestBufferedChunk,
+                    startupCompletedBytesReceived);
+            }
+
+            LogPullBatchCommit(context.TransferId, context.SessionId, batch.ChunkCount, batch.NextChunkIndexAfterDequeue, batch.BytesCommittedAfterDequeue);
+
+            if (isV3)
+            {
+                await SendInboundGrantWindowV3Async(context, forceGrant: completed).ConfigureAwait(false);
+            }
+
+            if (completed)
+            {
+                await FinalizeInboundTransferAsync(context, context.LifetimeCts.Token).ConfigureAwait(false);
+                return;
+            }
+
+            if (!HasContiguousInboundChunkReady(context))
+            {
+                return;
+            }
+        }
+    }
+
+    private async Task HandleInboundSparsePullChunksAsync(InboundTransferContext context, IReadOnlyList<(int ChunkIndex, byte[] ChunkBytes)> chunks)
+    {
+        var acceptedChunks = new List<(int ChunkIndex, byte[] ChunkBytes)>(chunks.Count);
+        Stream? writeStream = null;
+        bool shouldSendGrantAfterBuffering = false;
+        string? failureCode = null;
+        string? failureMessage = null;
+        lock (gate)
+        {
+            if (!ReferenceEquals(inboundTransfer, context) ||
+                context.IsTerminal ||
+                !context.ReceiverSparseWriteActive ||
+                context.WriteStream is null ||
+                context.Hash is null ||
+                context.ReceiverSparseChunksWritten is null)
+            {
+                return;
+            }
+
+            writeStream = context.WriteStream;
+            foreach (var (chunkIndex, chunkBytes) in chunks)
+            {
+                context.OutstandingChunkRequests.Remove(chunkIndex);
+                context.RequestedChunks.Remove(chunkIndex);
+                if (chunkIndex < context.NextChunkIndex)
+                {
+                    continue;
+                }
+
+                if (chunkIndex < 0 || chunkIndex >= context.ChunkCount)
+                {
+                    LogPullDataFrameIgnored(context.TransferId, context.SessionId, new FileTransferChunkDataFrameV3
+                    {
+                        SessionId = context.SessionId,
+                        TransferId = context.TransferId,
+                        ChunkIndex = chunkIndex,
+                        ChunkCount = context.ChunkCount,
+                        Data = chunkBytes,
+                    }, "sparse_chunk_out_of_range");
+                    continue;
+                }
+
+                var expectedChunkLength = GetExpectedInboundChunkLength(context, chunkIndex);
+                if (chunkBytes.Length != expectedChunkLength)
+                {
+                    failureCode = FileSizeMismatchErrorCode;
+                    failureMessage = "Received chunk length did not match the declared file size.";
+                    LocalOperationalLog.Warn(
+                        "FileTransferService",
+                        $"event=filetransfer_chunk_rejected; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=sparse_chunk_size_mismatch; chunk_index={chunkIndex}; chunk_bytes={chunkBytes.Length}; expected_chunk_bytes={expectedChunkLength}; chunk_count={context.ChunkCount}");
+                    break;
+                }
+
+                if (IsInboundV3ChunkPresentOrPendingLocked(context, chunkIndex))
+                {
+                    continue;
+                }
+
+                context.ReceiverSparseChunksPendingWrite.Add(chunkIndex);
+                context.BufferedBytes += chunkBytes.Length;
+                context.PullHighestReceivedChunkIndex = Math.Max(context.PullHighestReceivedChunkIndex, chunkIndex);
+                var now = DateTimeOffset.UtcNow;
+                context.RecentPullChunkSentUtc.Enqueue(now);
+                TrimRecentEvents(context.RecentPullChunkSentUtc, now);
+                context.PullUsefulPayloadBytesRecent += chunkBytes.Length;
+                context.PullReceiverRawBytesRecent += chunkBytes.Length;
+                acceptedChunks.Add((chunkIndex, chunkBytes));
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_chunk_received; transfer_id={context.TransferId}; session_id={context.SessionId}; chunk_index={chunkIndex}; chunk_bytes={chunkBytes.Length}");
+            }
+
+            UpdateReceiverBufferPressureLocked(context, DateTimeOffset.UtcNow);
+            if (failureCode is null && context.BufferedBytes >= ReceiverBufferEmergencyLimitBytes)
+            {
+                failureCode = ReceiverBufferExhaustedErrorCode;
+                failureMessage = "Receiver buffer exceeded the emergency safety limit.";
+                LocalOperationalLog.Warn(
+                    "FileTransferService",
+                    $"event=filetransfer_receiver_buffer_exhausted; transfer_id={context.TransferId}; session_id={context.SessionId}; pending_chunk_count={GetReceiverPendingChunkCountLocked(context)}; pending_bytes={context.BufferedBytes}; emergency_limit_bytes={ReceiverBufferEmergencyLimitBytes}; next_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; late_arrival_distance={context.PullLateArrivalDistance}; granted_window_bytes={GetInboundV3GrantedWindowBytesLocked(context)}");
+            }
+
+            shouldSendGrantAfterBuffering = failureCode is null;
+        }
+
+        if (failureCode is not null)
+        {
+            await TransitionInboundToTerminalAsync(
+                context,
+                FileTransferTransferState.Failed,
+                errorCode: failureCode,
+                statusMessage: failureMessage ?? "Inbound transfer failed.",
+                sendError: true,
+                errorMessage: failureMessage,
+                cancelReason: null,
+                ct: CancellationToken.None).ConfigureAwait(false);
+            return;
+        }
+
+        if (acceptedChunks.Count == 0)
+        {
+            if (shouldSendGrantAfterBuffering)
+            {
+                await SendInboundGrantWindowV3Async(context, forceGrant: false).ConfigureAwait(false);
+            }
+
+            return;
+        }
+
+        var writeStopwatch = Stopwatch.StartNew();
+        long sparseWriteBytes = 0;
+        try
+        {
+            foreach (var (chunkIndex, chunkBytes) in acceptedChunks)
+            {
+                var offset = (long)chunkIndex * Math.Max(1, context.ChunkSizeBytes);
+                writeStream!.Seek(offset, SeekOrigin.Begin);
+                await writeStream.WriteAsync(chunkBytes, context.LifetimeCts.Token).ConfigureAwait(false);
+                sparseWriteBytes += chunkBytes.Length;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await TransitionInboundToTerminalAsync(
+                context,
+                FileTransferTransferState.Failed,
+                errorCode: StreamWriteFailedErrorCode,
+                statusMessage: ex.Message,
+                sendError: true,
+                errorMessage: "Could not write a sparse receiver chunk.",
+                cancelReason: null,
+                ct: CancellationToken.None).ConfigureAwait(false);
+            return;
+        }
+        writeStopwatch.Stop();
+
+        bool completed;
+        bool shouldLogStartupCompleted = false;
+        long startupCompletedBytesReceived = 0;
+        int startupCompletedNextExpectedChunk = 0;
+        int startupCompletedHighestBufferedChunk = -1;
+        int committedChunkCount = 0;
+        long committedByteCount = 0;
+        int nextChunkIndexAfterCommit = 0;
+        long bytesCommittedAfterCommit = 0;
+        SessionFileTransferSnapshot? snapshot;
+        lock (gate)
+        {
+            if (!ReferenceEquals(inboundTransfer, context) ||
+                context.IsTerminal ||
+                context.WriteStream is null ||
+                context.Hash is null ||
+                context.ReceiverSparseChunksWritten is null)
+            {
+                return;
+            }
+
+            foreach (var (chunkIndex, chunkBytes) in acceptedChunks)
+            {
+                if (!context.ReceiverSparseChunksPendingWrite.Remove(chunkIndex))
+                {
+                    continue;
+                }
+
+                context.BufferedBytes = Math.Max(0, context.BufferedBytes - chunkBytes.Length);
+                if (!context.ReceiverSparseChunksWritten[chunkIndex])
+                {
+                    context.ReceiverSparseChunksWritten[chunkIndex] = true;
+                    context.ReceiverSparseBytesWritten += chunkBytes.Length;
+                    context.HighestBufferedChunkIndex = Math.Max(context.HighestBufferedChunkIndex, chunkIndex);
+                }
+            }
+
+            while (context.NextChunkIndex < context.ChunkCount &&
+                   context.ReceiverSparseChunksWritten[context.NextChunkIndex])
+            {
+                var expectedChunkLength = GetExpectedInboundChunkLength(context, context.NextChunkIndex);
+                context.ReceiverSparseChunksWritten[context.NextChunkIndex] = false;
                 context.OutstandingChunkRequests.Remove(context.NextChunkIndex);
                 context.RequestedChunks.Remove(context.NextChunkIndex);
                 context.ChunkAttemptCounts.Remove(context.NextChunkIndex);
                 context.NextChunkIndex++;
                 context.ChunksTransferred++;
-                context.BytesTransferred = Math.Min(context.FileSizeBytes, context.BytesTransferred + contiguous.Length);
+                context.BytesTransferred = Math.Min(context.FileSizeBytes, context.BytesTransferred + expectedChunkLength);
+                committedChunkCount++;
+                committedByteCount += expectedChunkLength;
             }
 
             context.PullLateArrivalDistance = Math.Max(0, context.PullHighestReceivedChunkIndex - context.NextChunkIndex);
+            UpdateReceiverBufferPressureLocked(context, DateTimeOffset.UtcNow);
 
-            if (contiguousChunkBytes.Count > 0)
+            if (committedChunkCount > 0)
             {
                 context.PullLastProgressUtc = DateTimeOffset.UtcNow;
                 context.PullRecoverySinceUtc ??= DateTimeOffset.UtcNow;
@@ -1904,15 +1541,29 @@ public sealed partial class SessionFileTransferService
                 context.PullTimeoutOldestChunkIndex = null;
                 context.PullTimeoutStreak = 0;
                 context.PullCommittedFrontier = context.NextChunkIndex;
-                if (context.PullGapFocusActive && contiguousChunkBytes.Count >= 2)
+                if (context.PullGapFocusActive && committedChunkCount >= 2)
                 {
                     context.PullGapFocusActive = false;
                     LogGapFocusChanged(context.TransferId, context.SessionId, active: false, context.NextChunkIndex, context.PullHighestReceivedChunkIndex, context.PullLateArrivalDistance);
                 }
-                ackDebtChunks = contiguousChunkBytes.Count;
-                ackDebtBytes = contiguousChunkBytes.Sum(static bytes => (long)bytes.Length);
-                context.PullAckDebtChunks += ackDebtChunks;
-                context.PullAckDebtBytes += ackDebtBytes;
+
+                context.PullAckDebtChunks += committedChunkCount;
+                context.PullAckDebtBytes += committedByteCount;
+                context.PullReceiverContiguousBytesCommittedRecent += committedByteCount;
+                if (context.PullV3LastProactiveFrontierRepairStartChunkIndex >= 0 &&
+                    context.NextChunkIndex > context.PullV3LastProactiveFrontierRepairStartChunkIndex &&
+                    context.PullV3LastProactiveFrontierRepairSentUtc is not null)
+                {
+                    var now = DateTimeOffset.UtcNow;
+                    var repairedStartChunkIndex = context.PullV3LastProactiveFrontierRepairStartChunkIndex;
+                    var requestedChunkCount = context.PullV3LastProactiveFrontierRepairRequestedChunkCount;
+                    var requestToFillMs = (long)Math.Max(0, (now - context.PullV3LastProactiveFrontierRepairSentUtc.Value).TotalMilliseconds);
+                    LocalOperationalLog.Info(
+                        "FileTransferService",
+                        $"event=filetransfer_frontier_gap_repair_filled; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={context.PullV3LastProactiveFrontierRepairRequestKey ?? CreateRepairRequestKey(repairedStartChunkIndex, requestedChunkCount)}; start_chunk_index={repairedStartChunkIndex}; requested_chunk_count={requestedChunkCount}; request_to_fill_ms={requestToFillMs}; next_chunk_index={context.NextChunkIndex}; highest_received_chunk_index={context.PullHighestReceivedChunkIndex}; committed_chunk_count={committedChunkCount}; sparse_written_ahead_bytes={GetSparseWrittenAheadBytesLocked(context)}; same_frontier_unfilled_ms={GetSameFrontierUnfilledProactiveRepairAgeMsLocked(context, now)}");
+                    ResetStaleProactiveFrontierRepairStateLocked(context, now);
+                }
+
                 if (!context.StartupPhaseCompleted && context.NextChunkIndex > 0)
                 {
                     context.StartupPhaseCompleted = true;
@@ -1923,6 +1574,15 @@ public sealed partial class SessionFileTransferService
                     startupCompletedHighestBufferedChunk = GetCurrentHighestBufferedChunkIndexLocked(context);
                 }
             }
+
+            context.PullReceiverWriteBatchCountRecent++;
+            context.PullReceiverWriteBatchBytesRecent += sparseWriteBytes;
+            context.PullReceiverWriteDurationMsRecent += writeStopwatch.ElapsedMilliseconds;
+            context.PullReceiverSparseWriteBatchCountRecent++;
+            context.PullReceiverSparseWriteBytesRecent += sparseWriteBytes;
+            context.PullReceiverSparseWriteDurationMsRecent += writeStopwatch.ElapsedMilliseconds;
+            context.PullReceiverSparseChunksWrittenRecent += acceptedChunks.Count;
+            context.PullReceiverSparseContiguousChunksCommittedRecent += committedChunkCount;
 
             if (context.PullLateArrivalDistance < PullLateArrivalDistanceThreshold)
             {
@@ -1953,14 +1613,21 @@ public sealed partial class SessionFileTransferService
                     context.ChunkSizeBytes);
             }
 
+            nextChunkIndexAfterCommit = context.NextChunkIndex;
+            bytesCommittedAfterCommit = context.BytesTransferred;
             completed = context.NextChunkIndex >= context.ChunkCount && context.ChunkCount > 0;
+            if (completed)
+            {
+                context.LastPullControlChatterLogUtc = null;
+            }
+
+            MaybeLogPullControlChatterWindow(context, context.TransferId, context.SessionId, DateTimeOffset.UtcNow);
             snapshot = CreateSnapshotLocked();
         }
 
-        foreach (var bytes in contiguousChunkBytes)
+        if (committedChunkCount > 0)
         {
-            await context.WriteStream!.WriteAsync(bytes, context.LifetimeCts.Token).ConfigureAwait(false);
-            context.Hash!.AppendData(bytes);
+            LogPullBatchCommit(context.TransferId, context.SessionId, committedChunkCount, nextChunkIndexAfterCommit, bytesCommittedAfterCommit);
         }
 
         if (snapshot is not null)
@@ -1979,96 +1646,110 @@ public sealed partial class SessionFileTransferService
                 startupCompletedBytesReceived);
         }
 
-        if (contiguousChunkBytes.Count > 0)
+        if (shouldSendGrantAfterBuffering)
         {
-            LogPullBatchCommit(context.TransferId, context.SessionId, contiguousChunkBytes.Count, context.NextChunkIndex, context.BytesTransferred);
-        }
-
-        var sentRequestImmediately = false;
-        if (!completed)
-        {
-            if (isV3)
-            {
-                await SendInboundGrantWindowV3Async(context, forceGrant: false).ConfigureAwait(false);
-            }
-            else
-            {
-                sentRequestImmediately = await MaybeSendNextChunkRequestAsync(context, forceResendOldestOutstanding: false).ConfigureAwait(false);
-            }
-        }
-
-        if (isV3)
-        {
-            if (context.DataSession is not null && contiguousChunkBytes.Count > 0)
-            {
-                await SendInboundGrantWindowV3Async(context, forceGrant: completed).ConfigureAwait(false);
-            }
-        }
-        else if (context.DataSession is not null &&
-            ShouldSendPullAckLocked(context, ackDebtChunks, completed, sentRequestImmediately))
-        {
-            await context.DataSession.SendAsync(
-                    new FileTransferAckProgressFrameV2
-                    {
-                        SessionId = context.SessionId,
-                        TransferId = context.TransferId,
-                        NextExpectedChunkIndex = context.NextChunkIndex,
-                        BytesCommitted = context.BytesTransferred,
-                    },
-                    context.LifetimeCts.Token)
-                .ConfigureAwait(false);
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_ack_progress_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; next_expected_chunk={context.NextChunkIndex}; bytes_received={context.BytesTransferred}");
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_ack_batch_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; contiguous_chunk_count={context.PullAckDebtChunks}; next_expected_chunk={context.NextChunkIndex}; bytes_received={context.BytesTransferred}");
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_ack_debt_flushed; transfer_id={context.TransferId}; session_id={context.SessionId}; ack_debt_chunks={context.PullAckDebtChunks}; ack_debt_bytes={context.PullAckDebtBytes}");
-            LogPullBinaryFrameSent(
-                context.TransferId,
-                context.SessionId,
-                new FileTransferAckProgressFrameV2
-                {
-                    SessionId = context.SessionId,
-                    TransferId = context.TransferId,
-                    NextExpectedChunkIndex = context.NextChunkIndex,
-                    BytesCommitted = context.BytesTransferred,
-                },
-                payloadBytes: 0);
-
-            lock (gate)
-            {
-                if (ReferenceEquals(inboundTransfer, context) && !context.IsTerminal)
-                {
-                    var now = DateTimeOffset.UtcNow;
-                    context.PullLastAckSentUtc = now;
-                    context.PullLastAckSentChunkIndex = context.NextChunkIndex;
-                    context.PullAckDebtChunks = 0;
-                    context.PullAckDebtBytes = 0;
-                    context.RecentPullAckSentUtc.Enqueue(now);
-                    MaybeLogPullControlChatterWindow(context, context.TransferId, context.SessionId, now);
-                }
-            }
-        }
-        else if (contiguousChunkBytes.Count > 0 && sentRequestImmediately)
-        {
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_ack_suppressed_coalesced; transfer_id={context.TransferId}; session_id={context.SessionId}; next_expected_chunk={context.NextChunkIndex}; bytes_received={context.BytesTransferred}");
-        }
-        else if (contiguousChunkBytes.Count > 0)
-        {
-            LocalOperationalLog.Info(
-                "FileTransferService",
-                $"event=filetransfer_ack_flush_skipped; transfer_id={context.TransferId}; session_id={context.SessionId}; next_expected_chunk={context.NextChunkIndex}; ack_debt_chunks={context.PullAckDebtChunks}; outstanding_count={context.OutstandingChunkRequests.Count}");
+            await SendInboundGrantWindowV3Async(context, forceGrant: completed).ConfigureAwait(false);
         }
 
         if (completed)
         {
             await FinalizeInboundTransferAsync(context, context.LifetimeCts.Token).ConfigureAwait(false);
+        }
+    }
+
+    private sealed record InboundWriteBatch(
+        IReadOnlyList<byte[]> Chunks,
+        int ChunkCount,
+        long ByteCount,
+        int NextChunkIndexAfterDequeue,
+        long BytesCommittedAfterDequeue,
+        int PendingChunkCountAfterDequeue,
+        long PendingBytesAfterDequeue,
+        int HighestReceivedChunkIndex,
+        int LateArrivalDistance,
+        long GrantedWindowBytes);
+
+    private bool HasContiguousInboundChunkReady(InboundTransferContext context)
+    {
+        lock (gate)
+        {
+            return ReferenceEquals(inboundTransfer, context) &&
+                   !context.IsTerminal &&
+                   context.PendingChunks.ContainsKey(context.NextChunkIndex);
+        }
+    }
+
+    private static InboundWriteBatch? TryDequeueInboundWriteBatchLocked(InboundTransferContext context)
+    {
+        if (!context.PendingChunks.TryGetValue(context.NextChunkIndex, out _))
+        {
+            return null;
+        }
+
+        List<byte[]> chunks = [];
+        long byteCount = 0;
+        while (chunks.Count < ReceiverWriteBatchMaxChunks &&
+               context.PendingChunks.TryGetValue(context.NextChunkIndex, out var contiguous))
+        {
+            if (chunks.Count > 0 && byteCount + contiguous.Length > ReceiverWriteBatchMaxBytes)
+            {
+                break;
+            }
+
+            if (!context.PendingChunks.Remove(context.NextChunkIndex))
+            {
+                break;
+            }
+
+            context.BufferedBytes = Math.Max(0, context.BufferedBytes - contiguous.Length);
+            chunks.Add(contiguous);
+            byteCount += contiguous.Length;
+            context.OutstandingChunkRequests.Remove(context.NextChunkIndex);
+            context.RequestedChunks.Remove(context.NextChunkIndex);
+            context.ChunkAttemptCounts.Remove(context.NextChunkIndex);
+            context.NextChunkIndex++;
+            context.ChunksTransferred++;
+            context.BytesTransferred = Math.Min(context.FileSizeBytes, context.BytesTransferred + contiguous.Length);
+        }
+
+        if (chunks.Count == 0)
+        {
+            return null;
+        }
+
+        var lateArrivalDistance = Math.Max(0, context.PullHighestReceivedChunkIndex - context.NextChunkIndex);
+        return new InboundWriteBatch(
+            chunks,
+            chunks.Count,
+            byteCount,
+            context.NextChunkIndex,
+            context.BytesTransferred,
+            context.PendingChunks.Count,
+            context.BufferedBytes,
+            context.PullHighestReceivedChunkIndex,
+            lateArrivalDistance,
+            GetInboundV3GrantedWindowBytesLocked(context));
+    }
+
+    private static void UpdateReceiverBufferPressureLocked(InboundTransferContext context, DateTimeOffset now)
+    {
+        if (!context.ReceiverBufferPressureActive && context.BufferedBytes >= ReceiverBufferSoftLimitBytes)
+        {
+            context.ReceiverBufferPressureActive = true;
+            context.ReceiverBufferPressureSinceUtc = now;
+            var reason = context.BufferedBytes >= ReceiverBufferSevereLimitBytes ? "severe_limit" : "soft_limit";
+            LogReceiverBufferPressureEntered(context, reason);
             return;
+        }
+
+        if (context.ReceiverBufferPressureActive && context.BufferedBytes <= ReceiverBufferExitLimitBytes)
+        {
+            var durationMs = context.ReceiverBufferPressureSinceUtc is null
+                ? 0L
+                : (long)Math.Max(0, (now - context.ReceiverBufferPressureSinceUtc.Value).TotalMilliseconds);
+            context.ReceiverBufferPressureActive = false;
+            context.ReceiverBufferPressureSinceUtc = null;
+            LogReceiverBufferPressureExited(context, durationMs);
         }
     }
 
@@ -2120,7 +1801,15 @@ public sealed partial class SessionFileTransferService
 
         foreach (var obsoleteChunkIndex in context.PullSentChunkCache.Keys.Where(chunkIndex => chunkIndex < nextExpectedChunkIndex).ToArray())
         {
-            context.PullSentChunkCache.Remove(obsoleteChunkIndex);
+            if (context.PullSentChunkCache.Remove(obsoleteChunkIndex, out var removedBytes))
+            {
+                context.PullSentChunkCacheBytes -= removedBytes.Length;
+            }
+        }
+
+        if (context.PullSentChunkCacheBytes < 0)
+        {
+            context.PullSentChunkCacheBytes = 0;
         }
     }
 
@@ -2144,6 +1833,7 @@ public sealed partial class SessionFileTransferService
         {
             FileTransferChunkDataFrameV2 chunk => chunk.ChunkIndex.ToString(),
             FileTransferChunkBatchFrameV2 batch => $"{batch.StartChunkIndex}-{batch.StartChunkIndex + batch.DataSegments.Count - 1}",
+            FileTransferRepairRequestSetFrameV3 repairSet when repairSet.Ranges.Count > 0 => string.Join(",", repairSet.Ranges.Select(static range => $"{range.StartChunkIndex}-{range.StartChunkIndex + range.RequestedChunkCount - 1}")),
             _ => "(none)",
         };
 
@@ -2151,9 +1841,12 @@ public sealed partial class SessionFileTransferService
     {
         var serializedPayloadBytes = FileTransferDataFrameCodec.Serialize(frame).Length;
         var rawChunkBytes = GetFrameRawChunkBytes(frame);
+        var batchChunkCount = frame is FileTransferChunkDataFrameV2 or FileTransferChunkBatchFrameV2
+            ? GetFrameChunkCount(frame)
+            : 0;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_binary_frame_sent; transfer_id={transferId}; session_id={sessionId}; frame_type={frame.Type}; chunk_index={GetFrameChunkIndex(frame)}; payload_bytes={serializedPayloadBytes}; serialized_payload_bytes={serializedPayloadBytes}; raw_chunk_bytes={rawChunkBytes}; chunk_count={GetFrameChunkCount(frame)}");
+            $"event=filetransfer_binary_frame_sent; transfer_id={transferId}; session_id={sessionId}; frame_type={frame.Type}; chunk_index={GetFrameChunkIndex(frame)}; payload_bytes={serializedPayloadBytes}; serialized_payload_bytes={serializedPayloadBytes}; raw_chunk_bytes={rawChunkBytes}; chunk_count={GetFrameChunkCount(frame)}; batch_chunk_count={batchChunkCount}");
     }
 
     private static void LogPullBinaryFrameReceived(string transferId, string sessionId, FileTransferDataFrameV2 frame)

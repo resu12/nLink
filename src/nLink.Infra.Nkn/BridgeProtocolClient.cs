@@ -15,7 +15,10 @@ internal sealed class BridgeProtocolClient
     private readonly Action<JsonElement> onPong;
     private readonly Action<JsonElement> onScreenShareQueueState;
     private readonly Action<JsonElement> onBridgeEventLoopSummary;
+    private readonly Action<JsonElement> onBridgeControlSendSummary;
     private readonly Action<JsonElement> onBridgeMediaSendSummary;
+    private readonly Action<JsonElement> onBulkQueueState;
+    private readonly Action<JsonElement> onBridgeBulkSendSummary;
     private readonly Action<JsonElement> onBridgeTransportHealthSummary;
     private readonly Action<string> onUnmatchedBridgeError;
     private readonly Action<string, int>? onCommandSerialized;
@@ -40,6 +43,9 @@ internal sealed class BridgeProtocolClient
         Action<JsonElement> onBridgeMediaSendSummary,
         Action<JsonElement> onBridgeTransportHealthSummary,
         Action<string> onUnmatchedBridgeError,
+        Action<JsonElement>? onBulkQueueState = null,
+        Action<JsonElement>? onBridgeBulkSendSummary = null,
+        Action<JsonElement>? onBridgeControlSendSummary = null,
         Action<string, int>? onCommandSerialized = null)
     {
         this.getWriter = getWriter;
@@ -52,7 +58,10 @@ internal sealed class BridgeProtocolClient
         this.onPong = onPong;
         this.onScreenShareQueueState = onScreenShareQueueState;
         this.onBridgeEventLoopSummary = onBridgeEventLoopSummary;
+        this.onBridgeControlSendSummary = onBridgeControlSendSummary ?? (_ => { });
         this.onBridgeMediaSendSummary = onBridgeMediaSendSummary;
+        this.onBulkQueueState = onBulkQueueState ?? (_ => { });
+        this.onBridgeBulkSendSummary = onBridgeBulkSendSummary ?? (_ => { });
         this.onBridgeTransportHealthSummary = onBridgeTransportHealthSummary;
         this.onUnmatchedBridgeError = onUnmatchedBridgeError;
         this.onCommandSerialized = onCommandSerialized;
@@ -162,6 +171,15 @@ internal sealed class BridgeProtocolClient
                     break;
                 case "bridge_media_send_summary":
                     onBridgeMediaSendSummary(root.Clone());
+                    break;
+                case "bridge_control_send_summary":
+                    onBridgeControlSendSummary(root.Clone());
+                    break;
+                case "bulk_queue_state":
+                    onBulkQueueState(root.Clone());
+                    break;
+                case "bridge_bulk_send_summary":
+                    onBridgeBulkSendSummary(root.Clone());
                     break;
                 case "bridge_transport_health_summary":
                     onBridgeTransportHealthSummary(root.Clone());

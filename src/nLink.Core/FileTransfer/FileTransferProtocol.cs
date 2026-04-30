@@ -32,6 +32,13 @@ public static class FileTransferProtocol
     public const string ChunkDataFrameTypeV3 = "filetransfer.chunk_data.v3";
     public const string ChunkBatchFrameTypeV3 = "filetransfer.chunk_batch.v3";
     public const string RepairRequestFrameTypeV3 = "filetransfer.repair_request.v3";
+    public const string RepairRequestSetFrameTypeV3 = "filetransfer.repair_request_set.v3";
+    public const string ManifestFrameTypeV4 = "filetransfer.manifest.v4";
+    public const string StateFrameTypeV4 = "filetransfer.state.v4";
+    public const string ChunkBatchFrameTypeV4 = "filetransfer.chunk_batch.v4";
+    public const string SessionCompleteFrameTypeV4 = "filetransfer.complete.v4";
+    public const string SessionCancelFrameTypeV4 = "filetransfer.cancel.v4";
+    public const string ErrorFrameTypeV4 = "filetransfer.error.v4";
 
     public const string PressureModeNormal = "Normal";
     public const string PressureModeCatchUpOnly = "CatchUpOnly";
@@ -42,6 +49,7 @@ public static class FileTransferProtocol
     public const string SessionRoleReceiver = "Receiver";
     public const int ProtocolVersionV2 = 2;
     public const int ProtocolVersionV3 = 3;
+    public const int ProtocolVersionV4 = 4;
 
     public const int Sha256LengthBytes = 32;
     public const int MaxTransferIdLength = 128;
@@ -50,5 +58,13 @@ public static class FileTransferProtocol
     public const int MaxErrorCodeLength = 64;
     public const int MaxErrorMessageLength = 256;
     public const int MaxChunkRawBytes = FileTransferChunkBudget.MaxRawChunkBytes;
+    public const int MaxChunkBatchRawBytesV3 = FileTransferChunkBudget.MaxRawBatchBytesV3;
     public const int MaxSerializedChunkPayloadBytes = FileTransferChunkBudget.MaxSerializedChunkPayloadBytes;
+    public const int MaxSerializedChunkBatchPayloadBytesV3 = FileTransferChunkBudget.MaxSerializedChunkBatchPayloadBytesV3;
+    public const int MaxRepairSetRangesV3 = 8;
+    public const int MaxRepairSetChunksV3 = 64;
+    public const int MaxStateMissingRangesV4 = 16;
+    public const int MaxStateMissingChunksV4 = 64;
+    public const int MaxChunkBatchRawBytesV4 = FileTransferChunkBudget.MaxRawBatchBytesV3;
+    public const int MaxSerializedChunkBatchPayloadBytesV4 = FileTransferChunkBudget.MaxSerializedChunkBatchPayloadBytesV3;
 }

@@ -4081,10 +4081,10 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
         var data = bitmap.LockBits(rect, ImageLockMode.ReadOnly, bitmap.PixelFormat);
         try
         {
-            var absStride = Math.Abs(data.Stride);
-            var bgraBytes = new byte[absStride * targetHeight];
-            Marshal.Copy(data.Scan0, bgraBytes, 0, bgraBytes.Length);
-            FillNv12FromBgraBuffer(bgraBytes, absStride, nv12, targetWidth, targetHeight);
+            unsafe
+            {
+                FillNv12FromBgraPointer((byte*)data.Scan0, data.Stride, nv12, targetWidth, targetHeight);
+            }
         }
         finally
         {
@@ -4194,6 +4194,41 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
         return nv12;
     }
 
+    internal static byte[] ConvertBgraBufferToNv12SignedStrideForTesting(byte[] bgraBytes, int scan0Offset, int stride, int targetWidth, int targetHeight)
+    {
+        ArgumentNullException.ThrowIfNull(bgraBytes);
+        if (scan0Offset < 0 || scan0Offset >= bgraBytes.Length)
+        {
+            throw new ArgumentOutOfRangeException(nameof(scan0Offset));
+        }
+
+        if (stride == 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(stride));
+        }
+
+        if (targetWidth <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetWidth));
+        }
+
+        if (targetHeight <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetHeight));
+        }
+
+        var nv12 = new byte[targetWidth * targetHeight * 3 / 2];
+        unsafe
+        {
+            fixed (byte* bgraPtr = bgraBytes)
+            {
+                FillNv12FromBgraPointer(bgraPtr + scan0Offset, stride, nv12, targetWidth, targetHeight);
+            }
+        }
+
+        return nv12;
+    }
+
     internal static bool CanUseDirectNv12PreprocessForTesting(
         int sourceWidth,
         int sourceHeight,
@@ -4209,15 +4244,44 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
     private static bool IsSupportedDirectBgraPixelFormat(PixelFormat pixelFormat)
         => pixelFormat is PixelFormat.Format32bppArgb or PixelFormat.Format32bppPArgb;
 
-    private static unsafe void FillNv12FromBgraPointer(byte* bgraBytes, int absStride, byte[] nv12, int targetWidth, int targetHeight)
+    private static unsafe void FillNv12FromBgraPointer(byte* bgraBytes, int stride, byte[] nv12, int targetWidth, int targetHeight)
     {
+        ArgumentNullException.ThrowIfNull(nv12);
+        if (bgraBytes is null)
+        {
+            throw new ArgumentNullException(nameof(bgraBytes));
+        }
+
+        if (targetWidth <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetWidth));
+        }
+
+        if (targetHeight <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetHeight));
+        }
+
+        var absStride = Math.Abs(stride);
+        var minimumRowBytes = checked(targetWidth * 4);
+        if (absStride < minimumRowBytes)
+        {
+            throw new ArgumentOutOfRangeException(nameof(stride), "Stride is smaller than the requested BGRA row width.");
+        }
+
+        var requiredNv12Bytes = checked((targetWidth * targetHeight) + (targetWidth * ((targetHeight + 1) / 2)));
+        if (nv12.Length < requiredNv12Bytes)
+        {
+            throw new ArgumentException("NV12 buffer is smaller than the requested frame dimensions.", nameof(nv12));
+        }
+
         fixed (byte* nv12Bytes = nv12)
         {
             var yPlaneSize = targetWidth * targetHeight;
 
             for (var y = 0; y < targetHeight; y++)
             {
-                var row = bgraBytes + (y * absStride);
+                var row = bgraBytes + (y * stride);
                 var yPlane = nv12Bytes + (y * targetWidth);
                 for (var x = 0; x < targetWidth; x++)
                 {
@@ -4231,8 +4295,8 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
 
             for (var y = 0; y < targetHeight; y += 2)
             {
-                var row0 = bgraBytes + (y * absStride);
-                var row1 = bgraBytes + (Math.Min(y + 1, targetHeight - 1) * absStride);
+                var row0 = bgraBytes + (y * stride);
+                var row1 = bgraBytes + (Math.Min(y + 1, targetHeight - 1) * stride);
                 var uvPlane = nv12Bytes + yPlaneSize + ((y / 2) * targetWidth);
                 for (var x = 0; x < targetWidth; x += 2)
                 {
@@ -5309,11 +5373,10 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
             var data = bgraBitmap.LockBits(rect, ImageLockMode.ReadOnly, bgraBitmap.PixelFormat);
             try
             {
-                var absStride = Math.Abs(data.Stride);
                 unsafe
                 {
                     var convertStartedAt = Stopwatch.GetTimestamp();
-                    FillNv12FromBgraPointer((byte*)data.Scan0, absStride, nv12Bytes, Width, Height);
+                    FillNv12FromBgraPointer((byte*)data.Scan0, data.Stride, nv12Bytes, Width, Height);
                     return new PreprocessResult(
                         nv12Bytes,
                         resizeDurationMs,
@@ -5359,7 +5422,7 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
                 unsafe
                 {
                     var convertStartedAt = Stopwatch.GetTimestamp();
-                    FillNv12FromBgraPointer((byte*)data.Scan0, Math.Abs(data.Stride), nv12Bytes, Width, Height);
+                    FillNv12FromBgraPointer((byte*)data.Scan0, data.Stride, nv12Bytes, Width, Height);
                     return new PreprocessResult(
                         nv12Bytes,
                         ResizeDurationMs: 0,

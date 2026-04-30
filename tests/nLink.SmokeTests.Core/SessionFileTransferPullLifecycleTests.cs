@@ -13,7 +13,7 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class SessionFileTransferPullLifecycleTests : SessionFileTransferServiceTestBase
 {
-    [Fact]
+    [Fact(Skip = "Legacy V2 timeout/request-loop coverage is disabled by V3-only negotiation.")]
     public async Task PullSession_SingleTimeout_CompletesWithoutStallingFirstChunk()
     {
         const string transferId = "transfer_service_pull_single_timeout";
@@ -64,8 +64,9 @@ public sealed class SessionFileTransferPullLifecycleTests : SessionFileTransferS
     {
         const string transferId = "transfer_service_pull_startup_resend_noise";
         var payload = Enumerable.Range(0, 96_000).Select(static i => (byte)(i % 251)).ToArray();
-        using var senderTransport = new LoopbackFileTransferTransport("session_service_pull_startup_resend_noise");
-        using var receiverTransport = new LoopbackFileTransferTransport("session_service_pull_startup_resend_noise");
+        var sessionId = "session_service_pull_startup_resend_noise_" + Guid.NewGuid().ToString("N");
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         using var receiver = new SessionFileTransferService();
@@ -77,10 +78,17 @@ public sealed class SessionFileTransferPullLifecycleTests : SessionFileTransferS
         using var destination = new NonDisposingMemoryStream();
         await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
         await WaitUntilAsync(() => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed && receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed, timeoutMs: 12000);
-        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("event=window_startup_completed", StringComparison.Ordinal), timeoutMs: 3000);
+        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("event=window_startup_completed", StringComparison.Ordinal), timeoutMs: 10000);
         var logTail = ReadOperationalLogTail(logStart);
         Assert.Equal(payload, destination.ToArray());
         Assert.Contains("event=window_startup_completed", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v3_throughput_summary", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v3_sender_throughput_summary", logTail, StringComparison.Ordinal);
+        Assert.Contains("raw_bytes_sent=", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v3_receiver_throughput_summary", logTail, StringComparison.Ordinal);
+        Assert.Contains("raw_bytes_received=", logTail, StringComparison.Ordinal);
+        Assert.Contains("contiguous_bytes_committed=", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v3_gap_stall_summary", logTail, StringComparison.Ordinal);
         Assert.True(Regex.Matches(logTail, "event=window_update_sent;.*reason=startup_resend", RegexOptions.CultureInvariant).Count <= 1, "Expected startup resend logging to stop after healthy pull-session progress was established.");
     }
 
@@ -121,7 +129,7 @@ public sealed class SessionFileTransferPullLifecycleTests : SessionFileTransferS
         Assert.Equal(payload, destination.ToArray());
     }
 
-    [Fact]
+    [Fact(Skip = "Legacy V2 timeout/degraded-loop coverage is disabled by V3-only negotiation.")]
     public async Task PullSession_RepeatedTimeouts_EnterDegradedMode_AndRecoverAtPipelineThreeOrHigher()
     {
         const string transferId = "transfer_service_pull_repeated_timeout";

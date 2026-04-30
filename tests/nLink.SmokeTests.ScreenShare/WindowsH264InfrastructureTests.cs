@@ -593,6 +593,45 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void MediaFoundationH264FrameEncoder_OptimizedNv12Conversion_HonorsNegativeStride()
+    {
+        const int width = 6;
+        const int height = 4;
+        const int stride = (width * 4) + 8;
+        var topDown = new byte[stride * height];
+        var bottomUp = new byte[stride * height];
+
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                var offset = (y * stride) + (x * 4);
+                topDown[offset] = (byte)((x * 19 + y * 7) & 0xFF);
+                topDown[offset + 1] = (byte)((x * 5 + y * 37 + 3) & 0xFF);
+                topDown[offset + 2] = (byte)((x * 41 + y * 13 + 11) & 0xFF);
+                topDown[offset + 3] = 0xFF;
+            }
+
+            Buffer.BlockCopy(topDown, y * stride, bottomUp, (height - 1 - y) * stride, stride);
+        }
+
+        var expected = MediaFoundationH264FrameEncoder.ConvertBgraBufferToNv12LegacyForTesting(
+            topDown,
+            stride,
+            width,
+            height);
+        var actual = MediaFoundationH264FrameEncoder.ConvertBgraBufferToNv12SignedStrideForTesting(
+            bottomUp,
+            (height - 1) * stride,
+            -stride,
+            width,
+            height);
+
+        Assert.Equal(expected, actual);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void MediaFoundationH264FrameEncoder_SameSizeBgra_UsesDirectNv12Preprocess()
     {
         Assert.True(MediaFoundationH264FrameEncoder.CanUseDirectNv12PreprocessForTesting(

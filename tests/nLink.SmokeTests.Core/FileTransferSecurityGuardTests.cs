@@ -281,6 +281,9 @@ public sealed class FileTransferSecurityGuardTests
 
             await using (first.Handle!)
             {
+                Assert.True(first.Handle.Stream.CanRead);
+                Assert.True(first.Handle.Stream.CanSeek);
+                Assert.True(first.Handle.Stream.CanWrite);
                 await first.Handle.Stream.WriteAsync("hello"u8.ToArray());
                 Assert.True(File.Exists(first.Plan.TempPath));
                 Assert.False(File.Exists(first.Plan.FinalPath));

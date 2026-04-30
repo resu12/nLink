@@ -292,7 +292,9 @@ public static class FileTransferPayloadCodec
     }
 
     internal static bool IsSupportedDataProtocolVersion(int protocolVersion)
-        => protocolVersion is FileTransferProtocol.ProtocolVersionV2 or FileTransferProtocol.ProtocolVersionV3;
+        => protocolVersion is FileTransferProtocol.ProtocolVersionV2
+            or FileTransferProtocol.ProtocolVersionV3
+            or FileTransferProtocol.ProtocolVersionV4;
 
     internal static bool TryNormalizeOptionalProtocolVersion(int? protocolVersion, out int? normalizedProtocolVersion)
     {

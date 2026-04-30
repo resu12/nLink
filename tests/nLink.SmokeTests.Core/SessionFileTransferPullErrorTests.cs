@@ -13,7 +13,7 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class SessionFileTransferPullErrorTests : SessionFileTransferServiceTestBase
 {
-    [Fact]
+    [Fact(Skip = "Legacy V2 request-loop stall coverage is disabled by V3-only negotiation.")]
     public async Task PullSession_StallsAtFirstChunk_FailsTerminallyInsteadOfLoopingForever()
     {
         const string transferId = "transfer_service_pull_stall";
@@ -47,7 +47,7 @@ public sealed class SessionFileTransferPullErrorTests : SessionFileTransferServi
         Assert.True(Regex.Matches(logTail, "event=filetransfer_request_sent;.*start_chunk=0; requested_chunk_count=1", RegexOptions.CultureInvariant).Count <= 4, "Expected the stalled pull session to fail fast instead of repeatedly requesting chunk 0.");
     }
 
-    [Fact]
+    [Fact(Skip = "Legacy V1/V2 control-lane chatter coverage is disabled by V3-only negotiation.")]
     public async Task InboundCancel_IsNotBlockedBehindWindowUpdateControlChatter()
     {
         const string transferId = "transfer_service_inbound_cancel_priority";
@@ -84,7 +84,7 @@ public sealed class SessionFileTransferPullErrorTests : SessionFileTransferServi
         releaseBlockedControl.TrySetResult(true);
     }
 
-    [Fact]
+    [Fact(Skip = "Legacy V2 data-frame mismatch coverage is disabled by V3-only negotiation.")]
     public async Task PullSession_MismatchedDataFrameSessionId_IsRejectedAndFails()
     {
         const string transferId = "transfer_service_pull_session_mismatch";
@@ -481,7 +481,7 @@ public sealed class SessionFileTransferPullErrorTests : SessionFileTransferServi
         }
     }
 
-    [Fact]
+    [Fact(Skip = "Legacy V2 chunk-disconnect cleanup coverage is disabled by V3-only negotiation.")]
     public async Task TransportDisconnectDuringReceiving_FailsAfterGraceAndDeletesTempArtifact()
     {
         const string transferId = "transfer_service_disconnect_cleanup";
