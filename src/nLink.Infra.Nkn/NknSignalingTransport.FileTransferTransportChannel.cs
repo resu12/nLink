@@ -2842,8 +2842,11 @@ public sealed partial class NknSignalingTransport
     private bool SourceMatchesExpectedRemoteBulkPeer(string? source)
     {
         var expectedBulkSource = ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
-        return !string.IsNullOrWhiteSpace(expectedBulkSource) &&
-               AddressMatchesForSessionPolicy(source, expectedBulkSource);
+        var normalizedSource = string.IsNullOrWhiteSpace(source) ? null : source.Trim();
+        var normalizedExpectedBulkSource = string.IsNullOrWhiteSpace(expectedBulkSource) ? null : expectedBulkSource.Trim();
+        return !string.IsNullOrWhiteSpace(normalizedSource) &&
+               !string.IsNullOrWhiteSpace(normalizedExpectedBulkSource) &&
+               string.Equals(normalizedSource, normalizedExpectedBulkSource, StringComparison.Ordinal);
     }
 
     private PeerAddress ResolveLocalPeerAddressForSecureEnvelope()

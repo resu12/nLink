@@ -586,8 +586,8 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
             using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
             NknTransportOptions options = NknTransportOptions.Load();
-            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.v4.senderpause.address");
-            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.v4.senderpause.address");
+            FakeNknClient hostClient = new FakeNknClient("nlink-host-v4-senderpause.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            FakeNknClient helperClient = new FakeNknClient("nlink-helper-v4-senderpause.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
             using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-v4-senderpause-id", hostClient.Address));
             using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-v4-senderpause-id", helperClient.Address));
 
