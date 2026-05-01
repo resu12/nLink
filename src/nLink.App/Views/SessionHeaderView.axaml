@@ -41,13 +41,14 @@
         </Style>
     </UserControl.Styles>
 
-    <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+    <Grid ColumnDefinitions="Auto,*,Auto"
           ColumnSpacing="10"
           MinHeight="38">
         <TextBlock Grid.Column="0"
                    Classes="headerRole"
                    Text="{Binding #Root.RoleText}"
-                   IsVisible="{Binding #Root.HasRoleText}"/>
+                   IsVisible="{Binding #Root.HasRoleText}"
+                   MaxLines="1"/>
 
         <TextBlock Grid.Column="1"
                    Classes="headerStatus"
@@ -57,86 +58,74 @@
                    MaxLines="1"
                    TextTrimming="CharacterEllipsis"/>
 
-        <Border Grid.Column="2"
-                Classes="remoteControlBadge"
-                IsVisible="{Binding #Root.ShowVerificationCode}">
-            <TextBlock Classes="remoteControlBadgeText"
-                       AutomationProperties.AutomationId="SessionHeader.VerificationCode"
-                       Text="{Binding #Root.VerificationCodeText}"
-                       IsVisible="{Binding #Root.ShowVerificationCode}"/>
-        </Border>
+        <StackPanel Grid.Column="2"
+                    Orientation="Horizontal"
+                    Spacing="10"
+                    VerticalAlignment="Center"
+                    HorizontalAlignment="Right">
+            <Border Classes="remoteControlBadge"
+                    IsVisible="{Binding #Root.ShowVerificationCode}">
+                <TextBlock Classes="remoteControlBadgeText"
+                           AutomationProperties.AutomationId="SessionHeader.VerificationCode"
+                           Text="{Binding #Root.VerificationCodeText}"
+                           IsVisible="{Binding #Root.ShowVerificationCode}"/>
+            </Border>
 
-        <Border Grid.Column="3"
-                Classes="remoteControlBadge"
-                IsVisible="{Binding #Root.ShowRemoteControlActiveStatus}">
-            <TextBlock Classes="remoteControlBadgeText"
-                       AutomationProperties.AutomationId="SessionHeader.RemoteControlActive"
-                       Text="Remote control active"/>
-        </Border>
+            <Border Classes="remoteControlBadge"
+                    IsVisible="{Binding #Root.ShowRemoteControlActiveStatus}">
+                <TextBlock Classes="remoteControlBadgeText"
+                           AutomationProperties.AutomationId="SessionHeader.RemoteControlActive"
+                           Text="Remote control active"/>
+            </Border>
 
-        <Button Grid.Column="4"
-                Classes="appButton secondaryButton"
-                AutomationProperties.AutomationId="SessionHeader.ControlMode"
-                Content="{Binding #Root.ControlModeButtonText}"
-                Command="{Binding #Root.ControlModeToggleCommand}"
-                IsEnabled="{Binding #Root.CanControlModeToggle}"
-                IsVisible="{Binding #Root.ShowControlModeToggle}"
-                HorizontalAlignment="Stretch"
-                Height="34"
-                MinWidth="144"
-                Padding="10,0"/>
+            <Button Classes="appButton secondaryButton compactButton"
+                    AutomationProperties.AutomationId="SessionHeader.ControlMode"
+                    Content="{Binding #Root.ControlModeButtonText}"
+                    Command="{Binding #Root.ControlModeToggleCommand}"
+                    IsEnabled="{Binding #Root.CanControlModeToggle}"
+                    IsVisible="{Binding #Root.ShowControlModeToggle}"
+                    HorizontalAlignment="Stretch"
+                    MinWidth="144"/>
 
-        <Button Grid.Column="5"
-                Classes="appButton secondaryButton"
-                AutomationProperties.AutomationId="SessionHeader.RequestControl"
-                Content="Request control"
-                Command="{Binding #Root.RequestControlCommand}"
-                IsEnabled="{Binding #Root.CanRequestControl}"
-                IsVisible="{Binding #Root.ShowRequestControl}"
-                HorizontalAlignment="Stretch"
-                Height="34"
-                MinWidth="132"
-                Padding="10,0"/>
+            <Button Classes="appButton secondaryButton compactButton"
+                    AutomationProperties.AutomationId="SessionHeader.RequestControl"
+                    Content="Request control"
+                    Command="{Binding #Root.RequestControlCommand}"
+                    IsEnabled="{Binding #Root.CanRequestControl}"
+                    IsVisible="{Binding #Root.ShowRequestControl}"
+                    HorizontalAlignment="Stretch"
+                    MinWidth="132"/>
 
-        <ContentPresenter Grid.Column="6"
-                          Content="{Binding #Root.ScreenShareAccessory}"
-                          VerticalAlignment="Center"
-                          IsVisible="{Binding #Root.HasScreenShareAccessory}"/>
+            <ContentPresenter Content="{Binding #Root.ScreenShareAccessory}"
+                              VerticalAlignment="Center"
+                              IsVisible="{Binding #Root.HasScreenShareAccessory}"/>
 
-        <Button Grid.Column="7"
-                x:Name="ShareScreenButton"
-                Classes="appButton secondaryButton"
-                AutomationProperties.AutomationId="SessionHeader.ShareScreen"
-                Content="{Binding #Root.ScreenShareButtonText}"
-                Command="{Binding #Root.ScreenShareCommand}"
-                IsEnabled="{Binding #Root.CanScreenShare}"
-                IsVisible="{Binding #Root.ShowScreenShare}"
-                HorizontalAlignment="Stretch"
-                Height="34"
-                MinWidth="132"
-                Padding="10,0"/>
+            <Button x:Name="ShareScreenButton"
+                    Classes="appButton secondaryButton compactButton"
+                    AutomationProperties.AutomationId="SessionHeader.ShareScreen"
+                    Content="{Binding #Root.ScreenShareButtonText}"
+                    Command="{Binding #Root.ScreenShareCommand}"
+                    IsEnabled="{Binding #Root.CanScreenShare}"
+                    IsVisible="{Binding #Root.ShowScreenShare}"
+                    HorizontalAlignment="Stretch"
+                    MinWidth="132"/>
 
-        <Button Grid.Column="8"
-                Classes="appButton primaryButton"
-                AutomationProperties.AutomationId="SessionHeader.StopControl"
-                Content="{Binding #Root.StopControlButtonText}"
-                Command="{Binding #Root.StopControlCommand}"
-                IsEnabled="{Binding #Root.CanStopControl}"
-                IsVisible="{Binding #Root.ShowStopControl}"
-                HorizontalAlignment="Stretch"
-                Height="34"
-                MinWidth="120"
-                Padding="10,0"/>
+            <Button Classes="appButton primaryButton compactButton"
+                    AutomationProperties.AutomationId="SessionHeader.StopControl"
+                    Content="{Binding #Root.StopControlButtonText}"
+                    Command="{Binding #Root.StopControlCommand}"
+                    IsEnabled="{Binding #Root.CanStopControl}"
+                    IsVisible="{Binding #Root.ShowStopControl}"
+                    HorizontalAlignment="Stretch"
+                    MinWidth="120"/>
 
-        <Button Grid.Column="9"
-                Classes="appButton secondaryButton"
-                Content="End session"
-                Command="{Binding #Root.EndSessionCommand}"
-                IsEnabled="{Binding #Root.CanEndSession}"
-                IsVisible="{Binding #Root.ShowEndSession}"
-                HorizontalAlignment="Stretch"
-                Height="34"
-                MinWidth="112"
-                Padding="10,0"/>
+            <Button Classes="appButton secondaryButton compactButton"
+                    Content="End session"
+                    Command="{Binding #Root.EndSessionCommand}"
+                    IsEnabled="{Binding #Root.CanEndSession}"
+                    IsVisible="{Binding #Root.ShowEndSession}"
+                    HorizontalAlignment="Stretch"
+                    MinWidth="112"/>
+        </StackPanel>
     </Grid>
 </UserControl>

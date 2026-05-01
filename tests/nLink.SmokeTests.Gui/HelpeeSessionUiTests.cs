@@ -247,6 +247,183 @@ public sealed class HelpeeSessionUiTests : SessionHeaderAndBannerTestBase
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task HelpeeViewModel_HelperClosesHelpRequest_ShowsUnavailableStatus()
+    {
+        using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+        using var scriptedTransport = new ScriptedSignalingTransport(onHostByAddressAsync: _ => Task.CompletedTask, localPeerAddress: "helpee.helper.closed.status");
+        using var helpeeRuntime = new SessionRuntime(() => scriptedTransport);
+        var transportConfig = CreateNknTestConfig();
+        using var helpee = new HelpeePageViewModel(cancelAction: static () =>
+        {
+        }, transportConfig, helpeeRuntime);
+        var helperIdentity = new PeerAddress("nlink-helper.closed.status");
+        var helperTarget = new PeerAddress("nlink-helper.closed.target");
+        var helperBootstrap = HelperBootstrapQrPayload.Format(HelperBootstrapPayload.Create(helperTarget, helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
+        helpee.SetVerifiedInviteHelperIdentity(helperIdentity, helperTargetAddress: helperTarget, refreshInvite: true, normalizedInputOverride: helperBootstrap);
+        await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
+        SetPrivateField(helpeeRuntime, "<PendingOutboundHelpRequestDecision>k__BackingField", new HelpRequestDecisionMessage("hr_closed", new PeerAddress("helpee.helper.closed.status"), helperTarget, Accepted: false, Reason: "helper_closed"));
+        SetPrivateField(helpeeRuntime, "state", SessionRuntimeState.Rejected);
+        SetPrivateField(helpeeRuntime, "statusText", "The helper is no longer available.");
+        SetPrivateField(helpeeRuntime, "currentFlowSnapshot", helpeeRuntime.FlowSnapshot with { Phase = SessionFlowPhase.Failed, UiPhase = SessionUiPhase.Failed, Role = SessionRuntimeRole.Helpee, RuntimeState = SessionRuntimeState.Rejected, LastEndOrigin = SessionFlowEndOrigin.Rejected, TerminalKind = SessionTerminalKind.Rejected, TerminalStatusText = "The helper is no longer available.", FailureTitle = "Request rejected", FailureMessage = "The helper is no longer available.", FailureActionText = "Retry", ShouldClearConversationUi = true, ShouldSuppressConnectedControls = true, DisplayStatusText = "The helper is no longer available.", DisplayConnectionState = "Failed", ShowRetryAction = true, ShowDiagnosticsAction = true, PostTerminalAction = SessionFlowPostTerminalAction.ReturnToWaitingPreserveBootstrap, });
+        InvokePrivateMethod(helpee, "OnHelpRequestDecisionAvailable", helpeeRuntime, EventArgs.Empty);
+        await WaitUntilAsync(
+            () => string.Equals(helpee.ShareInviteStatusText, "The helper is no longer available.", StringComparison.Ordinal) &&
+                  !helpee.HasIncomingRequest &&
+                  helpee.HasShareInvite &&
+                  string.IsNullOrWhiteSpace(helpee.InviteHelperIdentityInput) &&
+                  !helpee.HasVerifiedInviteHelperIdentity &&
+                  !helpee.RequestHelpCommand.CanExecute(null),
+            TimeSpan.FromSeconds(5));
+        Assert.False(helpee.HasIncomingRequest);
+        Assert.Equal("The helper is no longer available.", helpee.ShareInviteStatusText);
+        Assert.Equal(string.Empty, helpee.InviteHelperIdentityInput);
+        Assert.False(helpee.HasVerifiedInviteHelperIdentity);
+        Assert.False(helpee.CanRequestHelpAction);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task HelpeeViewModel_HelperDisconnectsAfterAccept_ReturnsToStartingSetupState()
+    {
+        using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+        using var scriptedTransport = new ScriptedSignalingTransport(onHostByAddressAsync: _ => Task.CompletedTask, localPeerAddress: "helpee.helper.accepted.disconnect");
+        using var helpeeRuntime = new SessionRuntime(() => scriptedTransport);
+        var transportConfig = CreateNknTestConfig();
+        using var helpee = new HelpeePageViewModel(cancelAction: static () =>
+        {
+        }, transportConfig, helpeeRuntime);
+        var helperIdentity = new PeerAddress("nlink-helper.accepted.disconnect.identity");
+        var helperTarget = new PeerAddress("nlink-helper.accepted.disconnect.target");
+        var helperBootstrap = HelperBootstrapQrPayload.Format(HelperBootstrapPayload.Create(helperTarget, helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
+        helpee.SetVerifiedInviteHelperIdentity(helperIdentity, helperTargetAddress: helperTarget, refreshInvite: true, normalizedInputOverride: helperBootstrap);
+        await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
+
+        SetPrivateField(helpeeRuntime, "<PendingOutboundHelpRequestDecision>k__BackingField", new HelpRequestDecisionMessage("hr_accepted_disconnect", new PeerAddress("helpee.helper.accepted.disconnect"), helperTarget, Accepted: true, Reason: null));
+        SetPrivateField(helpeeRuntime, "state", SessionRuntimeState.Failed);
+        SetPrivateField(helpeeRuntime, "transportState", TransportState.Failed);
+        SetPrivateField(helpeeRuntime, "statusText", "Connection lost.");
+        SetPrivateField(helpeeRuntime, "currentFlowSnapshot", helpeeRuntime.FlowSnapshot with
+        {
+            Phase = SessionFlowPhase.HelpeeWaiting,
+            UiPhase = SessionUiPhase.Waiting,
+            Role = SessionRuntimeRole.Helpee,
+            RuntimeState = SessionRuntimeState.Failed,
+            TransportState = TransportState.Failed,
+            LastEndOrigin = SessionFlowEndOrigin.Remote,
+            TerminalKind = SessionTerminalKind.None,
+            TerminalStatusText = string.Empty,
+            FailureTitle = string.Empty,
+            FailureMessage = string.Empty,
+            FailureActionText = string.Empty,
+            ShouldClearConversationUi = true,
+            ShouldSuppressConnectedControls = true,
+            DisplayStatusText = "Connection lost.",
+            DisplayConnectionState = "Waiting",
+            ShowRetryAction = false,
+            ShowDiagnosticsAction = true,
+            PostTerminalAction = SessionFlowPostTerminalAction.None,
+            FailureReason = "transport_disconnected",
+        });
+
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+
+        await WaitUntilAsync(
+            () => string.IsNullOrWhiteSpace(helpee.InviteHelperIdentityInput) &&
+                  !helpee.HasVerifiedInviteHelperIdentity &&
+                  !helpee.RequestHelpCommand.CanExecute(null) &&
+                  string.Equals(helpee.ConnectionState, "Waiting", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(5));
+
+        Assert.Equal(string.Empty, helpee.InviteHelperIdentityInput);
+        Assert.False(helpee.HasVerifiedInviteHelperIdentity);
+        Assert.False(helpee.CanRequestHelpAction);
+        Assert.False(helpee.RequestHelpCommand.CanExecute(null));
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task HelpeeViewModel_HelperDisconnectsDuringPendingHelpRequest_ReturnsToStartingSetupState()
+    {
+        using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+        using var scriptedTransport = new ScriptedSignalingTransport(
+            onHostByAddressAsync: _ => Task.CompletedTask,
+            localPeerAddress: "helpee.helper.pending.disconnect",
+            onSendHelpRequestAsync: static (_, _) => Task.CompletedTask);
+        using var helpeeRuntime = new SessionRuntime(() => scriptedTransport);
+        var transportConfig = CreateNknTestConfig();
+        using var helpee = new HelpeePageViewModel(cancelAction: static () =>
+        {
+        }, transportConfig, helpeeRuntime);
+        var helperIdentity = new PeerAddress("nlink-helper.pending.disconnect.identity");
+        var helperTarget = new PeerAddress("nlink-helper.pending.disconnect.target");
+        var helperBootstrap = HelperBootstrapQrPayload.Format(HelperBootstrapPayload.Create(helperTarget, helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
+        helpee.SetVerifiedInviteHelperIdentity(helperIdentity, helperTargetAddress: helperTarget, refreshInvite: true, normalizedInputOverride: helperBootstrap);
+        await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
+
+        var requestTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helpee, "RequestHelpAsync"));
+        await WaitUntilAsync(() => helpeeRuntime.HasPendingOutboundHelpRequest, TimeSpan.FromSeconds(2));
+
+        scriptedTransport.RaiseDisconnected();
+        await requestTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        await WaitUntilAsync(
+            () => string.Equals(helpee.ShareInviteStatusText, "The helper is no longer available.", StringComparison.Ordinal) &&
+                  string.IsNullOrWhiteSpace(helpee.InviteHelperIdentityInput) &&
+                  !helpee.HasVerifiedInviteHelperIdentity &&
+                  !helpee.RequestHelpCommand.CanExecute(null) &&
+                  string.Equals(helpee.ConnectionState, "Waiting", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(5));
+
+        Assert.Equal(string.Empty, helpee.InviteHelperIdentityInput);
+        Assert.False(helpee.HasVerifiedInviteHelperIdentity);
+        Assert.False(helpee.CanRequestHelpAction);
+        Assert.False(helpee.RequestHelpCommand.CanExecute(null));
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task HelpeeViewModel_PendingHelpRequestTimeout_ReturnsToWaiting()
+    {
+        using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
+        var scriptedTransport = new ScriptedSignalingTransport(
+            onHostByAddressAsync: _ => Task.CompletedTask,
+            localPeerAddress: "helpee.pending.timeout",
+            onSendHelpRequestAsync: static (_, ct) => Task.Delay(Timeout.InfiniteTimeSpan, ct));
+        using var helpeeRuntime = new SessionRuntime(
+            () => scriptedTransport,
+            SessionRuntimeWatchdogOptions.Default,
+            outboundHelpRequestDecisionTimeout: TimeSpan.FromMilliseconds(80));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () =>
+        {
+        }, CreateNknTestConfig(), helpeeRuntime);
+        var helperIdentity = new PeerAddress("nlink-helper.pending.timeout.identity");
+        var helperTarget = new PeerAddress("nlink-helper.pending.timeout.target");
+        var helperBootstrap = HelperBootstrapQrPayload.Format(HelperBootstrapPayload.Create(helperTarget, helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
+        helpee.SetVerifiedInviteHelperIdentity(helperIdentity, helperTargetAddress: helperTarget, refreshInvite: true, normalizedInputOverride: helperBootstrap);
+        await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
+
+        var requestTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helpee, "RequestHelpAsync"));
+        await WaitUntilAsync(() => helpeeRuntime.HasPendingOutboundHelpRequest, TimeSpan.FromSeconds(2));
+
+        await WaitUntilAsync(
+            () => !helpeeRuntime.HasPendingOutboundHelpRequest &&
+                  string.Equals(helpee.ShareInviteStatusText, "The help request expired.", StringComparison.Ordinal) &&
+                  string.IsNullOrWhiteSpace(helpee.InviteHelperIdentityInput) &&
+                  !helpee.HasVerifiedInviteHelperIdentity &&
+                  !helpee.RequestHelpCommand.CanExecute(null),
+            TimeSpan.FromSeconds(3));
+        await requestTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.NotNull(helpeeRuntime.PendingOutboundHelpRequestDecision);
+        Assert.False(helpeeRuntime.PendingOutboundHelpRequestDecision!.Accepted);
+        Assert.Equal("request_timeout", helpeeRuntime.PendingOutboundHelpRequestDecision.Reason);
+        Assert.Equal(string.Empty, helpee.InviteHelperIdentityInput);
+        Assert.False(helpee.HasVerifiedInviteHelperIdentity);
+        Assert.False(helpee.CanRequestHelpAction);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task HelpeePageViewModel_DisablingScreenShare_ClearsAndDisablesRemoteControlApproval()
     {
         var transportConfig = CreateDevLocalTestConfig();

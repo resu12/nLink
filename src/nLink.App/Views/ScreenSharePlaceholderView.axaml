@@ -26,7 +26,7 @@
                 VerticalAlignment="Center"
                 IsVisible="{ReflectionBinding ShowScreenShareViewerError}">
             <TextBlock Text="{ReflectionBinding ScreenShareViewerMessage}"
-                       Classes="appMuted"
+                       Classes="appStatusText"
                        AutomationProperties.AutomationId="ScreenShare.ViewerMessage"
                        TextWrapping="Wrap"
                        TextAlignment="Center"

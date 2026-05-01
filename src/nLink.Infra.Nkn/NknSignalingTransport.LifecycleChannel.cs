@@ -98,6 +98,29 @@ public sealed partial class NknSignalingTransport
         Log($"SendHelpRequestDecisionAsync sent HelpRequestDecision with Ack (msg_id={envelope.MessageId}, accepted={decision.Accepted})");
     }
 
+    public async Task SendHelpRequestCancellationAsync(HelpRequestMessage request, string? reason, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ThrowIfDisposed();
+
+        await client.ConnectAsync(ct).ConfigureAwait(false);
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "request_canceled" : reason.Trim();
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new HelpRequestDecisionPayload
+        {
+            requestId = request.RequestId,
+            helpeeAddress = request.HelpeeAddress.Value,
+            helperAddress = request.HelperAddress.Value,
+            accepted = false,
+            reason = normalizedReason,
+        });
+        var envelope = CreateEnvelope(CreateAddressSessionContextCode(), MsgType.HelpRequestDecision, payload, replyTo: null);
+        await SendEnvelopeWithAckRetryAsync(request.HelperAddress.Value, envelope, ct).ConfigureAwait(false);
+        LocalOperationalLog.Info(
+            "DirectHelpRequest",
+            $"event=help_request_cancellation_sent; request_id={request.RequestId}; helper_address={request.HelperAddress.Value}; helpee_address={request.HelpeeAddress.Value}; reason={normalizedReason}");
+        Log($"SendHelpRequestCancellationAsync sent HelpRequestDecision cancellation with Ack (msg_id={envelope.MessageId}, reason={normalizedReason})");
+    }
+
     public Task JoinByInviteAsync(string inviteToken, ValidatedInviteV1 invite, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(inviteToken))
@@ -809,16 +832,28 @@ public sealed partial class NknSignalingTransport
             pendingOutboundHandshake.HelperAddress,
             challenge.ChallengeNonce,
             Convert.ToBase64String(mac));
+        var verificationCode = CreateSessionVerificationCode(
+            macKey,
+            challenge.SessionId,
+            pendingOutboundHandshake.HelperAddress,
+            challenge.HelpeeAddress,
+            helperKeyPair.PublicKey,
+            helpeePubKey,
+            challenge.ChallengeNonce,
+            sessionContextCode);
         pendingOutboundHandshake = pendingOutboundHandshake.WithChallenge(
             challenge.ChallengeNonce,
             DateTimeOffset.FromUnixTimeMilliseconds(challenge.ExpiresAtUtcMs),
             helpeePubKey);
-        UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeChallenge(
-            challenge.SessionId,
-            challenge.HelpeeAddress,
-            pendingOutboundHandshake.HelperAddress,
-            pendingOutboundHandshake.InviteValidated,
-            DateTimeOffset.FromUnixTimeMilliseconds(challenge.ExpiresAtUtcMs)));
+        LogSessionVerificationCodeReady("Helper", challenge.SessionId, pendingOutboundHandshake.HelperAddress, verificationCode);
+        UpdateSessionSecurityState(
+            currentSessionSecurityState.WithHandshakeChallenge(
+                challenge.SessionId,
+                challenge.HelpeeAddress,
+                pendingOutboundHandshake.HelperAddress,
+                pendingOutboundHandshake.InviteValidated,
+                DateTimeOffset.FromUnixTimeMilliseconds(challenge.ExpiresAtUtcMs))
+            .WithVerificationCode(verificationCode));
 
         var envelope = CreateEnvelope(sessionContextCode, MsgType.SessionHandshakeResponse, SessionHandshakeProtocol.Serialize(response), env.MessageId);
         _ = SendEnvelopeAsync(pendingOutboundHandshake.HelpeeAddress.Value, envelope, CancellationToken.None);
@@ -937,6 +972,15 @@ public sealed partial class NknSignalingTransport
                 pending.RequestedCapabilities,
                 sessionId)
             : null;
+        var verificationCode = CreateSessionVerificationCode(
+            macKey,
+            sessionId,
+            pending.HelperAddress,
+            helpeeAddress,
+            pending.HelperEcdhPublicKey,
+            helpeeKeyPair.PublicKey,
+            pending.ChallengeNonce,
+            pending.EnvelopeCode);
 
         ReplacePendingJoinRequest(new PendingJoinRequestState(
             pending.JoinRequestMessageId,
@@ -947,7 +991,11 @@ public sealed partial class NknSignalingTransport
             sessionId,
             approvalRequest));
         ClearPendingInboundHandshake(pending.JoinRequestMessageId);
-        UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeVerified(pending.HelperAddress));
+        LogSessionVerificationCodeReady("Helpee", sessionId, pending.HelperAddress, verificationCode);
+        UpdateSessionSecurityState(
+            currentSessionSecurityState
+                .WithHandshakeVerified(pending.HelperAddress)
+                .WithVerificationCode(verificationCode));
         CancelPendingDirectHelpRequestAcks(
             pending.HelperAddress.Value,
             "incoming_join_request",
@@ -2772,6 +2820,41 @@ public sealed partial class NknSignalingTransport
         var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
         var publicKey = ecdh.ExportSubjectPublicKeyInfo();
         return new SessionEcdhKeyPair(ecdh, publicKey);
+    }
+
+    private static SessionVerificationCode CreateSessionVerificationCode(
+        byte[] sessionRootKey,
+        SessionId sessionId,
+        PeerAddress helperAddress,
+        PeerAddress helpeeAddress,
+        byte[] helperEcdhPublicKey,
+        byte[] helpeeEcdhPublicKey,
+        string challengeNonce,
+        string sessionContextCode)
+    {
+        return SessionVerificationCodeDerivation.Derive(new SessionVerificationMaterial(
+            sessionId,
+            helperAddress,
+            helpeeAddress,
+            sessionRootKey,
+            helperEcdhPublicKey,
+            helpeeEcdhPublicKey,
+            challengeNonce,
+            sessionContextCode));
+    }
+
+    private static void LogSessionVerificationCodeReady(
+        string role,
+        SessionId sessionId,
+        PeerAddress helperAddress,
+        SessionVerificationCode verificationCode)
+    {
+        var emojiCount = verificationCode.EmojiSequence.Split(
+            ' ',
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Length;
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=session_verification_code_ready; role={role}; session_id={sessionId.Value}; helper_identity={helperAddress.Value}; source={verificationCode.Source}; code_length={emojiCount}; fallback_length={verificationCode.FallbackCode.Length}");
     }
 
     private static byte[] DeriveSessionKey(SessionEcdhKeyPair localKeyPair, byte[] remotePublicKey, string codeDigits)

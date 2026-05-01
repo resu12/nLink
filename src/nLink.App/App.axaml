@@ -38,24 +38,48 @@
         <Style Selector="TextBlock.appTitle">
             <Setter Property="Foreground" Value="{StaticResource AppTextBrush}"/>
             <Setter Property="FontSize" Value="32"/>
-            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="FontWeight" Value="Medium"/>
+        </Style>
+
+        <Style Selector="TextBlock.appSectionTitle">
+            <Setter Property="Foreground" Value="{StaticResource AppTextBrush}"/>
+            <Setter Property="FontSize" Value="20"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
         </Style>
 
         <Style Selector="TextBlock.appBody">
             <Setter Property="Foreground" Value="{StaticResource AppBodyTextBrush}"/>
             <Setter Property="FontSize" Value="18"/>
+            <Setter Property="FontWeight" Value="Normal"/>
             <Setter Property="TextWrapping" Value="Wrap"/>
         </Style>
 
         <Style Selector="TextBlock.appMuted">
             <Setter Property="Foreground" Value="{StaticResource AppMutedTextBrush}"/>
             <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="Normal"/>
             <Setter Property="TextWrapping" Value="Wrap"/>
         </Style>
 
         <Style Selector="TextBlock.appLabel">
             <Setter Property="Foreground" Value="{StaticResource AppMutedTextBrush}"/>
             <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+        </Style>
+
+        <Style Selector="TextBlock.appStatusText">
+            <Setter Property="Foreground" Value="{StaticResource AppMutedTextBrush}"/>
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+
+        <Style Selector="TextBlock.appCaption">
+            <Setter Property="Foreground" Value="{StaticResource AppMutedTextBrush}"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
         </Style>
 
         <Style Selector="TextBlock.codeDigits">
@@ -83,7 +107,7 @@
             <Setter Property="Background" Value="{StaticResource AppSurfaceBrush}"/>
             <Setter Property="BorderBrush" Value="{StaticResource AppCardBorderBrush}"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="CornerRadius" Value="16"/>
+            <Setter Property="CornerRadius" Value="12"/>
             <Setter Property="Padding" Value="20"/>
         </Style>
 
@@ -100,10 +124,81 @@
         </Style>
 
         <Style Selector="Button.appButton">
+            <Setter Property="Height" Value="48"/>
+            <Setter Property="FontSize" Value="16"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="HorizontalContentAlignment" Value="Center"/>
             <Setter Property="VerticalContentAlignment" Value="Center"/>
             <Setter Property="Padding" Value="16,0"/>
+            <Setter Property="CornerRadius" Value="8"/>
+        </Style>
+
+        <Style Selector="Button.compactButton">
+            <Setter Property="Height" Value="36"/>
+            <Setter Property="MinWidth" Value="88"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Padding" Value="12,0"/>
+        </Style>
+
+        <Style Selector="Button.standardButton">
+            <Setter Property="Height" Value="48"/>
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="Padding" Value="16,0"/>
+        </Style>
+
+        <Style Selector="Button.prominentButton">
+            <Setter Property="Height" Value="64"/>
+            <Setter Property="FontSize" Value="20"/>
+            <Setter Property="Padding" Value="18,0"/>
+        </Style>
+
+        <Style Selector="Button.footerButton">
+            <Setter Property="Height" Value="48"/>
+            <Setter Property="MinWidth" Value="220"/>
+            <Setter Property="FontSize" Value="18"/>
+        </Style>
+
+        <Style Selector="Button.iconButton">
+            <Setter Property="Height" Value="48"/>
+            <Setter Property="Width" Value="48"/>
+            <Setter Property="MinWidth" Value="48"/>
+            <Setter Property="Padding" Value="0"/>
+        </Style>
+
+        <Style Selector="Button.action">
+            <Setter Property="Height" Value="56"/>
+            <Setter Property="FontSize" Value="18"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="HorizontalAlignment" Value="Stretch"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Padding" Value="18,0"/>
+        </Style>
+
+        <Style Selector="Button.inviteAction">
+            <Setter Property="Height" Value="48"/>
+            <Setter Property="MinWidth" Value="160"/>
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="HorizontalAlignment" Value="Stretch"/>
+        </Style>
+
+        <Style Selector="Button.compactSecondaryAction">
+            <Setter Property="Height" Value="48"/>
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="HorizontalAlignment" Value="Stretch"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Padding" Value="14,0"/>
+        </Style>
+
+        <Style Selector="Button.backAction">
+            <Setter Property="Height" Value="48"/>
+            <Setter Property="FontSize" Value="18"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="MinWidth" Value="220"/>
         </Style>
 
         <Style Selector="Button.primaryButton">
@@ -134,12 +229,29 @@
             <Setter Property="Padding" Value="8,4"/>
         </Style>
 
+        <Style Selector="Button.linkAction">
+            <Setter Property="Foreground" Value="{StaticResource AppAccentBrush}"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="Medium"/>
+            <Setter Property="Height" Value="32"/>
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Padding" Value="6,0"/>
+        </Style>
+
         <Style Selector="TextBox.appInput">
             <Setter Property="Background" Value="{StaticResource AppPanelBrush}"/>
             <Setter Property="Foreground" Value="{StaticResource AppTextBrush}"/>
             <Setter Property="CaretBrush" Value="{StaticResource AppTextBrush}"/>
             <Setter Property="BorderBrush" Value="{StaticResource AppInputBorderBrush}"/>
             <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="10"/>
+            <Setter Property="Height" Value="56"/>
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="Padding" Value="16,0"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
         </Style>
     </Application.Styles>
 </Application>

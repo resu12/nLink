@@ -93,6 +93,7 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
     private readonly Func<CancellationToken, Task> onHostByAddressAsync;
     private readonly Func<HelpRequestMessage, CancellationToken, Task> onSendHelpRequestAsync;
     private readonly Func<HelpRequestDecisionMessage, CancellationToken, Task> onSendHelpRequestDecisionAsync;
+    private readonly Func<HelpRequestMessage, string?, CancellationToken, Task> onSendHelpRequestCancellationAsync;
     private readonly Func<ReadOnlyMemory<byte>, CancellationToken, Task> onSendChatAsync;
     private readonly Func<ControlRequestMessageV1, CancellationToken, Task> onSendControlRequestAsync;
     private readonly Func<ControlResponseMessageV1, CancellationToken, Task> onSendControlResponseAsync;
@@ -111,6 +112,7 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
         string? localPeerAddress = null,
         Func<HelpRequestMessage, CancellationToken, Task>? onSendHelpRequestAsync = null,
         Func<HelpRequestDecisionMessage, CancellationToken, Task>? onSendHelpRequestDecisionAsync = null,
+        Func<HelpRequestMessage, string?, CancellationToken, Task>? onSendHelpRequestCancellationAsync = null,
         Func<ReadOnlyMemory<byte>, CancellationToken, Task>? onSendChatAsync = null,
         Func<ControlRequestMessageV1, CancellationToken, Task>? onSendControlRequestAsync = null,
         Func<ControlResponseMessageV1, CancellationToken, Task>? onSendControlResponseAsync = null,
@@ -129,6 +131,7 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
         LocalPeerAddress = string.IsNullOrWhiteSpace(localPeerAddress) ? "scripted.local.peer" : localPeerAddress.Trim();
         this.onSendHelpRequestAsync = onSendHelpRequestAsync ?? ((_, _) => Task.CompletedTask);
         this.onSendHelpRequestDecisionAsync = onSendHelpRequestDecisionAsync ?? ((_, _) => Task.CompletedTask);
+        this.onSendHelpRequestCancellationAsync = onSendHelpRequestCancellationAsync ?? ((_, _, _) => Task.CompletedTask);
         this.onSendChatAsync = onSendChatAsync ?? ((_, _) => Task.CompletedTask);
         this.onSendControlRequestAsync = onSendControlRequestAsync ?? ((_, _) => Task.CompletedTask);
         this.onSendControlResponseAsync = onSendControlResponseAsync ?? ((_, _) => Task.CompletedTask);
@@ -179,6 +182,7 @@ internal sealed class ScriptedSignalingTransport : ISignalingTransport, IAddress
 
     public Task SendHelpRequestAsync(HelpRequestMessage request, CancellationToken ct) => onSendHelpRequestAsync(request, ct);
     public Task SendHelpRequestDecisionAsync(HelpRequestDecisionMessage decision, CancellationToken ct) => onSendHelpRequestDecisionAsync(decision, ct);
+    public Task SendHelpRequestCancellationAsync(HelpRequestMessage request, string? reason, CancellationToken ct) => onSendHelpRequestCancellationAsync(request, reason, ct);
     public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => onSendChatAsync(payload, ct);
     public Task SendControlRequestAsync(ControlRequestMessageV1 message, CancellationToken ct) => onSendControlRequestAsync(message, ct);
     public Task SendControlResponseAsync(ControlResponseMessageV1 message, CancellationToken ct) => onSendControlResponseAsync(message, ct);
@@ -449,7 +453,24 @@ internal sealed class FakeSessionTransport : ISignalingTransport, IAddressTarget
             HelpeeAddress = helpeeAddress,
             HelperAddress = helperAddress,
             InviteValidated = inviteValidated,
-        }).WithHandshakeVerified(helperAddress);
+        }).WithHandshakeVerified(helperAddress)
+          .WithVerificationCode(CreateFakeVerificationCode(sessionId, helpeeAddress, helperAddress));
+    }
+
+    private static SessionVerificationCode CreateFakeVerificationCode(
+        SessionId sessionId,
+        PeerAddress helpeeAddress,
+        PeerAddress helperAddress)
+    {
+        return SessionVerificationCodeDerivation.Derive(new SessionVerificationMaterial(
+            sessionId,
+            helperAddress,
+            helpeeAddress,
+            CoreSmokeTestsBase.SHA256LikeDeterministicBytes("fake-verification-root|" + sessionId.Value, 32),
+            CoreSmokeTestsBase.SHA256LikeDeterministicBytes("fake-verification-helper-key|" + helperAddress.Value, 32),
+            CoreSmokeTestsBase.SHA256LikeDeterministicBytes("fake-verification-helpee-key|" + helpeeAddress.Value, 32),
+            "fake-challenge-" + sessionId.Value,
+            "fake-session-context"));
     }
 
     private static void ValidateApprovalDecision(ApprovalRequest approvalRequest, ApprovalDecision decision)

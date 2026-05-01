@@ -18,8 +18,8 @@
         </Style>
 
         <Style Selector="Button.choiceButton">
-            <Setter Property="Height" Value="72"/>
-            <Setter Property="FontSize" Value="26"/>
+            <Setter Property="Height" Value="64"/>
+            <Setter Property="FontSize" Value="22"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="HorizontalAlignment" Value="Stretch"/>
             <Setter Property="HorizontalContentAlignment" Value="Center"/>
@@ -46,7 +46,6 @@
                 <TextBlock Classes="appTitle"
                            Text="{Binding AppTitle}"
                            HorizontalAlignment="Center"
-                           FontSize="40"
                            TextAlignment="Center"/>
 
                 <TextBlock Classes="appBody"
@@ -68,7 +67,7 @@
                 </Border>
 
                 <Border Classes="appPanel"
-                        CornerRadius="18"
+                        CornerRadius="12"
                         Padding="14">
                     <StackPanel Spacing="14">
                         <Border Classes="appCard choiceCard">
@@ -101,11 +100,10 @@
                     </StackPanel>
                 </Border>
 
-                <Button Classes="linkButton"
+                <Button Classes="linkButton linkAction"
                         Content="Diagnostics"
                         Command="{Binding DiagnosticsCommand}"
                         HorizontalAlignment="Center"
-                        FontSize="16"
                         Padding="10,6"/>
             </StackPanel>
         </ScrollViewer>

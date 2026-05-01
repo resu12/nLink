@@ -1929,6 +1929,8 @@ public sealed partial class SessionRuntime
             {
                 // Tell the peer the session is over before best-effort teardown work starts
                 // competing for transport state or outbound bandwidth.
+                await TrySendPendingIncomingHelpRequestCancellationAsync(oldTransport, "helper_closed").ConfigureAwait(false);
+                await TrySendPendingOutboundHelpRequestCancellationAsync(oldTransport, "helpee_closed").ConfigureAwait(false);
                 await TrySendRemoteSessionEndAsync(oldTransport, oldRole, oldState).ConfigureAwait(false);
                 await TrySendRemoteControlStopAsync(oldTransport, oldControlState, oldControlRequestId, "session_end").ConfigureAwait(false);
                 await StopTransportScreenShareAsync(
@@ -2677,6 +2679,18 @@ public sealed partial class SessionRuntime
                 transportState,
                 "remote_session_end"));
             Disconnected?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        if (role == SessionRuntimeRole.Helpee &&
+            state == SessionRuntimeState.Waiting &&
+            HasPendingOutboundHelpRequest)
+        {
+            TryCompletePendingOutboundHelpRequestAsUnavailable(
+                reason: "helper_closed",
+                trigger: "transport_disconnected_pending_help_request");
+            QueueDetachFileTransferTransport();
+            TryScheduleQuietHelpeeRehost("transport_disconnected_pending_help_request_rehost");
             return;
         }
 

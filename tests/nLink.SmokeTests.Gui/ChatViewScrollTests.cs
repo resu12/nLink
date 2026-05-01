@@ -281,6 +281,92 @@ public sealed class ChatViewScrollTests : IClassFixture<ChatViewScrollFixture>
     }
 
     [Fact]
+    public async Task ChatView_ChatInput_UpdatesDraftWhileFocused()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var bindings = new TestChatPanelBindings();
+            var host = await CreateHostAsync(bindings);
+            try
+            {
+                var input = host.Window.GetVisualDescendants()
+                    .OfType<TextBox>()
+                    .FirstOrDefault(textBox => string.Equals(
+                        AutomationProperties.GetAutomationId(textBox),
+                        "Chat.Input",
+                        StringComparison.Ordinal));
+                var sendButton = host.Window.GetVisualDescendants()
+                    .OfType<Button>()
+                    .FirstOrDefault(button => string.Equals(
+                        AutomationProperties.GetAutomationId(button),
+                        "Chat.Send",
+                        StringComparison.Ordinal));
+
+                Assert.NotNull(input);
+                Assert.NotNull(sendButton);
+
+                input!.Focus();
+                input.Text = "hello during screenshare";
+                await FlushUiAsync();
+
+                Assert.Equal("hello during screenshare", bindings.ChatDraft);
+                Assert.True(sendButton!.IsEnabled);
+            }
+            finally
+            {
+                host.Window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ChatView_SendButton_SyncsFocusedDraftBeforeExecuting()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var bindings = new TestChatPanelBindings();
+            var host = await CreateHostAsync(bindings);
+            try
+            {
+                var input = host.Window.GetVisualDescendants()
+                    .OfType<TextBox>()
+                    .FirstOrDefault(textBox => string.Equals(
+                        AutomationProperties.GetAutomationId(textBox),
+                        "Chat.Input",
+                        StringComparison.Ordinal));
+                var sendButton = host.Window.GetVisualDescendants()
+                    .OfType<Button>()
+                    .FirstOrDefault(button => string.Equals(
+                        AutomationProperties.GetAutomationId(button),
+                        "Chat.Send",
+                        StringComparison.Ordinal));
+
+                Assert.NotNull(input);
+                Assert.NotNull(sendButton);
+
+                input!.Focus();
+                input.Text = "hello while focused";
+                await FlushUiAsync();
+
+                Assert.True(sendButton!.IsEnabled);
+                sendButton.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent, sendButton));
+                await FlushUiAsync();
+
+                Assert.Equal("hello while focused", bindings.LastSentChatText);
+                Assert.Equal(1, bindings.SendChatExecuteCount);
+            }
+            finally
+            {
+                host.Window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
     public async Task ChatView_FileTransferCancel_ExecutesItemCommandWithTransferId()
     {
         await fixture.Session.Dispatch(async () =>
@@ -515,7 +601,20 @@ public sealed class ChatViewScrollTests : IClassFixture<ChatViewScrollFixture>
 
                 Assert.NotNull(card);
 
-                card!.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(InputElement.PointerReleasedEvent, card));
+                var pointer = new Pointer(1, PointerType.Mouse, isPrimary: true);
+                var pointerArgs = new PointerReleasedEventArgs(
+                    card,
+                    pointer,
+                    host.Window,
+                    new Point(1, 1),
+                    timestamp: 0,
+                    new PointerPointProperties(RawInputModifiers.LeftMouseButton, PointerUpdateKind.LeftButtonReleased),
+                    KeyModifiers.None,
+                    MouseButton.Left)
+                {
+                    RoutedEvent = InputElement.PointerReleasedEvent,
+                };
+                card!.RaiseEvent(pointerArgs);
 
                 var openedPath = await opened.Task.WaitAsync(TimeSpan.FromSeconds(2));
                 Assert.Equal(Path.GetFullPath(savedDirectoryPath), openedPath);
@@ -598,6 +697,20 @@ public sealed class ChatViewScrollTests : IClassFixture<ChatViewScrollFixture>
 
     private sealed class TestChatPanelBindings : IChatPanelBindings
     {
+        private string chatDraft = string.Empty;
+
+        public TestChatPanelBindings()
+        {
+            SendChatCommand = new AsyncRelayCommand(
+                () =>
+                {
+                    SendChatExecuteCount++;
+                    LastSentChatText = ChatDraft;
+                    return Task.CompletedTask;
+                },
+                () => !string.IsNullOrWhiteSpace(ChatDraft));
+        }
+
         public string ChatPanelTitle => "Message";
 
         public bool ShowChatTopBar => false;
@@ -612,7 +725,19 @@ public sealed class ChatViewScrollTests : IClassFixture<ChatViewScrollFixture>
 
         public bool ShowNoMessagesPlaceholder => !HasChatMessages;
 
-        public string ChatDraft { get; set; } = string.Empty;
+        public int SendChatExecuteCount { get; private set; }
+
+        public string LastSentChatText { get; private set; } = string.Empty;
+
+        public string ChatDraft
+        {
+            get => chatDraft;
+            set
+            {
+                chatDraft = value;
+                SendChatCommand.NotifyCanExecuteChanged();
+            }
+        }
 
         public bool IsChatInputEnabled => true;
 
@@ -628,7 +753,7 @@ public sealed class ChatViewScrollTests : IClassFixture<ChatViewScrollFixture>
 
         public IRelayCommand SendFileCommand { get; init; } = new RelayCommand(() => { });
 
-        public IAsyncRelayCommand SendChatCommand { get; } = new AsyncRelayCommand(() => Task.CompletedTask);
+        public IAsyncRelayCommand SendChatCommand { get; }
 
         public IAsyncRelayCommand<string?> AcceptIncomingFileCommand { get; } =
             new AsyncRelayCommand<string?>(_ => Task.CompletedTask, _ => false);

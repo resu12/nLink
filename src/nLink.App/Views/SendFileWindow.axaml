@@ -11,18 +11,6 @@
         MinHeight="560"
         Background="{StaticResource AppBackgroundBrush}">
 
-    <Window.Styles>
-        <Style Selector="Button.action">
-            <Setter Property="Height" Value="56"/>
-            <Setter Property="FontSize" Value="18"/>
-            <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="HorizontalAlignment" Value="Center"/>
-            <Setter Property="HorizontalContentAlignment" Value="Center"/>
-            <Setter Property="VerticalContentAlignment" Value="Center"/>
-            <Setter Property="Padding" Value="16,0"/>
-        </Style>
-    </Window.Styles>
-
     <Grid Background="{StaticResource AppBackgroundBrush}" RowDefinitions="Auto,*,Auto">
         <Border Grid.Row="0"
                 Margin="20,20,20,12"
@@ -33,26 +21,24 @@
                         HorizontalAlignment="Center"
                         MaxWidth="620">
                 <TextBlock Text="Send file"
-                           Foreground="{StaticResource AppTextBrush}"
-                           FontSize="22"
-                           FontWeight="Bold"
+                           Classes="appSectionTitle"
                            TextAlignment="Center"
                            HorizontalAlignment="Center"/>
 
                 <TextBlock Text="1) Choose the helpee file"
                            Foreground="{StaticResource AppBodyTextBrush}"
                            FontSize="16"
-                           FontWeight="SemiBold"
+                           FontWeight="Normal"
                            TextAlignment="Center"/>
                 <TextBlock Text="2) Send"
                            Foreground="{StaticResource AppBodyTextBrush}"
                            FontSize="16"
-                           FontWeight="SemiBold"
+                           FontWeight="Normal"
                            TextAlignment="Center"/>
                 <TextBlock Text="3) Copy the link and send it to them"
                            Foreground="{StaticResource AppBodyTextBrush}"
                            FontSize="16"
-                           FontWeight="SemiBold"
+                           FontWeight="Normal"
                            TextAlignment="Center"
                            TextWrapping="Wrap"/>
             </StackPanel>
@@ -77,9 +63,7 @@
                             Spacing="12">
                     <TextBlock x:Name="FallbackTitleText"
                                Text="Opening nFTP in your browser..."
-                               Foreground="{StaticResource AppTextBrush}"
-                               FontSize="22"
-                               FontWeight="Bold"
+                               Classes="appSectionTitle"
                                TextAlignment="Center"/>
 
                     <TextBlock x:Name="FallbackMessageText"
@@ -114,12 +98,10 @@
                 Classes="appPanel"
                 CornerRadius="12"
                 Padding="12">
-            <Button Classes="appButton secondaryButton action"
+            <Button Classes="appButton secondaryButton action footerButton"
                     Content="Back"
                     Click="Back_Click"
-                    Width="220"
-                    Height="48"
-                    FontSize="18"/>
+                    Width="220"/>
         </Border>
     </Grid>
 </Window>

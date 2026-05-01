@@ -695,7 +695,21 @@ public abstract class Beta3DefaultUiSmokeTestBase : IClassFixture<Beta3DefaultUi
                 InviteValidated = inviteValidated,
             }
 
-            ).WithHandshakeVerified(helperAddress);
+            ).WithHandshakeVerified(helperAddress)
+             .WithVerificationCode(CreateFakeVerificationCode(sessionId, helpeeAddress, helperAddress));
+        }
+
+        private static SessionVerificationCode CreateFakeVerificationCode(SessionId sessionId, PeerAddress helpeeAddress, PeerAddress helperAddress)
+        {
+            return SessionVerificationCodeDerivation.Derive(new SessionVerificationMaterial(
+                sessionId,
+                helperAddress,
+                helpeeAddress,
+                SHA256LikeDeterministicBytes("fake-verification-root|" + sessionId.Value, 32),
+                SHA256LikeDeterministicBytes("fake-verification-helper-key|" + helperAddress.Value, 32),
+                SHA256LikeDeterministicBytes("fake-verification-helpee-key|" + helpeeAddress.Value, 32),
+                "fake-challenge-" + sessionId.Value,
+                "fake-session-context"));
         }
 
         protected static void ValidateApprovalDecision(ApprovalRequest approvalRequest, ApprovalDecision decision)

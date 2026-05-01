@@ -11,7 +11,7 @@
     <UserControl.Styles>
         <Style Selector="Border.chatTopBar">
             <Setter Property="Background" Value="{StaticResource AppSurfaceBrush}"/>
-            <Setter Property="CornerRadius" Value="14"/>
+            <Setter Property="CornerRadius" Value="12"/>
             <Setter Property="BorderBrush" Value="{StaticResource AppCardBorderBrush}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="10"/>
@@ -19,12 +19,12 @@
 
         <Style Selector="Border.chatShell">
             <Setter Property="Background" Value="{StaticResource AppMutedPanelBrush}"/>
-            <Setter Property="CornerRadius" Value="14"/>
+            <Setter Property="CornerRadius" Value="12"/>
             <Setter Property="BorderThickness" Value="0"/>
         </Style>
 
         <Style Selector="Border.chatBubbleBase">
-            <Setter Property="CornerRadius" Value="14"/>
+            <Setter Property="CornerRadius" Value="12"/>
             <Setter Property="Padding" Value="13,11"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="HorizontalAlignment" Value="Left"/>
@@ -125,48 +125,43 @@
                                 Spacing="8"
                                 IsVisible="{Binding ShowActions}">
                         <Button AutomationProperties.AutomationId="Chat.FileTransfer.Accept"
-                                Classes="appButton positiveButton"
+                                Classes="appButton positiveButton compactButton"
                                 Content="Accept"
                                 Click="AcceptFileTransferButton_Click"
                                 CommandParameter="{Binding TransferId}"
                                 IsVisible="{Binding ShowAccept}"
-                                Height="40"
                                 MinWidth="104"/>
 
                         <Button AutomationProperties.AutomationId="Chat.FileTransfer.Decline"
-                                Classes="appButton secondaryButton"
+                                Classes="appButton secondaryButton compactButton"
                                 Content="Decline"
                                 Click="DeclineFileTransferButton_Click"
                                 CommandParameter="{Binding TransferId}"
                                 IsVisible="{Binding ShowDecline}"
-                                Height="40"
                                 MinWidth="104"/>
 
                         <Button AutomationProperties.AutomationId="Chat.FileTransfer.Pause"
-                                Classes="appButton secondaryButton"
+                                Classes="appButton secondaryButton compactButton"
                                 Content="Pause"
                                 Click="PauseFileTransferButton_Click"
                                 CommandParameter="{Binding TransferId}"
                                 IsVisible="{Binding ShowPause}"
-                                Height="40"
                                 MinWidth="104"/>
 
                         <Button AutomationProperties.AutomationId="Chat.FileTransfer.Resume"
-                                Classes="appButton positiveButton"
+                                Classes="appButton positiveButton compactButton"
                                 Content="Resume"
                                 Click="ResumeFileTransferButton_Click"
                                 CommandParameter="{Binding TransferId}"
                                 IsVisible="{Binding ShowResume}"
-                                Height="40"
                                 MinWidth="104"/>
 
                         <Button AutomationProperties.AutomationId="Chat.FileTransfer.Cancel"
-                                Classes="appButton secondaryButton"
+                                Classes="appButton secondaryButton compactButton"
                                 Content="Cancel"
                                 Click="CancelFileTransferButton_Click"
                                 CommandParameter="{Binding TransferId}"
                                 IsVisible="{Binding ShowCancel}"
-                                Height="40"
                                 MinWidth="104"/>
                     </StackPanel>
                 </StackPanel>
@@ -187,12 +182,11 @@
 
                 <Button Grid.Column="1"
                         AutomationProperties.AutomationId="Chat.Disconnect"
-                        Classes="appButton secondaryButton"
+                        Classes="appButton secondaryButton compactButton"
                         Content="Disconnect"
                         Command="{Binding EndSessionCommand}"
                         IsVisible="{Binding #Root.ShowInlineEndSession}"
                         IsEnabled="{Binding CanEndSession}"
-                        Height="36"
                         MinWidth="104"
                         Padding="12,0"/>
             </Grid>
@@ -263,12 +257,10 @@
             <Button Grid.Column="0"
                     AutomationProperties.AutomationId="Chat.SendFile"
                     AutomationProperties.Name="Send file"
-                    Classes="appButton secondaryButton"
+                    Classes="appButton secondaryButton iconButton"
                     Click="SendFileButton_Click"
                     IsVisible="{Binding ShowSendFileAction}"
                     IsEnabled="{Binding CanSendFileAction}"
-                    Height="52"
-                    Width="52"
                     Padding="0"
                     ToolTip.Tip="Send file">
                 <Grid Width="18"
@@ -284,7 +276,7 @@
                      x:Name="ChatInputTextBox"
                      AutomationProperties.AutomationId="Chat.Input"
                      Classes="chatInput"
-                     Text="{Binding ChatDraft, Mode=TwoWay}"
+                     Text="{Binding ChatDraft, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                      IsEnabled="{Binding IsChatInputEnabled}"
                      Watermark="Type a message"
                      AcceptsReturn="True"
@@ -293,13 +285,13 @@
                      FontSize="16"/>
 
             <Button Grid.Column="2"
+                    x:Name="SendChatButton"
                     AutomationProperties.AutomationId="Chat.Send"
-                    Classes="appButton primaryButton"
+                    Classes="appButton primaryButton standardButton"
                     Content="Send"
-                    Command="{Binding SendChatCommand}"
-                    IsEnabled="{Binding IsChatInputEnabled}"
-                    Width="104"
-                    Height="48"/>
+                    Click="SendChatButton_Click"
+                    IsEnabled="False"
+                    Width="104"/>
         </Grid>
     </Grid>
 </UserControl>

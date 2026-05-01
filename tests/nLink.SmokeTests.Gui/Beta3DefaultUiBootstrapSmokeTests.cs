@@ -127,10 +127,9 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
                 await resolveTask;
                 await FlushUiAsync();
                 await WaitUntilAsync(() => string.Equals(helper.HelperIdentityBootstrapHintText, "Protected seed storage could not be read.", StringComparison.Ordinal), TimeSpan.FromSeconds(2));
-                var hint = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helper.HelperIdentityBootstrapHint"));
                 var shareButton = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "Helper.ShareHelperIdentity"));
                 var copyButton = Assert.IsType<Button>(FindFirstVisibleControlByAutomationId(window, "Helper.CopyHelperIdentity"));
-                Assert.Equal("Protected seed storage could not be read.", hint.Text);
+                Assert.Null(FindFirstVisibleControlByAutomationId(window, "Helper.HelperIdentityBootstrapHint"));
                 Assert.True(shareButton.IsVisible);
                 Assert.True(copyButton.IsVisible);
             }
@@ -257,7 +256,7 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
             }, transportConfig, helpeeRuntime);
             await WaitUntilAsync(() => !string.IsNullOrWhiteSpace(helpee.ShareInvite), TimeSpan.FromSeconds(3));
             await helperRuntime.StartHelperAsync(new NLink.Core.SessionConnect.PeerAddress(helpeeRuntime.CurrentLocalPeerAddress!.Value.Value), CancellationToken.None);
-            await WaitUntilAsync(() => helpee.IsIncomingRequestView && helpee.ShowIncomingRequestPanel && helpee.HasIncomingHelperVerificationCode && helpee.ShowIncomingRequestTimeout, TimeSpan.FromSeconds(3));
+            await WaitUntilAsync(() => helpee.IsIncomingRequestView && helpee.ShowIncomingRequestPanel && helpee.HasIncomingHelperVerificationCode && helpee.ShowIncomingRequestTimeout && helpee.ShowSessionVerificationCode, TimeSpan.FromSeconds(3));
             var view = new HelpeePageView
             {
                 DataContext = helpee
@@ -279,6 +278,10 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
                 Assert.Null(FindFirstControlByAutomationId(window, "Helpee.IncomingApprovalExplanation"));
                 var verificationCode = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "SessionHeader.VerificationCode"));
                 Assert.Equal(helpee.IncomingHelperVerificationCode, verificationCode.Text);
+                var sessionEmoji = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helpee.SessionVerification.EmojiSequence"));
+                var sessionFallback = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helpee.SessionVerification.FallbackCode"));
+                Assert.Equal(helpee.SessionVerificationEmojiSequence, sessionEmoji.Text);
+                Assert.Equal(helpee.SessionVerificationFallbackCode, sessionFallback.Text);
                 Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helpee.RequestedAccessTitle"));
                 Assert.Null(FindFirstControlByAutomationId(window, "Helpee.Status"));
                 Assert.Null(FindFirstControlByAutomationId(window, "Helpee.RequestedCapabilities"));
@@ -380,7 +383,7 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
             }, transportConfig, helperRuntime);
             await WaitUntilAsync(() => !string.IsNullOrWhiteSpace(helpee.ShareInvite), TimeSpan.FromSeconds(3));
             _ = helperRuntime.StartHelperAsync(new NLink.Core.SessionConnect.PeerAddress(helpeeRuntime.CurrentLocalPeerAddress!.Value.Value), CancellationToken.None);
-            await WaitUntilAsync(() => helpee.IsIncomingRequestView && helper.ShowHelperVerificationCode && !string.IsNullOrWhiteSpace(helper.HelperVerificationCode), TimeSpan.FromSeconds(3));
+            await WaitUntilAsync(() => helpee.IsIncomingRequestView && helper.ShowHelperVerificationCode && !string.IsNullOrWhiteSpace(helper.HelperVerificationCode) && helper.ShowSessionVerificationCode, TimeSpan.FromSeconds(3));
             var view = new HelperPageView
             {
                 DataContext = helper
@@ -398,6 +401,10 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
                 var verificationCode = FindFirstVisibleControlByAutomationId(window, "SessionHeader.VerificationCode") as TextBlock;
                 Assert.NotNull(verificationCode);
                 Assert.Equal(helper.HelperVerificationCode, verificationCode!.Text);
+                var sessionEmoji = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helper.SessionVerification.EmojiSequence"));
+                var sessionFallback = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helper.SessionVerification.FallbackCode"));
+                Assert.Equal(helper.SessionVerificationEmojiSequence, sessionEmoji.Text);
+                Assert.Equal(helper.SessionVerificationFallbackCode, sessionFallback.Text);
             }
             finally
             {
@@ -446,6 +453,7 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
             {
                 await FlushUiAsync();
                 Assert.Null(FindFirstVisibleControlByAutomationId(window, "SessionHeader.VerificationCode"));
+                Assert.Null(FindFirstVisibleControlByAutomationId(window, "Helper.SessionVerification.EmojiSequence"));
             }
             finally
             {

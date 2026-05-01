@@ -141,6 +141,8 @@ public sealed record SessionSecurityState
 
     public string? HandshakeFailureReason { get; init; }
 
+    public SessionVerificationCode? VerificationCode { get; init; }
+
     public bool IsApprovalActive(DateTimeOffset nowUtc)
     {
         return ApprovalGranted &&
@@ -199,6 +201,15 @@ public sealed record SessionSecurityState
             HandshakeState = SessionHandshakeState.ChallengeIssued,
             HandshakeExpiresAt = expiresAtUtc,
             HandshakeFailureReason = null,
+            VerificationCode = null,
+        };
+    }
+
+    public SessionSecurityState WithVerificationCode(SessionVerificationCode? verificationCode)
+    {
+        return this with
+        {
+            VerificationCode = verificationCode,
         };
     }
 
@@ -229,6 +240,7 @@ public sealed record SessionSecurityState
             HandshakeState = failureState,
             HandshakeFailureReason = NormalizeReason(reason),
             HandshakeExpiresAt = null,
+            VerificationCode = null,
         };
     }
 
@@ -272,6 +284,7 @@ public sealed record SessionSecurityState
             HandshakeState = SessionHandshakeState.Invalidated,
             HandshakeExpiresAt = null,
             HandshakeFailureReason = NormalizeReason(reason),
+            VerificationCode = null,
         };
     }
 

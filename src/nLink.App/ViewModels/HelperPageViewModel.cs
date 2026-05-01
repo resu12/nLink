@@ -61,6 +61,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly IConnectInputResolver connectInputResolver;
     private readonly DispatcherTimer remoteControlStateSnapshotTimer;
     private readonly DispatcherTimer peerEndedNoticeTimer;
+    private readonly DispatcherTimer incomingHelpRequestExpiryTimer;
     private readonly Func<CancellationToken, Task<PeerAddress?>>? bootstrapHelperIdentityResolver;
     private string automaticIdentityRecoveryWarning = string.Empty;
     private CancellationTokenSource? bootstrapHelperIdentityResolutionCts;
@@ -114,6 +115,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly Func<DateTimeOffset> nowProvider;
     private readonly TimeSpan connectFailureCooldown;
     private readonly TimeSpan approvalTimeout;
+    private DateTimeOffset incomingHelpRequestExpiresAtUtc = DateTimeOffset.MinValue;
+    private string incomingHelpRequestTimeoutText = string.Empty;
+    private CancellationTokenSource? incomingHelpRequestTimeoutCts;
     private readonly Func<CancellationToken, Task<PeerAddress?>>? regenerateHelperIdentityAsync;
     private DateTimeOffset lastFailedAttemptUtc = DateTimeOffset.MinValue;
     private TaskCompletionSource<HelperConnectOutcome>? connectOutcome;
@@ -151,7 +155,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool suppressRetryActionForReturnToWaiting;
     private bool helperListenerReturnToWaitingRequested;
     private string lastHelperBootstrapQrPayload = string.Empty;
-    private bool helperIdentityRegenerationConfirmationPending;
     private bool helperIdentityRegenerationInFlight;
 
     public HelperPageViewModel(
@@ -211,6 +214,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             Interval = PeerEndedNoticeDuration,
         };
         peerEndedNoticeTimer.Tick += OnPeerEndedNoticeTimerTick;
+        incomingHelpRequestExpiryTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1),
+        };
+        incomingHelpRequestExpiryTimer.Tick += OnIncomingHelpRequestExpiryTimerTick;
         lastKnownShowRemoteScreenShareFrame = ShowRemoteScreenShareFrame;
         lastKnownShowHelperMainContent = ShowHelperMainContent;
         lastKnownScreenShareViewerMessage = ScreenShareViewerMessage;
@@ -353,6 +361,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowHeaderVerificationCode));
                 OnPropertyChanged(nameof(FirstPillVerificationCodeText));
                 OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+                NotifySessionVerificationPropertiesChanged();
                 OnPropertyChanged(nameof(ShowBackButton));
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
@@ -450,8 +459,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool HasReadyHelperIdentityBootstrapText =>
         !string.IsNullOrWhiteSpace(HelperIdentityBootstrapText);
 
-    public bool ShowHelperIdentityBootstrapPanel =>
+    public bool ShowHelperSetupPanel =>
         ShowMainControls &&
+        !HasPendingHelpRequest;
+
+    public bool ShowHelperIdentityBootstrapPanel =>
+        ShowHelperSetupPanel &&
         RequiresHelperIdentityBootstrap;
 
     public bool ShowRegenerateHelperIdentityAction =>
@@ -469,9 +482,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public string RegenerateHelperIdentityButtonText =>
         helperIdentityRegenerationInFlight
             ? "Regenerating..."
-            : helperIdentityRegenerationConfirmationPending
-                ? "Confirm regenerate"
-                : "Regenerate helper address";
+            : "Regenerate helper address";
 
     public Bitmap? HelperBootstrapQrImage => helperBootstrapQrBitmap;
     public bool ShowHelperBootstrapQr => HelperBootstrapQrImage is not null;
@@ -481,6 +492,31 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.PendingHelpRequest is { } request
             ? $"Incoming request from {request.HelpeeAddress.Value}"
             : string.Empty;
+
+    public string IncomingHelpRequestTimeoutText => incomingHelpRequestTimeoutText;
+
+    public bool ShowIncomingHelpRequestTimeout =>
+        HasPendingHelpRequest &&
+        !string.IsNullOrWhiteSpace(IncomingHelpRequestTimeoutText);
+
+    private SessionVerificationCode? CurrentSessionVerificationCode =>
+        sessionRuntime.FlowSnapshot.VerificationCode ?? sessionRuntime.SecurityState.VerificationCode;
+
+    public string SessionVerificationEmojiSequence =>
+        CurrentSessionVerificationCode?.EmojiSequence ?? string.Empty;
+
+    public string SessionVerificationFallbackCode =>
+        CurrentSessionVerificationCode?.FallbackCode ?? string.Empty;
+
+    public bool HasSessionVerificationCode =>
+        !string.IsNullOrWhiteSpace(SessionVerificationEmojiSequence) &&
+        !string.IsNullOrWhiteSpace(SessionVerificationFallbackCode);
+
+    public bool ShowSessionVerificationCode =>
+        HasSessionVerificationCode &&
+        !sessionRuntime.SecurityState.ApprovalGranted &&
+        sessionRuntime.SecurityState.HandshakeState == SessionHandshakeState.Verified &&
+        EffectivePhase is SessionUiPhase.Connecting or SessionUiPhase.Recovering;
 
     public string HelperVerificationCode =>
         HelperVerificationCodeFormatter.FormatOrNull(HelperVerificationIdentity) ?? string.Empty;
@@ -710,6 +746,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowHeaderVerificationCode));
                 OnPropertyChanged(nameof(FirstPillVerificationCodeText));
                 OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+                NotifySessionVerificationPropertiesChanged();
                 NotifyRegenerateHelperIdentityStateChanged();
             }
         }
@@ -976,6 +1013,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         remoteControlStateSnapshotTimer.Tick -= OnRemoteControlStateSnapshotTimerTick;
         peerEndedNoticeTimer.Stop();
         peerEndedNoticeTimer.Tick -= OnPeerEndedNoticeTimerTick;
+        incomingHelpRequestExpiryTimer.Stop();
+        incomingHelpRequestExpiryTimer.Tick -= OnIncomingHelpRequestExpiryTimerTick;
+        CancelIncomingHelpRequestTimeout();
 
         sessionRuntime.FlowSnapshotChanged -= OnFlowSnapshotChanged;
         sessionRuntime.SessionSecurityStateChanged -= OnSessionSecurityStateChanged;
@@ -1058,7 +1098,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private bool CanRespondToHelpRequest()
     {
-        return sessionRuntime.HasPendingHelpRequest && !IsConnecting && !IsStartupBlocked;
+        return sessionRuntime.HasPendingHelpRequest && !IsStartupBlocked;
     }
 
     private ConnectInputResolution ResolveConnectInput()
@@ -1088,8 +1128,17 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowHeaderVerificationCode));
         OnPropertyChanged(nameof(FirstPillVerificationCodeText));
         OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+        NotifySessionVerificationPropertiesChanged();
         NotifyRegenerateHelperIdentityStateChanged();
         RecordHelperBootstrapDiagnostics();
+    }
+
+    private void NotifySessionVerificationPropertiesChanged()
+    {
+        OnPropertyChanged(nameof(SessionVerificationEmojiSequence));
+        OnPropertyChanged(nameof(SessionVerificationFallbackCode));
+        OnPropertyChanged(nameof(HasSessionVerificationCode));
+        OnPropertyChanged(nameof(ShowSessionVerificationCode));
     }
 
     private void NotifyRegenerateHelperIdentityStateChanged()
@@ -1161,13 +1210,134 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void OnIncomingHelpRequestAvailable(object? sender, EventArgs e)
     {
+        _ = UiThreadDispatch.RunAsync(ApplyIncomingHelpRequestAvailable);
+    }
+
+    private void ApplyIncomingHelpRequestAvailable()
+    {
         localEndCommandInFlight = false;
-        helperIdentityRegenerationConfirmationPending = false;
-        OnPropertyChanged(nameof(HasPendingHelpRequest));
-        OnPropertyChanged(nameof(IncomingHelpRequestText));
+        IsConnecting = false;
+        if (HasPendingHelpRequest)
+        {
+            StartIncomingHelpRequestTimeout();
+        }
+        else
+        {
+            CancelIncomingHelpRequestTimeout();
+        }
+
+        NotifyHelpRequestPresentationChanged();
         NotifyRegenerateHelperIdentityStateChanged();
         AcceptHelpRequestCommand.NotifyCanExecuteChanged();
         RejectHelpRequestCommand.NotifyCanExecuteChanged();
+    }
+
+    private void NotifyHelpRequestPresentationChanged()
+    {
+        OnPropertyChanged(nameof(HasPendingHelpRequest));
+        OnPropertyChanged(nameof(IncomingHelpRequestText));
+        OnPropertyChanged(nameof(ShowIncomingHelpRequestTimeout));
+        OnPropertyChanged(nameof(ShowHelperSetupPanel));
+        OnPropertyChanged(nameof(ShowHelperIdentityBootstrapPanel));
+        OnPropertyChanged(nameof(HeaderVerificationCodeText));
+        OnPropertyChanged(nameof(ShowHeaderVerificationCode));
+        OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+    }
+
+    private void StartIncomingHelpRequestTimeout()
+    {
+        CancelIncomingHelpRequestTimeout();
+
+        incomingHelpRequestExpiresAtUtc = nowProvider() + approvalTimeout;
+        UpdateIncomingHelpRequestTimeoutText(BuildIncomingHelpRequestTimeoutText(nowProvider()));
+        incomingHelpRequestExpiryTimer.Start();
+        incomingHelpRequestTimeoutCts = new CancellationTokenSource();
+        var ct = incomingHelpRequestTimeoutCts.Token;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(approvalTimeout, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            if (ct.IsCancellationRequested || disposed)
+            {
+                return;
+            }
+
+            try
+            {
+                await sessionRuntime.RejectIncomingHelpRequestAsync("request_timeout", CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                LocalOperationalLog.Warn(
+                    "DirectHelpRequest",
+                    $"event=help_request_timeout_reject_failed; reason=decision_send_failed; exception_type={ex.GetType().Name}; role=Helper; runtime_state={sessionRuntime.State}; transport_state={sessionRuntime.TransportLifecycleState}");
+            }
+
+            await UiThreadDispatch.RunAsync(() =>
+            {
+                CancelIncomingHelpRequestTimeout();
+                NotifyHelpRequestPresentationChanged();
+                NotifyRegenerateHelperIdentityStateChanged();
+                AcceptHelpRequestCommand.NotifyCanExecuteChanged();
+                RejectHelpRequestCommand.NotifyCanExecuteChanged();
+                TryShowUiRecoveryTransient("incoming_help_request_timeout", "The help request expired.", canCancel: false);
+                SyncTransientStatusFromRuntime();
+            }).ConfigureAwait(false);
+        });
+    }
+
+    private void CancelIncomingHelpRequestTimeout()
+    {
+        incomingHelpRequestExpiryTimer.Stop();
+        incomingHelpRequestTimeoutCts?.Cancel();
+        incomingHelpRequestTimeoutCts?.Dispose();
+        incomingHelpRequestTimeoutCts = null;
+        incomingHelpRequestExpiresAtUtc = DateTimeOffset.MinValue;
+        UpdateIncomingHelpRequestTimeoutText(string.Empty);
+    }
+
+    private void OnIncomingHelpRequestExpiryTimerTick(object? sender, EventArgs e)
+    {
+        if (!HasPendingHelpRequest ||
+            incomingHelpRequestExpiresAtUtc == DateTimeOffset.MinValue)
+        {
+            CancelIncomingHelpRequestTimeout();
+            NotifyHelpRequestPresentationChanged();
+            return;
+        }
+
+        UpdateIncomingHelpRequestTimeoutText(BuildIncomingHelpRequestTimeoutText(nowProvider()));
+    }
+
+    private string BuildIncomingHelpRequestTimeoutText(DateTimeOffset now)
+    {
+        if (incomingHelpRequestExpiresAtUtc == DateTimeOffset.MinValue)
+        {
+            return string.Empty;
+        }
+
+        var remaining = incomingHelpRequestExpiresAtUtc - now;
+        var totalSeconds = Math.Max(1, (int)Math.Ceiling(remaining.TotalSeconds));
+        var minutes = totalSeconds / 60;
+        var seconds = totalSeconds % 60;
+        return $"Request expires in {minutes:D2}:{seconds:D2}.";
+    }
+
+    private void UpdateIncomingHelpRequestTimeoutText(string value)
+    {
+        value ??= string.Empty;
+        if (SetProperty(ref incomingHelpRequestTimeoutText, value, nameof(IncomingHelpRequestTimeoutText)))
+        {
+            OnPropertyChanged(nameof(ShowIncomingHelpRequestTimeout));
+        }
     }
 
     public void ApplyExternalConnectInput(string input, string sourceLabel)
@@ -2167,20 +2337,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         if (!CanRegenerateHelperIdentity)
         {
-            helperIdentityRegenerationConfirmationPending = false;
             NotifyRegenerateHelperIdentityStateChanged();
             return;
         }
 
-        if (!helperIdentityRegenerationConfirmationPending)
-        {
-            helperIdentityRegenerationConfirmationPending = true;
-            NotifyRegenerateHelperIdentityStateChanged();
-            copyFeedback.Show("Click Confirm regenerate to replace this helper address.");
-            return;
-        }
-
-        helperIdentityRegenerationConfirmationPending = false;
         helperIdentityRegenerationInFlight = true;
         NotifyRegenerateHelperIdentityStateChanged();
         copyFeedback.Show("Regenerating helper address...");
@@ -2274,7 +2434,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         try
         {
+            CancelIncomingHelpRequestTimeout();
             await sessionRuntime.AcceptIncomingHelpRequestAsync(CancellationToken.None).ConfigureAwait(false);
+            await UiThreadDispatch.RunAsync(NotifyHelpRequestPresentationChanged).ConfigureAwait(false);
         }
         catch
         {
@@ -2289,7 +2451,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
+        CancelIncomingHelpRequestTimeout();
         await sessionRuntime.RejectIncomingHelpRequestAsync("request_rejected", CancellationToken.None).ConfigureAwait(false);
+        await UiThreadDispatch.RunAsync(NotifyHelpRequestPresentationChanged).ConfigureAwait(false);
     }
 
     private string BuildHelperInstallMessage()
@@ -2341,6 +2505,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowHeaderVerificationCode));
         OnPropertyChanged(nameof(FirstPillVerificationCodeText));
         OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+        NotifySessionVerificationPropertiesChanged();
     }
 
     private void PromoteBootstrapHelperIdentityFromConnectedSessionIfAvailable()
@@ -3302,6 +3467,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowInlineStatusText));
         OnPropertyChanged(nameof(ShowFailurePanel));
         OnPropertyChanged(nameof(ShowMainControls));
+        OnPropertyChanged(nameof(ShowHelperSetupPanel));
         OnPropertyChanged(nameof(ShowCopyFeedbackInline));
         OnPropertyChanged(nameof(HeaderStatusText));
         OnPropertyChanged(nameof(HelperVerificationCode));
@@ -3311,6 +3477,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowHeaderVerificationCode));
         OnPropertyChanged(nameof(FirstPillVerificationCodeText));
         OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+        NotifySessionVerificationPropertiesChanged();
         NotifyHelperBootstrapPropertiesChanged();
         RefreshHelperBootstrapQrBitmap();
         OnPropertyChanged(nameof(HelperTechnicalIdentityText));

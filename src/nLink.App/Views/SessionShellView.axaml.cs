@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Windows.Input;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Presenters;
 using Avalonia.Layout;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.Input;
@@ -456,95 +457,57 @@ public partial class SessionShellView : UserControl
         var responsiveNarrow = FeatureFlags.EnableResponsiveLayout && IsNarrow;
         var showMain = ShowMainPane;
 
-        if (FixedMainContentPresenter is not null)
+        var fixedMainContent = fixedLayout && showMain ? MainContent : null;
+        var responsiveWideMainContent = responsiveWide && showMain ? MainContent : null;
+        var responsiveNarrowMainContent = responsiveNarrow && showMain ? MainContent : null;
+        var fixedChatContent = fixedLayout && showMain && ShowChatPane ? ChatContent : null;
+        var fixedChatOnlyContent = fixedLayout && !showMain && ShowChatPane ? ChatContent : null;
+        var responsiveWideChatContent = responsiveWide && showMain && ShowChatPane ? ChatContent : null;
+        var responsiveWideChatOnlyContent = responsiveWide && !showMain && ShowChatPane ? ChatContent : null;
+        var responsiveNarrowChatContent = responsiveNarrow && showMain && ShowChatPane ? ChatContent : null;
+        var responsiveNarrowChatOnlyContent = responsiveNarrow && !showMain && ShowChatPane ? ChatContent : null;
+
+        ClearPresenterIfNeeded(FixedMainContentPresenter, fixedMainContent);
+        ClearPresenterIfNeeded(ResponsiveWideMainContentPresenter, responsiveWideMainContent);
+        ClearPresenterIfNeeded(ResponsiveNarrowMainContentPresenter, responsiveNarrowMainContent);
+        ClearPresenterIfNeeded(FixedChatContentPresenter, fixedChatContent);
+        ClearPresenterIfNeeded(FixedChatOnlyContentPresenter, fixedChatOnlyContent);
+        ClearPresenterIfNeeded(ResponsiveWideChatContentPresenter, responsiveWideChatContent);
+        ClearPresenterIfNeeded(ResponsiveWideChatOnlyContentPresenter, responsiveWideChatOnlyContent);
+        ClearPresenterIfNeeded(ResponsiveNarrowChatContentPresenter, responsiveNarrowChatContent);
+        ClearPresenterIfNeeded(ResponsiveNarrowChatOnlyContentPresenter, responsiveNarrowChatOnlyContent);
+
+        SetPresenterContent(FixedMainContentPresenter, fixedMainContent);
+        SetPresenterContent(ResponsiveWideMainContentPresenter, responsiveWideMainContent);
+        SetPresenterContent(ResponsiveNarrowMainContentPresenter, responsiveNarrowMainContent);
+        SetPresenterContent(FixedChatContentPresenter, fixedChatContent);
+        SetPresenterContent(FixedChatOnlyContentPresenter, fixedChatOnlyContent);
+        SetPresenterContent(ResponsiveWideChatContentPresenter, responsiveWideChatContent);
+        SetPresenterContent(ResponsiveWideChatOnlyContentPresenter, responsiveWideChatOnlyContent);
+        SetPresenterContent(ResponsiveNarrowChatContentPresenter, responsiveNarrowChatContent);
+        SetPresenterContent(ResponsiveNarrowChatOnlyContentPresenter, responsiveNarrowChatOnlyContent);
+    }
+
+    private static void ClearPresenterIfNeeded(ContentPresenter? presenter, object? desiredContent)
+    {
+        if (presenter is null ||
+            desiredContent is not null ||
+            presenter.Content is null)
         {
-            FixedMainContentPresenter.Content = null;
+            return;
         }
 
-        if (ResponsiveWideMainContentPresenter is not null)
+        presenter.Content = null;
+    }
+
+    private static void SetPresenterContent(ContentPresenter? presenter, object? content)
+    {
+        if (presenter is null || ReferenceEquals(presenter.Content, content))
         {
-            ResponsiveWideMainContentPresenter.Content = null;
+            return;
         }
 
-        if (ResponsiveNarrowMainContentPresenter is not null)
-        {
-            ResponsiveNarrowMainContentPresenter.Content = null;
-        }
-
-        if (FixedChatContentPresenter is not null)
-        {
-            FixedChatContentPresenter.Content = null;
-        }
-
-        if (FixedChatOnlyContentPresenter is not null)
-        {
-            FixedChatOnlyContentPresenter.Content = null;
-        }
-
-        if (ResponsiveWideChatContentPresenter is not null)
-        {
-            ResponsiveWideChatContentPresenter.Content = null;
-        }
-
-        if (ResponsiveWideChatOnlyContentPresenter is not null)
-        {
-            ResponsiveWideChatOnlyContentPresenter.Content = null;
-        }
-
-        if (ResponsiveNarrowChatContentPresenter is not null)
-        {
-            ResponsiveNarrowChatContentPresenter.Content = null;
-        }
-
-        if (ResponsiveNarrowChatOnlyContentPresenter is not null)
-        {
-            ResponsiveNarrowChatOnlyContentPresenter.Content = null;
-        }
-
-        if (FixedMainContentPresenter is not null)
-        {
-            FixedMainContentPresenter.Content = fixedLayout && showMain ? MainContent : null;
-        }
-
-        if (ResponsiveWideMainContentPresenter is not null)
-        {
-            ResponsiveWideMainContentPresenter.Content = responsiveWide && showMain ? MainContent : null;
-        }
-
-        if (ResponsiveNarrowMainContentPresenter is not null)
-        {
-            ResponsiveNarrowMainContentPresenter.Content = responsiveNarrow && showMain ? MainContent : null;
-        }
-
-        if (FixedChatContentPresenter is not null)
-        {
-            FixedChatContentPresenter.Content = fixedLayout && showMain && ShowChatPane ? ChatContent : null;
-        }
-
-        if (FixedChatOnlyContentPresenter is not null)
-        {
-            FixedChatOnlyContentPresenter.Content = fixedLayout && !showMain && ShowChatPane ? ChatContent : null;
-        }
-
-        if (ResponsiveWideChatContentPresenter is not null)
-        {
-            ResponsiveWideChatContentPresenter.Content = responsiveWide && showMain && ShowChatPane ? ChatContent : null;
-        }
-
-        if (ResponsiveWideChatOnlyContentPresenter is not null)
-        {
-            ResponsiveWideChatOnlyContentPresenter.Content = responsiveWide && !showMain && ShowChatPane ? ChatContent : null;
-        }
-
-        if (ResponsiveNarrowChatContentPresenter is not null)
-        {
-            ResponsiveNarrowChatContentPresenter.Content = responsiveNarrow && showMain && ShowChatPane ? ChatContent : null;
-        }
-
-        if (ResponsiveNarrowChatOnlyContentPresenter is not null)
-        {
-            ResponsiveNarrowChatOnlyContentPresenter.Content = responsiveNarrow && !showMain && ShowChatPane ? ChatContent : null;
-        }
+        presenter.Content = content;
     }
 
     private void ToggleScreenSharePane()

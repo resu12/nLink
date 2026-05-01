@@ -208,6 +208,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private readonly BridgeReusePolicy bridgeReusePolicy;
     private readonly Func<TimeSpan, CancellationToken, Task> bridgeIdleDelayAsync;
     private readonly Func<DateTimeOffset> nowProvider;
+    private readonly TimeSpan outboundHelpRequestDecisionTimeout;
     private readonly SessionAuthorizationGuard authorizationGuard;
     private readonly SessionClipboardGuard clipboardGuard;
     private readonly SessionFileTransferGuard fileTransferGuard;
@@ -533,7 +534,8 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         IRemoteInputInjector? remoteInputInjector = null,
         IRemoteCoordinateMapper? remoteCoordinateMapper = null,
         Func<DateTimeOffset>? nowProvider = null,
-        Func<IScreenCaptureSource>? transportScreenCaptureSourceFactory = null)
+        Func<IScreenCaptureSource>? transportScreenCaptureSourceFactory = null,
+        TimeSpan? outboundHelpRequestDecisionTimeout = null)
     {
         this.createTransport = createTransport ?? throw new ArgumentNullException(nameof(createTransport));
         this.watchdogOptions = watchdogOptions ?? SessionRuntimeWatchdogOptions.Default;
@@ -542,6 +544,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         this.bridgeReusePolicy = bridgeReusePolicy ?? BridgeReusePolicy.Default;
         this.bridgeIdleDelayAsync = bridgeIdleDelayAsync ?? DefaultWatchdogDelayAsync;
         this.nowProvider = nowProvider ?? (() => DateTimeOffset.UtcNow);
+        this.outboundHelpRequestDecisionTimeout = outboundHelpRequestDecisionTimeout ?? TimeSpan.FromSeconds(30);
         authorizationGuard = new SessionAuthorizationGuard(this.nowProvider);
         clipboardGuard = new SessionClipboardGuard(this.nowProvider);
         fileTransferGuard = new SessionFileTransferGuard(this.nowProvider);
@@ -698,6 +701,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
                 activeGrant?.SessionId.Value ?? sessionSecurityState.SessionId?.Value,
                 activeGrant?.HelperIdentity.Value ?? sessionSecurityState.HelperAddress?.Value,
                 ResolveCurrentRemoteEndpoint(),
+                sessionSecurityState.VerificationCode,
                 helperConnectOrigin,
                 lastTransportFailure));
             if (Equals(currentFlowSnapshot, projectedSnapshot))

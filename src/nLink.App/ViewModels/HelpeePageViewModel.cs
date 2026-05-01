@@ -404,6 +404,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(InviteHelperIdentityStatusText));
                 OnPropertyChanged(nameof(CanApplyInviteHelperIdentityAction));
                 OnPropertyChanged(nameof(CanClearInviteHelperIdentityAction));
+                OnPropertyChanged(nameof(CanRequestHelpAction));
                 ApplyInviteHelperIdentityCommand.NotifyCanExecuteChanged();
                 ClearInviteHelperIdentityCommand.NotifyCanExecuteChanged();
                 RequestHelpCommand.NotifyCanExecuteChanged();
@@ -489,6 +490,24 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         HelperVerificationCodeFormatter.FormatOrNull(incomingHelperIdentity) ?? string.Empty;
 
     public bool HasIncomingHelperVerificationCode => !string.IsNullOrWhiteSpace(IncomingHelperVerificationCode);
+
+    private SessionVerificationCode? CurrentSessionVerificationCode =>
+        sessionRuntime.FlowSnapshot.VerificationCode ?? sessionRuntime.SecurityState.VerificationCode;
+
+    public string SessionVerificationEmojiSequence =>
+        CurrentSessionVerificationCode?.EmojiSequence ?? string.Empty;
+
+    public string SessionVerificationFallbackCode =>
+        CurrentSessionVerificationCode?.FallbackCode ?? string.Empty;
+
+    public bool HasSessionVerificationCode =>
+        !string.IsNullOrWhiteSpace(SessionVerificationEmojiSequence) &&
+        !string.IsNullOrWhiteSpace(SessionVerificationFallbackCode);
+
+    public bool ShowSessionVerificationCode =>
+        ShowIncomingRequestPanel &&
+        HasIncomingRequest &&
+        HasSessionVerificationCode;
 
     public string IncomingTechnicalHelperIdentityText => IncomingHelperIdentityText;
 
@@ -626,6 +645,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowHeaderVerificationCode));
                 OnPropertyChanged(nameof(FirstPillVerificationCodeText));
                 OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+                NotifySessionVerificationPropertiesChanged();
                 OnPropertyChanged(nameof(ShowBackButton));
                 OnPropertyChanged(nameof(StatusLineText));
                 OnPropertyChanged(nameof(SecondaryActionText));
@@ -2509,8 +2529,27 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                !sessionRuntime.HasPendingOutboundHelpRequest &&
                sessionRuntime.PendingOutboundHelpRequestDecision?.Accepted != true &&
                !hasIncomingRequest &&
+               CurrentInviteHelperInputMatchesVerifiedIdentity() &&
                ResolveVerifiedHelpRequestTargetAddress() is not null &&
                HasShareInvite;
+    }
+
+    private bool CurrentInviteHelperInputMatchesVerifiedIdentity()
+    {
+        var currentInput = InviteHelperIdentityInput.Trim();
+        if (!HasVerifiedInviteHelperIdentity ||
+            string.IsNullOrWhiteSpace(currentInput))
+        {
+            return false;
+        }
+
+        if (string.Equals(currentInput, verifiedInviteHelperIdentity, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return TryResolveInviteHelperIdentityInput(out var helperIdentity, out _, out _, out _) &&
+               string.Equals(helperIdentity.Value, verifiedInviteHelperIdentity, StringComparison.Ordinal);
     }
 
     public void ApplyHelperBootstrapInput(string input, string sourceLabel)
@@ -2585,6 +2624,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             bootstrapPayload is not null)
         {
             helperTargetAddress = bootstrapPayload.HelperAddress;
+            normalizedInput = HelperBootstrapQrPayload.Format(bootstrapPayload);
             if (!string.IsNullOrWhiteSpace(bootstrapPayload.HelperId))
             {
                 var decodeResult = HelperIdentityTokenCodec.Decode(bootstrapPayload.HelperId);
@@ -2592,13 +2632,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 {
                     helperIdentity = decodeResult.Address.Value;
                     verificationIdentity = helperIdentity;
-                    normalizedInput = HelperIdentityTokenCodec.Encode(helperIdentity);
                     return true;
                 }
             }
 
             helperIdentity = bootstrapPayload.HelperAddress;
-            normalizedInput = helperIdentity.Value;
             return true;
         }
 
@@ -3334,7 +3372,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         var autoRegeneratedAfterDisconnect = false;
-        if (flow.ShowIncomingApproval)
+        if (TryApplyAcceptedHelpRequestFailureReset(flow))
+        {
+            autoRegeneratedAfterDisconnect = true;
+        }
+        else if (flow.ShowIncomingApproval)
         {
             ClearFailurePresentation();
             ConnectionStatus = SessionFlowViewProjection.ResolveStatusText(flow, transportConfig.AllowStatusText);
@@ -3432,6 +3474,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(RemoteControlAdminWarningText));
         OnPropertyChanged(nameof(CanRestartAsAdministrator));
         OnPropertyChanged(nameof(ShowRemoteControlPreviewActiveCue));
+        NotifySessionVerificationPropertiesChanged();
         NotifyRemoteControlDiagnosticsChanged();
         NotifyRemoteControlConsentUiChanged();
         StopControlCommand.NotifyCanExecuteChanged();
@@ -3546,7 +3589,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         try
         {
             RestartWaitingSession(
-                preserveHelperIdentityForRetry: flow.PostTerminalAction == SessionFlowPostTerminalAction.ReturnToWaitingPreserveBootstrap,
+                preserveHelperIdentityForRetry: ShouldPreserveHelperIdentityForPostTerminalAction(flow),
                 preservePeerEndedNotice: flow.ShouldShowPeerEndedNotice,
                 preservedPeerEndedText: flow.TerminalStatusText);
             return true;
@@ -3555,6 +3598,54 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             autoRegeneratingAfterDisconnect = false;
         }
+    }
+
+    private bool TryApplyAcceptedHelpRequestFailureReset(SessionFlowSnapshot flow)
+    {
+        if (!ShouldResetAfterAcceptedHelpRequestFailure(flow) ||
+            autoRegeneratingAfterDisconnect ||
+            IsStartupBlocked ||
+            startupFailureBlocksAutoRestart ||
+            disposed)
+        {
+            return false;
+        }
+
+        var actionKey = $"accepted_help_request_failed|{flow.RuntimeState}|{flow.LastEndOrigin}|{flow.FailureReason}|{flow.SessionId ?? "(none)"}";
+        if (string.Equals(lastAppliedPostTerminalActionKey, actionKey, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        lastAppliedPostTerminalActionKey = actionKey;
+        autoRegeneratingAfterDisconnect = true;
+        try
+        {
+            RestartWaitingSession(
+                preserveHelperIdentityForRetry: false,
+                preservePeerEndedNotice: false);
+            return true;
+        }
+        finally
+        {
+            autoRegeneratingAfterDisconnect = false;
+        }
+    }
+
+    private bool ShouldPreserveHelperIdentityForPostTerminalAction(SessionFlowSnapshot flow)
+    {
+        return flow.PostTerminalAction == SessionFlowPostTerminalAction.ReturnToWaitingPreserveBootstrap &&
+               !ShouldResetAfterAcceptedHelpRequestFailure(flow);
+    }
+
+    private bool ShouldResetAfterAcceptedHelpRequestFailure(SessionFlowSnapshot flow)
+    {
+        return sessionRuntime.PendingOutboundHelpRequestDecision is { Accepted: true } &&
+               flow.Role == SessionRuntimeRole.Helpee &&
+               !flow.ApprovalActive &&
+               flow.RuntimeState is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected or SessionRuntimeState.Rejected &&
+               flow.Phase is SessionFlowPhase.HelpeeWaiting or SessionFlowPhase.Failed or SessionFlowPhase.Ended &&
+               flow.LastEndOrigin is SessionFlowEndOrigin.Remote or SessionFlowEndOrigin.Failed or SessionFlowEndOrigin.Rejected;
     }
 
     private void SyncTransientStatusFromRuntime()
@@ -3645,9 +3736,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
+        var capturedDecision = sessionRuntime.PendingOutboundHelpRequestDecision;
         _ = UiThreadDispatch.RunAsync(() =>
         {
-            var decision = sessionRuntime.PendingOutboundHelpRequestDecision;
+            var decision = capturedDecision ?? sessionRuntime.PendingOutboundHelpRequestDecision;
             if (decision is null)
             {
                 UpdateUiFromSnapshot("help_request_decision_cleared");
@@ -3662,11 +3754,46 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             }
             else
             {
-                UpdateShareInviteStatusText("The helper declined the request.");
+                var statusText = GetHelpRequestDecisionStatusText(decision.Reason);
+                ConnectionState = "Waiting";
+                ConnectionStatus = statusText;
+                if (ShouldClearHelperIdentityAfterHelpRequestDecision(decision.Reason))
+                {
+                    ClearInviteHelperIdentityAfterUnavailableHelper(statusText);
+                }
+                else
+                {
+                    UpdateShareInviteStatusText(statusText);
+                }
             }
 
             UpdateUiFromSnapshot("help_request_decision");
         });
+    }
+
+    private void ClearInviteHelperIdentityAfterUnavailableHelper(string statusText)
+    {
+        InviteHelperIdentityInput = string.Empty;
+        SetVerifiedInviteHelperIdentity(null, refreshInvite: false);
+        UpdateShareInviteStatusText(statusText);
+    }
+
+    private static bool ShouldClearHelperIdentityAfterHelpRequestDecision(string? reason)
+    {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? string.Empty : reason.Trim();
+        return string.Equals(normalizedReason, "helper_closed", StringComparison.Ordinal) ||
+               string.Equals(normalizedReason, "request_timeout", StringComparison.Ordinal);
+    }
+
+    private static string GetHelpRequestDecisionStatusText(string? reason)
+    {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? string.Empty : reason.Trim();
+        return normalizedReason switch
+        {
+            "helper_closed" => "The helper is no longer available.",
+            "request_timeout" => "The help request expired.",
+            _ => "The helper declined the request.",
+        };
     }
 
     private void InitializeStartupAvailabilityState()
@@ -4060,6 +4187,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             OnPropertyChanged(nameof(ShowHeaderVerificationCode));
             OnPropertyChanged(nameof(FirstPillVerificationCodeText));
             OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+            NotifySessionVerificationPropertiesChanged();
             OnPropertyChanged(nameof(IncomingTechnicalHelperIdentityText));
             OnPropertyChanged(nameof(HasIncomingTechnicalHelperIdentity));
             OnPropertyChanged(nameof(HasIncomingTechnicalDetails));
@@ -4093,6 +4221,14 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         SetIncomingCapabilitySelectionCore(ref allowIncomingClipboardCapability, (approvedCapabilities & CapabilityGrant.Clipboard) == CapabilityGrant.Clipboard, nameof(AllowIncomingClipboardCapability));
         NormalizeIncomingCapabilityDependencies();
         OnIncomingCapabilitySelectionChanged();
+    }
+
+    private void NotifySessionVerificationPropertiesChanged()
+    {
+        OnPropertyChanged(nameof(SessionVerificationEmojiSequence));
+        OnPropertyChanged(nameof(SessionVerificationFallbackCode));
+        OnPropertyChanged(nameof(HasSessionVerificationCode));
+        OnPropertyChanged(nameof(ShowSessionVerificationCode));
     }
 
     private void SetIncomingCapabilitySelection(ref bool field, bool value, string propertyName)

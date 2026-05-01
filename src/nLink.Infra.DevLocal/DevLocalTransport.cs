@@ -305,6 +305,26 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
             ct).ConfigureAwait(false);
     }
 
+    public async Task SendHelpRequestCancellationAsync(HelpRequestMessage request, string? reason, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        using var client = new NamedPipeClientStream(".", BuildPipeName(request.HelperAddress.Value), PipeDirection.InOut, PipeOptions.Asynchronous);
+        await client.ConnectAsync(ConnectTimeoutMs, ct).ConfigureAwait(false);
+        var connection = new SessionConnection(client);
+        await connection.WriteFrameAsync(
+            new TransportFrame
+            {
+                Type = HelpRequestDecisionFrameType,
+                RequestId = request.RequestId,
+                HelpeeAddress = request.HelpeeAddress.Value,
+                HelperAddress = request.HelperAddress.Value,
+                Accepted = false,
+                Reason = string.IsNullOrWhiteSpace(reason) ? "request_canceled" : reason.Trim(),
+            },
+            ct).ConfigureAwait(false);
+    }
+
     public Task JoinByInviteAsync(string inviteToken, ValidatedInviteV1 invite, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(inviteToken))

@@ -15,6 +15,7 @@ public sealed partial class SessionRuntime
 {
     private PendingIncomingHelpRequest? pendingIncomingHelpRequest;
     private PendingOutboundHelpRequest? pendingOutboundHelpRequest;
+    private CancellationTokenSource? pendingOutboundHelpRequestTimeoutCts;
 
     public event EventHandler? IncomingHelpRequestAvailable;
     public event EventHandler? HelpRequestDecisionAvailable;
@@ -98,20 +99,24 @@ public sealed partial class SessionRuntime
         ArgumentException.ThrowIfNullOrWhiteSpace(inviteToken);
         ObjectDisposedException.ThrowIf(disposed, this);
 
+        IHelpRequestSignalingTransport helpRequestTransport;
+        HelpRequestMessage request;
         await lifecycleGate.WaitAsync(uiCt).ConfigureAwait(false);
         try
         {
-            if (transport is not IHelpRequestSignalingTransport helpRequestTransport)
+            if (transport is not IHelpRequestSignalingTransport currentHelpRequestTransport)
             {
                 throw new NotSupportedException("This transport does not support direct help requests.");
             }
+
+            helpRequestTransport = currentHelpRequestTransport;
 
             if (CurrentLocalPeerAddress is not PeerAddress helpeeAddress)
             {
                 throw new InvalidOperationException("Helpee address is not ready yet.");
             }
 
-            var request = new HelpRequestMessage(
+            request = new HelpRequestMessage(
                 $"hr_{Guid.NewGuid():N}",
                 helpeeAddress,
                 helperAddress,
@@ -126,23 +131,87 @@ public sealed partial class SessionRuntime
                 state,
                 transportState,
                 "request_help"));
-            try
-            {
-                await helpRequestTransport.SendHelpRequestAsync(request, uiCt).ConfigureAwait(false);
-            }
-            catch
-            {
-                pendingOutboundHelpRequest = null;
-                PendingOutboundHelpRequestDecision = null;
-                HelpRequestDecisionAvailable?.Invoke(this, EventArgs.Empty);
-                SetState(SessionRuntimeState.Waiting, "Waiting for helper…");
-                throw;
-            }
+            StartPendingOutboundHelpRequestTimeoutLocked(request);
         }
         finally
         {
             lifecycleGate.Release();
         }
+
+        using var sendCts = CancellationTokenSource.CreateLinkedTokenSource(uiCt);
+        if (outboundHelpRequestDecisionTimeout > TimeSpan.Zero)
+        {
+            sendCts.CancelAfter(outboundHelpRequestDecisionTimeout + TimeSpan.FromMilliseconds(250));
+        }
+
+        try
+        {
+            await helpRequestTransport.SendHelpRequestAsync(request, sendCts.Token).ConfigureAwait(false);
+            if (IsPendingOutboundHelpRequestTimedOut(request.RequestId))
+            {
+                throw new OperationCanceledException("The help request expired before transport acknowledgement.");
+            }
+        }
+        catch
+        {
+            if (IsPendingOutboundHelpRequestTimedOut(request.RequestId))
+            {
+                throw new OperationCanceledException("The help request expired before transport acknowledgement.");
+            }
+
+            await lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                if (pendingOutboundHelpRequest is { } pending &&
+                    string.Equals(pending.Request.RequestId, request.RequestId, StringComparison.Ordinal))
+                {
+                    CancelPendingOutboundHelpRequestTimeoutLocked();
+                    pendingOutboundHelpRequest = null;
+                    PendingOutboundHelpRequestDecision = null;
+                    HelpRequestDecisionAvailable?.Invoke(this, EventArgs.Empty);
+                    SetState(SessionRuntimeState.Waiting, "Waiting for helper…");
+                }
+            }
+            finally
+            {
+                lifecycleGate.Release();
+            }
+
+            throw;
+        }
+    }
+
+    private bool IsPendingOutboundHelpRequestTimedOut(string requestId)
+        => PendingOutboundHelpRequestDecision is { Accepted: false, Reason: "request_timeout" } decision &&
+           string.Equals(decision.RequestId, requestId, StringComparison.Ordinal);
+
+    private bool TryCompletePendingOutboundHelpRequestAsUnavailable(string reason, string trigger)
+    {
+        if (pendingOutboundHelpRequest is not { } pending)
+        {
+            return false;
+        }
+
+        CancelPendingOutboundHelpRequestTimeoutLocked();
+        pendingOutboundHelpRequest = null;
+        PendingOutboundHelpRequestDecision = new HelpRequestDecisionMessage(
+            pending.Request.RequestId,
+            pending.Request.HelpeeAddress,
+            pending.Request.HelperAddress,
+            Accepted: false,
+            Reason: reason);
+        SetState(SessionRuntimeState.Waiting, "Waiting for helper…");
+        PublishSessionFlowEvent(new SessionFlowEvent(
+            SessionFlowEventKind.None,
+            role,
+            state,
+            transportState,
+            reason));
+        LocalOperationalLog.Info(
+            "DirectHelpRequest",
+            $"event=help_request_outbound_unavailable; request_id={pending.Request.RequestId}; reason={reason}; trigger={trigger}; helper_address={pending.Request.HelperAddress.Value}; helpee_address={pending.Request.HelpeeAddress.Value}; role={role}; state={state}; transport_state={transportState}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+        HelpRequestDecisionAvailable?.Invoke(this, EventArgs.Empty);
+        return true;
     }
 
     public async Task AcceptIncomingHelpRequestAsync(CancellationToken uiCt)
@@ -167,13 +236,32 @@ public sealed partial class SessionRuntime
 
         if (transport is IHelpRequestSignalingTransport helpRequestTransport)
         {
-            await helpRequestTransport.SendHelpRequestDecisionAsync(
-                new HelpRequestDecisionMessage(
-                    pending.Request.RequestId,
-                    pending.Request.HelpeeAddress,
-                    pending.Request.HelperAddress,
-                    Accepted: true),
-                uiCt).ConfigureAwait(false);
+            try
+            {
+                await helpRequestTransport.SendHelpRequestDecisionAsync(
+                    new HelpRequestDecisionMessage(
+                        pending.Request.RequestId,
+                        pending.Request.HelpeeAddress,
+                        pending.Request.HelperAddress,
+                        Accepted: true),
+                    uiCt).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (uiCt.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                LocalOperationalLog.Warn(
+                    "DirectHelpRequest",
+                    $"event=help_request_accept_failed; reason=decision_send_failed; request_id={pending.Request.RequestId}; helpee={pending.Request.HelpeeAddress.Value}; helper={pending.Request.HelperAddress.Value}; exception_type={ex.GetType().Name}; role={role}; state={state}; transport_state={transportState}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+
+                await MarkIncomingHelpRequestAcceptFailedAsync(
+                        pending.Request.RequestId,
+                        "The help request is no longer available.")
+                    .ConfigureAwait(false);
+                return;
+            }
         }
 
         var validator = InviteTokenServiceFactory.CreateInviteTokenValidator();
@@ -190,6 +278,36 @@ public sealed partial class SessionRuntime
                 HelperConnectOrigin.IncomingHelpRequest,
                 uiCt)
             .ConfigureAwait(false);
+    }
+
+    private async Task MarkIncomingHelpRequestAcceptFailedAsync(string requestId, string statusText)
+    {
+        await lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            if (disposed)
+            {
+                return;
+            }
+
+            if (pendingIncomingHelpRequest is not null)
+            {
+                return;
+            }
+
+            SetTransientStatus(isVisible: true, text: statusText, canCancel: false);
+            SetState(SessionRuntimeState.Waiting, "Waiting for help requests…");
+            PublishSessionFlowEvent(new SessionFlowEvent(
+                SessionFlowEventKind.None,
+                role,
+                state,
+                transportState,
+                $"help_request_accept_failed:{requestId}"));
+        }
+        finally
+        {
+            lifecycleGate.Release();
+        }
     }
 
     private void PublishHelperListenerBootstrapSnapshotIfCurrent(
@@ -374,41 +492,257 @@ public sealed partial class SessionRuntime
             return;
         }
 
-        PendingOutboundHelpRequestDecision = e.Decision;
-        if (pendingOutboundHelpRequest is not null &&
-            string.Equals(pendingOutboundHelpRequest.Request.RequestId, e.Decision.RequestId, StringComparison.Ordinal))
+        if (TryHandleIncomingHelpRequestCancellation(e.Decision))
         {
-            if (e.Decision.Accepted)
-            {
-                pendingOutboundHelpRequest = null;
-                SetState(SessionRuntimeState.Waiting, "Helper accepted. Finalizing secure connection…");
-                PublishSessionFlowEvent(new SessionFlowEvent(
-                    SessionFlowEventKind.LocalApprovalStarted,
-                    role,
-                    state,
-                    transportState,
-                    "help_request_accepted"));
-            }
-            else
-            {
-                SetState(SessionRuntimeState.Rejected, "The helper declined the request.");
-                PublishSessionFlowEvent(new SessionFlowEvent(
-                    SessionFlowEventKind.TransportRejected,
-                    role,
-                    state,
-                    transportState,
-                    "help_request_rejected"));
-            }
+            return;
+        }
+
+        if (pendingOutboundHelpRequest is not { } pendingOutbound ||
+            !string.Equals(pendingOutbound.Request.RequestId, e.Decision.RequestId, StringComparison.Ordinal))
+        {
+            LocalOperationalLog.Info(
+                "DirectHelpRequest",
+                $"event=help_request_decision_ignored; reason=no_matching_pending_request; request_id={e.Decision.RequestId}; accepted={e.Decision.Accepted}; helper_address={e.Decision.HelperAddress.Value}; helpee_address={e.Decision.HelpeeAddress.Value}; role={role}; state={state}; transport_state={transportState}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+            return;
+        }
+
+        CancelPendingOutboundHelpRequestTimeoutLocked();
+        PendingOutboundHelpRequestDecision = e.Decision;
+        pendingOutboundHelpRequest = null;
+        if (e.Decision.Accepted)
+        {
+            SetState(SessionRuntimeState.Waiting, "Helper accepted. Finalizing secure connection…");
+            PublishSessionFlowEvent(new SessionFlowEvent(
+                SessionFlowEventKind.LocalApprovalStarted,
+                role,
+                state,
+                transportState,
+                "help_request_accepted"));
+        }
+        else
+        {
+            var rejectedStatus = GetHelpRequestRejectedStatus(e.Decision.Reason);
+            SetState(SessionRuntimeState.Rejected, rejectedStatus);
+            PublishSessionFlowEvent(new SessionFlowEvent(
+                SessionFlowEventKind.TransportRejected,
+                role,
+                state,
+                transportState,
+                NormalizeHelpRequestRejectedReason(e.Decision.Reason)));
         }
 
         HelpRequestDecisionAvailable?.Invoke(this, EventArgs.Empty);
     }
 
+    private bool TryHandleIncomingHelpRequestCancellation(HelpRequestDecisionMessage decision)
+    {
+        if (decision.Accepted ||
+            pendingIncomingHelpRequest is not { } pending ||
+            !string.Equals(pending.Request.RequestId, decision.RequestId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var reason = string.IsNullOrWhiteSpace(decision.Reason) ? "request_canceled" : decision.Reason.Trim();
+        if (!IsHelpRequestCancellationReason(reason))
+        {
+            return false;
+        }
+
+        pendingIncomingHelpRequest = null;
+        IncomingHelpRequestAvailable?.Invoke(this, EventArgs.Empty);
+        SetTransientStatus(isVisible: true, text: "The help request is no longer available.", canCancel: false);
+        SetState(SessionRuntimeState.Waiting, "Waiting for help requests…");
+        PublishSessionFlowEvent(new SessionFlowEvent(
+            SessionFlowEventKind.None,
+            role,
+            state,
+            transportState,
+            $"help_request_canceled:{reason}"));
+        LocalOperationalLog.Info(
+            "DirectHelpRequest",
+            $"event=help_request_cancellation_received; request_id={decision.RequestId}; reason={reason}; helper_address={decision.HelperAddress.Value}; helpee_address={decision.HelpeeAddress.Value}; role={role}; state={state}; transport_state={transportState}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+        return true;
+    }
+
+    private static bool IsHelpRequestCancellationReason(string reason) =>
+        string.Equals(reason, "request_canceled", StringComparison.Ordinal) ||
+        string.Equals(reason, "helpee_closed", StringComparison.Ordinal) ||
+        string.Equals(reason, "helper_closed", StringComparison.Ordinal) ||
+        string.Equals(reason, "request_timeout", StringComparison.Ordinal);
+
+    private static string GetHelpRequestRejectedStatus(string? reason) =>
+        NormalizeHelpRequestRejectedReason(reason) switch
+        {
+            "helper_closed" => "The helper is no longer available.",
+            "request_timeout" => "The help request expired.",
+            _ => "The helper declined the request.",
+        };
+
+    private static string NormalizeHelpRequestRejectedReason(string? reason)
+        => string.IsNullOrWhiteSpace(reason) ? "help_request_rejected" : reason.Trim();
+
+    private void StartPendingOutboundHelpRequestTimeoutLocked(HelpRequestMessage request)
+    {
+        CancelPendingOutboundHelpRequestTimeoutLocked();
+        if (outboundHelpRequestDecisionTimeout <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var timeoutCts = new CancellationTokenSource();
+        pendingOutboundHelpRequestTimeoutCts = timeoutCts;
+        LocalOperationalLog.Info(
+            "DirectHelpRequest",
+            $"event=help_request_outbound_timeout_scheduled; request_id={request.RequestId}; timeout_ms={outboundHelpRequestDecisionTimeout.TotalMilliseconds:0}; helper_address={request.HelperAddress.Value}; helpee_address={request.HelpeeAddress.Value}; role={role}; state={state}; transport_state={transportState}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+        RunCountedBackgroundTask(
+            () => RunPendingOutboundHelpRequestTimeoutAsync(request, timeoutCts),
+            countAsTransportTask: false);
+    }
+
+    private async Task RunPendingOutboundHelpRequestTimeoutAsync(HelpRequestMessage request, CancellationTokenSource timeoutCts)
+    {
+        var ct = timeoutCts.Token;
+        try
+        {
+            await Task.Delay(outboundHelpRequestDecisionTimeout, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return;
+        }
+
+        await lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            if (disposed ||
+                ct.IsCancellationRequested ||
+                pendingOutboundHelpRequest is not { } pending ||
+                !string.Equals(pending.Request.RequestId, request.RequestId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            pendingOutboundHelpRequest = null;
+            PendingOutboundHelpRequestDecision = new HelpRequestDecisionMessage(
+                request.RequestId,
+                request.HelpeeAddress,
+                request.HelperAddress,
+                Accepted: false,
+                Reason: "request_timeout");
+            SetState(SessionRuntimeState.Waiting, "Waiting for helper…");
+            PublishSessionFlowEvent(new SessionFlowEvent(
+                SessionFlowEventKind.None,
+                role,
+                state,
+                transportState,
+                "request_timeout"));
+            LocalOperationalLog.Info(
+                "DirectHelpRequest",
+                $"event=help_request_outbound_timeout; request_id={request.RequestId}; timeout_ms={outboundHelpRequestDecisionTimeout.TotalMilliseconds:0}; helper_address={request.HelperAddress.Value}; helpee_address={request.HelpeeAddress.Value}; role={role}; state={state}; transport_state={transportState}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+            HelpRequestDecisionAvailable?.Invoke(this, EventArgs.Empty);
+        }
+        finally
+        {
+            if (ReferenceEquals(pendingOutboundHelpRequestTimeoutCts, timeoutCts))
+            {
+                pendingOutboundHelpRequestTimeoutCts = null;
+            }
+
+            timeoutCts.Dispose();
+            lifecycleGate.Release();
+        }
+    }
+
+    private void CancelPendingOutboundHelpRequestTimeoutLocked()
+    {
+        var timeoutCts = pendingOutboundHelpRequestTimeoutCts;
+        pendingOutboundHelpRequestTimeoutCts = null;
+        if (timeoutCts is null)
+        {
+            return;
+        }
+
+        try
+        {
+            timeoutCts.Cancel();
+        }
+        catch
+        {
+            // Best-effort timer cancellation.
+        }
+        finally
+        {
+            timeoutCts.Dispose();
+        }
+    }
+
     private void ClearHelpRequestState()
     {
+        CancelPendingOutboundHelpRequestTimeoutLocked();
         pendingIncomingHelpRequest = null;
         pendingOutboundHelpRequest = null;
         PendingOutboundHelpRequestDecision = null;
+    }
+
+    private async Task TrySendPendingOutboundHelpRequestCancellationAsync(
+        ISignalingTransport? oldTransport,
+        string reason)
+    {
+        if (pendingOutboundHelpRequest is not { } pending ||
+            oldTransport is not IHelpRequestSignalingTransport helpRequestTransport)
+        {
+            return;
+        }
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try
+        {
+            await helpRequestTransport.SendHelpRequestCancellationAsync(pending.Request, reason, cts.Token).ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "DirectHelpRequest",
+                $"event=help_request_cancellation_requested; request_id={pending.Request.RequestId}; reason={reason}; helper_address={pending.Request.HelperAddress.Value}; helpee_address={pending.Request.HelpeeAddress.Value}; role={role}; state={state}; transport_state={transportState}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                "DirectHelpRequest",
+                $"event=help_request_cancellation_failed; request_id={pending.Request.RequestId}; reason={reason}; helper_address={pending.Request.HelperAddress.Value}; helpee_address={pending.Request.HelpeeAddress.Value}; exception_type={ex.GetType().Name}; role={role}; state={state}; transport_state={transportState}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+        }
+    }
+
+    private async Task TrySendPendingIncomingHelpRequestCancellationAsync(
+        ISignalingTransport? oldTransport,
+        string reason)
+    {
+        if (pendingIncomingHelpRequest is not { } pending ||
+            oldTransport is not IHelpRequestSignalingTransport helpRequestTransport)
+        {
+            return;
+        }
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try
+        {
+            await helpRequestTransport.SendHelpRequestDecisionAsync(
+                    new HelpRequestDecisionMessage(
+                        pending.Request.RequestId,
+                        pending.Request.HelpeeAddress,
+                        pending.Request.HelperAddress,
+                        Accepted: false,
+                        Reason: reason),
+                    cts.Token)
+                .ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "DirectHelpRequest",
+                $"event=help_request_incoming_cancellation_requested; request_id={pending.Request.RequestId}; reason={reason}; helper_address={pending.Request.HelperAddress.Value}; helpee_address={pending.Request.HelpeeAddress.Value}; role={role}; state={state}; transport_state={transportState}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                "DirectHelpRequest",
+                $"event=help_request_incoming_cancellation_failed; request_id={pending.Request.RequestId}; reason={reason}; helper_address={pending.Request.HelperAddress.Value}; helpee_address={pending.Request.HelpeeAddress.Value}; exception_type={ex.GetType().Name}; role={role}; state={state}; transport_state={transportState}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+        }
     }
 
     private bool TryScheduleQuietHelperListenerRestart(string reason)

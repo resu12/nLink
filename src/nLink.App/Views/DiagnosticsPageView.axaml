@@ -16,7 +16,6 @@
                         Spacing="16">
                 <TextBlock Classes="appTitle"
                            Text="{Binding PageTitle}"
-                           FontSize="34"
                            HorizontalAlignment="Center"
                            TextAlignment="Center"/>
 
@@ -28,9 +27,7 @@
                 <Border Classes="appCard" Padding="16">
                     <StackPanel Spacing="8">
                         <TextBlock Text="Privacy notice"
-                                   Foreground="{StaticResource AppTextBrush}"
-                                   FontSize="20"
-                                   FontWeight="SemiBold"/>
+                                   Classes="appSectionTitle"/>
                         <TextBlock Classes="appBody"
                                    Text="{Binding DiagnosticsPrivacyNotice}"
                                    TextWrapping="Wrap"/>
@@ -42,42 +39,33 @@
                       MaxWidth="820">
                     <Button Grid.Column="0"
                             AutomationProperties.AutomationId="Diag.Copy"
-                            Classes="appButton secondaryButton"
+                            Classes="appButton secondaryButton standardButton"
                             Content="Copy diagnostics"
                             Command="{Binding CopyReliabilityLogCommand}"
-                            Height="48"
-                            FontSize="16"
                             HorizontalAlignment="Stretch"/>
 
                     <Button Grid.Column="1"
-                            Classes="appButton secondaryButton"
+                            Classes="appButton secondaryButton standardButton"
                             Content="Save Hang Report"
                             Command="{Binding SaveHangReportCommand}"
-                            Height="48"
-                            FontSize="16"
                             HorizontalAlignment="Stretch"/>
 
                     <Button Grid.Column="2"
                             AutomationProperties.AutomationId="Diag.OpenLogs"
-                            Classes="appButton secondaryButton"
+                            Classes="appButton secondaryButton standardButton"
                             Content="Open logs folder"
                             Command="{Binding OpenLogsFolderCommand}"
-                            Height="48"
-                            FontSize="16"
                             HorizontalAlignment="Stretch"/>
 
                     <Button Grid.Column="3"
-                            Classes="appButton secondaryButton"
+                            Classes="appButton secondaryButton standardButton"
                             Content="Back"
                             Command="{Binding BackCommand}"
-                            Height="48"
-                            FontSize="16"
                             HorizontalAlignment="Stretch"/>
                 </Grid>
 
-                <TextBlock Classes="appMuted"
+                <TextBlock Classes="appCaption"
                            Text="{Binding CopyFeedback.Text}"
-                           FontSize="13"
                            HorizontalAlignment="Center"
                            TextAlignment="Center"
                            IsVisible="{Binding CopyFeedback.IsVisible}"/>
@@ -85,9 +73,7 @@
                 <Border Classes="appCard" Padding="20">
                     <StackPanel Spacing="14">
                         <TextBlock Text="Health"
-                                   Foreground="{StaticResource AppTextBrush}"
-                                   FontSize="22"
-                                   FontWeight="SemiBold"/>
+                                   Classes="appSectionTitle"/>
 
                         <Grid ColumnDefinitions="220,*"
                               RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto"
@@ -131,9 +117,7 @@
                 <Border Classes="appCard" Padding="20">
                     <StackPanel Spacing="14">
                         <TextBlock Text="Connection &amp; identity"
-                                   Foreground="{StaticResource AppTextBrush}"
-                                   FontSize="22"
-                                   FontWeight="SemiBold"/>
+                                   Classes="appSectionTitle"/>
 
                         <Grid ColumnDefinitions="220,*"
                               RowDefinitions="Auto,Auto,Auto,Auto,Auto"
@@ -160,9 +144,7 @@
                 <Border Classes="appCard" Padding="20">
                     <StackPanel Spacing="14">
                         <TextBlock Text="Screen share health"
-                                   Foreground="{StaticResource AppTextBrush}"
-                                   FontSize="22"
-                                   FontWeight="SemiBold"/>
+                                   Classes="appSectionTitle"/>
 
                         <Grid ColumnDefinitions="220,*"
                               RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
@@ -251,17 +233,13 @@
                                       ColumnSpacing="8"
                                       Margin="0,4,0,0">
                                     <Button Grid.Column="0"
-                                            Classes="appButton secondaryButton"
+                                            Classes="appButton secondaryButton compactButton"
                                             Content="Apply balanced"
-                                            Command="{Binding ApplyBalancedScreenSharePresetCommand}"
-                                            Height="40"
-                                            FontSize="14"/>
+                                            Command="{Binding ApplyBalancedScreenSharePresetCommand}"/>
                                     <Button Grid.Column="1"
-                                            Classes="appButton secondaryButton"
+                                            Classes="appButton secondaryButton compactButton"
                                             Content="Apply CPU saver"
-                                            Command="{Binding ApplyLowEndScreenSharePresetCommand}"
-                                            Height="40"
-                                            FontSize="14"/>
+                                            Command="{Binding ApplyLowEndScreenSharePresetCommand}"/>
                                 </Grid>
                                 <TextBlock Classes="appMuted"
                                            Text="{Binding ScreenShareCaptureEnvHint}"
@@ -289,18 +267,14 @@
                             <Grid ColumnDefinitions="*,*"
                                   ColumnSpacing="10">
                                 <Button Grid.Column="0"
-                                        Classes="appButton secondaryButton"
+                                        Classes="appButton secondaryButton standardButton"
                                         Content="Export metrics JSON"
-                                        Command="{Binding ExportMetricsJsonCommand}"
-                                        Height="44"
-                                        FontSize="15"/>
+                                        Command="{Binding ExportMetricsJsonCommand}"/>
                                 <Button Grid.Column="1"
-                                        Classes="appButton secondaryButton"
+                                        Classes="appButton secondaryButton standardButton"
                                         Content="Report a bug"
                                         Command="{Binding ReportBugCommand}"
-                                        IsVisible="{Binding ShowReportBug}"
-                                        Height="44"
-                                        FontSize="15"/>
+                                        IsVisible="{Binding ShowReportBug}"/>
                             </Grid>
                         </StackPanel>
                     </Border>
@@ -314,7 +288,7 @@
                                Text="Powered by"
                                FontSize="12"
                                VerticalAlignment="Center"/>
-                    <Button Classes="linkButton"
+                    <Button Classes="linkButton linkAction"
                             Content="NKN"
                             Click="PoweredByNknLink_Click"
                             FontSize="12"

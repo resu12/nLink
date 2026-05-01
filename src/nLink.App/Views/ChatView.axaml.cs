@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using Avalonia;
@@ -26,6 +27,8 @@ public partial class ChatView : UserControl
     private const string ResumeFileTransferAutomationId = "Chat.FileTransfer.Resume";
 
     private INotifyCollectionChanged? observedCollection;
+    private INotifyPropertyChanged? observedBindings;
+    private CommunityToolkit.Mvvm.Input.IAsyncRelayCommand? observedSendChatCommand;
     private bool isNearBottom = true;
     private bool scrollToEndQueued;
     private bool forceScrollToEndQueued;
@@ -39,6 +42,7 @@ public partial class ChatView : UserControl
         {
             // Handle Enter before TextBox AcceptsReturn consumes it, while still letting
             // Shift+Enter pass through for newline insertion.
+            ChatInputTextBox.TextChanged += ChatDraftTextBox_TextChanged;
             ChatInputTextBox.AddHandler(
                 InputElement.KeyDownEvent,
                 ChatDraftTextBox_KeyDown,
@@ -58,9 +62,12 @@ public partial class ChatView : UserControl
         };
         DetachedFromVisualTree += (_, _) =>
         {
+            UnhookBindings();
             UnhookMessagesCollection();
             UnhookScrollViewer();
         };
+        HookBindings();
+        UpdateSendChatButtonState();
     }
 
     public bool ShowInlineEndSession => !FeatureFlags.EnableSessionHeader;
@@ -69,9 +76,56 @@ public partial class ChatView : UserControl
     {
         if (e.Property == DataContextProperty)
         {
+            HookBindings();
             HookMessagesCollection();
+            UpdateSendChatButtonState();
         }
     }
+
+    private void HookBindings()
+    {
+        UnhookBindings();
+
+        observedBindings = DataContext as INotifyPropertyChanged;
+        if (observedBindings is not null)
+        {
+            observedBindings.PropertyChanged += OnObservedBindingsPropertyChanged;
+        }
+
+        observedSendChatCommand = (DataContext as IChatPanelBindings)?.SendChatCommand;
+        if (observedSendChatCommand is not null)
+        {
+            observedSendChatCommand.CanExecuteChanged += OnObservedSendChatCommandCanExecuteChanged;
+        }
+    }
+
+    private void UnhookBindings()
+    {
+        if (observedBindings is not null)
+        {
+            observedBindings.PropertyChanged -= OnObservedBindingsPropertyChanged;
+            observedBindings = null;
+        }
+
+        if (observedSendChatCommand is not null)
+        {
+            observedSendChatCommand.CanExecuteChanged -= OnObservedSendChatCommandCanExecuteChanged;
+            observedSendChatCommand = null;
+        }
+    }
+
+    private void OnObservedBindingsPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(e.PropertyName) ||
+            string.Equals(e.PropertyName, nameof(IChatPanelBindings.ChatDraft), StringComparison.Ordinal) ||
+            string.Equals(e.PropertyName, nameof(IChatPanelBindings.IsChatInputEnabled), StringComparison.Ordinal))
+        {
+            UpdateSendChatButtonState();
+        }
+    }
+
+    private void OnObservedSendChatCommandCanExecuteChanged(object? sender, EventArgs e)
+        => UpdateSendChatButtonState();
 
     private void HookMessagesCollection()
     {
@@ -206,6 +260,7 @@ public partial class ChatView : UserControl
         // suppress newline insertion rather than treating Enter like Shift+Enter.
         e.Handled = true;
 
+        SyncChatDraftFromTextBox();
         var command = (DataContext as IChatPanelBindings)?.SendChatCommand;
         if (command is null || !command.CanExecute(null))
         {
@@ -213,6 +268,62 @@ public partial class ChatView : UserControl
         }
 
         command.Execute(null);
+        UpdateSendChatButtonState();
+    }
+
+    private void ChatDraftTextBox_TextChanged(object? sender, TextChangedEventArgs e)
+    {
+        SyncChatDraftFromTextBox();
+        UpdateSendChatButtonState();
+    }
+
+    private void SendChatButton_Click(object? sender, RoutedEventArgs e)
+    {
+        SyncChatDraftFromTextBox();
+        var command = (DataContext as IChatPanelBindings)?.SendChatCommand;
+        if (command is null || !command.CanExecute(null))
+        {
+            UpdateSendChatButtonState();
+            return;
+        }
+
+        command.Execute(null);
+        UpdateSendChatButtonState();
+    }
+
+    private void SyncChatDraftFromTextBox()
+    {
+        if (DataContext is not IChatPanelBindings bindings ||
+            ChatInputTextBox is null)
+        {
+            return;
+        }
+
+        var visibleText = ChatInputTextBox.Text ?? string.Empty;
+        if (!string.Equals(bindings.ChatDraft, visibleText, StringComparison.Ordinal))
+        {
+            bindings.ChatDraft = visibleText;
+        }
+    }
+
+    private void UpdateSendChatButtonState()
+    {
+        if (SendChatButton is null)
+        {
+            return;
+        }
+
+        if (DataContext is not IChatPanelBindings bindings)
+        {
+            SendChatButton.IsEnabled = false;
+            return;
+        }
+
+        var visibleDraft = ChatInputTextBox?.Text ?? bindings.ChatDraft;
+        SendChatButton.IsEnabled =
+            bindings.IsChatInputEnabled &&
+            !string.IsNullOrWhiteSpace(visibleDraft) &&
+            bindings.SendChatCommand.CanExecute(null);
     }
 
     private void SendFileButton_Click(object? sender, RoutedEventArgs e)
@@ -343,7 +454,7 @@ public partial class ChatView : UserControl
             bindings => bindings.ResumeFileTransferCommand);
     }
 
-    private void FileTransferCard_PointerReleased(object? sender, PointerReleasedEventArgs e)
+    private void FileTransferCard_PointerReleased(object? sender, RoutedEventArgs e)
     {
         if ((sender as Control)?.DataContext is not FileTransferPanelItemViewModel item ||
             !item.ShowSavedLocation ||
