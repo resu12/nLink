@@ -456,6 +456,31 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        var localHelper = new PeerAddress(LocalPeerAddress);
+        var admission = helpRequestAdmissionGuard.Admit(
+            source,
+            localHelper,
+            helperAddress,
+            helpeeAddress,
+            request.requestId!,
+            request.inviteToken!,
+            DateTimeOffset.UtcNow);
+        if (admission != HelpRequestAdmissionDecision.Accepted)
+        {
+            var reason = GetHelpRequestAdmissionRejectionReason(admission);
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"help_request_{reason}");
+            LocalOperationalLog.Warn(
+                "DirectHelpRequest",
+                $"event=help_request_rejected; reason={reason}; msg_id={env.MessageId}; request_id={request.requestId}; source={source ?? "(none)"}; helper_address={request.helperAddress}; helpee_address={request.helpeeAddress}");
+
+            if (!string.IsNullOrWhiteSpace(source))
+            {
+                SendAckFireAndForget(source, env.Code, env.MessageId);
+            }
+
+            return;
+        }
+
         var validation = inviteTokenValidator.Validate(request.inviteToken, DateTimeOffset.UtcNow, InviteValidationMode.InspectOnly);
         if (!validation.IsSuccess || validation.Invite is null)
         {
@@ -466,7 +491,6 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        var localHelper = new PeerAddress(LocalPeerAddress);
         if (validation.Invite.BoundHelperAddress is not null &&
             !AddressesLikelySamePeer(validation.Invite.BoundHelperAddress.Value.Value, localHelper.Value))
         {
@@ -495,6 +519,15 @@ public sealed partial class NknSignalingTransport
                     helperAddress,
                     request.inviteToken!)));
     }
+
+    private static string GetHelpRequestAdmissionRejectionReason(HelpRequestAdmissionDecision decision) =>
+        decision switch
+        {
+            HelpRequestAdmissionDecision.DuplicateRecent => "duplicate_recent",
+            HelpRequestAdmissionDecision.SourceThrottled => "source_throttled",
+            HelpRequestAdmissionDecision.RequestChurnThrottled => "request_churn_throttled",
+            _ => "unknown",
+        };
 
     private void HandleHelpRequestDecision(string source, Envelope env)
     {
@@ -3451,6 +3484,155 @@ public sealed partial class NknSignalingTransport
                 ChallengeExpiresAtUtc = challengeExpiresAtUtc,
                 HelpeeEcdhPublicKey = helpeeEcdhPublicKey,
             };
+        }
+    }
+
+    private enum HelpRequestAdmissionDecision
+    {
+        Accepted = 0,
+        DuplicateRecent = 1,
+        SourceThrottled = 2,
+        RequestChurnThrottled = 3,
+    }
+
+    private sealed class HelpRequestAdmissionGuard
+    {
+        private static readonly TimeSpan DuplicateWindow = TimeSpan.FromMinutes(2);
+        private static readonly TimeSpan ThrottleWindow = TimeSpan.FromSeconds(30);
+        private const int MaxRequestsPerSourceWindow = 4;
+        private const int MaxDistinctRequestIdsPerInviteWindow = 2;
+        private const int MaxRecentDuplicateKeys = 2048;
+
+        private readonly object gate = new();
+        private readonly Dictionary<string, long> recentExactRequests = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, Queue<long>> sourceRequests = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, Dictionary<string, long>> requestIdsByInvite = new(StringComparer.Ordinal);
+
+        public HelpRequestAdmissionDecision Admit(
+            string? source,
+            PeerAddress localHelperAddress,
+            PeerAddress helperAddress,
+            PeerAddress helpeeAddress,
+            string requestId,
+            string inviteToken,
+            DateTimeOffset nowUtc)
+        {
+            var nowTicks = nowUtc.UtcTicks;
+            var sourceIdentity = NormalizeSourceIdentity(source, helpeeAddress);
+            var normalizedRequestId = requestId.Trim();
+            var exactKey = string.Join(
+                "|",
+                sourceIdentity,
+                helperAddress.Value,
+                helpeeAddress.Value,
+                normalizedRequestId);
+            var sourceKey = string.Join("|", localHelperAddress.Value, sourceIdentity);
+            var churnKey = string.Join("|", sourceKey, ComputeInviteTokenFingerprint(inviteToken));
+
+            lock (gate)
+            {
+                PruneExactRequests(nowTicks);
+                if (recentExactRequests.ContainsKey(exactKey))
+                {
+                    return HelpRequestAdmissionDecision.DuplicateRecent;
+                }
+
+                recentExactRequests[exactKey] = nowTicks;
+
+                var sourceQueue = GetOrCreateSourceQueue(sourceKey);
+                PruneQueue(sourceQueue, nowTicks, ThrottleWindow);
+                if (sourceQueue.Count >= MaxRequestsPerSourceWindow)
+                {
+                    return HelpRequestAdmissionDecision.SourceThrottled;
+                }
+
+                sourceQueue.Enqueue(nowTicks);
+
+                var requestIds = GetOrCreateRequestIds(churnKey);
+                PruneRequestIds(requestIds, nowTicks);
+                if (!requestIds.ContainsKey(normalizedRequestId) &&
+                    requestIds.Count >= MaxDistinctRequestIdsPerInviteWindow)
+                {
+                    return HelpRequestAdmissionDecision.RequestChurnThrottled;
+                }
+
+                requestIds[normalizedRequestId] = nowTicks;
+                return HelpRequestAdmissionDecision.Accepted;
+            }
+        }
+
+        private Queue<long> GetOrCreateSourceQueue(string sourceKey)
+        {
+            if (!sourceRequests.TryGetValue(sourceKey, out var queue))
+            {
+                queue = new Queue<long>();
+                sourceRequests[sourceKey] = queue;
+            }
+
+            return queue;
+        }
+
+        private Dictionary<string, long> GetOrCreateRequestIds(string churnKey)
+        {
+            if (!requestIdsByInvite.TryGetValue(churnKey, out var requestIds))
+            {
+                requestIds = new Dictionary<string, long>(StringComparer.Ordinal);
+                requestIdsByInvite[churnKey] = requestIds;
+            }
+
+            return requestIds;
+        }
+
+        private void PruneExactRequests(long nowTicks)
+        {
+            var cutoffTicks = nowTicks - DuplicateWindow.Ticks;
+            foreach (var pair in recentExactRequests.ToArray())
+            {
+                if (pair.Value < cutoffTicks)
+                {
+                    recentExactRequests.Remove(pair.Key);
+                }
+            }
+
+            if (recentExactRequests.Count <= MaxRecentDuplicateKeys)
+            {
+                return;
+            }
+
+            foreach (var pair in recentExactRequests.OrderBy(static pair => pair.Value).Take(recentExactRequests.Count - MaxRecentDuplicateKeys).ToArray())
+            {
+                recentExactRequests.Remove(pair.Key);
+            }
+        }
+
+        private void PruneRequestIds(Dictionary<string, long> requestIds, long nowTicks)
+        {
+            var cutoffTicks = nowTicks - ThrottleWindow.Ticks;
+            foreach (var pair in requestIds.ToArray())
+            {
+                if (pair.Value < cutoffTicks)
+                {
+                    requestIds.Remove(pair.Key);
+                }
+            }
+        }
+
+        private static void PruneQueue(Queue<long> queue, long nowTicks, TimeSpan window)
+        {
+            var cutoffTicks = nowTicks - window.Ticks;
+            while (queue.Count > 0 && queue.Peek() < cutoffTicks)
+            {
+                queue.Dequeue();
+            }
+        }
+
+        private static string NormalizeSourceIdentity(string? source, PeerAddress helpeeAddress) =>
+            string.IsNullOrWhiteSpace(source) ? helpeeAddress.Value : source.Trim();
+
+        private static string ComputeInviteTokenFingerprint(string inviteToken)
+        {
+            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(inviteToken.Trim()));
+            return Convert.ToHexString(hash.AsSpan(0, 16));
         }
     }
 

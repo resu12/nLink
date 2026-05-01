@@ -474,6 +474,27 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        if (pendingIncomingHelpRequest is { } pending)
+        {
+            var reason = string.Equals(pending.Request.RequestId, e.Request.RequestId, StringComparison.Ordinal)
+                ? "duplicate_pending"
+                : "already_pending";
+            LocalOperationalLog.Info(
+                "DirectHelpRequest",
+                $"event=help_request_ignored; reason={reason}; request_id={e.Request.RequestId}; pending_request_id={pending.Request.RequestId}; helper_address={e.Request.HelperAddress.Value}; helpee_address={e.Request.HelpeeAddress.Value}; role={role}; state={state}; transport_state={transportState}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+            return;
+        }
+
+        if (role != SessionRuntimeRole.Helper ||
+            helperConnectOrigin != HelperConnectOrigin.Listener ||
+            state != SessionRuntimeState.Waiting)
+        {
+            LocalOperationalLog.Info(
+                "DirectHelpRequest",
+                $"event=help_request_ignored; reason=helper_not_waiting; request_id={e.Request.RequestId}; helper_address={e.Request.HelperAddress.Value}; helpee_address={e.Request.HelpeeAddress.Value}; role={role}; state={state}; transport_state={transportState}; helper_origin={helperConnectOrigin}; run_id={GetRunIdForLog()}; session_id={GetSessionIdForLog()}; scenario={GetScenarioForLog()}");
+            return;
+        }
+
         pendingIncomingHelpRequest = new PendingIncomingHelpRequest(e.Request);
         SetState(SessionRuntimeState.Waiting, "Incoming help request.");
         PublishSessionFlowEvent(new SessionFlowEvent(

@@ -67,6 +67,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly IInviteTokenValidator inviteTokenValidator;
     private readonly IInviteValidationThrottle inviteValidationThrottle;
     private readonly ISessionHandshakeReplayCache handshakeReplayCache;
+    private readonly HelpRequestAdmissionGuard helpRequestAdmissionGuard = new();
     private readonly LruMessageIdCache seenMessageIds = new(500);
     private readonly ConcurrentDictionary<string, PendingAckWait> pendingAcks = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim outboundSendGate = new(1, 1);

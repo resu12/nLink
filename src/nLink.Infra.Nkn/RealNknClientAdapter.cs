@@ -1669,7 +1669,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
     private async Task EnsureProcessStartedAsync(CancellationToken ct)
     {
-        RefreshAndLogBridgeBundleIdentity();
+        var identity = RefreshAndLogBridgeBundleIdentity();
+        BridgeBundleStartupGuard.EnsureTrustedForStartup(identity, Log, RecordBridgeFailure);
         await bridgeSupervisor.EnsureStartedAsync(ct).ConfigureAwait(false);
         lock (gate)
         {
@@ -2787,7 +2788,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
     }
 
-    private void RefreshAndLogBridgeBundleIdentity()
+    private BridgeBundleIdentity RefreshAndLogBridgeBundleIdentity()
     {
         var bridgePath = ResolveBridgeScriptPath();
         var identity = BridgeBundleIdentity.Load(bridgePath);
@@ -2801,6 +2802,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         {
             Log($"event=bridge_bundle_mismatch_detected; classification=installed_payload_drift; reason={identity.ManifestStatus}{identity.BuildStructuredLogFields()}");
         }
+
+        return identity;
     }
 
     private void StartPingLoopIfNeeded()

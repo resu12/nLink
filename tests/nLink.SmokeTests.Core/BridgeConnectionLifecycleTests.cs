@@ -105,7 +105,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-delay", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var bridgePath = Path.Combine(tempDir, "mock-bridge-delay.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScript(delayPongMs: 250, respondToPing: true));
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScript(delayPongMs: 250, respondToPing: true));
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         try
@@ -175,7 +175,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-nopong", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var bridgePath = Path.Combine(tempDir, "mock-bridge-nopong.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: false));
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: false));
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         try
@@ -233,7 +233,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         Directory.CreateDirectory(tempDir);
         var countFile = Path.Combine(tempDir, "connect-count.txt");
         var bridgePath = Path.Combine(tempDir, "mock-bridge-concurrent.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: $@"
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: $@"
     connectCount++;
     fs.writeFileSync({JsonSerializer.Serialize(countFile)}, String(connectCount));
     emit({{ event:'ok', id: msg.id ?? null, cmd:'connect' }});
@@ -295,7 +295,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-same-identity-lease", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var bridgePath = Path.Combine(tempDir, "mock-bridge-same-identity-lease.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: $@"
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: $@"
     emit({{ event:'ok', id: msg.id ?? null, cmd:'connect' }});
     setTimeout(() => emit({{ event:'ready', protocol:2, channels:['control','media','bulk'], address:'mock.same.identity.addr', controlAddress:'mock.same.identity.addr', mediaAddress:'mock.same.identity-media.addr', bulkAddress:'mock.same.identity-bulk.addr', connectId: msg.connectId ?? null }}), 80);
     return;
@@ -358,7 +358,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-stale-ready", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var bridgePath = Path.Combine(tempDir, "mock-bridge-stale-ready.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
     emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
     setTimeout(() => emit({ event:'ready', protocol:2, channels:['control','media','bulk'], address:'wrong.addr', controlAddress:'wrong.addr', mediaAddress:'wrong-media.addr', bulkAddress:'wrong-bulk.addr', connectId:'ffffffffffffffffffffffffffffffff' }), 50);
     setTimeout(() => emit({ event:'ready', protocol:2, channels:['control','media','bulk'], address:'correct.addr', controlAddress:'correct.addr', mediaAddress:'correct-media.addr', bulkAddress:'correct-bulk.addr', connectId: msg.connectId ?? null }), 220);
@@ -420,7 +420,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         Directory.CreateDirectory(tempDir);
         var idsFile = Path.Combine(tempDir, "connect-ids.json");
         var bridgePath = Path.Combine(tempDir, "mock-bridge-connect-reset.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: $@"
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: $@"
     connectIds.push(String(msg.connectId || ''));
     fs.writeFileSync({JsonSerializer.Serialize(idsFile)}, JSON.stringify(connectIds));
     emit({{ event:'ok', id: msg.id ?? null, cmd:'connect' }});
@@ -488,7 +488,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-missing-bulk", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var bridgePath = Path.Combine(tempDir, "mock-bridge-missing-bulk.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
     emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
     setTimeout(() => emit({
       event:'ready',
@@ -1008,7 +1008,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-bulk-queue", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var bridgePath = Path.Combine(tempDir, "mock-bridge-bulk-queue.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
     emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
     setTimeout(() => emit({ event:'ready', protocol:2, channels:['control','media','bulk'], address:'bulk-queue.addr', controlAddress:'bulk-queue.addr', mediaAddress:'bulk-queue-media.addr', bulkAddress:'bulk-queue-bulk.addr', connectId: msg.connectId ?? null }), 20);
     return;
@@ -1163,7 +1163,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         Directory.CreateDirectory(tempDir);
         var countFile = Path.Combine(tempDir, "connect-count.txt");
         var bridgePath = Path.Combine(tempDir, "mock-bridge-receive-stall.js");
-        File.WriteAllText(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile));
+        WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile));
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
@@ -1230,7 +1230,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         Directory.CreateDirectory(tempDir);
         var countFile = Path.Combine(tempDir, "connect-count.txt");
         var bridgePath = Path.Combine(tempDir, "mock-bridge-bulk-receive-stall.js");
-        File.WriteAllText(
+        WriteBridgeScriptWithManifest(
             bridgePath,
             BuildReceiveStallRecoveryMockBridgeScript(
                 countFile,
@@ -1310,7 +1310,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         Directory.CreateDirectory(tempDir);
         var countFile = Path.Combine(tempDir, "connect-count.txt");
         var bridgePath = Path.Combine(tempDir, "mock-bridge-control-degraded.js");
-        File.WriteAllText(
+        WriteBridgeScriptWithManifest(
             bridgePath,
             BuildReceiveStallRecoveryMockBridgeScript(
                 countFile,
@@ -1398,7 +1398,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         Directory.CreateDirectory(tempDir);
         var countFile = Path.Combine(tempDir, "connect-count.txt");
         var bridgePath = Path.Combine(tempDir, "mock-bridge-control-recovery.js");
-        File.WriteAllText(
+        WriteBridgeScriptWithManifest(
             bridgePath,
             BuildReceiveStallRecoveryMockBridgeScript(
                 countFile,
@@ -1481,7 +1481,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         Directory.CreateDirectory(tempDir);
         var countFile = Path.Combine(tempDir, "connect-count.txt");
         var bridgePath = Path.Combine(tempDir, "mock-bridge-receive-stall-retry.js");
-        File.WriteAllText(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile, stallConnectCount: 2));
+        WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile, stallConnectCount: 2));
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
@@ -1548,7 +1548,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         Directory.CreateDirectory(tempDir);
         var countFile = Path.Combine(tempDir, "connect-count.txt");
         var bridgePath = Path.Combine(tempDir, "mock-bridge-receive-stall-disabled.js");
-        File.WriteAllText(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile));
+        WriteBridgeScriptWithManifest(bridgePath, BuildReceiveStallRecoveryMockBridgeScript(countFile));
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
@@ -1617,7 +1617,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         Directory.CreateDirectory(tempDir);
         var payloadFile = Path.Combine(tempDir, "payload.json");
         var bridgePath = Path.Combine(tempDir, "mock-bridge-preflight-payload.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: $@"
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: $@"
     fs.writeFileSync({JsonSerializer.Serialize(payloadFile)}, JSON.stringify(msg));
     emit({{ event:'ok', id: msg.id ?? null, cmd:'connect' }});
     setTimeout(() => emit({{ event:'ready', protocol:2, channels:['control','media','bulk'], address:'payload-test.addr', controlAddress:'payload-test.addr', mediaAddress:'payload-test-media.addr', bulkAddress:'payload-test-bulk.addr', connectId: msg.connectId ?? null }}), 20);
@@ -1725,7 +1725,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         Directory.CreateDirectory(tempDir);
         var payloadFile = Path.Combine(tempDir, "payload.json");
         var bridgePath = Path.Combine(tempDir, "mock-bridge-topology-payload.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: $@"
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: $@"
     fs.writeFileSync({JsonSerializer.Serialize(payloadFile)}, JSON.stringify(msg));
     emit({{ event:'ok', id: msg.id ?? null, cmd:'connect' }});
     setTimeout(() => emit({{ event:'ready', protocol:2, channels:['control','media','bulk'], address:'payload-test.addr', controlAddress:'payload-test.addr', mediaAddress:'payload-test-media.addr', bulkAddress:'payload-test-bulk.addr', connectId: msg.connectId ?? null }}), 20);
@@ -1826,7 +1826,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-protocol-outdated", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var bridgePath = Path.Combine(tempDir, "mock-bridge-protocol-outdated.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
     emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
     setTimeout(() => emit({
       event:'ready',
@@ -1891,7 +1891,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-progress-timeout", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var bridgePath = Path.Combine(tempDir, "mock-bridge-progress-timeout.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
     emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
     emit({ event:'rpc_selected', rpc:'https://mock-rpc-1.example:30003', connectId: msg.connectId ?? null, ts: Date.now() });
     return;
@@ -1956,7 +1956,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-ignore-shutdown", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var bridgePath = Path.Combine(tempDir, "mock-bridge-ignore-shutdown.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: true, respondToShutdown: false));
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: true, respondToShutdown: false));
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         try
@@ -2017,7 +2017,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-dispose", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var bridgePath = Path.Combine(tempDir, "mock-bridge-dispose.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: true, respondToShutdown: true));
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: true, respondToShutdown: true));
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         Process? bridgeProcess = null;
@@ -2122,7 +2122,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-dispose-ignore-shutdown", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var bridgePath = Path.Combine(tempDir, "mock-bridge-dispose-ignore-shutdown.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: true, respondToShutdown: false));
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: true, respondToShutdown: false));
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         Process? bridgeProcess = null;
@@ -2205,7 +2205,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-stderr-spam", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var bridgePath = Path.Combine(tempDir, "mock-bridge-stderr-spam.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScriptWithStderrSpam());
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithStderrSpam());
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         try
@@ -2264,7 +2264,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-rapid-cycles", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var bridgePath = Path.Combine(tempDir, "mock-bridge-rapid-cycles.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: true, respondToShutdown: true));
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: true, respondToShutdown: true));
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         try
@@ -2327,7 +2327,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-rapid-cycles-200", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempDir);
         var bridgePath = Path.Combine(tempDir, "mock-bridge-rapid-cycles-200.js");
-        File.WriteAllText(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: true, respondToShutdown: true));
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScript(delayPongMs: 0, respondToPing: true, respondToShutdown: true));
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         try
@@ -2494,6 +2494,34 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
         }
+    }
+
+    private static void WriteBridgeScriptWithManifest(string bridgePath, string script)
+    {
+        File.WriteAllText(bridgePath, script);
+        var bridgeScriptSha256 = ComputeSha256Hex(bridgePath);
+        var manifestPath = Path.Combine(Path.GetDirectoryName(bridgePath)!, "bridge-manifest.json");
+        File.WriteAllText(
+            manifestPath,
+            $$"""
+            {
+              "manifestVersion": 1,
+              "appVersion": "0.5.4-test",
+              "buildTimestampUtc": "2026-04-13T00:00:00.0000000Z",
+              "bridgeScriptSha256": "{{bridgeScriptSha256}}",
+              "nodeVersion": "v24.13.1",
+              "capabilities": {
+                "ownerPidWatchdog": true,
+                "killOnCloseJob": true
+              }
+            }
+            """);
+    }
+
+    private static string ComputeSha256Hex(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
     private static string BuildReceiveStallRecoveryMockBridgeScript(
