@@ -8,17 +8,17 @@ Powered by NKN. Official website: https://nkn.org/
 
 Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
 
-## Current Release (0.6.0)
+## Current Release (0.6.1)
 
-`0.6.0` is the current release. It keeps the authenticated helper-address session model from the previous stable release, and moves the default screenshare path from legacy JPEG frame updates to H.264 video with stronger visual-integrity recovery, smoother cursor presentation, lower helpee CPU cost, and improved Windows Graphics Capture teardown.
+`0.6.1` is the current release. It keeps the H.264 screen-sharing default from `0.6.0`, and focuses on file-transfer reliability, session approval clarity, connection lifecycle recovery, and chat usability while screen sharing.
 
 ## Quick Start (Windows)
 
 1. Go to the GitHub Releases page and download the Installer (recommended) or Portable ZIP.
 2. Helper opens nLink, clicks `I want to help`, and copies the helper address.
-3. Helpee opens nLink, clicks `I need help`, enters the provided helper address, checks the verification code, and clicks `Request help`.
+3. Helpee opens nLink, clicks `I need help`, enters the provided helper address, and clicks `Request help`.
 4. Helper receives the incoming help request and clicks `Accept`.
-5. Helpee clicks `Allow`.
+5. Both sides compare the session verification sequence, then Helpee clicks `Allow`.
 6. Chat opens on both sides.
 7. If `Transfer files` is allowed for the session, either side can click `Send file`.
 
@@ -51,17 +51,18 @@ For release-safe builds, Diagnostics should show:
 - `invite_security_release_ready: Yes`
 - `invite_security_warning: none`
 
-Normal release UX uses a raw helper address plus a short verification code, then a direct helpee-side `Request help` flow with QR/share/copy support where needed.
+Normal release UX uses a raw helper address and an approval-time session verification sequence, then a direct helpee-side `Request help` flow with QR/share/copy support where needed.
 
 Notes:
 - Windows x64 only
-- Current release (`0.6.0`)
-- `0.6.0` migrates default screensharing from JPEG frame updates to H.264 video transport, with helper-side recovery protection for broken reference chains.
-- `0.6.0` adds a helper-side cursor overlay for smoother cursor motion, H.264 motion/keyframe safeguards, WGC GPU scaling, and same-apartment Win10 WGC teardown for the yellow capture border.
-- Chat UX keeps `Enter` to send, `Shift+Enter` for a new line, and stable pane sizing in chat-only and screen-sharing layouts.
-- File transfer in `0.6.0` is single-file only. No folders, drag-and-drop, or resume after restart yet.
-- Received files are saved into an app-owned folder under `%LOCALAPPDATA%\nLink\transfers\incoming\...`
-- Safe-by-default file size cap for `0.6.0`: `1 GiB`
+- Current release (`0.6.1`)
+- Default screensharing uses H.264 video transport, with helper-side recovery protection for broken reference chains.
+- The helper-side cursor overlay, H.264 motion/keyframe safeguards, WGC GPU scaling, and same-apartment Win10 WGC teardown remain enabled.
+- Chat UX keeps `Enter` to send, `Shift+Enter` for a new line, stable pane sizing in chat-only and screen-sharing layouts, and message entry remains available during screen sharing.
+- File transfer in `0.6.1` is single-file only. No folders, drag-and-drop, or resume after restart yet.
+- Active file transfers can be paused, resumed, or canceled from either side when file transfer is allowed.
+- Received files are saved into the Windows Downloads folder by default, with a numbered suffix added automatically when the target name already exists.
+- Safe-by-default file size cap for `0.6.1`: `1 GiB`
 - Large file transfers over NKN can still be noticeably slower than local or direct network copy. Live screenshare latency can also vary with NKN/network delivery.
 - Installer path: `%LOCALAPPDATA%\Programs\nLink`
 
@@ -115,9 +116,9 @@ License:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
 - Final release notes:
-  [`docs/releases/0.6.0.md`](docs/releases/0.6.0.md)
+  [`docs/releases/0.6.1.md`](docs/releases/0.6.1.md)
 - GitHub release body:
-  [`docs/releases/0.6.0-github.md`](docs/releases/0.6.0-github.md)
+  [`docs/releases/0.6.1-github.md`](docs/releases/0.6.1-github.md)
 - RC/final validation checklist:
   [`docs/release/rc-validation-checklist.md`](docs/release/rc-validation-checklist.md)
 

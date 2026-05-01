@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.6.1] - 2026-05-01
+
+### Added
+
+- Final `0.6.1` release notes under `docs/releases/`.
+- V4-only file-transfer pause and resume controls for active inbound and outbound transfers, with cancel still available while paused.
+- Session verification derivation and approval UI using a compact emoji sequence plus fallback code so helper and helpee can compare the same handshake-derived value before allowing a session.
+- File-transfer operator docs, soak tooling, and stabilization gates for V4 transfer validation.
+- Receiver-confirmed file-transfer progress so the sender UI reflects accepted transfer progress instead of only locally queued bytes.
+
+### Changed
+
+- Release version sources and packaging defaults now resolve to `0.6.1`.
+- README and release-facing documentation now reflect `0.6.1` as the current release.
+- File-transfer protocol and tests now focus on the V4 path after removing legacy V1/V2/V3 transfer frames and pull-session tests.
+- Received files now default to the Windows Downloads folder and automatically receive a numbered suffix when the original file name already exists.
+- Completed file-transfer pills can open the destination folder, and longer transfer status messages are displayed without being clipped.
+- Helper and helpee session verification presentation was tightened and made more compact and uniform.
+- Helper first-run and request screens keep a stable width while the helper address loads.
+
+### Fixed
+
+- Help-request accept/decline handling was hardened so stale or closed peers during the approval phase recover to the correct starting state.
+- Helper request admission and NKN bridge startup paths now reject or recover from stale pending requests more reliably.
+- Helpee chat entry and send behavior during screen sharing was restored.
+- The Windows taskbar/app icon is applied instead of the blank default app icon.
+- Transient NKN bridge bulk sends are retried to improve file-transfer delivery without changing the stable production fanout defaults.
+- V4 file-transfer repair delivery and receiver-side progress behavior were tightened while preserving mixed-transfer pacing defaults.
+
+### Packaging
+
+- Windows installer and portable release assets for `0.6.1` are prepared together with `SHA256SUMS.txt`.
+
 ## [0.6.0] - 2026-04-26
 
 ### Added
