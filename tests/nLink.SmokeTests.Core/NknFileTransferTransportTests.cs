@@ -189,6 +189,60 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task NknTransport_LegacyFileTransferStart_RejectedBeforeDispatch_WhenOutOfPhase()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.legacy.start.reject.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.legacy.start.reject.address");
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-legacy-start-reject-id", hostClient.Address));
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-legacy-start-reject-id", helperClient.Address));
+
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_legacy_start_rejected_before_dispatch";
+            Envelope envelope = BuildSecureLegacyFileTransferEnvelope(
+                helper,
+                MsgType.FileTransferStart,
+                sessionId,
+                transferId,
+                CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper));
+
+            CoreSmokeTestsBase.InvokeNknIncomingMessage(
+                host,
+                helperClient,
+                new NknIncomingMessage(
+                    payload: EnvelopeCodec.Serialize(envelope),
+                    source: helperClient.ConnectedAddress,
+                    isTopic: false,
+                    topic: null,
+                    channel: NknBridgeChannel.Control,
+                    bridgeIngressObservedUtcMs: 0L,
+                    bridgeMessageObservedUtcMs: 0L,
+                    binaryFrameDecodedUtcMs: 0L,
+                    socketDataEventEmittedUtcMs: 0L,
+                    wsReceiverWriteEnteredUtcMs: 0L,
+                    wsMessageEmittedUtcMs: 0L,
+                    sdkHandleMsgEnteredUtcMs: 0L,
+                    clientMessageDispatchUtcMs: 0L,
+                    multiClientMessageDispatchUtcMs: 0L));
+
+            await Task.Delay(100, cts.Token);
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=filetransfer_message_rejected; message_type=file_transfer_start; reason=unknown_transfer_id", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_legacy_message_ignored", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task NknTransport_FileTransferDataSession_SendsOutboundV4RepairChunkBatchOnBulkOnlyByDefault()
     {
         FakeNknClient.ResetNetwork();
@@ -905,6 +959,10 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 cts.Token);
             FileTransferDataFrame terminalFrame = await helperDataSession.ReceiveAsync(cts.Token);
             Assert.IsType<FileTransferCompleteFrameV4>(terminalFrame);
+            IDictionary hostTransferStates = Assert.IsAssignableFrom<IDictionary>(CoreSmokeTestsBase.GetPrivateField(host, "fileTransferStates"));
+            IDictionary helperTransferStates = Assert.IsAssignableFrom<IDictionary>(CoreSmokeTestsBase.GetPrivateField(helper, "fileTransferStates"));
+            Assert.False(hostTransferStates.Contains("transfer_nkn_v4_repeat_1"));
+            Assert.False(helperTransferStates.Contains("transfer_nkn_v4_repeat_1"));
 
             await helper.SendFileTransferOfferAsync(
                 new FileTransferOfferV2
@@ -947,8 +1005,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                     multiClientMessageDispatchUtcMs: 0L));
             await Task.Delay(100, cts.Token);
             string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
-            Assert.Contains("event=filetransfer_data_frame_ignored; transport=nkn; transfer_id=transfer_nkn_v4_repeat_1", logTail, StringComparison.Ordinal);
-            Assert.Contains("reason=transfer_already_terminal", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=unknown_transfer_id", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=transfer_already_terminal", logTail, StringComparison.Ordinal);
         }
         finally
@@ -1090,6 +1147,55 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 new PeerAddress(expectedSenderIdentity)));
         Assert.True(FileTransferDataFrameCodec.TryDeserialize(payload.Plaintext, out FileTransferDataFrame? frame));
         return Assert.IsAssignableFrom<FileTransferDataFrame>(frame);
+    }
+
+    private static Envelope BuildSecureLegacyFileTransferEnvelope(
+        NknSignalingTransport senderTransport,
+        MsgType messageType,
+        string sessionId,
+        string transferId,
+        long sequence)
+    {
+        var key = Assert.IsType<byte[]>(CoreSmokeTestsBase.GetPrivateField(senderTransport, "fileTransferSessionSharedKey")).AsSpan().ToArray();
+        var envelopeCode = Assert.IsType<string>(CoreSmokeTestsBase.GetPrivateField(senderTransport, "currentEnvelopeCode"));
+        var senderClient = Assert.IsAssignableFrom<INknClient>(CoreSmokeTestsBase.GetPrivateField(senderTransport, "client"));
+        var senderIdentity = messageType == MsgType.FileTransferChunk
+            ? senderClient.BulkAddress
+            : senderTransport.LocalPeerAddress;
+        try
+        {
+            var securePayload = SessionSecureEnvelopeCodec.Encrypt(
+                key,
+                new SessionSecureEnvelopeMetadata(
+                    SessionSecureMessageFamily.FileTransfer,
+                    messageType switch
+                    {
+                        MsgType.FileTransferStart => "file_transfer_start",
+                        MsgType.FileTransferChunk => "file_transfer_chunk",
+                        MsgType.FileTransferWindowUpdate => "file_transfer_window_update",
+                        MsgType.FileTransferMissingRange => "file_transfer_missing_range",
+                        MsgType.FileTransferPressureState => "file_transfer_pressure_state",
+                        _ => throw new ArgumentOutOfRangeException(nameof(messageType), messageType, "Unsupported legacy file-transfer message type."),
+                    },
+                    new SessionId(sessionId),
+                    new PeerAddress(senderIdentity),
+                    sequence,
+                    transferId),
+                "legacy ignored payload"u8);
+
+            return new Envelope(
+                Version: 1,
+                Code: envelopeCode,
+                MessageId: Guid.NewGuid().ToString("N"),
+                Type: messageType,
+                Payload: securePayload,
+                UnixTimeMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ReplyTo: null);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(key);
+        }
     }
 
 }

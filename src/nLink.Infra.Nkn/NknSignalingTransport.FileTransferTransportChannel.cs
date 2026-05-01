@@ -1247,17 +1247,16 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
-        work = CreateInboundFileTransferDispatchWork(
-            messageType,
-            transferId,
-            () =>
-            {
-                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_legacy_message_ignored");
-                LocalOperationalLog.Warn(
-                    "SessionSecurity",
-                    $"event=filetransfer_legacy_message_ignored; transport=nkn; message_type={messageTypeName}; transfer_id={transferId}; source={source}; msg_id={env.MessageId}; reason=v4_only");
-            });
-        return true;
+        if (!TryValidateUnsupportedLegacyFileTransferState(messageTypeName, messageType, transferId, env.MessageId, source))
+        {
+            return false;
+        }
+
+        NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_legacy_message_ignored");
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=filetransfer_legacy_message_ignored; transport=nkn; message_type={messageTypeName}; transfer_id={transferId}; source={source}; msg_id={env.MessageId}; reason=v4_only");
+        return false;
     }
 
     private bool TryPrepareFileTransferCancelDispatch(string source, Envelope env, out InboundFileTransferDispatchWork work)
@@ -1517,6 +1516,27 @@ public sealed partial class NknSignalingTransport
             "SessionSecurity",
             $"event=filetransfer_message_rejected; message_type={messageType}; reason={failureReason}; transfer_id={transferId}; source={source ?? "(none)"}; msg_id={messageId}");
         Log($"FileTransfer message rejected (type={messageType}, msg_id={messageId}, reason={failureReason}, transfer_id={transferId})");
+        return false;
+    }
+
+    private bool TryValidateUnsupportedLegacyFileTransferState(
+        string messageType,
+        MsgType transportMessageType,
+        string transferId,
+        string messageId,
+        string? source)
+    {
+        if (TryValidateAndTrackFileTransferMessage(transportMessageType, transferId, inbound: true, applyStateChange: false, out var failureReason))
+        {
+            return true;
+        }
+
+        NknRuntimeDiagnostics.SetLastError($"{messageType}_{failureReason}");
+        NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageType}_{failureReason}");
+        LocalOperationalLog.Warn(
+            "SessionSecurity",
+            $"event=filetransfer_message_rejected; message_type={messageType}; reason={failureReason}; transfer_id={transferId}; source={source ?? "(none)"}; msg_id={messageId}");
+        Log($"FileTransfer legacy message rejected (type={messageType}, msg_id={messageId}, reason={failureReason}, transfer_id={transferId})");
         return false;
     }
 
@@ -3441,6 +3461,12 @@ public sealed partial class NknSignalingTransport
 
     private void CommitFileTransferStateLocked(string transferId, FileTransferTransportState nextState)
     {
+        if (nextState.IsTerminal)
+        {
+            fileTransferStates.Remove(transferId);
+            return;
+        }
+
         fileTransferStates[transferId] = nextState;
     }
 
