@@ -18,7 +18,7 @@ Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke
 2. Helper opens nLink, clicks `I want to help`, and copies the helper address.
 3. Helpee opens nLink, clicks `I need help`, enters the provided helper address, and clicks `Request help`.
 4. Helper receives the incoming help request and clicks `Accept`.
-5. Both sides compare the session verification sequence, then Helpee clicks `Allow`.
+5. Both sides compare the session verification symbols, then Helpee clicks `Allow`.
 6. Chat opens on both sides.
 7. If `Transfer files` is allowed for the session, either side can click `Send file`.
 
@@ -51,7 +51,7 @@ For release-safe builds, Diagnostics should show:
 - `invite_security_release_ready: Yes`
 - `invite_security_warning: none`
 
-Normal release UX uses a raw helper address and an approval-time session verification sequence, then a direct helpee-side `Request help` flow with QR/share/copy support where needed.
+Normal release UX uses a raw helper address and an approval-time session verification sequence, then a direct helpee-side `Request help` flow with QR/share/copy support where needed. The approval check is a compact five-symbol comparison on both screens.
 
 Notes:
 - Windows x64 only
@@ -240,13 +240,13 @@ Run the test (same PC, two app instances):
 1. Start the first app instance:
    `dotnet run --project src/nLink.App -c Release`
 2. Click `I need help`
-3. Copy the helper address from the helper screen, enter that helper address on the helpee screen, confirm the verification code, and share or copy the invite shown on screen
+3. Copy the helper address from the helper screen, enter that helper address on the helpee screen, and share or copy the invite shown on screen
 4. Start the second app instance:
    `dotnet run --project src/nLink.App -c Release`
 5. Click `I want to help someone`
 6. Paste the invite
 7. Click `Connect`
-8. On the first instance, click `Allow`
+8. Compare the session verification symbols on both screens, then on the first instance click `Allow`
 9. Send chat messages both ways and confirm they appear on both sides
 
 If it fails (copy diagnostics):

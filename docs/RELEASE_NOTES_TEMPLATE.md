@@ -11,13 +11,14 @@
 
 1. Open `nLink` on both computers.
 2. The helper clicks **I want to help someone** and copies the helper address.
-3. The helpee clicks **I need help**, enters that helper address, confirms the verification code, and shares the helper-bound invite code.
+3. The helpee clicks **I need help**, enters that helper address, and shares the helper-bound invite code.
 4. The helper pastes the invite code, or scans the QR code, and clicks **Connect**.
+5. Both sides compare the session verification symbols before approval completes.
 
 ## Known issues
 
 - Connection can still be slow on some networks.
-- If connection fails, retry with a refreshed invite code and confirm the helper address and verification code were entered correctly.
+- If connection fails, retry with a refreshed invite code and confirm the helper address and session verification symbols were correct.
 - This is a pre-release and may still have rough edges.
 
 ## If something goes wrong
