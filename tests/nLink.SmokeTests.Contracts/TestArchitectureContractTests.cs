@@ -18,6 +18,13 @@ public sealed class TestArchitectureContractTests
         ("ScreenShare", "nLink.SmokeTests.ScreenShare")
     ];
 
+    private static readonly string[] OptInProjectNames =
+    [
+        "nLink.OptInTests.BridgeManual",
+        "nLink.OptInTests.GuiSmoke",
+        "nLink.OptInTests.MediaFoundationDiagnostics"
+    ];
+
     private static readonly string[] AllowedAreas = DomainProjects
         .Select(project => project.Area)
         .ToArray();
@@ -270,8 +277,9 @@ public sealed class TestArchitectureContractTests
     {
         var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
         var testsRoot = Path.Combine(repoRoot, "tests");
-        var domainRoots = DomainProjects
+        var testProjectRoots = DomainProjects
             .Select(project => Path.Combine(testsRoot, project.ProjectName))
+            .Concat(OptInProjectNames.Select(projectName => Path.Combine(testsRoot, projectName)))
             .ToArray();
 
         foreach (var file in Directory.GetFiles(testsRoot, "*.cs", SearchOption.AllDirectories))
@@ -283,7 +291,7 @@ public sealed class TestArchitectureContractTests
                 continue;
             }
 
-            var owningProjectCount = domainRoots.Count(root => IsPathUnder(file, root));
+            var owningProjectCount = testProjectRoots.Count(root => IsPathUnder(file, root));
             Assert.Equal(1, owningProjectCount);
             Assert.DoesNotContain("/nLink.SmokeTests/", relativePath);
             Assert.DoesNotContain("/nLink.TestCommon/", relativePath);
@@ -305,6 +313,33 @@ public sealed class TestArchitectureContractTests
         var expected = RequiredTestLanes.OrderBy(lane => lane, StringComparer.Ordinal).ToArray();
         Assert.Equal(expected, ExtractLaneScriptLanes(scriptText));
         Assert.Equal(expected, ExtractLaneDocLanes(docsText));
+    }
+
+    [Fact]
+    public void TestsReadme_DocumentsDefaultAndOptInTestMatrix()
+    {
+        var repoRoot = CoreSmokeTestsBase.FindRepoRoot();
+        var readmePath = Path.Combine(repoRoot, "tests", "README.md");
+
+        Assert.True(File.Exists(readmePath), $"Expected tests README: {readmePath}");
+
+        var text = File.ReadAllText(readmePath);
+        Assert.Contains("dotnet test -c Release --no-restore -m:1 -p:UseSharedCompilation=false --verbosity minimal", text, StringComparison.Ordinal);
+        foreach (var (_, projectName) in DomainProjects)
+        {
+            Assert.Contains(projectName, text, StringComparison.Ordinal);
+            Assert.Contains($@"tests\{projectName}\{projectName}.csproj", text, StringComparison.Ordinal);
+        }
+
+        foreach (var projectName in OptInProjectNames)
+        {
+            Assert.Contains(projectName, text, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("NLINK_RUN_MANUAL_BRIDGE=1", text, StringComparison.Ordinal);
+        Assert.Contains("NLINK_RUN_GUI_SMOKE=1", text, StringComparison.Ordinal);
+        Assert.Contains("NLINK_RUN_MF_DIAGNOSTIC=1", text, StringComparison.Ordinal);
+        Assert.Contains("Soak-style tests should write enough failure context", text, StringComparison.Ordinal);
     }
 
     [Fact]

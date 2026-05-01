@@ -102,7 +102,9 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
             Assert.Contains("current_state:", copied!, StringComparison.Ordinal);
             Assert.Contains("session_ui_state:", copied!, StringComparison.Ordinal);
             Assert.Contains("attempt:", copied!, StringComparison.Ordinal);
+            Assert.Contains("runtime_summary:", copied!, StringComparison.Ordinal);
             Assert.Contains("authorization_summary:", copied!, StringComparison.Ordinal);
+            Assert.Contains("last_authorization_denial_reason:", copied!, StringComparison.Ordinal);
             Assert.Contains("session_security_summary:", copied!, StringComparison.Ordinal);
             Assert.Contains("remote_control_summary:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_summary:", copied!, StringComparison.Ordinal);
@@ -114,6 +116,7 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
             Assert.Contains("Transport:", copied!, StringComparison.Ordinal);
             Assert.Contains("Forced by environment:", copied!, StringComparison.Ordinal);
             Assert.Contains("bridge_process_status:", copied!, StringComparison.Ordinal);
+            Assert.Contains("bridge_manifest_summary:", copied!, StringComparison.Ordinal);
             Assert.Contains($"invite_security_mode: {inviteSecurity.Mode}", copied!, StringComparison.Ordinal);
             Assert.Contains($"invite_signing_configuration: {inviteSecurity.SigningConfiguration}", copied!, StringComparison.Ordinal);
             Assert.Contains($"invite_public_flow: {inviteSecurity.PublicInviteFlow}", copied!, StringComparison.Ordinal);

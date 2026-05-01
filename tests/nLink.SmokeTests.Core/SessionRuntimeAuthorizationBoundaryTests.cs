@@ -51,6 +51,51 @@ public sealed class SessionRuntimeAuthorizationBoundaryTests
         Assert.False(invoked);
     }
 
+    [Trait("Category", "Smoke")]
+    [Theory]
+    [InlineData(nameof(SessionPrivilegedActionKind.ChatSend), "chat_send")]
+    [InlineData(nameof(SessionPrivilegedActionKind.FileTransferStartSend), "file_transfer_send")]
+    [InlineData(nameof(SessionPrivilegedActionKind.FileTransferAcceptIncoming), "file_transfer_accept")]
+    [InlineData(nameof(SessionPrivilegedActionKind.FileTransferDeclineIncoming), "file_transfer_decline")]
+    [InlineData(nameof(SessionPrivilegedActionKind.FileTransferCancel), "file_transfer_cancel")]
+    [InlineData(nameof(SessionPrivilegedActionKind.FileTransferPause), "file_transfer_pause")]
+    [InlineData(nameof(SessionPrivilegedActionKind.FileTransferResume), "file_transfer_resume")]
+    [InlineData(nameof(SessionPrivilegedActionKind.RemoteControlRequest), "remote_control_request")]
+    [InlineData(nameof(SessionPrivilegedActionKind.RemoteControlRespond), "remote_control_respond")]
+    [InlineData(nameof(SessionPrivilegedActionKind.RemoteControlStop), "remote_control_stop")]
+    [InlineData(nameof(SessionPrivilegedActionKind.RemoteControlInputSend), "remote_control_input_send")]
+    [InlineData(nameof(SessionPrivilegedActionKind.RemoteControlSnapshotSend), "remote_control_snapshot_send")]
+    [InlineData(nameof(SessionPrivilegedActionKind.ScreenShareDispatch), "screen_share_stream")]
+    [InlineData(nameof(SessionPrivilegedActionKind.ClipboardSync), "clipboard_sync")]
+    [InlineData(nameof(SessionPrivilegedActionKind.ClipboardApply), "clipboard_apply")]
+    public void TryAuthorizePrivilegedAction_DeniesProtectedActions_BeforeApproval(
+        string kindName,
+        string operation)
+    {
+        using var runtime = new SessionRuntime(() => new NoopSignalingTransport());
+        var kind = Enum.Parse<SessionPrivilegedActionKind>(kindName);
+
+        var authorized = runtime.TryAuthorizePrivilegedAction(new SessionPrivilegedAction(kind, operation));
+
+        Assert.False(authorized);
+        Assert.Contains("authorization_", runtime.GetDiagnosticsSnapshot().LastAuthorizationDenialReason, StringComparison.Ordinal);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Theory]
+    [InlineData(nameof(SessionPrivilegedActionKind.ApprovalGrant))]
+    [InlineData(nameof(SessionPrivilegedActionKind.ApprovalDeny))]
+    public void TryAuthorizePrivilegedAction_AllowsApprovalDecisionActions(
+        string kindName)
+    {
+        using var runtime = new SessionRuntime(() => new NoopSignalingTransport());
+        var kind = Enum.Parse<SessionPrivilegedActionKind>(kindName);
+
+        var authorized = runtime.TryAuthorizePrivilegedAction(new SessionPrivilegedAction(kind, "approval"));
+
+        Assert.True(authorized);
+    }
+
 #pragma warning disable CS0067
     private sealed class NoopSignalingTransport : ISignalingTransport
     {

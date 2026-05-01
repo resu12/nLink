@@ -21,6 +21,8 @@ public sealed record FileTransferPanelItemViewModel(
     string? SavedLocationText,
     bool ShowSavedLocation,
     bool ShowProgress,
+    bool ShowRiskWarning,
+    string RiskWarningText,
     bool ShowAccept,
     bool ShowDecline,
     bool ShowCancel,
@@ -60,6 +62,9 @@ public sealed record FileTransferPanelItemViewModel(
                          snapshot.State == FileTransferTransferState.PendingDecision;
         var showDecline = snapshot.Direction == FileTransferDirection.Inbound &&
                           snapshot.State == FileTransferTransferState.PendingDecision;
+        var fileRisk = showAccept
+            ? FileTransferFileRiskClassifier.Assess(snapshot.FileName)
+            : FileTransferFileRiskAssessment.None;
         var showCancel = snapshot.State is FileTransferTransferState.Offering
             or FileTransferTransferState.AwaitingAcceptance
             or FileTransferTransferState.AwaitingMetadata
@@ -92,6 +97,8 @@ public sealed record FileTransferPanelItemViewModel(
                                snapshot.State == FileTransferTransferState.Completed &&
                                !string.IsNullOrWhiteSpace(snapshot.SavedDirectoryPath),
             showProgress,
+            fileRisk.IsRisky,
+            fileRisk.WarningText,
             showAccept,
             showDecline,
             showCancel,

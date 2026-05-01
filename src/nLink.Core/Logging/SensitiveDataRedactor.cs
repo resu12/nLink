@@ -17,6 +17,16 @@ public static partial class SensitiveDataRedactor
         "identifier",
         "key_path",
         "keyPath",
+        "inviteToken",
+        "invite_token",
+        "rootKey",
+        "root_key",
+        "sessionRootKey",
+        "session_root_key",
+        "fallbackCode",
+        "fallback_code",
+        "verificationFallbackCode",
+        "verification_fallback_code",
     };
 
     public static string Redact(string? text)
@@ -66,7 +76,7 @@ public static partial class SensitiveDataRedactor
         return builder.ToString();
     }
 
-    [GeneratedRegex(@"\b(?:payloadBase64|sharedKey|seedBase64|seed|privateKey|private_key|secret|identifier|key_path|keyPath)\b\s*[:=]\s*(?:""[^""]*""|'[^']*'|[^\s|,;]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\b(?:payloadBase64|sharedKey|seedBase64|seed|privateKey|private_key|secret|identifier|key_path|keyPath|inviteToken|invite_token|rootKey|root_key|sessionRootKey|session_root_key|fallbackCode|fallback_code|verificationFallbackCode|verification_fallback_code)\b\s*[:=]\s*(?:""[^""]*""|'[^']*'|[^\s|,;]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SecretKeyValueRegex();
 
     [GeneratedRegex(@"\b(?:chat|message|text)\b\s*[:=]\s*(?:""[^""]*""|'[^']*'|[^\r\n|]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]

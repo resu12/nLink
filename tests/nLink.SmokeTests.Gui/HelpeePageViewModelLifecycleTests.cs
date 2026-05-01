@@ -654,11 +654,124 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
         Assert.Equal(verificationCode.FallbackCode, helpee.SessionVerificationFallbackCode);
     }
 
-    private static SessionVerificationCode CreateTestSessionVerificationCode()
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeePageViewModel_SessionVerificationCode_ReplacesStalePendingApprovalCode()
+    {
+        using var runtime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateDevLocalTestConfig(), runtime);
+        var firstSessionId = new SessionId("session-verification-helpee-first");
+        var secondSessionId = new SessionId("session-verification-helpee-second");
+        var helpeeAddress = new PeerAddress("verification.helpee.freshness");
+        var firstHelperAddress = new PeerAddress("verification.helper.first");
+        var secondHelperAddress = new PeerAddress("verification.helper.second");
+        var firstCode = CreateTestSessionVerificationCode("sun moon star cloud leaf", "1111-2222-3333");
+        var secondCode = CreateTestSessionVerificationCode("key lock wave spark map", "4444-5555-6666");
+
+        SetPendingApprovalState(runtime, firstSessionId, helpeeAddress, firstHelperAddress, firstCode);
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+
+        Assert.True(helpee.ShowSessionVerificationCode);
+        Assert.Equal(firstCode.EmojiSequence, helpee.SessionVerificationEmojiSequence);
+
+        SetPendingApprovalState(runtime, secondSessionId, helpeeAddress, secondHelperAddress, secondCode);
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+
+        Assert.True(helpee.ShowSessionVerificationCode);
+        Assert.Equal(secondCode.EmojiSequence, helpee.SessionVerificationEmojiSequence);
+        Assert.DoesNotContain(firstCode.EmojiSequence, helpee.SessionVerificationEmojiSequence, StringComparison.Ordinal);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Theory]
+    [InlineData(SessionFlowPhase.Ended, SessionUiPhase.Ended, SessionRuntimeState.Rejected, TransportState.Failed)]
+    [InlineData(SessionFlowPhase.Failed, SessionUiPhase.Failed, SessionRuntimeState.Disconnected, TransportState.Failed)]
+    public void HelpeePageViewModel_SessionVerificationCode_HidesAfterPendingApprovalEnds(
+        SessionFlowPhase phase,
+        SessionUiPhase uiPhase,
+        SessionRuntimeState runtimeState,
+        TransportState transportState)
+    {
+        using var runtime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateDevLocalTestConfig(), runtime);
+        var sessionId = new SessionId("session-verification-helpee-clears");
+        var helpeeAddress = new PeerAddress("verification.helpee.clears");
+        var helperAddress = new PeerAddress("verification.helper.clears");
+        var verificationCode = CreateTestSessionVerificationCode();
+
+        SetPendingApprovalState(runtime, sessionId, helpeeAddress, helperAddress, verificationCode);
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+        Assert.True(helpee.ShowSessionVerificationCode);
+
+        SetPrivateField(runtime, "state", runtimeState);
+        SetPrivateField(runtime, "transportState", transportState);
+        SetPrivateField(runtime, "pendingApprovalRequest", null);
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = phase,
+                UiPhase = uiPhase,
+                RuntimeState = runtimeState,
+                TransportState = transportState,
+                HasPendingApproval = false,
+                ShowIncomingApproval = false,
+                DisplayStatusText = "Connection ended",
+                DisplayConnectionState = "Disconnected",
+                VerificationCode = verificationCode,
+            });
+
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+
+        Assert.True(helpee.HasSessionVerificationCode);
+        Assert.False(helpee.ShowSessionVerificationCode);
+    }
+
+    private static void SetPendingApprovalState(
+        SessionRuntime runtime,
+        SessionId sessionId,
+        PeerAddress helpeeAddress,
+        PeerAddress helperAddress,
+        SessionVerificationCode verificationCode)
+    {
+        var pendingApproval = new ApprovalRequest(helperAddress, CapabilityGrant.Chat, sessionId);
+        var verifiedState = CreateVerifiedSecurityState(helpeeAddress, helperAddress, sessionId)
+            .WithVerificationCode(verificationCode);
+
+        SetPrivateField(runtime, "role", SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "state", SessionRuntimeState.IncomingJoinRequest);
+        SetPrivateField(runtime, "transportState", TransportState.Handshake);
+        SetPrivateField(runtime, "pendingApprovalRequest", pendingApproval);
+        SetPrivateField(runtime, "sessionSecurityState", verifiedState);
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = SessionFlowPhase.PendingApproval,
+                UiPhase = SessionUiPhase.Waiting,
+                Role = SessionRuntimeRole.Helpee,
+                RuntimeState = SessionRuntimeState.IncomingJoinRequest,
+                TransportState = TransportState.Handshake,
+                HasPendingApproval = true,
+                StatusText = "Waiting for your approval…",
+                DisplayStatusText = "Waiting for your approval…",
+                DisplayConnectionState = "IncomingRequest",
+                ShowIncomingApproval = true,
+                SessionId = sessionId.Value,
+                HelperIdentity = helperAddress.Value,
+                VerificationCode = verificationCode,
+            });
+    }
+
+    private static SessionVerificationCode CreateTestSessionVerificationCode(
+        string emojiSequence = "sun moon star cloud leaf fire key",
+        string fallbackCode = "FACE-B00C-1234")
     {
         return new SessionVerificationCode(
-            "sun moon star cloud leaf fire key",
-            "FACE-B00C-1234",
+            emojiSequence,
+            fallbackCode,
             SessionVerificationCodeDerivation.SourceHandshakeTranscriptV1);
     }
 

@@ -54,6 +54,12 @@ public sealed partial class SessionFileTransferService
             context.State = terminalState;
             context.ErrorCode = NormalizeErrorCode(errorCode);
             context.StatusMessage = NormalizeReason(statusMessage) ?? statusMessage;
+            context.UserPaused = false;
+            context.UserPauseReason = null;
+            context.UserPausedSinceUtc = null;
+            context.PeerPaused = false;
+            context.PeerPauseReason = null;
+            context.PeerPausedSinceUtc = null;
             if (terminalState == FileTransferTransferState.Completed)
             {
                 context.BytesTransferred = context.FileSizeBytes;
@@ -126,6 +132,12 @@ public sealed partial class SessionFileTransferService
             context.ErrorCode = NormalizeErrorCode(errorCode);
             context.StatusMessage = NormalizeReason(statusMessage) ?? statusMessage;
             context.AcceptInProgress = false;
+            context.UserPaused = false;
+            context.UserPauseReason = null;
+            context.UserPausedSinceUtc = null;
+            context.PeerPaused = false;
+            context.PeerPauseReason = null;
+            context.PeerPausedSinceUtc = null;
             snapshot = CreateSnapshotLocked();
             shouldSendError = sendError;
             sessionId = context.SessionId;

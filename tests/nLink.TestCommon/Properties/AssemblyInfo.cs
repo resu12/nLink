@@ -5,3 +5,6 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("NLink.SmokeTests.Gui")]
 [assembly: InternalsVisibleTo("NLink.SmokeTests.RemoteControl")]
 [assembly: InternalsVisibleTo("NLink.SmokeTests.ScreenShare")]
+[assembly: InternalsVisibleTo("NLink.OptInTests.BridgeManual")]
+[assembly: InternalsVisibleTo("NLink.OptInTests.GuiSmoke")]
+[assembly: InternalsVisibleTo("NLink.OptInTests.MediaFoundationDiagnostics")]

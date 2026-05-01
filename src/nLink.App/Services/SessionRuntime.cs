@@ -114,7 +114,9 @@ public readonly record struct DiagnosticsSnapshot(
     double? LastConnectDurationMs,
     double? LastHandshakeDurationMs,
     double? LastBridgeStartDurationMs,
+    string RuntimeSummary = "(unknown)",
     string AuthorizationSummary = "(unknown)",
+    string LastAuthorizationDenialReason = "(none)",
     string SessionSecuritySummary = "(unknown)",
     string RemoteControlSummary = "(unknown)",
     string ScreenShareSummary = "(unknown)",
@@ -143,8 +145,13 @@ internal sealed record SessionRuntimeWatchdogOptions(
         AutoRetryEnabled: false,
         BridgeStartingTimeout: TimeSpan.FromSeconds(8),
         ConnectingTimeout: TimeSpan.FromSeconds(20),
-        HandshakeTimeout: TimeSpan.FromSeconds(30),
+        HandshakeTimeout: SessionApprovalTimeouts.DefaultHumanDecisionTimeout,
         ReconnectingTimeout: TimeSpan.FromSeconds(8));
+}
+
+internal static class SessionApprovalTimeouts
+{
+    public static TimeSpan DefaultHumanDecisionTimeout { get; } = TimeSpan.FromSeconds(45);
 }
 
 internal sealed record HelperListenerBootstrapSnapshot(
@@ -236,6 +243,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private readonly object fileTransferTerminalLogGate = new();
     private readonly HashSet<string> loggedFileTransferTerminalKeys = new(StringComparer.Ordinal);
     private string? preservedDevLocalPeerAddress;
+    private string lastAuthorizationDenialReason = "(none)";
 
     private CancellationTokenSource? sessionCts;
     private ISignalingTransport? transport;
@@ -544,7 +552,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         this.bridgeReusePolicy = bridgeReusePolicy ?? BridgeReusePolicy.Default;
         this.bridgeIdleDelayAsync = bridgeIdleDelayAsync ?? DefaultWatchdogDelayAsync;
         this.nowProvider = nowProvider ?? (() => DateTimeOffset.UtcNow);
-        this.outboundHelpRequestDecisionTimeout = outboundHelpRequestDecisionTimeout ?? TimeSpan.FromSeconds(30);
+        this.outboundHelpRequestDecisionTimeout = outboundHelpRequestDecisionTimeout ?? SessionApprovalTimeouts.DefaultHumanDecisionTimeout;
         authorizationGuard = new SessionAuthorizationGuard(this.nowProvider);
         clipboardGuard = new SessionClipboardGuard(this.nowProvider);
         fileTransferGuard = new SessionFileTransferGuard(this.nowProvider);
@@ -986,9 +994,29 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         SessionCapability capability,
         SessionAuthorizationFailure failure)
     {
+        var reason = MapAuthorizationFailureReason(failure);
+        lastAuthorizationDenialReason = reason;
         LocalOperationalLog.Warn(
             "SessionSecurity",
-            $"event=authorization_denied; operation={operation}; capability={capability}; reason={failure}; session_id={sessionSecurityState.SessionId?.Value ?? "(none)"}; helper_identity={sessionSecurityState.HelperAddress?.Value ?? "(none)"}");
+            $"event=authorization_denied; operation={operation}; capability={capability}; reason={reason}; session_present={FormatYesNo(sessionSecurityState.SessionId is not null)}; helper_identity_present={FormatYesNo(sessionSecurityState.HelperAddress is not null)}");
+    }
+
+    private static string MapAuthorizationFailureReason(SessionAuthorizationFailure failure)
+    {
+        return failure switch
+        {
+            SessionAuthorizationFailure.SecurityTransportRequired => "authorization_transport_required",
+            SessionAuthorizationFailure.InviteNotValidated => "authorization_invite_not_validated",
+            SessionAuthorizationFailure.HandshakeIncomplete => "authorization_handshake_incomplete",
+            SessionAuthorizationFailure.ApprovalMissing => "authorization_approval_missing",
+            SessionAuthorizationFailure.SessionIdMissing => "authorization_session_missing",
+            SessionAuthorizationFailure.HelperIdentityMissing => "authorization_helper_identity_missing",
+            SessionAuthorizationFailure.SessionMismatch => "authorization_session_mismatch",
+            SessionAuthorizationFailure.HelperIdentityMismatch => "authorization_helper_identity_mismatch",
+            SessionAuthorizationFailure.Expired => "authorization_expired",
+            SessionAuthorizationFailure.CapabilityMissing => "authorization_capability_missing",
+            _ => "authorization_denied",
+        };
     }
 
     private bool RequireRemoteControlAuxiliaryCapability(
@@ -1051,6 +1079,8 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         FileTransferAccessResult result,
         FileTransferDescriptor? descriptor = null)
     {
+        var authReason = MapAuthorizationFailureReason(result.AuthorizationFailure);
+        lastAuthorizationDenialReason = authReason;
         var fileNameLength = descriptor is null
             ? "(none)"
             : descriptor.FileName.Length.ToString(CultureInfo.InvariantCulture);
@@ -1059,7 +1089,7 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             : descriptor.FileSizeBytes.ToString(CultureInfo.InvariantCulture);
         LocalOperationalLog.Warn(
             "SessionSecurity",
-            $"event=file_transfer_rejected; operation={operation}; reason={result.Failure}; auth_reason={result.AuthorizationFailure}; session_id={descriptor?.SessionId.Value ?? sessionSecurityState.SessionId?.Value ?? "(none)"}; helper_identity={descriptor?.HelperIdentity.Value ?? sessionSecurityState.HelperAddress?.Value ?? "(none)"}; file_name_len={fileNameLength}; file_size_bytes={fileSizeBytes}");
+            $"event=file_transfer_rejected; operation={operation}; reason={result.Failure}; auth_reason={authReason}; session_present={FormatYesNo((descriptor?.SessionId ?? sessionSecurityState.SessionId) is not null)}; helper_identity_present={FormatYesNo((descriptor?.HelperIdentity ?? sessionSecurityState.HelperAddress) is not null)}; file_name_len={fileNameLength}; file_size_bytes={fileSizeBytes}");
     }
 
     private void LogClipboardRejected(
@@ -1067,12 +1097,14 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         ClipboardAccessResult result,
         ClipboardTransferDescriptor? descriptor = null)
     {
+        var authReason = MapAuthorizationFailureReason(result.AuthorizationFailure);
+        lastAuthorizationDenialReason = authReason;
         var textLength = descriptor is null
             ? "(none)"
             : descriptor.TextLength.ToString(CultureInfo.InvariantCulture);
         LocalOperationalLog.Warn(
             "SessionSecurity",
-            $"event=clipboard_rejected; operation={operation}; reason={result.Failure}; auth_reason={result.AuthorizationFailure}; session_id={descriptor?.SessionId.Value ?? sessionSecurityState.SessionId?.Value ?? "(none)"}; helper_identity={descriptor?.HelperIdentity.Value ?? sessionSecurityState.HelperAddress?.Value ?? "(none)"}; text_length={textLength}");
+            $"event=clipboard_rejected; operation={operation}; reason={result.Failure}; auth_reason={authReason}; session_present={FormatYesNo((descriptor?.SessionId ?? sessionSecurityState.SessionId) is not null)}; helper_identity_present={FormatYesNo((descriptor?.HelperIdentity ?? sessionSecurityState.HelperAddress) is not null)}; text_length={textLength}");
     }
 
     internal bool TryAuthorizeClipboardSync()
@@ -1379,7 +1411,9 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             LastConnectDurationMs: GetLastDurationMetricMilliseconds("connect_duration_ms"),
             LastHandshakeDurationMs: GetLastDurationMetricMilliseconds("handshake_duration_ms"),
             LastBridgeStartDurationMs: GetLastDurationMetricMilliseconds("bridge_start_duration_ms"),
+            RuntimeSummary: BuildRuntimeSummary(),
             AuthorizationSummary: BuildAuthorizationSummary(),
+            LastAuthorizationDenialReason: NormalizeDiagnosticsText(lastAuthorizationDenialReason),
             SessionSecuritySummary: BuildSessionSecuritySummary(),
             RemoteControlSummary: BuildRemoteControlSummary(),
             ScreenShareSummary: BuildScreenShareSummary(),
@@ -1429,7 +1463,29 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         => $"chat={DescribeCapabilityAuthorization(SessionCapability.Chat)}; " +
            $"file_transfer={DescribeCapabilityAuthorization(SessionCapability.FileTransfer)}; " +
            $"screenshare={DescribeCapabilityAuthorization(SessionCapability.ScreenShare)}; " +
-           $"remote_control={DescribeCapabilityAuthorization(SessionCapability.RemoteControl)}";
+           $"remote_control={DescribeCapabilityAuthorization(SessionCapability.RemoteControl)}; " +
+           $"clipboard={DescribeCapabilityAuthorization(SessionCapability.Clipboard)}; " +
+           $"last_denial={NormalizeDiagnosticsText(lastAuthorizationDenialReason)}";
+
+    private string BuildRuntimeSummary()
+    {
+        SessionFlowSnapshot snapshot;
+        lock (sessionFlowGate)
+        {
+            snapshot = currentFlowSnapshot;
+        }
+
+        var lastTerminalReason = string.IsNullOrWhiteSpace(snapshot.FailureReason)
+            ? "(none)"
+            : snapshot.FailureReason.Trim();
+        return $"role={role}; " +
+               $"runtime_state={state}; " +
+               $"transport_state={transportState}; " +
+               $"terminal={snapshot.TerminalKind}; " +
+               $"last_terminal_reason={lastTerminalReason}; " +
+               $"pending_request={FormatYesNo(HasPendingHelpRequest || HasPendingOutboundHelpRequest)}; " +
+               $"pending_approval={FormatYesNo(pendingApprovalRequest is not null || state == SessionRuntimeState.IncomingJoinRequest)}";
+    }
 
     private string BuildSessionSecuritySummary()
     {

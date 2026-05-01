@@ -13,7 +13,6 @@ using Avalonia.LogicalTree;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
-using Avalonia.Threading;
 using Avalonia.VisualTree;
 using CommunityToolkit.Mvvm.Input;
 using NLink.App.Services;
@@ -92,21 +91,11 @@ public abstract class Beta3DefaultUiSmokeTestBase : IClassFixture<Beta3DefaultUi
 
     protected static Control? FindFirstVisibleControlByAutomationId(Control root, string automationId) => root.GetVisualDescendants().OfType<Control>().FirstOrDefault(control => control.IsVisible && string.Equals(AutomationProperties.GetAutomationId(control), automationId, StringComparison.Ordinal));
 
+    protected static Button FindVisibleEnabledButton(Control root, string automationId) =>
+        GuiTestAssertions.FindVisibleEnabledButton(root, automationId);
+
     protected static async Task FlushUiAsync()
-    {
-        await Dispatcher.UIThread.InvokeAsync(() =>
-        {
-        }, DispatcherPriority.Loaded);
-        await Dispatcher.UIThread.InvokeAsync(() =>
-        {
-        }, DispatcherPriority.Background);
-        await Dispatcher.UIThread.InvokeAsync(() =>
-        {
-        }, DispatcherPriority.Render);
-        await Dispatcher.UIThread.InvokeAsync(() =>
-        {
-        }, DispatcherPriority.Background);
-    }
+        => await GuiTestAssertions.FlushUiAsync();
 
     protected static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)
     {

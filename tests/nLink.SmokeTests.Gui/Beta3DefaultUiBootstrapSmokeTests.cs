@@ -297,6 +297,7 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
                 var declineButton = FindFirstVisibleControlByAutomationId(window, "Helpee.Decline") as Button;
                 Assert.NotNull(allowButton);
                 Assert.NotNull(declineButton);
+                Assert.True(allowButton!.IsEnabled);
                 Assert.True(Math.Abs(allowButton!.Bounds.Y - declineButton!.Bounds.Y) < 2, $"Expected approval actions on the same row, got Y={allowButton.Bounds.Y:N1} and {declineButton.Bounds.Y:N1}.");
                 Assert.Null(FindFirstControlByAutomationId(window, "Helpee.IncomingHelperIdentity"));
                 Assert.Null(FindFirstControlByAutomationId(window, "Helpee.IncomingSessionId"));

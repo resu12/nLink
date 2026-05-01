@@ -991,6 +991,56 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
     }
 
     [Fact]
+    public async Task V4SparseReceiver_RejectsManifestTupleMismatchBeforeOpeningDestination()
+    {
+        const string transferId = "transfer_v4_manifest_tuple_mismatch";
+        const string sessionId = "session_v4_manifest_tuple_mismatch";
+        var payload = Enumerable.Range(1, 10).Select(static value => (byte)value).ToArray();
+        var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
+        using var destination = new NonDisposingMemoryStream();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.Connect(receiverTransport);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(receiverTransport);
+        var openWriteCalled = false;
+
+        var senderSession = await StartInboundV4ReceiverAsync(
+            senderTransport,
+            receiver,
+            transferId,
+            sessionId,
+            "v4-manifest-tuple-mismatch.bin",
+            payload.Length,
+            sha256,
+            (_, _) =>
+            {
+                openWriteCalled = true;
+                return Task.FromResult<Stream>(destination);
+            });
+
+        await senderSession.SendAsync(
+            new FileTransferManifestFrameV4
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                FileName = "v4-manifest-tuple-mismatch.bin",
+                FileSizeBytes = payload.Length,
+                ChunkSizeBytes = 4,
+                ChunkCount = 2,
+                Sha256Base64 = sha256,
+            },
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.Failed, timeoutMs: 5000);
+        Assert.False(openWriteCalled);
+        Assert.Equal(FileTransferResultCodes.InvalidState, receiver.Snapshot.Inbound!.ErrorCode);
+        Assert.Equal(0, receiver.Snapshot.Inbound.ChunkCount);
+        Assert.Contains(receiverTransport.SentDataFrames.OfType<FileTransferErrorFrameV4>(), static frame => frame.ErrorCode == FileTransferResultCodes.InvalidState);
+        Assert.Empty(receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>());
+    }
+
+    [Fact]
     public async Task V4SparseReceiver_CancelFrameTerminatesInbound()
     {
         const string transferId = "transfer_v4_cancel";

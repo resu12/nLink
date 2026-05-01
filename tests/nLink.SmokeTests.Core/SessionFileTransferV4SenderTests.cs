@@ -393,11 +393,12 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         await receiverSession.SendAsync(repairState, CancellationToken.None);
 
         await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v4_repair_scheduled; transfer_id=transfer_v4_sender_repair_dedupe", StringComparison.Ordinal), timeoutMs: 5000);
-        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v4_repair_suppressed; transfer_id=transfer_v4_sender_repair_dedupe", StringComparison.Ordinal), timeoutMs: 5000);
+        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v4_state_received; transfer_id=transfer_v4_sender_repair_dedupe; session_id=session_v4_sender_repair_dedupe; epoch=2; previous_epoch=2; duplicate=1; applied=0", StringComparison.Ordinal), timeoutMs: 5000);
 
         var log = ReadOperationalLogTail(logStart);
         Assert.Equal(1, CountOccurrences(log, "event=filetransfer_v4_repair_scheduled; transfer_id=transfer_v4_sender_repair_dedupe"));
-        Assert.Contains("reason=", log, StringComparison.Ordinal);
+        Assert.Contains("duplicate=1; applied=0", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v4_repair_suppressed; transfer_id=transfer_v4_sender_repair_dedupe", log, StringComparison.Ordinal);
         Assert.DoesNotContain("filetransfer.request_chunks.v2", log, StringComparison.Ordinal);
     }
 
@@ -629,7 +630,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
-    public async Task V4Sender_AppliesRepair_FromStaleSameFrontierMissingRanges()
+    public async Task V4Sender_SuppressesRepair_FromStaleSameFrontierMissingRanges()
     {
         const string transferId = "v4_stale_same";
         const string sessionId = "session_v4_stale_same";
@@ -688,15 +689,87 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             },
             CancellationToken.None);
 
-        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains($"event=filetransfer_v4_stale_state_missing_ranges_applied; transfer_id={transferId}", StringComparison.Ordinal), timeoutMs: 5000);
-        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains($"event=filetransfer_v4_repair_scheduled; transfer_id={transferId}", StringComparison.Ordinal), timeoutMs: 5000);
+        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains($"event=filetransfer_v4_stale_state_missing_ranges_suppressed; transfer_id={transferId}", StringComparison.Ordinal), timeoutMs: 5000);
 
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains($"event=filetransfer_v4_state_received; transfer_id={transferId}", log, StringComparison.Ordinal);
         Assert.Contains("stale=1; applied=0", log, StringComparison.Ordinal);
-        Assert.Contains($"event=filetransfer_v4_stale_state_missing_ranges_applied; transfer_id={transferId}", log, StringComparison.Ordinal);
-        Assert.Contains("reason=same_frontier", log, StringComparison.Ordinal);
-        Assert.Contains($"event=filetransfer_v4_repair_scheduled; transfer_id={transferId}", log, StringComparison.Ordinal);
+        Assert.Contains($"event=filetransfer_v4_stale_state_missing_ranges_suppressed; transfer_id={transferId}", log, StringComparison.Ordinal);
+        Assert.Contains("reason=stale_epoch", log, StringComparison.Ordinal);
+        Assert.DoesNotContain($"event=filetransfer_v4_stale_state_missing_ranges_applied; transfer_id={transferId}", log, StringComparison.Ordinal);
+        Assert.DoesNotContain($"event=filetransfer_v4_repair_scheduled; transfer_id={transferId}", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("filetransfer.request_chunks.v2", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task V4Sender_TreatsSameEpochReceiverStateAsDuplicate()
+    {
+        const string transferId = "v4_duplicate_epoch";
+        const string sessionId = "session_v4_duplicate_epoch";
+        var logStart = ReadOperationalLogText().Length;
+        var payload = Enumerable.Range(0, 256_000).Select(static index => (byte)(index % 211)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("v4-duplicate-epoch.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+        await WaitUntilAsync(() => senderTransport.SentOffers.TryPeek(out _), timeoutMs: 5000);
+        var offer = senderTransport.SentOffers.Single();
+        await receiverTransport.SendFileTransferAcceptAsync(
+            new FileTransferAcceptV1
+            {
+                SessionId = offer.SessionId,
+                TransferId = transferId,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+            },
+            CancellationToken.None);
+        await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV4>().Any(), timeoutMs: 5000);
+
+        var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
+        await receiverSession.SendAsync(
+            new FileTransferStateFrameV4
+            {
+                SessionId = offer.SessionId,
+                TransferId = transferId,
+                Epoch = 10,
+                ContiguousCommittedChunkIndex = 0,
+                DurableReceivedHighestChunkIndex = 8,
+                CreditUntilChunkIndexExclusive = 16,
+                MissingRanges = [],
+                BytesCommitted = 0,
+            },
+            CancellationToken.None);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV4>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
+
+        await receiverSession.SendAsync(
+            new FileTransferStateFrameV4
+            {
+                SessionId = offer.SessionId,
+                TransferId = transferId,
+                Epoch = 10,
+                ContiguousCommittedChunkIndex = 0,
+                DurableReceivedHighestChunkIndex = 8,
+                CreditUntilChunkIndexExclusive = 1,
+                MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 0, ChunkCount = 1 }],
+                BytesCommitted = 0,
+                TransferPaused = true,
+                TransferPauseReason = "duplicate_pause",
+            },
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains($"event=filetransfer_v4_state_received; transfer_id={transferId}; session_id={sessionId}; epoch=10; previous_epoch=10; duplicate=1; applied=0", StringComparison.Ordinal), timeoutMs: 5000);
+        await Task.Delay(250);
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains($"event=filetransfer_v4_state_received; transfer_id={transferId}; session_id={sessionId}; epoch=10; previous_epoch=10; duplicate=1; applied=0", log, StringComparison.Ordinal);
+        Assert.DoesNotContain($"event=filetransfer_v4_repair_scheduled; transfer_id={transferId}", log, StringComparison.Ordinal);
+        Assert.False(sender.Snapshot.Outbound!.IsPeerPaused);
         Assert.DoesNotContain("filetransfer.request_chunks.v2", log, StringComparison.Ordinal);
     }
 

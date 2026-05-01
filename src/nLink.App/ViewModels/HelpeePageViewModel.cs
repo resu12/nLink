@@ -43,7 +43,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         Failed,
     }
 
-    private static readonly TimeSpan DefaultIncomingRequestTimeout = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan DefaultIncomingRequestTimeout = SessionApprovalTimeouts.DefaultHumanDecisionTimeout;
     private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultInviteLifetime = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan PeerEndedNoticeDuration = TimeSpan.FromSeconds(4);
@@ -3454,17 +3454,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             RequestTransportScreenShareSync(true, "runtime_sync");
         }
 
-        OnPropertyChanged(nameof(ShowRetryAction));
-        OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
         OnPropertyChanged(nameof(ShowFailurePanel));
-        RetryCommand.NotifyCanExecuteChanged();
-        OpenDiagnosticsCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(IsChatReady));
-        SendChatCommand.NotifyCanExecuteChanged();
-        AllowCommand.NotifyCanExecuteChanged();
-        DeclineCommand.NotifyCanExecuteChanged();
-        EndSessionCommand.NotifyCanExecuteChanged();
-        ToggleScreenSharePreviewCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(ShowHeaderCaptureDisplayPicker));
         OnPropertyChanged(nameof(SessionSupportsRemoteControl));
         OnPropertyChanged(nameof(ShowStopControlAction));
@@ -3477,8 +3468,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         NotifySessionVerificationPropertiesChanged();
         NotifyRemoteControlDiagnosticsChanged();
         NotifyRemoteControlConsentUiChanged();
-        StopControlCommand.NotifyCanExecuteChanged();
-        RestartAsAdministratorCommand.NotifyCanExecuteChanged();
+        RefreshCommandStates();
         SyncTransientStatusFromRuntime();
         NotifyStatusBannerDetailChanged();
     }
@@ -4031,10 +4021,28 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         CanOpenDiagnostics = nextCanOpenDiagnostics;
         CanSendFiles = nextCanSendFiles;
 
+        RefreshCommandStates();
+        LogCurrentChatPanelState(source);
+        AssertUiConsistency();
+    }
+
+    private void RefreshCommandStates()
+    {
+        OnPropertyChanged(nameof(CanApplyInviteHelperIdentityAction));
+        OnPropertyChanged(nameof(CanClearInviteHelperIdentityAction));
+        OnPropertyChanged(nameof(CanRequestHelpAction));
+        OnPropertyChanged(nameof(CanAllowIncomingRequestAction));
+        OnPropertyChanged(nameof(ShowRetryAction));
         OnPropertyChanged(nameof(ShowOpenDiagnosticsLink));
         OnPropertyChanged(nameof(ShowSendFileAction));
         OnPropertyChanged(nameof(CanSendFileAction));
-        OpenDiagnosticsCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(CanSubmitRemoteControlConsent));
+
+        ApplyInviteHelperIdentityCommand.NotifyCanExecuteChanged();
+        ClearInviteHelperIdentityCommand.NotifyCanExecuteChanged();
+        RequestHelpCommand.NotifyCanExecuteChanged();
+        AllowCommand.NotifyCanExecuteChanged();
+        DeclineCommand.NotifyCanExecuteChanged();
         SendFileCommand.NotifyCanExecuteChanged();
         SendChatCommand.NotifyCanExecuteChanged();
         AcceptIncomingFileCommand.NotifyCanExecuteChanged();
@@ -4042,11 +4050,18 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         CancelFileTransferCommand.NotifyCanExecuteChanged();
         PauseFileTransferCommand.NotifyCanExecuteChanged();
         ResumeFileTransferCommand.NotifyCanExecuteChanged();
+        RetryCommand.NotifyCanExecuteChanged();
+        CancelTransientCommand.NotifyCanExecuteChanged();
+        OpenDiagnosticsCommand.NotifyCanExecuteChanged();
         EndSessionCommand.NotifyCanExecuteChanged();
-        OnPropertyChanged(nameof(CanRequestHelpAction));
-        RequestHelpCommand.NotifyCanExecuteChanged();
-        LogCurrentChatPanelState(source);
-        AssertUiConsistency();
+        ToggleScreenSharePreviewCommand.NotifyCanExecuteChanged();
+        RequestControlCommand.NotifyCanExecuteChanged();
+        StopControlCommand.NotifyCanExecuteChanged();
+        RestartAsAdministratorCommand.NotifyCanExecuteChanged();
+        ToggleControlModeCommand.NotifyCanExecuteChanged();
+        ToggleRemoteControlDebugPanelCommand.NotifyCanExecuteChanged();
+        AllowControlConsentCommand.NotifyCanExecuteChanged();
+        DenyControlConsentCommand.NotifyCanExecuteChanged();
     }
 
     private void LogCurrentChatPanelState(string source)

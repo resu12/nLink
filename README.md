@@ -10,7 +10,7 @@ Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke
 
 ## Current Release (0.6.1)
 
-`0.6.1` is the current release. It keeps the H.264 screen-sharing default from `0.6.0`, and focuses on file-transfer reliability, session approval clarity, connection lifecycle recovery, and chat usability while screen sharing.
+`0.6.1` is the current release. It keeps the H.264 screen-sharing default from the prior release, and focuses on file-transfer reliability, session approval clarity, connection lifecycle recovery, and chat usability while screen sharing.
 
 ## Quick Start (Windows)
 

@@ -2482,7 +2482,9 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static bool TryCalculateExpectedChunkCount(long fileSizeBytes, int chunkSizeBytes, out int chunkCount)
     {
         chunkCount = 0;
-        if (fileSizeBytes <= 0 || chunkSizeBytes <= 0)
+        if (fileSizeBytes <= 0 ||
+            chunkSizeBytes <= 0 ||
+            chunkSizeBytes > FileTransferProtocol.MaxChunkRawBytes)
         {
             return false;
         }
@@ -2490,7 +2492,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         try
         {
             chunkCount = checked((int)((fileSizeBytes + chunkSizeBytes - 1) / chunkSizeBytes));
-            return chunkCount > 0;
+            return chunkCount is > 0 and <= FileTransferProtocol.MaxChunkCountV4;
         }
         catch (OverflowException)
         {

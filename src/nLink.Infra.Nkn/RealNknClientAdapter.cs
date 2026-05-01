@@ -2797,6 +2797,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             bridgeBundleIdentity = identity;
         }
 
+        NknRuntimeDiagnostics.SetBridgeBundleIdentity(identity);
         Log($"event=bridge_bundle_loaded{identity.BuildStructuredLogFields()}");
         if (identity.HasMismatch)
         {

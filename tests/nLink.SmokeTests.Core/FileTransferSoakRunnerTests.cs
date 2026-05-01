@@ -4,6 +4,7 @@ using System.Text;
 using NLink.App;
 using NLink.Core.FileTransfer;
 using NLink.Infra.DevLocal;
+using Xunit.Sdk;
 
 namespace NLink.SmokeTests;
 
@@ -232,13 +233,29 @@ public sealed class FileTransferSoakRunnerTests
                 error,
                 CancellationToken.None);
 
-            await AssertLocalV4SoakSuccessAsync(artifactDir, exitCode, "local-fast", expectedCyclesRequested: "2");
-            Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-local-soak-summary.json")));
-            Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-local-soak-cycles.jsonl")));
-            Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-local-soak-summary.txt")));
-            Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log")));
-            Assert.True(File.Exists(Path.Combine(artifactDir, "baseline-comparison.txt")));
-            Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-operator-verdict.txt")));
+            try
+            {
+                await AssertLocalV4SoakSuccessAsync(artifactDir, exitCode, "local-fast", expectedCyclesRequested: "2");
+                Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-local-soak-summary.json")));
+                Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-local-soak-cycles.jsonl")));
+                Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-local-soak-summary.txt")));
+                Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log")));
+                Assert.True(File.Exists(Path.Combine(artifactDir, "baseline-comparison.txt")));
+                Assert.True(File.Exists(Path.Combine(artifactDir, "filetransfer-operator-verdict.txt")));
+            }
+            catch (Exception ex) when (ex is not XunitException)
+            {
+                throw;
+            }
+            catch (XunitException ex)
+            {
+                throw new XunitException(BuildSoakFailureMessage(
+                    artifactDir,
+                    exitCode,
+                    output.ToString(),
+                    error.ToString(),
+                    ex.Message));
+            }
         }
         finally
         {
@@ -491,6 +508,62 @@ public sealed class FileTransferSoakRunnerTests
             .Select(line => line.Split('=', 2))
             .Where(parts => parts.Length == 2)
             .ToDictionary(parts => parts[0], parts => parts[1], StringComparer.Ordinal);
+    }
+
+    private static string BuildSoakFailureMessage(
+        string artifactDir,
+        int exitCode,
+        string stdout,
+        string stderr,
+        string assertionMessage)
+    {
+        var files = Directory.Exists(artifactDir)
+            ? Directory.GetFiles(artifactDir, "*", SearchOption.AllDirectories)
+                .Select(path => Path.GetRelativePath(artifactDir, path).Replace('\\', '/'))
+                .OrderBy(path => path, StringComparer.Ordinal)
+                .ToArray()
+            : [];
+
+        var summaryPath = Path.Combine(artifactDir, "filetransfer-local-soak-summary.txt");
+        var verdictPath = Path.Combine(artifactDir, "filetransfer-operator-verdict.txt");
+        var cyclesPath = Path.Combine(artifactDir, "filetransfer-local-soak-cycles.jsonl");
+        var logPath = Path.Combine(artifactDir, "filetransfer-retained-log-slice.log");
+
+        return string.Join(
+            Environment.NewLine,
+            [
+                "File transfer local-fast soak failed.",
+                $"Assertion: {assertionMessage}",
+                $"ExitCode: {exitCode}",
+                $"ArtifactDir: {artifactDir}",
+                $"Artifacts: {(files.Length == 0 ? "(none)" : string.Join(", ", files))}",
+                "Stdout:",
+                string.IsNullOrWhiteSpace(stdout) ? "(empty)" : stdout.Trim(),
+                "Stderr:",
+                string.IsNullOrWhiteSpace(stderr) ? "(empty)" : stderr.Trim(),
+                "Summary:",
+                ReadFileIfExists(summaryPath),
+                "Verdict:",
+                ReadFileIfExists(verdictPath),
+                "Cycles tail:",
+                ReadFileTailIfExists(cyclesPath, 8),
+                "Retained log tail:",
+                ReadFileTailIfExists(logPath, 40)
+            ]);
+    }
+
+    private static string ReadFileIfExists(string path)
+        => File.Exists(path) ? File.ReadAllText(path, Encoding.UTF8).Trim() : "(missing)";
+
+    private static string ReadFileTailIfExists(string path, int maxLines)
+    {
+        if (!File.Exists(path))
+        {
+            return "(missing)";
+        }
+
+        var lines = File.ReadAllLines(path, Encoding.UTF8);
+        return string.Join(Environment.NewLine, lines.Skip(Math.Max(0, lines.Length - maxLines)));
     }
 
     private static async Task AssertLocalV4SoakSuccessAsync(

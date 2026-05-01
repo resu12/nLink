@@ -223,8 +223,8 @@ public sealed class NknIdentityStoreAndStartupCleanupTests : SessionRuntimeConne
             var backend = new CorruptedProtectedSeedBackend();
             using var backendOverride = NknSecretStore.OverrideBackendForTests(backend);
             using var sharedPathOverride = NknIdentityStore.OverrideDefaultSharedKeyPathForTests(keyPath);
-            var recoveryDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "nLink", "security", "identity-recovery");
-            var beforeRecoveryFiles = Directory.Exists(recoveryDir) ? Directory.GetFiles(recoveryDir).ToHashSet(StringComparer.OrdinalIgnoreCase) : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var recoveryDir = Path.Combine(tempDir, "identity-recovery");
+            using var recoveryDirOverride = NknIdentityStore.OverrideRecoveryDirectoryForTests(recoveryDir);
             var originalIdentity = NknIdentityStore.LoadOrCreate(options);
             var originalJson = File.ReadAllText(keyPath);
             backend.ThrowOnLoad = true;
@@ -234,7 +234,7 @@ public sealed class NknIdentityStoreAndStartupCleanupTests : SessionRuntimeConne
             Assert.True(File.Exists(keyPath));
             Assert.True(File.Exists(NknSecretStore.GetSecretPath(keyPath)));
             Assert.True(Directory.Exists(recoveryDir));
-            var newRecoveryFiles = Directory.GetFiles(recoveryDir).Where(path => !beforeRecoveryFiles.Contains(path)).ToArray();
+            var newRecoveryFiles = Directory.GetFiles(recoveryDir);
             Assert.Contains(newRecoveryFiles, path => Path.GetFileName(path).StartsWith("identity.", StringComparison.Ordinal) && Path.GetFileName(path).Contains(".corrupt.json", StringComparison.Ordinal));
             Assert.Contains(newRecoveryFiles, path => Path.GetFileName(path).StartsWith("identity.json.", StringComparison.Ordinal) && Path.GetFileName(path).Contains(".corrupt.seed", StringComparison.Ordinal));
             var snapshot = PersistenceDiagnostics.Snapshot();
@@ -343,8 +343,8 @@ public sealed class NknIdentityStoreAndStartupCleanupTests : SessionRuntimeConne
             var keyPath = options.KeyPath;
             var backend = new CorruptedProtectedSeedBackend();
             using var backendOverride = NknSecretStore.OverrideBackendForTests(backend);
-            var recoveryDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "nLink", "security", "identity-recovery");
-            var beforeRecoveryFiles = Directory.Exists(recoveryDir) ? Directory.GetFiles(recoveryDir).ToHashSet(StringComparer.OrdinalIgnoreCase) : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var recoveryDir = Path.Combine(tempDir, "identity-recovery");
+            using var recoveryDirOverride = NknIdentityStore.OverrideRecoveryDirectoryForTests(recoveryDir);
             var originalIdentity = NknIdentityStore.LoadOrCreate(options);
             var originalJson = File.ReadAllText(keyPath);
             backend.ThrowOnLoad = true;
@@ -354,7 +354,7 @@ public sealed class NknIdentityStoreAndStartupCleanupTests : SessionRuntimeConne
             Assert.True(File.Exists(keyPath));
             Assert.True(File.Exists(NknSecretStore.GetSecretPath(keyPath)));
             Assert.True(Directory.Exists(recoveryDir));
-            var newRecoveryFiles = Directory.GetFiles(recoveryDir).Where(path => !beforeRecoveryFiles.Contains(path)).ToArray();
+            var newRecoveryFiles = Directory.GetFiles(recoveryDir);
             var expectedPrefix = Path.GetFileNameWithoutExtension(keyPath);
             Assert.Contains(newRecoveryFiles, path => Path.GetFileName(path).StartsWith(expectedPrefix + ".", StringComparison.Ordinal) && Path.GetFileName(path).Contains(".corrupt.json", StringComparison.Ordinal));
             Assert.Contains(newRecoveryFiles, path => Path.GetFileName(path).StartsWith(Path.GetFileName(keyPath) + ".", StringComparison.Ordinal) && Path.GetFileName(path).Contains(".corrupt.seed", StringComparison.Ordinal));
@@ -392,6 +392,7 @@ public sealed class NknIdentityStoreAndStartupCleanupTests : SessionRuntimeConne
             var keyPath = Path.Combine(tempDir, "identity.json");
             var options = LoadNknOptionsWithOverrides(keyPath, "blank-protected-seed-test");
             using var sharedPathOverride = NknIdentityStore.OverrideDefaultSharedKeyPathForTests(keyPath);
+            using var recoveryDirOverride = NknIdentityStore.OverrideRecoveryDirectoryForTests(Path.Combine(tempDir, "identity-recovery"));
             var originalIdentity = NknIdentityStore.LoadOrCreate(options);
             File.WriteAllText(NknSecretStore.GetSecretPath(keyPath), string.Empty);
             var recoveredIdentity = NknIdentityStore.LoadOrCreate(options);
@@ -400,6 +401,63 @@ public sealed class NknIdentityStoreAndStartupCleanupTests : SessionRuntimeConne
             Assert.True(File.Exists(NknSecretStore.GetSecretPath(keyPath)));
             var snapshot = PersistenceDiagnostics.Snapshot();
             Assert.Contains(snapshot.RecentEvents, e => string.Equals(e.Operation, "automatic_identity_recovery", StringComparison.Ordinal));
+        }
+        finally
+        {
+            PersistenceDiagnostics.ClearForTests();
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void NknIdentityStore_RecoveryQuarantine_UsesOverriddenDirectoryAndPrunesStaleFiles()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-protected-seed-recovery-retention", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        PersistenceDiagnostics.ClearForTests();
+        try
+        {
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            var recoveryDir = Path.Combine(tempDir, "identity-recovery");
+            Directory.CreateDirectory(recoveryDir);
+            var staleFile = Path.Combine(recoveryDir, "stale.20240101T000000Z.corrupt.json");
+            File.WriteAllText(staleFile, "{}");
+            File.SetLastWriteTimeUtc(staleFile, DateTimeOffset.UtcNow.AddDays(-45).UtcDateTime);
+
+            for (var i = 0; i < 22; i++)
+            {
+                var recentFile = Path.Combine(recoveryDir, $"recent-{i:00}.20260401T000000Z.corrupt.json");
+                File.WriteAllText(recentFile, "{}");
+                File.SetLastWriteTimeUtc(recentFile, DateTimeOffset.UtcNow.AddMinutes(-60 + i).UtcDateTime);
+            }
+
+            var options = LoadNknOptionsWithOverrides(keyPath, "recovery-retention-test");
+            var backend = new CorruptedProtectedSeedBackend();
+            using var backendOverride = NknSecretStore.OverrideBackendForTests(backend);
+            using var sharedPathOverride = NknIdentityStore.OverrideDefaultSharedKeyPathForTests(keyPath);
+            using var recoveryDirOverride = NknIdentityStore.OverrideRecoveryDirectoryForTests(recoveryDir);
+            NknIdentityStore.LoadOrCreate(options);
+            backend.ThrowOnLoad = true;
+
+            NknIdentityStore.LoadOrCreate(options);
+
+            var recoveryFiles = Directory.GetFiles(recoveryDir);
+            Assert.False(File.Exists(staleFile));
+            Assert.True(recoveryFiles.Length <= 20);
+            Assert.Contains(recoveryFiles, path => Path.GetFileName(path).StartsWith("identity.", StringComparison.Ordinal) && Path.GetFileName(path).Contains(".corrupt.json", StringComparison.Ordinal));
+            Assert.Contains(recoveryFiles, path => Path.GetFileName(path).StartsWith("identity.json.", StringComparison.Ordinal) && Path.GetFileName(path).Contains(".corrupt.seed", StringComparison.Ordinal));
         }
         finally
         {

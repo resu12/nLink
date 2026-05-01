@@ -256,7 +256,9 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string LastConnectDurationMs => FormatDuration(runtimeDiagnosticsSnapshot.LastConnectDurationMs);
     public string LastHandshakeDurationMs => FormatDuration(runtimeDiagnosticsSnapshot.LastHandshakeDurationMs);
     public string LastBridgeStartDurationMs => FormatDuration(runtimeDiagnosticsSnapshot.LastBridgeStartDurationMs);
+    public string RuntimeSummary => runtimeDiagnosticsSnapshot.RuntimeSummary;
     public string AuthorizationSummary => runtimeDiagnosticsSnapshot.AuthorizationSummary;
+    public string LastAuthorizationDenialReason => runtimeDiagnosticsSnapshot.LastAuthorizationDenialReason;
     public string SessionSecuritySummary => runtimeDiagnosticsSnapshot.SessionSecuritySummary;
     public string RemoteControlSummary => runtimeDiagnosticsSnapshot.RemoteControlSummary;
     public string ScreenShareSummary => runtimeDiagnosticsSnapshot.ScreenShareSummary;
@@ -302,6 +304,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string BridgeRestarts { get; }
 
     public string LastBridgeExit { get; }
+    public string BridgeManifestSummary => BuildBridgeManifestSummary();
 
     public string BridgeRawMessagesReceived { get; }
 
@@ -572,7 +575,9 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"current_state: {CurrentTransportState}",
             $"session_ui_state: {SessionUiState}",
             $"attempt: {AttemptNumber}",
+            $"runtime_summary: {RuntimeSummary}",
             $"authorization_summary: {AuthorizationSummary}",
+            $"last_authorization_denial_reason: {LastAuthorizationDenialReason}",
             $"session_security_summary: {SessionSecuritySummary}",
             $"remote_control_summary: {RemoteControlSummary}",
             $"screenshare_summary: {ScreenShareSummary}",
@@ -627,6 +632,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"Bridge restarts: {BridgeRestarts}",
             $"Last bridge exit: {LastBridgeExit}",
             $"bridge_process_status: {BuildBridgeProcessStatus()}",
+            $"bridge_manifest_summary: {BridgeManifestSummary}",
             $"bridge_raw_messages_received: {BridgeRawMessagesReceived}",
             $"screenshare_outbound_busy_drops: {ScreenShareOutboundBusyDrops}",
             $"screenshare_messages_sent: {ScreenShareMessagesSent}",
@@ -1138,6 +1144,19 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         }
 
         return $"not running (last exit: {LastBridgeExit})";
+    }
+
+    private string BuildBridgeManifestSummary()
+    {
+        var version = nknDiagnosticsSnapshot.BridgeManifestVersion > 0
+            ? nknDiagnosticsSnapshot.BridgeManifestVersion.ToString(CultureInfo.InvariantCulture)
+            : "(none)";
+        return $"status={nknDiagnosticsSnapshot.BridgeManifestStatus}; " +
+               $"reason={nknDiagnosticsSnapshot.BridgeManifestReason}; " +
+               $"version={version}; " +
+               $"script_hash_prefix={nknDiagnosticsSnapshot.BridgeManifestHashPrefix}; " +
+               $"owner_pid_watchdog={FormatYesNo(nknDiagnosticsSnapshot.BridgeManifestOwnerPidWatchdog)}; " +
+               $"kill_on_close_job={FormatYesNo(nknDiagnosticsSnapshot.BridgeManifestKillOnCloseJob)}";
     }
 
     private static string FormatDuration(double? value)

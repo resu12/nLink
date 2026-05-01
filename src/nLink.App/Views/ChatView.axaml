@@ -121,6 +121,14 @@
                                TextWrapping="Wrap"
                                IsVisible="{Binding ShowSavedLocation}"/>
 
+                    <TextBlock AutomationProperties.AutomationId="Chat.FileTransfer.RiskWarning"
+                               Text="{Binding RiskWarningText}"
+                               Foreground="#B45309"
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               TextWrapping="Wrap"
+                               IsVisible="{Binding ShowRiskWarning}"/>
+
                     <StackPanel Orientation="Horizontal"
                                 Spacing="8"
                                 IsVisible="{Binding ShowActions}">

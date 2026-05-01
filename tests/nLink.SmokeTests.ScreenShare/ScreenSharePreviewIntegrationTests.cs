@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Headless;
@@ -9,6 +10,8 @@ using NLink.App.Configuration;
 using NLink.App.Services;
 using NLink.App.Services.ScreenCapture;
 using NLink.App.ViewModels;
+using NLink.Core.SessionConnect;
+using NLink.Core.SessionSecurity;
 using NLink.Infra.DevLocal;
 using NLink.SmokeTests.Fakes;
 
@@ -16,7 +19,7 @@ namespace NLink.SmokeTests;
 
 [Collection(AvaloniaHeadlessUiCollection.Name)]
 [Trait("Area", "ScreenShare")]
-public sealed class ScreenSharePreviewIntegrationTests
+public sealed class ScreenSharePreviewIntegrationTests : CoreSmokeTestsBase
 {
     private static readonly SemaphoreSlim PreviewDispatchGate = new(1, 1);
 
@@ -34,12 +37,14 @@ public sealed class ScreenSharePreviewIntegrationTests
         {
             var transportConfig = CreateDevLocalTestConfig();
             var fakeSource = new FakeScreenCaptureSource();
-            using var runtime = new SessionRuntime(() => new DevLocalTransport());
+            using var transport = new DevLocalTransport();
+            using var runtime = new SessionRuntime(() => transport);
             using var helpee = new HelpeePageViewModel(
                 cancelAction: static () => { },
                 transportConfig,
                 runtime,
                 screenCaptureSourceFactory: new FixedCaptureSourceFactory(fakeSource));
+            await GrantScreenShareAsync(runtime, transport, helpee);
 
             try
             {
@@ -56,7 +61,7 @@ public sealed class ScreenSharePreviewIntegrationTests
                         () => helpee.ShowScreenSharePreviewFrame && helpee.ScreenSharePreviewFrame is not null,
                         nameof(HelpeePageViewModel.ShowScreenSharePreviewFrame),
                         nameof(HelpeePageViewModel.ScreenSharePreviewFrame));
-                    helpee.ToggleScreenSharePreviewCommand.Execute(null);
+                    await TogglePreviewAsync(helpee);
 
                     await WaitForSignalAsync(
                         startedSignal,
@@ -77,12 +82,16 @@ public sealed class ScreenSharePreviewIntegrationTests
                         nameof(HelpeePageViewModel.IsScreenSharingPreviewActive),
                         nameof(HelpeePageViewModel.ScreenSharePreviewFrame),
                         nameof(HelpeePageViewModel.ScreenSharePreviewStatus));
-                    helpee.ToggleScreenSharePreviewCommand.Execute(null);
+                    await TogglePreviewAsync(helpee);
 
                     await WaitForSignalAsync(
                         stoppedSignal,
                         TimeSpan.FromSeconds(10),
                         () => BuildState(helpee));
+                    await WaitUntilAsync(
+                        () => fakeSource.StopCallCount >= i + 1 &&
+                              fakeSource.DisposeCallCount >= i + 2,
+                        TimeSpan.FromSeconds(5));
                 }
 
                 Assert.Equal(2, fakeSource.StartCallCount);
@@ -110,7 +119,8 @@ public sealed class ScreenSharePreviewIntegrationTests
         {
             var transportConfig = CreateDevLocalTestConfig();
             var fakeSource = new FakeScreenCaptureSource();
-            using var runtime = new SessionRuntime(() => new DevLocalTransport());
+            using var transport = new DevLocalTransport();
+            using var runtime = new SessionRuntime(() => transport);
             using var decodeGate = new SemaphoreSlim(0, 50);
             var appliedFrames = 0;
 
@@ -133,6 +143,7 @@ public sealed class ScreenSharePreviewIntegrationTests
                         "Timed out waiting to release preview decode.");
                     return CreateBitmap(bytes[0], 1);
                 });
+            await GrantScreenShareAsync(runtime, transport, helpee);
 
             helpee.PropertyChanged += (_, e) =>
             {
@@ -210,7 +221,8 @@ public sealed class ScreenSharePreviewIntegrationTests
         {
             var transportConfig = CreateDevLocalTestConfig();
             var fakeSource = new FakeScreenCaptureSource();
-            using var runtime = new SessionRuntime(() => new DevLocalTransport());
+            using var transport = new DevLocalTransport();
+            using var runtime = new SessionRuntime(() => transport);
             using var decodeGate = new SemaphoreSlim(0, 2);
             var firstDecodeStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var decodeCalls = 0;
@@ -242,6 +254,7 @@ public sealed class ScreenSharePreviewIntegrationTests
                         $"Timed out waiting to release preview decode {call}.");
                     return CreateBitmap(bytes[0], 1);
                 });
+            await GrantScreenShareAsync(runtime, transport, helpee);
 
             var startedSignal = CreateConditionSignal(
                 helpee,
@@ -293,7 +306,8 @@ public sealed class ScreenSharePreviewIntegrationTests
         {
             var transportConfig = CreateDevLocalTestConfig();
             var fakeSource = new FakeScreenCaptureSource();
-            using var runtime = new SessionRuntime(() => new DevLocalTransport());
+            using var transport = new DevLocalTransport();
+            using var runtime = new SessionRuntime(() => transport);
             var applyCount = 0;
             var firstApplyObserved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var postStopApplyObserved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -312,6 +326,7 @@ public sealed class ScreenSharePreviewIntegrationTests
                 backAction: null,
                 screenCaptureSourceFactory: new FixedCaptureSourceFactory(fakeSource),
                 decodeFrame: bytes => CreateBitmap(bytes[0], 1));
+            await GrantScreenShareAsync(runtime, transport, helpee);
 
             helpee.PropertyChanged += (_, e) =>
             {
@@ -422,7 +437,7 @@ public sealed class ScreenSharePreviewIntegrationTests
         }
     }
 
-    private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)
+    private new static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
@@ -437,6 +452,68 @@ public sealed class ScreenSharePreviewIntegrationTests
         }
 
         Assert.True(predicate(), $"Condition not met within {timeout.TotalSeconds:N1}s.");
+    }
+
+    private static async Task GrantScreenShareAsync(
+        SessionRuntime runtime,
+        DevLocalTransport transport,
+        HelpeePageViewModel helpee)
+    {
+        await WaitUntilAsync(
+            () => runtime.State is SessionRuntimeState.Waiting or SessionRuntimeState.Connected,
+            TimeSpan.FromSeconds(2));
+
+        GrantScreenShare(runtime, transport);
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = SessionFlowPhase.ActiveSession,
+                UiPhase = SessionUiPhase.Connected,
+                Role = SessionRuntimeRole.Helpee,
+                RuntimeState = SessionRuntimeState.Connected,
+                TransportState = TransportState.Connected,
+                ApprovalActive = true,
+                ApprovedCapabilities = CapabilityGrant.ScreenShare,
+                DisplayStatusText = "Connected",
+                DisplayConnectionState = "Connected",
+            });
+        SetPrivateProperty(helpee, "ConnectionState", "Connected");
+        SetPrivateField(helpee, "effectivePhase", SessionUiPhase.Connected);
+        helpee.ToggleScreenSharePreviewCommand.NotifyCanExecuteChanged();
+    }
+
+    private static void GrantScreenShare(SessionRuntime runtime, DevLocalTransport transport)
+    {
+        SetPrivateField(runtime, "transport", transport);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "transportState", TransportState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        InvokePrivateMethod(
+            runtime,
+            "ApplyTransportSecurityState",
+            CreateApprovedSecurityState(
+                new PeerAddress(transport.LocalPeerAddress),
+                new PeerAddress("helpee.preview.helper"),
+                CapabilityGrant.ScreenShare));
+    }
+
+    private static async Task TogglePreviewAsync(HelpeePageViewModel helpee)
+    {
+        Assert.True(helpee.ToggleScreenSharePreviewCommand.CanExecute(null), BuildState(helpee));
+        if (!helpee.IsScreenSharingPreviewActive)
+        {
+            InvokePrivateMethod(helpee, "PersistSelectedCaptureTargetForShareStart");
+        }
+
+        var coordinator = GetPrivateField(helpee, "screenShareCoordinator");
+        Assert.NotNull(coordinator);
+        var method = coordinator!.GetType().GetMethod("ToggleAsync", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var task = Assert.IsAssignableFrom<Task>(method!.Invoke(coordinator, Array.Empty<object>()));
+        await task.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     private static Task CreateConditionSignal(
@@ -486,7 +563,7 @@ public sealed class ScreenSharePreviewIntegrationTests
 
     private static string BuildState(HelpeePageViewModel helpee)
     {
-        return $"CanShow={helpee.CanShowScreenShareAction}, Active={helpee.IsScreenSharingPreviewActive}, HasFrame={helpee.ScreenSharePreviewFrame is not null}, ShowFrame={helpee.ShowScreenSharePreviewFrame}, Status={helpee.ScreenSharePreviewStatus.State}";
+        return $"CanShow={helpee.CanShowScreenShareAction}, CanToggle={helpee.ToggleScreenSharePreviewCommand.CanExecute(null)}, Active={helpee.IsScreenSharingPreviewActive}, HasFrame={helpee.ScreenSharePreviewFrame is not null}, ShowFrame={helpee.ShowScreenSharePreviewFrame}, Status={helpee.ScreenSharePreviewStatus.State}";
     }
 
     private static Bitmap CreateBitmap(int width, int height)
@@ -504,7 +581,7 @@ public sealed class ScreenSharePreviewIntegrationTests
         return writeable;
     }
 
-    private static TransportRuntimeConfig CreateDevLocalTestConfig()
+    private new static TransportRuntimeConfig CreateDevLocalTestConfig()
     {
         var previous = Environment.GetEnvironmentVariable("FRH_TRANSPORT");
 

@@ -401,19 +401,9 @@ public sealed partial class SessionFileTransferService
                     var reason = staleCommitted == context.RemoteNextExpectedChunkIndex
                         ? "stale_epoch"
                         : "frontier_moved";
-                    if (staleCommitted == context.RemoteNextExpectedChunkIndex)
-                    {
-                        shouldEnqueueRepairs = true;
-                        LocalOperationalLog.Info(
-                            "FileTransferService",
-                            $"event=filetransfer_v4_stale_state_missing_ranges_applied; transfer_id={context.TransferId}; session_id={context.SessionId}; epoch={state.Epoch}; reason=same_frontier; stale_contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; current_remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; missing_range_count={state.MissingRanges.Count}");
-                    }
-                    else
-                    {
-                        LocalOperationalLog.Info(
-                            "FileTransferService",
-                            $"event=filetransfer_v4_stale_state_missing_ranges_suppressed; transfer_id={context.TransferId}; session_id={context.SessionId}; epoch={state.Epoch}; reason={reason}; stale_contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; current_remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; missing_range_count={state.MissingRanges.Count}");
-                    }
+                    LocalOperationalLog.Info(
+                        "FileTransferService",
+                        $"event=filetransfer_v4_stale_state_missing_ranges_suppressed; transfer_id={context.TransferId}; session_id={context.SessionId}; epoch={state.Epoch}; reason={reason}; stale_contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; current_remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; missing_range_count={state.MissingRanges.Count}");
                 }
             }
             else
@@ -423,21 +413,17 @@ public sealed partial class SessionFileTransferService
                 var normalizedCredit = frameCredit < context.RemoteGrantedUntilExclusive
                     ? Math.Max(context.ChunksAcceptedForTransport, frameCredit)
                     : Math.Max(context.RemoteGrantedUntilExclusive, frameCredit);
-                var normalizedPauseReason = NormalizeReason(state.TransferPauseReason);
-                var peerPauseChanged = state.TransferPaused != context.PeerPaused ||
-                    !string.Equals(normalizedPauseReason, context.PeerPauseReason, StringComparison.Ordinal);
-                var valuesChanged =
-                    normalizedCommitted > context.RemoteNextExpectedChunkIndex ||
-                    normalizedCredit != context.RemoteGrantedUntilExclusive ||
-                    state.TerminalReady && !context.V4TerminalReady ||
-                    peerPauseChanged;
-                if (state.Epoch == previousEpoch && !valuesChanged && state.MissingRanges.Count == 0)
+                if (state.Epoch == previousEpoch)
                 {
                     LocalOperationalLog.Info(
                         "FileTransferService",
                         $"event=filetransfer_v4_state_received; transfer_id={context.TransferId}; session_id={context.SessionId}; epoch={state.Epoch}; previous_epoch={previousEpoch}; duplicate=1; applied=0; contiguous_committed_chunk_index={state.ContiguousCommittedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; missing_range_count={state.MissingRanges.Count}; terminal_ready={(state.TerminalReady ? 1 : 0)}");
                     return;
                 }
+
+                var normalizedPauseReason = NormalizeReason(state.TransferPauseReason);
+                var peerPauseChanged = state.TransferPaused != context.PeerPaused ||
+                    !string.Equals(normalizedPauseReason, context.PeerPauseReason, StringComparison.Ordinal);
 
                 context.V4LastStateEpoch = Math.Max(context.V4LastStateEpoch, state.Epoch);
                 context.RemoteNextExpectedChunkIndex = Math.Max(context.RemoteNextExpectedChunkIndex, normalizedCommitted);
