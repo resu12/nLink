@@ -62,7 +62,7 @@ Notes:
 - File transfer in `0.6.1` is single-file only. No folders, drag-and-drop, or resume after restart yet.
 - Active file transfers can be paused, resumed, or canceled from either side when file transfer is allowed.
 - Received files are saved into the Windows Downloads folder by default, with a numbered suffix added automatically when the target name already exists.
-- Safe-by-default file size cap for `0.6.1`: `1 GiB`
+- Safe-by-default file size cap for `0.6.1`: `25 GiB`
 - Large file transfers over NKN can still be noticeably slower than local or direct network copy. Live screenshare latency can also vary with NKN/network delivery.
 - Installer path: `%LOCALAPPDATA%\Programs\nLink`
 

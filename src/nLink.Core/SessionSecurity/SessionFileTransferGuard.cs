@@ -57,11 +57,11 @@ public sealed record FileTransferChunkDescriptor(
 
 public sealed record FileTransferStoragePolicy(
     string RootDirectoryPath,
-    long MaxFileSizeBytes = 1024L * 1024 * 1024,
+    long MaxFileSizeBytes = 25L * 1024 * 1024 * 1024,
     int MaxChunkSizeBytes = 256 * 1024,
     bool AllowOverwrite = false)
 {
-    public const long DefaultMaxFileSizeBytes = 1024L * 1024 * 1024;
+    public const long DefaultMaxFileSizeBytes = 25L * 1024 * 1024 * 1024;
     public const int DefaultMaxChunkSizeBytes = 256 * 1024;
 }
 

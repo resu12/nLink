@@ -68,6 +68,11 @@ public partial class ScreenShareSurfaceView : UserControl
     private double lastLoggedRenderScaling = double.NaN;
     private double lastKnownRenderScaling = 1d;
     private long lastInterpolationLogTick;
+    private bool? lastLoggedCaptureEnabled;
+    private bool? lastLoggedKeyboardCaptureEnabled;
+    private bool? lastLoggedHitTestVisible;
+    private bool? lastLoggedFocusable;
+    private string? lastLoggedSurfaceRole;
     private static readonly TimeSpan InterpolationLogInterval = TimeSpan.FromSeconds(2);
 #if DEBUG
     private int debugMouseMoveSentPerSecond;
@@ -86,7 +91,11 @@ public partial class ScreenShareSurfaceView : UserControl
         MouseMoveRateHzProperty.Changed.AddClassHandler<ScreenShareSurfaceView>(
             static (view, _) => view.OnMouseMoveRateHzChanged());
         SurfaceRoleProperty.Changed.AddClassHandler<ScreenShareSurfaceView>(
-            static (view, _) => view.UpdateFrameInterpolationMode());
+            static (view, _) =>
+            {
+                view.UpdateFrameInterpolationMode();
+                view.LogCaptureStateIfChanged();
+            });
         CursorOverlayVisibleProperty.Changed.AddClassHandler<ScreenShareSurfaceView>(
             static (view, _) => view.UpdateCursorOverlayPosition());
         CursorOverlayNxProperty.Changed.AddClassHandler<ScreenShareSurfaceView>(
@@ -121,14 +130,14 @@ public partial class ScreenShareSurfaceView : UserControl
             Interval = GetMouseMoveThrottleInterval(MouseMoveRateHz),
         };
         mouseMoveThrottleTimer.Tick += OnMouseMoveThrottleTick;
-        PointerMoved += OnPointerMoved;
-        PointerPressed += OnPointerPressed;
-        PointerReleased += OnPointerReleased;
-        PointerWheelChanged += OnPointerWheelChanged;
+        AddHandler(PointerMovedEvent, OnPointerMoved, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(PointerPressedEvent, OnPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(PointerReleasedEvent, OnPointerReleased, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(PointerWheelChangedEvent, OnPointerWheelChanged, RoutingStrategies.Tunnel, handledEventsToo: true);
         PointerCaptureLost += OnPointerCaptureLost;
         LostFocus += OnLostFocus;
-        KeyDown += OnKeyDown;
-        KeyUp += OnKeyUp;
+        AddHandler(KeyDownEvent, OnKeyDown, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(KeyUpEvent, OnKeyUp, RoutingStrategies.Tunnel, handledEventsToo: true);
         OnCaptureEnabledChanged();
     }
 
@@ -189,6 +198,14 @@ public partial class ScreenShareSurfaceView : UserControl
         IsHitTestVisible = CaptureEnabled;
         Focusable = KeyboardCaptureEnabled;
         RemoteControlDebugDiagnostics.SetHelperControlMode(CaptureEnabled && KeyboardCaptureEnabled);
+        LogCaptureStateIfChanged();
+        if (KeyboardCaptureEnabled)
+        {
+            Dispatcher.UIThread.Post(
+                () => TryFocusForKeyboardCapture("keyboard_capture_enabled"),
+                DispatcherPriority.Input);
+        }
+
         if (CaptureEnabled)
         {
             return;
@@ -196,6 +213,40 @@ public partial class ScreenShareSurfaceView : UserControl
 
         ClearHeldStateAndRequestReleaseAll();
         ResetMouseMovePumpState();
+    }
+
+    private void TryFocusForKeyboardCapture(string reason)
+    {
+        if (!KeyboardCaptureEnabled || !Focusable || IsFocused)
+        {
+            return;
+        }
+
+        var focused = Focus(NavigationMethod.Pointer);
+        LocalOperationalLog.Info(
+            "ScreenShareUi",
+            $"event=remote_control_surface_focus_requested; role={SanitizeRole(SurfaceRole)}; reason={SanitizeRole(reason)}; focused={(focused ? 1 : 0)}; keyboard_capture_enabled={(KeyboardCaptureEnabled ? 1 : 0)}; focusable={(Focusable ? 1 : 0)}");
+    }
+
+    private void LogCaptureStateIfChanged()
+    {
+        if (lastLoggedCaptureEnabled == CaptureEnabled &&
+            lastLoggedKeyboardCaptureEnabled == KeyboardCaptureEnabled &&
+            lastLoggedHitTestVisible == IsHitTestVisible &&
+            lastLoggedFocusable == Focusable &&
+            string.Equals(lastLoggedSurfaceRole, SurfaceRole, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        lastLoggedCaptureEnabled = CaptureEnabled;
+        lastLoggedKeyboardCaptureEnabled = KeyboardCaptureEnabled;
+        lastLoggedHitTestVisible = IsHitTestVisible;
+        lastLoggedFocusable = Focusable;
+        lastLoggedSurfaceRole = SurfaceRole;
+        LocalOperationalLog.Info(
+            "ScreenShareUi",
+            $"event=remote_control_surface_capture_state; role={SanitizeRole(SurfaceRole)}; capture_enabled={(CaptureEnabled ? 1 : 0)}; keyboard_capture_enabled={(KeyboardCaptureEnabled ? 1 : 0)}; hit_test_visible={(IsHitTestVisible ? 1 : 0)}; focusable={(Focusable ? 1 : 0)}");
     }
 
     private void OnFrameChanged()
@@ -558,6 +609,8 @@ public partial class ScreenShareSurfaceView : UserControl
 
     private void OnPointerPressed(object? sender, PointerPressedEventArgs e)
     {
+        TryFocusForKeyboardCapture("pointer_pressed");
+
         if (!CaptureEnabled ||
             !TryMapPointerToNormalized(e, out var nx, out var ny) ||
             !TryMapButtonUpdate(e.GetCurrentPoint(this).Properties.PointerUpdateKind, out var action, out var button))

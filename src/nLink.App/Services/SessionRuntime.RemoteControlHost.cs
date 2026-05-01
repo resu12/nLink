@@ -5905,6 +5905,7 @@ public sealed partial class SessionRuntime
             }
 
             var previous = latestRemoteControlDisplayInfo;
+            var mappingBecameAvailable = previous is null;
             if (previous is not null &&
                 string.Equals(previous.DisplayId, e.Message.DisplayId, StringComparison.Ordinal) &&
                 e.Message.Revision <= previous.Revision)
@@ -5937,6 +5938,10 @@ public sealed partial class SessionRuntime
             else
             {
                 remoteControlCoordinatorDisplayInfoState = CreateRemoteControlDisplayInfoState(e.Message);
+                if (mappingBecameAvailable && remoteControlSessionState.ControlState == ControlState.Active)
+                {
+                    NotifyRemoteControlStateChanged();
+                }
             }
 
             if (didMappingChange)

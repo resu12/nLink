@@ -146,6 +146,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private int remoteControlSnapshotSendsInWindow;
     private long remoteControlSnapshotSendWindowStartTickMs;
     private bool remoteControlDebugPanelExpanded;
+    private string lastRemoteControlInputUiLog = string.Empty;
     private bool disposed;
     private int windowCloseDisconnectStarted;
     private bool showPeerEndedNotice;
@@ -1798,15 +1799,27 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             if (!IsRemoteControlKeyboardCaptureEnabled)
             {
+                LogRemoteControlInputUi(
+                    "remote_control_input_ui_ignored",
+                    "keyboard_capture_disabled",
+                    kind);
                 return;
             }
         }
         else if (!IsRemoteControlInputCaptureEnabled)
         {
+            LogRemoteControlInputUi(
+                "remote_control_input_ui_ignored",
+                "pointer_capture_disabled",
+                kind);
             return;
         }
 
         TrackRemoteControlDebugMetrics(message);
+        LogRemoteControlInputUi(
+            "remote_control_input_ui_forwarded",
+            "ok",
+            kind);
         _ = sessionRuntime.SendRemoteControlInputAsync(message, CancellationToken.None);
     }
 
@@ -4011,6 +4024,27 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             $"inbound_state={inbound?.State.ToString() ?? "(none)"}; inbound_show_pause={(inbound?.ShowPause == true ? 1 : 0)}; inbound_show_resume={(inbound?.ShowResume == true ? 1 : 0)}; " +
             $"outbound_state={outbound?.State.ToString() ?? "(none)"}; outbound_show_pause={(outbound?.ShowPause == true ? 1 : 0)}; outbound_show_resume={(outbound?.ShowResume == true ? 1 : 0)}; " +
             $"effective_phase={EffectivePhase}; runtime_state={sessionRuntime.State}");
+    }
+
+    private void LogRemoteControlInputUi(string eventName, string reason, string kind)
+    {
+        var normalizedKind = string.IsNullOrWhiteSpace(kind) ? "mouse_move" : kind.Trim();
+        var payload =
+            $"event={eventName}; role=Helper; reason={reason}; kind={SanitizeForLog(normalizedKind)}; " +
+            $"input_capture_enabled={(IsRemoteControlInputCaptureEnabled ? 1 : 0)}; " +
+            $"keyboard_capture_enabled={(IsRemoteControlKeyboardCaptureEnabled ? 1 : 0)}; " +
+            $"mapping_available={(RemoteControlMappingAvailable ? 1 : 0)}; " +
+            $"ui_connected={(IsRemoteControlUiConnected ? 1 : 0)}; " +
+            $"show_frame={(ShowRemoteScreenShareFrame ? 1 : 0)}; " +
+            $"control_state={sessionRuntime.ControlState}; runtime_state={sessionRuntime.State}; " +
+            $"remote_control_available={(sessionRuntime.RemoteControlAvailable ? 1 : 0)}";
+        if (string.Equals(payload, lastRemoteControlInputUiLog, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        lastRemoteControlInputUiLog = payload;
+        LocalOperationalLog.Info("HelperUi", payload);
     }
 
     [Conditional("DEBUG")]

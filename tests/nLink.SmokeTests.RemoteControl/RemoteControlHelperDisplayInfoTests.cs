@@ -52,6 +52,9 @@ public sealed class RemoteControlHelperDisplayInfoTests : RemoteControlP4TestBas
         Assert.False(blocked);
         Assert.Equal(0, transport.SentControlInputCount);
 
+        var stateChangedCount = 0;
+        runtime.RemoteControlStateChanged += (_, _) => stateChangedCount++;
+
         transport.InjectIncomingControlDisplayInfo(
             CreateDisplayInfoMessage(
                 displayId: "primary",
@@ -63,7 +66,9 @@ public sealed class RemoteControlHelperDisplayInfoTests : RemoteControlP4TestBas
                 frameWidth: 1280,
                 frameHeight: 720),
             peerId: "helpee-peer");
-        await WaitUntilAsync(() => runtime.RemoteControlMappingAvailable, TimeSpan.FromSeconds(1));
+        await WaitUntilAsync(
+            () => runtime.RemoteControlMappingAvailable && stateChangedCount > 0,
+            TimeSpan.FromSeconds(1));
 
         var sent = await runtime.SendRemoteControlInputAsync(
             new ControlInputMessageV1

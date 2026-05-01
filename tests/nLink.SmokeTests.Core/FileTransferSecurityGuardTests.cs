@@ -1,4 +1,5 @@
 using System.IO;
+using NLink.Core.FileTransfer;
 using NLink.Core.SessionConnect;
 using NLink.Core.SessionSecurity;
 
@@ -146,6 +147,43 @@ public sealed class FileTransferSecurityGuardTests
 
             Assert.False(result.IsAllowed);
             Assert.Equal(FileTransferValidationFailure.FileTooLarge, result.Access.Failure);
+        }
+        finally
+        {
+            CleanupTempRoot(tempRoot);
+        }
+    }
+
+    [Fact]
+    public void ValidateReceiveMetadata_AllowsDefaultTwentyFiveGiBFileSize()
+    {
+        const long expectedDefaultMaxFileSizeBytes = 25L * 1024 * 1024 * 1024;
+        const int currentDefaultV4ChunkSizeBytes = 21 * 1024;
+        var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_200_000_000);
+        var guard = new SessionFileTransferGuard(() => nowUtc);
+        var state = CreateApprovedSecurityState(nowUtc, CapabilityGrant.FileTransfer);
+        var grant = CreateGrant(state, nowUtc, CapabilityGrant.FileTransfer);
+        var tempRoot = CreateTempRoot();
+
+        try
+        {
+            Assert.Equal(expectedDefaultMaxFileSizeBytes, FileTransferStoragePolicy.DefaultMaxFileSizeBytes);
+            Assert.True(
+                (FileTransferStoragePolicy.DefaultMaxFileSizeBytes + currentDefaultV4ChunkSizeBytes - 1) /
+                currentDefaultV4ChunkSizeBytes <= FileTransferProtocol.MaxChunkCountV4);
+
+            var result = guard.ValidateReceiveMetadata(
+                hasSecurityTransport: true,
+                securityState: state,
+                grant: grant,
+                descriptor: new FileTransferDescriptor(
+                    state.SessionId!.Value,
+                    state.HelperAddress!.Value,
+                    "large-allowed.bin",
+                    FileTransferStoragePolicy.DefaultMaxFileSizeBytes),
+                storagePolicy: new FileTransferStoragePolicy(tempRoot));
+
+            Assert.True(result.IsAllowed, result.Message);
         }
         finally
         {
