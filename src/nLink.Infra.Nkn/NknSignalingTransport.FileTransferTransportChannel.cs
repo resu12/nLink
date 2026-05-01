@@ -328,7 +328,7 @@ public sealed partial class NknSignalingTransport
             throw new InvalidOperationException("Remote endpoint is not known yet.");
         }
 
-        var securePayload = CreateSecureFileTransferPayload(messageType, normalizedTransferId, plaintextPayload);
+        var securePayload = CreateSecureFileTransferPayload(messageType, normalizedTransferId, plaintextPayload, useBulkIdentity: useBulkLane);
         var envelope = CreateEnvelope(envelopeCode, messageType, securePayload, replyTo: null);
         var transportPayload = EnvelopeCodec.Serialize(envelope);
         var lane = useBulkLane ? "bulk" : "control";
@@ -419,7 +419,8 @@ public sealed partial class NknSignalingTransport
             var securePayload = CreateSecureFileTransferPayloadForBudgetEstimate(
                 messageType,
                 normalizedTransferId,
-                plaintextPayload);
+                plaintextPayload,
+                useBulkIdentity: useBulkLane);
             var envelope = new Envelope(
                 Version: EnvelopeVersion,
                 Code: envelopeCode,
@@ -1382,7 +1383,7 @@ public sealed partial class NknSignalingTransport
     private bool TryPrepareFileTransferDataFrameDispatch(string source, NknBridgeChannel channel, Envelope env, out InboundFileTransferDispatchWork work)
     {
         work = default;
-        if (!TryDecryptFileTransferPayload(source, env, MsgType.FileTransferDataFrame, out var securePayload))
+        if (!TryDecryptFileTransferPayload(source, env, MsgType.FileTransferDataFrame, out var securePayload, channel))
         {
             return false;
         }
@@ -1399,7 +1400,7 @@ public sealed partial class NknSignalingTransport
         }
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_data_frame", securePayload.Metadata, frame.TransferId, env.MessageId) ||
-            !TryValidateFileTransferMessageSession("file_transfer_data_frame", frame.SessionId, frame.TransferId, env.MessageId, source))
+            !TryValidateFileTransferMessageSession("file_transfer_data_frame", frame.SessionId, frame.TransferId, env.MessageId, source, channel))
         {
             return false;
         }
@@ -2234,9 +2235,7 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
-        var expectedSender = messageType == MsgType.FileTransferChunk
-            ? ResolveExpectedRemoteBulkPeerAddressForCurrentSession()
-            : ResolveExpectedRemotePeerAddressForCurrentSession();
+        var expectedSender = ResolveExpectedRemotePeerAddressForCurrentSession();
         if (string.IsNullOrWhiteSpace(expectedSender) || !PeerAddress.TryParse(expectedSender, out var senderIdentity))
         {
             NknRuntimeDiagnostics.SetLastError($"{MapSecureControlMessageType(messageType)}_expected_sender_unavailable");
@@ -2367,13 +2366,17 @@ public sealed partial class NknSignalingTransport
         return SessionSecureEnvelopeCodec.Encrypt(key, metadata, plaintextPayload);
     }
 
-    private byte[] CreateSecureFileTransferPayload(MsgType messageType, string transferId, byte[] plaintextPayload)
+    private byte[] CreateSecureFileTransferPayload(
+        MsgType messageType,
+        string transferId,
+        byte[] plaintextPayload,
+        bool useBulkIdentity = false)
     {
         ArgumentNullException.ThrowIfNull(plaintextPayload);
 
         var sessionId = currentSessionSecurityState.SessionId
             ?? throw new InvalidOperationException("Session security state does not have an active session id.");
-        var senderIdentity = messageType == MsgType.FileTransferChunk
+        var senderIdentity = useBulkIdentity || messageType == MsgType.FileTransferChunk
             ? ResolveLocalBulkPeerAddressForSecureEnvelope()
             : ResolveLocalPeerAddressForSecureEnvelope();
         var key = GetFileTransferSessionSharedKeyOrThrow();
@@ -2388,13 +2391,17 @@ public sealed partial class NknSignalingTransport
         return SessionSecureEnvelopeCodec.Encrypt(key, metadata, plaintextPayload);
     }
 
-    private byte[] CreateSecureFileTransferPayloadForBudgetEstimate(MsgType messageType, string transferId, byte[] plaintextPayload)
+    private byte[] CreateSecureFileTransferPayloadForBudgetEstimate(
+        MsgType messageType,
+        string transferId,
+        byte[] plaintextPayload,
+        bool useBulkIdentity = false)
     {
         ArgumentNullException.ThrowIfNull(plaintextPayload);
 
         var sessionId = currentSessionSecurityState.SessionId
             ?? throw new InvalidOperationException("Session security state does not have an active session id.");
-        var senderIdentity = messageType == MsgType.FileTransferChunk
+        var senderIdentity = useBulkIdentity || messageType == MsgType.FileTransferChunk
             ? ResolveLocalBulkPeerAddressForSecureEnvelope()
             : ResolveLocalPeerAddressForSecureEnvelope();
         var key = GetFileTransferSessionSharedKeyOrThrow();
@@ -2596,7 +2603,8 @@ public sealed partial class NknSignalingTransport
         string? source,
         Envelope env,
         MsgType messageType,
-        out SessionSecureEnvelopePayload securePayload)
+        out SessionSecureEnvelopePayload securePayload,
+        NknBridgeChannel? channel = null)
     {
         securePayload = default;
 
@@ -2608,9 +2616,7 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
-        var expectedSender = messageType == MsgType.FileTransferChunk
-            ? ResolveExpectedRemoteBulkPeerAddressForCurrentSession()
-            : ResolveExpectedRemotePeerAddressForCurrentSession();
+        var expectedSender = ResolveExpectedRemoteFileTransferSenderForMessage(messageType, source, channel);
         if (string.IsNullOrWhiteSpace(expectedSender) || !PeerAddress.TryParse(expectedSender, out var senderIdentity))
         {
             NknRuntimeDiagnostics.SetLastError($"{MapSecureFileTransferMessageType(messageType)}_expected_sender_unavailable");
@@ -2708,12 +2714,11 @@ public sealed partial class NknSignalingTransport
         string? messageSessionId,
         string transferId,
         string messageId,
-        string? source)
+        string? source,
+        NknBridgeChannel? channel = null)
     {
         var expectedSessionId = currentSessionSecurityState.SessionId?.Value;
-        var expectedSource = messageType == "file_transfer_chunk"
-            ? ResolveExpectedRemoteBulkPeerAddressForCurrentSession()
-            : ResolveExpectedRemotePeerAddressForCurrentSession();
+        var expectedSource = ResolveExpectedRemoteFileTransferSourceForMessage(messageType, source, channel);
         var normalizedMessageSessionId = string.IsNullOrWhiteSpace(messageSessionId) ? null : messageSessionId.Trim();
         var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
         var normalizedSource = string.IsNullOrWhiteSpace(source) ? null : source.Trim();
@@ -2752,6 +2757,65 @@ public sealed partial class NknSignalingTransport
             $"event=filetransfer_message_rejected; message_type={messageType}; reason={failureReason}; session_id={normalizedMessageSessionId ?? "(none)"}; expected_session_id={expectedSessionId ?? "(none)"}; transfer_id={normalizedTransferId}; source={normalizedSource ?? "(none)"}; expected_source={expectedSource ?? "(none)"}");
         Log($"FileTransfer message rejected (type={messageType}, msg_id={messageId}, reason={failureReason}, transfer_id={normalizedTransferId})");
         return false;
+    }
+
+    private string? ResolveExpectedRemoteFileTransferSenderForMessage(
+        MsgType messageType,
+        string? source,
+        NknBridgeChannel? channel)
+    {
+        if (messageType == MsgType.FileTransferChunk)
+        {
+            return ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
+        }
+
+        if (messageType == MsgType.FileTransferDataFrame &&
+            channel == NknBridgeChannel.Bulk &&
+            PeerAddress.TryParse(source, out _))
+        {
+            return source?.Trim();
+        }
+
+        if (messageType == MsgType.FileTransferDataFrame &&
+            SourceMatchesExpectedRemoteBulkPeer(source))
+        {
+            return ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
+        }
+
+        return ResolveExpectedRemotePeerAddressForCurrentSession();
+    }
+
+    private string? ResolveExpectedRemoteFileTransferSourceForMessage(
+        string messageType,
+        string? source,
+        NknBridgeChannel? channel)
+    {
+        if (string.Equals(messageType, "file_transfer_chunk", StringComparison.Ordinal))
+        {
+            return ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
+        }
+
+        if (string.Equals(messageType, "file_transfer_data_frame", StringComparison.Ordinal) &&
+            channel == NknBridgeChannel.Bulk &&
+            PeerAddress.TryParse(source, out _))
+        {
+            return source?.Trim();
+        }
+
+        if (string.Equals(messageType, "file_transfer_data_frame", StringComparison.Ordinal) &&
+            SourceMatchesExpectedRemoteBulkPeer(source))
+        {
+            return ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
+        }
+
+        return ResolveExpectedRemotePeerAddressForCurrentSession();
+    }
+
+    private bool SourceMatchesExpectedRemoteBulkPeer(string? source)
+    {
+        var expectedBulkSource = ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
+        return !string.IsNullOrWhiteSpace(expectedBulkSource) &&
+               AddressMatchesForSessionPolicy(source, expectedBulkSource);
     }
 
     private PeerAddress ResolveLocalPeerAddressForSecureEnvelope()

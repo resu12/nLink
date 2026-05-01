@@ -734,7 +734,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 ChunkCount = 2,
                 DataSegments = new byte[2][] { Enumerable.Repeat((byte)17, 1024).ToArray(), Enumerable.Repeat((byte)34, 1024).ToArray() }
             };
-            CoreSmokeTestsBase.InvokeNknIncomingMessage(host, helperClient, new NknIncomingMessage(payload: EnvelopeCodec.Serialize(CoreSmokeTestsBase.BuildSecureFileTransferDataFrameEnvelope(helper, batchFrame, CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper))), source: helperClient.ConnectedAddress, isTopic: false, topic: null, channel: NknBridgeChannel.Bulk, bridgeIngressObservedUtcMs: 0L, bridgeMessageObservedUtcMs: 0L, binaryFrameDecodedUtcMs: 0L, socketDataEventEmittedUtcMs: 0L, wsReceiverWriteEnteredUtcMs: 0L, wsMessageEmittedUtcMs: 0L, sdkHandleMsgEnteredUtcMs: 0L, clientMessageDispatchUtcMs: 0L, multiClientMessageDispatchUtcMs: 0L));
+            CoreSmokeTestsBase.InvokeNknIncomingMessage(host, helperClient, new NknIncomingMessage(payload: EnvelopeCodec.Serialize(CoreSmokeTestsBase.BuildSecureFileTransferDataFrameEnvelope(helper, batchFrame, CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper), useBulkSenderIdentity: true)), source: helperClient.ConnectedBulkAddress, isTopic: false, topic: null, channel: NknBridgeChannel.Bulk, bridgeIngressObservedUtcMs: 0L, bridgeMessageObservedUtcMs: 0L, binaryFrameDecodedUtcMs: 0L, socketDataEventEmittedUtcMs: 0L, wsReceiverWriteEnteredUtcMs: 0L, wsMessageEmittedUtcMs: 0L, sdkHandleMsgEnteredUtcMs: 0L, clientMessageDispatchUtcMs: 0L, multiClientMessageDispatchUtcMs: 0L));
             FileTransferDataFrame receivedFrame = await inboundSession.ReceiveAsync(cts.Token);
             string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
             FileTransferChunkBatchFrameV4 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV4>(receivedFrame);
@@ -870,8 +870,8 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 host,
                 helperClient,
                 new NknIncomingMessage(
-                    payload: EnvelopeCodec.Serialize(CoreSmokeTestsBase.BuildSecureFileTransferDataFrameEnvelope(helper, lateBatch, CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper))),
-                    source: helperClient.ConnectedAddress,
+                    payload: EnvelopeCodec.Serialize(CoreSmokeTestsBase.BuildSecureFileTransferDataFrameEnvelope(helper, lateBatch, CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper), useBulkSenderIdentity: true)),
+                    source: helperClient.ConnectedBulkAddress,
                     isTopic: false,
                     topic: null,
                     channel: NknBridgeChannel.Bulk,
@@ -948,7 +948,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 ChunkCount = 2,
                 DataSegments = new byte[2][] { Enumerable.Repeat((byte)17, 1024).ToArray(), Enumerable.Repeat((byte)34, 1024).ToArray() }
             };
-            CoreSmokeTestsBase.InvokeNknIncomingMessage(host, helperClient, new NknIncomingMessage(payload: EnvelopeCodec.Serialize(CoreSmokeTestsBase.BuildSecureFileTransferDataFrameEnvelope(helper, batchFrame, CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper))), source: helperClient.ConnectedAddress, isTopic: false, topic: null, channel: NknBridgeChannel.Bulk, bridgeIngressObservedUtcMs: 0L, bridgeMessageObservedUtcMs: 0L, binaryFrameDecodedUtcMs: 0L, socketDataEventEmittedUtcMs: 0L, wsReceiverWriteEnteredUtcMs: 0L, wsMessageEmittedUtcMs: 0L, sdkHandleMsgEnteredUtcMs: 0L, clientMessageDispatchUtcMs: 0L, multiClientMessageDispatchUtcMs: 0L));
+            CoreSmokeTestsBase.InvokeNknIncomingMessage(host, helperClient, new NknIncomingMessage(payload: EnvelopeCodec.Serialize(CoreSmokeTestsBase.BuildSecureFileTransferDataFrameEnvelope(helper, batchFrame, CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper), useBulkSenderIdentity: true)), source: helperClient.ConnectedBulkAddress, isTopic: false, topic: null, channel: NknBridgeChannel.Bulk, bridgeIngressObservedUtcMs: 0L, bridgeMessageObservedUtcMs: 0L, binaryFrameDecodedUtcMs: 0L, socketDataEventEmittedUtcMs: 0L, wsReceiverWriteEnteredUtcMs: 0L, wsMessageEmittedUtcMs: 0L, sdkHandleMsgEnteredUtcMs: 0L, clientMessageDispatchUtcMs: 0L, multiClientMessageDispatchUtcMs: 0L));
 
             IFileTransferDataSession replacementSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             FileTransferDataFrame receivedFrame = await replacementSession.ReceiveAsync(cts.Token);
@@ -1015,6 +1015,10 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
     {
         Assert.True(EnvelopeCodec.TryDeserialize(message.Payload, out Envelope env));
         byte[] decryptKey = Assert.IsType<byte[]>(CoreSmokeTestsBase.GetPrivateField(recipient, "fileTransferSessionSharedKey")).AsSpan().ToArray();
+        var senderClient = Assert.IsAssignableFrom<INknClient>(CoreSmokeTestsBase.GetPrivateField(sender, "client"));
+        var expectedSenderIdentity = message.Channel == NknBridgeChannel.Bulk
+            ? senderClient.BulkAddress
+            : sender.LocalPeerAddress;
         SessionSecureEnvelopePayload payload = SessionSecureEnvelopeCodec.Decrypt(
             decryptKey,
             env.Payload,
@@ -1022,7 +1026,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 SessionSecureMessageFamily.FileTransfer,
                 "file_transfer_data_frame",
                 new SessionId(sessionId),
-                new PeerAddress(sender.LocalPeerAddress)));
+                new PeerAddress(expectedSenderIdentity)));
         Assert.True(FileTransferDataFrameCodec.TryDeserialize(payload.Plaintext, out FileTransferDataFrame? frame));
         return Assert.IsAssignableFrom<FileTransferDataFrame>(frame);
     }

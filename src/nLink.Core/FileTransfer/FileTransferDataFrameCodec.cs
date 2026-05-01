@@ -100,6 +100,11 @@ public static class FileTransferDataFrameCodec
                     throw new InvalidOperationException("Chunk batch payload may not be empty.");
                 }
 
+                if (batch.DataSegments.Count > FileTransferProtocol.MaxChunkBatchSegmentsV4)
+                {
+                    throw new InvalidOperationException($"V4 chunk batch segment count exceeded {FileTransferProtocol.MaxChunkBatchSegmentsV4}.");
+                }
+
                 if (batch.ChunkCount != batch.DataSegments.Count)
                 {
                     throw new InvalidOperationException("V4 chunk batch count must match the number of data segments.");
@@ -264,6 +269,7 @@ public static class FileTransferDataFrameCodec
                     !reader.TryReadInt32(out var batchChunkCount) ||
                     !reader.TryReadInt32(out var batchSegmentCount) ||
                     batchSegmentCount <= 0 ||
+                    batchSegmentCount > FileTransferProtocol.MaxChunkBatchSegmentsV4 ||
                     batchChunkCount != batchSegmentCount)
                 {
                     return false;
@@ -454,6 +460,7 @@ public static class FileTransferDataFrameCodec
                 batch.StartChunkIndex >= 0 &&
                 batch.ChunkCount > 0 &&
                 batch.DataSegments.Count > 0 &&
+                batch.DataSegments.Count <= FileTransferProtocol.MaxChunkBatchSegmentsV4 &&
                 batch.ChunkCount == batch.DataSegments.Count:
                 var normalizedSegments = new byte[batch.DataSegments.Count][];
                 var totalChunkBytes = 0;

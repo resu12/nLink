@@ -1,4 +1,6 @@
 using NLink.Core.FileTransfer;
+using System.Buffers.Binary;
+using System.Text;
 using System.Text.Json;
 
 namespace NLink.SmokeTests;
@@ -172,6 +174,31 @@ public sealed class FileTransferDataFrameCodecTests
     }
 
     [Fact]
+    public void V4ChunkBatchFrame_RejectsSegmentCountAboveProtocolMaximum()
+    {
+        Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(
+            new FileTransferChunkBatchFrameV4
+            {
+                SessionId = "session_a",
+                TransferId = "transfer_v4_too_many_segments",
+                StartChunkIndex = 0,
+                ChunkCount = FileTransferProtocol.MaxChunkBatchSegmentsV4 + 1,
+                DataSegments = Enumerable
+                    .Range(0, FileTransferProtocol.MaxChunkBatchSegmentsV4 + 1)
+                    .Select(static _ => new byte[] { 1 })
+                    .ToArray(),
+            }));
+    }
+
+    [Fact]
+    public void V4ChunkBatchFrame_RejectsUntrustedBinarySegmentCountBeforeReadingSegments()
+    {
+        var payload = BuildChunkBatchHeaderWithSegmentCount(FileTransferProtocol.MaxChunkBatchSegmentsV4 + 1);
+
+        Assert.False(FileTransferDataFrameCodec.TryDeserialize(payload, out _));
+    }
+
+    [Fact]
     public void V4CompleteCancelAndErrorFrames_RoundTrip()
     {
         var hash = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
@@ -277,5 +304,42 @@ public sealed class FileTransferDataFrameCodecTests
         });
 
         Assert.False(FileTransferDataFrameCodec.TryDeserialize(payload, out _));
+    }
+
+    private static byte[] BuildChunkBatchHeaderWithSegmentCount(int segmentCount)
+    {
+        using var buffer = new MemoryStream();
+        WriteUInt32(buffer, 0x3246544E);
+        buffer.WriteByte(1);
+        buffer.WriteByte(20);
+        WriteString(buffer, "session_a");
+        WriteString(buffer, "transfer_v4_malicious_segment_count");
+        WriteInt32(buffer, 0);
+        WriteInt32(buffer, segmentCount);
+        WriteInt32(buffer, segmentCount);
+        return buffer.ToArray();
+    }
+
+    private static void WriteUInt32(Stream stream, uint value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        stream.Write(bytes);
+    }
+
+    private static void WriteInt32(Stream stream, int value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(bytes, value);
+        stream.Write(bytes);
+    }
+
+    private static void WriteString(Stream stream, string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        Span<byte> lengthBytes = stackalloc byte[sizeof(ushort)];
+        BinaryPrimitives.WriteUInt16LittleEndian(lengthBytes, checked((ushort)bytes.Length));
+        stream.Write(lengthBytes);
+        stream.Write(bytes);
     }
 }

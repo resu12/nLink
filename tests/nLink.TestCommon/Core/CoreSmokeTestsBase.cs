@@ -869,11 +869,13 @@ internal static Envelope BuildSecureLifecycleEnvelope(
 internal static Envelope BuildSecureFileTransferDataFrameEnvelope(
         NknSignalingTransport senderTransport,
         FileTransferDataFrame frame,
-        long sequence)
+        long sequence,
+        bool useBulkSenderIdentity = false)
     {
         var key = Assert.IsType<byte[]>(GetPrivateField(senderTransport, "fileTransferSessionSharedKey")).AsSpan().ToArray();
         var envelopeCode = Assert.IsType<string>(GetPrivateField(senderTransport, "currentEnvelopeCode"));
         var sessionId = Assert.IsType<SessionId>(senderTransport.CurrentSessionSecurityState.SessionId);
+        var senderClient = Assert.IsAssignableFrom<INknClient>(GetPrivateField(senderTransport, "client"));
         var plaintext = FileTransferDataFrameCodec.Serialize(frame);
         var securePayload = SessionSecureEnvelopeCodec.Encrypt(
             key,
@@ -881,7 +883,7 @@ internal static Envelope BuildSecureFileTransferDataFrameEnvelope(
                 Family: SessionSecureMessageFamily.FileTransfer,
                 MessageType: "file_transfer_data_frame",
                 SessionId: sessionId,
-                SenderIdentity: new PeerAddress(senderTransport.LocalPeerAddress),
+                SenderIdentity: new PeerAddress(useBulkSenderIdentity ? senderClient.BulkAddress : senderTransport.LocalPeerAddress),
                 Sequence: sequence,
                 RequestId: string.IsNullOrWhiteSpace(frame.TransferId) ? null : frame.TransferId),
             plaintext);
