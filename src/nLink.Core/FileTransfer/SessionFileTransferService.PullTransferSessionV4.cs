@@ -2012,6 +2012,11 @@ public sealed partial class SessionFileTransferService
                 failureCode = InvalidStateErrorCode;
                 failureMessage = "V4 manifest chunk metadata did not match the declared file size.";
             }
+            else if (manifest.ChunkCount > FileTransferProtocol.MaxChunkCountV4)
+            {
+                failureCode = InvalidStateErrorCode;
+                failureMessage = "V4 manifest chunk count exceeded the supported limit.";
+            }
         }
 
         if (failureCode is null && (context.WriteStream is null || context.Hash is null))

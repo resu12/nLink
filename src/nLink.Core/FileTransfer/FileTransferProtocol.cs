@@ -33,6 +33,7 @@ public static class FileTransferProtocol
     public const int MaxSerializedChunkPayloadBytes = FileTransferChunkBudget.MaxSerializedChunkPayloadBytes;
     public const int MaxStateMissingRangesV4 = 16;
     public const int MaxStateMissingChunksV4 = 64;
+    public const int MaxChunkCountV4 = 1_000_000;
     public const int MaxChunkBatchSegmentsV4 = 3;
     public const int MaxChunkBatchRawBytesV4 = FileTransferChunkBudget.MaxRawBatchBytes;
     public const int MaxSerializedChunkBatchPayloadBytesV4 = FileTransferChunkBudget.MaxSerializedChunkBatchPayloadBytes;

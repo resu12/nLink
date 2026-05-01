@@ -23,7 +23,7 @@ public sealed record SessionVerificationMaterial(
 public static class SessionVerificationCodeDerivation
 {
     public const string SourceHandshakeTranscriptV1 = "handshake_transcript_v1";
-    public const int DefaultEmojiCount = 7;
+    public const int DefaultEmojiCount = 5;
 
     private const int MinEmojiCount = 4;
     private const int MaxEmojiCount = 10;

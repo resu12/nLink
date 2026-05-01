@@ -328,16 +328,7 @@
                                                            TextAlignment="Center"
                                                            HorizontalAlignment="Center"
                                                            MaxWidth="460"/>
-                                                <TextBlock AutomationProperties.AutomationId="Helpee.SessionVerification.FallbackCode"
-                                                           Text="{Binding SessionVerificationFallbackCode}"
-                                                           Foreground="{StaticResource AppAccentBrush}"
-                                                           FontFamily="Consolas, Cascadia Mono, monospace"
-                                                           FontSize="14"
-                                                           FontWeight="SemiBold"
-                                                           TextAlignment="Center"
-                                                           HorizontalAlignment="Center"
-                                                           TextWrapping="Wrap"/>
-                                                <TextBlock Text="Compare this code on both screens."
+                                                <TextBlock Text="Compare these symbols on both screens."
                                                            Classes="appCaption"
                                                            TextAlignment="Center"
                                                            HorizontalAlignment="Center"

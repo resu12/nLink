@@ -43,7 +43,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         Failed,
     }
 
-    private static readonly TimeSpan DefaultIncomingRequestTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan DefaultIncomingRequestTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultInviteLifetime = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan PeerEndedNoticeDuration = TimeSpan.FromSeconds(4);

@@ -32,7 +32,7 @@ namespace NLink.App.ViewModels;
 public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanelBindings, IWindowCloseAware
 {
     private static readonly TimeSpan DefaultConnectFailureCooldown = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan DefaultApprovalTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan DefaultApprovalTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan DisposeOperationTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan EndSessionAfterControlStopGuard = TimeSpan.FromMilliseconds(500);

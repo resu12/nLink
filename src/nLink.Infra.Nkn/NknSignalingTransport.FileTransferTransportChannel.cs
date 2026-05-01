@@ -1195,7 +1195,7 @@ public sealed partial class NknSignalingTransport
 
     private bool TryPrepareFileTransferChunkDispatch(string source, NknBridgeChannel channel, Envelope env, out InboundFileTransferDispatchWork work)
     {
-        return TryPrepareUnsupportedLegacyFileTransferDispatch(MsgType.FileTransferChunk, source, env, out work);
+        return TryPrepareUnsupportedLegacyFileTransferDispatch(MsgType.FileTransferChunk, source, env, out work, channel);
     }
 
     private bool TryPrepareFileTransferWindowUpdateDispatch(string source, Envelope env, out InboundFileTransferDispatchWork work)
@@ -1217,17 +1217,45 @@ public sealed partial class NknSignalingTransport
         MsgType messageType,
         string source,
         Envelope env,
-        out InboundFileTransferDispatchWork work)
+        out InboundFileTransferDispatchWork work,
+        NknBridgeChannel? channel = null)
     {
+        work = default;
+        if (!TryDecryptFileTransferPayload(source, env, messageType, out var securePayload, channel))
+        {
+            return false;
+        }
+
+        var messageTypeName = MapSecureFileTransferMessageType(messageType);
+        var transferId = string.IsNullOrWhiteSpace(securePayload.Metadata.RequestId)
+            ? null
+            : securePayload.Metadata.RequestId.Trim();
+        if (string.IsNullOrWhiteSpace(transferId))
+        {
+            NknRuntimeDiagnostics.SetLastError($"{messageTypeName}_secure_transfer_id_missing");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{messageTypeName}_secure_transfer_id_missing");
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=filetransfer_message_rejected; message_type={messageTypeName}; reason=secure_transfer_id_missing; session_id={securePayload.Metadata.SessionId.Value}; source={source}; msg_id={env.MessageId}");
+            Log($"FileTransfer secure envelope rejected (type={messageTypeName}, msg_id={env.MessageId}, reason=secure_transfer_id_missing)");
+            return false;
+        }
+
+        if (!TryValidateFileTransferSecureMetadata(messageTypeName, securePayload.Metadata, transferId, env.MessageId) ||
+            !TryValidateFileTransferMessageSession(messageTypeName, securePayload.Metadata.SessionId.Value, transferId, env.MessageId, source, channel))
+        {
+            return false;
+        }
+
         work = CreateInboundFileTransferDispatchWork(
             messageType,
-            string.Empty,
+            transferId,
             () =>
             {
                 NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_legacy_message_ignored");
                 LocalOperationalLog.Warn(
                     "SessionSecurity",
-                    $"event=filetransfer_legacy_message_ignored; transport=nkn; message_type={MapSecureFileTransferMessageType(messageType)}; source={source}; msg_id={env.MessageId}; reason=v4_only");
+                    $"event=filetransfer_legacy_message_ignored; transport=nkn; message_type={messageTypeName}; transfer_id={transferId}; source={source}; msg_id={env.MessageId}; reason=v4_only");
             });
         return true;
     }

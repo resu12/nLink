@@ -279,9 +279,8 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
                 var verificationCode = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "SessionHeader.VerificationCode"));
                 Assert.Equal(helpee.IncomingHelperVerificationCode, verificationCode.Text);
                 var sessionEmoji = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helpee.SessionVerification.EmojiSequence"));
-                var sessionFallback = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helpee.SessionVerification.FallbackCode"));
                 Assert.Equal(helpee.SessionVerificationEmojiSequence, sessionEmoji.Text);
-                Assert.Equal(helpee.SessionVerificationFallbackCode, sessionFallback.Text);
+                Assert.Null(FindFirstVisibleControlByAutomationId(window, "Helpee.SessionVerification.FallbackCode"));
                 Assert.NotNull(FindFirstVisibleControlByAutomationId(window, "Helpee.RequestedAccessTitle"));
                 Assert.Null(FindFirstControlByAutomationId(window, "Helpee.Status"));
                 Assert.Null(FindFirstControlByAutomationId(window, "Helpee.RequestedCapabilities"));
@@ -402,9 +401,8 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
                 Assert.NotNull(verificationCode);
                 Assert.Equal(helper.HelperVerificationCode, verificationCode!.Text);
                 var sessionEmoji = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helper.SessionVerification.EmojiSequence"));
-                var sessionFallback = Assert.IsType<TextBlock>(FindFirstVisibleControlByAutomationId(window, "Helper.SessionVerification.FallbackCode"));
                 Assert.Equal(helper.SessionVerificationEmojiSequence, sessionEmoji.Text);
-                Assert.Equal(helper.SessionVerificationFallbackCode, sessionFallback.Text);
+                Assert.Null(FindFirstVisibleControlByAutomationId(window, "Helper.SessionVerification.FallbackCode"));
             }
             finally
             {

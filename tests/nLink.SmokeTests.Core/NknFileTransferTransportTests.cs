@@ -128,6 +128,67 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task NknTransport_LegacyFileTransferChunk_RejectedBeforeDispatch_WhenSecureEnvelopeInvalid()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.legacy.chunk.reject.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.legacy.chunk.reject.address");
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-legacy-chunk-reject-id", hostClient.Address));
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-legacy-chunk-reject-id", helperClient.Address));
+
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_legacy_chunk_rejected_before_dispatch";
+            Envelope envelope = CoreSmokeTestsBase.BuildSecureFileTransferEnvelope(
+                helper,
+                MsgType.FileTransferChunk,
+                new FileTransferCancelV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Reason = "legacy_probe",
+                },
+                transferId,
+                CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper));
+            byte[] tamperedPayload = envelope.Payload.ToArray();
+            tamperedPayload[^1] ^= 0x01;
+
+            CoreSmokeTestsBase.InvokeNknIncomingMessage(
+                host,
+                helperClient,
+                new NknIncomingMessage(
+                    payload: EnvelopeCodec.Serialize(envelope with { Payload = tamperedPayload }),
+                    source: helperClient.ConnectedBulkAddress,
+                    isTopic: false,
+                    topic: null,
+                    channel: NknBridgeChannel.Bulk,
+                    bridgeIngressObservedUtcMs: 0L,
+                    bridgeMessageObservedUtcMs: 0L,
+                    binaryFrameDecodedUtcMs: 0L,
+                    socketDataEventEmittedUtcMs: 0L,
+                    wsReceiverWriteEnteredUtcMs: 0L,
+                    wsMessageEmittedUtcMs: 0L,
+                    sdkHandleMsgEnteredUtcMs: 0L,
+                    clientMessageDispatchUtcMs: 0L,
+                    multiClientMessageDispatchUtcMs: 0L));
+
+            await Task.Delay(100, cts.Token);
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=filetransfer_message_rejected; message_type=file_transfer_chunk; reason=secure_envelope_invalid", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_legacy_message_ignored", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task NknTransport_FileTransferDataSession_SendsOutboundV4RepairChunkBatchOnBulkOnlyByDefault()
     {
         FakeNknClient.ResetNetwork();
