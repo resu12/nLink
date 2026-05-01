@@ -188,6 +188,7 @@ public abstract class SessionRuntimeConnectionTestBase : CoreSmokeTestsBase
         private readonly Func<CancellationToken, Task> onHostByAddressAsync;
         private readonly Func<HelpRequestMessage, CancellationToken, Task> onSendHelpRequestAsync;
         private readonly Func<HelpRequestDecisionMessage, CancellationToken, Task> onSendHelpRequestDecisionAsync;
+        private readonly Func<HelpRequestMessage, string?, CancellationToken, Task> onSendHelpRequestCancellationAsync;
         private readonly Func<ReadOnlyMemory<byte>, CancellationToken, Task> onSendChatAsync;
         private readonly Func<ControlRequestMessageV1, CancellationToken, Task> onSendControlRequestAsync;
         private readonly Func<ControlResponseMessageV1, CancellationToken, Task> onSendControlResponseAsync;
@@ -198,7 +199,7 @@ public abstract class SessionRuntimeConnectionTestBase : CoreSmokeTestsBase
         private readonly Func<ControlStateSnapshotV1, CancellationToken, Task> onSendControlStateSnapshotAsync;
         private readonly Func<ControlDisplayInfoMessageV1, CancellationToken, Task> onSendControlDisplayInfoAsync;
         private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
-        public ScriptedSignalingTransport(Func<string, CancellationToken, Task>? onJoinByAddressAsync = null, Func<string, ValidatedInviteV1, CancellationToken, Task>? onJoinByInviteAsync = null, Func<CancellationToken, Task>? onHostByAddressAsync = null, string? localPeerAddress = null, Func<HelpRequestMessage, CancellationToken, Task>? onSendHelpRequestAsync = null, Func<HelpRequestDecisionMessage, CancellationToken, Task>? onSendHelpRequestDecisionAsync = null, Func<ReadOnlyMemory<byte>, CancellationToken, Task>? onSendChatAsync = null, Func<ControlRequestMessageV1, CancellationToken, Task>? onSendControlRequestAsync = null, Func<ControlResponseMessageV1, CancellationToken, Task>? onSendControlResponseAsync = null, Func<ControlStartMessageV1, CancellationToken, Task>? onSendControlStartAsync = null, Func<ControlStopMessageV1, CancellationToken, Task>? onSendControlStopAsync = null, Func<ControlInputMessageV1, CancellationToken, Task>? onSendControlInputAsync = null, Func<ControlInputAckV1, CancellationToken, Task>? onSendControlAckAsync = null, Func<ControlStateSnapshotV1, CancellationToken, Task>? onSendControlStateSnapshotAsync = null, Func<ControlDisplayInfoMessageV1, CancellationToken, Task>? onSendControlDisplayInfoAsync = null, bool localSupportsRemoteControl = true, bool remoteSupportsRemoteControl = true)
+        public ScriptedSignalingTransport(Func<string, CancellationToken, Task>? onJoinByAddressAsync = null, Func<string, ValidatedInviteV1, CancellationToken, Task>? onJoinByInviteAsync = null, Func<CancellationToken, Task>? onHostByAddressAsync = null, string? localPeerAddress = null, Func<HelpRequestMessage, CancellationToken, Task>? onSendHelpRequestAsync = null, Func<HelpRequestDecisionMessage, CancellationToken, Task>? onSendHelpRequestDecisionAsync = null, Func<HelpRequestMessage, string?, CancellationToken, Task>? onSendHelpRequestCancellationAsync = null, Func<ReadOnlyMemory<byte>, CancellationToken, Task>? onSendChatAsync = null, Func<ControlRequestMessageV1, CancellationToken, Task>? onSendControlRequestAsync = null, Func<ControlResponseMessageV1, CancellationToken, Task>? onSendControlResponseAsync = null, Func<ControlStartMessageV1, CancellationToken, Task>? onSendControlStartAsync = null, Func<ControlStopMessageV1, CancellationToken, Task>? onSendControlStopAsync = null, Func<ControlInputMessageV1, CancellationToken, Task>? onSendControlInputAsync = null, Func<ControlInputAckV1, CancellationToken, Task>? onSendControlAckAsync = null, Func<ControlStateSnapshotV1, CancellationToken, Task>? onSendControlStateSnapshotAsync = null, Func<ControlDisplayInfoMessageV1, CancellationToken, Task>? onSendControlDisplayInfoAsync = null, bool localSupportsRemoteControl = true, bool remoteSupportsRemoteControl = true)
         {
             this.onJoinByAddressAsync = onJoinByAddressAsync ?? ((_, ct) => Task.Delay(Timeout.Infinite, ct));
             this.onJoinByInviteAsync = onJoinByInviteAsync ?? ((_, invite, ct) => this.onJoinByAddressAsync(invite.TargetAddress.Value, ct));
@@ -206,6 +207,7 @@ public abstract class SessionRuntimeConnectionTestBase : CoreSmokeTestsBase
             LocalPeerAddress = string.IsNullOrWhiteSpace(localPeerAddress) ? "scripted.local.peer" : localPeerAddress.Trim();
             this.onSendHelpRequestAsync = onSendHelpRequestAsync ?? ((_, _) => Task.CompletedTask);
             this.onSendHelpRequestDecisionAsync = onSendHelpRequestDecisionAsync ?? ((_, _) => Task.CompletedTask);
+            this.onSendHelpRequestCancellationAsync = onSendHelpRequestCancellationAsync ?? ((_, _, _) => Task.CompletedTask);
             this.onSendChatAsync = onSendChatAsync ?? ((_, _) => Task.CompletedTask);
             this.onSendControlRequestAsync = onSendControlRequestAsync ?? ((_, _) => Task.CompletedTask);
             this.onSendControlResponseAsync = onSendControlResponseAsync ?? ((_, _) => Task.CompletedTask);
@@ -252,6 +254,7 @@ public abstract class SessionRuntimeConnectionTestBase : CoreSmokeTestsBase
         public Task JoinByInviteAsync(string inviteToken, ValidatedInviteV1 invite, CancellationToken ct) => onJoinByInviteAsync(inviteToken, invite, ct);
         public Task SendHelpRequestAsync(HelpRequestMessage request, CancellationToken ct) => onSendHelpRequestAsync(request, ct);
         public Task SendHelpRequestDecisionAsync(HelpRequestDecisionMessage decision, CancellationToken ct) => onSendHelpRequestDecisionAsync(decision, ct);
+        public Task SendHelpRequestCancellationAsync(HelpRequestMessage request, string? reason, CancellationToken ct) => onSendHelpRequestCancellationAsync(request, reason, ct);
         public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct) => onSendChatAsync(payload, ct);
         public Task SendControlRequestAsync(ControlRequestMessageV1 message, CancellationToken ct) => onSendControlRequestAsync(message, ct);
         public Task SendControlResponseAsync(ControlResponseMessageV1 message, CancellationToken ct) => onSendControlResponseAsync(message, ct);
@@ -559,7 +562,21 @@ public abstract class SessionRuntimeConnectionTestBase : CoreSmokeTestsBase
                 InviteValidated = inviteValidated,
             }
 
-            ).WithHandshakeVerified(helperAddress);
+            ).WithHandshakeVerified(helperAddress)
+             .WithVerificationCode(CreateFakeVerificationCode(sessionId, helpeeAddress, helperAddress));
+        }
+
+        private static SessionVerificationCode CreateFakeVerificationCode(SessionId sessionId, PeerAddress helpeeAddress, PeerAddress helperAddress)
+        {
+            return SessionVerificationCodeDerivation.Derive(new SessionVerificationMaterial(
+                sessionId,
+                helperAddress,
+                helpeeAddress,
+                CoreSmokeTestsBase.SHA256LikeDeterministicBytes("fake-verification-root|" + sessionId.Value, 32),
+                CoreSmokeTestsBase.SHA256LikeDeterministicBytes("fake-verification-helper-key|" + helperAddress.Value, 32),
+                CoreSmokeTestsBase.SHA256LikeDeterministicBytes("fake-verification-helpee-key|" + helpeeAddress.Value, 32),
+                "fake-challenge-" + sessionId.Value,
+                "fake-session-context"));
         }
 
         protected static void ValidateApprovalDecision(ApprovalRequest approvalRequest, ApprovalDecision decision)

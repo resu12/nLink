@@ -44,6 +44,8 @@ public interface IHelpRequestSignalingTransport
     Task SendHelpRequestAsync(HelpRequestMessage request, CancellationToken ct);
 
     Task SendHelpRequestDecisionAsync(HelpRequestDecisionMessage decision, CancellationToken ct);
+
+    Task SendHelpRequestCancellationAsync(HelpRequestMessage request, string? reason, CancellationToken ct);
 }
 
 public interface IHostReadySignalingTransport

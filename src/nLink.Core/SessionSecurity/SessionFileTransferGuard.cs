@@ -57,11 +57,11 @@ public sealed record FileTransferChunkDescriptor(
 
 public sealed record FileTransferStoragePolicy(
     string RootDirectoryPath,
-    long MaxFileSizeBytes = 1024L * 1024 * 1024,
+    long MaxFileSizeBytes = 25L * 1024 * 1024 * 1024,
     int MaxChunkSizeBytes = 256 * 1024,
     bool AllowOverwrite = false)
 {
-    public const long DefaultMaxFileSizeBytes = 1024L * 1024 * 1024;
+    public const long DefaultMaxFileSizeBytes = 25L * 1024 * 1024 * 1024;
     public const int DefaultMaxChunkSizeBytes = 256 * 1024;
 }
 
@@ -350,10 +350,10 @@ public sealed class SessionFileTransferGuard
 
             var options = new FileStreamOptions
             {
-                Access = FileAccess.Write,
-                Mode = FileMode.Create,
+                Access = FileAccess.ReadWrite,
+                Mode = FileMode.CreateNew,
                 Share = FileShare.None,
-                Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
+                Options = FileOptions.Asynchronous | FileOptions.RandomAccess,
                 BufferSize = Math.Clamp(storagePolicy.MaxChunkSizeBytes, 4096, 64 * 1024),
             };
             var stream = new FileStream(plan.TempPath, options);
@@ -464,7 +464,12 @@ public sealed class SessionFileTransferGuard
         }
 
         var rootPath = Path.GetFullPath(storagePolicy.RootDirectoryPath.Trim());
-        var candidatePath = Path.GetFullPath(Path.Combine(rootPath, safeFileName));
+        if (!TryResolveAvailableSafeFileName(rootPath, safeFileName, storagePolicy.AllowOverwrite, out var resolvedSafeFileName, out validation))
+        {
+            return false;
+        }
+
+        var candidatePath = Path.GetFullPath(Path.Combine(rootPath, resolvedSafeFileName));
         if (!IsPathWithinRoot(rootPath, candidatePath))
         {
             validation = FileTransferAccessResult.Denied(
@@ -473,22 +478,10 @@ public sealed class SessionFileTransferGuard
             return false;
         }
 
-        if (!storagePolicy.AllowOverwrite && (File.Exists(candidatePath) || Directory.Exists(candidatePath)))
-        {
-            validation = FileTransferAccessResult.Denied(
-                Directory.Exists(candidatePath)
-                    ? FileTransferValidationFailure.DirectoryTargetBlocked
-                    : FileTransferValidationFailure.OverwriteBlocked,
-                Directory.Exists(candidatePath)
-                    ? "File-transfer target path resolves to a directory."
-                    : "File-transfer target already exists and overwrite is disabled.");
-            return false;
-        }
-
-        var tempFileName = CreateTempFileName(safeFileName);
+        var tempFileName = CreateTempFileName(resolvedSafeFileName);
         plan = new FileTransferWritePlan(
             rootPath,
-            safeFileName,
+            resolvedSafeFileName,
             tempFileName,
             Path.Combine(rootPath, tempFileName),
             candidatePath,
@@ -602,6 +595,71 @@ public sealed class SessionFileTransferGuard
         return FileTransferAccessResult.Allowed();
     }
 
+    private static bool TryResolveAvailableSafeFileName(
+        string rootPath,
+        string safeFileName,
+        bool allowOverwrite,
+        out string resolvedSafeFileName,
+        out FileTransferAccessResult validation)
+    {
+        resolvedSafeFileName = safeFileName;
+        validation = FileTransferAccessResult.Allowed();
+        if (allowOverwrite)
+        {
+            return true;
+        }
+
+        for (var attempt = 0; attempt <= 999; attempt++)
+        {
+            var candidateSafeFileName = attempt == 0
+                ? safeFileName
+                : CreateNumberedSafeFileName(safeFileName, attempt);
+            var candidatePath = Path.GetFullPath(Path.Combine(rootPath, candidateSafeFileName));
+            if (!IsPathWithinRoot(rootPath, candidatePath))
+            {
+                validation = FileTransferAccessResult.Denied(
+                    FileTransferValidationFailure.WriteOutsideAllowedDirectory,
+                    "File-transfer target path escapes the allowed directory.");
+                return false;
+            }
+
+            if (!File.Exists(candidatePath) && !Directory.Exists(candidatePath))
+            {
+                resolvedSafeFileName = candidateSafeFileName;
+                return true;
+            }
+        }
+
+        validation = FileTransferAccessResult.Denied(
+            FileTransferValidationFailure.OverwriteBlocked,
+            "File-transfer target already exists and no available numbered file name could be found.");
+        return false;
+    }
+
+    private static string CreateNumberedSafeFileName(string safeFileName, int number)
+    {
+        var extension = Path.GetExtension(safeFileName);
+        var stem = Path.GetFileNameWithoutExtension(safeFileName);
+        if (string.IsNullOrEmpty(stem))
+        {
+            stem = safeFileName;
+            extension = string.Empty;
+        }
+
+        var suffix = string.Create(CultureInfo.InvariantCulture, $" ({number})");
+        var maxStemLength = Math.Max(1, MaxSafeFileNameLength - suffix.Length - extension.Length);
+        if (stem.Length > maxStemLength)
+        {
+            stem = stem[..maxStemLength].TrimEnd(' ', '.');
+            if (stem.Length == 0)
+            {
+                stem = "file";
+            }
+        }
+
+        return string.Concat(stem, suffix, extension);
+    }
+
     private static bool IsPathWithinRoot(string rootPath, string candidatePath)
     {
         var normalizedRoot = Path.TrimEndingDirectorySeparator(rootPath);
@@ -616,6 +674,6 @@ public sealed class SessionFileTransferGuard
     {
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"{safeFileName}.part");
+            $"{safeFileName}.nlink-{Guid.NewGuid():N}.part");
     }
 }

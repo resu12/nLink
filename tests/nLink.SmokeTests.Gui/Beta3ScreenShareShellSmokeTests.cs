@@ -328,6 +328,69 @@ public sealed class Beta3ScreenShareShellSmokeTests : Beta3DefaultUiSmokeTestBas
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task SessionShell_ScreenShareRefresh_DoesNotDetachFocusedChatContent()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            var context = new MutableConnectedScreenShareShellContext
+            {
+                HeaderStatusText = "Connected",
+                ShowConnectedPanel = true,
+                CanShowScreenShareAction = true,
+                IsScreenSharingPreviewActive = true,
+                ShowScreenSharePreviewFrame = true,
+                ScreenSharePreviewFrame = CreateTinyBitmap(),
+            };
+            var chatInput = new TextBox
+            {
+                [AutomationProperties.AutomationIdProperty] = "Shell.Chat.Input",
+            };
+            var shell = new SessionShellView
+            {
+                Width = 1080,
+                MainContent = new Border
+                {
+                    [AutomationProperties.AutomationIdProperty] = "Shell.Main",
+                },
+                ChatContent = chatInput,
+                ShowScreenShareAction = true,
+                DataContext = context,
+            };
+            var window = new Window
+            {
+                Width = 1080,
+                Height = 760,
+                Content = shell
+            };
+            window.Show();
+            try
+            {
+                await WaitUntilAsync(() => shell.ShowScreenSharePane, TimeSpan.FromSeconds(2));
+                chatInput.Focus();
+                chatInput.Text = "message while sharing";
+                await FlushUiAsync();
+                Assert.True(chatInput.IsFocused);
+
+                context.IsScreenSharingPreviewActive = false;
+                await FlushUiAsync();
+                context.IsScreenSharingPreviewActive = true;
+                await FlushUiAsync();
+
+                Assert.Same(chatInput, FindFirstVisibleControlByAutomationId(window, "Shell.Chat.Input"));
+                Assert.Equal("message while sharing", chatInput.Text);
+                Assert.True(chatInput.IsFocused);
+            }
+            finally
+            {
+                window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task SessionShell_WhenScreenShareVisibleInResponsiveNarrowLayout_KeepsStableChatPaneWidth()
     {
         await fixture.Session.Dispatch(async () =>

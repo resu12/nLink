@@ -119,6 +119,7 @@ public sealed record SessionFlowSnapshot(
     string? SessionId,
     string? HelperIdentity,
     string? RemoteEndpoint,
+    SessionVerificationCode? VerificationCode = null,
     string DisplayStatusText = "",
     string DisplayConnectionState = "",
     bool ShowRetryAction = false,

@@ -43,7 +43,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         Failed,
     }
 
-    private static readonly TimeSpan DefaultIncomingRequestTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan DefaultIncomingRequestTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultInviteLifetime = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan PeerEndedNoticeDuration = TimeSpan.FromSeconds(4);
@@ -309,6 +309,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         AcceptIncomingFileCommand = new AsyncRelayCommand<string?>(AcceptIncomingFileAsync, CanAcceptIncomingFile);
         DeclineIncomingFileCommand = new AsyncRelayCommand<string?>(DeclineIncomingFileAsync, CanDeclineIncomingFile);
         CancelFileTransferCommand = new AsyncRelayCommand<string?>(CancelFileTransferAsync, CanCancelFileTransfer);
+        PauseFileTransferCommand = new AsyncRelayCommand<string?>(PauseFileTransferAsync, CanPauseFileTransfer);
+        ResumeFileTransferCommand = new AsyncRelayCommand<string?>(ResumeFileTransferAsync, CanResumeFileTransfer);
         RetryCommand = new AsyncRelayCommand(RetryAsync);
         CancelTransientCommand = new AsyncRelayCommand(CancelTransientAsync, CanCancelTransientOperation);
         OpenDiagnosticsCommand = new RelayCommand(OpenDiagnostics, CanOpenDiagnosticsCommand);
@@ -402,6 +404,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(InviteHelperIdentityStatusText));
                 OnPropertyChanged(nameof(CanApplyInviteHelperIdentityAction));
                 OnPropertyChanged(nameof(CanClearInviteHelperIdentityAction));
+                OnPropertyChanged(nameof(CanRequestHelpAction));
                 ApplyInviteHelperIdentityCommand.NotifyCanExecuteChanged();
                 ClearInviteHelperIdentityCommand.NotifyCanExecuteChanged();
                 RequestHelpCommand.NotifyCanExecuteChanged();
@@ -487,6 +490,24 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         HelperVerificationCodeFormatter.FormatOrNull(incomingHelperIdentity) ?? string.Empty;
 
     public bool HasIncomingHelperVerificationCode => !string.IsNullOrWhiteSpace(IncomingHelperVerificationCode);
+
+    private SessionVerificationCode? CurrentSessionVerificationCode =>
+        sessionRuntime.FlowSnapshot.VerificationCode ?? sessionRuntime.SecurityState.VerificationCode;
+
+    public string SessionVerificationEmojiSequence =>
+        CurrentSessionVerificationCode?.EmojiSequence ?? string.Empty;
+
+    public string SessionVerificationFallbackCode =>
+        CurrentSessionVerificationCode?.FallbackCode ?? string.Empty;
+
+    public bool HasSessionVerificationCode =>
+        !string.IsNullOrWhiteSpace(SessionVerificationEmojiSequence) &&
+        !string.IsNullOrWhiteSpace(SessionVerificationFallbackCode);
+
+    public bool ShowSessionVerificationCode =>
+        ShowIncomingRequestPanel &&
+        HasIncomingRequest &&
+        HasSessionVerificationCode;
 
     public string IncomingTechnicalHelperIdentityText => IncomingHelperIdentityText;
 
@@ -624,6 +645,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowHeaderVerificationCode));
                 OnPropertyChanged(nameof(FirstPillVerificationCodeText));
                 OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+                NotifySessionVerificationPropertiesChanged();
                 OnPropertyChanged(nameof(ShowBackButton));
                 OnPropertyChanged(nameof(StatusLineText));
                 OnPropertyChanged(nameof(SecondaryActionText));
@@ -1143,6 +1165,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public IAsyncRelayCommand<string?> CancelFileTransferCommand { get; }
 
+    public IAsyncRelayCommand<string?> PauseFileTransferCommand { get; }
+
+    public IAsyncRelayCommand<string?> ResumeFileTransferCommand { get; }
+
     public IAsyncRelayCommand RetryCommand { get; }
     public IAsyncRelayCommand CancelTransientCommand { get; }
 
@@ -1553,13 +1579,16 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void RequestSendFileWindow()
     {
+        LogSendFileActionUi("file_transfer_send_ui_requested", "(entry)");
         if (!CanExecuteSendFileAction())
         {
+            LogSendFileActionUi("file_transfer_send_ui_ignored", "can_execute_false");
             return;
         }
 
         if (!sessionRuntime.TryAuthorizeFileTransferSend())
         {
+            LogSendFileActionUi("file_transfer_send_ui_ignored", "authorize_false");
             CanSendFiles = false;
             OnPropertyChanged(nameof(CanSendFileAction));
             SendFileCommand.NotifyCanExecuteChanged();
@@ -1577,8 +1606,16 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private async Task AcceptIncomingFileAsync(string? transferId)
     {
         var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferActionUi(
+            "file_transfer_accept_ui_requested",
+            normalizedTransferId,
+            includeDecline: false);
         if (!CanAcceptIncomingFile(normalizedTransferId))
         {
+            LogFileTransferActionUi(
+                "file_transfer_accept_ui_ignored",
+                normalizedTransferId,
+                includeDecline: false);
             return;
         }
 
@@ -1596,6 +1633,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private async Task DeclineIncomingFileAsync(string? transferId)
     {
         var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferActionUi(
+            "file_transfer_decline_ui_requested",
+            normalizedTransferId,
+            includeDecline: true);
         if (!CanDeclineIncomingFile(normalizedTransferId))
         {
             return;
@@ -1615,8 +1656,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private async Task CancelFileTransferAsync(string? transferId)
     {
         var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferCancelUi("file_transfer_cancel_ui_requested", normalizedTransferId);
         if (!CanCancelFileTransfer(normalizedTransferId))
         {
+            LogFileTransferCancelUi("file_transfer_cancel_ui_ignored", normalizedTransferId);
             return;
         }
 
@@ -1634,6 +1677,60 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         return (InboundFileTransfer is { ShowCancel: true } inbound &&
                 string.Equals(inbound.TransferId, normalizedTransferId, StringComparison.Ordinal)) ||
                (OutboundFileTransfer is { ShowCancel: true } outbound &&
+                string.Equals(outbound.TransferId, normalizedTransferId, StringComparison.Ordinal));
+    }
+
+    private async Task PauseFileTransferAsync(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferPauseResumeUi("file_transfer_pause_ui_requested", normalizedTransferId);
+        if (!CanPauseFileTransfer(normalizedTransferId))
+        {
+            LogFileTransferPauseResumeUi("file_transfer_pause_ui_ignored", normalizedTransferId);
+            return;
+        }
+
+        await sessionRuntime.PauseTransferAsync(normalizedTransferId!, "ui_pause", CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private bool CanPauseFileTransfer(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        if (normalizedTransferId is null)
+        {
+            return false;
+        }
+
+        return (InboundFileTransfer is { ShowPause: true } inbound &&
+                string.Equals(inbound.TransferId, normalizedTransferId, StringComparison.Ordinal)) ||
+               (OutboundFileTransfer is { ShowPause: true } outbound &&
+                string.Equals(outbound.TransferId, normalizedTransferId, StringComparison.Ordinal));
+    }
+
+    private async Task ResumeFileTransferAsync(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferPauseResumeUi("file_transfer_resume_ui_requested", normalizedTransferId);
+        if (!CanResumeFileTransfer(normalizedTransferId))
+        {
+            LogFileTransferPauseResumeUi("file_transfer_resume_ui_ignored", normalizedTransferId);
+            return;
+        }
+
+        await sessionRuntime.ResumeTransferAsync(normalizedTransferId!, "ui_resume", CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private bool CanResumeFileTransfer(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        if (normalizedTransferId is null)
+        {
+            return false;
+        }
+
+        return (InboundFileTransfer is { ShowResume: true } inbound &&
+                string.Equals(inbound.TransferId, normalizedTransferId, StringComparison.Ordinal)) ||
+               (OutboundFileTransfer is { ShowResume: true } outbound &&
                 string.Equals(outbound.TransferId, normalizedTransferId, StringComparison.Ordinal));
     }
 
@@ -2432,8 +2529,27 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                !sessionRuntime.HasPendingOutboundHelpRequest &&
                sessionRuntime.PendingOutboundHelpRequestDecision?.Accepted != true &&
                !hasIncomingRequest &&
+               CurrentInviteHelperInputMatchesVerifiedIdentity() &&
                ResolveVerifiedHelpRequestTargetAddress() is not null &&
                HasShareInvite;
+    }
+
+    private bool CurrentInviteHelperInputMatchesVerifiedIdentity()
+    {
+        var currentInput = InviteHelperIdentityInput.Trim();
+        if (!HasVerifiedInviteHelperIdentity ||
+            string.IsNullOrWhiteSpace(currentInput))
+        {
+            return false;
+        }
+
+        if (string.Equals(currentInput, verifiedInviteHelperIdentity, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return TryResolveInviteHelperIdentityInput(out var helperIdentity, out _, out _, out _) &&
+               string.Equals(helperIdentity.Value, verifiedInviteHelperIdentity, StringComparison.Ordinal);
     }
 
     public void ApplyHelperBootstrapInput(string input, string sourceLabel)
@@ -2508,6 +2624,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             bootstrapPayload is not null)
         {
             helperTargetAddress = bootstrapPayload.HelperAddress;
+            normalizedInput = HelperBootstrapQrPayload.Format(bootstrapPayload);
             if (!string.IsNullOrWhiteSpace(bootstrapPayload.HelperId))
             {
                 var decodeResult = HelperIdentityTokenCodec.Decode(bootstrapPayload.HelperId);
@@ -2515,13 +2632,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
                 {
                     helperIdentity = decodeResult.Address.Value;
                     verificationIdentity = helperIdentity;
-                    normalizedInput = HelperIdentityTokenCodec.Encode(helperIdentity);
                     return true;
                 }
             }
 
             helperIdentity = bootstrapPayload.HelperAddress;
-            normalizedInput = helperIdentity.Value;
             return true;
         }
 
@@ -3257,7 +3372,11 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         var autoRegeneratedAfterDisconnect = false;
-        if (flow.ShowIncomingApproval)
+        if (TryApplyAcceptedHelpRequestFailureReset(flow))
+        {
+            autoRegeneratedAfterDisconnect = true;
+        }
+        else if (flow.ShowIncomingApproval)
         {
             ClearFailurePresentation();
             ConnectionStatus = SessionFlowViewProjection.ResolveStatusText(flow, transportConfig.AllowStatusText);
@@ -3355,6 +3474,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(RemoteControlAdminWarningText));
         OnPropertyChanged(nameof(CanRestartAsAdministrator));
         OnPropertyChanged(nameof(ShowRemoteControlPreviewActiveCue));
+        NotifySessionVerificationPropertiesChanged();
         NotifyRemoteControlDiagnosticsChanged();
         NotifyRemoteControlConsentUiChanged();
         StopControlCommand.NotifyCanExecuteChanged();
@@ -3469,7 +3589,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         try
         {
             RestartWaitingSession(
-                preserveHelperIdentityForRetry: flow.PostTerminalAction == SessionFlowPostTerminalAction.ReturnToWaitingPreserveBootstrap,
+                preserveHelperIdentityForRetry: ShouldPreserveHelperIdentityForPostTerminalAction(flow),
                 preservePeerEndedNotice: flow.ShouldShowPeerEndedNotice,
                 preservedPeerEndedText: flow.TerminalStatusText);
             return true;
@@ -3478,6 +3598,54 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             autoRegeneratingAfterDisconnect = false;
         }
+    }
+
+    private bool TryApplyAcceptedHelpRequestFailureReset(SessionFlowSnapshot flow)
+    {
+        if (!ShouldResetAfterAcceptedHelpRequestFailure(flow) ||
+            autoRegeneratingAfterDisconnect ||
+            IsStartupBlocked ||
+            startupFailureBlocksAutoRestart ||
+            disposed)
+        {
+            return false;
+        }
+
+        var actionKey = $"accepted_help_request_failed|{flow.RuntimeState}|{flow.LastEndOrigin}|{flow.FailureReason}|{flow.SessionId ?? "(none)"}";
+        if (string.Equals(lastAppliedPostTerminalActionKey, actionKey, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        lastAppliedPostTerminalActionKey = actionKey;
+        autoRegeneratingAfterDisconnect = true;
+        try
+        {
+            RestartWaitingSession(
+                preserveHelperIdentityForRetry: false,
+                preservePeerEndedNotice: false);
+            return true;
+        }
+        finally
+        {
+            autoRegeneratingAfterDisconnect = false;
+        }
+    }
+
+    private bool ShouldPreserveHelperIdentityForPostTerminalAction(SessionFlowSnapshot flow)
+    {
+        return flow.PostTerminalAction == SessionFlowPostTerminalAction.ReturnToWaitingPreserveBootstrap &&
+               !ShouldResetAfterAcceptedHelpRequestFailure(flow);
+    }
+
+    private bool ShouldResetAfterAcceptedHelpRequestFailure(SessionFlowSnapshot flow)
+    {
+        return sessionRuntime.PendingOutboundHelpRequestDecision is { Accepted: true } &&
+               flow.Role == SessionRuntimeRole.Helpee &&
+               !flow.ApprovalActive &&
+               flow.RuntimeState is SessionRuntimeState.Failed or SessionRuntimeState.Disconnected or SessionRuntimeState.Rejected &&
+               flow.Phase is SessionFlowPhase.HelpeeWaiting or SessionFlowPhase.Failed or SessionFlowPhase.Ended &&
+               flow.LastEndOrigin is SessionFlowEndOrigin.Remote or SessionFlowEndOrigin.Failed or SessionFlowEndOrigin.Rejected;
     }
 
     private void SyncTransientStatusFromRuntime()
@@ -3568,9 +3736,10 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
+        var capturedDecision = sessionRuntime.PendingOutboundHelpRequestDecision;
         _ = UiThreadDispatch.RunAsync(() =>
         {
-            var decision = sessionRuntime.PendingOutboundHelpRequestDecision;
+            var decision = capturedDecision ?? sessionRuntime.PendingOutboundHelpRequestDecision;
             if (decision is null)
             {
                 UpdateUiFromSnapshot("help_request_decision_cleared");
@@ -3585,11 +3754,46 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             }
             else
             {
-                UpdateShareInviteStatusText("The helper declined the request.");
+                var statusText = GetHelpRequestDecisionStatusText(decision.Reason);
+                ConnectionState = "Waiting";
+                ConnectionStatus = statusText;
+                if (ShouldClearHelperIdentityAfterHelpRequestDecision(decision.Reason))
+                {
+                    ClearInviteHelperIdentityAfterUnavailableHelper(statusText);
+                }
+                else
+                {
+                    UpdateShareInviteStatusText(statusText);
+                }
             }
 
             UpdateUiFromSnapshot("help_request_decision");
         });
+    }
+
+    private void ClearInviteHelperIdentityAfterUnavailableHelper(string statusText)
+    {
+        InviteHelperIdentityInput = string.Empty;
+        SetVerifiedInviteHelperIdentity(null, refreshInvite: false);
+        UpdateShareInviteStatusText(statusText);
+    }
+
+    private static bool ShouldClearHelperIdentityAfterHelpRequestDecision(string? reason)
+    {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? string.Empty : reason.Trim();
+        return string.Equals(normalizedReason, "helper_closed", StringComparison.Ordinal) ||
+               string.Equals(normalizedReason, "request_timeout", StringComparison.Ordinal);
+    }
+
+    private static string GetHelpRequestDecisionStatusText(string? reason)
+    {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? string.Empty : reason.Trim();
+        return normalizedReason switch
+        {
+            "helper_closed" => "The helper is no longer available.",
+            "request_timeout" => "The help request expired.",
+            _ => "The helper declined the request.",
+        };
     }
 
     private void InitializeStartupAvailabilityState()
@@ -3735,8 +3939,18 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         bool nextCanSendFiles;
         var flow = sessionRuntime.FlowSnapshot;
         var fileTransferSnapshot = sessionRuntime.FileTransferSnapshot;
-        InboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(fileTransferSnapshot.Inbound);
-        OutboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(fileTransferSnapshot.Outbound);
+        InboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(
+            fileTransferSnapshot.Inbound,
+            AcceptIncomingFileCommand,
+            DeclineIncomingFileCommand,
+            CancelFileTransferCommand,
+            PauseFileTransferCommand,
+            ResumeFileTransferCommand);
+        OutboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(
+            fileTransferSnapshot.Outbound,
+            cancelCommand: CancelFileTransferCommand,
+            pauseCommand: PauseFileTransferCommand,
+            resumeCommand: ResumeFileTransferCommand);
         var hasActiveOutboundTransfer = fileTransferSnapshot.Outbound is { IsTerminal: false };
         var phase = GetEffectivePhase();
         var suppressConnectedControlsDuringLocalEnd =
@@ -3826,6 +4040,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         AcceptIncomingFileCommand.NotifyCanExecuteChanged();
         DeclineIncomingFileCommand.NotifyCanExecuteChanged();
         CancelFileTransferCommand.NotifyCanExecuteChanged();
+        PauseFileTransferCommand.NotifyCanExecuteChanged();
+        ResumeFileTransferCommand.NotifyCanExecuteChanged();
         EndSessionCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(CanRequestHelpAction));
         RequestHelpCommand.NotifyCanExecuteChanged();
@@ -3852,6 +4068,58 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         lastChatPanelStateLog = payload;
         LocalOperationalLog.Info("HelpeeUi", payload);
+    }
+
+    private void LogFileTransferActionUi(
+        string eventName,
+        string? normalizedTransferId,
+        bool includeDecline)
+    {
+        var inbound = InboundFileTransfer;
+        var payload =
+            $"event={eventName}; role=Helpee; transfer_id_present={(normalizedTransferId is null ? 0 : 1)}; " +
+            $"inbound_state={inbound?.State.ToString() ?? "(none)"}; " +
+            $"inbound_show_accept={(inbound?.ShowAccept == true ? 1 : 0)}; " +
+            $"effective_phase={EffectivePhase}; runtime_state={sessionRuntime.State}";
+        if (includeDecline)
+        {
+            payload += $"; inbound_show_decline={(inbound?.ShowDecline == true ? 1 : 0)}";
+        }
+
+        LocalOperationalLog.Info("HelpeeUi", payload);
+    }
+
+    private void LogSendFileActionUi(string eventName, string reason)
+    {
+        LocalOperationalLog.Info(
+            "HelpeeUi",
+            $"event={eventName}; role=Helpee; reason={reason}; " +
+            $"can_send_files={(CanSendFiles ? 1 : 0)}; can_send_file_action={(CanExecuteSendFileAction() ? 1 : 0)}; " +
+            $"effective_phase={EffectivePhase}; runtime_state={sessionRuntime.State}");
+    }
+
+    private void LogFileTransferCancelUi(string eventName, string? normalizedTransferId)
+    {
+        var inbound = InboundFileTransfer;
+        var outbound = OutboundFileTransfer;
+        LocalOperationalLog.Info(
+            "HelpeeUi",
+            $"event={eventName}; role=Helpee; transfer_id_present={(normalizedTransferId is null ? 0 : 1)}; " +
+            $"inbound_state={inbound?.State.ToString() ?? "(none)"}; inbound_show_cancel={(inbound?.ShowCancel == true ? 1 : 0)}; " +
+            $"outbound_state={outbound?.State.ToString() ?? "(none)"}; outbound_show_cancel={(outbound?.ShowCancel == true ? 1 : 0)}; " +
+            $"effective_phase={EffectivePhase}; runtime_state={sessionRuntime.State}");
+    }
+
+    private void LogFileTransferPauseResumeUi(string eventName, string? normalizedTransferId)
+    {
+        var inbound = InboundFileTransfer;
+        var outbound = OutboundFileTransfer;
+        LocalOperationalLog.Info(
+            "HelpeeUi",
+            $"event={eventName}; role=Helpee; transfer_id_present={(normalizedTransferId is null ? 0 : 1)}; " +
+            $"inbound_state={inbound?.State.ToString() ?? "(none)"}; inbound_show_pause={(inbound?.ShowPause == true ? 1 : 0)}; inbound_show_resume={(inbound?.ShowResume == true ? 1 : 0)}; " +
+            $"outbound_state={outbound?.State.ToString() ?? "(none)"}; outbound_show_pause={(outbound?.ShowPause == true ? 1 : 0)}; outbound_show_resume={(outbound?.ShowResume == true ? 1 : 0)}; " +
+            $"effective_phase={EffectivePhase}; runtime_state={sessionRuntime.State}");
     }
 
     private static string SanitizeForLog(string? value)
@@ -3919,6 +4187,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
             OnPropertyChanged(nameof(ShowHeaderVerificationCode));
             OnPropertyChanged(nameof(FirstPillVerificationCodeText));
             OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+            NotifySessionVerificationPropertiesChanged();
             OnPropertyChanged(nameof(IncomingTechnicalHelperIdentityText));
             OnPropertyChanged(nameof(HasIncomingTechnicalHelperIdentity));
             OnPropertyChanged(nameof(HasIncomingTechnicalDetails));
@@ -3952,6 +4221,14 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         SetIncomingCapabilitySelectionCore(ref allowIncomingClipboardCapability, (approvedCapabilities & CapabilityGrant.Clipboard) == CapabilityGrant.Clipboard, nameof(AllowIncomingClipboardCapability));
         NormalizeIncomingCapabilityDependencies();
         OnIncomingCapabilitySelectionChanged();
+    }
+
+    private void NotifySessionVerificationPropertiesChanged()
+    {
+        OnPropertyChanged(nameof(SessionVerificationEmojiSequence));
+        OnPropertyChanged(nameof(SessionVerificationFallbackCode));
+        OnPropertyChanged(nameof(HasSessionVerificationCode));
+        OnPropertyChanged(nameof(ShowSessionVerificationCode));
     }
 
     private void SetIncomingCapabilitySelection(ref bool field, bool value, string propertyName)

@@ -286,3 +286,29 @@ internal sealed class BridgeBundleIdentity
         return value ? "true" : "false";
     }
 }
+
+internal static class BridgeBundleStartupGuard
+{
+    public const string IntegrityFailureCodePrefix = "bridge_bundle_integrity_failed";
+
+    public static void EnsureTrustedForStartup(
+        BridgeBundleIdentity identity,
+        Action<string> log,
+        Action<string, string?> recordBridgeFailure)
+    {
+        ArgumentNullException.ThrowIfNull(identity);
+        ArgumentNullException.ThrowIfNull(log);
+        ArgumentNullException.ThrowIfNull(recordBridgeFailure);
+
+        if (!identity.HasMismatch)
+        {
+            return;
+        }
+
+        var errorCode = $"{IntegrityFailureCodePrefix}:{identity.ManifestStatus}";
+        log($"event=bridge_bundle_start_blocked; classification=installed_payload_drift; reason={identity.ManifestStatus}{identity.BuildStructuredLogFields()}");
+        NknRuntimeDiagnostics.SetLastError($"NKN_START_FAILED: {errorCode}");
+        recordBridgeFailure(errorCode, "The bundled NKN bridge failed integrity verification. Please reinstall nLink.");
+        throw new InvalidOperationException($"Bundled NKN bridge failed integrity verification ({identity.ManifestStatus}). Please reinstall nLink.");
+    }
+}

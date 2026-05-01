@@ -36,6 +36,8 @@ const MAX_INPUT_LINE_BYTES = 256 * 1024;
 const MAX_DECODED_PAYLOAD_BYTES = 64 * 1024;
 const DEFAULT_SUBSCRIBE_DURATION = 1440;
 const DEFAULT_CONNECT_READY_TIMEOUT_MS = 12000;
+const MIN_CONNECT_FALLBACK_DELAY_MS = 1000;
+const MAX_CONNECT_FALLBACK_DELAY_MS = DEFAULT_CONNECT_READY_TIMEOUT_MS;
 const DEFAULT_NUM_SUBCLIENTS = 4;
 const DEFAULT_MEDIA_NUM_SUBCLIENTS = 8;
 const MIN_NUM_SUBCLIENTS = 1;
@@ -43,8 +45,13 @@ const MAX_NUM_SUBCLIENTS = 16;
 const OWNER_PID_CHECK_INTERVAL_MS = 2000;
 const BRIDGE_EVENT_LOOP_SAMPLE_WINDOW_MS = 2000;
 const BRIDGE_EVENT_LOOP_RESOLUTION_MS = 20;
+const BRIDGE_CONTROL_SEND_SAMPLE_WINDOW_MS = 2000;
 const BRIDGE_MEDIA_SEND_SAMPLE_WINDOW_MS = 2000;
+const BRIDGE_BULK_SEND_SAMPLE_WINDOW_MS = 2000;
 const BRIDGE_TRANSPORT_HEALTH_SAMPLE_WINDOW_MS = 2000;
+const DEFAULT_CONTROL_SEND_TIMEOUT_MS = 5000;
+const MIN_CONTROL_SEND_TIMEOUT_MS = 1000;
+const MAX_CONTROL_SEND_TIMEOUT_MS = 30000;
 const SCREEN_SHARE_QUEUE_MAX_MESSAGES = 24;
 const SCREEN_SHARE_QUEUE_MAX_BYTES = 384 * 1024;
 const SCREEN_SHARE_QUEUE_CONGESTED_MESSAGES = 8;
@@ -55,6 +62,22 @@ const SCREEN_SHARE_QUEUE_SEVERE_BYTES = 256 * 1024;
 const SCREEN_SHARE_QUEUE_SEVERE_AGE_MS = 500;
 const SCREEN_SHARE_CATCH_UP_QUEUE_MAX_MESSAGES = 4;
 const SCREEN_SHARE_CATCH_UP_QUEUE_MAX_BYTES = 96 * 1024;
+const BULK_QUEUE_CONGESTED_MESSAGES = 64;
+const BULK_QUEUE_CONGESTED_BYTES = 4 * 1024 * 1024;
+const BULK_QUEUE_CONGESTED_AGE_MS = 250;
+const BULK_QUEUE_SEVERE_MESSAGES = 192;
+const BULK_QUEUE_SEVERE_BYTES = 12 * 1024 * 1024;
+const BULK_QUEUE_SEVERE_AGE_MS = 1000;
+const BULK_QUEUE_TRANSIENT_RETRY_MAX_ATTEMPTS = 4;
+const BULK_QUEUE_TRANSIENT_RETRY_DELAY_MS = 150;
+const DEFAULT_BULK_SEND_CONCURRENCY = 4;
+const MIN_BULK_SEND_CONCURRENCY = 1;
+const MAX_BULK_SEND_CONCURRENCY = 8;
+const DEFAULT_BULK_SEND_MODE = 'fanout';
+const BULK_SEND_MODE_FANOUT = 'fanout';
+const BULK_SEND_MODE_ROUND_ROBIN = 'round_robin';
+const BULK_SEND_MODE_SINGLE = 'single';
+const BULK_SEND_MODE_REDUNDANT2 = 'redundant2';
 const DEFAULT_RPC_SERVERS = [
   'https://mainnet-rpc-node-0001.nkn.org/mainnet/api/wallet',
   'https://seed.nkn.org:30003',
@@ -82,14 +105,18 @@ console.warn = (...args) => stderrWrite(args.join(' ') + '\n');
 console.error = (...args) => stderrWrite(args.join(' ') + '\n');
 
 let nkn = null;
-try {
-  nkn = require('nkn-sdk');
-} catch (error) {
-  // Keep process alive and report protocol-level error to stdout.
-  emitJson({
-    event: 'disconnected',
-    reason: `Failed to load nkn-sdk: ${safeErrorMessage(error)}`
-  });
+if (process.env.NLINK_BRIDGE_FAKE_NKN_RUNTIME === '1') {
+  nkn = createFakeNknRuntime();
+} else {
+  try {
+    nkn = require('nkn-sdk');
+  } catch (error) {
+    // Keep process alive and report protocol-level error to stdout.
+    emitJson({
+      event: 'disconnected',
+      reason: `Failed to load nkn-sdk: ${safeErrorMessage(error)}`
+    });
+  }
 }
 
 let wsRuntime = null;
@@ -117,7 +144,9 @@ try {
 
 installNknReceiveTimingHooks();
 startBridgeEventLoopMonitor();
+startBridgeControlSendSummaryMonitor();
 startBridgeMediaSendSummaryMonitor();
+startBridgeBulkSendSummaryMonitor();
 startBridgeTransportHealthSummaryMonitor();
 
 const state = {
@@ -153,7 +182,27 @@ const state = {
   screenShareQueueDroppedSinceLast: 0,
   lastEmittedScreenShareQueueStateKey: '',
   lastEmittedScreenShareQueueStateAt: 0,
+  bulkSendQueue: [],
+  bulkQueuedBytes: 0,
+  bulkQueueInFlight: 0,
+  bulkQueueInFlightBytes: 0,
+  bulkSendConcurrency: DEFAULT_BULK_SEND_CONCURRENCY,
+  bulkSendMode: DEFAULT_BULK_SEND_MODE,
+  bulkRoundRobinCursor: 0,
+  bulkQueueClearedSinceLast: 0,
+  lastEmittedBulkQueueStateKey: '',
+  lastEmittedBulkQueueStateAt: 0,
+  controlSendQueue: [],
+  controlQueuedBytes: 0,
+  controlQueueDrainActive: false,
+  controlQueueInFlight: false,
+  controlQueueClearedSinceLast: 0,
+  controlLastMessageReceivedAtMs: 0,
+  mediaLastMessageReceivedAtMs: 0,
+  bulkLastMessageReceivedAtMs: 0,
+  bridgeControlSendSummaryWindow: createBridgeControlSendSummaryWindow(),
   bridgeMediaSendSummaryWindow: createBridgeMediaSendSummaryWindow(),
+  bridgeBulkSendSummaryWindow: createBridgeBulkSendSummaryWindow(),
   bridgeTransportHealthSummaryWindow: createBridgeTransportHealthSummaryWindow()
 };
 
@@ -168,6 +217,164 @@ let ownerPidMonitor = null;
 function emitJson(obj) {
   // Control/status events stay on the JSONL control plane.
   process.stdout.write(JSON.stringify(obj) + '\n');
+}
+
+function parseNonNegativeEnvInt(name, fallback) {
+  const raw = Number.parseInt(process.env[name] || '', 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : fallback;
+}
+
+function clampNumber(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(max, Math.floor(parsed)));
+}
+
+function getControlSendTimeoutMs() {
+  return clampNumber(
+    process.env.NLINK_NKN_CONTROL_SEND_TIMEOUT_MS,
+    DEFAULT_CONTROL_SEND_TIMEOUT_MS,
+    MIN_CONTROL_SEND_TIMEOUT_MS,
+    MAX_CONTROL_SEND_TIMEOUT_MS);
+}
+
+function createFakeNknRuntime() {
+  let fakeBulkClientNotReadyFailuresRemaining = parseNonNegativeEnvInt(
+    'NLINK_BRIDGE_FAKE_BULK_SEND_CLIENT_NOT_READY_COUNT',
+    0);
+
+  class FakeClient {
+    constructor(options = {}) {
+      this.identifier = typeof options.identifier === 'string' && options.identifier.length > 0
+        ? options.identifier
+        : 'nlink-fake';
+      const lowerIdentifier = this.identifier.toLowerCase();
+      this.channel = lowerIdentifier.includes('bulk')
+        ? 'bulk'
+        : lowerIdentifier.includes('media')
+          ? 'media'
+          : 'control';
+      this.addr = `${this.identifier}.fake-${this.channel}.addr`;
+      this.address = this.addr;
+      this.connected = false;
+      this.connectHandlers = [];
+      this.messageHandlers = [];
+      this.numSubClients = Math.max(1, Number(options.numSubClients) || DEFAULT_NUM_SUBCLIENTS);
+
+      setTimeout(() => {
+        this.connected = true;
+        for (const handler of this.connectHandlers.slice()) {
+          try {
+            handler();
+          } catch (error) {
+            logStderr(`Fake NKN connect handler failed: ${safeErrorMessage(error)}`);
+          }
+        }
+      }, parseNonNegativeEnvInt('NLINK_BRIDGE_FAKE_READY_DELAY_MS', 0));
+    }
+
+    onConnect(handler) {
+      if (typeof handler !== 'function') {
+        return;
+      }
+
+      this.connectHandlers.push(handler);
+      if (this.connected) {
+        setTimeout(handler, 0);
+      }
+    }
+
+    onMessage(handler) {
+      if (typeof handler === 'function') {
+        this.messageHandlers.push(handler);
+      }
+    }
+
+    onConnectFailed() {
+    }
+
+    onWsError() {
+    }
+
+    on(eventName, handler) {
+      if (eventName === 'connect' || eventName === 'ready') {
+        this.onConnect(handler);
+      } else if (eventName === 'message') {
+        this.onMessage(handler);
+      }
+
+      return this;
+    }
+
+    send() {
+      const delayMs = this.channel === 'bulk'
+        ? parseNonNegativeEnvInt('NLINK_BRIDGE_FAKE_BULK_SEND_DELAY_MS', 0)
+        : this.channel === 'media'
+          ? parseNonNegativeEnvInt('NLINK_BRIDGE_FAKE_MEDIA_SEND_DELAY_MS', 0)
+          : parseNonNegativeEnvInt('NLINK_BRIDGE_FAKE_CONTROL_SEND_DELAY_MS', 0);
+
+      return new Promise((resolve, reject) => setTimeout(() => {
+        if (this.channel === 'bulk' && process.env.NLINK_BRIDGE_FAKE_BULK_SEND_FAIL === '1') {
+          reject(new Error('fake bulk send failure'));
+          return;
+        }
+
+        if (this.channel === 'bulk' && fakeBulkClientNotReadyFailuresRemaining > 0) {
+          fakeBulkClientNotReadyFailuresRemaining -= 1;
+          reject(new Error('client not ready'));
+          return;
+        }
+
+        resolve({});
+      }, delayMs));
+    }
+
+    readyClientIDs() {
+      const ids = [''];
+      for (let index = 0; index < this.numSubClients; index++) {
+        ids.push(`__${index}__`);
+      }
+
+      return ids;
+    }
+
+    sendWithClient() {
+      return this.send();
+    }
+
+    publish() {
+      return Promise.resolve({});
+    }
+
+    subscribe() {
+      return Promise.resolve({});
+    }
+
+    unsubscribe() {
+      return Promise.resolve({});
+    }
+
+    close() {
+      this.connected = false;
+      return Promise.resolve();
+    }
+
+    stop() {
+      return this.close();
+    }
+
+    disconnect() {
+      return this.close();
+    }
+  }
+
+  return {
+    Client: FakeClient,
+    MultiClient: FakeClient
+  };
 }
 
 function channelToByte(channel) {
@@ -650,18 +857,74 @@ function createBridgeMediaSendSummaryWindow() {
   };
 }
 
+function createBridgeControlSendSummaryWindow() {
+  return {
+    binarySendFrameObservedToQueueEnqueueMs: [],
+    queueEnqueueToQueueDequeueMs: [],
+    queueDequeueToControlSendStartedMs: [],
+    controlSendStartedToControlSendResolvedMs: [],
+    framesSent: 0,
+    sendFailures: 0,
+    queueClears: 0,
+    payloadBytesSent: 0
+  };
+}
+
+function createBridgeBulkSendSummaryWindow() {
+  return {
+    binarySendFrameObservedToQueueEnqueueMs: [],
+    queueEnqueueToQueueDequeueMs: [],
+    queueDequeueToBulkSendStartedMs: [],
+    bulkSendStartedToBulkSendResolvedMs: [],
+    framesSent: 0,
+    framesEnqueued: 0,
+    sendFailures: 0,
+    queueClears: 0,
+    payloadBytesSent: 0,
+    payloadBytesEnqueued: 0,
+    interEnqueueGapMs: [],
+    lastEnqueueUtcMs: 0,
+    inFlightMax: 0,
+    inFlightBytesMax: 0,
+    inFlightSampleSum: 0,
+    inFlightSampleCount: 0,
+    workerIdleSlotSamples: 0,
+    workerSaturatedSampleCount: 0,
+    drainWakeCount: 0,
+    sendModeFanoutFrames: 0,
+    sendModeRoundRobinFrames: 0,
+    sendModeSingleFrames: 0,
+    sendModeRedundant2Frames: 0,
+    sendModeFallbackFrames: 0
+  };
+}
+
 function createBridgeTransportHealthSummaryWindow() {
   return {
     disconnectCountSinceLast: 0,
     connectFailedCountSinceLast: 0,
     wsErrorCountSinceLast: 0,
     rpcFallbackAttemptCountSinceLast: 0,
-    framesSentSinceLast: 0
+    framesSentSinceLast: 0,
+    controlMessagesReceivedSinceLast: 0,
+    mediaMessagesReceivedSinceLast: 0,
+    bulkMessagesReceivedSinceLast: 0,
+    controlBytesReceivedSinceLast: 0,
+    mediaBytesReceivedSinceLast: 0,
+    bulkBytesReceivedSinceLast: 0
   };
+}
+
+function resetBridgeControlSendSummaryWindow() {
+  state.bridgeControlSendSummaryWindow = createBridgeControlSendSummaryWindow();
 }
 
 function resetBridgeMediaSendSummaryWindow() {
   state.bridgeMediaSendSummaryWindow = createBridgeMediaSendSummaryWindow();
+}
+
+function resetBridgeBulkSendSummaryWindow() {
+  state.bridgeBulkSendSummaryWindow = createBridgeBulkSendSummaryWindow();
 }
 
 function resetBridgeTransportHealthSummaryWindow() {
@@ -749,6 +1012,163 @@ function emitBridgeMediaSendSummary() {
   });
 }
 
+function getControlQueueOldestAgeMs(nowMs = Date.now()) {
+  if (!state.controlSendQueue.length) {
+    return 0;
+  }
+
+  return Math.max(0, nowMs - state.controlSendQueue[0].queuedAtMs);
+}
+
+function emitBridgeControlSendSummary() {
+  const window = state.bridgeControlSendSummaryWindow;
+  const ingressStats = buildDurationStats(window.binarySendFrameObservedToQueueEnqueueMs);
+  const queueStats = buildDurationStats(window.queueEnqueueToQueueDequeueMs);
+  const sendStartStats = buildDurationStats(window.queueDequeueToControlSendStartedMs);
+  const sendResolveStats = buildDurationStats(window.controlSendStartedToControlSendResolvedMs);
+
+  emitJson({
+    event: 'bridge_control_send_summary',
+    binary_send_frame_observed_to_queue_enqueue_avg_ms: ingressStats.avg,
+    binary_send_frame_observed_to_queue_enqueue_median_ms: ingressStats.median,
+    binary_send_frame_observed_to_queue_enqueue_p95_ms: ingressStats.p95,
+    binary_send_frame_observed_to_queue_enqueue_max_ms: ingressStats.max,
+    queue_enqueue_to_queue_dequeue_avg_ms: queueStats.avg,
+    queue_enqueue_to_queue_dequeue_median_ms: queueStats.median,
+    queue_enqueue_to_queue_dequeue_p95_ms: queueStats.p95,
+    queue_enqueue_to_queue_dequeue_max_ms: queueStats.max,
+    queue_dequeue_to_control_send_started_avg_ms: sendStartStats.avg,
+    queue_dequeue_to_control_send_started_median_ms: sendStartStats.median,
+    queue_dequeue_to_control_send_started_p95_ms: sendStartStats.p95,
+    queue_dequeue_to_control_send_started_max_ms: sendStartStats.max,
+    control_send_started_to_control_send_resolved_avg_ms: sendResolveStats.avg,
+    control_send_started_to_control_send_resolved_median_ms: sendResolveStats.median,
+    control_send_started_to_control_send_resolved_p95_ms: sendResolveStats.p95,
+    control_send_started_to_control_send_resolved_max_ms: sendResolveStats.max,
+    send_p95_ms: sendResolveStats.p95,
+    send_max_ms: sendResolveStats.max,
+    frames_sent: window.framesSent,
+    payload_bytes_sent: window.payloadBytesSent,
+    payload_bytes_per_second: Math.round(window.payloadBytesSent / (BRIDGE_CONTROL_SEND_SAMPLE_WINDOW_MS / 1000)),
+    send_failures: window.sendFailures,
+    queue_clears: window.queueClears,
+    queue_depth: state.controlSendQueue.length,
+    queued_bytes: state.controlQueuedBytes,
+    oldest_queued_age_ms: getControlQueueOldestAgeMs(),
+    in_flight: state.controlQueueInFlight ? 1 : 0,
+    send_timeout_ms: getControlSendTimeoutMs(),
+    sample_window_ms: BRIDGE_CONTROL_SEND_SAMPLE_WINDOW_MS
+  });
+}
+
+function emitBridgeBulkSendSummary() {
+  const window = state.bridgeBulkSendSummaryWindow;
+  const ingressStats = buildDurationStats(window.binarySendFrameObservedToQueueEnqueueMs);
+  const queueStats = buildDurationStats(window.queueEnqueueToQueueDequeueMs);
+  const sendStartStats = buildDurationStats(window.queueDequeueToBulkSendStartedMs);
+  const sendResolveStats = buildDurationStats(window.bulkSendStartedToBulkSendResolvedMs);
+  const interEnqueueGapStats = buildDurationStats(window.interEnqueueGapMs);
+  recordBulkInFlightSnapshot();
+  const configuredConcurrency = state.bulkSendConcurrency;
+  const effectiveConcurrency = getEffectiveBulkSendConcurrency();
+  const workerUtilizationPercent = effectiveConcurrency > 0 && window.inFlightSampleCount > 0
+    ? Math.min(100, Math.round((window.inFlightSampleSum / (window.inFlightSampleCount * effectiveConcurrency)) * 100))
+    : 0;
+  const workerSaturationPercent = window.inFlightSampleCount > 0
+    ? Math.min(100, Math.round((window.workerSaturatedSampleCount / window.inFlightSampleCount) * 100))
+    : 0;
+
+  emitJson({
+    event: 'bridge_bulk_send_summary',
+    binary_send_frame_observed_to_queue_enqueue_avg_ms: ingressStats.avg,
+    binary_send_frame_observed_to_queue_enqueue_median_ms: ingressStats.median,
+    binary_send_frame_observed_to_queue_enqueue_p95_ms: ingressStats.p95,
+    binary_send_frame_observed_to_queue_enqueue_max_ms: ingressStats.max,
+    queue_enqueue_to_queue_dequeue_avg_ms: queueStats.avg,
+    queue_enqueue_to_queue_dequeue_median_ms: queueStats.median,
+    queue_enqueue_to_queue_dequeue_p95_ms: queueStats.p95,
+    queue_enqueue_to_queue_dequeue_max_ms: queueStats.max,
+    queue_dequeue_to_bulk_send_started_avg_ms: sendStartStats.avg,
+    queue_dequeue_to_bulk_send_started_median_ms: sendStartStats.median,
+    queue_dequeue_to_bulk_send_started_p95_ms: sendStartStats.p95,
+    queue_dequeue_to_bulk_send_started_max_ms: sendStartStats.max,
+    bulk_send_started_to_bulk_send_resolved_avg_ms: sendResolveStats.avg,
+    bulk_send_started_to_bulk_send_resolved_median_ms: sendResolveStats.median,
+    bulk_send_started_to_bulk_send_resolved_p95_ms: sendResolveStats.p95,
+    bulk_send_started_to_bulk_send_resolved_max_ms: sendResolveStats.max,
+    send_p95_ms: sendResolveStats.p95,
+    send_max_ms: sendResolveStats.max,
+    frames_sent: window.framesSent,
+    frames_enqueued: window.framesEnqueued,
+    payload_bytes_sent: window.payloadBytesSent,
+    payload_bytes_per_second: Math.round(window.payloadBytesSent / (BRIDGE_BULK_SEND_SAMPLE_WINDOW_MS / 1000)),
+    payload_bytes_enqueued: window.payloadBytesEnqueued,
+    payload_bytes_enqueued_per_second: Math.round(window.payloadBytesEnqueued / (BRIDGE_BULK_SEND_SAMPLE_WINDOW_MS / 1000)),
+    inter_enqueue_gap_p95_ms: interEnqueueGapStats.p95,
+    inter_enqueue_gap_max_ms: interEnqueueGapStats.max,
+    send_failures: window.sendFailures,
+    queue_clears: window.queueClears,
+    queue_depth: state.bulkSendQueue.length,
+    queued_bytes: state.bulkQueuedBytes,
+    oldest_queued_age_ms: getBulkQueueOldestAgeMs(),
+    in_flight: Math.max(0, state.bulkQueueInFlight),
+    in_flight_bytes: Math.max(0, state.bulkQueueInFlightBytes),
+    configured_concurrency: configuredConcurrency,
+    effective_concurrency: effectiveConcurrency,
+    in_flight_max: window.inFlightMax,
+    in_flight_bytes_max: window.inFlightBytesMax,
+    worker_utilization_percent: workerUtilizationPercent,
+    worker_idle_slot_samples: window.workerIdleSlotSamples,
+    worker_saturation_percent: workerSaturationPercent,
+    drain_wake_count: window.drainWakeCount,
+    send_mode: getBulkSendMode(),
+    send_mode_fanout_frames: window.sendModeFanoutFrames,
+    send_mode_round_robin_frames: window.sendModeRoundRobinFrames,
+    send_mode_single_frames: window.sendModeSingleFrames,
+    send_mode_redundant2_frames: window.sendModeRedundant2Frames,
+    send_mode_fallback_frames: window.sendModeFallbackFrames,
+    sample_window_ms: BRIDGE_BULK_SEND_SAMPLE_WINDOW_MS
+  });
+}
+
+function recordBridgeMessageReceived(channel, payloadLength) {
+  const bytes = Number.isFinite(payloadLength) ? Math.max(0, Math.round(payloadLength)) : 0;
+  const nowMs = Date.now();
+  const window = state.bridgeTransportHealthSummaryWindow;
+
+  if (channel === 'media') {
+    window.mediaMessagesReceivedSinceLast += 1;
+    window.mediaBytesReceivedSinceLast += bytes;
+    state.mediaLastMessageReceivedAtMs = nowMs;
+    return;
+  }
+
+  if (channel === 'bulk') {
+    window.bulkMessagesReceivedSinceLast += 1;
+    window.bulkBytesReceivedSinceLast += bytes;
+    state.bulkLastMessageReceivedAtMs = nowMs;
+    return;
+  }
+
+  window.controlMessagesReceivedSinceLast += 1;
+  window.controlBytesReceivedSinceLast += bytes;
+  state.controlLastMessageReceivedAtMs = nowMs;
+}
+
+function getBridgeChannelLastReceivedAgeMs(channel) {
+  const lastReceivedAtMs = channel === 'media'
+    ? state.mediaLastMessageReceivedAtMs
+    : channel === 'bulk'
+      ? state.bulkLastMessageReceivedAtMs
+      : state.controlLastMessageReceivedAtMs;
+
+  if (!lastReceivedAtMs) {
+    return -1;
+  }
+
+  return Math.max(0, Date.now() - lastReceivedAtMs);
+}
+
 function emitBridgeTransportHealthSummary() {
   const window = state.bridgeTransportHealthSummaryWindow;
   const readyEmitted = Boolean(state.readyEmitted && state.controlReady && state.mediaReady && state.bulkReady);
@@ -781,6 +1201,24 @@ function emitBridgeTransportHealthSummary() {
     control_subclients: state.controlNumSubClients,
     media_subclients: state.mediaNumSubClients,
     bulk_subclients: state.bulkNumSubClients,
+    bulk_send_concurrency: state.bulkSendConcurrency,
+    control_messages_received_since_last: window.controlMessagesReceivedSinceLast,
+    media_messages_received_since_last: window.mediaMessagesReceivedSinceLast,
+    bulk_messages_received_since_last: window.bulkMessagesReceivedSinceLast,
+    total_messages_received_since_last:
+      window.controlMessagesReceivedSinceLast +
+      window.mediaMessagesReceivedSinceLast +
+      window.bulkMessagesReceivedSinceLast,
+    control_bytes_received_since_last: window.controlBytesReceivedSinceLast,
+    media_bytes_received_since_last: window.mediaBytesReceivedSinceLast,
+    bulk_bytes_received_since_last: window.bulkBytesReceivedSinceLast,
+    total_bytes_received_since_last:
+      window.controlBytesReceivedSinceLast +
+      window.mediaBytesReceivedSinceLast +
+      window.bulkBytesReceivedSinceLast,
+    control_last_received_age_ms: getBridgeChannelLastReceivedAgeMs('control'),
+    media_last_received_age_ms: getBridgeChannelLastReceivedAgeMs('media'),
+    bulk_last_received_age_ms: getBridgeChannelLastReceivedAgeMs('bulk'),
     sample_window_ms: BRIDGE_TRANSPORT_HEALTH_SAMPLE_WINDOW_MS
   });
 }
@@ -795,6 +1233,39 @@ function startBridgeMediaSendSummaryMonitor() {
       resetBridgeMediaSendSummaryWindow();
     }
   }, BRIDGE_MEDIA_SEND_SAMPLE_WINDOW_MS);
+
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
+}
+
+function startBridgeControlSendSummaryMonitor() {
+  const timer = setInterval(() => {
+    try {
+      emitBridgeControlSendSummary();
+    } catch (error) {
+      logStderr(`Bridge control send summary failed: ${safeErrorMessage(error)}`);
+    } finally {
+      resetBridgeControlSendSummaryWindow();
+    }
+  }, BRIDGE_CONTROL_SEND_SAMPLE_WINDOW_MS);
+
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
+}
+
+function startBridgeBulkSendSummaryMonitor() {
+  const timer = setInterval(() => {
+    try {
+      emitBulkQueueState(false);
+      emitBridgeBulkSendSummary();
+    } catch (error) {
+      logStderr(`Bridge bulk send summary failed: ${safeErrorMessage(error)}`);
+    } finally {
+      resetBridgeBulkSendSummaryWindow();
+    }
+  }, BRIDGE_BULK_SEND_SAMPLE_WINDOW_MS);
 
   if (typeof timer.unref === 'function') {
     timer.unref();
@@ -974,6 +1445,128 @@ function normalizeSubClientCount(value, fallback = DEFAULT_NUM_SUBCLIENTS) {
   return Math.min(MAX_NUM_SUBCLIENTS, Math.max(MIN_NUM_SUBCLIENTS, parsed));
 }
 
+function normalizeBulkSendConcurrency(value, fallback = DEFAULT_BULK_SEND_CONCURRENCY) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(MAX_BULK_SEND_CONCURRENCY, Math.max(MIN_BULK_SEND_CONCURRENCY, parsed));
+}
+
+function normalizeBulkSendMode(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/-/g, '_');
+  if (normalized === BULK_SEND_MODE_ROUND_ROBIN || normalized === 'roundrobin') {
+    return BULK_SEND_MODE_ROUND_ROBIN;
+  }
+
+  if (normalized === BULK_SEND_MODE_SINGLE || normalized === 'single_client' || normalized === 'singleclient') {
+    return BULK_SEND_MODE_SINGLE;
+  }
+
+  if (normalized === BULK_SEND_MODE_REDUNDANT2 || normalized === 'redundant_2' || normalized === 'dual' || normalized === 'dual_round_robin') {
+    return BULK_SEND_MODE_REDUNDANT2;
+  }
+
+  return BULK_SEND_MODE_FANOUT;
+}
+
+function getConfiguredBulkSendMode() {
+  return normalizeBulkSendMode(process.env.NLINK_NKN_BULK_SEND_MODE || DEFAULT_BULK_SEND_MODE);
+}
+
+function getBulkSendMode() {
+  return normalizeBulkSendMode(state.bulkSendMode || getConfiguredBulkSendMode());
+}
+
+function clearControlSendQueue(reason) {
+  if (state.controlSendQueue.length > 0) {
+    state.controlQueueClearedSinceLast += state.controlSendQueue.length;
+    state.bridgeControlSendSummaryWindow.queueClears += state.controlSendQueue.length;
+  }
+
+  state.controlSendQueue = [];
+  state.controlQueuedBytes = 0;
+  logStderr(`Control queue cleared (${reason})`);
+}
+
+function enqueueControlSend(destination, payload, binarySendFrameObservedUtcMs = 0) {
+  const normalizedPayload = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+  const queueEnqueuedUtcMs = Date.now();
+  state.controlSendQueue.push({
+    destination,
+    payload: normalizedPayload,
+    queuedAtMs: queueEnqueuedUtcMs,
+    queueEnqueuedUtcMs,
+    transientRetryAttempt: 0,
+    binarySendFrameObservedUtcMs: Number.isFinite(binarySendFrameObservedUtcMs)
+      ? Math.max(0, Math.round(binarySendFrameObservedUtcMs))
+      : 0
+  });
+  state.controlQueuedBytes += normalizedPayload.length;
+  if (binarySendFrameObservedUtcMs > 0) {
+    recordBridgeMediaSendDuration(
+      state.bridgeControlSendSummaryWindow.binarySendFrameObservedToQueueEnqueueMs,
+      queueEnqueuedUtcMs - binarySendFrameObservedUtcMs);
+  }
+  scheduleControlQueueDrain();
+}
+
+function scheduleControlQueueDrain() {
+  if (state.controlQueueDrainActive || state.shuttingDown) {
+    return;
+  }
+
+  state.controlQueueDrainActive = true;
+  void drainControlQueue().finally(() => {
+    state.controlQueueDrainActive = false;
+    if (state.controlSendQueue.length > 0 && !state.shuttingDown) {
+      scheduleControlQueueDrain();
+    }
+  });
+}
+
+async function drainControlQueue() {
+  while (state.controlSendQueue.length > 0 && !state.shuttingDown) {
+    const item = state.controlSendQueue.shift();
+    if (!item) {
+      break;
+    }
+
+    state.controlQueuedBytes = Math.max(0, state.controlQueuedBytes - item.payload.length);
+    state.controlQueueInFlight = true;
+    const queueDequeuedUtcMs = Date.now();
+    if (item.queueEnqueuedUtcMs > 0) {
+      recordBridgeMediaSendDuration(
+        state.bridgeControlSendSummaryWindow.queueEnqueueToQueueDequeueMs,
+        queueDequeuedUtcMs - item.queueEnqueuedUtcMs);
+    }
+    const controlSendStartedUtcMs = Date.now();
+    recordBridgeMediaSendDuration(
+      state.bridgeControlSendSummaryWindow.queueDequeueToControlSendStartedMs,
+      controlSendStartedUtcMs - queueDequeuedUtcMs);
+    try {
+      await callClientMethodWithTimeout(
+        'send',
+        [item.destination, item.payload, { noReply: true }],
+        'control',
+        getControlSendTimeoutMs());
+      state.bridgeControlSendSummaryWindow.framesSent += 1;
+      state.bridgeControlSendSummaryWindow.payloadBytesSent += item.payload.length;
+      state.bridgeTransportHealthSummaryWindow.framesSentSinceLast += 1;
+    } catch (error) {
+      state.bridgeControlSendSummaryWindow.sendFailures += 1;
+      logStderr(`Control queue send failed: ${safeErrorMessage(error)}`);
+    } finally {
+      const controlSendResolvedUtcMs = Date.now();
+      recordBridgeMediaSendDuration(
+        state.bridgeControlSendSummaryWindow.controlSendStartedToControlSendResolvedMs,
+        controlSendResolvedUtcMs - controlSendStartedUtcMs);
+      state.controlQueueInFlight = false;
+    }
+  }
+}
+
 function hasCommandValue(command, key) {
   return command[key] !== undefined && command[key] !== null && String(command[key]).trim() !== '';
 }
@@ -984,10 +1577,12 @@ function resolveSubClientTopology(command) {
   const mediaFallback = hasControlOverride ? controlCount : DEFAULT_MEDIA_NUM_SUBCLIENTS;
   const mediaCount = normalizeSubClientCount(command.mediaNumSubClients, mediaFallback);
   const bulkCount = normalizeSubClientCount(command.bulkNumSubClients, controlCount);
+  const bulkSendConcurrency = normalizeBulkSendConcurrency(command.bulkSendConcurrency, DEFAULT_BULK_SEND_CONCURRENCY);
   return {
     control: controlCount,
     media: mediaCount,
-    bulk: bulkCount
+    bulk: bulkCount,
+    bulkSendConcurrency
   };
 }
 
@@ -1176,6 +1771,362 @@ async function drainScreenShareQueue() {
       state.screenShareQueueInFlight = false;
       emitScreenShareQueueState(true);
     }
+  }
+}
+
+function getBulkQueueOldestAgeMs(nowMs = Date.now()) {
+  if (!state.bulkSendQueue.length) {
+    return 0;
+  }
+
+  return Math.max(0, nowMs - state.bulkSendQueue[0].queuedAtMs);
+}
+
+function getEffectiveBulkSendConcurrency() {
+  return normalizeBulkSendConcurrency(state.bulkSendConcurrency, DEFAULT_BULK_SEND_CONCURRENCY);
+}
+
+function getReadyBulkClientIds() {
+  const client = state.bulkClient;
+  if (!client) {
+    return [];
+  }
+
+  if (typeof client.readyClientIDs === 'function') {
+    try {
+      const ids = client.readyClientIDs();
+      if (Array.isArray(ids)) {
+        return ids
+          .map((id) => String(id))
+          .filter((id) => id.length > 0 || id === '');
+      }
+    } catch (error) {
+      logStderr(`Bulk readyClientIDs failed: ${safeErrorMessage(error)}`);
+    }
+  }
+
+  if (client.clients && typeof client.clients === 'object') {
+    return Object.keys(client.clients).filter((id) => {
+      const subClient = client.clients[id];
+      return subClient && subClient.isReady !== false;
+    });
+  }
+
+  return [];
+}
+
+function getBulkClientIdSequence() {
+  const ids = getReadyBulkClientIds().sort();
+  if (ids.length === 0) {
+    return [];
+  }
+
+  const start = Math.max(0, state.bulkRoundRobinCursor % ids.length);
+  const ordered = ids.slice(start).concat(ids.slice(0, start));
+  state.bulkRoundRobinCursor = (start + 1) % ids.length;
+  return ordered;
+}
+
+function createNknMessageId() {
+  if (cryptoRuntime && typeof cryptoRuntime.randomBytes === 'function') {
+    return cryptoRuntime.randomBytes(16);
+  }
+
+  return undefined;
+}
+
+async function sendBulkWithSingleClient(destination, payload, mode) {
+  const client = state.bulkClient;
+  if (!client || typeof client.sendWithClient !== 'function') {
+    throw new Error('bulk sendWithClient is not available');
+  }
+
+  const ids = mode === BULK_SEND_MODE_SINGLE
+    ? getReadyBulkClientIds().sort().slice(0, 1)
+    : getBulkClientIdSequence();
+  if (ids.length === 0) {
+    throw new Error('no ready bulk subclients');
+  }
+
+  const failures = [];
+  for (const id of ids) {
+    try {
+      await client.sendWithClient(id, destination, payload, { noReply: true });
+      if (mode === BULK_SEND_MODE_SINGLE) {
+        state.bridgeBulkSendSummaryWindow.sendModeSingleFrames += 1;
+      } else {
+        state.bridgeBulkSendSummaryWindow.sendModeRoundRobinFrames += 1;
+      }
+      return;
+    } catch (error) {
+      failures.push(`${id || '(original)'}:${safeErrorMessage(error)}`);
+    }
+  }
+
+  throw new Error(`bulk single-client send failed: ${failures.join(', ')}`);
+}
+
+async function sendBulkWithRedundant2(destination, payload) {
+  const client = state.bulkClient;
+  if (!client || typeof client.sendWithClient !== 'function') {
+    throw new Error('bulk sendWithClient is not available');
+  }
+
+  const ids = getBulkClientIdSequence();
+  if (ids.length === 0) {
+    throw new Error('no ready bulk subclients');
+  }
+
+  const selected = ids.length === 1 ? ids : ids.slice(0, 2);
+  const options = { noReply: true };
+  const messageId = createNknMessageId();
+  if (messageId) {
+    options.messageId = messageId;
+  }
+
+  const results = await Promise.allSettled(
+    selected.map((id) => client.sendWithClient(id, destination, payload, options)));
+  if (results.some((result) => result.status === 'fulfilled')) {
+    state.bridgeBulkSendSummaryWindow.sendModeRedundant2Frames += 1;
+    return;
+  }
+
+  const failures = results.map((result, index) => {
+    const id = selected[index] || '(original)';
+    return result.status === 'rejected'
+      ? `${id}:${safeErrorMessage(result.reason)}`
+      : `${id}:unknown`;
+  });
+  throw new Error(`bulk redundant2 send failed: ${failures.join(', ')}`);
+}
+
+async function sendBulkPayload(destination, payload) {
+  const mode = getBulkSendMode();
+  if (mode === BULK_SEND_MODE_REDUNDANT2) {
+    try {
+      await sendBulkWithRedundant2(destination, payload);
+      return;
+    } catch (error) {
+      state.bridgeBulkSendSummaryWindow.sendModeFallbackFrames += 1;
+      logStderr(`Bulk ${mode} send fell back to fanout: ${safeErrorMessage(error)}`);
+    }
+  }
+
+  if (mode === BULK_SEND_MODE_ROUND_ROBIN || mode === BULK_SEND_MODE_SINGLE) {
+    try {
+      await sendBulkWithSingleClient(destination, payload, mode);
+      return;
+    } catch (error) {
+      state.bridgeBulkSendSummaryWindow.sendModeFallbackFrames += 1;
+      logStderr(`Bulk ${mode} send fell back to fanout: ${safeErrorMessage(error)}`);
+    }
+  }
+
+  await callClientMethod('send', [destination, payload, { noReply: true }], 'bulk');
+  state.bridgeBulkSendSummaryWindow.sendModeFanoutFrames += 1;
+}
+
+function isTransientBulkSendError(error) {
+  const message = safeErrorMessage(error).toLowerCase();
+  return message.includes('client not ready') ||
+    message.includes('no ready bulk subclients') ||
+    message.includes('not connected') ||
+    message.includes('not ready');
+}
+
+function scheduleBulkSendRetry(item, error) {
+  const nextAttempt = Math.max(0, Number(item.transientRetryAttempt) || 0) + 1;
+  if (nextAttempt > BULK_QUEUE_TRANSIENT_RETRY_MAX_ATTEMPTS || state.shuttingDown) {
+    return false;
+  }
+
+  item.transientRetryAttempt = nextAttempt;
+  logStderr(
+    `Bulk queue transient send retry scheduled ` +
+    `(attempt=${nextAttempt}, delay_ms=${BULK_QUEUE_TRANSIENT_RETRY_DELAY_MS}, reason=${safeErrorMessage(error)})`);
+  setTimeout(() => {
+    if (state.shuttingDown) {
+      return;
+    }
+
+    state.bulkSendQueue.unshift(item);
+    state.bulkQueuedBytes += item.payload.length;
+    emitBulkQueueState(true);
+    scheduleBulkQueueDrain();
+  }, BULK_QUEUE_TRANSIENT_RETRY_DELAY_MS);
+  return true;
+}
+
+function recordBulkInFlightSnapshot() {
+  const window = state.bridgeBulkSendSummaryWindow;
+  const inFlight = Math.max(0, state.bulkQueueInFlight);
+  const inFlightBytes = Math.max(0, state.bulkQueueInFlightBytes);
+  window.inFlightMax = Math.max(window.inFlightMax, inFlight);
+  window.inFlightBytesMax = Math.max(window.inFlightBytesMax, inFlightBytes);
+  window.inFlightSampleSum += inFlight;
+  window.inFlightSampleCount += 1;
+  const effectiveConcurrency = getEffectiveBulkSendConcurrency();
+  window.workerIdleSlotSamples += Math.max(0, effectiveConcurrency - inFlight);
+  if (effectiveConcurrency > 0 && inFlight >= effectiveConcurrency) {
+    window.workerSaturatedSampleCount += 1;
+  }
+}
+
+function buildBulkQueueState() {
+  const queueDepth = state.bulkSendQueue.length;
+  const queuedBytes = state.bulkQueuedBytes;
+  const oldestQueuedAgeMs = getBulkQueueOldestAgeMs();
+  const inFlight = Math.max(0, state.bulkQueueInFlight);
+  const congested =
+    queueDepth >= BULK_QUEUE_CONGESTED_MESSAGES ||
+    queuedBytes >= BULK_QUEUE_CONGESTED_BYTES ||
+    oldestQueuedAgeMs >= BULK_QUEUE_CONGESTED_AGE_MS;
+  const severe =
+    queueDepth >= BULK_QUEUE_SEVERE_MESSAGES ||
+    queuedBytes >= BULK_QUEUE_SEVERE_BYTES ||
+    oldestQueuedAgeMs >= BULK_QUEUE_SEVERE_AGE_MS;
+
+  return {
+    queueDepth,
+    queuedBytes,
+    oldestQueuedAgeMs,
+    inFlight,
+    inFlightBytes: Math.max(0, state.bulkQueueInFlightBytes),
+    configuredConcurrency: state.bulkSendConcurrency,
+    effectiveConcurrency: getEffectiveBulkSendConcurrency(),
+    congested,
+    severe,
+    clearedSinceLast: state.bulkQueueClearedSinceLast
+  };
+}
+
+function emitBulkQueueState(force = false) {
+  const snapshot = buildBulkQueueState();
+  const key = JSON.stringify([
+    snapshot.queueDepth,
+    snapshot.queuedBytes,
+    snapshot.oldestQueuedAgeMs > 0 ? 1 : 0,
+    snapshot.inFlight,
+    snapshot.inFlightBytes,
+    snapshot.configuredConcurrency,
+    snapshot.effectiveConcurrency,
+    snapshot.congested ? 1 : 0,
+    snapshot.severe ? 1 : 0,
+    snapshot.clearedSinceLast
+  ]);
+  if (!force &&
+      key === state.lastEmittedBulkQueueStateKey &&
+      Date.now() - state.lastEmittedBulkQueueStateAt < 250) {
+    return;
+  }
+
+  state.lastEmittedBulkQueueStateKey = key;
+  state.lastEmittedBulkQueueStateAt = Date.now();
+  emitJson({
+    event: 'bulk_queue_state',
+    ...snapshot
+  });
+  state.bulkQueueClearedSinceLast = 0;
+}
+
+function clearBulkSendQueue(reason) {
+  if (state.bulkSendQueue.length > 0) {
+    state.bulkQueueClearedSinceLast += state.bulkSendQueue.length;
+    state.bridgeBulkSendSummaryWindow.queueClears += state.bulkSendQueue.length;
+  }
+
+  state.bulkSendQueue = [];
+  state.bulkQueuedBytes = 0;
+  logStderr(`Bulk queue cleared (${reason})`);
+  emitBulkQueueState(true);
+}
+
+function enqueueBulkSend(destination, payload, binarySendFrameObservedUtcMs = 0) {
+  const normalizedPayload = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+  const queueEnqueuedUtcMs = Date.now();
+  state.bulkSendQueue.push({
+    destination,
+    payload: normalizedPayload,
+    queuedAtMs: queueEnqueuedUtcMs,
+    queueEnqueuedUtcMs,
+    binarySendFrameObservedUtcMs: Number.isFinite(binarySendFrameObservedUtcMs)
+      ? Math.max(0, Math.round(binarySendFrameObservedUtcMs))
+      : 0
+  });
+  state.bulkQueuedBytes += normalizedPayload.length;
+  const window = state.bridgeBulkSendSummaryWindow;
+  window.framesEnqueued += 1;
+  window.payloadBytesEnqueued += normalizedPayload.length;
+  if (window.lastEnqueueUtcMs > 0) {
+    recordBridgeMediaSendDuration(window.interEnqueueGapMs, queueEnqueuedUtcMs - window.lastEnqueueUtcMs);
+  }
+  window.lastEnqueueUtcMs = queueEnqueuedUtcMs;
+  if (binarySendFrameObservedUtcMs > 0) {
+    recordBridgeMediaSendDuration(
+      state.bridgeBulkSendSummaryWindow.binarySendFrameObservedToQueueEnqueueMs,
+      queueEnqueuedUtcMs - binarySendFrameObservedUtcMs);
+  }
+  emitBulkQueueState(true);
+  scheduleBulkQueueDrain();
+}
+
+function scheduleBulkQueueDrain() {
+  if (state.shuttingDown) {
+    return;
+  }
+
+  state.bridgeBulkSendSummaryWindow.drainWakeCount += 1;
+  while (state.bulkSendQueue.length > 0 &&
+      state.bulkQueueInFlight < getEffectiveBulkSendConcurrency() &&
+      !state.shuttingDown) {
+    const item = state.bulkSendQueue.shift();
+    if (!item) {
+      break;
+    }
+
+    state.bulkQueuedBytes = Math.max(0, state.bulkQueuedBytes - item.payload.length);
+    state.bulkQueueInFlight += 1;
+    state.bulkQueueInFlightBytes += item.payload.length;
+    recordBulkInFlightSnapshot();
+    emitBulkQueueState(true);
+    void sendBulkQueueItem(item).finally(() => {
+      state.bulkQueueInFlight = Math.max(0, state.bulkQueueInFlight - 1);
+      state.bulkQueueInFlightBytes = Math.max(0, state.bulkQueueInFlightBytes - item.payload.length);
+      recordBulkInFlightSnapshot();
+      emitBulkQueueState(true);
+      scheduleBulkQueueDrain();
+    });
+  }
+}
+
+async function sendBulkQueueItem(item) {
+  const queueDequeuedUtcMs = Date.now();
+  if (item.queueEnqueuedUtcMs > 0) {
+    recordBridgeMediaSendDuration(
+      state.bridgeBulkSendSummaryWindow.queueEnqueueToQueueDequeueMs,
+      queueDequeuedUtcMs - item.queueEnqueuedUtcMs);
+  }
+  const bulkSendStartedUtcMs = Date.now();
+  recordBridgeMediaSendDuration(
+    state.bridgeBulkSendSummaryWindow.queueDequeueToBulkSendStartedMs,
+    bulkSendStartedUtcMs - queueDequeuedUtcMs);
+  try {
+    await sendBulkPayload(item.destination, item.payload);
+    state.bridgeBulkSendSummaryWindow.framesSent += 1;
+    state.bridgeBulkSendSummaryWindow.payloadBytesSent += item.payload.length;
+    state.bridgeTransportHealthSummaryWindow.framesSentSinceLast += 1;
+  } catch (error) {
+    if (isTransientBulkSendError(error) && scheduleBulkSendRetry(item, error)) {
+      return;
+    }
+
+    state.bridgeBulkSendSummaryWindow.sendFailures += 1;
+    logStderr(`Bulk queue send failed: ${safeErrorMessage(error)}`);
+  } finally {
+    const bulkSendResolvedUtcMs = Date.now();
+    recordBridgeMediaSendDuration(
+      state.bridgeBulkSendSummaryWindow.bulkSendStartedToBulkSendResolvedMs,
+      bulkSendResolvedUtcMs - bulkSendStartedUtcMs);
   }
 }
 
@@ -1453,6 +2404,7 @@ function attachClientHandlers(client, channel) {
   const onMessage = (...args) => {
     try {
       const msg = normalizeMessageEvent(args);
+      recordBridgeMessageReceived(channel, Buffer.isBuffer(msg.payload) ? msg.payload.length : 0);
       const bridgeMessageObservedUtcMs = channel === 'media' ? Date.now() : 0;
       emitBinaryMessage(
         channel,
@@ -1566,11 +2518,16 @@ async function closeClient() {
   state.controlNumSubClients = DEFAULT_NUM_SUBCLIENTS;
   state.mediaNumSubClients = DEFAULT_MEDIA_NUM_SUBCLIENTS;
   state.bulkNumSubClients = DEFAULT_NUM_SUBCLIENTS;
+  state.bulkSendConcurrency = DEFAULT_BULK_SEND_CONCURRENCY;
+  state.bulkSendMode = getConfiguredBulkSendMode();
+  state.bulkRoundRobinCursor = 0;
   state.connectAttemptId = 0;
   state.clientReadyAtMs = 0;
   state.screenShareQueueMode = 'normal';
   state.screenShareQueueGeneration = 0;
+  clearControlSendQueue('close_client');
   clearScreenShareQueue('close_client');
+  clearBulkSendQueue('close_client');
 
   await closeSingleClient(controlClient);
   if (mediaClient && mediaClient !== controlClient) {
@@ -1595,6 +2552,9 @@ async function handleConnect(command) {
   state.controlNumSubClients = subClientTopology.control;
   state.mediaNumSubClients = subClientTopology.media;
   state.bulkNumSubClients = subClientTopology.bulk;
+  state.bulkSendConcurrency = subClientTopology.bulkSendConcurrency;
+  state.bulkSendMode = getConfiguredBulkSendMode();
+  state.bulkRoundRobinCursor = 0;
   const baseOptions = {
     // MultiClient reliability defaults inspired by production NKN apps.
     numSubClients: subClientTopology.control,
@@ -1643,7 +2603,7 @@ async function handleConnect(command) {
     }
   }
 
-  logStderr(`Creating NKN clients (rpc=${baseOptions.rpcServerAddr || 'default'}, control_subclients=${subClientTopology.control}, media_subclients=${subClientTopology.media}, bulk_subclients=${subClientTopology.bulk})`);
+  logStderr(`Creating NKN clients (rpc=${baseOptions.rpcServerAddr || 'default'}, control_subclients=${subClientTopology.control}, media_subclients=${subClientTopology.media}, bulk_subclients=${subClientTopology.bulk}, bulk_send_concurrency=${subClientTopology.bulkSendConcurrency}, bulk_send_mode=${state.bulkSendMode})`);
   const ClientCtor = nkn.MultiClient || nkn.Client;
   if (typeof ClientCtor !== 'function') {
     throw new Error('NKN Client constructor not found in SDK.');
@@ -1682,13 +2642,18 @@ async function handleConnect(command) {
   if (rpcCandidates.length > 1) {
     const connectAttemptId = Date.now() + Math.random();
     state.connectAttemptId = connectAttemptId;
-    tryFallbackRpcCandidates(connectAttemptId, command, rpcCandidates.slice(1));
+    const fallbackDelayMs = clampNumber(
+      command.fallbackDelayMs,
+      DEFAULT_CONNECT_READY_TIMEOUT_MS,
+      MIN_CONNECT_FALLBACK_DELAY_MS,
+      MAX_CONNECT_FALLBACK_DELAY_MS);
+    tryFallbackRpcCandidates(connectAttemptId, command, rpcCandidates.slice(1), fallbackDelayMs);
   }
 }
 
-async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remainingRpcCandidates) {
+async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remainingRpcCandidates, fallbackDelayMs = DEFAULT_CONNECT_READY_TIMEOUT_MS) {
   for (const rpc of remainingRpcCandidates) {
-    await delay(DEFAULT_CONNECT_READY_TIMEOUT_MS);
+    await delay(fallbackDelayMs);
 
     if (state.shuttingDown) {
       return;
@@ -1710,6 +2675,7 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
           event: 'rpc_fallback_attempt',
           connectId: state.connectId || null,
           rpc,
+          fallbackDelayMs,
           ts: Date.now()
         });
       }
@@ -1723,6 +2689,9 @@ async function tryFallbackRpcCandidates(connectAttemptId, originalCommand, remai
       state.controlNumSubClients = subClientTopology.control;
       state.mediaNumSubClients = subClientTopology.media;
       state.bulkNumSubClients = subClientTopology.bulk;
+      state.bulkSendConcurrency = subClientTopology.bulkSendConcurrency;
+      state.bulkSendMode = getConfiguredBulkSendMode();
+      state.bulkRoundRobinCursor = 0;
       const baseOptions = {
         numSubClients: subClientTopology.control,
         originalClient: true,
@@ -1810,6 +2779,34 @@ async function callClientMethod(methodName, args, channel = 'control') {
   }
 
   return result;
+}
+
+async function callClientMethodWithTimeout(methodName, args, channel = 'control', timeoutMs = DEFAULT_CONTROL_SEND_TIMEOUT_MS) {
+  const normalizedTimeoutMs = clampNumber(
+    timeoutMs,
+    DEFAULT_CONTROL_SEND_TIMEOUT_MS,
+    MIN_CONTROL_SEND_TIMEOUT_MS,
+    MAX_CONTROL_SEND_TIMEOUT_MS);
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${methodName}_timeout_after_${normalizedTimeoutMs}ms`));
+    }, normalizedTimeoutMs);
+    if (timer && typeof timer.unref === 'function') {
+      timer.unref();
+    }
+  });
+
+  try {
+    return await Promise.race([
+      callClientMethod(methodName, args, channel),
+      timeout
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 async function handleSubscribe(command) {
@@ -1928,7 +2925,12 @@ async function handleBinarySendFrame(frame) {
     return;
   }
 
-  await callClientMethod('send', [destination, frame.payload, { noReply: true }], frame.channel);
+  if (frame.channel === 'bulk') {
+    enqueueBulkSend(destination, frame.payload, Date.now());
+    return;
+  }
+
+  enqueueControlSend(destination, frame.payload, Date.now());
 }
 
 async function handleSetScreenSharePolicy(command) {

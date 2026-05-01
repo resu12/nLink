@@ -8,6 +8,7 @@ using Avalonia.Input.Platform;
 using Avalonia.Platform.Storage;
 using NLink.App.Services;
 using NLink.App.ViewModels;
+using NLink.Core.Logging;
 
 namespace NLink.App.Views;
 
@@ -55,18 +56,33 @@ public partial class HelpeePageView : UserControl
 
         try
         {
+            LocalOperationalLog.Info("HelpeeUi", "event=file_transfer_picker_requested; role=Helpee");
             var selection = await NativeFileTransferPicker.PickSingleFileAsync(this);
             if (selection is null)
             {
+                LocalOperationalLog.Info("HelpeeUi", "event=file_transfer_picker_canceled; role=Helpee");
                 return;
             }
 
+            LocalOperationalLog.Info(
+                "HelpeeUi",
+                $"event=file_transfer_picker_selected; role=Helpee; file_name_len={selection.Descriptor.FileName?.Length ?? 0}; file_size_bytes={selection.Descriptor.FileSizeBytes}");
             await vm.StartSendFileAsync(selection.Descriptor, selection.OpenReadStreamAsync);
         }
-        catch
+        catch (Exception ex)
         {
+            LocalOperationalLog.Info(
+                "HelpeeUi",
+                $"event=file_transfer_picker_failed; role=Helpee; ex={ex.GetType().Name}; message={SanitizeForLog(ex.Message)}");
             vm.NotifySendFileError("Couldn't open the selected file.");
         }
+    }
+
+    private static string SanitizeForLog(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value)
+            ? "(none)"
+            : value.Replace(';', ',').Replace('\r', ' ').Replace('\n', ' ').Trim();
     }
 
     private void ChatDraftTextBox_KeyDown(object? sender, KeyEventArgs e)

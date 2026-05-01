@@ -67,6 +67,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly IInviteTokenValidator inviteTokenValidator;
     private readonly IInviteValidationThrottle inviteValidationThrottle;
     private readonly ISessionHandshakeReplayCache handshakeReplayCache;
+    private readonly HelpRequestAdmissionGuard helpRequestAdmissionGuard = new();
     private readonly LruMessageIdCache seenMessageIds = new(500);
     private readonly ConcurrentDictionary<string, PendingAckWait> pendingAcks = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim outboundSendGate = new(1, 1);
@@ -110,7 +111,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private const int FileTransferInboundReplayWindowSize = 32768;
     private const long FileTransferInboundReplayMaxForwardAdvance = 131072;
 
-    public bool SupportsFileTransferV3Streaming => true;
+    public bool SupportsFileTransferV4Streaming => true;
 
     public FileTransferTransportProfileKind FileTransferTransportProfileKind => FileTransferTransportProfileKind.ConservativeNknStartup;
 
@@ -254,11 +255,6 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     public event EventHandler<FileTransferAcceptReceivedEventArgs>? FileTransferAcceptReceived;
     public event EventHandler<FileTransferDeclineReceivedEventArgs>? FileTransferDeclineReceived;
     public event EventHandler<FileTransferSessionOpenReceivedEventArgs>? FileTransferSessionOpenReceived;
-    public event EventHandler<FileTransferStartReceivedEventArgs>? FileTransferStartReceived;
-    public event EventHandler<FileTransferChunkReceivedEventArgs>? FileTransferChunkReceived;
-    public event EventHandler<FileTransferWindowUpdateReceivedEventArgs>? FileTransferWindowUpdateReceived;
-    public event EventHandler<FileTransferMissingRangeReceivedEventArgs>? FileTransferMissingRangeReceived;
-    public event EventHandler<FileTransferPressureStateReceivedEventArgs>? FileTransferPressureStateReceived;
     public event EventHandler<FileTransferCancelReceivedEventArgs>? FileTransferCancelReceived;
     public event EventHandler<FileTransferErrorReceivedEventArgs>? FileTransferErrorReceived;
     public event EventHandler<FileTransferCompleteReceivedEventArgs>? FileTransferCompleteReceived;

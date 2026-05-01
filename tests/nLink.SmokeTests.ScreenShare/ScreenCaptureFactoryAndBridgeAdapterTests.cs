@@ -1,5 +1,6 @@
 using NLink.App.Services.ScreenCapture;
 using NLink.Core;
+using NLink.Core.Logging;
 using NLink.Core.ScreenShare;
 using NLink.Core.SessionConnect;
 using NLink.Core.SessionSecurity;
@@ -105,6 +106,36 @@ public sealed class ScreenCaptureFactoryAndBridgeAdapterTests : ScreenCaptureAbs
         Assert.False(received.State.IsSevere);
         Assert.Equal(BridgeScreenShareQueueMode.CatchUpOnly, received.State.Mode);
         Assert.Equal(received.State, capability.CurrentScreenShareQueueState);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void RealNknClientAdapter_BulkQueueEvents_UpdateSnapshotAndLog()
+    {
+        var options = NknTransportOptions.Load();
+        var identity = new NknIdentity("bulk-queue-state", "bulk-queue-state.fake");
+        using var adapter = new RealNknClientAdapter(identity, options);
+
+        adapter.HandleStdoutJsonLineForTests("{\"event\":\"bulk_queue_state\",\"queueDepth\":193,\"queuedBytes\":12582912,\"oldestQueuedAgeMs\":1001,\"inFlight\":true,\"clearedSinceLast\":2,\"congested\":true,\"severe\":true}");
+        adapter.HandleStdoutJsonLineForTests("{\"event\":\"bulk_queue_state\",\"queueDepth\":193,\"queuedBytes\":12582912,\"oldestQueuedAgeMs\":1001,\"inFlight\":3,\"inFlightBytes\":147456,\"configuredConcurrency\":4,\"effectiveConcurrency\":4,\"clearedSinceLast\":2,\"congested\":true,\"severe\":true}");
+        adapter.HandleStdoutJsonLineForTests("{\"event\":\"bridge_bulk_send_summary\",\"frames_sent\":5,\"send_failures\":1,\"queue_clears\":2,\"queue_depth\":3,\"queued_bytes\":4096,\"oldest_queued_age_ms\":12,\"in_flight\":3,\"in_flight_bytes\":147456,\"configured_concurrency\":4,\"effective_concurrency\":4,\"in_flight_max\":3,\"in_flight_bytes_max\":147456,\"worker_utilization_percent\":75,\"sample_window_ms\":2000}");
+
+        var state = adapter.GetBulkQueueStateForTests();
+        Assert.Equal(193, state.QueueDepth);
+        Assert.Equal(12582912, state.QueuedBytes);
+        Assert.Equal(1001, state.OldestQueuedAgeMs);
+        Assert.True(state.InFlight);
+        Assert.Equal(3, state.InFlightCount);
+        Assert.Equal(147456, state.InFlightBytes);
+        Assert.Equal(4, state.ConfiguredConcurrency);
+        Assert.Equal(4, state.EffectiveConcurrency);
+        Assert.Equal(2, state.ClearedSinceLast);
+        Assert.True(state.IsCongested);
+        Assert.True(state.IsSevere);
+
+        var logText = LocalOperationalLog.GetRecentLogText();
+        Assert.Contains("event=nkn_bridge_bulk_queue_state", logText, StringComparison.Ordinal);
+        Assert.Contains("event=nkn_bridge_bulk_send_summary", logText, StringComparison.Ordinal);
     }
 
 }

@@ -17,6 +17,8 @@ internal enum SessionPrivilegedActionKind
     FileTransferAcceptIncoming,
     FileTransferDeclineIncoming,
     FileTransferCancel,
+    FileTransferPause,
+    FileTransferResume,
     RemoteControlRequest,
     RemoteControlRespond,
     RemoteControlStop,
@@ -108,6 +110,12 @@ internal sealed class SessionRuntimeFileTransferHost
 
     public Task<FileTransferTransferSnapshot?> CancelTransferAsync(string transferId, string? reason, CancellationToken ct)
         => owner.CancelTransferCoreAsync(transferId, reason, ct);
+
+    public Task<FileTransferTransferSnapshot?> PauseTransferAsync(string transferId, string? reason, CancellationToken ct)
+        => owner.PauseTransferCoreAsync(transferId, reason, ct);
+
+    public Task<FileTransferTransferSnapshot?> ResumeTransferAsync(string transferId, string? reason, CancellationToken ct)
+        => owner.ResumeTransferCoreAsync(transferId, reason, ct);
 
     public void AttachTransport(ISignalingTransport nextTransport)
     {

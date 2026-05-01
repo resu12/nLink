@@ -1,4 +1,5 @@
 using System.IO;
+using NLink.Core.FileTransfer;
 using NLink.Core.SessionConnect;
 using NLink.Core.SessionSecurity;
 
@@ -154,6 +155,43 @@ public sealed class FileTransferSecurityGuardTests
     }
 
     [Fact]
+    public void ValidateReceiveMetadata_AllowsDefaultTwentyFiveGiBFileSize()
+    {
+        const long expectedDefaultMaxFileSizeBytes = 25L * 1024 * 1024 * 1024;
+        const int currentDefaultV4ChunkSizeBytes = 21 * 1024;
+        var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_200_000_000);
+        var guard = new SessionFileTransferGuard(() => nowUtc);
+        var state = CreateApprovedSecurityState(nowUtc, CapabilityGrant.FileTransfer);
+        var grant = CreateGrant(state, nowUtc, CapabilityGrant.FileTransfer);
+        var tempRoot = CreateTempRoot();
+
+        try
+        {
+            Assert.Equal(expectedDefaultMaxFileSizeBytes, FileTransferStoragePolicy.DefaultMaxFileSizeBytes);
+            Assert.True(
+                (FileTransferStoragePolicy.DefaultMaxFileSizeBytes + currentDefaultV4ChunkSizeBytes - 1) /
+                currentDefaultV4ChunkSizeBytes <= FileTransferProtocol.MaxChunkCountV4);
+
+            var result = guard.ValidateReceiveMetadata(
+                hasSecurityTransport: true,
+                securityState: state,
+                grant: grant,
+                descriptor: new FileTransferDescriptor(
+                    state.SessionId!.Value,
+                    state.HelperAddress!.Value,
+                    "large-allowed.bin",
+                    FileTransferStoragePolicy.DefaultMaxFileSizeBytes),
+                storagePolicy: new FileTransferStoragePolicy(tempRoot));
+
+            Assert.True(result.IsAllowed, result.Message);
+        }
+        finally
+        {
+            CleanupTempRoot(tempRoot);
+        }
+    }
+
+    [Fact]
     public void ValidateReceiveMetadata_RejectsSessionIdMismatch()
     {
         var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_200_000_000);
@@ -248,7 +286,7 @@ public sealed class FileTransferSecurityGuardTests
     }
 
     [Fact]
-    public async Task OpenReceiveWriteStream_CreatesFileWithinAllowedRoot_AndBlocksOverwrite()
+    public async Task OpenReceiveWriteStream_CreatesFileWithinAllowedRoot_AndNumbersDuplicateName()
     {
         var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_760_200_000_000);
         var guard = new SessionFileTransferGuard(() => nowUtc);
@@ -281,6 +319,9 @@ public sealed class FileTransferSecurityGuardTests
 
             await using (first.Handle!)
             {
+                Assert.True(first.Handle.Stream.CanRead);
+                Assert.True(first.Handle.Stream.CanSeek);
+                Assert.True(first.Handle.Stream.CanWrite);
                 await first.Handle.Stream.WriteAsync("hello"u8.ToArray());
                 Assert.True(File.Exists(first.Plan.TempPath));
                 Assert.False(File.Exists(first.Plan.FinalPath));
@@ -301,8 +342,19 @@ public sealed class FileTransferSecurityGuardTests
                     5),
                 storagePolicy: new FileTransferStoragePolicy(tempRoot));
 
-            Assert.False(second.IsAllowed);
-            Assert.Equal(FileTransferValidationFailure.OverwriteBlocked, second.Access.Failure);
+            Assert.True(second.IsAllowed);
+            Assert.NotNull(second.Plan);
+            Assert.NotNull(second.Handle);
+            Assert.Equal("report (1).txt", second.Plan!.SafeFileName);
+
+            await using (second.Handle!)
+            {
+                await second.Handle.Stream.WriteAsync("world"u8.ToArray());
+                await second.Handle.FinalizeAsync(CancellationToken.None);
+            }
+
+            Assert.True(File.Exists(Path.Combine(tempRoot, "report.txt")));
+            Assert.True(File.Exists(Path.Combine(tempRoot, "report (1).txt")));
         }
         finally
         {

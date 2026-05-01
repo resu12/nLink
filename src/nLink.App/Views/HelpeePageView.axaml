@@ -19,48 +19,6 @@
             <Setter Property="BorderBrush" Value="{StaticResource AppInputBorderBrush}"/>
         </Style>
 
-        <Style Selector="Button.action">
-            <Setter Property="Height" Value="64"/>
-            <Setter Property="FontSize" Value="20"/>
-            <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="HorizontalAlignment" Value="Stretch"/>
-            <Setter Property="HorizontalContentAlignment" Value="Center"/>
-            <Setter Property="VerticalContentAlignment" Value="Center"/>
-            <Setter Property="Padding" Value="16,0"/>
-        </Style>
-
-        <Style Selector="Button.inviteAction">
-            <Setter Property="Height" Value="48"/>
-            <Setter Property="MinWidth" Value="160"/>
-            <Setter Property="FontSize" Value="16"/>
-            <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="HorizontalAlignment" Value="Stretch"/>
-            <Setter Property="HorizontalContentAlignment" Value="Center"/>
-            <Setter Property="VerticalContentAlignment" Value="Center"/>
-            <Setter Property="Padding" Value="18,0"/>
-        </Style>
-
-        <Style Selector="Button.linkAction">
-            <Setter Property="FontSize" Value="14"/>
-            <Setter Property="FontWeight" Value="Normal"/>
-            <Setter Property="Foreground" Value="{StaticResource AppMutedTextBrush}"/>
-            <Setter Property="Height" Value="32"/>
-            <Setter Property="HorizontalAlignment" Value="Center"/>
-            <Setter Property="HorizontalContentAlignment" Value="Center"/>
-            <Setter Property="VerticalContentAlignment" Value="Center"/>
-            <Setter Property="Padding" Value="6,0"/>
-        </Style>
-
-        <Style Selector="Button.backAction">
-            <Setter Property="FontSize" Value="18"/>
-            <Setter Property="Height" Value="52"/>
-            <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="HorizontalAlignment" Value="Center"/>
-            <Setter Property="HorizontalContentAlignment" Value="Center"/>
-            <Setter Property="VerticalContentAlignment" Value="Center"/>
-            <Setter Property="MinWidth" Value="220"/>
-        </Style>
-
         <Style Selector="Border.inlineBadge">
             <Setter Property="Background" Value="{StaticResource AppPanelBrush}"/>
             <Setter Property="BorderBrush" Value="{StaticResource AppCardBorderBrush}"/>
@@ -120,11 +78,10 @@
                                         Margin="12"
                                         Spacing="6"
                                         MaxWidth="320">
-                                <Button Classes="appButton secondaryButton"
+                                <Button Classes="appButton secondaryButton compactButton"
                                         Content="{Binding RemoteControlDebugToggleText}"
                                         Command="{Binding ToggleRemoteControlDebugPanelCommand}"
                                         MinWidth="148"
-                                        Height="28"
                                         HorizontalAlignment="Right"/>
                                 <Border IsVisible="{Binding ShowRemoteControlDebugOverlay}"
                                         Padding="10"
@@ -176,13 +133,12 @@
                                     <TextBlock Text="{Binding RemoteControlAdminWarningText}"
                                                Classes="appMuted"
                                                TextWrapping="Wrap"/>
-                                    <Button Classes="appButton secondaryButton"
+                                    <Button Classes="appButton secondaryButton compactButton"
                                             Content="Restart as administrator"
                                             Command="{Binding RestartAsAdministratorCommand}"
                                             IsEnabled="{Binding CanRestartAsAdministrator}"
                                             HorizontalAlignment="Left"
-                                            MinWidth="220"
-                                            Height="34"/>
+                                            MinWidth="220"/>
                                 </StackPanel>
                             </Border>
 
@@ -192,10 +148,10 @@
                                     IsVisible="{Binding ShowHelpeeMainContent}"
                                     Margin="0,8,0,0"
                                     HorizontalAlignment="Center"
-                                    VerticalAlignment="Center"
+                                    VerticalAlignment="Top"
                                     MaxWidth="620"
                                     MinWidth="620">
-                                <StackPanel Spacing="18">
+                                <StackPanel Spacing="12">
                                     <views:StatusBanner Status="{Binding BannerStatus}"
                                                         ForceVisible="{Binding ShowStatusBanner}"
                                                         DetailsText="{Binding StatusBannerDetailsText}"
@@ -217,119 +173,107 @@
                                                        VerticalAlignment="Center"/>
 
                                             <Button Grid.Column="1"
-                                                    Classes="appButton secondaryButton"
+                                                    Classes="appButton secondaryButton compactButton"
                                                     Content="Cancel"
                                                     Command="{Binding CancelTransientCommand}"
                                                     IsVisible="{Binding CanCancelTransient}"
                                                     IsEnabled="{Binding CanCancelTransient}"
-                                                    Height="34"
                                                     MinWidth="88"/>
                                         </Grid>
                                     </Border>
 
                                     <Border Background="{StaticResource AppMutedPanelBrush}"
-                                            CornerRadius="18"
-                                            Padding="24,14,24,24"
+                                            BorderBrush="{StaticResource AppCardBorderBrush}"
+                                            BorderThickness="1"
+                                            CornerRadius="14"
+                                            Padding="24"
                                             IsVisible="{Binding ShowWaitingPanel}">
-                                        <StackPanel Spacing="16"
+                                        <StackPanel Spacing="12"
                                                     HorizontalAlignment="Stretch">
-                                            <Border Background="{StaticResource AppSurfaceBrush}"
-                                                    CornerRadius="16"
-                                                    Padding="16"
-                                                    HorizontalAlignment="Stretch">
-                                                <StackPanel Spacing="10">
-                                                    <Grid ColumnDefinitions="*,Auto"
-                                                          ColumnSpacing="10">
-                                                        <TextBlock Text="Enter helper address"
-                                                                   Foreground="{StaticResource AppTextBrush}"
-                                                                   FontSize="16"
-                                                                   FontWeight="SemiBold"
-                                                                   VerticalAlignment="Center"/>
-                                                        <Border Grid.Column="1"
-                                                                Classes="inlineBadge"
-                                                                IsVisible="{Binding ShowFirstPillVerificationCode}">
-                                                            <TextBlock Classes="inlineBadgeText"
-                                                                       AutomationProperties.AutomationId="Helpee.FirstPillVerificationCode"
-                                                                       Text="{Binding FirstPillVerificationCodeText}"/>
-                                                        </Border>
-                                                    </Grid>
-                                                    <TextBox Classes="appInput highContrastInput"
-                                                             AutomationProperties.AutomationId="Helpee.HelperIdentityInput"
-                                                             Text="{Binding InviteHelperIdentityInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                                             KeyDown="InviteHelperIdentityInput_KeyDown"
-                                                             Watermark="Enter helper address or import helper QR"
-                                                             IsEnabled="{Binding CanStartOrConnect}"/>
-                                                    <Grid ColumnDefinitions="*,*"
-                                                          ColumnSpacing="10">
-                                                        <Button Grid.Column="0"
-                                                                Classes="appButton secondaryButton inviteAction"
-                                                                Content="Paste helper address"
-                                                                Click="PasteHelperId_Click"/>
-                                                        <Button Grid.Column="1"
-                                                                x:Name="ImportQrMenuButton"
-                                                                Classes="appButton secondaryButton inviteAction"
-                                                                Content="Import QR"
-                                                                Click="OpenImportQrMenu_Click">
-                                                            <Button.ContextMenu>
-                                                                <ContextMenu x:Name="ImportQrContextMenu"
-                                                                             Placement="Bottom">
-                                                                    <MenuItem Header="Import from file"
-                                                                              Click="ImportHelperQr_Click"/>
-                                                                    <MenuItem x:Name="ScanHelperQrMenuItem"
-                                                                              Header="Scan with camera"
-                                                                              Click="ScanHelperQr_Click"/>
-                                                                </ContextMenu>
-                                                            </Button.ContextMenu>
-                                                        </Button>
-                                                    </Grid>
-                                                    <StackPanel Spacing="10"
-                                                                HorizontalAlignment="Center"
-                                                                MaxWidth="380">
-                                                        <Grid ColumnDefinitions="Auto,Auto"
-                                                              ColumnSpacing="10"
-                                                              HorizontalAlignment="Center"
-                                                              IsVisible="{Binding ShowShareInviteExpiry}">
-                                                            <TextBlock Text="{Binding ShareInviteExpiryText}"
-                                                                       Classes="appMuted"
-                                                                       FontSize="12"
-                                                                       FontWeight="SemiBold"
-                                                                       VerticalAlignment="Center"
-                                                                       TextAlignment="Center"/>
-                                                            <Button Grid.Column="1"
-                                                                    AutomationProperties.AutomationId="Helpee.RefreshInvite"
-                                                                    Classes="linkButton linkAction"
-                                                                    Content="Refresh"
-                                                                    Command="{Binding RefreshInviteCommand}"
-                                                                    IsEnabled="{Binding CanStartOrConnect}"
-                                                                     VerticalAlignment="Center"
-                                                                     IsVisible="{Binding HasVerifiedInviteHelperIdentity}"/>
-                                                        </Grid>
-                                                    </StackPanel>
+                                            <Grid ColumnDefinitions="*,Auto"
+                                                  ColumnSpacing="10">
+                                                <TextBlock Text="Enter helper address"
+                                                           Classes="appSectionTitle"
+                                                           VerticalAlignment="Center"/>
+                                                <Border Grid.Column="1"
+                                                        Classes="inlineBadge"
+                                                        IsVisible="{Binding ShowFirstPillVerificationCode}">
+                                                    <TextBlock Classes="inlineBadgeText"
+                                                               AutomationProperties.AutomationId="Helpee.FirstPillVerificationCode"
+                                                               Text="{Binding FirstPillVerificationCodeText}"/>
+                                                </Border>
+                                            </Grid>
+                                            <TextBox Classes="appInput highContrastInput"
+                                                     AutomationProperties.AutomationId="Helpee.HelperIdentityInput"
+                                                     Text="{Binding InviteHelperIdentityInput, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                     KeyDown="InviteHelperIdentityInput_KeyDown"
+                                                     Watermark="Enter helper address or import helper QR"
+                                                     IsEnabled="{Binding CanStartOrConnect}"/>
+                                            <Grid ColumnDefinitions="*,*"
+                                                  ColumnSpacing="12">
+                                                <Button Grid.Column="0"
+                                                        Classes="appButton primaryButton inviteAction"
+                                                        Content="Paste helper address"
+                                                        Click="PasteHelperId_Click"/>
+                                                <Button Grid.Column="1"
+                                                        x:Name="ImportQrMenuButton"
+                                                        Classes="appButton primaryButton inviteAction"
+                                                        Content="Import QR"
+                                                        Click="OpenImportQrMenu_Click">
+                                                    <Button.ContextMenu>
+                                                        <ContextMenu x:Name="ImportQrContextMenu"
+                                                                     Placement="Bottom">
+                                                            <MenuItem Header="Import from file"
+                                                                      Click="ImportHelperQr_Click"/>
+                                                            <MenuItem x:Name="ScanHelperQrMenuItem"
+                                                                      Header="Scan with camera"
+                                                                      Click="ScanHelperQr_Click"/>
+                                                        </ContextMenu>
+                                                    </Button.ContextMenu>
+                                                </Button>
+                                            </Grid>
+                                            <StackPanel Spacing="10"
+                                                        HorizontalAlignment="Center"
+                                                        MaxWidth="380"
+                                                        IsVisible="{Binding ShowShareInviteExpiry}">
+                                                <Grid ColumnDefinitions="Auto,Auto"
+                                                      ColumnSpacing="10"
+                                                      HorizontalAlignment="Center">
+                                                    <TextBlock Text="{Binding ShareInviteExpiryText}"
+                                                               Classes="appCaption"
+                                                               VerticalAlignment="Center"
+                                                               TextAlignment="Center"/>
+                                                    <Button Grid.Column="1"
+                                                            AutomationProperties.AutomationId="Helpee.RefreshInvite"
+                                                            Classes="linkButton linkAction"
+                                                            Content="Refresh"
+                                                            Command="{Binding RefreshInviteCommand}"
+                                                            IsEnabled="{Binding CanStartOrConnect}"
+                                                            VerticalAlignment="Center"
+                                                            IsVisible="{Binding HasVerifiedInviteHelperIdentity}"/>
+                                                </Grid>
+                                            </StackPanel>
 
-                                                    <TextBlock AutomationProperties.AutomationId="Helpee.InviteStatus"
-                                                               Text="{Binding ShareInviteStatusText}"
-                                                               Classes="appMuted"
-                                                               FontSize="13"
-                                                               TextAlignment="Center"
-                                                               HorizontalAlignment="Center"
-                                                               MaxWidth="380"
-                                                               IsVisible="{Binding ShowShareInviteStatus}"/>
+                                            <TextBlock AutomationProperties.AutomationId="Helpee.InviteStatus"
+                                                       Text="{Binding ShareInviteStatusText}"
+                                                       Classes="appStatusText"
+                                                       TextAlignment="Center"
+                                                       HorizontalAlignment="Center"
+                                                       MaxWidth="380"
+                                                       IsVisible="{Binding ShowShareInviteStatus}"/>
 
-                                                    <Button AutomationProperties.AutomationId="Helpee.RequestHelp"
-                                                            Classes="appButton positiveButton action"
-                                                            Content="Request help"
-                                                            Command="{Binding RequestHelpCommand}"
-                                                            IsEnabled="{Binding CanRequestHelpAction}"/>
+                                            <Button AutomationProperties.AutomationId="Helpee.RequestHelp"
+                                                    Classes="appButton positiveButton action prominentButton"
+                                                    Content="Request help"
+                                                    Command="{Binding RequestHelpCommand}"
+                                                    IsEnabled="{Binding CanRequestHelpAction}"/>
 
-                                                    <TextBlock Classes="appMuted"
-                                                               Text="{Binding CopyFeedback.Text}"
-                                                               FontSize="13"
-                                                               TextAlignment="Center"
-                                                               HorizontalAlignment="Center"
-                                                               MaxWidth="380"
-                                                               IsVisible="{Binding CopyFeedback.IsVisible}"/>
-                                                </StackPanel>
-                                            </Border>
+                                            <TextBlock Classes="appCaption"
+                                                       Text="{Binding CopyFeedback.Text}"
+                                                       TextAlignment="Center"
+                                                       HorizontalAlignment="Center"
+                                                       MaxWidth="380"
+                                                       IsVisible="{Binding CopyFeedback.IsVisible}"/>
 
                                             <Button Classes="appButton secondaryButton action"
                                                     Content="Retry"
@@ -345,21 +289,52 @@
                                         <StackPanel Spacing="6">
                                             <TextBlock AutomationProperties.AutomationId="Helpee.IncomingApprovalTitle"
                                                        Text="Allow this helper to connect?"
-                                                       Foreground="{StaticResource AppTextBrush}"
-                                                       FontSize="21"
-                                                       FontWeight="SemiBold"
+                                                       Classes="appSectionTitle"
                                                        TextAlignment="Center"
                                                        HorizontalAlignment="Center"
                                                        MaxWidth="420"/>
                                             <TextBlock AutomationProperties.AutomationId="Helpee.IncomingApprovalTimer"
                                                        Text="{Binding IncomingRequestTimeoutText}"
-                                                       Classes="appMuted"
-                                                       FontSize="12"
-                                                       FontWeight="SemiBold"
+                                                       Classes="appCaption"
                                                        TextAlignment="Center"
                                                        HorizontalAlignment="Center"
                                                        IsVisible="{Binding ShowIncomingRequestTimeout}"/>
                                         </StackPanel>
+
+                                        <Border Background="{StaticResource AppSurfaceBrush}"
+                                                BorderBrush="{StaticResource AppCardBorderBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="12"
+                                                Padding="12"
+                                                HorizontalAlignment="Center"
+                                                MaxWidth="520"
+                                                IsVisible="{Binding ShowSessionVerificationCode}">
+                                            <StackPanel Spacing="6"
+                                                        HorizontalAlignment="Stretch">
+                                                <TextBlock AutomationProperties.AutomationId="Helpee.SessionVerification.Title"
+                                                           Text="Session verification"
+                                                           Foreground="{StaticResource AppTextBrush}"
+                                                           FontSize="13"
+                                                           FontWeight="SemiBold"
+                                                           TextAlignment="Center"
+                                                           HorizontalAlignment="Center"/>
+                                                <TextBlock AutomationProperties.AutomationId="Helpee.SessionVerification.EmojiSequence"
+                                                           Text="{Binding SessionVerificationEmojiSequence}"
+                                                           Foreground="{StaticResource AppTextBrush}"
+                                                           FontFamily="Segoe UI Emoji, Segoe UI Symbol, Segoe UI"
+                                                           FontSize="22"
+                                                           LineHeight="30"
+                                                           TextWrapping="NoWrap"
+                                                           TextAlignment="Center"
+                                                           HorizontalAlignment="Center"
+                                                           MaxWidth="460"/>
+                                                <TextBlock Text="Compare these symbols on both screens."
+                                                           Classes="appCaption"
+                                                           TextAlignment="Center"
+                                                           HorizontalAlignment="Center"
+                                                           MaxWidth="460"/>
+                                            </StackPanel>
+                                        </Border>
 
                                         <Border Background="{StaticResource AppSurfaceBrush}"
                                                 CornerRadius="12"
@@ -451,12 +426,10 @@
                                         Background="{StaticResource AppSurfaceBrush}"
                                         BorderBrush="{StaticResource AppCardBorderBrush}"
                                         BorderThickness="1"
-                                        CornerRadius="16">
+                                        CornerRadius="12">
                                     <StackPanel Spacing="14">
                                         <TextBlock Text="{Binding RemoteControlConsentTitle}"
-                                                   Foreground="{StaticResource AppTextBrush}"
-                                                   FontSize="20"
-                                                   FontWeight="SemiBold"
+                                                   Classes="appSectionTitle"
                                                    TextAlignment="Center"/>
 
                                         <TextBlock Text="{Binding RemoteControlConsentMessage}"
@@ -474,13 +447,13 @@
                                               ColumnSpacing="10"
                                               HorizontalAlignment="Center">
                                             <Button Grid.Column="0"
-                                                    Classes="appButton positiveButton"
+                                                    Classes="appButton positiveButton standardButton"
                                                     AutomationProperties.AutomationId="Helpee.ControlConsent.Allow"
                                                     Content="Allow control"
                                                     Command="{Binding AllowControlConsentCommand}"
                                                     IsEnabled="{Binding CanSubmitRemoteControlConsent}"/>
                                             <Button Grid.Column="1"
-                                                    Classes="appButton secondaryButton"
+                                                    Classes="appButton secondaryButton standardButton"
                                                     AutomationProperties.AutomationId="Helpee.ControlConsent.Deny"
                                                     Content="Deny"
                                                     Command="{Binding DenyControlConsentCommand}"
@@ -494,13 +467,11 @@
                 </views:SessionShellView>
 
                 <Button Grid.Row="1"
-                        Classes="appButton secondaryButton backAction"
+                        Classes="appButton secondaryButton backAction footerButton"
                         Content="Back"
                         Command="{Binding CancelCommand}"
                         HorizontalAlignment="Center"
                         IsVisible="{Binding ShowBackButton}"
-                        Height="48"
-                        MinWidth="200"
                         Opacity="0.92"/>
 
             </Grid>

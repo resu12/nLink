@@ -1951,7 +1951,7 @@ private async Task ScreenShareViewer_HelperRemote_SequentialPFrames_StayLiveWith
             var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             vm.OnOwnedEncodedFrame("h264", new byte[] { 10 }, capturedTsUtcMs: nowMs, isKeyFrame: true, streamEpoch: 46, streamConfig: config, frameId: 10, sessionId: "helper-future-tail-taint");
             await WaitUntilAsync(
-                () => vm.CurrentFrame is Bitmap first && first.PixelSize.Width == 10 && vm.IsIdleForDiagnostics,
+                () => CurrentFrameWidthEqualsSafely(vm, 10) && vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(2));
 
             vm.OnOwnedEncodedFrame("h264", new byte[] { 12 }, capturedTsUtcMs: nowMs, isKeyFrame: false, streamEpoch: 46, frameId: 12, sessionId: "helper-future-tail-taint");
@@ -1961,14 +1961,14 @@ private async Task ScreenShareViewer_HelperRemote_SequentialPFrames_StayLiveWith
 
             vm.OnOwnedEncodedFrame("h264", new byte[] { 14 }, capturedTsUtcMs: nowMs, isKeyFrame: true, streamEpoch: 46, frameId: 14, sessionId: "helper-future-tail-taint");
             await WaitUntilAsync(
-                () => vm.CurrentFrame is Bitmap owner && owner.PixelSize.Width == 14 && vm.IsIdleForDiagnostics,
+                () => CurrentFrameWidthEqualsSafely(vm, 14) && vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(2));
 
             vm.OnOwnedEncodedFrame("h264", new byte[] { 20 }, capturedTsUtcMs: nowMs, isKeyFrame: false, streamEpoch: 46, frameId: 20, sessionId: "helper-future-tail-taint");
             vm.OnOwnedEncodedFrame("h264", new byte[] { 15 }, capturedTsUtcMs: nowMs, isKeyFrame: false, streamEpoch: 46, frameId: 15, sessionId: "helper-future-tail-taint", recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
             vm.OnOwnedEncodedFrame("h264", new byte[] { 16 }, capturedTsUtcMs: nowMs, isKeyFrame: false, streamEpoch: 46, frameId: 16, sessionId: "helper-future-tail-taint", recoveryDeliveryClass: ScreenShareRecoveryDeliveryClass.ProtectedFollower);
             await WaitUntilAsync(
-                () => vm.CurrentFrame is Bitmap recovered && recovered.PixelSize.Width == 16 && vm.IsIdleForDiagnostics,
+                () => CurrentFrameWidthEqualsSafely(vm, 16) && vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(2));
 
             var metricsAfterCorridor = vm.GetMetricsSnapshot();
@@ -1979,7 +1979,7 @@ private async Task ScreenShareViewer_HelperRemote_SequentialPFrames_StayLiveWith
             vm.OnOwnedEncodedFrame("h264", new byte[] { 17 }, capturedTsUtcMs: nowMs, isKeyFrame: false, streamEpoch: 46, frameId: 17, sessionId: "helper-future-tail-taint");
             await WaitUntilAsync(() => vm.IsIdleForDiagnostics, TimeSpan.FromSeconds(2));
 
-            Assert.Equal(16, Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame).PixelSize.Width);
+            AssertCurrentFrameWidthSafely(vm, 16);
             Assert.True(vm.GetMetricsSnapshot().H264ReferenceTaintDroppedNonKeyCount >= 1);
             return true;
         }, default);

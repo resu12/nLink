@@ -35,3 +35,4 @@ tools/nkn-bridge/.nlink-bundle/
 # OS files
 .DS_Store
 Thumbs.db
+/.tmp

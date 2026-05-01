@@ -2,6 +2,7 @@
 using System.Collections.Concurrent;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using NLink.Core;
@@ -22,6 +23,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private static readonly TimeSpan PingTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ScreenShareBridgeLogInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan BridgeTrafficLogInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan ReceiveStallRecoveryCooldown = TimeSpan.FromSeconds(60);
+    private const int ReceiveStallRequiredConsecutiveWindows = 3;
+    private const int ReceiveStallFastRequiredConsecutiveWindows = 2;
+    private const int ReceiveStallControlAgeThresholdMs = 8_000;
+    private const int ReceiveStallBulkAgeThresholdMs = 6_000;
+    private const int ReceiveStallMaxRecoveriesPerSession = 4;
     private static readonly string[] RequiredBridgeChannels = ["control", "media", "bulk"];
     internal const string BridgeProtocolOutdatedBulkMissingCode = "bridge_protocol_outdated_bulk_missing";
     private static readonly RetryPolicyOptions UnexpectedExitRestartRetryOptions = new(
@@ -62,6 +69,9 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private long bulkBridgeMessageCountSinceLastLog;
     private long bulkBridgeMessagePayloadBytesSinceLastLog;
     private long lastBulkBridgeMessageSummaryLogTick;
+    private readonly InboundDeliveryCounters controlInboundDeliveryCounters = new();
+    private readonly InboundDeliveryCounters mediaInboundDeliveryCounters = new();
+    private readonly InboundDeliveryCounters bulkInboundDeliveryCounters = new();
     private string[] supportedBridgeChannels = [];
     private int? negotiatedBridgeProtocol;
     private string? bridgeAppVersion;
@@ -83,6 +93,36 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private TaskCompletionSource<long> screenShareQueueStateChangedTcs = CreateQueueStateChangedTcs();
     private long screenShareQueueStateVersion;
     private long lastScreenShareQueueWaitLogTick;
+    private int receiveStallConsecutiveWindows;
+    private int receiveStallBulkConsecutiveWindows;
+    private int receiveStallControlConsecutiveWindows;
+    private int receiveStallRecoveryInProgress;
+    private int receiveStallRecoveryCount;
+    private long receiveStallLastRecoveryStartedTick;
+    private long receiveStallLastRecoveryCompletedTick;
+    private int receiveStallRecoveryAwaitingReceiveProof;
+    private int receiveStallRecoveryRequiresControlProof;
+    private int receiveStallRecoveryRequiresBulkProof;
+    private long receiveStallRecoveryLastUnprovenLogTick;
+    private int receiveStallRecoveryConnectActive;
+    private int activeFileTransferDataSessions;
+    private bool suppressBridgeDisconnectDuringReceiveStallRecovery;
+    private readonly object bulkQueueStateGate = new();
+    private BridgeBulkQueueState bulkQueueState = new(
+        QueueDepth: 0,
+        QueuedBytes: 0,
+        OldestQueuedAgeMs: 0,
+        InFlight: false,
+        InFlightCount: 0,
+        InFlightBytes: 0,
+        ConfiguredConcurrency: 1,
+        EffectiveConcurrency: 1,
+        ClearedSinceLast: 0,
+        IsCongested: false,
+        IsSevere: false);
+    private TaskCompletionSource<long> bulkQueueStateChangedTcs = CreateQueueStateChangedTcs();
+    private long bulkQueueStateVersion;
+    private long lastBulkQueueWaitLogTick;
     private const int ScreenShareHealthSevereThreshold = 3;
     private static readonly TimeSpan ScreenShareHealthIssueWindow = TimeSpan.FromSeconds(8);
 
@@ -94,6 +134,23 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         long SdkHandleMsgEnteredUtcMs,
         long ClientMessageDispatchUtcMs,
         long MultiClientMessageDispatchUtcMs);
+
+    private sealed class InboundDeliveryCounters
+    {
+        public long MessageCount;
+        public long PayloadBytes;
+        public long SubscriberPresentCount;
+        public long SubscriberMissingCount;
+        public long HandlerFailureCount;
+        public long TopicCount;
+        public long SourceMatchesLocalControlCount;
+        public long SourceMatchesLocalMediaCount;
+        public long SourceMatchesLocalBulkCount;
+        public long SourceMatchesAnyLocalCount;
+        public long LastSummaryLogTick;
+        public int LastSourceLength;
+        public string LastSourceHash = "(none)";
+    }
 
     internal event EventHandler<BridgeScreenShareQueueStateChangedEventArgs>? ScreenShareQueueStateChanged;
 
@@ -187,9 +244,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             onPong: root => protocolEventRouter.HandlePong(root),
             onScreenShareQueueState: HandleScreenShareQueueState,
             onBridgeEventLoopSummary: HandleBridgeEventLoopSummary,
+            onBridgeControlSendSummary: HandleBridgeControlSendSummary,
             onBridgeMediaSendSummary: HandleBridgeMediaSendSummary,
             onBridgeTransportHealthSummary: HandleBridgeTransportHealthSummary,
-            onUnmatchedBridgeError: reason => SignalDisconnected("bridge_error:" + reason));
+            onUnmatchedBridgeError: reason => SignalDisconnected("bridge_error:" + reason),
+            onBulkQueueState: HandleBulkQueueState,
+            onBridgeBulkSendSummary: HandleBridgeBulkSendSummary);
     }
 
     public string Address
@@ -286,6 +346,24 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
     }
 
+    internal void RegisterActiveFileTransferDataSession(string transferId)
+    {
+        var activeCount = Interlocked.Increment(ref activeFileTransferDataSessions);
+        Log($"event=filetransfer_v4_receive_liveness_summary; reason=data_session_opened; transfer_id={SanitizeLogToken(transferId)}; active_file_transfer_sessions={activeCount}");
+    }
+
+    internal void UnregisterActiveFileTransferDataSession(string transferId)
+    {
+        var activeCount = Interlocked.Decrement(ref activeFileTransferDataSessions);
+        if (activeCount < 0)
+        {
+            activeCount = 0;
+            Interlocked.Exchange(ref activeFileTransferDataSessions, 0);
+        }
+
+        Log($"event=filetransfer_v4_receive_liveness_summary; reason=data_session_closed; transfer_id={SanitizeLogToken(transferId)}; active_file_transfer_sessions={activeCount}");
+    }
+
     internal void SetConnectReadyTimeoutForTests(TimeSpan timeout)
     {
         connectReadyTimeoutOverrideForTests = timeout <= TimeSpan.Zero ? null : timeout;
@@ -301,6 +379,14 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         lock (screenShareQueueStateGate)
         {
             return screenShareQueueState;
+        }
+    }
+
+    internal BridgeBulkQueueState GetBulkQueueStateForTests()
+    {
+        lock (bulkQueueStateGate)
+        {
+            return bulkQueueState;
         }
     }
 
@@ -392,6 +478,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             {
                 payload["numSubClients"] = options.NumSubClients;
                 payload["mediaNumSubClients"] = options.MediaNumSubClients;
+                payload["bulkNumSubClients"] = options.BulkNumSubClients;
+                payload["bulkSendConcurrency"] = options.BulkSendConcurrency;
             }
 
             if (options.PreflightRpcEnabled)
@@ -400,6 +488,11 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
                 payload["preflightTimeoutMs"] = options.PreflightTimeoutMs;
                 payload["preflightConcurrency"] = options.PreflightConcurrency;
                 payload["preflightCacheTtlMs"] = options.PreflightCacheTtlMs;
+            }
+
+            if (Volatile.Read(ref receiveStallRecoveryConnectActive) != 0)
+            {
+                payload["fallbackDelayMs"] = options.ReceiveStallRecoveryFallbackDelayMs;
             }
 
             await SendCommandAndWaitAckAsync("connect", payload, ct, timeoutOverride: CommandAckTimeout);
@@ -502,6 +595,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
         finally
         {
+            Interlocked.Exchange(ref receiveStallRecoveryAwaitingReceiveProof, 0);
+            Interlocked.Exchange(ref receiveStallConsecutiveWindows, 0);
             NknRuntimeDiagnostics.SetMediaPlaneAttached(false);
             ReleaseIdentityUsageLease();
         }
@@ -570,7 +665,13 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
     public Task SendBulkAsync(string destination, byte[] payload, CancellationToken ct)
     {
-        return SendCoreAsync(destination, payload, NknBridgeChannel.Bulk, ct);
+        return SendBulkCoreAsync(destination, payload, ct);
+    }
+
+    private async Task SendBulkCoreAsync(string destination, byte[] payload, CancellationToken ct)
+    {
+        await WaitWhileBulkQueueSeverelyCongestedAsync(ct).ConfigureAwait(false);
+        await SendCoreAsync(destination, payload, NknBridgeChannel.Bulk, ct).ConfigureAwait(false);
     }
 
     public Task SetScreenSharePolicyAsync(BridgeScreenShareQueueMode mode, long generation, bool flushQueued, CancellationToken ct)
@@ -618,6 +719,10 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             NknRuntimeDiagnostics.IncrementBridgeControlMessagesSent();
             NknRuntimeDiagnostics.AddBridgeControlBytesSent(serializedBytes);
         }
+        else if (channel == NknBridgeChannel.Bulk)
+        {
+            NknRuntimeDiagnostics.AddOutboundLaneSent("file_transfer", payload.Length);
+        }
     }
 
     private static TaskCompletionSource<long> CreateQueueStateChangedTcs()
@@ -648,6 +753,29 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
     }
 
+    private async Task WaitWhileBulkQueueSeverelyCongestedAsync(CancellationToken ct)
+    {
+        while (true)
+        {
+            BridgeBulkQueueState state;
+            Task waitTask;
+            lock (bulkQueueStateGate)
+            {
+                state = bulkQueueState;
+                if (!state.IsSevere)
+                {
+                    return;
+                }
+
+                waitTask = bulkQueueStateChangedTcs.Task;
+            }
+
+            NknRuntimeDiagnostics.IncrementOutboundLaneWaitCount("file_transfer");
+            MaybeLogBulkQueueWait(state);
+            await waitTask.WaitAsync(ct).ConfigureAwait(false);
+        }
+    }
+
     private void MaybeLogScreenShareQueueWait(BridgeScreenShareQueueState state)
     {
         var nowTick = Stopwatch.GetTimestamp();
@@ -665,6 +793,25 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         Log(
             $"event=screenshare_bridge_queue_waiting; queue_depth={state.QueueDepth}; queued_bytes={state.QueuedBytes}; oldest_queued_age_ms={state.OldestQueuedAgeMs}; mode={FormatBridgeScreenShareQueueMode(state.Mode)}");
+    }
+
+    private void MaybeLogBulkQueueWait(BridgeBulkQueueState state)
+    {
+        var nowTick = Stopwatch.GetTimestamp();
+        var previousTick = Volatile.Read(ref lastBulkQueueWaitLogTick);
+        if (previousTick != 0 &&
+            Stopwatch.GetElapsedTime(previousTick, nowTick) < TimeSpan.FromSeconds(1))
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref lastBulkQueueWaitLogTick, nowTick, previousTick) != previousTick)
+        {
+            return;
+        }
+
+        Log(
+            $"event=nkn_bridge_bulk_queue_waiting; queue_depth={state.QueueDepth}; queued_bytes={state.QueuedBytes}; oldest_queued_age_ms={state.OldestQueuedAgeMs}; in_flight={state.InFlightCount}; in_flight_bytes={state.InFlightBytes}; configured_concurrency={state.ConfiguredConcurrency}; effective_concurrency={state.EffectiveConcurrency}");
     }
 
     private void HandleScreenShareQueueState(JsonElement root)
@@ -692,6 +839,34 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             mode));
     }
 
+    private void HandleBulkQueueState(JsonElement root)
+    {
+        var queueDepth = TryGetInt32(root, "queueDepth", out var queueDepthValue) ? Math.Max(0, queueDepthValue) : 0;
+        var queuedBytes = TryGetInt64(root, "queuedBytes", out var queuedBytesValue) ? Math.Max(0, queuedBytesValue) : 0;
+        var oldestQueuedAgeMs = TryGetInt64(root, "oldestQueuedAgeMs", out var oldestQueuedAgeValue) ? Math.Max(0, oldestQueuedAgeValue) : 0;
+        var clearedSinceLast = TryGetInt64(root, "clearedSinceLast", out var clearedSinceLastValue) ? Math.Max(0, clearedSinceLastValue) : 0;
+        var inFlightCount = TryGetInt64OrBool(root, "inFlight", out var inFlightValue) ? (int)Math.Min(int.MaxValue, Math.Max(0, inFlightValue)) : 0;
+        var inFlight = inFlightCount > 0;
+        var inFlightBytes = TryGetInt64(root, "inFlightBytes", out var inFlightBytesValue) ? Math.Max(0, inFlightBytesValue) : 0;
+        var configuredConcurrency = TryGetInt32(root, "configuredConcurrency", out var configuredConcurrencyValue) ? Math.Max(0, configuredConcurrencyValue) : 1;
+        var effectiveConcurrency = TryGetInt32(root, "effectiveConcurrency", out var effectiveConcurrencyValue) ? Math.Max(0, effectiveConcurrencyValue) : Math.Max(1, configuredConcurrency);
+        var isCongested = TryGetBool(root, "congested", out var congestedValue) && congestedValue;
+        var isSevere = TryGetBool(root, "severe", out var severeValue) && severeValue;
+
+        SetBulkQueueState(new BridgeBulkQueueState(
+            queueDepth,
+            queuedBytes,
+            oldestQueuedAgeMs,
+            inFlight,
+            inFlightCount,
+            inFlightBytes,
+            configuredConcurrency,
+            effectiveConcurrency,
+            clearedSinceLast,
+            isCongested,
+            isSevere));
+    }
+
     private void HandleBridgeEventLoopSummary(JsonElement root)
     {
         var p95Ms = TryGetInt64(root, "event_loop_p95_ms", out var p95Value) ? Math.Max(0, p95Value) : 0;
@@ -701,6 +876,38 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         Log(
             $"event=screenshare_bridge_event_loop_summary; event_loop_p95_ms={p95Ms}; event_loop_max_ms={maxMs}; event_loop_mean_ms={meanMs}; sample_window_ms={sampleWindowMs}");
+    }
+
+    private void HandleBridgeControlSendSummary(JsonElement root)
+    {
+        var ingressP95Ms = TryGetInt64(root, "binary_send_frame_observed_to_queue_enqueue_p95_ms", out var ingressP95Value) ? ingressP95Value : -1;
+        var ingressMaxMs = TryGetInt64(root, "binary_send_frame_observed_to_queue_enqueue_max_ms", out var ingressMaxValue) ? ingressMaxValue : -1;
+        var queueP95Ms = TryGetInt64(root, "queue_enqueue_to_queue_dequeue_p95_ms", out var queueP95Value) ? queueP95Value : -1;
+        var queueMaxMs = TryGetInt64(root, "queue_enqueue_to_queue_dequeue_max_ms", out var queueMaxValue) ? queueMaxValue : -1;
+        var sendP95Ms = TryGetInt64(root, "send_p95_ms", out var sendP95Value) ? sendP95Value : -1;
+        var sendMaxMs = TryGetInt64(root, "send_max_ms", out var sendMaxValue) ? sendMaxValue : -1;
+        var framesSent = TryGetInt64(root, "frames_sent", out var framesSentValue) ? Math.Max(0, framesSentValue) : 0;
+        var payloadBytesSent = TryGetInt64(root, "payload_bytes_sent", out var payloadBytesSentValue) ? Math.Max(0, payloadBytesSentValue) : 0;
+        var payloadBytesPerSecond = TryGetInt64(root, "payload_bytes_per_second", out var payloadBytesPerSecondValue) ? Math.Max(0, payloadBytesPerSecondValue) : 0;
+        var sendFailures = TryGetInt64(root, "send_failures", out var sendFailuresValue) ? Math.Max(0, sendFailuresValue) : 0;
+        var queueClears = TryGetInt64(root, "queue_clears", out var queueClearsValue) ? Math.Max(0, queueClearsValue) : 0;
+        var queueDepth = TryGetInt64(root, "queue_depth", out var queueDepthValue) ? Math.Max(0, queueDepthValue) : 0;
+        var queuedBytes = TryGetInt64(root, "queued_bytes", out var queuedBytesValue) ? Math.Max(0, queuedBytesValue) : 0;
+        var oldestQueuedAgeMs = TryGetInt64(root, "oldest_queued_age_ms", out var oldestQueuedAgeValue) ? Math.Max(0, oldestQueuedAgeValue) : 0;
+        var inFlight = TryGetInt64(root, "in_flight", out var inFlightValue) ? Math.Max(0, inFlightValue) : 0;
+        var sendTimeoutMs = TryGetInt64(root, "send_timeout_ms", out var sendTimeoutValue) ? Math.Max(0, sendTimeoutValue) : 0;
+        var sampleWindowMs = TryGetInt64(root, "sample_window_ms", out var sampleWindowValue) ? Math.Max(0, sampleWindowValue) : 0;
+
+        Log(
+            "event=nkn_bridge_control_send_summary; " +
+            $"binary_send_frame_observed_to_queue_enqueue_p95_ms={ingressP95Ms}; " +
+            $"binary_send_frame_observed_to_queue_enqueue_max_ms={ingressMaxMs}; " +
+            $"queue_enqueue_to_queue_dequeue_p95_ms={queueP95Ms}; " +
+            $"queue_enqueue_to_queue_dequeue_max_ms={queueMaxMs}; " +
+            $"send_p95_ms={sendP95Ms}; send_max_ms={sendMaxMs}; frames_sent={framesSent}; " +
+            $"payload_bytes_sent={payloadBytesSent}; payload_bytes_per_second={payloadBytesPerSecond}; " +
+            $"send_failures={sendFailures}; queue_clears={queueClears}; queue_depth={queueDepth}; queued_bytes={queuedBytes}; " +
+            $"oldest_queued_age_ms={oldestQueuedAgeMs}; in_flight={inFlight}; send_timeout_ms={sendTimeoutMs}; sample_window_ms={sampleWindowMs}");
     }
 
     private void HandleBridgeMediaSendSummary(JsonElement root)
@@ -766,6 +973,78 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             $"frames_sent={framesSent}; send_failures={sendFailures}; queue_drops={queueDrops}; queue_mode={queueMode}; queue_depth={queueDepth}; oldest_queued_age_ms={oldestQueuedAgeMs}; sample_window_ms={sampleWindowMs}");
     }
 
+    private void HandleBridgeBulkSendSummary(JsonElement root)
+    {
+        var binarySendFrameObservedToQueueEnqueueAvgMs = TryGetInt64(root, "binary_send_frame_observed_to_queue_enqueue_avg_ms", out var ingressAvgValue) ? ingressAvgValue : -1;
+        var binarySendFrameObservedToQueueEnqueueMedianMs = TryGetInt64(root, "binary_send_frame_observed_to_queue_enqueue_median_ms", out var ingressMedianValue) ? ingressMedianValue : -1;
+        var binarySendFrameObservedToQueueEnqueueP95Ms = TryGetInt64(root, "binary_send_frame_observed_to_queue_enqueue_p95_ms", out var ingressP95Value) ? ingressP95Value : -1;
+        var binarySendFrameObservedToQueueEnqueueMaxMs = TryGetInt64(root, "binary_send_frame_observed_to_queue_enqueue_max_ms", out var ingressMaxValue) ? ingressMaxValue : -1;
+        var queueEnqueueToQueueDequeueAvgMs = TryGetInt64(root, "queue_enqueue_to_queue_dequeue_avg_ms", out var queueAvgValue) ? queueAvgValue : -1;
+        var queueEnqueueToQueueDequeueMedianMs = TryGetInt64(root, "queue_enqueue_to_queue_dequeue_median_ms", out var queueMedianValue) ? queueMedianValue : -1;
+        var queueEnqueueToQueueDequeueP95Ms = TryGetInt64(root, "queue_enqueue_to_queue_dequeue_p95_ms", out var queueP95Value) ? queueP95Value : -1;
+        var queueEnqueueToQueueDequeueMaxMs = TryGetInt64(root, "queue_enqueue_to_queue_dequeue_max_ms", out var queueMaxValue) ? queueMaxValue : -1;
+        var queueDequeueToBulkSendStartedAvgMs = TryGetInt64(root, "queue_dequeue_to_bulk_send_started_avg_ms", out var startAvgValue) ? startAvgValue : -1;
+        var queueDequeueToBulkSendStartedMedianMs = TryGetInt64(root, "queue_dequeue_to_bulk_send_started_median_ms", out var startMedianValue) ? startMedianValue : -1;
+        var queueDequeueToBulkSendStartedP95Ms = TryGetInt64(root, "queue_dequeue_to_bulk_send_started_p95_ms", out var startP95Value) ? startP95Value : -1;
+        var queueDequeueToBulkSendStartedMaxMs = TryGetInt64(root, "queue_dequeue_to_bulk_send_started_max_ms", out var startMaxValue) ? startMaxValue : -1;
+        var bulkSendStartedToBulkSendResolvedAvgMs = TryGetInt64(root, "bulk_send_started_to_bulk_send_resolved_avg_ms", out var resolvedAvgValue) ? resolvedAvgValue : -1;
+        var bulkSendStartedToBulkSendResolvedMedianMs = TryGetInt64(root, "bulk_send_started_to_bulk_send_resolved_median_ms", out var resolvedMedianValue) ? resolvedMedianValue : -1;
+        var bulkSendStartedToBulkSendResolvedP95Ms = TryGetInt64(root, "bulk_send_started_to_bulk_send_resolved_p95_ms", out var resolvedP95Value) ? resolvedP95Value : -1;
+        var bulkSendStartedToBulkSendResolvedMaxMs = TryGetInt64(root, "bulk_send_started_to_bulk_send_resolved_max_ms", out var resolvedMaxValue) ? resolvedMaxValue : -1;
+        var sendP95Ms = TryGetInt64(root, "send_p95_ms", out var sendP95Value) ? sendP95Value : bulkSendStartedToBulkSendResolvedP95Ms;
+        var sendMaxMs = TryGetInt64(root, "send_max_ms", out var sendMaxValue) ? sendMaxValue : bulkSendStartedToBulkSendResolvedMaxMs;
+        var framesSent = TryGetInt64(root, "frames_sent", out var framesSentValue) ? Math.Max(0, framesSentValue) : 0;
+        var framesEnqueued = TryGetInt64(root, "frames_enqueued", out var framesEnqueuedValue) ? Math.Max(0, framesEnqueuedValue) : 0;
+        var payloadBytesSent = TryGetInt64(root, "payload_bytes_sent", out var payloadBytesSentValue) ? Math.Max(0, payloadBytesSentValue) : 0;
+        var payloadBytesPerSecond = TryGetInt64(root, "payload_bytes_per_second", out var payloadBytesPerSecondValue) ? Math.Max(0, payloadBytesPerSecondValue) : 0;
+        var payloadBytesEnqueued = TryGetInt64(root, "payload_bytes_enqueued", out var payloadBytesEnqueuedValue) ? Math.Max(0, payloadBytesEnqueuedValue) : 0;
+        var payloadBytesEnqueuedPerSecond = TryGetInt64(root, "payload_bytes_enqueued_per_second", out var payloadBytesEnqueuedPerSecondValue) ? Math.Max(0, payloadBytesEnqueuedPerSecondValue) : 0;
+        var interEnqueueGapP95Ms = TryGetInt64(root, "inter_enqueue_gap_p95_ms", out var interEnqueueP95Value) ? interEnqueueP95Value : -1;
+        var interEnqueueGapMaxMs = TryGetInt64(root, "inter_enqueue_gap_max_ms", out var interEnqueueMaxValue) ? interEnqueueMaxValue : -1;
+        var sendFailures = TryGetInt64(root, "send_failures", out var sendFailuresValue) ? Math.Max(0, sendFailuresValue) : 0;
+        var queueClears = TryGetInt64(root, "queue_clears", out var queueClearsValue) ? Math.Max(0, queueClearsValue) : 0;
+        var queueDepth = TryGetInt64(root, "queue_depth", out var queueDepthValue) ? Math.Max(0, queueDepthValue) : 0;
+        var queuedBytes = TryGetInt64(root, "queued_bytes", out var queuedBytesValue) ? Math.Max(0, queuedBytesValue) : 0;
+        var oldestQueuedAgeMs = TryGetInt64(root, "oldest_queued_age_ms", out var oldestQueuedAgeValue) ? Math.Max(0, oldestQueuedAgeValue) : 0;
+        var inFlight = TryGetInt64(root, "in_flight", out var inFlightValue) ? Math.Max(0, inFlightValue) : 0;
+        var inFlightBytes = TryGetInt64(root, "in_flight_bytes", out var inFlightBytesValue) ? Math.Max(0, inFlightBytesValue) : 0;
+        var configuredConcurrency = TryGetInt64(root, "configured_concurrency", out var configuredConcurrencyValue) ? Math.Max(0, configuredConcurrencyValue) : 0;
+        var effectiveConcurrency = TryGetInt64(root, "effective_concurrency", out var effectiveConcurrencyValue) ? Math.Max(0, effectiveConcurrencyValue) : 0;
+        var inFlightMax = TryGetInt64(root, "in_flight_max", out var inFlightMaxValue) ? Math.Max(0, inFlightMaxValue) : inFlight;
+        var inFlightBytesMax = TryGetInt64(root, "in_flight_bytes_max", out var inFlightBytesMaxValue) ? Math.Max(0, inFlightBytesMaxValue) : inFlightBytes;
+        var workerUtilizationPercent = TryGetInt64(root, "worker_utilization_percent", out var workerUtilizationValue) ? Math.Clamp(workerUtilizationValue, 0, 100) : 0;
+        var workerIdleSlotSamples = TryGetInt64(root, "worker_idle_slot_samples", out var workerIdleSlotSamplesValue) ? Math.Max(0, workerIdleSlotSamplesValue) : 0;
+        var workerSaturationPercent = TryGetInt64(root, "worker_saturation_percent", out var workerSaturationValue) ? Math.Clamp(workerSaturationValue, 0, 100) : 0;
+        var drainWakeCount = TryGetInt64(root, "drain_wake_count", out var drainWakeCountValue) ? Math.Max(0, drainWakeCountValue) : 0;
+        var sendMode = TryGetString(root, "send_mode", out var sendModeValue) ? SanitizeLogToken(sendModeValue) : "fanout";
+        var sendModeFanoutFrames = TryGetInt64(root, "send_mode_fanout_frames", out var sendModeFanoutFramesValue) ? Math.Max(0, sendModeFanoutFramesValue) : 0;
+        var sendModeRoundRobinFrames = TryGetInt64(root, "send_mode_round_robin_frames", out var sendModeRoundRobinFramesValue) ? Math.Max(0, sendModeRoundRobinFramesValue) : 0;
+        var sendModeSingleFrames = TryGetInt64(root, "send_mode_single_frames", out var sendModeSingleFramesValue) ? Math.Max(0, sendModeSingleFramesValue) : 0;
+        var sendModeRedundant2Frames = TryGetInt64(root, "send_mode_redundant2_frames", out var sendModeRedundant2FramesValue) ? Math.Max(0, sendModeRedundant2FramesValue) : 0;
+        var sendModeFallbackFrames = TryGetInt64(root, "send_mode_fallback_frames", out var sendModeFallbackFramesValue) ? Math.Max(0, sendModeFallbackFramesValue) : 0;
+        var sampleWindowMs = TryGetInt64(root, "sample_window_ms", out var sampleWindowValue) ? Math.Max(0, sampleWindowValue) : 0;
+
+        Log(
+            "event=nkn_bridge_bulk_send_summary; " +
+            $"binary_send_frame_observed_to_queue_enqueue_avg_ms={binarySendFrameObservedToQueueEnqueueAvgMs}; " +
+            $"binary_send_frame_observed_to_queue_enqueue_median_ms={binarySendFrameObservedToQueueEnqueueMedianMs}; " +
+            $"binary_send_frame_observed_to_queue_enqueue_p95_ms={binarySendFrameObservedToQueueEnqueueP95Ms}; " +
+            $"binary_send_frame_observed_to_queue_enqueue_max_ms={binarySendFrameObservedToQueueEnqueueMaxMs}; " +
+            $"queue_enqueue_to_queue_dequeue_avg_ms={queueEnqueueToQueueDequeueAvgMs}; " +
+            $"queue_enqueue_to_queue_dequeue_median_ms={queueEnqueueToQueueDequeueMedianMs}; " +
+            $"queue_enqueue_to_queue_dequeue_p95_ms={queueEnqueueToQueueDequeueP95Ms}; " +
+            $"queue_enqueue_to_queue_dequeue_max_ms={queueEnqueueToQueueDequeueMaxMs}; " +
+            $"queue_dequeue_to_bulk_send_started_avg_ms={queueDequeueToBulkSendStartedAvgMs}; " +
+            $"queue_dequeue_to_bulk_send_started_median_ms={queueDequeueToBulkSendStartedMedianMs}; " +
+            $"queue_dequeue_to_bulk_send_started_p95_ms={queueDequeueToBulkSendStartedP95Ms}; " +
+            $"queue_dequeue_to_bulk_send_started_max_ms={queueDequeueToBulkSendStartedMaxMs}; " +
+            $"bulk_send_started_to_bulk_send_resolved_avg_ms={bulkSendStartedToBulkSendResolvedAvgMs}; " +
+            $"bulk_send_started_to_bulk_send_resolved_median_ms={bulkSendStartedToBulkSendResolvedMedianMs}; " +
+            $"bulk_send_started_to_bulk_send_resolved_p95_ms={bulkSendStartedToBulkSendResolvedP95Ms}; " +
+            $"bulk_send_started_to_bulk_send_resolved_max_ms={bulkSendStartedToBulkSendResolvedMaxMs}; " +
+            $"send_p95_ms={sendP95Ms}; send_max_ms={sendMaxMs}; frames_sent={framesSent}; frames_enqueued={framesEnqueued}; payload_bytes_sent={payloadBytesSent}; payload_bytes_per_second={payloadBytesPerSecond}; payload_bytes_enqueued={payloadBytesEnqueued}; payload_bytes_enqueued_per_second={payloadBytesEnqueuedPerSecond}; inter_enqueue_gap_p95_ms={interEnqueueGapP95Ms}; inter_enqueue_gap_max_ms={interEnqueueGapMaxMs}; send_failures={sendFailures}; queue_clears={queueClears}; queue_depth={queueDepth}; queued_bytes={queuedBytes}; oldest_queued_age_ms={oldestQueuedAgeMs}; in_flight={inFlight}; in_flight_bytes={inFlightBytes}; configured_concurrency={configuredConcurrency}; effective_concurrency={effectiveConcurrency}; in_flight_max={inFlightMax}; in_flight_bytes_max={inFlightBytesMax}; worker_utilization_percent={workerUtilizationPercent}; worker_idle_slot_samples={workerIdleSlotSamples}; worker_saturation_percent={workerSaturationPercent}; drain_wake_count={drainWakeCount}; send_mode={sendMode}; send_mode_fanout_frames={sendModeFanoutFrames}; send_mode_round_robin_frames={sendModeRoundRobinFrames}; send_mode_single_frames={sendModeSingleFrames}; send_mode_redundant2_frames={sendModeRedundant2Frames}; send_mode_fallback_frames={sendModeFallbackFrames}; sample_window_ms={sampleWindowMs}");
+    }
+
     private void HandleBridgeTransportHealthSummary(JsonElement root)
     {
         var selectedRpc = TryGetString(root, "selected_rpc", out var selectedRpcValue) ? selectedRpcValue : "(none)";
@@ -788,6 +1067,28 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var controlSubClients = TryGetInt64(root, "control_subclients", out var controlSubClientsValue) ? Math.Max(0, controlSubClientsValue) : 0;
         var mediaSubClients = TryGetInt64(root, "media_subclients", out var mediaSubClientsValue) ? Math.Max(0, mediaSubClientsValue) : 0;
         var bulkSubClients = TryGetInt64(root, "bulk_subclients", out var bulkSubClientsValue) ? Math.Max(0, bulkSubClientsValue) : 0;
+        var bulkSendConcurrency = TryGetInt64(root, "bulk_send_concurrency", out var bulkSendConcurrencyValue) ? Math.Max(0, bulkSendConcurrencyValue) : 0;
+        var controlMessagesReceivedSinceLast = TryGetInt64(root, "control_messages_received_since_last", out var controlMessagesReceivedValue) ? Math.Max(0, controlMessagesReceivedValue) : 0;
+        var mediaMessagesReceivedSinceLast = TryGetInt64(root, "media_messages_received_since_last", out var mediaMessagesReceivedValue) ? Math.Max(0, mediaMessagesReceivedValue) : 0;
+        var bulkMessagesReceivedSinceLast = TryGetInt64(root, "bulk_messages_received_since_last", out var bulkMessagesReceivedValue) ? Math.Max(0, bulkMessagesReceivedValue) : 0;
+        var totalMessagesReceivedSinceLast = TryGetInt64(root, "total_messages_received_since_last", out var totalMessagesReceivedValue) ? Math.Max(0, totalMessagesReceivedValue) : controlMessagesReceivedSinceLast + mediaMessagesReceivedSinceLast + bulkMessagesReceivedSinceLast;
+        var controlBytesReceivedSinceLast = TryGetInt64(root, "control_bytes_received_since_last", out var controlBytesReceivedValue) ? Math.Max(0, controlBytesReceivedValue) : 0;
+        var mediaBytesReceivedSinceLast = TryGetInt64(root, "media_bytes_received_since_last", out var mediaBytesReceivedValue) ? Math.Max(0, mediaBytesReceivedValue) : 0;
+        var bulkBytesReceivedSinceLast = TryGetInt64(root, "bulk_bytes_received_since_last", out var bulkBytesReceivedValue) ? Math.Max(0, bulkBytesReceivedValue) : 0;
+        var totalBytesReceivedSinceLast = TryGetInt64(root, "total_bytes_received_since_last", out var totalBytesReceivedValue) ? Math.Max(0, totalBytesReceivedValue) : controlBytesReceivedSinceLast + mediaBytesReceivedSinceLast + bulkBytesReceivedSinceLast;
+        var controlLastReceivedAgeMs = TryGetInt64(root, "control_last_received_age_ms", out var controlLastReceivedAgeValue) ? controlLastReceivedAgeValue : -1;
+        var mediaLastReceivedAgeMs = TryGetInt64(root, "media_last_received_age_ms", out var mediaLastReceivedAgeValue) ? mediaLastReceivedAgeValue : -1;
+        var bulkLastReceivedAgeMs = TryGetInt64(root, "bulk_last_received_age_ms", out var bulkLastReceivedAgeValue) ? bulkLastReceivedAgeValue : -1;
+
+        MaybeLogReceiveStallRecoveryReceiveResumed(
+            connectKey,
+            totalMessagesReceivedSinceLast,
+            totalBytesReceivedSinceLast,
+            controlMessagesReceivedSinceLast,
+            mediaMessagesReceivedSinceLast,
+            bulkMessagesReceivedSinceLast,
+            controlLastReceivedAgeMs,
+            bulkLastReceivedAgeMs);
 
         Log(
             "event=screenshare_bridge_transport_health_summary; " +
@@ -796,7 +1097,377 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             $"connect_failed_count_since_last={connectFailedCountSinceLast}; ws_error_count_since_last={wsErrorCountSinceLast}; rpc_fallback_attempt_count_since_last={rpcFallbackAttemptCountSinceLast}; " +
             $"control_ready={controlReady}; media_ready={mediaReady}; bulk_ready={bulkReady}; frames_sent_since_last={framesSentSinceLast}; latest_disconnect_reason={latestDisconnectReason}; sample_window_ms={sampleWindowMs}; " +
             $"control_subclients={controlSubClients}; media_subclients={mediaSubClients}; bulk_subclients={bulkSubClients}; " +
-            $"srk={selectedRpcKey}; srs={selectedRpcStage}; cky={connectKey}; rdy={readyEmitted}; cra={clientReadyAgeMs}; dcc={disconnectCountSinceLast}; cfc={connectFailedCountSinceLast}; wec={wsErrorCountSinceLast}; rfc={rpcFallbackAttemptCountSinceLast}; cr={controlReady}; mr={mediaReady}; br={bulkReady}; fss={framesSentSinceLast}; ldr={latestDisconnectReason}; csc={controlSubClients}; msc={mediaSubClients}; bsc={bulkSubClients}");
+            $"bulk_send_concurrency={bulkSendConcurrency}; control_messages_received_since_last={controlMessagesReceivedSinceLast}; media_messages_received_since_last={mediaMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; " +
+            $"total_messages_received_since_last={totalMessagesReceivedSinceLast}; control_bytes_received_since_last={controlBytesReceivedSinceLast}; media_bytes_received_since_last={mediaBytesReceivedSinceLast}; bulk_bytes_received_since_last={bulkBytesReceivedSinceLast}; " +
+            $"total_bytes_received_since_last={totalBytesReceivedSinceLast}; control_last_received_age_ms={controlLastReceivedAgeMs}; media_last_received_age_ms={mediaLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}; " +
+            $"srk={selectedRpcKey}; srs={selectedRpcStage}; cky={connectKey}; rdy={readyEmitted}; cra={clientReadyAgeMs}; dcc={disconnectCountSinceLast}; cfc={connectFailedCountSinceLast}; wec={wsErrorCountSinceLast}; rfc={rpcFallbackAttemptCountSinceLast}; cr={controlReady}; mr={mediaReady}; br={bulkReady}; fss={framesSentSinceLast}; " +
+            $"cmr={controlMessagesReceivedSinceLast}; mmr={mediaMessagesReceivedSinceLast}; bmr={bulkMessagesReceivedSinceLast}; tmr={totalMessagesReceivedSinceLast}; cbrx={controlBytesReceivedSinceLast}; mbrx={mediaBytesReceivedSinceLast}; bbrx={bulkBytesReceivedSinceLast}; tbrx={totalBytesReceivedSinceLast}; clar={controlLastReceivedAgeMs}; mlar={mediaLastReceivedAgeMs}; blar={bulkLastReceivedAgeMs}; " +
+            $"ldr={latestDisconnectReason}; csc={controlSubClients}; msc={mediaSubClients}; bsc={bulkSubClients}; bcc={bulkSendConcurrency}");
+
+        EvaluateReceiveStallRecovery(
+            connectKey,
+            readyEmitted,
+            controlReady,
+            mediaReady,
+            bulkReady,
+            framesSentSinceLast,
+            controlMessagesReceivedSinceLast,
+            bulkMessagesReceivedSinceLast,
+            totalMessagesReceivedSinceLast,
+            controlLastReceivedAgeMs,
+            mediaLastReceivedAgeMs,
+            bulkLastReceivedAgeMs,
+            sampleWindowMs);
+    }
+
+    private void EvaluateReceiveStallRecovery(
+        string connectKey,
+        long readyEmitted,
+        long controlReady,
+        long mediaReady,
+        long bulkReady,
+        long framesSentSinceLast,
+        long controlMessagesReceivedSinceLast,
+        long bulkMessagesReceivedSinceLast,
+        long totalMessagesReceivedSinceLast,
+        long controlLastReceivedAgeMs,
+        long mediaLastReceivedAgeMs,
+        long bulkLastReceivedAgeMs,
+        long sampleWindowMs)
+    {
+        var allChannelsReady = readyEmitted > 0 && controlReady > 0 && mediaReady > 0 && bulkReady > 0;
+        var activeOutboundTraffic = framesSentSinceLast > 0;
+        var fileTransferActiveSessionCount = Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions));
+        var fileTransferActive = fileTransferActiveSessionCount > 0;
+        var receiveStalled = allChannelsReady && activeOutboundTraffic && totalMessagesReceivedSinceLast == 0;
+        var consecutiveWindows = receiveStalled
+            ? Interlocked.Increment(ref receiveStallConsecutiveWindows)
+            : Interlocked.Exchange(ref receiveStallConsecutiveWindows, 0);
+        var bulkReceiveStalledCandidate =
+            fileTransferActive &&
+            readyEmitted > 0 &&
+            bulkReady > 0 &&
+            activeOutboundTraffic &&
+            bulkMessagesReceivedSinceLast == 0 &&
+            bulkLastReceivedAgeMs >= ReceiveStallBulkAgeThresholdMs;
+        var bulkConsecutiveWindows = bulkReceiveStalledCandidate
+            ? Interlocked.Increment(ref receiveStallBulkConsecutiveWindows)
+            : Interlocked.Exchange(ref receiveStallBulkConsecutiveWindows, 0);
+        var bulkReceiveStalled = options.ReceiveStallFileTransferFastRecoveryEnabled && bulkReceiveStalledCandidate;
+        var controlReceiveStalledCandidate =
+            fileTransferActive &&
+            readyEmitted > 0 &&
+            controlReady > 0 &&
+            activeOutboundTraffic &&
+            controlMessagesReceivedSinceLast == 0 &&
+            controlLastReceivedAgeMs >= ReceiveStallControlAgeThresholdMs;
+        var controlConsecutiveWindows = controlReceiveStalledCandidate
+            ? Interlocked.Increment(ref receiveStallControlConsecutiveWindows)
+            : Interlocked.Exchange(ref receiveStallControlConsecutiveWindows, 0);
+        var controlReceiveStalled = options.ReceiveStallFileTransferFastRecoveryEnabled && controlReceiveStalledCandidate;
+        var bulkReceiveActiveThisWindow = bulkMessagesReceivedSinceLast > 0;
+
+        Log(
+            "event=filetransfer_v4_receive_liveness_summary; " +
+            $"reason=sample; active_file_transfer_sessions={fileTransferActiveSessionCount}; ready_emitted={readyEmitted}; control_ready={controlReady}; media_ready={mediaReady}; bulk_ready={bulkReady}; frames_sent_since_last={framesSentSinceLast}; " +
+            $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; total_messages_received_since_last={totalMessagesReceivedSinceLast}; " +
+            $"control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}; all_zero_receive_consecutive_windows={consecutiveWindows}; bulk_zero_receive_consecutive_windows={bulkConsecutiveWindows}; control_zero_receive_consecutive_windows={controlConsecutiveWindows}; " +
+            $"filetransfer_fast_recovery_enabled={(options.ReceiveStallFileTransferFastRecoveryEnabled ? 1 : 0)}; sample_window_ms={sampleWindowMs}");
+
+        string? stallReason = null;
+        var qualifiedConsecutiveWindows = 0;
+        var requiresControlProof = false;
+        var requiresBulkProof = false;
+        if (receiveStalled &&
+            consecutiveWindows >= ReceiveStallRequiredConsecutiveWindows &&
+            controlLastReceivedAgeMs >= ReceiveStallControlAgeThresholdMs)
+        {
+            stallReason = "all_channels_zero_receive";
+            qualifiedConsecutiveWindows = consecutiveWindows;
+            requiresControlProof = true;
+            requiresBulkProof = bulkLastReceivedAgeMs >= ReceiveStallBulkAgeThresholdMs;
+        }
+        else if (bulkReceiveStalled &&
+                 bulkConsecutiveWindows >= ReceiveStallFastRequiredConsecutiveWindows)
+        {
+            stallReason = "bulk_receive_stalled";
+            qualifiedConsecutiveWindows = bulkConsecutiveWindows;
+            requiresBulkProof = true;
+        }
+        else if (controlReceiveStalled &&
+                 controlConsecutiveWindows >= ReceiveStallFastRequiredConsecutiveWindows)
+        {
+            if (bulkReceiveActiveThisWindow && !options.ReceiveStallControlOnlyRecoveryEnabled)
+            {
+                Log(
+                    "event=nkn_bridge_control_receive_degraded; " +
+                    $"connect_key={connectKey}; consecutive_control_zero_receive_windows={controlConsecutiveWindows}; active_file_transfer_sessions={fileTransferActiveSessionCount}; frames_sent_since_last={framesSentSinceLast}; " +
+                    $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; total_messages_received_since_last={totalMessagesReceivedSinceLast}; " +
+                    $"control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}; sample_window_ms={sampleWindowMs}");
+                Log(
+                    "event=nkn_bridge_control_receive_recovery_suppressed; reason=bulk_receive_active; " +
+                    $"connect_key={connectKey}; consecutive_control_zero_receive_windows={controlConsecutiveWindows}; active_file_transfer_sessions={fileTransferActiveSessionCount}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}; " +
+                    $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}");
+                return;
+            }
+
+            if (!options.ReceiveStallControlOnlyRecoveryEnabled &&
+                bulkConsecutiveWindows < ReceiveStallFastRequiredConsecutiveWindows)
+            {
+                Log(
+                    "event=nkn_bridge_control_receive_degraded; " +
+                    $"connect_key={connectKey}; consecutive_control_zero_receive_windows={controlConsecutiveWindows}; active_file_transfer_sessions={fileTransferActiveSessionCount}; frames_sent_since_last={framesSentSinceLast}; " +
+                    $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; total_messages_received_since_last={totalMessagesReceivedSinceLast}; " +
+                    $"control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}; sample_window_ms={sampleWindowMs}");
+                Log(
+                    "event=nkn_bridge_control_receive_recovery_suppressed; reason=bulk_not_idle; " +
+                    $"connect_key={connectKey}; consecutive_control_zero_receive_windows={controlConsecutiveWindows}; bulk_zero_receive_consecutive_windows={bulkConsecutiveWindows}; active_file_transfer_sessions={fileTransferActiveSessionCount}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}; " +
+                    $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}");
+                return;
+            }
+
+            stallReason = "control_receive_stalled";
+            qualifiedConsecutiveWindows = controlConsecutiveWindows;
+            requiresControlProof = true;
+        }
+
+        if (stallReason is null)
+        {
+            if (!options.ReceiveStallFileTransferFastRecoveryEnabled &&
+                ((bulkReceiveStalledCandidate && bulkConsecutiveWindows >= ReceiveStallFastRequiredConsecutiveWindows) ||
+                 (controlReceiveStalledCandidate && controlConsecutiveWindows >= ReceiveStallFastRequiredConsecutiveWindows)))
+            {
+                Log(
+                    "event=nkn_bridge_receive_stall_recovery_failed; reason=filetransfer_fast_recovery_disabled; " +
+                    $"connect_key={connectKey}; bulk_zero_receive_consecutive_windows={bulkConsecutiveWindows}; control_zero_receive_consecutive_windows={controlConsecutiveWindows}; active_file_transfer_sessions={fileTransferActiveSessionCount}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}");
+            }
+
+            return;
+        }
+
+        Log(
+            "event=nkn_bridge_receive_stall_detected; " +
+            $"connect_key={connectKey}; reason={stallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; all_zero_receive_consecutive_windows={consecutiveWindows}; bulk_zero_receive_consecutive_windows={bulkConsecutiveWindows}; control_zero_receive_consecutive_windows={controlConsecutiveWindows}; active_file_transfer_sessions={fileTransferActiveSessionCount}; frames_sent_since_last={framesSentSinceLast}; " +
+            $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; total_messages_received_since_last={totalMessagesReceivedSinceLast}; control_last_received_age_ms={controlLastReceivedAgeMs}; " +
+            $"media_last_received_age_ms={mediaLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}; sample_window_ms={sampleWindowMs}");
+
+        if (!options.ReceiveStallRecoveryEnabled)
+        {
+            Log(
+                "event=nkn_bridge_receive_stall_recovery_failed; reason=disabled; " +
+                $"connect_key={connectKey}; stall_reason={stallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}");
+            return;
+        }
+
+        if (disposed || shuttingDown)
+        {
+            Log(
+                "event=nkn_bridge_receive_stall_recovery_failed; reason=adapter_not_active; " +
+                $"connect_key={connectKey}; stall_reason={stallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}");
+            return;
+        }
+
+        var recoveryCount = Volatile.Read(ref receiveStallRecoveryCount);
+        if (recoveryCount >= ReceiveStallMaxRecoveriesPerSession)
+        {
+            Log(
+                "event=nkn_bridge_receive_stall_recovery_failed; reason=max_restarts_reached; " +
+                $"connect_key={connectKey}; stall_reason={stallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; recovery_count={recoveryCount}; max_restarts={ReceiveStallMaxRecoveriesPerSession}");
+            return;
+        }
+
+        var nowTick = Stopwatch.GetTimestamp();
+        var lastRecoveryTick = Volatile.Read(ref receiveStallLastRecoveryStartedTick);
+        var awaitingReceiveProof = Volatile.Read(ref receiveStallRecoveryAwaitingReceiveProof) != 0;
+        var withinCooldown = lastRecoveryTick > 0 && Stopwatch.GetElapsedTime(lastRecoveryTick, nowTick) < ReceiveStallRecoveryCooldown;
+        if (withinCooldown && !awaitingReceiveProof)
+        {
+            var cooldownRemainingMs = Math.Max(0, (long)(ReceiveStallRecoveryCooldown - Stopwatch.GetElapsedTime(lastRecoveryTick, nowTick)).TotalMilliseconds);
+            Log(
+                "event=nkn_bridge_receive_stall_recovery_failed; reason=cooldown_active; " +
+                $"connect_key={connectKey}; stall_reason={stallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; recovery_count={recoveryCount}; cooldown_remaining_ms={cooldownRemainingMs}");
+            return;
+        }
+
+        if (withinCooldown && awaitingReceiveProof)
+        {
+            var elapsedSinceLastRecoveryMs = Math.Max(0, (long)Stopwatch.GetElapsedTime(lastRecoveryTick, nowTick).TotalMilliseconds);
+            Log(
+                "event=nkn_bridge_receive_stall_recovery_cooldown_bypassed; reason=previous_recovery_unproven; " +
+                $"connect_key={connectKey}; stall_reason={stallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; recovery_count={recoveryCount}; elapsed_since_last_recovery_ms={elapsedSinceLastRecoveryMs}");
+        }
+
+        if (Interlocked.CompareExchange(ref receiveStallRecoveryInProgress, 1, 0) != 0)
+        {
+            Log(
+                "event=nkn_bridge_receive_stall_recovery_failed; reason=recovery_already_in_progress; " +
+                $"connect_key={connectKey}; stall_reason={stallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; recovery_count={recoveryCount}");
+            return;
+        }
+
+        Volatile.Write(ref receiveStallLastRecoveryStartedTick, nowTick);
+        var attempt = Interlocked.Increment(ref receiveStallRecoveryCount);
+        Volatile.Write(ref receiveStallRecoveryRequiresControlProof, requiresControlProof ? 1 : 0);
+        Volatile.Write(ref receiveStallRecoveryRequiresBulkProof, requiresBulkProof ? 1 : 0);
+        _ = Task.Run(
+            () => RecoverFromReceiveStallAsync(
+                connectKey,
+                stallReason,
+                attempt,
+                qualifiedConsecutiveWindows,
+                framesSentSinceLast,
+                controlLastReceivedAgeMs,
+                mediaLastReceivedAgeMs,
+                bulkLastReceivedAgeMs),
+            CancellationToken.None);
+    }
+
+    private async Task RecoverFromReceiveStallAsync(
+        string connectKey,
+        string stallReason,
+        int attempt,
+        int consecutiveWindows,
+        long framesSentSinceLast,
+        long controlLastReceivedAgeMs,
+        long mediaLastReceivedAgeMs,
+        long bulkLastReceivedAgeMs)
+    {
+        Log(
+            "event=nkn_bridge_receive_stall_recovery_started; " +
+            $"connect_key={connectKey}; stall_reason={stallReason}; attempt={attempt}; max_restarts={ReceiveStallMaxRecoveriesPerSession}; consecutive_zero_receive_windows={consecutiveWindows}; " +
+            $"frames_sent_since_last={framesSentSinceLast}; control_last_received_age_ms={controlLastReceivedAgeMs}; media_last_received_age_ms={mediaLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}");
+
+        try
+        {
+            lock (gate)
+            {
+                suppressBridgeDisconnectDuringReceiveStallRecovery = true;
+            }
+
+            connectAttempts.ResetPendingReadyForNewProcessStart();
+            Interlocked.Exchange(ref receiveStallRecoveryConnectActive, 1);
+            try
+            {
+                await ConnectAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref receiveStallRecoveryConnectActive, 0);
+            }
+
+            Interlocked.Exchange(ref receiveStallConsecutiveWindows, 0);
+            Interlocked.Exchange(ref receiveStallBulkConsecutiveWindows, 0);
+            Interlocked.Exchange(ref receiveStallControlConsecutiveWindows, 0);
+            Interlocked.Exchange(ref receiveStallRecoveryAwaitingReceiveProof, 1);
+            Interlocked.Exchange(ref receiveStallRecoveryLastUnprovenLogTick, 0);
+            Volatile.Write(ref receiveStallLastRecoveryCompletedTick, Stopwatch.GetTimestamp());
+            Log(
+                "event=nkn_bridge_receive_stall_recovery_completed; " +
+                $"connect_key={connectKey}; stall_reason={stallReason}; attempt={attempt}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}; " +
+                $"fallback_delay_ms={options.ReceiveStallRecoveryFallbackDelayMs}; requires_control_proof={Volatile.Read(ref receiveStallRecoveryRequiresControlProof)}; requires_bulk_proof={Volatile.Read(ref receiveStallRecoveryRequiresBulkProof)}");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            NknRuntimeDiagnostics.SetLastError("nkn_bridge_receive_stall_recovery_failed");
+            Log(
+                "event=nkn_bridge_receive_stall_recovery_failed; " +
+                $"connect_key={connectKey}; stall_reason={stallReason}; attempt={attempt}; reason={ex.GetType().Name}; message={SanitizeLogToken(ex.Message)}");
+            SignalDisconnected("receive_stall_recovery_failed");
+        }
+        finally
+        {
+            lock (gate)
+            {
+                suppressBridgeDisconnectDuringReceiveStallRecovery = false;
+            }
+
+            Interlocked.Exchange(ref receiveStallRecoveryInProgress, 0);
+        }
+    }
+
+    private void MaybeLogReceiveStallRecoveryReceiveResumed(
+        string connectKey,
+        long totalMessagesReceivedSinceLast,
+        long totalBytesReceivedSinceLast,
+        long controlMessagesReceivedSinceLast,
+        long mediaMessagesReceivedSinceLast,
+        long bulkMessagesReceivedSinceLast,
+        long controlLastReceivedAgeMs,
+        long bulkLastReceivedAgeMs)
+    {
+        if (totalMessagesReceivedSinceLast <= 0)
+        {
+            return;
+        }
+
+        if (Volatile.Read(ref receiveStallRecoveryAwaitingReceiveProof) == 0)
+        {
+            return;
+        }
+
+        var requiresControlProof = Volatile.Read(ref receiveStallRecoveryRequiresControlProof) != 0;
+        var requiresBulkProof = Volatile.Read(ref receiveStallRecoveryRequiresBulkProof) != 0;
+        var hasRequiredControl = !requiresControlProof || controlMessagesReceivedSinceLast > 0;
+        var hasRequiredBulk = !requiresBulkProof || bulkMessagesReceivedSinceLast > 0;
+        if (!hasRequiredControl || !hasRequiredBulk)
+        {
+            MaybeLogReceiveStallRecoveryUnproven(
+                connectKey,
+                totalMessagesReceivedSinceLast,
+                totalBytesReceivedSinceLast,
+                controlMessagesReceivedSinceLast,
+                mediaMessagesReceivedSinceLast,
+                bulkMessagesReceivedSinceLast,
+                controlLastReceivedAgeMs,
+                bulkLastReceivedAgeMs,
+                requiresControlProof,
+                requiresBulkProof);
+            return;
+        }
+
+        if (Interlocked.Exchange(ref receiveStallRecoveryAwaitingReceiveProof, 0) == 0)
+        {
+            return;
+        }
+
+        var completedTick = Volatile.Read(ref receiveStallLastRecoveryCompletedTick);
+        var resumeAfterRecoveryMs = completedTick > 0
+            ? Math.Max(0, (long)Stopwatch.GetElapsedTime(completedTick, Stopwatch.GetTimestamp()).TotalMilliseconds)
+            : -1;
+        Log(
+            "event=nkn_bridge_receive_stall_recovery_receive_resumed; " +
+            $"connect_key={connectKey}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}; resume_after_recovery_ms={resumeAfterRecoveryMs}; " +
+            $"total_messages_received_since_last={totalMessagesReceivedSinceLast}; total_bytes_received_since_last={totalBytesReceivedSinceLast}; " +
+            $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; media_messages_received_since_last={mediaMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}");
+    }
+
+    private void MaybeLogReceiveStallRecoveryUnproven(
+        string connectKey,
+        long totalMessagesReceivedSinceLast,
+        long totalBytesReceivedSinceLast,
+        long controlMessagesReceivedSinceLast,
+        long mediaMessagesReceivedSinceLast,
+        long bulkMessagesReceivedSinceLast,
+        long controlLastReceivedAgeMs,
+        long bulkLastReceivedAgeMs,
+        bool requiresControlProof,
+        bool requiresBulkProof)
+    {
+        var nowTick = Stopwatch.GetTimestamp();
+        var lastLogTick = Volatile.Read(ref receiveStallRecoveryLastUnprovenLogTick);
+        if (lastLogTick > 0 && Stopwatch.GetElapsedTime(lastLogTick, nowTick) < ScreenShareBridgeLogInterval)
+        {
+            return;
+        }
+
+        Volatile.Write(ref receiveStallRecoveryLastUnprovenLogTick, nowTick);
+        Log(
+            "event=nkn_bridge_receive_stall_recovery_unproven; " +
+            $"connect_key={connectKey}; recovery_count={Volatile.Read(ref receiveStallRecoveryCount)}; " +
+            $"requires_control_proof={(requiresControlProof ? 1 : 0)}; requires_bulk_proof={(requiresBulkProof ? 1 : 0)}; " +
+            $"total_messages_received_since_last={totalMessagesReceivedSinceLast}; total_bytes_received_since_last={totalBytesReceivedSinceLast}; " +
+            $"control_messages_received_since_last={controlMessagesReceivedSinceLast}; media_messages_received_since_last={mediaMessagesReceivedSinceLast}; bulk_messages_received_since_last={bulkMessagesReceivedSinceLast}; " +
+            $"control_last_received_age_ms={controlLastReceivedAgeMs}; bulk_last_received_age_ms={bulkLastReceivedAgeMs}");
     }
 
     private void SetScreenShareQueueState(BridgeScreenShareQueueState nextState)
@@ -834,6 +1505,39 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         ScreenShareQueueStateChanged?.Invoke(this, new BridgeScreenShareQueueStateChangedEventArgs(nextState));
         changed?.TrySetResult(screenShareQueueStateVersion);
+    }
+
+    private void SetBulkQueueState(BridgeBulkQueueState nextState)
+    {
+        TaskCompletionSource<long>? changed = null;
+        bool shouldLogTransition = false;
+        bool previousCongested;
+        bool previousSevere;
+        lock (bulkQueueStateGate)
+        {
+            previousCongested = bulkQueueState.IsCongested;
+            previousSevere = bulkQueueState.IsSevere;
+            if (bulkQueueState.Equals(nextState))
+            {
+                return;
+            }
+
+            bulkQueueState = nextState;
+            bulkQueueStateVersion++;
+            changed = bulkQueueStateChangedTcs;
+            bulkQueueStateChangedTcs = CreateQueueStateChangedTcs();
+            shouldLogTransition = previousCongested != nextState.IsCongested ||
+                                  previousSevere != nextState.IsSevere ||
+                                  nextState.ClearedSinceLast > 0;
+        }
+
+        if (shouldLogTransition)
+        {
+            Log(
+                $"event=nkn_bridge_bulk_queue_state; congested={(nextState.IsCongested ? 1 : 0)}; severe={(nextState.IsSevere ? 1 : 0)}; queue_depth={nextState.QueueDepth}; queued_bytes={nextState.QueuedBytes}; oldest_queued_age_ms={nextState.OldestQueuedAgeMs}; in_flight={nextState.InFlightCount}; in_flight_bytes={nextState.InFlightBytes}; configured_concurrency={nextState.ConfiguredConcurrency}; effective_concurrency={nextState.EffectiveConcurrency}; cleared_since_last={nextState.ClearedSinceLast}");
+        }
+
+        changed?.TrySetResult(bulkQueueStateVersion);
     }
 
     private static string FormatBridgeScreenShareQueueMode(BridgeScreenShareQueueMode mode)
@@ -965,7 +1669,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
     private async Task EnsureProcessStartedAsync(CancellationToken ct)
     {
-        RefreshAndLogBridgeBundleIdentity();
+        var identity = RefreshAndLogBridgeBundleIdentity();
+        BridgeBundleStartupGuard.EnsureTrustedForStartup(identity, Log, RecordBridgeFailure);
         await bridgeSupervisor.EnsureStartedAsync(ct).ConfigureAwait(false);
         lock (gate)
         {
@@ -1322,23 +2027,53 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             MaybeLogBridgeMessageSummary(payloadBytes.Length, source.Length, isTopic);
         }
 
-        MessageReceived?.Invoke(
-            this,
-            new NknIncomingMessage(
-                source,
-                payloadBytes,
-                isTopic,
-                topic,
-                channel,
-                bridgeIngressObservedUtcMs,
-                bridgeMessageObservedUtcMs,
-                binaryFrameDecodedUtcMs,
-                socketDataEventEmittedUtcMs,
-                wsReceiverWriteEnteredUtcMs,
-                wsMessageEmittedUtcMs,
-                sdkHandleMsgEnteredUtcMs,
-                clientMessageDispatchUtcMs,
-                multiClientMessageDispatchUtcMs));
+        var handler = MessageReceived;
+        var subscriberPresent = handler is not null;
+        var matchesLocalControl = AddressesLikelySamePeer(source, Address);
+        var matchesLocalMedia = AddressesLikelySamePeer(source, MediaAddress);
+        var matchesLocalBulk = AddressesLikelySamePeer(source, BulkAddress);
+        RecordInboundDelivery(
+            channel,
+            payloadBytes.Length,
+            subscriberPresent,
+            isTopic,
+            matchesLocalControl,
+            matchesLocalMedia,
+            matchesLocalBulk,
+            source.Length,
+            HashLogValue(source));
+
+        try
+        {
+            handler?.Invoke(
+                this,
+                new NknIncomingMessage(
+                    source,
+                    payloadBytes,
+                    isTopic,
+                    topic,
+                    channel,
+                    bridgeIngressObservedUtcMs,
+                    bridgeMessageObservedUtcMs,
+                    binaryFrameDecodedUtcMs,
+                    socketDataEventEmittedUtcMs,
+                    wsReceiverWriteEnteredUtcMs,
+                    wsMessageEmittedUtcMs,
+                    sdkHandleMsgEnteredUtcMs,
+                    clientMessageDispatchUtcMs,
+                    multiClientMessageDispatchUtcMs));
+        }
+        catch (Exception ex)
+        {
+            RecordInboundDeliveryHandlerFailure(channel);
+            Log(
+                $"event=nkn_bridge_inbound_delivery_failed; channel={FormatBridgeChannel(channel)}; payload_bytes={payloadBytes.Length}; source_len={source.Length}; is_topic={(isTopic ? 1 : 0)}; ex={ex.GetType().Name}");
+            throw;
+        }
+        finally
+        {
+            MaybeLogInboundDeliverySummary(channel);
+        }
     }
 
     private static bool TryParseBridgeMediaTimingMetadata(string? secondaryText, out BridgeMediaTimingMetadata metadata)
@@ -1488,6 +2223,80 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
 
         return NknBridgeChannel.Control;
+    }
+
+    private static string FormatBridgeChannel(NknBridgeChannel channel)
+        => channel switch
+        {
+            NknBridgeChannel.Media => "media",
+            NknBridgeChannel.Bulk => "bulk",
+            _ => "control",
+        };
+
+    private static bool AddressesLikelySamePeer(string? left, string? right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+        {
+            return false;
+        }
+
+        if (string.Equals(left, right, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var leftTail = GetAddressTail(left);
+        var rightTail = GetAddressTail(right);
+        return LooksLikeNknPubKeyTail(leftTail) &&
+               LooksLikeNknPubKeyTail(rightTail) &&
+               string.Equals(leftTail, rightTail, StringComparison.Ordinal);
+    }
+
+    private static string GetAddressTail(string address)
+    {
+        if (string.IsNullOrWhiteSpace(address))
+        {
+            return string.Empty;
+        }
+
+        var span = address.AsSpan().Trim();
+        var lastDot = span.LastIndexOf('.');
+        return lastDot < 0 || lastDot == span.Length - 1
+            ? span.ToString()
+            : span[(lastDot + 1)..].ToString();
+    }
+
+    private static bool LooksLikeNknPubKeyTail(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length < 32)
+        {
+            return false;
+        }
+
+        foreach (var ch in value)
+        {
+            var isHex =
+                (ch >= '0' && ch <= '9') ||
+                (ch >= 'a' && ch <= 'f') ||
+                (ch >= 'A' && ch <= 'F');
+            if (!isHex)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static string HashLogValue(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "(none)";
+        }
+
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(value.Trim()));
+        return Convert.ToHexString(hash, 0, Math.Min(hash.Length, 8)).ToLowerInvariant();
     }
 
     private void ValidateBridgeCapabilitiesOrThrow(BridgeReadyInfo readyInfo)
@@ -1670,9 +2479,142 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         Log($"Bridge filetransfer bulk traffic (messages={messageCount}, payload_bytes={totalPayloadBytes}, source_len={sourceLength}, is_topic={isTopic})");
     }
 
+    private void RecordInboundDelivery(
+        NknBridgeChannel channel,
+        int payloadLength,
+        bool subscriberPresent,
+        bool isTopic,
+        bool sourceMatchesLocalControl,
+        bool sourceMatchesLocalMedia,
+        bool sourceMatchesLocalBulk,
+        int sourceLength,
+        string sourceHash)
+    {
+        var counters = GetInboundDeliveryCounters(channel);
+        Interlocked.Increment(ref counters.MessageCount);
+        Interlocked.Add(ref counters.PayloadBytes, payloadLength);
+        if (subscriberPresent)
+        {
+            Interlocked.Increment(ref counters.SubscriberPresentCount);
+        }
+        else
+        {
+            Interlocked.Increment(ref counters.SubscriberMissingCount);
+        }
+
+        if (isTopic)
+        {
+            Interlocked.Increment(ref counters.TopicCount);
+        }
+
+        if (sourceMatchesLocalControl)
+        {
+            Interlocked.Increment(ref counters.SourceMatchesLocalControlCount);
+        }
+
+        if (sourceMatchesLocalMedia)
+        {
+            Interlocked.Increment(ref counters.SourceMatchesLocalMediaCount);
+        }
+
+        if (sourceMatchesLocalBulk)
+        {
+            Interlocked.Increment(ref counters.SourceMatchesLocalBulkCount);
+        }
+
+        if (sourceMatchesLocalControl || sourceMatchesLocalMedia || sourceMatchesLocalBulk)
+        {
+            Interlocked.Increment(ref counters.SourceMatchesAnyLocalCount);
+        }
+
+        Volatile.Write(ref counters.LastSourceLength, sourceLength);
+        counters.LastSourceHash = sourceHash;
+    }
+
+    private void RecordInboundDeliveryHandlerFailure(NknBridgeChannel channel)
+    {
+        var counters = GetInboundDeliveryCounters(channel);
+        Interlocked.Increment(ref counters.HandlerFailureCount);
+    }
+
+    private void MaybeLogInboundDeliverySummary(NknBridgeChannel channel)
+    {
+        var counters = GetInboundDeliveryCounters(channel);
+        var nowTick = Stopwatch.GetTimestamp();
+        var previousTick = Volatile.Read(ref counters.LastSummaryLogTick);
+        if (previousTick == 0)
+        {
+            if (Interlocked.CompareExchange(ref counters.LastSummaryLogTick, nowTick, 0) == 0)
+            {
+                EmitInboundDeliverySummary(channel, counters, initial: true);
+            }
+
+            return;
+        }
+
+        if (Stopwatch.GetElapsedTime(previousTick, nowTick) < BridgeTrafficLogInterval)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref counters.LastSummaryLogTick, nowTick, previousTick) != previousTick)
+        {
+            return;
+        }
+
+        EmitInboundDeliverySummary(channel, counters, initial: false);
+    }
+
+    private void EmitInboundDeliverySummary(NknBridgeChannel channel, InboundDeliveryCounters counters, bool initial)
+    {
+        var messageCount = Interlocked.Exchange(ref counters.MessageCount, 0);
+        var payloadBytes = Interlocked.Exchange(ref counters.PayloadBytes, 0);
+        var subscriberPresent = Interlocked.Exchange(ref counters.SubscriberPresentCount, 0);
+        var subscriberMissing = Interlocked.Exchange(ref counters.SubscriberMissingCount, 0);
+        var handlerFailures = Interlocked.Exchange(ref counters.HandlerFailureCount, 0);
+        var topicCount = Interlocked.Exchange(ref counters.TopicCount, 0);
+        var sourceMatchesLocalControl = Interlocked.Exchange(ref counters.SourceMatchesLocalControlCount, 0);
+        var sourceMatchesLocalMedia = Interlocked.Exchange(ref counters.SourceMatchesLocalMediaCount, 0);
+        var sourceMatchesLocalBulk = Interlocked.Exchange(ref counters.SourceMatchesLocalBulkCount, 0);
+        var sourceMatchesAnyLocal = Interlocked.Exchange(ref counters.SourceMatchesAnyLocalCount, 0);
+        Log(
+            "event=nkn_bridge_inbound_delivery_summary; " +
+            $"channel={FormatBridgeChannel(channel)}; " +
+            $"messages={messageCount}; " +
+            $"payload_bytes={payloadBytes}; " +
+            $"subscriber_present_count={subscriberPresent}; " +
+            $"subscriber_missing_count={subscriberMissing}; " +
+            $"handler_failure_count={handlerFailures}; " +
+            $"source_matches_local_control_count={sourceMatchesLocalControl}; " +
+            $"source_matches_local_media_count={sourceMatchesLocalMedia}; " +
+            $"source_matches_local_bulk_count={sourceMatchesLocalBulk}; " +
+            $"source_matches_any_local_count={sourceMatchesAnyLocal}; " +
+            $"topic_count={topicCount}; " +
+            $"last_source_len={Volatile.Read(ref counters.LastSourceLength)}; " +
+            $"last_source_hash={counters.LastSourceHash}; " +
+            $"initial={(initial ? 1 : 0)}");
+    }
+
+    private InboundDeliveryCounters GetInboundDeliveryCounters(NknBridgeChannel channel)
+        => channel switch
+        {
+            NknBridgeChannel.Media => mediaInboundDeliveryCounters,
+            NknBridgeChannel.Bulk => bulkInboundDeliveryCounters,
+            _ => controlInboundDeliveryCounters,
+        };
+
     private void HandleBridgeDisconnected(JsonElement root)
     {
         var reason = TryGetString(root, "reason", out var r) ? r : "bridge_disconnected";
+        lock (gate)
+        {
+            if (suppressBridgeDisconnectDuringReceiveStallRecovery)
+            {
+                Log($"event=nkn_bridge_receive_stall_recovery_disconnect_suppressed; reason={SanitizeLogToken(reason)}");
+                return;
+            }
+        }
+
         NknRuntimeDiagnostics.SetBridgeLastExit(exitCode: null, reason: reason);
         SignalDisconnected(reason);
     }
@@ -1695,6 +2637,18 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             IsCongested: false,
             IsSevere: false,
             Mode: BridgeScreenShareQueueMode.Normal));
+        SetBulkQueueState(new BridgeBulkQueueState(
+            QueueDepth: 0,
+            QueuedBytes: 0,
+            OldestQueuedAgeMs: 0,
+            InFlight: false,
+            InFlightCount: 0,
+            InFlightBytes: 0,
+            ConfiguredConcurrency: 1,
+            EffectiveConcurrency: 1,
+            ClearedSinceLast: 0,
+            IsCongested: false,
+            IsSevere: false));
 
         if (!string.Equals(reason, "shutdown", StringComparison.OrdinalIgnoreCase))
         {
@@ -1834,7 +2788,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
     }
 
-    private void RefreshAndLogBridgeBundleIdentity()
+    private BridgeBundleIdentity RefreshAndLogBridgeBundleIdentity()
     {
         var bridgePath = ResolveBridgeScriptPath();
         var identity = BridgeBundleIdentity.Load(bridgePath);
@@ -1848,6 +2802,8 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         {
             Log($"event=bridge_bundle_mismatch_detected; classification=installed_payload_drift; reason={identity.ManifestStatus}{identity.BuildStructuredLogFields()}");
         }
+
+        return identity;
     }
 
     private void StartPingLoopIfNeeded()
@@ -2026,6 +2982,34 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
 
         return prop.ValueKind == JsonValueKind.Number && prop.TryGetInt64(out value);
+    }
+
+    private static bool TryGetInt64OrBool(JsonElement root, string propertyName, out long value)
+    {
+        value = default;
+        if (!root.TryGetProperty(propertyName, out var prop))
+        {
+            return false;
+        }
+
+        if (prop.ValueKind == JsonValueKind.Number && prop.TryGetInt64(out value))
+        {
+            return true;
+        }
+
+        if (prop.ValueKind == JsonValueKind.True)
+        {
+            value = 1;
+            return true;
+        }
+
+        if (prop.ValueKind == JsonValueKind.False)
+        {
+            value = 0;
+            return true;
+        }
+
+        return false;
     }
 
     private static bool TryGetBool(JsonElement root, string propertyName, out bool value)
@@ -2283,6 +3267,25 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         var safePrefix = string.IsNullOrWhiteSpace(prefix) ? "bridge" : prefix.Trim();
         var safeDetail = SensitiveDataRedactor.Redact(detail ?? string.Empty).Trim();
         return string.IsNullOrWhiteSpace(safeDetail) ? safePrefix : $"{safePrefix}: {safeDetail}";
+    }
+
+    private static string SanitizeLogToken(string? value)
+    {
+        var safe = SensitiveDataRedactor.Redact(value ?? string.Empty).Trim();
+        if (safe.Length == 0)
+        {
+            return "(none)";
+        }
+
+        if (safe.Length > 160)
+        {
+            safe = safe[..160];
+        }
+
+        return safe
+            .Replace(";", ",", StringComparison.Ordinal)
+            .Replace("\r", " ", StringComparison.Ordinal)
+            .Replace("\n", " ", StringComparison.Ordinal);
     }
 
     private static string BuildLastProgressSummaryForDiagnostics()

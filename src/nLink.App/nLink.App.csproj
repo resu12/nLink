@@ -8,6 +8,7 @@
     <RootNamespace>NLink.App</RootNamespace>
     <Product>nLink</Product>
     <PackageId>nLink.App</PackageId>
+    <ApplicationIcon>Assets\avalonia-logo.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <BuildInParallel>false</BuildInParallel>

@@ -1,6 +1,5 @@
 using System.Text.Encodings.Web;
 using System.Text.Json;
-using NLink.Core.Logging;
 
 namespace NLink.Core.FileTransfer;
 
@@ -31,76 +30,10 @@ public static class FileTransferPayloadCodec
         return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
     }
 
-    public static byte[] Serialize(FileTransferStartV2 msg)
-    {
-        ArgumentNullException.ThrowIfNull(msg);
-        return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
-    }
-
-    public static byte[] Serialize(FileTransferChunkV1 msg)
-    {
-        ArgumentNullException.ThrowIfNull(msg);
-        var payload = JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
-        if (payload.Length > FileTransferProtocol.MaxSerializedChunkPayloadBytes)
-        {
-            var diagnostics = BuildChunkSerializationDiagnostics(msg, payload.Length);
-            LocalOperationalLog.Warn("FileTransferPayload", $"event=serialize_chunk_payload_budget_exceeded; {diagnostics}");
-            throw new InvalidOperationException(
-                $"Serialized file-transfer chunk payload exceeded safe budget of {FileTransferProtocol.MaxSerializedChunkPayloadBytes} bytes ({diagnostics}).");
-        }
-
-        return payload;
-    }
-
-    public static byte[] Serialize(FileTransferWindowUpdateV1 msg)
-    {
-        ArgumentNullException.ThrowIfNull(msg);
-        return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
-    }
-
-    public static byte[] Serialize(FileTransferMissingRangeV1 msg)
-    {
-        ArgumentNullException.ThrowIfNull(msg);
-        return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
-    }
-
-    public static byte[] Serialize(FileTransferPressureStateV1 msg)
-    {
-        ArgumentNullException.ThrowIfNull(msg);
-        return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
-    }
-
     public static byte[] Serialize(FileTransferSessionOpenV2 msg)
     {
         ArgumentNullException.ThrowIfNull(msg);
         return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
-    }
-
-    public static int ComputeSafeRawChunkSizeForBudget(
-        string sessionId,
-        string transferId,
-        int chunkCount,
-        int requestedMaxChunkSize)
-    {
-        if (string.IsNullOrWhiteSpace(sessionId))
-        {
-            throw new ArgumentException("Session id is required.", nameof(sessionId));
-        }
-
-        if (string.IsNullOrWhiteSpace(transferId))
-        {
-            throw new ArgumentException("Transfer id is required.", nameof(transferId));
-        }
-
-        if (chunkCount <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(chunkCount), "Chunk count must be positive.");
-        }
-
-        return FileTransferChunkBudget.ComputeLargestFittingRawChunkSize(
-            requestedMaxChunkSize,
-            candidate => DoesChunkPayloadFitBudget(sessionId, transferId, chunkCount, candidate),
-            "No valid file-transfer chunk size fits within the payload budget.");
     }
 
     public static byte[] Serialize(FileTransferCancelV1 msg)
@@ -190,59 +123,6 @@ public static class FileTransferPayloadCodec
         return true;
     }
 
-    public static bool TryDeserializeStart(ReadOnlySpan<byte> utf8Json, out FileTransferStartV2 msg)
-    {
-        msg = default!;
-        if (!TryDeserialize(utf8Json, out FileTransferStartV2? parsed) ||
-            parsed is null ||
-            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.StartTypeV2, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
-            !TryNormalizeFileName(parsed.FileName, out var fileName) ||
-            parsed.FileSizeBytes <= 0 ||
-            !TryNormalizeSha256(parsed.Sha256Base64, out var sha256Base64) ||
-            parsed.ChunkCount <= 0 ||
-            parsed.ChunkSizeBytes <= 0 ||
-            parsed.ChunkSizeBytes > FileTransferProtocol.MaxChunkRawBytes)
-        {
-            return false;
-        }
-
-        msg = parsed with
-        {
-            Kind = FileTransferProtocol.Kind,
-            Type = FileTransferProtocol.StartTypeV2,
-            SessionId = sessionId,
-            TransferId = transferId,
-            FileName = fileName,
-            Sha256Base64 = sha256Base64,
-        };
-        return true;
-    }
-
-    public static bool TryDeserializeChunk(ReadOnlySpan<byte> utf8Json, out FileTransferChunkV1 msg)
-    {
-        msg = default!;
-        if (!TryDeserialize(utf8Json, out FileTransferChunkV1? parsed) ||
-            parsed is null ||
-            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.ChunkTypeV1, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
-            parsed.ChunkIndex < 0 ||
-            parsed.ChunkCount <= 0 ||
-            parsed.ChunkIndex >= parsed.ChunkCount ||
-            !TryNormalizeChunkData(parsed.DataBase64, out var dataBase64))
-        {
-            return false;
-        }
-
-        msg = parsed with
-        {
-            Kind = FileTransferProtocol.Kind,
-            Type = FileTransferProtocol.ChunkTypeV1,
-            SessionId = sessionId,
-            TransferId = transferId,
-            DataBase64 = dataBase64,
-        };
-        return true;
-    }
-
     public static bool TryDeserializeCancel(ReadOnlySpan<byte> utf8Json, out FileTransferCancelV1 msg)
     {
         msg = default!;
@@ -292,7 +172,7 @@ public static class FileTransferPayloadCodec
     }
 
     internal static bool IsSupportedDataProtocolVersion(int protocolVersion)
-        => protocolVersion is FileTransferProtocol.ProtocolVersionV2 or FileTransferProtocol.ProtocolVersionV3;
+        => protocolVersion == FileTransferProtocol.ProtocolVersionV4;
 
     internal static bool TryNormalizeOptionalProtocolVersion(int? protocolVersion, out int? normalizedProtocolVersion)
     {
@@ -308,79 +188,6 @@ public static class FileTransferPayloadCodec
         }
 
         normalizedProtocolVersion = protocolVersion.Value;
-        return true;
-    }
-
-    public static bool TryDeserializeWindowUpdate(ReadOnlySpan<byte> utf8Json, out FileTransferWindowUpdateV1 msg)
-    {
-        msg = default!;
-        if (!TryDeserialize(utf8Json, out FileTransferWindowUpdateV1? parsed) ||
-            parsed is null ||
-            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.WindowUpdateTypeV1, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
-            parsed.NextExpectedChunkIndex < 0 ||
-            parsed.GrantedUntilChunkIndexExclusive < 0 ||
-            parsed.GrantedUntilChunkIndexExclusive < parsed.NextExpectedChunkIndex ||
-            parsed.BytesReceived < 0)
-        {
-            return false;
-        }
-
-        msg = parsed with
-        {
-            Kind = FileTransferProtocol.Kind,
-            Type = FileTransferProtocol.WindowUpdateTypeV1,
-            SessionId = sessionId,
-            TransferId = transferId,
-        };
-        return true;
-    }
-
-    public static bool TryDeserializeMissingRange(ReadOnlySpan<byte> utf8Json, out FileTransferMissingRangeV1 msg)
-    {
-        msg = default!;
-        if (!TryDeserialize(utf8Json, out FileTransferMissingRangeV1? parsed) ||
-            parsed is null ||
-            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.MissingRangeTypeV1, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
-            parsed.StartChunkIndex < 0 ||
-            parsed.EndChunkIndexExclusive <= parsed.StartChunkIndex)
-        {
-            return false;
-        }
-
-        msg = parsed with
-        {
-            Kind = FileTransferProtocol.Kind,
-            Type = FileTransferProtocol.MissingRangeTypeV1,
-            SessionId = sessionId,
-            TransferId = transferId,
-        };
-        return true;
-    }
-
-    public static bool TryDeserializePressureState(ReadOnlySpan<byte> utf8Json, out FileTransferPressureStateV1 msg)
-    {
-        msg = default!;
-        if (!TryDeserialize(utf8Json, out FileTransferPressureStateV1? parsed) ||
-            parsed is null ||
-            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.PressureStateTypeV1, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
-            parsed.Revision < 0 ||
-            parsed.SuggestedSendAheadChunks < 0 ||
-            parsed.ReceiverNextExpectedChunkIndex < 0 ||
-            !TryNormalizePressureMode(parsed.Mode, out var mode) ||
-            !TryNormalizePressureReason(parsed.Reason, out var reason))
-        {
-            return false;
-        }
-
-        msg = parsed with
-        {
-            Kind = FileTransferProtocol.Kind,
-            Type = FileTransferProtocol.PressureStateTypeV1,
-            SessionId = sessionId,
-            TransferId = transferId,
-            Mode = mode,
-            Reason = reason,
-        };
         return true;
     }
 
@@ -563,73 +370,6 @@ public static class FileTransferPayloadCodec
         }
     }
 
-    internal static bool TryNormalizeChunkData(string? value, out string normalized)
-    {
-        normalized = string.Empty;
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return false;
-        }
-
-        try
-        {
-            var bytes = Convert.FromBase64String(value.Trim());
-            if (bytes.Length == 0 || bytes.Length > FileTransferProtocol.MaxChunkRawBytes)
-            {
-                return false;
-            }
-
-            normalized = Convert.ToBase64String(bytes);
-            return true;
-        }
-        catch (FormatException)
-        {
-            return false;
-        }
-    }
-
-    private static bool TryNormalizePressureMode(string? value, out string normalized)
-    {
-        normalized = string.Empty;
-        if (!TryNormalizeRequiredToken(value, out var candidate))
-        {
-            return false;
-        }
-
-        normalized = candidate switch
-        {
-            var mode when string.Equals(mode, FileTransferProtocol.PressureModeNormal, StringComparison.OrdinalIgnoreCase)
-                => FileTransferProtocol.PressureModeNormal,
-            var mode when string.Equals(mode, FileTransferProtocol.PressureModeCatchUpOnly, StringComparison.OrdinalIgnoreCase)
-                => FileTransferProtocol.PressureModeCatchUpOnly,
-            _ => string.Empty,
-        };
-
-        return normalized.Length > 0;
-    }
-
-    private static bool TryNormalizePressureReason(string? value, out string normalized)
-    {
-        normalized = string.Empty;
-        if (!TryNormalizeRequiredToken(value, out var candidate))
-        {
-            return false;
-        }
-
-        normalized = candidate switch
-        {
-            var reason when string.Equals(reason, FileTransferProtocol.PressureReasonGapRepair, StringComparison.OrdinalIgnoreCase)
-                => FileTransferProtocol.PressureReasonGapRepair,
-            var reason when string.Equals(reason, FileTransferProtocol.PressureReasonMediaProtection, StringComparison.OrdinalIgnoreCase)
-                => FileTransferProtocol.PressureReasonMediaProtection,
-            var reason when string.Equals(reason, FileTransferProtocol.PressureReasonBulkBacklog, StringComparison.OrdinalIgnoreCase)
-                => FileTransferProtocol.PressureReasonBulkBacklog,
-            _ => string.Empty,
-        };
-
-        return normalized.Length > 0;
-    }
-
     private static bool TryNormalizeSessionRole(string? value, out string normalized)
     {
         normalized = string.Empty;
@@ -650,65 +390,4 @@ public static class FileTransferPayloadCodec
         return normalized.Length > 0;
     }
 
-    private static string BuildChunkSerializationDiagnostics(FileTransferChunkV1 msg, int serializedLength)
-    {
-        var rawChunkBytes = EstimateRawBytesFromBase64(msg.DataBase64);
-        return string.Join(
-            "; ",
-            $"serialized_bytes={serializedLength}",
-            $"budget_bytes={FileTransferProtocol.MaxSerializedChunkPayloadBytes}",
-            $"raw_chunk_bytes={rawChunkBytes}",
-            $"base64_bytes={msg.DataBase64.Length}",
-            $"session_id_len={msg.SessionId?.Length ?? 0}",
-            $"transfer_id_len={msg.TransferId?.Length ?? 0}",
-            $"chunk={msg.ChunkIndex + 1}/{msg.ChunkCount}");
-    }
-
-    private static bool DoesChunkPayloadFitBudget(
-        string sessionId,
-        string transferId,
-        int chunkCount,
-        int rawChunkBytes)
-    {
-        try
-        {
-            var serialized = JsonSerializer.SerializeToUtf8Bytes(
-                new FileTransferChunkV1
-                {
-                    SessionId = sessionId,
-                    TransferId = transferId,
-                    ChunkIndex = Math.Max(0, chunkCount - 1),
-                    ChunkCount = chunkCount,
-                    DataBase64 = Convert.ToBase64String(new byte[rawChunkBytes]),
-                },
-                JsonOptions);
-            return serialized.Length <= FileTransferProtocol.MaxSerializedChunkPayloadBytes;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static int EstimateRawBytesFromBase64(string? base64)
-    {
-        if (string.IsNullOrEmpty(base64))
-        {
-            return 0;
-        }
-
-        var length = base64.Length;
-        var padding = 0;
-        if (length > 0 && base64[^1] == '=')
-        {
-            padding++;
-        }
-
-        if (length > 1 && base64[^2] == '=')
-        {
-            padding++;
-        }
-
-        return Math.Max(0, (length / 4 * 3) - padding);
-    }
 }

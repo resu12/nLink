@@ -21,6 +21,7 @@ internal readonly record struct SessionFlowProjectionInput(
     string? SessionId,
     string? HelperIdentity,
     string? RemoteEndpoint,
+    SessionVerificationCode? VerificationCode,
     HelperConnectOrigin HelperConnectOrigin,
     TransportFailure? LastTransportFailure);
 
@@ -58,6 +59,7 @@ internal static class SessionFlowProjector
             input.SessionId,
             input.HelperIdentity,
             input.RemoteEndpoint,
+            input.VerificationCode,
             displayProjection.StatusText,
             displayProjection.ConnectionState,
             displayProjection.ShowRetryAction,

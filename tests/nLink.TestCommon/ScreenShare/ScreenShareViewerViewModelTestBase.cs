@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using Avalonia;
+using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Threading;
@@ -35,6 +36,40 @@ internal static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout
         }
 
         Assert.True(predicate(), $"Condition not met within {timeout.TotalSeconds:N1}s.");
+    }
+
+internal static bool CurrentFrameWidthEqualsSafely(ScreenShareViewerViewModel vm, int expectedWidth)
+    {
+        return TryGetFrameWidth(vm.CurrentFrame, out var width) && width == expectedWidth;
+    }
+
+internal static void AssertCurrentFrameWidthSafely(ScreenShareViewerViewModel vm, int expectedWidth)
+    {
+        Assert.True(TryGetFrameWidth(vm.CurrentFrame, out var width), "Expected the current frame to be a readable bitmap.");
+        Assert.Equal(expectedWidth, width);
+    }
+
+private static bool TryGetFrameWidth(IImage? frame, out int width)
+    {
+        width = 0;
+        if (frame is not Bitmap bitmap)
+        {
+            return false;
+        }
+
+        try
+        {
+            width = bitmap.PixelSize.Width;
+            return true;
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+        catch (NullReferenceException)
+        {
+            return false;
+        }
     }
 
 internal static Bitmap CreateTinyBitmap()

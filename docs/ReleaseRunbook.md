@@ -183,11 +183,12 @@ Verify:
 Safe invite flow sanity check:
 - Helper-bound invite flow is active by default:
   - helper waiting screen shows a copyable helper address before any invite is shared
-  - helper waiting screen also shows a short verification code derived from that address
+  - helper waiting screen does not show a separate address-derived verification code
   - helpee waiting screen does not show share/copy actions until a valid helper address is entered
   - after entering a valid helper address, share/copy/refresh invite-code actions appear
-  - helpee waiting screen shows the bound helper address and its verification code
+  - helpee waiting screen shows the bound helper address and helper identity tag
   - helpee waiting screen shows an invite code by default; raw invite token is only available in technical details
+  - approval screens on both sides show the same five-symbol handshake-derived verification sequence before allow/accept completes
 - Diagnostics -> Copy diagnostics includes:
   - `invite_security_mode: issued_one_time_secret_invites`
   - `invite_signing_configuration: not_used_in_issued_secret_mode`

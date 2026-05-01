@@ -217,8 +217,10 @@ public sealed class SessionIdentityAndVerificationTests : SessionHeaderAndBanner
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
         _ = await WaitForShareInviteAsync(helpee);
         var connectTask = helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
-        await WaitUntilAsync(() => helpee.IsIncomingRequestView && helpee.ShowIncomingRequestPanel && helpee.HasIncomingHelperVerificationCode && helper.HasHelperVerificationCode, TimeSpan.FromSeconds(3));
+        await WaitUntilAsync(() => helpee.IsIncomingRequestView && helpee.ShowIncomingRequestPanel && helpee.HasIncomingHelperVerificationCode && helper.HasHelperVerificationCode && helpee.ShowSessionVerificationCode && helper.ShowSessionVerificationCode, TimeSpan.FromSeconds(3));
         Assert.Equal(helpee.IncomingHelperVerificationCode, helper.HelperVerificationCode);
+        Assert.Equal(helpee.SessionVerificationEmojiSequence, helper.SessionVerificationEmojiSequence);
+        Assert.Equal(helpee.SessionVerificationFallbackCode, helper.SessionVerificationFallbackCode);
         Assert.True(helpee.HasIncomingTechnicalDetails);
         Assert.False(string.IsNullOrWhiteSpace(helpee.IncomingTechnicalHelperIdentityText));
         Assert.False(string.IsNullOrWhiteSpace(helpee.IncomingTechnicalSessionIdText));
@@ -228,6 +230,41 @@ public sealed class SessionIdentityAndVerificationTests : SessionHeaderAndBanner
         Assert.True(helper.ShowHelperVerificationCode);
         await helpee.DeclineCommand.ExecuteAsync(null);
         await connectTask;
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task ApprovalVerificationCode_HidesAfterApprovalCompletes()
+    {
+        var transportConfig = CreateDevLocalTestConfig();
+        var network = new FakeSessionTransportNetwork();
+        using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-verify-hide-" + Guid.NewGuid().ToString("N")));
+        using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-verify-hide-" + Guid.NewGuid().ToString("N")));
+        using var helpee = new HelpeePageViewModel(cancelAction: static () =>
+        {
+        }, transportConfig, helpeeRuntime);
+        using var helper = new HelperPageViewModel(cancelAction: static () =>
+        {
+        }, transportConfig, helperRuntime);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+        _ = await WaitForShareInviteAsync(helpee);
+        var connectTask = helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
+
+        await WaitUntilAsync(
+            () => helpee.ShowSessionVerificationCode && helper.ShowSessionVerificationCode,
+            TimeSpan.FromSeconds(3));
+
+        helpee.AllowCommand.Execute(null);
+        await connectTask;
+
+        await WaitUntilAsync(
+            () => string.Equals(helpee.ConnectionState, "Connected", StringComparison.Ordinal) &&
+                  string.Equals(helper.ConnectionState, "Connected", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(3));
+
+        Assert.False(helpee.ShowSessionVerificationCode);
+        Assert.False(helper.ShowSessionVerificationCode);
+        Assert.False(helpee.IsIncomingRequestView);
     }
 
     [Trait("Category", "LegacySmoke")]
@@ -279,7 +316,7 @@ public sealed class SessionIdentityAndVerificationTests : SessionHeaderAndBanner
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task HelperRegenerateIdentityCommand_RequiresConfirmation_AndUsesInjectedRegenerator()
+    public async Task HelperRegenerateIdentityCommand_RegeneratesImmediately_AndUsesInjectedRegenerator()
     {
         using var unboundInviteOptIn = new EnvironmentOverride(NLink.App.Configuration.AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, null);
         var transportConfig = CreateNknTestConfig();
@@ -302,11 +339,8 @@ public sealed class SessionIdentityAndVerificationTests : SessionHeaderAndBanner
 
         Assert.True(helper.CanRegenerateHelperIdentity);
         await helper.RegenerateHelperIdentityCommand.ExecuteAsync(null);
-        Assert.Equal(0, regenerateCalls);
-        Assert.Equal("Confirm regenerate", helper.RegenerateHelperIdentityButtonText);
-
-        await helper.RegenerateHelperIdentityCommand.ExecuteAsync(null);
         Assert.Equal(1, regenerateCalls);
+        Assert.Equal("Regenerate helper address", helper.RegenerateHelperIdentityButtonText);
     }
 
     [Trait("Category", "LegacySmoke")]
@@ -318,6 +352,8 @@ public sealed class SessionIdentityAndVerificationTests : SessionHeaderAndBanner
         var xaml = File.ReadAllText(viewPath!);
 
         Assert.Contains("Helper.RegenerateHelperIdentity", xaml, StringComparison.Ordinal);
+        Assert.Contains("Content=\"↻\"", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("Helper.HelperIdentityBootstrapHint", xaml, StringComparison.Ordinal);
         Assert.DoesNotContain("Helper.HelperIdentityBootstrapPrivacyHint", xaml, StringComparison.Ordinal);
         Assert.DoesNotContain("This helper address stays saved on this PC", xaml, StringComparison.Ordinal);
     }

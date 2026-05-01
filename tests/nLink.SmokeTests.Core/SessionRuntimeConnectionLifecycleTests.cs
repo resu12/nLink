@@ -39,6 +39,135 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
 {
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task NknSignalingTransport_HelpRequest_DuplicateRequestId_IsAckedButNotSurfacedTwice()
+    {
+        using var fixture = await CreateDirectHelpRequestFixtureAsync("duplicate");
+        var events = new List<HelpRequestMessage>();
+        fixture.HelperTransport.IncomingHelpRequest += (_, e) => events.Add(e.Request);
+
+        var request = fixture.CreateRequest("help_req_duplicate");
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await SendHelpRequestOrFailAsync(fixture.HelpeeTransport, request, cts.Token);
+        await SendHelpRequestOrFailAsync(fixture.HelpeeTransport, request, cts.Token);
+
+        Assert.Single(events);
+        Assert.Equal("help_req_duplicate", events[0].RequestId);
+        Assert.Equal("help_request_duplicate_recent", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task NknSignalingTransport_HelpRequest_SourceBurst_IsThrottledAfterFour()
+    {
+        using var fixture = await CreateDirectHelpRequestFixtureAsync("source-burst");
+        var events = new List<HelpRequestMessage>();
+        fixture.HelperTransport.IncomingHelpRequest += (_, e) => events.Add(e.Request);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        for (var i = 0; i < 5; i++)
+        {
+            await SendHelpRequestOrFailAsync(fixture.HelpeeTransport, fixture.CreateRequest($"help_req_burst_{i}", newInviteToken: true), cts.Token);
+        }
+
+        Assert.Equal(4, events.Count);
+        Assert.Equal("help_request_source_throttled", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task NknSignalingTransport_HelpRequest_RequestIdChurnForSameInvite_IsThrottledAfterTwo()
+    {
+        using var fixture = await CreateDirectHelpRequestFixtureAsync("request-churn");
+        var events = new List<HelpRequestMessage>();
+        fixture.HelperTransport.IncomingHelpRequest += (_, e) => events.Add(e.Request);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await SendHelpRequestOrFailAsync(fixture.HelpeeTransport, fixture.CreateRequest("help_req_churn_1"), cts.Token);
+        await SendHelpRequestOrFailAsync(fixture.HelpeeTransport, fixture.CreateRequest("help_req_churn_2"), cts.Token);
+        await SendHelpRequestOrFailAsync(fixture.HelpeeTransport, fixture.CreateRequest("help_req_churn_3"), cts.Token);
+
+        Assert.Equal(2, events.Count);
+        Assert.Equal("help_request_request_churn_throttled", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task NknSignalingTransport_HelpRequest_ThrottledPreApprovalRequest_DoesNotConsumeInviteToken()
+    {
+        using var fixture = await CreateDirectHelpRequestFixtureAsync("invite-not-consumed");
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await SendHelpRequestOrFailAsync(fixture.HelpeeTransport, fixture.CreateRequest("help_req_consume_1"), cts.Token);
+        await SendHelpRequestOrFailAsync(fixture.HelpeeTransport, fixture.CreateRequest("help_req_consume_2"), cts.Token);
+        await SendHelpRequestOrFailAsync(fixture.HelpeeTransport, fixture.CreateRequest("help_req_consume_3"), cts.Token);
+
+        var validator = InviteTokenServiceFactory.CreateInviteTokenValidator();
+        var validation = validator.Validate(fixture.InviteToken, DateTimeOffset.UtcNow, InviteValidationMode.ConsumeIfValid);
+        Assert.True(validation.IsSuccess, validation.Message);
+        Assert.NotNull(validation.Invite);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void SessionRuntime_IncomingHelpRequest_DuplicatePendingRequest_IsIgnored()
+    {
+        var scripted = new ScriptedSignalingTransport(localPeerAddress: "helper.runtime.pending.duplicate");
+        using var runtime = new SessionRuntime(() => scripted);
+        PrepareHelperRuntimeForIncomingHelpRequest(runtime, scripted);
+        var events = 0;
+        runtime.IncomingHelpRequestAvailable += (_, _) => events++;
+
+        var request = CreateRuntimeHelpRequest("runtime_pending_duplicate", "helper.runtime.pending.duplicate");
+        InvokePrivateMethod(runtime, "OnIncomingHelpRequest", scripted, new IncomingHelpRequestEventArgs(request));
+        InvokePrivateMethod(runtime, "OnIncomingHelpRequest", scripted, new IncomingHelpRequestEventArgs(request));
+
+        Assert.Equal(1, events);
+        Assert.True(runtime.HasPendingHelpRequest);
+        Assert.Equal("runtime_pending_duplicate", runtime.PendingHelpRequest?.RequestId);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void SessionRuntime_IncomingHelpRequest_DifferentPendingRequest_DoesNotReplacePrompt()
+    {
+        var scripted = new ScriptedSignalingTransport(localPeerAddress: "helper.runtime.pending.replace");
+        using var runtime = new SessionRuntime(() => scripted);
+        PrepareHelperRuntimeForIncomingHelpRequest(runtime, scripted);
+        var events = 0;
+        runtime.IncomingHelpRequestAvailable += (_, _) => events++;
+
+        var first = CreateRuntimeHelpRequest("runtime_pending_first", "helper.runtime.pending.replace");
+        var second = CreateRuntimeHelpRequest("runtime_pending_second", "helper.runtime.pending.replace");
+        InvokePrivateMethod(runtime, "OnIncomingHelpRequest", scripted, new IncomingHelpRequestEventArgs(first));
+        InvokePrivateMethod(runtime, "OnIncomingHelpRequest", scripted, new IncomingHelpRequestEventArgs(second));
+
+        Assert.Equal(1, events);
+        Assert.True(runtime.HasPendingHelpRequest);
+        Assert.Equal("runtime_pending_first", runtime.PendingHelpRequest?.RequestId);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void SessionRuntime_IncomingHelpRequest_WhenHelperNotWaiting_IsIgnored()
+    {
+        var scripted = new ScriptedSignalingTransport(localPeerAddress: "helper.runtime.notwaiting");
+        using var runtime = new SessionRuntime(() => scripted);
+        SetPrivateField(runtime, "transport", scripted);
+        SetPrivateField(runtime, "role", SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "helperConnectOrigin", HelperConnectOrigin.DirectInvite);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connecting);
+        var events = 0;
+        runtime.IncomingHelpRequestAvailable += (_, _) => events++;
+
+        var request = CreateRuntimeHelpRequest("runtime_not_waiting", "helper.runtime.notwaiting");
+        InvokePrivateMethod(runtime, "OnIncomingHelpRequest", scripted, new IncomingHelpRequestEventArgs(request));
+
+        Assert.Equal(0, events);
+        Assert.False(runtime.HasPendingHelpRequest);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task SessionRuntime_KeepAliveBridge_IdleTimeout_DisposesCachedBridge_AndRecordsKilledMetric()
     {
         FakeNknClient.ResetNetwork();
@@ -634,6 +763,111 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         Assert.False(runtime.CanAutoStartTransportScreenShareForTests);
         Assert.Equal(SessionRuntimeState.Connected, runtime.State);
         Assert.Equal("Connected", runtime.StatusText);
+    }
+
+    private static async Task<DirectHelpRequestFixture> CreateDirectHelpRequestFixtureAsync(string scenario)
+    {
+        FakeNknClient.ResetNetwork();
+        NknRuntimeDiagnostics.SetLastEnvelopeDropReason(null);
+
+        var suffix = Guid.NewGuid().ToString("N");
+        var helperAddress = $"helper.direct.{scenario}.{suffix}";
+        var helpeeAddress = $"helpee.direct.{scenario}.{Guid.NewGuid():N}";
+        var options = LoadNknOptionsWithOverrides(
+            Path.Combine(Path.GetTempPath(), $"nlink-direct-help-{scenario}-{suffix}.json"),
+            $"direct-help-{scenario}");
+        var helperClient = new FakeNknClient(helperAddress);
+        var helpeeClient = new FakeNknClient(helpeeAddress);
+        var helperTransport = new NknSignalingTransport(
+            helperClient,
+            options,
+            new NknIdentity($"helper-{scenario}", helperAddress));
+        var helpeeTransport = new NknSignalingTransport(
+            helpeeClient,
+            options,
+            new NknIdentity($"helpee-{scenario}", helpeeAddress));
+        var helperPeerAddress = new PeerAddress(helperAddress);
+        var helpeePeerAddress = new PeerAddress(helpeeAddress);
+        CreateValidatedInviteForTarget(helpeePeerAddress, out var inviteToken, boundHelperAddress: helperPeerAddress);
+        await helperTransport.HostByAddressAsync(CancellationToken.None);
+
+        return new DirectHelpRequestFixture(
+            helperTransport,
+            helpeeTransport,
+            helperPeerAddress,
+            helpeePeerAddress,
+            inviteToken);
+    }
+
+    private static HelpRequestMessage CreateRuntimeHelpRequest(string requestId, string helperAddress) =>
+        new(
+            requestId,
+            new PeerAddress($"helpee.{requestId}"),
+            new PeerAddress(helperAddress),
+            "runtime-test-invite-token");
+
+    private static async Task SendHelpRequestOrFailAsync(
+        NknSignalingTransport transport,
+        HelpRequestMessage request,
+        CancellationToken ct)
+    {
+        var error = await Record.ExceptionAsync(() => transport.SendHelpRequestAsync(request, ct));
+        if (error is not null)
+        {
+            var diagnostics = NknRuntimeDiagnostics.Snapshot();
+            Assert.True(
+                error is null,
+                $"HelpRequest send failed with {error!.GetType().Name}: {error.Message}; last_drop={diagnostics.LastEnvelopeDropReason}; last_error={diagnostics.LastError}");
+        }
+    }
+
+    private static void PrepareHelperRuntimeForIncomingHelpRequest(SessionRuntime runtime, ScriptedSignalingTransport transport)
+    {
+        SetPrivateField(runtime, "transport", transport);
+        SetPrivateField(runtime, "role", SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "helperConnectOrigin", HelperConnectOrigin.Listener);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Waiting);
+    }
+
+    private sealed class DirectHelpRequestFixture : IDisposable
+    {
+        public DirectHelpRequestFixture(
+            NknSignalingTransport helperTransport,
+            NknSignalingTransport helpeeTransport,
+            PeerAddress helperAddress,
+            PeerAddress helpeeAddress,
+            string inviteToken)
+        {
+            HelperTransport = helperTransport;
+            HelpeeTransport = helpeeTransport;
+            HelperAddress = helperAddress;
+            HelpeeAddress = helpeeAddress;
+            InviteToken = inviteToken;
+        }
+
+        public NknSignalingTransport HelperTransport { get; }
+        public NknSignalingTransport HelpeeTransport { get; }
+        public PeerAddress HelperAddress { get; }
+        public PeerAddress HelpeeAddress { get; }
+        public string InviteToken { get; }
+
+        public HelpRequestMessage CreateRequest(string requestId, bool newInviteToken = false)
+        {
+            var token = InviteToken;
+            if (newInviteToken)
+            {
+                CreateValidatedInviteForTarget(HelpeeAddress, out token, boundHelperAddress: HelperAddress);
+            }
+
+            return new HelpRequestMessage(requestId, HelpeeAddress, HelperAddress, token);
+        }
+
+        public void Dispose()
+        {
+            HelperTransport.Dispose();
+            HelpeeTransport.Dispose();
+            FakeNknClient.ResetNetwork();
+        }
     }
 
 }

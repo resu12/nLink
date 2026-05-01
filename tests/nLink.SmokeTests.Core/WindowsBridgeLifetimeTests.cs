@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
@@ -75,6 +76,91 @@ public sealed class WindowsBridgeLifetimeTests
             {
                 // Best-effort test cleanup.
             }
+        }
+    }
+
+    [Theory]
+    [InlineData("ok", false)]
+    [InlineData("manifest_missing", true)]
+    [InlineData("manifest_invalid", true)]
+    [InlineData("manifest_malformed", true)]
+    [InlineData("capability_mismatch", true)]
+    [InlineData("script_hash_mismatch", true)]
+    public void BridgeBundleStartupGuard_RejectsEveryNonOkManifestStatus(string manifestStatus, bool shouldReject)
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-bridge-startup-guard", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var identity = CreateBridgeBundleIdentityForStatus(tempDir, manifestStatus);
+            var logs = new List<string>();
+            var failures = new List<(string Code, string? Hint)>();
+
+            if (shouldReject)
+            {
+                var ex = Assert.Throws<InvalidOperationException>(() =>
+                    BridgeBundleStartupGuard.EnsureTrustedForStartup(
+                        identity,
+                        logs.Add,
+                        (code, hint) => failures.Add((code, hint))));
+
+                Assert.Contains(manifestStatus, ex.Message, StringComparison.Ordinal);
+                Assert.Contains(logs, entry => entry.Contains("event=bridge_bundle_start_blocked", StringComparison.Ordinal));
+                var failure = Assert.Single(failures);
+                Assert.Equal($"{BridgeBundleStartupGuard.IntegrityFailureCodePrefix}:{manifestStatus}", failure.Code);
+                Assert.Contains(failure.Code, NknRuntimeDiagnostics.Snapshot().LastError, StringComparison.Ordinal);
+            }
+            else
+            {
+                BridgeBundleStartupGuard.EnsureTrustedForStartup(
+                    identity,
+                    logs.Add,
+                    (code, hint) => failures.Add((code, hint)));
+
+                Assert.Empty(logs);
+                Assert.Empty(failures);
+            }
+        }
+        finally
+        {
+            TryDeleteDirectory(tempDir);
+        }
+    }
+
+    [Fact]
+    public async Task RealNknClientAdapter_StartBridgeAsync_BlocksMismatchedBundleBeforeLaunch()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-bridge-start-blocked", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var scriptPath = Path.Combine(tempDir, "index.js");
+        File.WriteAllText(scriptPath, "console.log('tampered bridge');");
+        WriteBridgeManifest(scriptPath, bridgeScriptSha256: "deadbeef");
+
+        var previousBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", scriptPath);
+            NknRuntimeDiagnostics.SetLastError("(none)");
+
+            using var adapter = new RealNknClientAdapter(
+                new NknIdentity("blocked-mismatch", "blocked-mismatch.fake"),
+                NknTransportOptions.Load());
+
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                adapter.StartBridgeAsync(CancellationToken.None));
+
+            Assert.Contains("integrity verification", ex.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.False(adapter.IsBridgeProcessRunning);
+            var snapshot = NknRuntimeDiagnostics.Snapshot();
+            Assert.Contains("NKN_START_FAILED", snapshot.LastError, StringComparison.Ordinal);
+            Assert.Contains("bridge_bundle_integrity_failed:script_hash_mismatch", snapshot.LastError, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", previousBridgePath);
+            TryDeleteDirectory(tempDir);
         }
     }
 
@@ -277,6 +363,87 @@ public sealed class WindowsBridgeLifetimeTests
         catch (ArgumentException)
         {
             return false;
+        }
+    }
+
+    private static BridgeBundleIdentity CreateBridgeBundleIdentityForStatus(string tempDir, string manifestStatus)
+    {
+        var scriptPath = Path.Combine(tempDir, "index-" + manifestStatus + ".js");
+        File.WriteAllText(scriptPath, "console.log('bridge " + manifestStatus + "');");
+
+        switch (manifestStatus)
+        {
+            case "ok":
+                WriteBridgeManifest(scriptPath);
+                break;
+            case "manifest_missing":
+                break;
+            case "manifest_invalid":
+                File.WriteAllText(Path.Combine(tempDir, "bridge-manifest.json"), """{"manifestVersion":1}""");
+                break;
+            case "manifest_malformed":
+                File.WriteAllText(Path.Combine(tempDir, "bridge-manifest.json"), "{ malformed");
+                break;
+            case "capability_mismatch":
+                WriteBridgeManifest(scriptPath, ownerPidWatchdog: true, killOnCloseJob: false);
+                break;
+            case "script_hash_mismatch":
+                WriteBridgeManifest(scriptPath, bridgeScriptSha256: "deadbeef");
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(manifestStatus), manifestStatus, "Unknown manifest status.");
+        }
+
+        var identity = BridgeBundleIdentity.Load(scriptPath);
+        Assert.Equal(manifestStatus, identity.ManifestStatus);
+        return identity;
+    }
+
+    private static void WriteBridgeManifest(
+        string scriptPath,
+        string? bridgeScriptSha256 = null,
+        bool ownerPidWatchdog = true,
+        bool killOnCloseJob = true)
+    {
+        bridgeScriptSha256 ??= ComputeSha256Hex(scriptPath);
+        var manifestPath = Path.Combine(Path.GetDirectoryName(scriptPath)!, "bridge-manifest.json");
+        File.WriteAllText(
+            manifestPath,
+            $$"""
+            {
+              "manifestVersion": 1,
+              "appVersion": "0.5.4-test",
+              "buildTimestampUtc": "2026-04-13T00:00:00.0000000Z",
+              "bridgeScriptSha256": "{{bridgeScriptSha256}}",
+              "nodeVersion": "v24.13.1",
+              "capabilities": {
+                "ownerPidWatchdog": {{FormatJsonBool(ownerPidWatchdog)}},
+                "killOnCloseJob": {{FormatJsonBool(killOnCloseJob)}}
+              }
+            }
+            """);
+    }
+
+    private static string ComputeSha256Hex(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
+
+    private static string FormatJsonBool(bool value) => value ? "true" : "false";
+
+    private static void TryDeleteDirectory(string directory)
+    {
+        try
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+        catch
+        {
+            // Best-effort test cleanup.
         }
     }
 }

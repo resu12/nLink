@@ -131,6 +131,27 @@ function Get-PathSizeBytes {
     return Get-DirectorySizeBytes -RootDir $item.FullName
 }
 
+function Get-Sha256FileHash {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hashBytes = $sha256.ComputeHash($stream)
+            return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+        }
+        finally {
+            $sha256.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 function Format-Size {
     param([int64]$Bytes)
 
@@ -170,7 +191,7 @@ function Publish-ReleaseAssets {
 
     $lines = @()
     foreach ($file in $checksumTargets) {
-        $hash = (Get-FileHash -Path $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $hash = Get-Sha256FileHash -Path $file.FullName
         $lines += "$hash  $($file.Name)"
     }
 

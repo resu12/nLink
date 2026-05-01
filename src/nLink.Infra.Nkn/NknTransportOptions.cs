@@ -9,6 +9,8 @@ internal sealed class NknTransportOptions
 {
     private const int DefaultNumSubClients = 4;
     private const int DefaultMediaNumSubClients = 8;
+    private const int DefaultBulkNumSubClients = 4;
+    private const int DefaultBulkSendConcurrency = 4;
 
     private readonly struct ResolvedKeyPath
     {
@@ -55,12 +57,26 @@ internal sealed class NknTransportOptions
 
     public int MediaNumSubClients { get; private set; }
 
+    public int BulkNumSubClients { get; private set; }
+
+    public int BulkSendConcurrency { get; private set; }
+
+    public bool ReceiveStallRecoveryEnabled { get; private set; }
+
+    public bool ReceiveStallFileTransferFastRecoveryEnabled { get; private set; }
+
+    public bool ReceiveStallControlOnlyRecoveryEnabled { get; private set; }
+
+    public int ReceiveStallRecoveryFallbackDelayMs { get; private set; }
+
     internal bool HasSubClientTopologyOverride { get; private set; }
 
     internal bool ShouldSendSubClientTopology =>
         HasSubClientTopologyOverride ||
         NumSubClients != DefaultNumSubClients ||
-        MediaNumSubClients != DefaultMediaNumSubClients;
+        MediaNumSubClients != DefaultMediaNumSubClients ||
+        BulkNumSubClients != DefaultBulkNumSubClients ||
+        BulkSendConcurrency != DefaultBulkSendConcurrency;
 
     public static NknTransportOptions Load()
     {
@@ -108,6 +124,24 @@ internal sealed class NknTransportOptions
 
         var numSubClients = Environment.GetEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS");
         var mediaNumSubClients = Environment.GetEnvironmentVariable("NLINK_NKN_MEDIA_NUM_SUBCLIENTS");
+        var bulkNumSubClients = Environment.GetEnvironmentVariable("NLINK_NKN_BULK_NUM_SUBCLIENTS");
+        var bulkSendConcurrency = Environment.GetEnvironmentVariable("NLINK_NKN_BULK_SEND_CONCURRENCY");
+        var receiveStallRecovery = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY"),
+            appSettings.Get("NLINK_NKN_RECEIVE_STALL_RECOVERY"),
+            appSettings.Get("nLink:nkn:receiveStallRecovery"));
+        var receiveStallFileTransferFastRecovery = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY"),
+            appSettings.Get("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY"),
+            appSettings.Get("nLink:nkn:receiveStallFileTransferFastRecovery"));
+        var receiveStallControlOnlyRecovery = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY"),
+            appSettings.Get("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY"),
+            appSettings.Get("nLink:nkn:controlOnlyStallRecovery"));
+        var receiveStallRecoveryFallbackDelayMs = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS"),
+            appSettings.Get("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS"),
+            appSettings.Get("nLink:nkn:receiveStallRecoveryFallbackDelayMs"));
         var resolvedKeyPath = ResolveKeyPath(configuredKeyPath);
         var parsedNumSubClients = ParseInt(numSubClients, defaultValue: DefaultNumSubClients, minValue: 1, maxValue: 16);
         var parsedMediaNumSubClients = ParseInt(
@@ -115,6 +149,16 @@ internal sealed class NknTransportOptions
             defaultValue: string.IsNullOrWhiteSpace(numSubClients) ? DefaultMediaNumSubClients : parsedNumSubClients,
             minValue: 1,
             maxValue: 16);
+        var parsedBulkNumSubClients = ParseInt(
+            bulkNumSubClients,
+            defaultValue: parsedNumSubClients,
+            minValue: 1,
+            maxValue: 16);
+        var parsedBulkSendConcurrency = ParseInt(
+            bulkSendConcurrency,
+            defaultValue: DefaultBulkSendConcurrency,
+            minValue: 1,
+            maxValue: 8);
 
         return new NknTransportOptions
         {
@@ -129,7 +173,16 @@ internal sealed class NknTransportOptions
             FileTransferChunkPacingMs = ParseInt(fileTransferChunkPacingMs, defaultValue: 2, minValue: 0, maxValue: 1_000),
             NumSubClients = parsedNumSubClients,
             MediaNumSubClients = parsedMediaNumSubClients,
-            HasSubClientTopologyOverride = !string.IsNullOrWhiteSpace(numSubClients) || !string.IsNullOrWhiteSpace(mediaNumSubClients),
+            BulkNumSubClients = parsedBulkNumSubClients,
+            BulkSendConcurrency = parsedBulkSendConcurrency,
+            ReceiveStallRecoveryEnabled = ParseBool(receiveStallRecovery, defaultValue: true),
+            ReceiveStallFileTransferFastRecoveryEnabled = ParseBool(receiveStallFileTransferFastRecovery, defaultValue: true),
+            ReceiveStallControlOnlyRecoveryEnabled = ParseBool(receiveStallControlOnlyRecovery, defaultValue: false),
+            ReceiveStallRecoveryFallbackDelayMs = ParseInt(receiveStallRecoveryFallbackDelayMs, defaultValue: 3_000, minValue: 1_000, maxValue: 12_000),
+            HasSubClientTopologyOverride = !string.IsNullOrWhiteSpace(numSubClients) ||
+                                           !string.IsNullOrWhiteSpace(mediaNumSubClients) ||
+                                           !string.IsNullOrWhiteSpace(bulkNumSubClients) ||
+                                           !string.IsNullOrWhiteSpace(bulkSendConcurrency),
         };
     }
 
@@ -488,6 +541,17 @@ internal sealed class NknTransportOptions
         if (bool.TryParse(value, out var parsed))
         {
             return parsed;
+        }
+
+        var trimmed = value.Trim();
+        if (string.Equals(trimmed, "1", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (string.Equals(trimmed, "0", StringComparison.Ordinal))
+        {
+            return false;
         }
 
         return defaultValue;

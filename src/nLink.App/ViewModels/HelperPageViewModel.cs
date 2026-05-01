@@ -32,7 +32,7 @@ namespace NLink.App.ViewModels;
 public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanelBindings, IWindowCloseAware
 {
     private static readonly TimeSpan DefaultConnectFailureCooldown = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan DefaultApprovalTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan DefaultApprovalTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan DisposeOperationTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RecoveryTransientThrottle = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan EndSessionAfterControlStopGuard = TimeSpan.FromMilliseconds(500);
@@ -61,6 +61,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly IConnectInputResolver connectInputResolver;
     private readonly DispatcherTimer remoteControlStateSnapshotTimer;
     private readonly DispatcherTimer peerEndedNoticeTimer;
+    private readonly DispatcherTimer incomingHelpRequestExpiryTimer;
     private readonly Func<CancellationToken, Task<PeerAddress?>>? bootstrapHelperIdentityResolver;
     private string automaticIdentityRecoveryWarning = string.Empty;
     private CancellationTokenSource? bootstrapHelperIdentityResolutionCts;
@@ -114,6 +115,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private readonly Func<DateTimeOffset> nowProvider;
     private readonly TimeSpan connectFailureCooldown;
     private readonly TimeSpan approvalTimeout;
+    private DateTimeOffset incomingHelpRequestExpiresAtUtc = DateTimeOffset.MinValue;
+    private string incomingHelpRequestTimeoutText = string.Empty;
+    private CancellationTokenSource? incomingHelpRequestTimeoutCts;
     private readonly Func<CancellationToken, Task<PeerAddress?>>? regenerateHelperIdentityAsync;
     private DateTimeOffset lastFailedAttemptUtc = DateTimeOffset.MinValue;
     private TaskCompletionSource<HelperConnectOutcome>? connectOutcome;
@@ -142,6 +146,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private int remoteControlSnapshotSendsInWindow;
     private long remoteControlSnapshotSendWindowStartTickMs;
     private bool remoteControlDebugPanelExpanded;
+    private string lastRemoteControlInputUiLog = string.Empty;
     private bool disposed;
     private int windowCloseDisconnectStarted;
     private bool showPeerEndedNotice;
@@ -151,7 +156,6 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool suppressRetryActionForReturnToWaiting;
     private bool helperListenerReturnToWaitingRequested;
     private string lastHelperBootstrapQrPayload = string.Empty;
-    private bool helperIdentityRegenerationConfirmationPending;
     private bool helperIdentityRegenerationInFlight;
 
     public HelperPageViewModel(
@@ -211,6 +215,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             Interval = PeerEndedNoticeDuration,
         };
         peerEndedNoticeTimer.Tick += OnPeerEndedNoticeTimerTick;
+        incomingHelpRequestExpiryTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1),
+        };
+        incomingHelpRequestExpiryTimer.Tick += OnIncomingHelpRequestExpiryTimerTick;
         lastKnownShowRemoteScreenShareFrame = ShowRemoteScreenShareFrame;
         lastKnownShowHelperMainContent = ShowHelperMainContent;
         lastKnownScreenShareViewerMessage = ScreenShareViewerMessage;
@@ -262,6 +271,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         AcceptIncomingFileCommand = new AsyncRelayCommand<string?>(AcceptIncomingFileAsync, CanAcceptIncomingFile);
         DeclineIncomingFileCommand = new AsyncRelayCommand<string?>(DeclineIncomingFileAsync, CanDeclineIncomingFile);
         CancelFileTransferCommand = new AsyncRelayCommand<string?>(CancelFileTransferAsync, CanCancelFileTransfer);
+        PauseFileTransferCommand = new AsyncRelayCommand<string?>(PauseFileTransferAsync, CanPauseFileTransfer);
+        ResumeFileTransferCommand = new AsyncRelayCommand<string?>(ResumeFileTransferAsync, CanResumeFileTransfer);
         RetryCommand = new AsyncRelayCommand(RetryAsync, CanRetry);
         CancelTransientCommand = new AsyncRelayCommand(CancelTransientAsync, CanCancelTransientOperation);
         OpenDiagnosticsCommand = new RelayCommand(OpenDiagnostics, CanOpenDiagnosticsCommand);
@@ -351,6 +362,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowHeaderVerificationCode));
                 OnPropertyChanged(nameof(FirstPillVerificationCodeText));
                 OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+                NotifySessionVerificationPropertiesChanged();
                 OnPropertyChanged(nameof(ShowBackButton));
                 OnPropertyChanged(nameof(HeaderStatusText));
                 OnPropertyChanged(nameof(ShowTransientStatusPanel));
@@ -448,8 +460,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public bool HasReadyHelperIdentityBootstrapText =>
         !string.IsNullOrWhiteSpace(HelperIdentityBootstrapText);
 
-    public bool ShowHelperIdentityBootstrapPanel =>
+    public bool ShowHelperSetupPanel =>
         ShowMainControls &&
+        !HasPendingHelpRequest;
+
+    public bool ShowHelperIdentityBootstrapPanel =>
+        ShowHelperSetupPanel &&
         RequiresHelperIdentityBootstrap;
 
     public bool ShowRegenerateHelperIdentityAction =>
@@ -467,9 +483,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     public string RegenerateHelperIdentityButtonText =>
         helperIdentityRegenerationInFlight
             ? "Regenerating..."
-            : helperIdentityRegenerationConfirmationPending
-                ? "Confirm regenerate"
-                : "Regenerate helper address";
+            : "Regenerate helper address";
 
     public Bitmap? HelperBootstrapQrImage => helperBootstrapQrBitmap;
     public bool ShowHelperBootstrapQr => HelperBootstrapQrImage is not null;
@@ -479,6 +493,31 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         sessionRuntime.PendingHelpRequest is { } request
             ? $"Incoming request from {request.HelpeeAddress.Value}"
             : string.Empty;
+
+    public string IncomingHelpRequestTimeoutText => incomingHelpRequestTimeoutText;
+
+    public bool ShowIncomingHelpRequestTimeout =>
+        HasPendingHelpRequest &&
+        !string.IsNullOrWhiteSpace(IncomingHelpRequestTimeoutText);
+
+    private SessionVerificationCode? CurrentSessionVerificationCode =>
+        sessionRuntime.FlowSnapshot.VerificationCode ?? sessionRuntime.SecurityState.VerificationCode;
+
+    public string SessionVerificationEmojiSequence =>
+        CurrentSessionVerificationCode?.EmojiSequence ?? string.Empty;
+
+    public string SessionVerificationFallbackCode =>
+        CurrentSessionVerificationCode?.FallbackCode ?? string.Empty;
+
+    public bool HasSessionVerificationCode =>
+        !string.IsNullOrWhiteSpace(SessionVerificationEmojiSequence) &&
+        !string.IsNullOrWhiteSpace(SessionVerificationFallbackCode);
+
+    public bool ShowSessionVerificationCode =>
+        HasSessionVerificationCode &&
+        !sessionRuntime.SecurityState.ApprovalGranted &&
+        sessionRuntime.SecurityState.HandshakeState == SessionHandshakeState.Verified &&
+        EffectivePhase is SessionUiPhase.Connecting or SessionUiPhase.Recovering;
 
     public string HelperVerificationCode =>
         HelperVerificationCodeFormatter.FormatOrNull(HelperVerificationIdentity) ?? string.Empty;
@@ -708,6 +747,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 OnPropertyChanged(nameof(ShowHeaderVerificationCode));
                 OnPropertyChanged(nameof(FirstPillVerificationCodeText));
                 OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+                NotifySessionVerificationPropertiesChanged();
                 NotifyRegenerateHelperIdentityStateChanged();
             }
         }
@@ -883,6 +923,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     public IAsyncRelayCommand<string?> CancelFileTransferCommand { get; }
 
+    public IAsyncRelayCommand<string?> PauseFileTransferCommand { get; }
+
+    public IAsyncRelayCommand<string?> ResumeFileTransferCommand { get; }
+
     public IAsyncRelayCommand RetryCommand { get; }
     public IAsyncRelayCommand CancelTransientCommand { get; }
 
@@ -970,6 +1014,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         remoteControlStateSnapshotTimer.Tick -= OnRemoteControlStateSnapshotTimerTick;
         peerEndedNoticeTimer.Stop();
         peerEndedNoticeTimer.Tick -= OnPeerEndedNoticeTimerTick;
+        incomingHelpRequestExpiryTimer.Stop();
+        incomingHelpRequestExpiryTimer.Tick -= OnIncomingHelpRequestExpiryTimerTick;
+        CancelIncomingHelpRequestTimeout();
 
         sessionRuntime.FlowSnapshotChanged -= OnFlowSnapshotChanged;
         sessionRuntime.SessionSecurityStateChanged -= OnSessionSecurityStateChanged;
@@ -1052,7 +1099,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private bool CanRespondToHelpRequest()
     {
-        return sessionRuntime.HasPendingHelpRequest && !IsConnecting && !IsStartupBlocked;
+        return sessionRuntime.HasPendingHelpRequest && !IsStartupBlocked;
     }
 
     private ConnectInputResolution ResolveConnectInput()
@@ -1082,8 +1129,17 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowHeaderVerificationCode));
         OnPropertyChanged(nameof(FirstPillVerificationCodeText));
         OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+        NotifySessionVerificationPropertiesChanged();
         NotifyRegenerateHelperIdentityStateChanged();
         RecordHelperBootstrapDiagnostics();
+    }
+
+    private void NotifySessionVerificationPropertiesChanged()
+    {
+        OnPropertyChanged(nameof(SessionVerificationEmojiSequence));
+        OnPropertyChanged(nameof(SessionVerificationFallbackCode));
+        OnPropertyChanged(nameof(HasSessionVerificationCode));
+        OnPropertyChanged(nameof(ShowSessionVerificationCode));
     }
 
     private void NotifyRegenerateHelperIdentityStateChanged()
@@ -1155,13 +1211,134 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void OnIncomingHelpRequestAvailable(object? sender, EventArgs e)
     {
+        _ = UiThreadDispatch.RunAsync(ApplyIncomingHelpRequestAvailable);
+    }
+
+    private void ApplyIncomingHelpRequestAvailable()
+    {
         localEndCommandInFlight = false;
-        helperIdentityRegenerationConfirmationPending = false;
-        OnPropertyChanged(nameof(HasPendingHelpRequest));
-        OnPropertyChanged(nameof(IncomingHelpRequestText));
+        IsConnecting = false;
+        if (HasPendingHelpRequest)
+        {
+            StartIncomingHelpRequestTimeout();
+        }
+        else
+        {
+            CancelIncomingHelpRequestTimeout();
+        }
+
+        NotifyHelpRequestPresentationChanged();
         NotifyRegenerateHelperIdentityStateChanged();
         AcceptHelpRequestCommand.NotifyCanExecuteChanged();
         RejectHelpRequestCommand.NotifyCanExecuteChanged();
+    }
+
+    private void NotifyHelpRequestPresentationChanged()
+    {
+        OnPropertyChanged(nameof(HasPendingHelpRequest));
+        OnPropertyChanged(nameof(IncomingHelpRequestText));
+        OnPropertyChanged(nameof(ShowIncomingHelpRequestTimeout));
+        OnPropertyChanged(nameof(ShowHelperSetupPanel));
+        OnPropertyChanged(nameof(ShowHelperIdentityBootstrapPanel));
+        OnPropertyChanged(nameof(HeaderVerificationCodeText));
+        OnPropertyChanged(nameof(ShowHeaderVerificationCode));
+        OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+    }
+
+    private void StartIncomingHelpRequestTimeout()
+    {
+        CancelIncomingHelpRequestTimeout();
+
+        incomingHelpRequestExpiresAtUtc = nowProvider() + approvalTimeout;
+        UpdateIncomingHelpRequestTimeoutText(BuildIncomingHelpRequestTimeoutText(nowProvider()));
+        incomingHelpRequestExpiryTimer.Start();
+        incomingHelpRequestTimeoutCts = new CancellationTokenSource();
+        var ct = incomingHelpRequestTimeoutCts.Token;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(approvalTimeout, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            if (ct.IsCancellationRequested || disposed)
+            {
+                return;
+            }
+
+            try
+            {
+                await sessionRuntime.RejectIncomingHelpRequestAsync("request_timeout", CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                LocalOperationalLog.Warn(
+                    "DirectHelpRequest",
+                    $"event=help_request_timeout_reject_failed; reason=decision_send_failed; exception_type={ex.GetType().Name}; role=Helper; runtime_state={sessionRuntime.State}; transport_state={sessionRuntime.TransportLifecycleState}");
+            }
+
+            await UiThreadDispatch.RunAsync(() =>
+            {
+                CancelIncomingHelpRequestTimeout();
+                NotifyHelpRequestPresentationChanged();
+                NotifyRegenerateHelperIdentityStateChanged();
+                AcceptHelpRequestCommand.NotifyCanExecuteChanged();
+                RejectHelpRequestCommand.NotifyCanExecuteChanged();
+                TryShowUiRecoveryTransient("incoming_help_request_timeout", "The help request expired.", canCancel: false);
+                SyncTransientStatusFromRuntime();
+            }).ConfigureAwait(false);
+        });
+    }
+
+    private void CancelIncomingHelpRequestTimeout()
+    {
+        incomingHelpRequestExpiryTimer.Stop();
+        incomingHelpRequestTimeoutCts?.Cancel();
+        incomingHelpRequestTimeoutCts?.Dispose();
+        incomingHelpRequestTimeoutCts = null;
+        incomingHelpRequestExpiresAtUtc = DateTimeOffset.MinValue;
+        UpdateIncomingHelpRequestTimeoutText(string.Empty);
+    }
+
+    private void OnIncomingHelpRequestExpiryTimerTick(object? sender, EventArgs e)
+    {
+        if (!HasPendingHelpRequest ||
+            incomingHelpRequestExpiresAtUtc == DateTimeOffset.MinValue)
+        {
+            CancelIncomingHelpRequestTimeout();
+            NotifyHelpRequestPresentationChanged();
+            return;
+        }
+
+        UpdateIncomingHelpRequestTimeoutText(BuildIncomingHelpRequestTimeoutText(nowProvider()));
+    }
+
+    private string BuildIncomingHelpRequestTimeoutText(DateTimeOffset now)
+    {
+        if (incomingHelpRequestExpiresAtUtc == DateTimeOffset.MinValue)
+        {
+            return string.Empty;
+        }
+
+        var remaining = incomingHelpRequestExpiresAtUtc - now;
+        var totalSeconds = Math.Max(1, (int)Math.Ceiling(remaining.TotalSeconds));
+        var minutes = totalSeconds / 60;
+        var seconds = totalSeconds % 60;
+        return $"Request expires in {minutes:D2}:{seconds:D2}.";
+    }
+
+    private void UpdateIncomingHelpRequestTimeoutText(string value)
+    {
+        value ??= string.Empty;
+        if (SetProperty(ref incomingHelpRequestTimeoutText, value, nameof(IncomingHelpRequestTimeoutText)))
+        {
+            OnPropertyChanged(nameof(ShowIncomingHelpRequestTimeout));
+        }
     }
 
     public void ApplyExternalConnectInput(string input, string sourceLabel)
@@ -1622,15 +1799,27 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         {
             if (!IsRemoteControlKeyboardCaptureEnabled)
             {
+                LogRemoteControlInputUi(
+                    "remote_control_input_ui_ignored",
+                    "keyboard_capture_disabled",
+                    kind);
                 return;
             }
         }
         else if (!IsRemoteControlInputCaptureEnabled)
         {
+            LogRemoteControlInputUi(
+                "remote_control_input_ui_ignored",
+                "pointer_capture_disabled",
+                kind);
             return;
         }
 
         TrackRemoteControlDebugMetrics(message);
+        LogRemoteControlInputUi(
+            "remote_control_input_ui_forwarded",
+            "ok",
+            kind);
         _ = sessionRuntime.SendRemoteControlInputAsync(message, CancellationToken.None);
     }
 
@@ -1926,13 +2115,16 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
     private void RequestSendFileWindow()
     {
+        LogSendFileActionUi("file_transfer_send_ui_requested", "(entry)");
         if (!CanExecuteSendFileAction())
         {
+            LogSendFileActionUi("file_transfer_send_ui_ignored", "can_execute_false");
             return;
         }
 
         if (!sessionRuntime.TryAuthorizeFileTransferSend())
         {
+            LogSendFileActionUi("file_transfer_send_ui_ignored", "authorize_false");
             CanSendFiles = false;
             OnPropertyChanged(nameof(CanSendFileAction));
             SendFileCommand.NotifyCanExecuteChanged();
@@ -1950,8 +2142,16 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private async Task AcceptIncomingFileAsync(string? transferId)
     {
         var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferActionUi(
+            "file_transfer_accept_ui_requested",
+            normalizedTransferId,
+            includeDecline: false);
         if (!CanAcceptIncomingFile(normalizedTransferId))
         {
+            LogFileTransferActionUi(
+                "file_transfer_accept_ui_ignored",
+                normalizedTransferId,
+                includeDecline: false);
             return;
         }
 
@@ -1969,6 +2169,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private async Task DeclineIncomingFileAsync(string? transferId)
     {
         var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferActionUi(
+            "file_transfer_decline_ui_requested",
+            normalizedTransferId,
+            includeDecline: true);
         if (!CanDeclineIncomingFile(normalizedTransferId))
         {
             return;
@@ -1988,8 +2192,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private async Task CancelFileTransferAsync(string? transferId)
     {
         var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferCancelUi("file_transfer_cancel_ui_requested", normalizedTransferId);
         if (!CanCancelFileTransfer(normalizedTransferId))
         {
+            LogFileTransferCancelUi("file_transfer_cancel_ui_ignored", normalizedTransferId);
             return;
         }
 
@@ -2007,6 +2213,60 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         return (InboundFileTransfer is { ShowCancel: true } inbound &&
                 string.Equals(inbound.TransferId, normalizedTransferId, StringComparison.Ordinal)) ||
                (OutboundFileTransfer is { ShowCancel: true } outbound &&
+                string.Equals(outbound.TransferId, normalizedTransferId, StringComparison.Ordinal));
+    }
+
+    private async Task PauseFileTransferAsync(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferPauseResumeUi("file_transfer_pause_ui_requested", normalizedTransferId);
+        if (!CanPauseFileTransfer(normalizedTransferId))
+        {
+            LogFileTransferPauseResumeUi("file_transfer_pause_ui_ignored", normalizedTransferId);
+            return;
+        }
+
+        await sessionRuntime.PauseTransferAsync(normalizedTransferId!, "ui_pause", CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private bool CanPauseFileTransfer(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        if (normalizedTransferId is null)
+        {
+            return false;
+        }
+
+        return (InboundFileTransfer is { ShowPause: true } inbound &&
+                string.Equals(inbound.TransferId, normalizedTransferId, StringComparison.Ordinal)) ||
+               (OutboundFileTransfer is { ShowPause: true } outbound &&
+                string.Equals(outbound.TransferId, normalizedTransferId, StringComparison.Ordinal));
+    }
+
+    private async Task ResumeFileTransferAsync(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        LogFileTransferPauseResumeUi("file_transfer_resume_ui_requested", normalizedTransferId);
+        if (!CanResumeFileTransfer(normalizedTransferId))
+        {
+            LogFileTransferPauseResumeUi("file_transfer_resume_ui_ignored", normalizedTransferId);
+            return;
+        }
+
+        await sessionRuntime.ResumeTransferAsync(normalizedTransferId!, "ui_resume", CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private bool CanResumeFileTransfer(string? transferId)
+    {
+        var normalizedTransferId = NormalizeTransferActionId(transferId);
+        if (normalizedTransferId is null)
+        {
+            return false;
+        }
+
+        return (InboundFileTransfer is { ShowResume: true } inbound &&
+                string.Equals(inbound.TransferId, normalizedTransferId, StringComparison.Ordinal)) ||
+               (OutboundFileTransfer is { ShowResume: true } outbound &&
                 string.Equals(outbound.TransferId, normalizedTransferId, StringComparison.Ordinal));
     }
 
@@ -2090,20 +2350,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         if (!CanRegenerateHelperIdentity)
         {
-            helperIdentityRegenerationConfirmationPending = false;
             NotifyRegenerateHelperIdentityStateChanged();
             return;
         }
 
-        if (!helperIdentityRegenerationConfirmationPending)
-        {
-            helperIdentityRegenerationConfirmationPending = true;
-            NotifyRegenerateHelperIdentityStateChanged();
-            copyFeedback.Show("Click Confirm regenerate to replace this helper address.");
-            return;
-        }
-
-        helperIdentityRegenerationConfirmationPending = false;
         helperIdentityRegenerationInFlight = true;
         NotifyRegenerateHelperIdentityStateChanged();
         copyFeedback.Show("Regenerating helper address...");
@@ -2197,7 +2447,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         try
         {
+            CancelIncomingHelpRequestTimeout();
             await sessionRuntime.AcceptIncomingHelpRequestAsync(CancellationToken.None).ConfigureAwait(false);
+            await UiThreadDispatch.RunAsync(NotifyHelpRequestPresentationChanged).ConfigureAwait(false);
         }
         catch
         {
@@ -2212,7 +2464,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
+        CancelIncomingHelpRequestTimeout();
         await sessionRuntime.RejectIncomingHelpRequestAsync("request_rejected", CancellationToken.None).ConfigureAwait(false);
+        await UiThreadDispatch.RunAsync(NotifyHelpRequestPresentationChanged).ConfigureAwait(false);
     }
 
     private string BuildHelperInstallMessage()
@@ -2264,6 +2518,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowHeaderVerificationCode));
         OnPropertyChanged(nameof(FirstPillVerificationCodeText));
         OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+        NotifySessionVerificationPropertiesChanged();
     }
 
     private void PromoteBootstrapHelperIdentityFromConnectedSessionIfAvailable()
@@ -3225,6 +3480,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowInlineStatusText));
         OnPropertyChanged(nameof(ShowFailurePanel));
         OnPropertyChanged(nameof(ShowMainControls));
+        OnPropertyChanged(nameof(ShowHelperSetupPanel));
         OnPropertyChanged(nameof(ShowCopyFeedbackInline));
         OnPropertyChanged(nameof(HeaderStatusText));
         OnPropertyChanged(nameof(HelperVerificationCode));
@@ -3234,6 +3490,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         OnPropertyChanged(nameof(ShowHeaderVerificationCode));
         OnPropertyChanged(nameof(FirstPillVerificationCodeText));
         OnPropertyChanged(nameof(ShowFirstPillVerificationCode));
+        NotifySessionVerificationPropertiesChanged();
         NotifyHelperBootstrapPropertiesChanged();
         RefreshHelperBootstrapQrBitmap();
         OnPropertyChanged(nameof(HelperTechnicalIdentityText));
@@ -3609,8 +3866,18 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         bool nextCanOpenDiagnostics;
         var flow = sessionRuntime.FlowSnapshot;
         var fileTransferSnapshot = sessionRuntime.FileTransferSnapshot;
-        InboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(fileTransferSnapshot.Inbound);
-        OutboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(fileTransferSnapshot.Outbound);
+        InboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(
+            fileTransferSnapshot.Inbound,
+            AcceptIncomingFileCommand,
+            DeclineIncomingFileCommand,
+            CancelFileTransferCommand,
+            PauseFileTransferCommand,
+            ResumeFileTransferCommand);
+        OutboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(
+            fileTransferSnapshot.Outbound,
+            cancelCommand: CancelFileTransferCommand,
+            pauseCommand: PauseFileTransferCommand,
+            resumeCommand: ResumeFileTransferCommand);
         var hasActiveOutboundTransfer = fileTransferSnapshot.Outbound is { IsTerminal: false };
         var phase = GetEffectivePhase();
         var suppressConnectedControlsDuringLocalEnd = flow.SuppressConnectedControls;
@@ -3678,6 +3945,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         AcceptIncomingFileCommand.NotifyCanExecuteChanged();
         DeclineIncomingFileCommand.NotifyCanExecuteChanged();
         CancelFileTransferCommand.NotifyCanExecuteChanged();
+        PauseFileTransferCommand.NotifyCanExecuteChanged();
+        ResumeFileTransferCommand.NotifyCanExecuteChanged();
         OpenDiagnosticsCommand.NotifyCanExecuteChanged();
         EndSessionCommand.NotifyCanExecuteChanged();
         LogCurrentChatPanelState(source);
@@ -3703,6 +3972,79 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         lastChatPanelStateLog = payload;
         WriteDebugTrace($"[HelperUi] {payload}");
+    }
+
+    private void LogFileTransferActionUi(
+        string eventName,
+        string? normalizedTransferId,
+        bool includeDecline)
+    {
+        var inbound = InboundFileTransfer;
+        var payload =
+            $"event={eventName}; role=Helper; transfer_id_present={(normalizedTransferId is null ? 0 : 1)}; " +
+            $"inbound_state={inbound?.State.ToString() ?? "(none)"}; " +
+            $"inbound_show_accept={(inbound?.ShowAccept == true ? 1 : 0)}; " +
+            $"effective_phase={EffectivePhase}; runtime_state={sessionRuntime.State}";
+        if (includeDecline)
+        {
+            payload += $"; inbound_show_decline={(inbound?.ShowDecline == true ? 1 : 0)}";
+        }
+
+        LocalOperationalLog.Info("HelperUi", payload);
+    }
+
+    private void LogSendFileActionUi(string eventName, string reason)
+    {
+        LocalOperationalLog.Info(
+            "HelperUi",
+            $"event={eventName}; role=Helper; reason={reason}; " +
+            $"can_send_files={(CanSendFiles ? 1 : 0)}; can_send_file_action={(CanExecuteSendFileAction() ? 1 : 0)}; " +
+            $"effective_phase={EffectivePhase}; runtime_state={sessionRuntime.State}");
+    }
+
+    private void LogFileTransferCancelUi(string eventName, string? normalizedTransferId)
+    {
+        var inbound = InboundFileTransfer;
+        var outbound = OutboundFileTransfer;
+        LocalOperationalLog.Info(
+            "HelperUi",
+            $"event={eventName}; role=Helper; transfer_id_present={(normalizedTransferId is null ? 0 : 1)}; " +
+            $"inbound_state={inbound?.State.ToString() ?? "(none)"}; inbound_show_cancel={(inbound?.ShowCancel == true ? 1 : 0)}; " +
+            $"outbound_state={outbound?.State.ToString() ?? "(none)"}; outbound_show_cancel={(outbound?.ShowCancel == true ? 1 : 0)}; " +
+            $"effective_phase={EffectivePhase}; runtime_state={sessionRuntime.State}");
+    }
+
+    private void LogFileTransferPauseResumeUi(string eventName, string? normalizedTransferId)
+    {
+        var inbound = InboundFileTransfer;
+        var outbound = OutboundFileTransfer;
+        LocalOperationalLog.Info(
+            "HelperUi",
+            $"event={eventName}; role=Helper; transfer_id_present={(normalizedTransferId is null ? 0 : 1)}; " +
+            $"inbound_state={inbound?.State.ToString() ?? "(none)"}; inbound_show_pause={(inbound?.ShowPause == true ? 1 : 0)}; inbound_show_resume={(inbound?.ShowResume == true ? 1 : 0)}; " +
+            $"outbound_state={outbound?.State.ToString() ?? "(none)"}; outbound_show_pause={(outbound?.ShowPause == true ? 1 : 0)}; outbound_show_resume={(outbound?.ShowResume == true ? 1 : 0)}; " +
+            $"effective_phase={EffectivePhase}; runtime_state={sessionRuntime.State}");
+    }
+
+    private void LogRemoteControlInputUi(string eventName, string reason, string kind)
+    {
+        var normalizedKind = string.IsNullOrWhiteSpace(kind) ? "mouse_move" : kind.Trim();
+        var payload =
+            $"event={eventName}; role=Helper; reason={reason}; kind={SanitizeForLog(normalizedKind)}; " +
+            $"input_capture_enabled={(IsRemoteControlInputCaptureEnabled ? 1 : 0)}; " +
+            $"keyboard_capture_enabled={(IsRemoteControlKeyboardCaptureEnabled ? 1 : 0)}; " +
+            $"mapping_available={(RemoteControlMappingAvailable ? 1 : 0)}; " +
+            $"ui_connected={(IsRemoteControlUiConnected ? 1 : 0)}; " +
+            $"show_frame={(ShowRemoteScreenShareFrame ? 1 : 0)}; " +
+            $"control_state={sessionRuntime.ControlState}; runtime_state={sessionRuntime.State}; " +
+            $"remote_control_available={(sessionRuntime.RemoteControlAvailable ? 1 : 0)}";
+        if (string.Equals(payload, lastRemoteControlInputUiLog, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        lastRemoteControlInputUiLog = payload;
+        LocalOperationalLog.Info("HelperUi", payload);
     }
 
     [Conditional("DEBUG")]

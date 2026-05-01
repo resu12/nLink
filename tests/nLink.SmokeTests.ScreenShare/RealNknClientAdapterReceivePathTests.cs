@@ -1,4 +1,5 @@
 using NLink.Core;
+using NLink.Core.Logging;
 using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
@@ -149,5 +150,54 @@ public sealed class RealNknClientAdapterReceivePathTests
         Assert.Equal(0, receivedRawMessage.SdkHandleMsgEnteredUtcMs);
         Assert.Equal(0, receivedRawMessage.ClientMessageDispatchUtcMs);
         Assert.Equal(0, receivedRawMessage.MultiClientMessageDispatchUtcMs);
+    }
+
+    [Fact]
+    public void BulkBinaryMessage_LogsInboundDeliverySummaryWithSubscriberPresence()
+    {
+        var options = NknTransportOptions.Load();
+        var identity = new NknIdentity("bulk-delivery-summary", "bulk-delivery-summary.fake");
+        using var adapter = new RealNknClientAdapter(identity, options);
+
+        NknIncomingMessage? receivedRawMessage = null;
+        adapter.MessageReceived += (_, message) => receivedRawMessage = message;
+
+        adapter.HandleBinaryBridgeFrameForTests(
+            new BridgeBinaryFrame(
+                BridgeBinaryFrameKind.Message,
+                NknBridgeChannel.Bulk,
+                Flags: 0,
+                PrimaryText: "peer.test",
+                SecondaryText: null,
+                Payload: new byte[] { 4, 5, 6 }));
+
+        Assert.NotNull(receivedRawMessage);
+        var logText = LocalOperationalLog.GetRecentLogText();
+        Assert.Contains("event=nkn_bridge_inbound_delivery_summary", logText, StringComparison.Ordinal);
+        Assert.Contains("channel=bulk", logText, StringComparison.Ordinal);
+        Assert.Contains("subscriber_present_count=1", logText, StringComparison.Ordinal);
+        Assert.Contains("subscriber_missing_count=0", logText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BulkBinaryMessageWithoutSubscriber_LogsSubscriberMissing()
+    {
+        var options = NknTransportOptions.Load();
+        var identity = new NknIdentity("bulk-delivery-missing", "bulk-delivery-missing.fake");
+        using var adapter = new RealNknClientAdapter(identity, options);
+
+        adapter.HandleBinaryBridgeFrameForTests(
+            new BridgeBinaryFrame(
+                BridgeBinaryFrameKind.Message,
+                NknBridgeChannel.Bulk,
+                Flags: 0,
+                PrimaryText: "peer.test",
+                SecondaryText: null,
+                Payload: new byte[] { 7, 8, 9 }));
+
+        var logText = LocalOperationalLog.GetRecentLogText();
+        Assert.Contains("event=nkn_bridge_inbound_delivery_summary", logText, StringComparison.Ordinal);
+        Assert.Contains("channel=bulk", logText, StringComparison.Ordinal);
+        Assert.Contains("subscriber_missing_count=1", logText, StringComparison.Ordinal);
     }
 }

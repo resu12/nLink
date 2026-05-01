@@ -10,7 +10,7 @@ public sealed record FileTransferSessionOpenV2
 
     public string TransferId { get; init; } = string.Empty;
 
-    public int ProtocolVersion { get; init; } = FileTransferProtocol.ProtocolVersionV2;
+    public int ProtocolVersion { get; init; } = FileTransferProtocol.ProtocolVersionV4;
 
     public string SessionRole { get; init; } = string.Empty;
 

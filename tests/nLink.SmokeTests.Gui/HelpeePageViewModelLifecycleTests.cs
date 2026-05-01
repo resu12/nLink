@@ -343,6 +343,61 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task HelpeePageViewModel_PastedHelperBootstrap_PreservesDisplayedFormat()
+    {
+        var scriptedTransport = new ScriptedSignalingTransport(
+            onHostByAddressAsync: _ => Task.CompletedTask,
+            localPeerAddress: "helpee.bootstrap.format");
+
+        using var runtime = new SessionRuntime(() => scriptedTransport);
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateNknTestConfig(), runtime);
+
+        var helperIdentity = new PeerAddress("nlink-helper.format.identity");
+        var helperTarget = new PeerAddress("nlink-helper.format.target");
+        var helperBootstrap = HelperBootstrapQrPayload.Format(
+            HelperBootstrapPayload.Create(
+                helperTarget,
+                helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
+
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
+
+        helpee.InviteHelperIdentityInput = helperBootstrap;
+
+        await WaitUntilAsync(
+            () => helpee.HasVerifiedInviteHelperIdentity &&
+                  string.Equals(helpee.InviteHelperIdentityInput, helperBootstrap, StringComparison.Ordinal) &&
+                  helpee.RequestHelpCommand.CanExecute(null),
+            TimeSpan.FromSeconds(2));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task HelpeePageViewModel_ClearingHelperAddress_DisablesRequestHelp()
+    {
+        var scriptedTransport = new ScriptedSignalingTransport(
+            onHostByAddressAsync: _ => Task.CompletedTask,
+            localPeerAddress: "helpee.clear.helper");
+
+        using var runtime = new SessionRuntime(() => scriptedTransport);
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateNknTestConfig(), runtime);
+
+        const string helperInput = "nhid1-DSP6-JVKB-5MW3-GE9M-71GK-ADHE-60VK-CE36-70WP-ARB2-CMRK-4DB1-60VP-4E9Q-75GK-4D33-6WS3-AE1N-CHJ6-2CV5-6XJ3-2E9H-6XHP-8E1Q-6GSK-GE35-74VK-8DV2-6MWP-8D9M-68W6-ASAN-JYRC-J";
+
+        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
+
+        helpee.InviteHelperIdentityInput = helperInput;
+        await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
+
+        helpee.InviteHelperIdentityInput = string.Empty;
+
+        await WaitUntilAsync(
+            () => !helpee.RequestHelpCommand.CanExecute(null) &&
+                  !helpee.CanRequestHelpAction,
+            TimeSpan.FromSeconds(2));
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task HelpeePageViewModel_ReusingSameVerifiedHelperIdentity_RefreshesInviteForRetry()
     {
         var scriptedTransport = new ScriptedSignalingTransport(
@@ -534,6 +589,77 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
         Assert.False(Assert.IsType<bool>(GetPrivateField(helpee, "showPeerEndedNotice")));
         Assert.True(helpee.IsIncomingRequestView);
         Assert.Equal("Waiting for your approval…", helpee.HeaderStatusText);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeePageViewModel_SessionVerificationCode_RequiresHandshakeVerificationMaterial()
+    {
+        using var runtime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateDevLocalTestConfig(), runtime);
+        var sessionId = new SessionId("session-verification-helpee-vm");
+        var helpeeAddress = new PeerAddress("verification.helpee.vm");
+        var helperAddress = new PeerAddress("verification.helper.vm");
+        var pendingApproval = new ApprovalRequest(helperAddress, CapabilityGrant.Chat, sessionId);
+        var verifiedWithoutCode = CreateVerifiedSecurityState(helpeeAddress, helperAddress, sessionId);
+
+        SetPrivateField(runtime, "role", SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "state", SessionRuntimeState.IncomingJoinRequest);
+        SetPrivateField(runtime, "transportState", TransportState.Handshake);
+        SetPrivateField(runtime, "pendingApprovalRequest", pendingApproval);
+        SetPrivateField(runtime, "sessionSecurityState", verifiedWithoutCode);
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = SessionFlowPhase.PendingApproval,
+                UiPhase = SessionUiPhase.Waiting,
+                Role = SessionRuntimeRole.Helpee,
+                RuntimeState = SessionRuntimeState.IncomingJoinRequest,
+                TransportState = TransportState.Handshake,
+                HasPendingApproval = true,
+                StatusText = "Waiting for your approval…",
+                DisplayStatusText = "Waiting for your approval…",
+                DisplayConnectionState = "IncomingRequest",
+                ShowIncomingApproval = true,
+                SessionId = sessionId.Value,
+                HelperIdentity = helperAddress.Value,
+                VerificationCode = null,
+            });
+
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+
+        Assert.True(helpee.HasIncomingHelperVerificationCode);
+        Assert.False(helpee.HasSessionVerificationCode);
+        Assert.False(helpee.ShowSessionVerificationCode);
+        Assert.Equal(string.Empty, helpee.SessionVerificationEmojiSequence);
+        Assert.Equal(string.Empty, helpee.SessionVerificationFallbackCode);
+
+        var verificationCode = CreateTestSessionVerificationCode();
+        SetPrivateField(runtime, "sessionSecurityState", verifiedWithoutCode.WithVerificationCode(verificationCode));
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                VerificationCode = verificationCode,
+            });
+
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+
+        Assert.True(helpee.HasSessionVerificationCode);
+        Assert.True(helpee.ShowSessionVerificationCode);
+        Assert.Equal(verificationCode.EmojiSequence, helpee.SessionVerificationEmojiSequence);
+        Assert.Equal(verificationCode.FallbackCode, helpee.SessionVerificationFallbackCode);
+    }
+
+    private static SessionVerificationCode CreateTestSessionVerificationCode()
+    {
+        return new SessionVerificationCode(
+            "sun moon star cloud leaf fire key",
+            "FACE-B00C-1234",
+            SessionVerificationCodeDerivation.SourceHandshakeTranscriptV1);
     }
 
     private sealed class AuthoritativeAddressSuppressedHelpeeTransport :

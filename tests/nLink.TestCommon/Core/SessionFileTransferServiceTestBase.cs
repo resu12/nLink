@@ -47,7 +47,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         Directory.CreateDirectory(directoryPath);
         var tempPath = finalPath + ".part";
         var preserveTempArtifact = false;
-        var stream = new FileStream(tempPath, new FileStreamOptions { Access = FileAccess.Write, Mode = FileMode.Create, Share = FileShare.None, Options = FileOptions.Asynchronous | FileOptions.SequentialScan, });
+        var stream = new FileStream(tempPath, new FileStreamOptions { Access = FileAccess.ReadWrite, Mode = FileMode.Create, Share = FileShare.None, Options = FileOptions.Asynchronous | FileOptions.RandomAccess, });
         return new FileTransferReceiveDestination(stream, async ct =>
         {
             await stream.FlushAsync(ct).ConfigureAwait(false);
@@ -129,10 +129,9 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         return logText[startIndex..];
     }
 
-    protected static string GetLoopbackFrameChunkIndex(FileTransferDataFrameV2 frame) => frame switch
+    protected static string GetLoopbackFrameChunkIndex(FileTransferDataFrame frame) => frame switch
     {
-        FileTransferChunkDataFrameV2 chunk => chunk.ChunkIndex.ToString(),
-        FileTransferChunkBatchFrameV2 batch => $"{batch.StartChunkIndex}-{batch.StartChunkIndex + batch.DataSegments.Count - 1}",
+        FileTransferChunkBatchFrameV4 batch => $"{batch.StartChunkIndex}-{batch.StartChunkIndex + batch.DataSegments.Count - 1}",
         _ => "(none)",
     };
 
@@ -148,37 +147,56 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         return reader.ReadToEnd();
     }
 
+    protected static string ReadRetainedOperationalLogs()
+    {
+        var logDirectory = Path.GetDirectoryName(LocalOperationalLog.LogFilePath);
+        if (string.IsNullOrWhiteSpace(logDirectory) || !Directory.Exists(logDirectory))
+        {
+            return string.Empty;
+        }
+
+        var builder = new System.Text.StringBuilder();
+        foreach (var path in Directory.EnumerateFiles(logDirectory, "nlink*.log").OrderBy(static file => File.GetLastWriteTimeUtc(file)))
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            builder.AppendLine(reader.ReadToEnd());
+        }
+
+        return builder.ToString();
+    }
+
     protected sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);
         private LoopbackFileTransferTransport? peer;
+        private int activeDataSessionSends;
+        private int maxConcurrentDataSessionSends;
+        private int dataSessionSendCount;
         public LoopbackFileTransferTransport(string sessionId)
         {
             this.sessionId = sessionId;
         }
 
-        public bool SupportsFileTransferV3Streaming { get; set; }
+        public bool SupportsFileTransferV4Streaming { get; set; } = true;
         public FileTransferTransportProfileKind FileTransferTransportProfileKind { get; set; } = FileTransferTransportProfileKind.Default;
-        public Func<FileTransferStartV2, FileTransferStartV2>? OutboundStartTransform { get; init; }
-        public Func<LoopbackFileTransferTransport, FileTransferStartV2, CancellationToken, Task<bool>>? OutboundStartDeliveryOverrideAsync { get; set; }
-        public Func<FileTransferChunkV1, FileTransferChunkV1>? OutboundChunkTransform { get; init; }
-        public Func<FileTransferChunkV1, CancellationToken, Task>? AfterChunkDeliveredAsync { get; set; }
-        public Func<LoopbackFileTransferTransport, FileTransferChunkV1, CancellationToken, Task<bool>>? OutboundChunkDeliveryOverrideAsync { get; set; }
-        public Func<LoopbackFileTransferTransport, FileTransferWindowUpdateV1, CancellationToken, Task<bool>>? OutboundWindowUpdateDeliveryOverrideAsync { get; set; }
-        public Func<LoopbackFileTransferTransport, FileTransferMissingRangeV1, CancellationToken, Task<bool>>? OutboundMissingRangeDeliveryOverrideAsync { get; set; }
-        public Func<LoopbackFileTransferTransport, FileTransferPressureStateV1, CancellationToken, Task<bool>>? OutboundPressureStateDeliveryOverrideAsync { get; set; }
-        public Func<LoopbackFileTransferTransport, FileTransferDataFrameV2, CancellationToken, Task<bool>>? OutboundDataFrameDeliveryOverrideAsync { get; set; }
-        public Func<LoopbackFileTransferTransport, FileTransferDataFrameV2, bool, CancellationToken, Task<bool>>? OutboundDataFrameDeliveryOverrideWithLaneAsync { get; set; }
+        public int DataSessionSendDelayMs { get; set; }
+        public int DataSessionSendFailureAfterCount { get; set; }
+        public int MaxConcurrentDataSessionSends => Volatile.Read(ref maxConcurrentDataSessionSends);
+        public Func<LoopbackFileTransferTransport, FileTransferDataFrame, CancellationToken, Task<bool>>? OutboundDataFrameDeliveryOverrideAsync { get; set; }
+        public Func<LoopbackFileTransferTransport, FileTransferDataFrame, bool, CancellationToken, Task<bool>>? OutboundDataFrameDeliveryOverrideWithLaneAsync { get; set; }
         public Func<LoopbackFileTransferTransport, FileTransferSessionOpenV2, CancellationToken, Task<bool>>? OutboundSessionOpenDeliveryOverrideAsync { get; set; }
         public Func<FileTransferCompleteV1, CancellationToken, Task>? BeforeCompleteDeliveredAsync { get; set; }
         public Exception? OfferSendException { get; init; }
         public ConcurrentQueue<FileTransferErrorV1> SentErrors { get; } = [];
+        public ConcurrentQueue<FileTransferOfferV2> SentOffers { get; } = [];
+        public ConcurrentQueue<FileTransferAcceptV1> SentAccepts { get; } = [];
+        public ConcurrentQueue<FileTransferDeclineV1> SentDeclines { get; } = [];
+        public ConcurrentQueue<FileTransferCancelV1> SentCancels { get; } = [];
         public ConcurrentQueue<FileTransferCompleteV1> SentCompletes { get; } = [];
-        public ConcurrentQueue<FileTransferWindowUpdateV1> SentWindowUpdates { get; } = [];
-        public ConcurrentQueue<FileTransferMissingRangeV1> SentMissingRanges { get; } = [];
-        public ConcurrentQueue<FileTransferPressureStateV1> SentPressureStates { get; } = [];
-        public ConcurrentQueue<FileTransferDataFrameV2> SentDataFrames { get; } = [];
+        public ConcurrentQueue<FileTransferSessionOpenV2> SentSessionOpens { get; } = [];
+        public ConcurrentQueue<FileTransferDataFrame> SentDataFrames { get; } = [];
 
         public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
         public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
@@ -190,11 +208,6 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public event EventHandler<FileTransferAcceptReceivedEventArgs>? FileTransferAcceptReceived;
         public event EventHandler<FileTransferDeclineReceivedEventArgs>? FileTransferDeclineReceived;
         public event EventHandler<FileTransferSessionOpenReceivedEventArgs>? FileTransferSessionOpenReceived;
-        public event EventHandler<FileTransferStartReceivedEventArgs>? FileTransferStartReceived;
-        public event EventHandler<FileTransferChunkReceivedEventArgs>? FileTransferChunkReceived;
-        public event EventHandler<FileTransferWindowUpdateReceivedEventArgs>? FileTransferWindowUpdateReceived;
-        public event EventHandler<FileTransferMissingRangeReceivedEventArgs>? FileTransferMissingRangeReceived;
-        public event EventHandler<FileTransferPressureStateReceivedEventArgs>? FileTransferPressureStateReceived;
         public event EventHandler<FileTransferCancelReceivedEventArgs>? FileTransferCancelReceived;
         public event EventHandler<FileTransferErrorReceivedEventArgs>? FileTransferErrorReceived;
         public event EventHandler<FileTransferCompleteReceivedEventArgs>? FileTransferCompleteReceived;
@@ -217,38 +230,31 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 return Task.FromException(OfferSendException);
             }
 
-            return DeliverAsync(message with { SessionId = NormalizeSessionId(message.SessionId) }, (target, payload) => target.FileTransferOfferReceived?.Invoke(target, new FileTransferOfferReceivedEventArgs(payload, "loopback-peer")), ct);
+            var payload = message with { SessionId = NormalizeSessionId(message.SessionId) };
+            SentOffers.Enqueue(payload);
+            return DeliverAsync(payload, (target, delivered) => target.FileTransferOfferReceived?.Invoke(target, new FileTransferOfferReceivedEventArgs(delivered, "loopback-peer")), ct);
         }
 
-        public Task SendFileTransferAcceptAsync(FileTransferAcceptV1 message, CancellationToken ct) => DeliverAsync(message with { SessionId = NormalizeSessionId(message.SessionId) }, (target, payload) => target.FileTransferAcceptReceived?.Invoke(target, new FileTransferAcceptReceivedEventArgs(payload, "loopback-peer")), ct);
-        public Task SendFileTransferDeclineAsync(FileTransferDeclineV1 message, CancellationToken ct) => DeliverAsync(message with { SessionId = NormalizeSessionId(message.SessionId) }, (target, payload) => target.FileTransferDeclineReceived?.Invoke(target, new FileTransferDeclineReceivedEventArgs(payload, "loopback-peer")), ct);
-        public Task SendFileTransferSessionOpenAsync(FileTransferSessionOpenV2 message, CancellationToken ct) => DeliverMaybeAsync(message with { SessionId = NormalizeSessionId(message.SessionId) }, static (transport, payload, token) => transport.OutboundSessionOpenDeliveryOverrideAsync?.Invoke(transport.peer!, payload, token) ?? Task.FromResult(false), (target, payload) => target.FileTransferSessionOpenReceived?.Invoke(target, new FileTransferSessionOpenReceivedEventArgs(payload, "loopback-peer")), ct);
-        public Task SendFileTransferStartAsync(FileTransferStartV2 message, CancellationToken ct) => DeliverMaybeAsync(ApplyStartTransform(message with { SessionId = NormalizeSessionId(message.SessionId) }), static (transport, payload, token) => transport.OutboundStartDeliveryOverrideAsync?.Invoke(transport.peer!, payload, token) ?? Task.FromResult(false), (target, payload) => target.FileTransferStartReceived?.Invoke(target, new FileTransferStartReceivedEventArgs(payload, "loopback-peer")), ct);
-        public async Task SendFileTransferChunkAsync(FileTransferChunkV1 message, CancellationToken ct)
+        public Task SendFileTransferAcceptAsync(FileTransferAcceptV1 message, CancellationToken ct)
         {
-            var payload = ApplyChunkTransform(message with { SessionId = NormalizeSessionId(message.SessionId) });
-            var target = peer ?? throw new InvalidOperationException("Loopback peer is not connected.");
-            var handled = false;
-            if (OutboundChunkDeliveryOverrideAsync is not null)
-            {
-                handled = await OutboundChunkDeliveryOverrideAsync(target, payload, ct);
-            }
-
-            if (!handled)
-            {
-                DeliverChunkToPeer(payload);
-            }
-
-            if (AfterChunkDeliveredAsync is not null)
-            {
-                await AfterChunkDeliveredAsync(payload, ct);
-            }
+            var payload = message with { SessionId = NormalizeSessionId(message.SessionId) };
+            SentAccepts.Enqueue(payload);
+            return DeliverAsync(payload, (target, delivered) => target.FileTransferAcceptReceived?.Invoke(target, new FileTransferAcceptReceivedEventArgs(delivered, "loopback-peer")), ct);
         }
 
-        public Task SendFileTransferWindowUpdateAsync(FileTransferWindowUpdateV1 message, CancellationToken ct) => DeliverMaybeAsync(TrackWindowUpdate(message with { SessionId = NormalizeSessionId(message.SessionId) }), static (transport, payload, token) => transport.OutboundWindowUpdateDeliveryOverrideAsync?.Invoke(transport.peer!, payload, token) ?? Task.FromResult(false), static (target, payload) => target.FileTransferWindowUpdateReceived?.Invoke(target, new FileTransferWindowUpdateReceivedEventArgs(payload, "loopback-peer")), ct);
-        public Task SendFileTransferMissingRangeAsync(FileTransferMissingRangeV1 message, CancellationToken ct) => DeliverMaybeAsync(TrackMissingRange(message with { SessionId = NormalizeSessionId(message.SessionId) }), static (transport, payload, token) => transport.OutboundMissingRangeDeliveryOverrideAsync?.Invoke(transport.peer!, payload, token) ?? Task.FromResult(false), static (target, payload) => target.FileTransferMissingRangeReceived?.Invoke(target, new FileTransferMissingRangeReceivedEventArgs(payload, "loopback-peer")), ct);
-        public Task SendFileTransferPressureStateAsync(FileTransferPressureStateV1 message, CancellationToken ct) => DeliverMaybeAsync(TrackPressureState(message with { SessionId = NormalizeSessionId(message.SessionId) }), static (transport, payload, token) => transport.OutboundPressureStateDeliveryOverrideAsync?.Invoke(transport.peer!, payload, token) ?? Task.FromResult(false), static (target, payload) => target.FileTransferPressureStateReceived?.Invoke(target, new FileTransferPressureStateReceivedEventArgs(payload, "loopback-peer")), ct);
-        public Task SendFileTransferCancelAsync(FileTransferCancelV1 message, CancellationToken ct) => DeliverAsync(message with { SessionId = NormalizeSessionId(message.SessionId) }, (target, payload) => target.FileTransferCancelReceived?.Invoke(target, new FileTransferCancelReceivedEventArgs(payload, "loopback-peer")), ct);
+        public Task SendFileTransferDeclineAsync(FileTransferDeclineV1 message, CancellationToken ct)
+        {
+            var payload = message with { SessionId = NormalizeSessionId(message.SessionId) };
+            SentDeclines.Enqueue(payload);
+            return DeliverAsync(payload, (target, delivered) => target.FileTransferDeclineReceived?.Invoke(target, new FileTransferDeclineReceivedEventArgs(delivered, "loopback-peer")), ct);
+        }
+        public Task SendFileTransferSessionOpenAsync(FileTransferSessionOpenV2 message, CancellationToken ct)
+        {
+            var payload = message with { SessionId = NormalizeSessionId(message.SessionId) };
+            SentSessionOpens.Enqueue(payload);
+            return DeliverMaybeAsync(payload, static (transport, delivered, token) => transport.OutboundSessionOpenDeliveryOverrideAsync?.Invoke(transport.peer!, delivered, token) ?? Task.FromResult(false), (target, delivered) => target.FileTransferSessionOpenReceived?.Invoke(target, new FileTransferSessionOpenReceivedEventArgs(delivered, "loopback-peer")), ct);
+        }
+        public Task SendFileTransferCancelAsync(FileTransferCancelV1 message, CancellationToken ct) => DeliverAsync(TrackCancel(message with { SessionId = NormalizeSessionId(message.SessionId) }), (target, payload) => target.FileTransferCancelReceived?.Invoke(target, new FileTransferCancelReceivedEventArgs(payload, "loopback-peer")), ct);
         public Task SendFileTransferErrorAsync(FileTransferErrorV1 message, CancellationToken ct) => DeliverAsync(TrackError(message with { SessionId = NormalizeSessionId(message.SessionId) }), (target, payload) => target.FileTransferErrorReceived?.Invoke(target, new FileTransferErrorReceivedEventArgs(payload, "loopback-peer")), ct);
         public async Task SendFileTransferCompleteAsync(FileTransferCompleteV1 message, CancellationToken ct)
         {
@@ -290,43 +296,12 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             peer?.SetAllDataSessionsAvailability(isAvailable: true, "transport_recovered", requiresResumeRequest: true);
         }
 
-        public void DeliverChunkToPeer(FileTransferChunkV1 payload)
-        {
-            var target = peer ?? throw new InvalidOperationException("Loopback peer is not connected.");
-            target.ReceiveDeliveredChunk(payload);
-        }
-
-        public void ReceiveDeliveredChunk(FileTransferChunkV1 payload)
-        {
-            FileTransferChunkReceived?.Invoke(this, new FileTransferChunkReceivedEventArgs(payload, "loopback-peer"));
-        }
-
-        public void ReceiveDeliveredWindowUpdate(FileTransferWindowUpdateV1 payload)
-        {
-            FileTransferWindowUpdateReceived?.Invoke(this, new FileTransferWindowUpdateReceivedEventArgs(payload, "loopback-peer"));
-        }
-
-        public void ReceiveDeliveredMissingRange(FileTransferMissingRangeV1 payload)
-        {
-            FileTransferMissingRangeReceived?.Invoke(this, new FileTransferMissingRangeReceivedEventArgs(payload, "loopback-peer"));
-        }
-
-        public void ReceiveDeliveredPressureState(FileTransferPressureStateV1 payload)
-        {
-            FileTransferPressureStateReceived?.Invoke(this, new FileTransferPressureStateReceivedEventArgs(payload, "loopback-peer"));
-        }
-
         public void ReceiveDeliveredSessionOpen(FileTransferSessionOpenV2 payload)
         {
             FileTransferSessionOpenReceived?.Invoke(this, new FileTransferSessionOpenReceivedEventArgs(payload, "loopback-peer"));
         }
 
-        public void ReceiveDeliveredStart(FileTransferStartV2 payload)
-        {
-            FileTransferStartReceived?.Invoke(this, new FileTransferStartReceivedEventArgs(payload, "loopback-peer"));
-        }
-
-        public void ReceiveDeliveredDataFrame(FileTransferDataFrameV2 payload)
+        public void ReceiveDeliveredDataFrame(FileTransferDataFrame payload)
         {
             if (TryGetOrCreateDataSession(NormalizeSessionId(payload.SessionId), payload.TransferId, out var session))
             {
@@ -357,8 +332,6 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         }
 
         private string NormalizeSessionId(string? sessionId) => string.IsNullOrWhiteSpace(sessionId) ? this.sessionId : sessionId.Trim();
-        private FileTransferStartV2 ApplyStartTransform(FileTransferStartV2 message) => OutboundStartTransform?.Invoke(message) ?? message;
-        private FileTransferChunkV1 ApplyChunkTransform(FileTransferChunkV1 message) => OutboundChunkTransform?.Invoke(message) ?? message;
         private FileTransferErrorV1 TrackError(FileTransferErrorV1 message)
         {
             SentErrors.Enqueue(message);
@@ -371,21 +344,9 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             return message;
         }
 
-        private FileTransferWindowUpdateV1 TrackWindowUpdate(FileTransferWindowUpdateV1 message)
+        private FileTransferCancelV1 TrackCancel(FileTransferCancelV1 message)
         {
-            SentWindowUpdates.Enqueue(message);
-            return message;
-        }
-
-        private FileTransferMissingRangeV1 TrackMissingRange(FileTransferMissingRangeV1 message)
-        {
-            SentMissingRanges.Enqueue(message);
-            return message;
-        }
-
-        private FileTransferPressureStateV1 TrackPressureState(FileTransferPressureStateV1 message)
-        {
-            SentPressureStates.Enqueue(message);
+            SentCancels.Enqueue(message);
             return message;
         }
 
@@ -404,8 +365,32 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             return string.Equals(session.SessionId, normalizedSessionId, StringComparison.Ordinal);
         }
 
-        private async Task DeliverDataFrameToPeerAsync(FileTransferDataFrameV2 frame, bool useBulkLane, CancellationToken ct)
+        private async Task DeliverDataFrameToPeerAsync(FileTransferDataFrame frame, bool useBulkLane, CancellationToken ct)
         {
+            var currentInFlight = Interlocked.Increment(ref activeDataSessionSends);
+            while (true)
+            {
+                var observedMax = Volatile.Read(ref maxConcurrentDataSessionSends);
+                if (currentInFlight <= observedMax ||
+                    Interlocked.CompareExchange(ref maxConcurrentDataSessionSends, currentInFlight, observedMax) == observedMax)
+                {
+                    break;
+                }
+            }
+
+            try
+            {
+                var sendCount = Interlocked.Increment(ref dataSessionSendCount);
+                if (DataSessionSendFailureAfterCount > 0 && sendCount >= DataSessionSendFailureAfterCount)
+                {
+                    throw new InvalidOperationException("Injected loopback data-session send failure.");
+                }
+
+                if (DataSessionSendDelayMs > 0)
+                {
+                    await Task.Delay(DataSessionSendDelayMs, ct).ConfigureAwait(false);
+                }
+
             var target = peer ?? throw new InvalidOperationException("Loopback peer is not connected.");
             SentDataFrames.Enqueue(frame);
             if (!TryGetOrCreateDataSession(NormalizeSessionId(frame.SessionId), frame.TransferId, out var localSession) || !localSession.IsAvailable)
@@ -436,12 +421,17 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             {
                 LocalOperationalLog.Warn("SessionSecurity", $"event=filetransfer_data_frame_ignored; transport=loopback; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetLoopbackFrameChunkIndex(frame)}; reason=session_id_mismatch_existing_queue");
             }
+            }
+            finally
+            {
+                Interlocked.Decrement(ref activeDataSessionSends);
+            }
         }
 
         protected sealed class LoopbackDataSession : IFileTransferDataSession
         {
             private readonly LoopbackFileTransferTransport owner;
-            private readonly Channel<FileTransferDataFrameV2> frames = Channel.CreateUnbounded<FileTransferDataFrameV2>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false, AllowSynchronousContinuations = false, });
+            private readonly Channel<FileTransferDataFrame> frames = Channel.CreateUnbounded<FileTransferDataFrame>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false, AllowSynchronousContinuations = false, });
             private int disposed;
             private int activeReader;
             private int available = 1;
@@ -457,7 +447,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             public bool IsAvailable => Volatile.Read(ref available) != 0;
 
             public event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged;
-            public async ValueTask<FileTransferDataFrameV2> ReceiveAsync(CancellationToken ct)
+            public async ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct)
             {
                 if (Interlocked.CompareExchange(ref activeReader, 1, 0) != 0)
                 {
@@ -474,14 +464,14 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 }
             }
 
-            public Task SendAsync(FileTransferDataFrameV2 frame, CancellationToken ct)
+            public Task SendAsync(FileTransferDataFrame frame, CancellationToken ct)
             {
                 ct.ThrowIfCancellationRequested();
                 ObjectDisposedException.ThrowIf(disposed != 0, this);
-                return owner.DeliverDataFrameToPeerAsync(frame, frame is FileTransferChunkDataFrameV2 or FileTransferChunkBatchFrameV2, ct);
+                return owner.DeliverDataFrameToPeerAsync(frame, frame is FileTransferChunkBatchFrameV4, ct);
             }
 
-            public void Deliver(FileTransferDataFrameV2 frame)
+            public void Deliver(FileTransferDataFrame frame)
             {
                 if (disposed != 0)
                 {

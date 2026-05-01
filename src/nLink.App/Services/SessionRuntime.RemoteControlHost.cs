@@ -7,6 +7,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using NLink.App.Configuration;
@@ -1928,6 +1929,8 @@ public sealed partial class SessionRuntime
             {
                 // Tell the peer the session is over before best-effort teardown work starts
                 // competing for transport state or outbound bandwidth.
+                await TrySendPendingIncomingHelpRequestCancellationAsync(oldTransport, "helper_closed").ConfigureAwait(false);
+                await TrySendPendingOutboundHelpRequestCancellationAsync(oldTransport, "helpee_closed").ConfigureAwait(false);
                 await TrySendRemoteSessionEndAsync(oldTransport, oldRole, oldState).ConfigureAwait(false);
                 await TrySendRemoteControlStopAsync(oldTransport, oldControlState, oldControlRequestId, "session_end").ConfigureAwait(false);
                 await StopTransportScreenShareAsync(
@@ -2676,6 +2679,18 @@ public sealed partial class SessionRuntime
                 transportState,
                 "remote_session_end"));
             Disconnected?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        if (role == SessionRuntimeRole.Helpee &&
+            state == SessionRuntimeState.Waiting &&
+            HasPendingOutboundHelpRequest)
+        {
+            TryCompletePendingOutboundHelpRequestAsUnavailable(
+                reason: "helper_closed",
+                trigger: "transport_disconnected_pending_help_request");
+            QueueDetachFileTransferTransport();
+            TryScheduleQuietHelpeeRehost("transport_disconnected_pending_help_request_rehost");
             return;
         }
 
@@ -5890,6 +5905,7 @@ public sealed partial class SessionRuntime
             }
 
             var previous = latestRemoteControlDisplayInfo;
+            var mappingBecameAvailable = previous is null;
             if (previous is not null &&
                 string.Equals(previous.DisplayId, e.Message.DisplayId, StringComparison.Ordinal) &&
                 e.Message.Revision <= previous.Revision)
@@ -5922,6 +5938,10 @@ public sealed partial class SessionRuntime
             else
             {
                 remoteControlCoordinatorDisplayInfoState = CreateRemoteControlDisplayInfoState(e.Message);
+                if (mappingBecameAvailable && remoteControlSessionState.ControlState == ControlState.Active)
+                {
+                    NotifyRemoteControlStateChanged();
+                }
             }
 
             if (didMappingChange)
@@ -7860,14 +7880,16 @@ public sealed partial class SessionRuntime
 
     private void OnFileTransferChanged(object? sender, SessionFileTransferSnapshotChangedEventArgs e)
     {
+        var screenShareActive = IsSessionScreenShareActive();
         fileTransferHost.LogSnapshot(e.Snapshot);
         fileTransferService.SetSessionScreenShareDegraded(
-            IsSessionScreenShareActive() &&
+            screenShareActive &&
             !string.Equals(transportScreenShareCoordinator.GetMetricsSnapshot().FreshnessMode, "normal", StringComparison.Ordinal));
+        var mixedV4TransferActive = screenShareActive && fileTransferService.IsV4MixedScreenShareTransferActive;
         transportScreenShareCoordinator.SetFileTransferDegradedHint(
-            IsSessionScreenShareActive() && fileTransferService.IsTransferDegraded);
+            screenShareActive && (fileTransferService.IsTransferDegraded || mixedV4TransferActive));
         transportScreenShareCoordinator.SetFileTransferCatchUpOnlyHint(
-            IsSessionScreenShareActive() && fileTransferService.IsCatchUpOnlyPressureActive);
+            screenShareActive && (fileTransferService.IsCatchUpOnlyPressureActive || mixedV4TransferActive));
         FileTransferChanged?.Invoke(this, e);
     }
 
@@ -7912,16 +7934,73 @@ public sealed partial class SessionRuntime
 
     private static FileTransferStoragePolicy CreateInboundFileTransferStoragePolicy(FileTransferIncomingOffer offer)
     {
+        return new FileTransferStoragePolicy(GetDefaultInboundFileTransferRootDirectory());
+    }
+
+    internal static string GetDefaultInboundFileTransferRootDirectory()
+    {
+        if (OperatingSystem.IsWindows() &&
+            TryGetWindowsKnownFolderPath(WindowsDownloadsKnownFolderId, out var downloadsPath))
+        {
+            return downloadsPath;
+        }
+
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!string.IsNullOrWhiteSpace(userProfile))
+        {
+            return Path.Combine(userProfile, "Downloads");
+        }
+
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var rootDirectoryPath = Path.Combine(
+        return Path.Combine(
             localAppData,
             FileTransferAppDataDirectoryName,
             FileTransferTransfersDirectoryName,
-            FileTransferIncomingDirectoryName,
-            SanitizeFileTransferPathSegment(offer.SessionId, "session"),
-            SanitizeFileTransferPathSegment(offer.TransferId, "transfer"));
-        return new FileTransferStoragePolicy(rootDirectoryPath);
+            FileTransferIncomingDirectoryName);
     }
+
+    private static bool TryGetWindowsKnownFolderPath(Guid folderId, out string path)
+    {
+        path = string.Empty;
+        var nativePath = IntPtr.Zero;
+        try
+        {
+            var hr = SHGetKnownFolderPath(folderId, 0, IntPtr.Zero, out nativePath);
+            if (hr != 0 || nativePath == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            var value = Marshal.PtrToStringUni(nativePath);
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return false;
+            }
+
+            path = value;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            if (nativePath != IntPtr.Zero)
+            {
+                Marshal.FreeCoTaskMem(nativePath);
+            }
+        }
+    }
+
+    private static readonly Guid WindowsDownloadsKnownFolderId = new("374DE290-123F-4565-9164-39C4925E467B");
+
+    [DllImport("shell32.dll")]
+    private static extern int SHGetKnownFolderPath(
+        [MarshalAs(UnmanagedType.LPStruct)] Guid rfid,
+        uint dwFlags,
+        IntPtr hToken,
+        out IntPtr ppszPath);
 
     private static string SanitizeFileTransferPathSegment(string? value, string fallback)
     {

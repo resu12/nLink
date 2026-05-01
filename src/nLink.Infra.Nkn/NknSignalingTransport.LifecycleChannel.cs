@@ -98,6 +98,29 @@ public sealed partial class NknSignalingTransport
         Log($"SendHelpRequestDecisionAsync sent HelpRequestDecision with Ack (msg_id={envelope.MessageId}, accepted={decision.Accepted})");
     }
 
+    public async Task SendHelpRequestCancellationAsync(HelpRequestMessage request, string? reason, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ThrowIfDisposed();
+
+        await client.ConnectAsync(ct).ConfigureAwait(false);
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "request_canceled" : reason.Trim();
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new HelpRequestDecisionPayload
+        {
+            requestId = request.RequestId,
+            helpeeAddress = request.HelpeeAddress.Value,
+            helperAddress = request.HelperAddress.Value,
+            accepted = false,
+            reason = normalizedReason,
+        });
+        var envelope = CreateEnvelope(CreateAddressSessionContextCode(), MsgType.HelpRequestDecision, payload, replyTo: null);
+        await SendEnvelopeWithAckRetryAsync(request.HelperAddress.Value, envelope, ct).ConfigureAwait(false);
+        LocalOperationalLog.Info(
+            "DirectHelpRequest",
+            $"event=help_request_cancellation_sent; request_id={request.RequestId}; helper_address={request.HelperAddress.Value}; helpee_address={request.HelpeeAddress.Value}; reason={normalizedReason}");
+        Log($"SendHelpRequestCancellationAsync sent HelpRequestDecision cancellation with Ack (msg_id={envelope.MessageId}, reason={normalizedReason})");
+    }
+
     public Task JoinByInviteAsync(string inviteToken, ValidatedInviteV1 invite, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(inviteToken))
@@ -433,6 +456,31 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        var localHelper = new PeerAddress(LocalPeerAddress);
+        var admission = helpRequestAdmissionGuard.Admit(
+            source,
+            localHelper,
+            helperAddress,
+            helpeeAddress,
+            request.requestId!,
+            request.inviteToken!,
+            DateTimeOffset.UtcNow);
+        if (admission != HelpRequestAdmissionDecision.Accepted)
+        {
+            var reason = GetHelpRequestAdmissionRejectionReason(admission);
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"help_request_{reason}");
+            LocalOperationalLog.Warn(
+                "DirectHelpRequest",
+                $"event=help_request_rejected; reason={reason}; msg_id={env.MessageId}; request_id={request.requestId}; source={source ?? "(none)"}; helper_address={request.helperAddress}; helpee_address={request.helpeeAddress}");
+
+            if (!string.IsNullOrWhiteSpace(source))
+            {
+                SendAckFireAndForget(source, env.Code, env.MessageId);
+            }
+
+            return;
+        }
+
         var validation = inviteTokenValidator.Validate(request.inviteToken, DateTimeOffset.UtcNow, InviteValidationMode.InspectOnly);
         if (!validation.IsSuccess || validation.Invite is null)
         {
@@ -443,7 +491,6 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        var localHelper = new PeerAddress(LocalPeerAddress);
         if (validation.Invite.BoundHelperAddress is not null &&
             !AddressesLikelySamePeer(validation.Invite.BoundHelperAddress.Value.Value, localHelper.Value))
         {
@@ -472,6 +519,15 @@ public sealed partial class NknSignalingTransport
                     helperAddress,
                     request.inviteToken!)));
     }
+
+    private static string GetHelpRequestAdmissionRejectionReason(HelpRequestAdmissionDecision decision) =>
+        decision switch
+        {
+            HelpRequestAdmissionDecision.DuplicateRecent => "duplicate_recent",
+            HelpRequestAdmissionDecision.SourceThrottled => "source_throttled",
+            HelpRequestAdmissionDecision.RequestChurnThrottled => "request_churn_throttled",
+            _ => "unknown",
+        };
 
     private void HandleHelpRequestDecision(string source, Envelope env)
     {
@@ -809,16 +865,28 @@ public sealed partial class NknSignalingTransport
             pendingOutboundHandshake.HelperAddress,
             challenge.ChallengeNonce,
             Convert.ToBase64String(mac));
+        var verificationCode = CreateSessionVerificationCode(
+            macKey,
+            challenge.SessionId,
+            pendingOutboundHandshake.HelperAddress,
+            challenge.HelpeeAddress,
+            helperKeyPair.PublicKey,
+            helpeePubKey,
+            challenge.ChallengeNonce,
+            sessionContextCode);
         pendingOutboundHandshake = pendingOutboundHandshake.WithChallenge(
             challenge.ChallengeNonce,
             DateTimeOffset.FromUnixTimeMilliseconds(challenge.ExpiresAtUtcMs),
             helpeePubKey);
-        UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeChallenge(
-            challenge.SessionId,
-            challenge.HelpeeAddress,
-            pendingOutboundHandshake.HelperAddress,
-            pendingOutboundHandshake.InviteValidated,
-            DateTimeOffset.FromUnixTimeMilliseconds(challenge.ExpiresAtUtcMs)));
+        LogSessionVerificationCodeReady("Helper", challenge.SessionId, pendingOutboundHandshake.HelperAddress, verificationCode);
+        UpdateSessionSecurityState(
+            currentSessionSecurityState.WithHandshakeChallenge(
+                challenge.SessionId,
+                challenge.HelpeeAddress,
+                pendingOutboundHandshake.HelperAddress,
+                pendingOutboundHandshake.InviteValidated,
+                DateTimeOffset.FromUnixTimeMilliseconds(challenge.ExpiresAtUtcMs))
+            .WithVerificationCode(verificationCode));
 
         var envelope = CreateEnvelope(sessionContextCode, MsgType.SessionHandshakeResponse, SessionHandshakeProtocol.Serialize(response), env.MessageId);
         _ = SendEnvelopeAsync(pendingOutboundHandshake.HelpeeAddress.Value, envelope, CancellationToken.None);
@@ -937,6 +1005,15 @@ public sealed partial class NknSignalingTransport
                 pending.RequestedCapabilities,
                 sessionId)
             : null;
+        var verificationCode = CreateSessionVerificationCode(
+            macKey,
+            sessionId,
+            pending.HelperAddress,
+            helpeeAddress,
+            pending.HelperEcdhPublicKey,
+            helpeeKeyPair.PublicKey,
+            pending.ChallengeNonce,
+            pending.EnvelopeCode);
 
         ReplacePendingJoinRequest(new PendingJoinRequestState(
             pending.JoinRequestMessageId,
@@ -947,7 +1024,11 @@ public sealed partial class NknSignalingTransport
             sessionId,
             approvalRequest));
         ClearPendingInboundHandshake(pending.JoinRequestMessageId);
-        UpdateSessionSecurityState(currentSessionSecurityState.WithHandshakeVerified(pending.HelperAddress));
+        LogSessionVerificationCodeReady("Helpee", sessionId, pending.HelperAddress, verificationCode);
+        UpdateSessionSecurityState(
+            currentSessionSecurityState
+                .WithHandshakeVerified(pending.HelperAddress)
+                .WithVerificationCode(verificationCode));
         CancelPendingDirectHelpRequestAcks(
             pending.HelperAddress.Value,
             "incoming_join_request",
@@ -2774,6 +2855,41 @@ public sealed partial class NknSignalingTransport
         return new SessionEcdhKeyPair(ecdh, publicKey);
     }
 
+    private static SessionVerificationCode CreateSessionVerificationCode(
+        byte[] sessionRootKey,
+        SessionId sessionId,
+        PeerAddress helperAddress,
+        PeerAddress helpeeAddress,
+        byte[] helperEcdhPublicKey,
+        byte[] helpeeEcdhPublicKey,
+        string challengeNonce,
+        string sessionContextCode)
+    {
+        return SessionVerificationCodeDerivation.Derive(new SessionVerificationMaterial(
+            sessionId,
+            helperAddress,
+            helpeeAddress,
+            sessionRootKey,
+            helperEcdhPublicKey,
+            helpeeEcdhPublicKey,
+            challengeNonce,
+            sessionContextCode));
+    }
+
+    private static void LogSessionVerificationCodeReady(
+        string role,
+        SessionId sessionId,
+        PeerAddress helperAddress,
+        SessionVerificationCode verificationCode)
+    {
+        var emojiCount = verificationCode.EmojiSequence.Split(
+            ' ',
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Length;
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=session_verification_code_ready; role={role}; session_id={sessionId.Value}; helper_identity={helperAddress.Value}; source={verificationCode.Source}; code_length={emojiCount}; fallback_length={verificationCode.FallbackCode.Length}");
+    }
+
     private static byte[] DeriveSessionKey(SessionEcdhKeyPair localKeyPair, byte[] remotePublicKey, string codeDigits)
     {
         if (localKeyPair is null)
@@ -3368,6 +3484,155 @@ public sealed partial class NknSignalingTransport
                 ChallengeExpiresAtUtc = challengeExpiresAtUtc,
                 HelpeeEcdhPublicKey = helpeeEcdhPublicKey,
             };
+        }
+    }
+
+    private enum HelpRequestAdmissionDecision
+    {
+        Accepted = 0,
+        DuplicateRecent = 1,
+        SourceThrottled = 2,
+        RequestChurnThrottled = 3,
+    }
+
+    private sealed class HelpRequestAdmissionGuard
+    {
+        private static readonly TimeSpan DuplicateWindow = TimeSpan.FromMinutes(2);
+        private static readonly TimeSpan ThrottleWindow = TimeSpan.FromSeconds(30);
+        private const int MaxRequestsPerSourceWindow = 4;
+        private const int MaxDistinctRequestIdsPerInviteWindow = 2;
+        private const int MaxRecentDuplicateKeys = 2048;
+
+        private readonly object gate = new();
+        private readonly Dictionary<string, long> recentExactRequests = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, Queue<long>> sourceRequests = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, Dictionary<string, long>> requestIdsByInvite = new(StringComparer.Ordinal);
+
+        public HelpRequestAdmissionDecision Admit(
+            string? source,
+            PeerAddress localHelperAddress,
+            PeerAddress helperAddress,
+            PeerAddress helpeeAddress,
+            string requestId,
+            string inviteToken,
+            DateTimeOffset nowUtc)
+        {
+            var nowTicks = nowUtc.UtcTicks;
+            var sourceIdentity = NormalizeSourceIdentity(source, helpeeAddress);
+            var normalizedRequestId = requestId.Trim();
+            var exactKey = string.Join(
+                "|",
+                sourceIdentity,
+                helperAddress.Value,
+                helpeeAddress.Value,
+                normalizedRequestId);
+            var sourceKey = string.Join("|", localHelperAddress.Value, sourceIdentity);
+            var churnKey = string.Join("|", sourceKey, ComputeInviteTokenFingerprint(inviteToken));
+
+            lock (gate)
+            {
+                PruneExactRequests(nowTicks);
+                if (recentExactRequests.ContainsKey(exactKey))
+                {
+                    return HelpRequestAdmissionDecision.DuplicateRecent;
+                }
+
+                recentExactRequests[exactKey] = nowTicks;
+
+                var sourceQueue = GetOrCreateSourceQueue(sourceKey);
+                PruneQueue(sourceQueue, nowTicks, ThrottleWindow);
+                if (sourceQueue.Count >= MaxRequestsPerSourceWindow)
+                {
+                    return HelpRequestAdmissionDecision.SourceThrottled;
+                }
+
+                sourceQueue.Enqueue(nowTicks);
+
+                var requestIds = GetOrCreateRequestIds(churnKey);
+                PruneRequestIds(requestIds, nowTicks);
+                if (!requestIds.ContainsKey(normalizedRequestId) &&
+                    requestIds.Count >= MaxDistinctRequestIdsPerInviteWindow)
+                {
+                    return HelpRequestAdmissionDecision.RequestChurnThrottled;
+                }
+
+                requestIds[normalizedRequestId] = nowTicks;
+                return HelpRequestAdmissionDecision.Accepted;
+            }
+        }
+
+        private Queue<long> GetOrCreateSourceQueue(string sourceKey)
+        {
+            if (!sourceRequests.TryGetValue(sourceKey, out var queue))
+            {
+                queue = new Queue<long>();
+                sourceRequests[sourceKey] = queue;
+            }
+
+            return queue;
+        }
+
+        private Dictionary<string, long> GetOrCreateRequestIds(string churnKey)
+        {
+            if (!requestIdsByInvite.TryGetValue(churnKey, out var requestIds))
+            {
+                requestIds = new Dictionary<string, long>(StringComparer.Ordinal);
+                requestIdsByInvite[churnKey] = requestIds;
+            }
+
+            return requestIds;
+        }
+
+        private void PruneExactRequests(long nowTicks)
+        {
+            var cutoffTicks = nowTicks - DuplicateWindow.Ticks;
+            foreach (var pair in recentExactRequests.ToArray())
+            {
+                if (pair.Value < cutoffTicks)
+                {
+                    recentExactRequests.Remove(pair.Key);
+                }
+            }
+
+            if (recentExactRequests.Count <= MaxRecentDuplicateKeys)
+            {
+                return;
+            }
+
+            foreach (var pair in recentExactRequests.OrderBy(static pair => pair.Value).Take(recentExactRequests.Count - MaxRecentDuplicateKeys).ToArray())
+            {
+                recentExactRequests.Remove(pair.Key);
+            }
+        }
+
+        private void PruneRequestIds(Dictionary<string, long> requestIds, long nowTicks)
+        {
+            var cutoffTicks = nowTicks - ThrottleWindow.Ticks;
+            foreach (var pair in requestIds.ToArray())
+            {
+                if (pair.Value < cutoffTicks)
+                {
+                    requestIds.Remove(pair.Key);
+                }
+            }
+        }
+
+        private static void PruneQueue(Queue<long> queue, long nowTicks, TimeSpan window)
+        {
+            var cutoffTicks = nowTicks - window.Ticks;
+            while (queue.Count > 0 && queue.Peek() < cutoffTicks)
+            {
+                queue.Dequeue();
+            }
+        }
+
+        private static string NormalizeSourceIdentity(string? source, PeerAddress helpeeAddress) =>
+            string.IsNullOrWhiteSpace(source) ? helpeeAddress.Value : source.Trim();
+
+        private static string ComputeInviteTokenFingerprint(string inviteToken)
+        {
+            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(inviteToken.Trim()));
+            return Convert.ToHexString(hash.AsSpan(0, 16));
         }
     }
 

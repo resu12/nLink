@@ -14,8 +14,8 @@
         <StackPanel Spacing="10">
             <StackPanel Spacing="4">
                 <TextBlock Text="{Binding #Root.StatusTitle}"
+                           Classes="appSectionTitle"
                            FontSize="16"
-                           FontWeight="SemiBold"
                            AutomationProperties.AutomationId="StatusTitle"/>
 
                 <TextBlock Text="{Binding #Root.StatusMessage}"
@@ -32,18 +32,16 @@
             <StackPanel Orientation="Horizontal"
                         Spacing="8">
                 <Button Content="Copy Diagnostics"
-                        Classes="appButton secondaryButton"
+                        Classes="appButton secondaryButton compactButton"
                         Command="{Binding #Root.CopyDiagnosticsCommand}"
                         IsVisible="{Binding #Root.ShowCopyDiagnosticsButton}"
-                        Height="36"
                         MinWidth="140"
                         AutomationProperties.AutomationId="CopyDiagnosticsButton"/>
 
                 <Button Content="Cancel"
-                        Classes="appButton secondaryButton"
+                        Classes="appButton secondaryButton compactButton"
                         Command="{Binding #Root.CancelCommand}"
                         IsVisible="{Binding #Root.ShowCancelButton}"
-                        Height="36"
                         MinWidth="92"
                         AutomationProperties.AutomationId="CancelButton"/>
             </StackPanel>
