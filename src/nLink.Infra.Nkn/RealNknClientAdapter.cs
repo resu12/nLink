@@ -14,7 +14,7 @@ namespace NLink.Infra.Nkn;
 
 internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, IAuthoritativeConnectedAddressSource, IBridgeScreenShareQueueCapability
 {
-    private const int MaxPayloadBytes = 64 * 1024;
+    private const int MaxPayloadBytes = BridgeBinaryProtocol.MaxPayloadBytes;
     private const int BridgeProtocolVersion = BridgeBinaryProtocol.ProtocolVersion;
     private static readonly TimeSpan CommandAckTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan HelloTimeout = TimeSpan.FromSeconds(5);

@@ -51,6 +51,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     };
     private static readonly TimeSpan ScreenShareOutboundGateWaitBudget = TimeSpan.FromMilliseconds(25);
     private const int FileTransferMaxBridgePayloadBytes = 64 * 1024;
+    internal const int FileTransferDataSessionMaxQueuedFrames = 512;
+    internal const long FileTransferDataSessionMaxQueuedBytes = 32L * 1024L * 1024L;
     private const int ScreenShareLaneMaxMessages = 32;
     private const int ScreenShareLaneMaxBytes = 768 * 1024;
     private const int ScreenShareLaneCongestionDepthThreshold = 12;
@@ -97,6 +99,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         maxForwardAdvance: FileTransferInboundReplayMaxForwardAdvance);
     private readonly Dictionary<string, FileTransferTransportState> fileTransferStates = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
+    private readonly HashSet<string> fileTransferDataSessionRemoteOpenSuppressed = new(StringComparer.Ordinal);
     private readonly SortedDictionary<long, InboundFileTransferDispatchWork> pendingInboundFileTransferControlDispatch = new();
     private readonly NknLifecycleChannel lifecycleChannel;
     private readonly NknSecureControlChannel controlChannel;

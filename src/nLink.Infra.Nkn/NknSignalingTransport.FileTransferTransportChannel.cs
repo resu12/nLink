@@ -185,6 +185,7 @@ public sealed partial class NknSignalingTransport
 
         lock (gate)
         {
+            fileTransferDataSessionRemoteOpenSuppressed.Remove(normalizedTransferId);
             fileTransferDataSessions.TryGetValue(normalizedTransferId, out var existingSession);
             TransportFileTransferDataSession? session = existingSession;
             if (session is not null &&
@@ -2818,10 +2819,9 @@ public sealed partial class NknSignalingTransport
         }
 
         if (messageType == MsgType.FileTransferDataFrame &&
-            channel == NknBridgeChannel.Bulk &&
-            PeerAddress.TryParse(source, out _))
+            channel == NknBridgeChannel.Bulk)
         {
-            return source?.Trim();
+            return ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
         }
 
         if (messageType == MsgType.FileTransferDataFrame &&
@@ -2844,10 +2844,9 @@ public sealed partial class NknSignalingTransport
         }
 
         if (string.Equals(messageType, "file_transfer_data_frame", StringComparison.Ordinal) &&
-            channel == NknBridgeChannel.Bulk &&
-            PeerAddress.TryParse(source, out _))
+            channel == NknBridgeChannel.Bulk)
         {
-            return source?.Trim();
+            return ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
         }
 
         if (string.Equals(messageType, "file_transfer_data_frame", StringComparison.Ordinal) &&
@@ -3576,6 +3575,14 @@ public sealed partial class NknSignalingTransport
 
             if (session is null)
             {
+                if (fileTransferDataSessionRemoteOpenSuppressed.Contains(frame.TransferId))
+                {
+                    LocalOperationalLog.Warn(
+                        "SessionSecurity",
+                        $"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; reason=data_session_resume_required");
+                    return;
+                }
+
                 session = new TransportFileTransferDataSession(this, frame.SessionId, frame.TransferId);
                 fileTransferDataSessions[frame.TransferId] = session;
             }
@@ -3823,17 +3830,22 @@ public sealed partial class NknSignalingTransport
         }
     }
 
-    private void RemoveFileTransferDataSession(TransportFileTransferDataSession session)
+    private void RemoveFileTransferDataSession(TransportFileTransferDataSession session, bool requireLocalOpenForRemoteDelivery = false, string reason = "disposed")
     {
         lock (gate)
         {
+            if (requireLocalOpenForRemoteDelivery)
+            {
+                fileTransferDataSessionRemoteOpenSuppressed.Add(session.TransferId);
+            }
+
             if (fileTransferDataSessions.TryGetValue(session.TransferId, out var current) &&
                 ReferenceEquals(current, session))
             {
                 fileTransferDataSessions.Remove(session.TransferId);
                 LocalOperationalLog.Info(
                     "SessionSecurity",
-                    $"event=filetransfer_data_session_removed; transport=nkn; transfer_id={session.TransferId}; session_id={session.SessionId}; reason=disposed");
+                    $"event=filetransfer_data_session_removed; transport=nkn; transfer_id={session.TransferId}; session_id={session.SessionId}; reason={reason}");
             }
         }
 
@@ -3842,14 +3854,20 @@ public sealed partial class NknSignalingTransport
 
     private sealed class TransportFileTransferDataSession : IFileTransferDataSession
     {
+        private const long QueuedControlFrameEstimatedBytes = 1024L;
+
         private readonly NknSignalingTransport owner;
-        private readonly Channel<FileTransferDataFrame> frames = Channel.CreateUnbounded<FileTransferDataFrame>(
-            new UnboundedChannelOptions
+        private readonly object queueGate = new();
+        private readonly Channel<QueuedFileTransferDataFrame> frames = Channel.CreateBounded<QueuedFileTransferDataFrame>(
+            new BoundedChannelOptions(FileTransferDataSessionMaxQueuedFrames)
             {
                 SingleReader = true,
                 SingleWriter = false,
+                FullMode = BoundedChannelFullMode.Wait,
                 AllowSynchronousContinuations = false,
             });
+        private int queuedFrameCount;
+        private long queuedBytes;
         private int disposed;
         private int activeReader;
         private int available = 1;
@@ -3883,7 +3901,9 @@ public sealed partial class NknSignalingTransport
 
             try
             {
-                return await frames.Reader.ReadAsync(ct).ConfigureAwait(false);
+                var queuedFrame = await frames.Reader.ReadAsync(ct).ConfigureAwait(false);
+                ReleaseQueuedFrame(queuedFrame.EstimatedBytes);
+                return queuedFrame.Frame;
             }
             finally
             {
@@ -4354,10 +4374,119 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
+            var estimatedBytes = EstimateQueuedFrameBytes(frame);
+            if (!TryReserveQueuedFrame(estimatedBytes, out var queuedFramesAfter, out var queuedBytesAfter))
+            {
+                FailQueueOverflow(frame, channel, estimatedBytes);
+                return;
+            }
+
+            if (!frames.Writer.TryWrite(new QueuedFileTransferDataFrame(frame, estimatedBytes)))
+            {
+                ReleaseQueuedFrame(estimatedBytes);
+                if (disposed == 0)
+                {
+                    FailQueueOverflow(frame, channel, estimatedBytes);
+                }
+
+                return;
+            }
+
             LocalOperationalLog.Info(
                 "SessionSecurity",
-                $"event=filetransfer_data_frame_dispatched; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; lane={MapBridgeChannel(channel)}");
-            frames.Writer.TryWrite(frame);
+                $"event=filetransfer_data_frame_dispatched; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; lane={MapBridgeChannel(channel)}; queued_frames={queuedFramesAfter}; queued_bytes={queuedBytesAfter}");
+        }
+
+        private bool TryReserveQueuedFrame(long estimatedBytes, out int queuedFramesAfter, out long queuedBytesAfter)
+        {
+            lock (queueGate)
+            {
+                queuedFramesAfter = queuedFrameCount;
+                queuedBytesAfter = queuedBytes;
+                if (disposed != 0)
+                {
+                    return false;
+                }
+
+                if (queuedFrameCount >= FileTransferDataSessionMaxQueuedFrames ||
+                    queuedBytes > FileTransferDataSessionMaxQueuedBytes - estimatedBytes)
+                {
+                    return false;
+                }
+
+                queuedFrameCount++;
+                queuedBytes += estimatedBytes;
+                queuedFramesAfter = queuedFrameCount;
+                queuedBytesAfter = queuedBytes;
+                return true;
+            }
+        }
+
+        private void ReleaseQueuedFrame(long estimatedBytes)
+        {
+            lock (queueGate)
+            {
+                if (queuedFrameCount > 0)
+                {
+                    queuedFrameCount--;
+                }
+
+                queuedBytes = Math.Max(0L, queuedBytes - estimatedBytes);
+            }
+        }
+
+        private void FailQueueOverflow(FileTransferDataFrame frame, NknBridgeChannel channel, long estimatedBytes)
+        {
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
+            {
+                return;
+            }
+
+            int queuedFramesSnapshot;
+            long queuedBytesSnapshot;
+            lock (queueGate)
+            {
+                queuedFramesSnapshot = queuedFrameCount;
+                queuedBytesSnapshot = queuedBytes;
+            }
+
+            Interlocked.Exchange(ref available, 0);
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=filetransfer_data_session_overflow; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; lane={MapBridgeChannel(channel)}; queued_frames={queuedFramesSnapshot}; queued_bytes={queuedBytesSnapshot}; frame_estimated_bytes={estimatedBytes}; reason={FileTransferResultCodes.ReceiverBufferExhausted}");
+
+            AvailabilityChanged?.Invoke(
+                this,
+                new FileTransferDataSessionAvailabilityChangedEventArgs(
+                    isAvailable: false,
+                    reason: FileTransferResultCodes.ReceiverBufferExhausted,
+                    requiresResumeRequest: true));
+
+            frames.Writer.TryComplete(new InvalidOperationException(FileTransferResultCodes.ReceiverBufferExhausted));
+            owner.RemoveFileTransferDataSession(
+                this,
+                requireLocalOpenForRemoteDelivery: true,
+                reason: FileTransferResultCodes.ReceiverBufferExhausted);
+        }
+
+        private static long EstimateQueuedFrameBytes(FileTransferDataFrame frame)
+        {
+            if (frame is not FileTransferChunkBatchFrameV4 batch)
+            {
+                return QueuedControlFrameEstimatedBytes;
+            }
+
+            long rawBytes = QueuedControlFrameEstimatedBytes;
+            foreach (var segment in batch.DataSegments)
+            {
+                rawBytes += segment?.Length ?? 0;
+                if (rawBytes >= FileTransferDataSessionMaxQueuedBytes)
+                {
+                    return FileTransferDataSessionMaxQueuedBytes;
+                }
+            }
+
+            return rawBytes;
         }
 
         public void SetAvailability(bool isAvailable, string reason, bool requiresResumeRequest)
@@ -4392,6 +4521,8 @@ public sealed partial class NknSignalingTransport
             frames.Writer.TryComplete();
             owner.RemoveFileTransferDataSession(this);
         }
+
+        private readonly record struct QueuedFileTransferDataFrame(FileTransferDataFrame Frame, long EstimatedBytes);
     }
 
     private static string GetFileTransferDataFrameChunkIndex(FileTransferDataFrame frame)

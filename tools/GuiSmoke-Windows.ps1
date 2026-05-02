@@ -1712,7 +1712,6 @@ function Resolve-FileTransferLiveReceivedFilePath {
         $loggedItem = Get-Item -LiteralPath $LoggedPath -ErrorAction SilentlyContinue
         $minimumWriteUtc = $NotBeforeUtc.AddMilliseconds(-500)
         if ($null -ne $loggedItem -and
-            $loggedItem.Name -eq $ExpectedFileName -and
             $loggedItem.Length -eq $ExpectedSizeBytes -and
             $loggedItem.LastWriteTimeUtc -ge $minimumWriteUtc) {
             return (Resolve-Path -LiteralPath $LoggedPath).Path
@@ -2009,11 +2008,9 @@ function Wait-FileTransferTerminalPairAfterBookmark {
                         -ExpectedFileName $ExpectedFileName `
                         -ExpectedSizeBytes $ExpectedSizeBytes `
                         -NotBeforeUtc $NotBeforeUtc
-                    if ([string]::IsNullOrWhiteSpace($resolvedSavedPath)) {
-                        continue
+                    if (-not [string]::IsNullOrWhiteSpace($resolvedSavedPath)) {
+                        $byTransfer[$transferId]['ResolvedSavedPath'] = $resolvedSavedPath
                     }
-
-                    $byTransfer[$transferId]['ResolvedSavedPath'] = $resolvedSavedPath
                 }
 
                 $byTransfer[$transferId]['Inbound'] = $fields

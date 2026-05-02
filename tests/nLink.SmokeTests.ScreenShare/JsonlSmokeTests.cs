@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
 using NLink.Infra.Nkn;
@@ -129,6 +130,72 @@ public sealed class JsonlSmokeTests
         Assert.Equal(NknBridgeChannel.Bulk, frame.Channel);
         Assert.Equal("peer.test", frame.PrimaryText);
         Assert.Equal(payload, frame.Payload);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void BridgeBinaryProtocol_ParseHeader_RejectsPayloadLengthAboveLimit()
+    {
+        var headerBytes = BuildBinaryFrameHeader(payloadLength: BridgeBinaryProtocol.MaxPayloadBytes + 1);
+
+        var ex = Assert.Throws<InvalidDataException>(() => BridgeBinaryProtocol.ParseHeader(headerBytes));
+
+        Assert.Equal("Binary frame payload length exceeded maximum.", ex.Message);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void BridgeBinaryProtocol_ParseHeader_RejectsVeryLargePayloadLength()
+    {
+        var headerBytes = BuildBinaryFrameHeader(payloadLength: int.MaxValue);
+
+        var ex = Assert.Throws<InvalidDataException>(() => BridgeBinaryProtocol.ParseHeader(headerBytes));
+
+        Assert.Equal("Binary frame payload length exceeded maximum.", ex.Message);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void BridgeBinaryProtocol_ParseHeader_RejectsNegativePayloadLength()
+    {
+        var headerBytes = BuildBinaryFrameHeader(payloadLength: -1);
+
+        var ex = Assert.Throws<InvalidDataException>(() => BridgeBinaryProtocol.ParseHeader(headerBytes));
+
+        Assert.Equal("Binary frame payload length was negative.", ex.Message);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void BridgeBinaryProtocol_ParseHeader_AcceptsMaximumCompatibleBodyLength()
+    {
+        var headerBytes = BuildBinaryFrameHeader(
+            primaryLength: ushort.MaxValue,
+            secondaryLength: ushort.MaxValue,
+            payloadLength: BridgeBinaryProtocol.MaxPayloadBytes);
+
+        var header = BridgeBinaryProtocol.ParseHeader(headerBytes);
+
+        Assert.Equal(BridgeBinaryProtocol.MaxBodyBytes, header.BodyLength);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task BridgeMixedStreamReader_RejectsOversizedBinaryPayloadBeforeBodyRead()
+    {
+        var headerBytes = BuildBinaryFrameHeader(payloadLength: BridgeBinaryProtocol.MaxPayloadBytes + 1);
+        using var stream = new HeaderOnlyReadStream(headerBytes);
+        var reader = new BridgeMixedStreamReader();
+
+        var ex = await Assert.ThrowsAsync<InvalidDataException>(
+            () => reader.ReadAsync(
+                stream,
+                static (_, _) => Task.CompletedTask,
+                static (_, _) => Task.CompletedTask,
+                CancellationToken.None));
+
+        Assert.Equal("Binary frame payload length exceeded maximum.", ex.Message);
+        Assert.False(stream.BodyReadAttempted);
     }
 
     [Fact]
@@ -286,6 +353,29 @@ public sealed class JsonlSmokeTests
         Assert.True(binaryFrame.BinaryFrameDecodedUtcMs > 0);
     }
 
+    private static byte[] BuildBinaryFrameHeader(
+        ushort primaryLength = 1,
+        ushort secondaryLength = 0,
+        int payloadLength = 0,
+        BridgeBinaryFrameKind kind = BridgeBinaryFrameKind.Message,
+        NknBridgeChannel channel = NknBridgeChannel.Media)
+    {
+        var header = new byte[BridgeBinaryProtocol.HeaderSize];
+        header[0] = BridgeBinaryProtocol.FrameMagic;
+        header[1] = BridgeBinaryProtocol.ProtocolVersion;
+        header[2] = (byte)kind;
+        header[3] = channel switch
+        {
+            NknBridgeChannel.Media => (byte)1,
+            NknBridgeChannel.Bulk => (byte)2,
+            _ => (byte)0,
+        };
+        BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(6, 2), primaryLength);
+        BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(8, 2), secondaryLength);
+        BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(10, 4), payloadLength);
+        return header;
+    }
+
     private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
@@ -321,6 +411,45 @@ public sealed class JsonlSmokeTests
         }
 
         return sizes.ToArray();
+    }
+
+    private sealed class HeaderOnlyReadStream : Stream
+    {
+        private readonly byte[] header;
+        private int offset;
+
+        public HeaderOnlyReadStream(byte[] header)
+        {
+            this.header = header;
+        }
+
+        public bool BodyReadAttempted { get; private set; }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => header.Length;
+        public override long Position { get => offset; set => throw new NotSupportedException(); }
+
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override ValueTask<int> ReadAsync(Memory<byte> destination, CancellationToken cancellationToken = default)
+        {
+            if (offset >= header.Length)
+            {
+                BodyReadAttempted = true;
+                throw new InvalidOperationException("Body read attempted after invalid binary header.");
+            }
+
+            var size = Math.Min(destination.Length, header.Length - offset);
+            header.AsSpan(offset, size).CopyTo(destination.Span);
+            offset += size;
+            return ValueTask.FromResult(size);
+        }
     }
 
     private sealed class ChunkedReadStream : Stream

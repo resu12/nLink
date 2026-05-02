@@ -405,8 +405,12 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         }
         catch (Exception ex)
         {
-            callbacks.Log($"Bridge stdout reader failed ({ex.GetType().Name})");
-            callbacks.SignalDisconnected($"stdout_reader_failed:{ex.GetType().Name}");
+            var reason = ex is InvalidDataException
+                ? "bridge_stdout_protocol_violation"
+                : "bridge_stdout_reader_failed";
+            callbacks.Log($"event=bridge_stdout_reader_failed; ex={ex.GetType().Name}; reason={reason}");
+            callbacks.RecordBridgeFailure(reason, "The local helper process wrote invalid stdout data.");
+            callbacks.OnUnexpectedExitDetected($"{reason}:{ex.GetType().Name}");
         }
         finally
         {

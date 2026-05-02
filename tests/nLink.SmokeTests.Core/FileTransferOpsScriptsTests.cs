@@ -1173,6 +1173,53 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostTerminalUnknownTransferDataFrameReject_DoesNotFailCleanCompletion()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_post_terminal_cleanup_reject";
+        var lines = BuildCleanCompletedV4TransferFixture(transferId)
+            .Append(LogLine($"event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=unknown_transfer_id; session_id=sess_a; transfer_id={transferId}; source=nlink-helper-bulk.test; msg_id=late_frame_after_terminal"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+
+        var budget = ReadArtifactReport(result.ArtifactDir, "transport-budget-summary.txt");
+        Assert.Equal("1", budget["message_rejected_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PreTerminalUnknownTransferDataFrameReject_RemainsProtocolFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_pre_terminal_unknown_reject";
+        var lines = BuildCleanCompletedV4TransferFixture(transferId).ToList();
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.Insert(
+            firstTerminalIndex,
+            LogLine($"event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=unknown_transfer_id; session_id=sess_a; transfer_id={transferId}; source=nlink-helper-bulk.test; msg_id=early_frame_before_terminal"));
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("stability-gates-summary.txt", verdict["next_artifact"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_FailOnGate_ReturnsNonZeroForHardFailure()
     {
         if (!OperatingSystem.IsWindows())

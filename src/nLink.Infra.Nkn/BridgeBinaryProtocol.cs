@@ -31,7 +31,7 @@ internal sealed record BridgeBinaryFrameHeader(
     ushort SecondaryLength,
     int PayloadLength)
 {
-    public int BodyLength => PrimaryLength + SecondaryLength + PayloadLength;
+    public int BodyLength => checked(PrimaryLength + SecondaryLength + PayloadLength);
 }
 
 internal static class BridgeBinaryProtocol
@@ -40,22 +40,27 @@ internal static class BridgeBinaryProtocol
     public const byte ProtocolVersion = 2;
     public const byte IsTopicFlag = 0x01;
     public const int HeaderSize = 16;
+    public const int MaxPayloadBytes = 64 * 1024;
+    public const int MaxPrimaryTextBytes = ushort.MaxValue;
+    public const int MaxSecondaryTextBytes = ushort.MaxValue;
+    public const int MaxBodyBytes = MaxPrimaryTextBytes + MaxSecondaryTextBytes + MaxPayloadBytes;
 
     private static readonly Encoding Utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
     public static int MeasureSendFrameBytes(string destination, ReadOnlySpan<byte> payload)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
-        return HeaderSize + Utf8.GetByteCount(destination) + payload.Length;
+        return checked(HeaderSize + ValidateTextFieldLength(Utf8.GetByteCount(destination), "Primary") + ValidatePayloadLength(payload.Length));
     }
 
     public static int MeasureMessageFrameBytes(string source, string? topic, ReadOnlySpan<byte> payload)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(source);
-        return HeaderSize +
-            Utf8.GetByteCount(source) +
-            (string.IsNullOrWhiteSpace(topic) ? 0 : Utf8.GetByteCount(topic)) +
-            payload.Length;
+        return checked(
+            HeaderSize +
+            ValidateTextFieldLength(Utf8.GetByteCount(source), "Primary") +
+            ValidateTextFieldLength(string.IsNullOrWhiteSpace(topic) ? 0 : Utf8.GetByteCount(topic), "Secondary") +
+            ValidatePayloadLength(payload.Length));
     }
 
     public static byte[] BuildSendFrame(string destination, ReadOnlySpan<byte> payload, NknBridgeChannel channel)
@@ -117,10 +122,7 @@ internal static class BridgeBinaryProtocol
         var primaryLength = BinaryPrimitives.ReadUInt16LittleEndian(headerBytes.Slice(6, 2));
         var secondaryLength = BinaryPrimitives.ReadUInt16LittleEndian(headerBytes.Slice(8, 2));
         var payloadLength = BinaryPrimitives.ReadInt32LittleEndian(headerBytes.Slice(10, 4));
-        if (payloadLength < 0)
-        {
-            throw new InvalidDataException("Binary frame payload length was negative.");
-        }
+        ValidateHeaderLengths(primaryLength, secondaryLength, payloadLength);
 
         return new BridgeBinaryFrameHeader(
             version,
@@ -146,7 +148,8 @@ internal static class BridgeBinaryProtocol
             secondaryText = Utf8.GetString(bodyBytes.Slice(header.PrimaryLength, header.SecondaryLength));
         }
 
-        var payload = bodyBytes.Slice(header.PrimaryLength + header.SecondaryLength, header.PayloadLength).ToArray();
+        var payloadOffset = checked(header.PrimaryLength + header.SecondaryLength);
+        var payload = bodyBytes.Slice(payloadOffset, header.PayloadLength).ToArray();
         return new BridgeBinaryFrame(header.Kind, header.Channel, header.Flags, primaryText, secondaryText, payload);
     }
 
@@ -160,17 +163,17 @@ internal static class BridgeBinaryProtocol
     {
         var primaryBytes = Utf8.GetBytes(primaryText);
         var secondaryBytes = string.IsNullOrWhiteSpace(secondaryText) ? Array.Empty<byte>() : Utf8.GetBytes(secondaryText);
-        if (primaryBytes.Length > ushort.MaxValue)
+        ValidateTextFieldLength(primaryBytes.Length, "Primary");
+        ValidateTextFieldLength(secondaryBytes.Length, "Secondary");
+        ValidatePayloadLength(payload.Length);
+
+        var bodyLength = checked(primaryBytes.Length + secondaryBytes.Length + payload.Length);
+        if (bodyLength > MaxBodyBytes)
         {
-            throw new InvalidOperationException("Primary bridge binary text field was too large.");
+            throw new InvalidOperationException("Bridge binary frame body length exceeded maximum.");
         }
 
-        if (secondaryBytes.Length > ushort.MaxValue)
-        {
-            throw new InvalidOperationException("Secondary bridge binary text field was too large.");
-        }
-
-        var frame = new byte[HeaderSize + primaryBytes.Length + secondaryBytes.Length + payload.Length];
+        var frame = new byte[HeaderSize + bodyLength];
         frame[0] = FrameMagic;
         frame[1] = ProtocolVersion;
         frame[2] = (byte)kind;
@@ -191,5 +194,76 @@ internal static class BridgeBinaryProtocol
         secondaryBytes.CopyTo(frame.AsSpan(HeaderSize + primaryBytes.Length, secondaryBytes.Length));
         payload.CopyTo(frame.AsSpan(HeaderSize + primaryBytes.Length + secondaryBytes.Length, payload.Length));
         return frame;
+    }
+
+    private static int ValidateTextFieldLength(int length, string fieldName)
+    {
+        if (length < 0)
+        {
+            throw new InvalidOperationException($"{fieldName} bridge binary text field length was negative.");
+        }
+
+        var maximum = string.Equals(fieldName, "Secondary", StringComparison.Ordinal)
+            ? MaxSecondaryTextBytes
+            : MaxPrimaryTextBytes;
+        if (length > maximum)
+        {
+            throw new InvalidOperationException($"{fieldName} bridge binary text field was too large.");
+        }
+
+        return length;
+    }
+
+    private static int ValidatePayloadLength(int payloadLength)
+    {
+        if (payloadLength < 0)
+        {
+            throw new InvalidOperationException("Bridge binary payload length was negative.");
+        }
+
+        if (payloadLength > MaxPayloadBytes)
+        {
+            throw new InvalidOperationException("Bridge binary payload length exceeded maximum.");
+        }
+
+        return payloadLength;
+    }
+
+    private static void ValidateHeaderLengths(ushort primaryLength, ushort secondaryLength, int payloadLength)
+    {
+        if (primaryLength > MaxPrimaryTextBytes)
+        {
+            throw new InvalidDataException("Binary frame primary text length exceeded maximum.");
+        }
+
+        if (secondaryLength > MaxSecondaryTextBytes)
+        {
+            throw new InvalidDataException("Binary frame secondary text length exceeded maximum.");
+        }
+
+        if (payloadLength < 0)
+        {
+            throw new InvalidDataException("Binary frame payload length was negative.");
+        }
+
+        if (payloadLength > MaxPayloadBytes)
+        {
+            throw new InvalidDataException("Binary frame payload length exceeded maximum.");
+        }
+
+        int bodyLength;
+        try
+        {
+            bodyLength = checked(primaryLength + secondaryLength + payloadLength);
+        }
+        catch (OverflowException ex)
+        {
+            throw new InvalidDataException("Binary frame body length overflowed.", ex);
+        }
+
+        if (bodyLength > MaxBodyBytes)
+        {
+            throw new InvalidDataException("Binary frame body length exceeded maximum.");
+        }
     }
 }

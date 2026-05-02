@@ -349,7 +349,7 @@ public sealed partial class SessionFileTransferService
 
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v4_repair_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairSend.RepairRequestKey}; range_count={repairSend.RangeCount}; requested_chunk_count={repairSend.RequestedChunkCount}; sent_chunk_count={repairSend.ChunkIndices.Count}; transport_sent_chunk_count={repairSend.ChunkIndices.Count * V4RepairBatchSendAttempts}; repair_batch_send_attempt_count={V4RepairBatchSendAttempts}; repair_delivery_mode={FormatV4RepairDeliveryMode(repairSend.DeliveryMode)}; repair_delivery_escalation_reason={repairSend.DeliveryEscalationReason}; first_start_chunk_index={repairSend.FirstStartChunkIndex}; last_end_chunk_exclusive={repairSend.LastEndChunkExclusive}; frontier_tail_repair={(repairSend.FrontierTailRepair ? 1 : 0)}; remote_next_expected_chunk_index={repairSend.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={repairSend.ChunksAcceptedForTransport}; skipped_obsolete_count={repairSend.SkippedObsoleteCount}; skipped_future_count={repairSend.SkippedFutureCount}; skipped_out_of_bounds_count={repairSend.SkippedOutOfBoundsCount}; sent_unix_ms={sentUtc.ToUnixTimeMilliseconds()}");
+                    $"event=filetransfer_v4_repair_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairSend.RepairRequestKey}; range_count={repairSend.RangeCount}; requested_chunk_count={repairSend.RequestedChunkCount}; sent_chunk_count={repairSend.ChunkIndices.Count}; transport_sent_chunk_count={repairSend.ChunkIndices.Count * V4RepairBatchSendAttempts}; repair_batch_send_attempt_count={V4RepairBatchSendAttempts}; repair_delivery_mode={FormatV4RepairDeliveryMode(repairSend.DeliveryMode)}; repair_delivery_escalation_reason={repairSend.DeliveryEscalationReason}; first_start_chunk_index={repairSend.FirstStartChunkIndex}; last_end_chunk_exclusive={repairSend.LastEndChunkExclusive}; frontier_tail_repair={(repairSend.FrontierTailRepair ? 1 : 0)}; credit_exhausted_time_ms_at_repair={repairSend.CreditExhaustedTimeMsAtDecision}; remote_next_expected_chunk_index={repairSend.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={repairSend.ChunksAcceptedForTransport}; skipped_obsolete_count={repairSend.SkippedObsoleteCount}; skipped_future_count={repairSend.SkippedFutureCount}; skipped_out_of_bounds_count={repairSend.SkippedOutOfBoundsCount}; sent_unix_ms={sentUtc.ToUnixTimeMilliseconds()}");
                 continue;
             }
 
@@ -625,16 +625,17 @@ public sealed partial class SessionFileTransferService
             repairRequestKey,
             frontierTailRepair,
             FileTransferV4RepairDeliveryMode.BulkOnly,
-            "first_send");
+            "first_send",
+            -1);
 
         if (chunkIndices.Count == 0)
         {
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v4_repair_scheduled; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; epoch={state.Epoch}; range_count={normalizedRanges.Count}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count=0; first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; frontier_tail_repair={(frontierTailRepair ? 1 : 0)}; remote_next_expected_chunk_index={stats.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={stats.ChunksAcceptedForTransport}; skipped_obsolete_count={stats.SkippedObsoleteCount}; skipped_future_count={stats.SkippedFutureCount}; skipped_out_of_bounds_count={stats.SkippedOutOfBoundsCount}");
+                $"event=filetransfer_v4_repair_scheduled; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; epoch={state.Epoch}; range_count={normalizedRanges.Count}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count=0; first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; frontier_tail_repair={(frontierTailRepair ? 1 : 0)}; credit_exhausted_time_ms_at_repair=-1; remote_next_expected_chunk_index={stats.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={stats.ChunksAcceptedForTransport}; skipped_obsolete_count={stats.SkippedObsoleteCount}; skipped_future_count={stats.SkippedFutureCount}; skipped_out_of_bounds_count={stats.SkippedOutOfBoundsCount}");
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v4_repair_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; range_count={queuedRepair.RangeCount}; requested_chunk_count={queuedRepair.RequestedChunkCount}; sent_chunk_count=0; repair_delivery_mode=bulk_only; repair_delivery_escalation_reason=no_chunks; first_start_chunk_index={queuedRepair.FirstStartChunkIndex}; last_end_chunk_exclusive={queuedRepair.LastEndChunkExclusive}; frontier_tail_repair={(queuedRepair.FrontierTailRepair ? 1 : 0)}; remote_next_expected_chunk_index={queuedRepair.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={queuedRepair.ChunksAcceptedForTransport}; skipped_obsolete_count={queuedRepair.SkippedObsoleteCount}; skipped_future_count={queuedRepair.SkippedFutureCount}; skipped_out_of_bounds_count={queuedRepair.SkippedOutOfBoundsCount}");
+                $"event=filetransfer_v4_repair_sent; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; range_count={queuedRepair.RangeCount}; requested_chunk_count={queuedRepair.RequestedChunkCount}; sent_chunk_count=0; repair_delivery_mode=bulk_only; repair_delivery_escalation_reason=no_chunks; first_start_chunk_index={queuedRepair.FirstStartChunkIndex}; last_end_chunk_exclusive={queuedRepair.LastEndChunkExclusive}; frontier_tail_repair={(queuedRepair.FrontierTailRepair ? 1 : 0)}; credit_exhausted_time_ms_at_repair=-1; remote_next_expected_chunk_index={queuedRepair.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={queuedRepair.ChunksAcceptedForTransport}; skipped_obsolete_count={queuedRepair.SkippedObsoleteCount}; skipped_future_count={queuedRepair.SkippedFutureCount}; skipped_out_of_bounds_count={queuedRepair.SkippedOutOfBoundsCount}");
             return;
         }
 
@@ -647,15 +648,17 @@ public sealed partial class SessionFileTransferService
 
             CleanupOutboundV4RepairRequestStateLocked(context, DateTimeOffset.UtcNow);
             var now = DateTimeOffset.UtcNow;
-            if (!TryMarkOutboundV4RepairQueuedLocked(context, repairRequestKey, now, out var repairState, out var suppressionReason, out var lastSentAgeMs))
+            var frontierRepair = firstStart == state.ContiguousCommittedChunkIndex;
+            var senderRepairRepeatIntervalMs = ResolveV4SenderRepairRepeatIntervalMs(context, frontierRepair);
+            if (!TryMarkOutboundV4RepairQueuedLocked(context, repairRequestKey, now, senderRepairRepeatIntervalMs, out var repairState, out var suppressionReason, out var lastSentAgeMs))
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v4_repair_suppressed; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; reason={suppressionReason}; epoch={state.Epoch}; range_count={normalizedRanges.Count}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count={chunkIndices.Count}; first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; frontier_tail_repair={(frontierTailRepair ? 1 : 0)}; last_sent_age_ms={lastSentAgeMs}; remote_next_expected_chunk_index={stats.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={stats.ChunksAcceptedForTransport}");
+                    $"event=filetransfer_v4_repair_suppressed; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; reason={suppressionReason}; epoch={state.Epoch}; range_count={normalizedRanges.Count}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count={chunkIndices.Count}; first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; frontier_tail_repair={(frontierTailRepair ? 1 : 0)}; last_sent_age_ms={lastSentAgeMs}; repair_interval_ms={senderRepairRepeatIntervalMs}; remote_next_expected_chunk_index={stats.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={stats.ChunksAcceptedForTransport}");
                 return;
             }
 
-            var deliveryDecision = ResolveV4RepairDeliveryDecisionLocked(context, repairState, stats.RemoteNextExpectedChunkIndex, now);
+            var deliveryDecision = ResolveV4RepairDeliveryDecisionLocked(context, repairState, stats.RemoteNextExpectedChunkIndex, frontierRepair, now);
             var deduped = new List<int>(chunkIndices.Count);
             foreach (var chunkIndex in chunkIndices)
             {
@@ -684,10 +687,11 @@ public sealed partial class SessionFileTransferService
                     ChunkIndices = deduped,
                     DeliveryMode = deliveryDecision.Mode,
                     DeliveryEscalationReason = deliveryDecision.Reason,
+                    CreditExhaustedTimeMsAtDecision = deliveryDecision.CreditExhaustedTimeMs,
                 });
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v4_repair_scheduled; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; epoch={state.Epoch}; range_count={normalizedRanges.Count}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count={deduped.Count}; repair_delivery_mode={FormatV4RepairDeliveryMode(deliveryDecision.Mode)}; repair_delivery_escalation_reason={deliveryDecision.Reason}; first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; frontier_tail_repair={(frontierTailRepair ? 1 : 0)}; remote_next_expected_chunk_index={stats.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={stats.ChunksAcceptedForTransport}; skipped_obsolete_count={stats.SkippedObsoleteCount}; skipped_future_count={stats.SkippedFutureCount}; skipped_out_of_bounds_count={stats.SkippedOutOfBoundsCount}");
+                $"event=filetransfer_v4_repair_scheduled; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; epoch={state.Epoch}; range_count={normalizedRanges.Count}; requested_chunk_count={requestedChunkCount}; scheduled_chunk_count={deduped.Count}; repair_delivery_mode={FormatV4RepairDeliveryMode(deliveryDecision.Mode)}; repair_delivery_escalation_reason={deliveryDecision.Reason}; first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; frontier_tail_repair={(frontierTailRepair ? 1 : 0)}; credit_exhausted_time_ms_at_repair={deliveryDecision.CreditExhaustedTimeMs}; remote_next_expected_chunk_index={stats.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={stats.ChunksAcceptedForTransport}; skipped_obsolete_count={stats.SkippedObsoleteCount}; skipped_future_count={stats.SkippedFutureCount}; skipped_out_of_bounds_count={stats.SkippedOutOfBoundsCount}");
             context.SignalV4SenderPump();
         }
     }
@@ -714,6 +718,7 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         string repairRequestKey,
         DateTimeOffset now,
+        int repairRepeatIntervalMs,
         out V4SenderRepairRequestState repairState,
         out string suppressionReason,
         out long lastSentAgeMs)
@@ -745,7 +750,7 @@ public sealed partial class SessionFileTransferService
         if (repairState.LastSentUtc is not null)
         {
             lastSentAgeMs = (long)Math.Max(0, (now - repairState.LastSentUtc.Value).TotalMilliseconds);
-            if (lastSentAgeMs < V4RepairRepeatIntervalMs)
+            if (lastSentAgeMs < repairRepeatIntervalMs)
             {
                 suppressionReason = "recently_sent";
                 repairState.SuppressedCount++;
@@ -757,23 +762,31 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
-    private static (FileTransferV4RepairDeliveryMode Mode, string Reason) ResolveV4RepairDeliveryDecisionLocked(
+    private static (FileTransferV4RepairDeliveryMode Mode, string Reason, long CreditExhaustedTimeMs) ResolveV4RepairDeliveryDecisionLocked(
         OutboundTransferContext context,
         V4SenderRepairRequestState repairState,
         int queuedRemoteFrontierChunkIndex,
+        bool frontierRepair,
         DateTimeOffset now)
     {
-        if (repairState.SentCount == 0)
-        {
-            return (FileTransferV4RepairDeliveryMode.BulkOnly, "first_send");
-        }
-
         var creditStallAgeMs = context.V4SenderCreditExhaustedSinceUtc is null
             ? 0
             : (long)Math.Max(0, (now - context.V4SenderCreditExhaustedSinceUtc.Value).TotalMilliseconds);
+        if (repairState.SentCount == 0)
+        {
+            if (frontierRepair &&
+                IsV4FileOnlyFastRepairEnabled(context) &&
+                creditStallAgeMs >= V4FileOnlyFirstRepairCreditStallEscalationMs)
+            {
+                return (FileTransferV4RepairDeliveryMode.ControlBulkRedundant, "first_send_credit_stall", creditStallAgeMs);
+            }
+
+            return (FileTransferV4RepairDeliveryMode.BulkOnly, "first_send", creditStallAgeMs);
+        }
+
         if (creditStallAgeMs >= V4RepairRedundancyEscalationStallMs)
         {
-            return (FileTransferV4RepairDeliveryMode.ControlBulkRedundant, "credit_stall");
+            return (FileTransferV4RepairDeliveryMode.ControlBulkRedundant, "credit_stall", creditStallAgeMs);
         }
 
         var currentRemoteFrontier = Math.Max(
@@ -781,10 +794,10 @@ public sealed partial class SessionFileTransferService
             Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount));
         if (repairState.LastSentRemoteFrontierChunkIndex >= currentRemoteFrontier)
         {
-            return (FileTransferV4RepairDeliveryMode.ControlBulkRedundant, "frontier_not_advanced");
+            return (FileTransferV4RepairDeliveryMode.ControlBulkRedundant, "frontier_not_advanced", creditStallAgeMs);
         }
 
-        return (FileTransferV4RepairDeliveryMode.ControlBulkRedundant, "retry");
+        return (FileTransferV4RepairDeliveryMode.ControlBulkRedundant, "retry", creditStallAgeMs);
     }
 
     private static string FormatV4RepairDeliveryMode(FileTransferV4RepairDeliveryMode mode)
@@ -2755,7 +2768,8 @@ public sealed partial class SessionFileTransferService
         }
 
         var frontierStallAgeMs = GetInboundV4FrontierStallAgeMsLocked(context, now);
-        if (frontierStallAgeMs < V4RepairRepeatIntervalMs)
+        var repairRepeatIntervalMs = ResolveV4FrontierRepairRepeatIntervalMs(context);
+        if (frontierStallAgeMs < repairRepeatIntervalMs)
         {
             return false;
         }
@@ -2772,7 +2786,7 @@ public sealed partial class SessionFileTransferService
 
         var previousFrontierRepair = FindRecentInboundV4FrontierTailRepairLocked(context, context.NextChunkIndex);
         return previousFrontierRepair?.LastRequestedUtc is null ||
-            now - previousFrontierRepair.LastRequestedUtc.Value >= TimeSpan.FromMilliseconds(V4RepairRepeatIntervalMs);
+            now - previousFrontierRepair.LastRequestedUtc.Value >= TimeSpan.FromMilliseconds(repairRepeatIntervalMs);
     }
 
     private async Task<bool> SendInboundV4CompleteAsync(InboundTransferContext context, string sessionId, string transferId, long fileSizeBytes, string sha256Base64, CancellationToken ct)
@@ -2924,16 +2938,17 @@ public sealed partial class SessionFileTransferService
         var now = DateTimeOffset.UtcNow;
         ClearFilledInboundV4RepairRequestsLocked(context, now);
         var frontierStallAgeMs = GetInboundV4FrontierStallAgeMsLocked(context, now);
+        var frontierRepairRepeatIntervalMs = ResolveV4FrontierRepairRepeatIntervalMs(context);
         if (context.PullHighestReceivedChunkIndex >= context.NextChunkIndex &&
-            frontierStallAgeMs < V4RepairRepeatIntervalMs)
+            frontierStallAgeMs < frontierRepairRepeatIntervalMs)
         {
             if (context.V4FrontierStallLastSuppressedLogUtc is null ||
-                now - context.V4FrontierStallLastSuppressedLogUtc.Value >= TimeSpan.FromMilliseconds(V4RepairRepeatIntervalMs))
+                now - context.V4FrontierStallLastSuppressedLogUtc.Value >= TimeSpan.FromMilliseconds(frontierRepairRepeatIntervalMs))
             {
                 context.V4FrontierStallLastSuppressedLogUtc = now;
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v4_frontier_stall_missing_range_suppressed; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=stall_age_below_min; epoch={context.V4StateEpoch}; start_chunk_index={context.NextChunkIndex}; frontier_stall_age_ms={frontierStallAgeMs}; retry_in_ms={Math.Max(0, V4RepairRepeatIntervalMs - frontierStallAgeMs)}; credit_until_chunk_index_exclusive={context.V4CreditUntilChunkIndexExclusive}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}");
+                    $"event=filetransfer_v4_frontier_stall_missing_range_suppressed; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=stall_age_below_min; epoch={context.V4StateEpoch}; start_chunk_index={context.NextChunkIndex}; frontier_stall_age_ms={frontierStallAgeMs}; retry_in_ms={Math.Max(0, frontierRepairRepeatIntervalMs - frontierStallAgeMs)}; repair_interval_ms={frontierRepairRepeatIntervalMs}; initial_frontier_repair_chunks={ResolveV4InitialFrontierRepairChunks(context)}; credit_until_chunk_index_exclusive={context.V4CreditUntilChunkIndexExclusive}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}");
             }
 
             return [];
@@ -2967,7 +2982,7 @@ public sealed partial class SessionFileTransferService
                 var count = 0;
                 var isFrontierRange = start == context.NextChunkIndex;
                 var maxRangeChunks = isFrontierRange && sameFrontierRetry
-                    ? V4FrontierTailRetryChunks
+                    ? ResolveV4FrontierTailRetryChunks(context)
                     : isFrontierRange
                         ? ResolveV4InitialFrontierRepairChunks(context)
                         : V4RepairBurstMaxChunks;
@@ -3018,14 +3033,14 @@ public sealed partial class SessionFileTransferService
                     context.NextChunkIndex + V4RepairBurstMaxChunks));
             if (repairEndExclusive > context.NextChunkIndex)
             {
-                if (frontierStallAgeMs >= V4RepairRepeatIntervalMs)
+                if (frontierStallAgeMs >= frontierRepairRepeatIntervalMs)
                 {
                     frontierTailRepair = true;
                     previousFrontierTailRepair = FindRecentInboundV4FrontierTailRepairLocked(context, context.NextChunkIndex);
                     var maxRepairCount = repairEndExclusive - context.NextChunkIndex;
                     var repairCount = previousFrontierTailRepair is null
                         ? Math.Min(ResolveV4InitialFrontierRepairChunks(context), maxRepairCount)
-                        : Math.Min(V4FrontierTailRetryChunks, maxRepairCount);
+                        : Math.Min(ResolveV4FrontierTailRetryChunks(context), maxRepairCount);
                     ranges.Add(new FileTransferRangeV4
                     {
                         StartChunkIndex = context.NextChunkIndex,
@@ -3040,12 +3055,12 @@ public sealed partial class SessionFileTransferService
                     }
                 }
                 else if (context.V4FrontierStallLastSuppressedLogUtc is null ||
-                         now - context.V4FrontierStallLastSuppressedLogUtc.Value >= TimeSpan.FromMilliseconds(V4RepairRepeatIntervalMs))
+                         now - context.V4FrontierStallLastSuppressedLogUtc.Value >= TimeSpan.FromMilliseconds(frontierRepairRepeatIntervalMs))
                 {
                     context.V4FrontierStallLastSuppressedLogUtc = now;
                     LocalOperationalLog.Info(
                         "FileTransferService",
-                        $"event=filetransfer_v4_frontier_stall_missing_range_suppressed; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=stall_age_below_min; epoch={context.V4StateEpoch}; start_chunk_index={context.NextChunkIndex}; frontier_stall_age_ms={frontierStallAgeMs}; retry_in_ms={Math.Max(0, V4RepairRepeatIntervalMs - frontierStallAgeMs)}; credit_until_chunk_index_exclusive={context.V4CreditUntilChunkIndexExclusive}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}");
+                        $"event=filetransfer_v4_frontier_stall_missing_range_suppressed; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=stall_age_below_min; epoch={context.V4StateEpoch}; start_chunk_index={context.NextChunkIndex}; frontier_stall_age_ms={frontierStallAgeMs}; retry_in_ms={Math.Max(0, frontierRepairRepeatIntervalMs - frontierStallAgeMs)}; repair_interval_ms={frontierRepairRepeatIntervalMs}; initial_frontier_repair_chunks={ResolveV4InitialFrontierRepairChunks(context)}; credit_until_chunk_index_exclusive={context.V4CreditUntilChunkIndexExclusive}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}");
                 }
             }
         }
@@ -3148,23 +3163,24 @@ public sealed partial class SessionFileTransferService
             lastRequestedUtc = previousFrontierTailRepair.LastRequestedUtc;
         }
 
+        var repairRepeatIntervalMs = ResolveV4RepairRepeatIntervalMs(context, firstStart, frontierTailRepair);
         var due = lastRequestedUtc is null ||
-            now - lastRequestedUtc.Value >= TimeSpan.FromMilliseconds(V4RepairRepeatIntervalMs);
+            now - lastRequestedUtc.Value >= TimeSpan.FromMilliseconds(repairRepeatIntervalMs);
         if (!due)
         {
-            var retryInMs = V4RepairRepeatIntervalMs - (long)Math.Max(0, (now - lastRequestedUtc!.Value).TotalMilliseconds);
+            var retryInMs = repairRepeatIntervalMs - (long)Math.Max(0, (now - lastRequestedUtc!.Value).TotalMilliseconds);
             if (repairState.LastSuppressedLogUtc is null ||
-                now - repairState.LastSuppressedLogUtc.Value >= TimeSpan.FromMilliseconds(V4RepairRepeatIntervalMs))
+                now - repairState.LastSuppressedLogUtc.Value >= TimeSpan.FromMilliseconds(repairRepeatIntervalMs))
             {
                 repairState.LastSuppressedLogUtc = now;
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v4_repair_suppressed; direction=receiver; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; reason=retry_interval; epoch={context.V4StateEpoch}; attempt_count={repairState.AttemptCount}; range_count={ranges.Count}; requested_chunk_count={requestedChunkCount}; first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; retry_in_ms={Math.Max(0, retryInMs)}; contiguous_committed_chunk_index={context.NextChunkIndex}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}; frontier_tail_repair={(repairState.FrontierTailRepair ? 1 : 0)}; frontier_stall_age_ms={frontierStallAgeMs}; overlap_repair_request_key={overlappingRepair?.RepairRequestKey ?? "(none)"}");
+                    $"event=filetransfer_v4_repair_suppressed; direction=receiver; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; reason=retry_interval; epoch={context.V4StateEpoch}; attempt_count={repairState.AttemptCount}; range_count={ranges.Count}; requested_chunk_count={requestedChunkCount}; first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; retry_in_ms={Math.Max(0, retryInMs)}; repair_interval_ms={repairRepeatIntervalMs}; contiguous_committed_chunk_index={context.NextChunkIndex}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}; frontier_tail_repair={(repairState.FrontierTailRepair ? 1 : 0)}; frontier_stall_age_ms={frontierStallAgeMs}; overlap_repair_request_key={overlappingRepair?.RepairRequestKey ?? "(none)"}");
                 if (frontierTailRepair)
                 {
                     LocalOperationalLog.Info(
                         "FileTransferService",
-                        $"event=filetransfer_v4_frontier_stall_missing_range_suppressed; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=retry_interval; epoch={context.V4StateEpoch}; repair_request_key={repairRequestKey}; start_chunk_index={firstStart}; requested_chunk_count={requestedChunkCount}; frontier_stall_age_ms={frontierStallAgeMs}; retry_in_ms={Math.Max(0, retryInMs)}; credit_until_chunk_index_exclusive={context.V4CreditUntilChunkIndexExclusive}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}");
+                        $"event=filetransfer_v4_frontier_stall_missing_range_suppressed; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=retry_interval; epoch={context.V4StateEpoch}; repair_request_key={repairRequestKey}; start_chunk_index={firstStart}; requested_chunk_count={requestedChunkCount}; frontier_stall_age_ms={frontierStallAgeMs}; retry_in_ms={Math.Max(0, retryInMs)}; repair_interval_ms={repairRepeatIntervalMs}; initial_frontier_repair_chunks={ResolveV4InitialFrontierRepairChunks(context)}; credit_until_chunk_index_exclusive={context.V4CreditUntilChunkIndexExclusive}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}");
                 }
             }
 
@@ -3178,19 +3194,58 @@ public sealed partial class SessionFileTransferService
         {
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v4_frontier_stall_missing_range_due; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; epoch={context.V4StateEpoch}; attempt_count={repairState.AttemptCount}; start_chunk_index={context.NextChunkIndex}; requested_chunk_count={ranges[0].ChunkCount}; frontier_stall_age_ms={frontierStallAgeMs}; credit_until_chunk_index_exclusive={context.V4CreditUntilChunkIndexExclusive}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}");
+                $"event=filetransfer_v4_frontier_stall_missing_range_due; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; epoch={context.V4StateEpoch}; attempt_count={repairState.AttemptCount}; start_chunk_index={context.NextChunkIndex}; requested_chunk_count={ranges[0].ChunkCount}; frontier_stall_age_ms={frontierStallAgeMs}; repair_interval_ms={repairRepeatIntervalMs}; initial_frontier_repair_chunks={ResolveV4InitialFrontierRepairChunks(context)}; credit_until_chunk_index_exclusive={context.V4CreditUntilChunkIndexExclusive}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}");
         }
 
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v4_repair_requested; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; epoch={context.V4StateEpoch}; attempt_count={repairState.AttemptCount}; range_count={ranges.Count}; requested_chunk_count={requestedChunkCount}; first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; first_seen_age_ms={(long)Math.Max(0, (now - repairState.FirstSeenUtc).TotalMilliseconds)}; contiguous_committed_chunk_index={context.NextChunkIndex}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}; frontier_tail_repair={(repairState.FrontierTailRepair ? 1 : 0)}; frontier_stall_age_ms={frontierStallAgeMs}");
+            $"event=filetransfer_v4_repair_requested; transfer_id={context.TransferId}; session_id={context.SessionId}; repair_request_key={repairRequestKey}; epoch={context.V4StateEpoch}; attempt_count={repairState.AttemptCount}; range_count={ranges.Count}; requested_chunk_count={requestedChunkCount}; first_start_chunk_index={firstStart}; last_end_chunk_exclusive={lastEndExclusive}; first_seen_age_ms={(long)Math.Max(0, (now - repairState.FirstSeenUtc).TotalMilliseconds)}; contiguous_committed_chunk_index={context.NextChunkIndex}; durable_received_highest_chunk_index={context.PullHighestReceivedChunkIndex}; frontier_tail_repair={(repairState.FrontierTailRepair ? 1 : 0)}; frontier_stall_age_ms={frontierStallAgeMs}; repair_interval_ms={repairRepeatIntervalMs}; initial_frontier_repair_chunks={ResolveV4InitialFrontierRepairChunks(context)}");
         return ranges;
     }
 
     private static int ResolveV4InitialFrontierRepairChunks(InboundTransferContext context)
         => context.V4MixedScreenShareTransfer
             ? V4MixedInitialFrontierRepairChunks
-            : V4KnownFrontierRepairChunks;
+            : IsV4FileOnlyFastRepairEnabled()
+                ? V4FileOnlyInitialFrontierRepairChunks
+                : V4KnownFrontierRepairChunks;
+
+    private static int ResolveV4FrontierTailRetryChunks(InboundTransferContext context)
+        => context.V4MixedScreenShareTransfer
+            ? V4FrontierTailRetryChunks
+            : IsV4FileOnlyFastRepairEnabled()
+                ? V4FileOnlyFrontierTailRetryChunks
+                : V4FrontierTailRetryChunks;
+
+    private static int ResolveV4FrontierRepairRepeatIntervalMs(InboundTransferContext context)
+        => context.V4MixedScreenShareTransfer || !IsV4FileOnlyFastRepairEnabled()
+            ? V4RepairRepeatIntervalMs
+            : V4FileOnlyFrontierRepairRepeatIntervalMs;
+
+    private static int ResolveV4RepairRepeatIntervalMs(
+        InboundTransferContext context,
+        int firstStartChunkIndex,
+        bool frontierTailRepair)
+        => frontierTailRepair || firstStartChunkIndex == context.NextChunkIndex
+            ? ResolveV4FrontierRepairRepeatIntervalMs(context)
+            : V4RepairRepeatIntervalMs;
+
+    private static int ResolveV4SenderRepairRepeatIntervalMs(OutboundTransferContext context, bool frontierRepair)
+        => frontierRepair && IsV4FileOnlyFastRepairEnabled(context)
+            ? V4FileOnlyFrontierRepairRepeatIntervalMs
+            : V4RepairRepeatIntervalMs;
+
+    private static bool IsV4FileOnlyFastRepairEnabled(OutboundTransferContext context)
+        => !context.V4MixedScreenShareTransfer && IsV4FileOnlyFastRepairEnabled();
+
+    private static bool IsV4FileOnlyFastRepairEnabled()
+    {
+        var value = Environment.GetEnvironmentVariable(V4FileOnlyFastRepairEnvironmentVariableName);
+        return value is null ||
+               (!string.Equals(value, "0", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(value, "false", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(value, "off", StringComparison.OrdinalIgnoreCase));
+    }
 
     private static long GetInboundV4FrontierStallAgeMsLocked(InboundTransferContext context, DateTimeOffset now)
     {
