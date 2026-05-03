@@ -749,6 +749,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
     public async Task NknTransport_FileTransferDataSession_DisablesV4FeedbackBulkRedundancy_WhenRollbackEnvIsOff()
     {
         var previous = Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_V4_FEEDBACK_BULK_REDUNDANCY");
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         Environment.SetEnvironmentVariable("NLINK_FILETRANSFER_V4_FEEDBACK_BULK_REDUNDANCY", "0");
         FakeNknClient.ResetNetwork();
         try
@@ -1227,7 +1228,9 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                     multiClientMessageDispatchUtcMs: 0L));
             await Task.Delay(100, cts.Token);
             string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
-            Assert.Contains("event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=unknown_transfer_id", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_data_frame_ignored; transport=nkn; transfer_id=transfer_nkn_v4_repeat_1", logTail, StringComparison.Ordinal);
+            Assert.Contains("reason=post_completion_late_sender_frame", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=unknown_transfer_id", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=transfer_already_terminal", logTail, StringComparison.Ordinal);
         }
         finally

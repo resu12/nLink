@@ -17,6 +17,7 @@ using NLink.App.ViewModels;
 using NLink.App.Views;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.Configuration;
 using NLink.Core.Diagnostics;
 using NLink.Core.FileTransfer;
 using NLink.Core.Metrics;
@@ -55,12 +56,13 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
         var previousScreenShareScale = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCALE");
         try
         {
+            ReleaseOverridePolicy.ResetSuppressedOverridesForTests();
             SessionTimeline.Clear();
             SessionTimeline.Record("Started");
             SessionTimeline.Record("Disconnected", "timeout; session_id=session-123; helper_identity=nlink-helper-123");
             NknRuntimeDiagnostics.SetLastError("event=failure; session_id=session-123; source=nlink-source-123");
             NknRuntimeDiagnostics.SetLastDisconnectReason("peer_id=nlink-peer-123; reply_to=req-123");
-            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", null);
             Environment.SetEnvironmentVariable(InviteTokenServiceFactory.InviteModeEnvVar, null);
             Environment.SetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, null);
             Environment.SetEnvironmentVariable(InviteTokenServiceFactory.InviteSigningKeyEnvVar, null);
@@ -492,9 +494,10 @@ public void HangReport_WritesScreenshareEvidenceText()
         var previousScreenShareScale = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCALE");
         var previousScreenShareTransportAutotune = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE");
 
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         try
         {
-            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", null);
             Environment.SetEnvironmentVariable("NLINK_FEATURE_REMOTE_CONTROL_SEQ_GATE", "0");
             Environment.SetEnvironmentVariable(FeatureFlags.AllowInsecureRemoteControlSeqGateOverrideEnvVar, "1");
             Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", "true");
@@ -594,6 +597,7 @@ public void HangReport_WritesScreenshareEvidenceText()
         Directory.CreateDirectory(tempDir);
         var keyPath = Path.Combine(tempDir, "identity.json");
 
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         try
         {
             var uniqueIdentifier = "nkn-init-log-test-" + Guid.NewGuid().ToString("N")[..8];
@@ -697,7 +701,7 @@ public void HangReport_WritesScreenshareEvidenceText()
             Assert.DoesNotContain("identifier=", runtimeSnapshot.LastDisconnectReason, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain(uniqueChatText, runtimeSnapshot.LastDisconnectReason, StringComparison.OrdinalIgnoreCase);
 
-            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", null);
             var config = TransportRuntimeConfig.Select();
             var vm = new DiagnosticsPageViewModel(static () => { }, config);
             string? diagnostics = null;

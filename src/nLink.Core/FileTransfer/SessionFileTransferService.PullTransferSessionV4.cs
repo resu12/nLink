@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Security.Cryptography;
+using NLink.Core.Configuration;
 using NLink.Core.Logging;
 
 namespace NLink.Core.FileTransfer;
@@ -1211,7 +1212,7 @@ public sealed partial class SessionFileTransferService
                 : V4MixedScreenShareNormalBatchSegments;
         }
 
-        var value = Environment.GetEnvironmentVariable(V4MaxBatchSegmentsEnvironmentVariableName);
+        var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(V4MaxBatchSegmentsEnvironmentVariableName, category: "filetransfer_tuning");
         return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
             ? Math.Clamp(parsed, V4MaxBatchSegmentsMin, V4MaxBatchSegmentsMax)
             : V4MaxBatchSegmentsDefault;
@@ -3240,7 +3241,7 @@ public sealed partial class SessionFileTransferService
 
     private static bool IsV4FileOnlyFastRepairEnabled()
     {
-        var value = Environment.GetEnvironmentVariable(V4FileOnlyFastRepairEnvironmentVariableName);
+        var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(V4FileOnlyFastRepairEnvironmentVariableName, category: "filetransfer_tuning");
         return value is null ||
                (!string.Equals(value, "0", StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(value, "false", StringComparison.OrdinalIgnoreCase) &&

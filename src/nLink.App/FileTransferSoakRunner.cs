@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using NLink.App.Services;
 using NLink.App.Services.ScreenCapture;
 using NLink.Core;
+using NLink.Core.Configuration;
 using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
 using NLink.Core.ScreenShare;
@@ -100,6 +101,7 @@ internal static class FileTransferSoakRunner
         int PayloadRejectedCount,
         int DecodeFailureCount,
         int MessageRejectedCount,
+        int PostCompletionLateFrameIgnoredCount,
         int BridgeBulkSendFailureCount,
         int BridgeBulkQueueClearCount,
         string ImpairmentProfile,
@@ -434,21 +436,24 @@ internal static class FileTransferSoakRunner
         return true;
     }
 
-    private static (string? Profile, string? AllowScreenShare) SetPayloadEfficiencyProfileEnvironment(FileTransferSoakRunnerOptions options)
+    private static (string? Profile, string? AllowScreenShare, string? UnsafeDeveloperMode) SetPayloadEfficiencyProfileEnvironment(FileTransferSoakRunnerOptions options)
     {
         var previousProfile = Environment.GetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.EnvironmentVariableName);
         var previousAllowScreenShare = Environment.GetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.AllowScreenShareEnvironmentVariableName);
+        var previousUnsafeDeveloperMode = Environment.GetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar);
 
+        Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, "1");
         Environment.SetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.EnvironmentVariableName, options.PayloadEfficiencyProfile);
         Environment.SetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.AllowScreenShareEnvironmentVariableName, null);
 
-        return (previousProfile, previousAllowScreenShare);
+        return (previousProfile, previousAllowScreenShare, previousUnsafeDeveloperMode);
     }
 
-    private static void RestorePayloadEfficiencyProfileEnvironment((string? Profile, string? AllowScreenShare) restore)
+    private static void RestorePayloadEfficiencyProfileEnvironment((string? Profile, string? AllowScreenShare, string? UnsafeDeveloperMode) restore)
     {
         Environment.SetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.EnvironmentVariableName, restore.Profile);
         Environment.SetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.AllowScreenShareEnvironmentVariableName, restore.AllowScreenShare);
+        Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, restore.UnsafeDeveloperMode);
     }
 
     private static bool TryParsePayloadSize(string value, out long size)
@@ -936,6 +941,7 @@ internal static class FileTransferSoakRunner
             logMetrics.PayloadRejectedCount,
             logMetrics.DecodeFailureCount,
             logMetrics.MessageRejectedCount,
+            logMetrics.PostCompletionLateFrameIgnoredCount,
             logMetrics.BridgeBulkSendFailureCount,
             logMetrics.BridgeBulkQueueClearCount,
             options.ImpairmentProfile,
@@ -1003,6 +1009,7 @@ internal static class FileTransferSoakRunner
             $"payload_rejected_count={aggregate.PayloadRejectedCount}",
             $"decode_failure_count={aggregate.DecodeFailureCount}",
             $"message_rejected_count={aggregate.MessageRejectedCount}",
+            $"post_completion_late_frame_ignored_count={aggregate.PostCompletionLateFrameIgnoredCount}",
             $"bridge_bulk_send_failure_count={aggregate.BridgeBulkSendFailureCount}",
             $"bridge_bulk_queue_clear_count={aggregate.BridgeBulkQueueClearCount}",
             $"impairment_delay_count={aggregate.ImpairmentDelayCount}",
@@ -1190,6 +1197,11 @@ internal static class FileTransferSoakRunner
             {
                 metrics.MessageRejectedCount++;
             }
+            if (line.Contains("event=filetransfer_data_frame_ignored", StringComparison.Ordinal) &&
+                line.Contains("reason=post_completion_late_sender_frame", StringComparison.Ordinal))
+            {
+                metrics.PostCompletionLateFrameIgnoredCount++;
+            }
             if (line.Contains("event=nkn_bridge_bulk_send_summary", StringComparison.Ordinal) &&
                 !line.Contains("send_failures=0", StringComparison.Ordinal))
             {
@@ -1274,6 +1286,7 @@ internal static class FileTransferSoakRunner
         public int PayloadRejectedCount { get; set; }
         public int DecodeFailureCount { get; set; }
         public int MessageRejectedCount { get; set; }
+        public int PostCompletionLateFrameIgnoredCount { get; set; }
         public int BridgeBulkSendFailureCount { get; set; }
         public int BridgeBulkQueueClearCount { get; set; }
     }

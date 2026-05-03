@@ -1,3 +1,5 @@
+using NLink.Core.Configuration;
+
 namespace NLink.Core.FileTransfer;
 
 public enum FileTransferPayloadEfficiencyProfileKind
@@ -78,7 +80,7 @@ public readonly record struct FileTransferPayloadEfficiencyProfile(
 
     public static FileTransferPayloadEfficiencyProfile ResolveRequestedFromEnvironment(out string reason)
     {
-        var value = Environment.GetEnvironmentVariable(EnvironmentVariableName);
+        var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(EnvironmentVariableName, category: "filetransfer_tuning");
         if (string.IsNullOrWhiteSpace(value))
         {
             reason = "current_default";
@@ -99,7 +101,7 @@ public readonly record struct FileTransferPayloadEfficiencyProfile(
 
     public static bool AllowExperimentalProfileDuringScreenShare()
     {
-        var value = Environment.GetEnvironmentVariable(AllowScreenShareEnvironmentVariableName);
+        var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(AllowScreenShareEnvironmentVariableName, category: "filetransfer_tuning");
         return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);

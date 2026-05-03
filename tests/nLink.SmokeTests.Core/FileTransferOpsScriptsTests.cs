@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using NLink.App.Views;
+using NLink.Core.Configuration;
 
 namespace NLink.SmokeTests;
 
@@ -205,6 +206,7 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("FILETRANSFER_NKN_SOAK", scriptText, StringComparison.Ordinal);
         Assert.Contains("FILETRANSFER_NKN_MIXED_SOAK", scriptText, StringComparison.Ordinal);
         Assert.Contains("NLINK_FILETRANSFER_SOAK_AUTOPICK_FILE", scriptText, StringComparison.Ordinal);
+        Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE", scriptText, StringComparison.Ordinal);
         Assert.Contains("Invoke-FileTransferGuiSmokeWithTimeout", scriptText, StringComparison.Ordinal);
         Assert.Contains("Stop-FileTransferProcessTree", scriptText, StringComparison.Ordinal);
         Assert.Contains("gui-smoke-stdout.log", scriptText, StringComparison.Ordinal);
@@ -228,6 +230,7 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("FILETRANSFER_NKN_MIXED_SOAK", scriptText, StringComparison.Ordinal);
         Assert.Contains("Run-ScenarioFileTransferNknSoak", scriptText, StringComparison.Ordinal);
         Assert.Contains("Run-ScenarioFileTransferNknMixedSoak", scriptText, StringComparison.Ordinal);
+        Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE", scriptText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-live-nkn-cycles.jsonl", scriptText, StringComparison.Ordinal);
         Assert.Contains("NLINK_FILETRANSFER_SOAK_STARTUP_TIMEOUT_SECONDS", scriptText, StringComparison.Ordinal);
         Assert.Contains("NLINK_FILETRANSFER_SOAK_PROGRESS_TIMEOUT_SECONDS", scriptText, StringComparison.Ordinal);
@@ -275,6 +278,7 @@ public sealed class FileTransferOpsScriptsTests
     public async Task NativeFileTransferPicker_AutopickFileUsesExistingEnvPathOnly()
     {
         var previous = Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_SOAK_AUTOPICK_FILE");
+        using var unsafeDeveloperMode = ReleaseOverridePolicy.OverrideUnsafeDeveloperModeForTests(true);
         var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-filetransfer-autopick", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
         var payloadPath = Path.Combine(tempRoot, "payload.bin");

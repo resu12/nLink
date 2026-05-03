@@ -58,8 +58,10 @@ Ensure-NknBridgeRuntimeForExe -RepoRoot $repoRoot -ResolvedExePath $resolvedExeP
 $previousScenarioEnv = $env:NLINK_GUI_SMOKE_SCENARIOS
 $previousTransportEnv = $env:NLINK_TRANSPORT
 $previousDurationEnv = $env:NLINK_SCREENSHARE_SOAK_SECONDS
+$previousUnsafeDeveloperModeEnv = $env:NLINK_UNSAFE_DEVELOPER_MODE
 
 try {
+    $env:NLINK_UNSAFE_DEVELOPER_MODE = '1'
     $env:NLINK_GUI_SMOKE_SCENARIOS = 'SCREENSHARE_NKN_SOAK'
     $env:NLINK_TRANSPORT = 'NKN'
     $env:NLINK_SCREENSHARE_SOAK_SECONDS = [string][Math]::Max(1, $DurationSeconds)
@@ -400,5 +402,12 @@ finally {
     }
     else {
         $env:NLINK_SCREENSHARE_SOAK_SECONDS = $previousDurationEnv
+    }
+
+    if ($null -eq $previousUnsafeDeveloperModeEnv) {
+        Remove-Item Env:NLINK_UNSAFE_DEVELOPER_MODE -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:NLINK_UNSAFE_DEVELOPER_MODE = $previousUnsafeDeveloperModeEnv
     }
 }

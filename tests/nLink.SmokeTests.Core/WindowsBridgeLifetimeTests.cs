@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using NLink.Core.Configuration;
 using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
@@ -171,6 +172,7 @@ public sealed class WindowsBridgeLifetimeTests
 
         var previousBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
 
+        using var unsafeDeveloperMode = ReleaseOverridePolicy.OverrideUnsafeDeveloperModeForTests(true);
         try
         {
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", scriptPath);

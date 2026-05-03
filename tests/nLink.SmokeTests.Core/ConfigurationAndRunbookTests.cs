@@ -17,6 +17,7 @@ using NLink.App.ViewModels;
 using NLink.App.Views;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.Configuration;
 using NLink.Core.Diagnostics;
 using NLink.Core.FileTransfer;
 using NLink.Core.Metrics;
@@ -78,12 +79,21 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
 
             Environment.SetEnvironmentVariable(FeatureFlags.AllowInsecureRemoteControlSeqGateOverrideEnvVar, "1");
 
+#if DEBUG
             Assert.False(FeatureFlags.RemoteControlSeqGateEnabled);
+#else
+            Assert.True(FeatureFlags.RemoteControlSeqGateEnabled);
+            using (EnableUnsafeDeveloperModeForTests())
+            {
+                Assert.False(FeatureFlags.RemoteControlSeqGateEnabled);
+            }
+#endif
         }
         finally
         {
             Environment.SetEnvironmentVariable("NLINK_FEATURE_REMOTE_CONTROL_SEQ_GATE", previousSeqGate);
             Environment.SetEnvironmentVariable(FeatureFlags.AllowInsecureRemoteControlSeqGateOverrideEnvVar, previousOptIn);
+            ReleaseOverridePolicy.ResetSuppressedOverridesForTests();
         }
     }
 
@@ -96,6 +106,14 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
 
         Assert.Contains("Transport abuse-resistance limit matrix:", runbook, StringComparison.Ordinal);
         Assert.Contains("NknSignalingTransport` high-priority control queue: `256`", runbook, StringComparison.Ordinal);
+        Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE", runbook, StringComparison.Ordinal);
+        Assert.Contains("file-transfer data-session queue: `512` frames and `32 MiB`", runbook, StringComparison.Ordinal);
+        Assert.Contains("filetransfer_data_session_overflow", runbook, StringComparison.Ordinal);
+        Assert.Contains("ReceiverBufferExhausted", runbook, StringComparison.Ordinal);
+        Assert.Contains("negotiated remote bulk endpoint", runbook, StringComparison.Ordinal);
+        Assert.Contains("`64 KiB` payload cap", runbook, StringComparison.Ordinal);
+        Assert.Contains("`196,606` body bytes before allocation", runbook, StringComparison.Ordinal);
+        Assert.Contains("live NKN file-transfer soak", runbook, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("public release artifacts must be Authenticode-signed before publish", runbook, StringComparison.Ordinal);
         Assert.Contains("Authenticode status is `Valid`", runbook, StringComparison.Ordinal);
         Assert.Contains("security_relevant_overrides", runbook, StringComparison.Ordinal);
@@ -103,6 +121,57 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("high_priority_control_rejected:", runbook, StringComparison.Ordinal);
         Assert.Contains("high_priority_control_coalesced:", runbook, StringComparison.Ordinal);
         Assert.Contains("high_priority_control_dropped_for_stop:", runbook, StringComparison.Ordinal);
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void ReleaseDocs_IncludeUnsafeOverrideAndFileTransferSecurityGates()
+    {
+        var repoRoot = FindRepoRoot();
+        var checklist = File.ReadAllText(Path.Combine(repoRoot, "docs", "release", "rc-validation-checklist.md"));
+        var releaseNotes = File.ReadAllText(Path.Combine(repoRoot, "docs", "releases", "0.6.1.md"));
+        var githubNotes = File.ReadAllText(Path.Combine(repoRoot, "docs", "releases", "0.6.1-github.md"));
+        var readme = File.ReadAllText(Path.Combine(repoRoot, "README.md"));
+
+        Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE", checklist, StringComparison.Ordinal);
+        Assert.Contains("512` frames / `32 MiB", checklist, StringComparison.Ordinal);
+        Assert.Contains("64 KiB", checklist, StringComparison.Ordinal);
+        Assert.Contains("live NKN file-transfer soak", checklist, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("bundled `bridge/win-x64/node.exe`", checklist, StringComparison.Ordinal);
+
+        Assert.Contains("V4-only", releaseNotes, StringComparison.Ordinal);
+        Assert.Contains("explicit accept/decline", releaseNotes, StringComparison.Ordinal);
+        Assert.Contains("session envelope", releaseNotes, StringComparison.Ordinal);
+        Assert.Contains("source/session validation", releaseNotes, StringComparison.Ordinal);
+        Assert.Contains("NKN transport alone", releaseNotes, StringComparison.Ordinal);
+
+        Assert.Contains("V4-only", githubNotes, StringComparison.Ordinal);
+        Assert.Contains("explicit accept/decline", githubNotes, StringComparison.Ordinal);
+        Assert.Contains("session envelope", githubNotes, StringComparison.Ordinal);
+
+        Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE=1", readme, StringComparison.Ordinal);
+        Assert.Contains("session envelope", readme, StringComparison.Ordinal);
+        Assert.Contains("source/session validation", readme, StringComparison.Ordinal);
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void SecurityAuditReport_TreatsFileTransferAsShippedAndResolved()
+    {
+        var report = File.ReadAllText(Path.Combine(FindRepoRoot(), "SECURITY_AUDIT_REPORT.md"));
+        var normalizedReport = report.Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        Assert.Contains("NLINK-SEC-001", report, StringComparison.Ordinal);
+        Assert.Contains("NLINK-SEC-002", report, StringComparison.Ordinal);
+        Assert.Contains("NLINK-SEC-003", report, StringComparison.Ordinal);
+        Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE=1", report, StringComparison.Ordinal);
+        Assert.Contains("file transfer uses the post-handshake session envelope", report, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("V4-only, single-file, explicit accept/decline", report, StringComparison.Ordinal);
+        Assert.Contains("remote clipboard", report, StringComparison.Ordinal);
+        Assert.Contains("## Out Of Scope Features For This Release", normalizedReport, StringComparison.Ordinal);
+        Assert.Contains("\n- remote clipboard\n", normalizedReport, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotMatch("(?is)out of scope[^#]*file transfer", normalizedReport);
+        Assert.DoesNotContain("file transfer looks partially wired", report, StringComparison.OrdinalIgnoreCase);
     }
 
 [Trait("Category", "LegacySmoke")]
@@ -395,6 +464,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
     public void TransportRuntimeConfig_EnvDevLocal_SelectsDevLocal()
     {
         var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         try
         {
             Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
@@ -406,6 +476,227 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         finally
         {
             Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
+        }
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void TransportRuntimeConfig_ReleaseEnvDevLocal_IsIgnoredWithoutUnsafeDeveloperMode()
+    {
+#if DEBUG
+        return;
+#endif
+        var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
+        var bridgeRid = GetCurrentBridgeRidForTests();
+        var bridgeRoot = Path.Combine(AppContext.BaseDirectory, "bridge", bridgeRid);
+
+        using var safeReleaseMode = DisableUnsafeDeveloperModeForTests();
+        try
+        {
+            ReleaseOverridePolicy.ResetSuppressedOverridesForTests();
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            PrepareFakeBridgeBundle(bridgeRoot);
+
+            var config = TransportRuntimeConfig.Select();
+
+            Assert.Equal("NKN", config.Key);
+            Assert.False(config.ForcedByEnvironment);
+            Assert.Contains("NLINK_TRANSPORT:env:transport_devlocal=suppressed", ReleaseOverridePolicy.GetSuppressedOverrideSummaries());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
+            ReleaseOverridePolicy.ResetSuppressedOverridesForTests();
+            CleanupDirectoryIfExists(bridgeRoot);
+            CleanupDirectoryIfExists(Path.Combine(AppContext.BaseDirectory, "bridge"));
+        }
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void NknTransportOptions_ReleaseUnsafeOverrides_AreIgnoredWithoutUnsafeDeveloperMode()
+    {
+#if DEBUG
+        return;
+#endif
+        var previousKeyPath = Environment.GetEnvironmentVariable("NLINK_NKN_KEY_PATH");
+        var previousIdentifier = Environment.GetEnvironmentVariable("NLINK_NKN_IDENTIFIER");
+        var previousPreflight = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED");
+        var previousBulkClients = Environment.GetEnvironmentVariable("NLINK_NKN_BULK_NUM_SUBCLIENTS");
+        var previousFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+
+        using var safeReleaseMode = DisableUnsafeDeveloperModeForTests();
+        try
+        {
+            ReleaseOverridePolicy.ResetSuppressedOverridesForTests();
+            Environment.SetEnvironmentVariable("NLINK_NKN_KEY_PATH", Path.Combine(Path.GetTempPath(), "unsafe-ignored-identity.json"));
+            Environment.SetEnvironmentVariable("NLINK_NKN_IDENTIFIER", "unsafe-ignored-id");
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", "true");
+            Environment.SetEnvironmentVariable("NLINK_NKN_BULK_NUM_SUBCLIENTS", "9");
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", "false");
+
+            var options = NknTransportOptions.Load();
+
+            Assert.DoesNotContain("unsafe-ignored-identity.json", options.KeyPath, StringComparison.OrdinalIgnoreCase);
+            Assert.NotEqual("unsafe-ignored-id", options.Identifier);
+            Assert.False(options.PreflightRpcEnabled);
+            Assert.Equal(4, options.BulkNumSubClients);
+            Assert.True(options.ReceiveStallFileTransferFastRecoveryEnabled);
+            Assert.Contains("NLINK_NKN_KEY_PATH:env:nkn_identity=suppressed", ReleaseOverridePolicy.GetSuppressedOverrideSummaries());
+            Assert.Contains("NLINK_NKN_PREFLIGHT_RPC_ENABLED:env:nkn_tuning=suppressed", ReleaseOverridePolicy.GetSuppressedOverrideSummaries());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_KEY_PATH", previousKeyPath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_IDENTIFIER", previousIdentifier);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", previousPreflight);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BULK_NUM_SUBCLIENTS", previousBulkClients);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", previousFastRecovery);
+            ReleaseOverridePolicy.ResetSuppressedOverridesForTests();
+        }
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void NknTransportOptions_ReleaseUnsafeOverrides_AreHonoredWithUnsafeDeveloperMode()
+    {
+        var previousKeyPath = Environment.GetEnvironmentVariable("NLINK_NKN_KEY_PATH");
+        var previousIdentifier = Environment.GetEnvironmentVariable("NLINK_NKN_IDENTIFIER");
+        var previousPreflight = Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED");
+        var previousBulkClients = Environment.GetEnvironmentVariable("NLINK_NKN_BULK_NUM_SUBCLIENTS");
+        var previousFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
+        try
+        {
+            var keyPath = Path.Combine(Path.GetTempPath(), "unsafe-honored-identity.json");
+            Environment.SetEnvironmentVariable("NLINK_NKN_KEY_PATH", keyPath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_IDENTIFIER", "unsafe-honored-id");
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", "true");
+            Environment.SetEnvironmentVariable("NLINK_NKN_BULK_NUM_SUBCLIENTS", "9");
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", "false");
+
+            var options = NknTransportOptions.Load();
+
+            Assert.Equal(Path.GetFullPath(keyPath), options.KeyPath);
+            Assert.Equal("unsafe-honored-id", options.Identifier);
+            Assert.True(options.PreflightRpcEnabled);
+            Assert.Equal(9, options.BulkNumSubClients);
+            Assert.False(options.ReceiveStallFileTransferFastRecoveryEnabled);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_KEY_PATH", previousKeyPath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_IDENTIFIER", previousIdentifier);
+            Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", previousPreflight);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BULK_NUM_SUBCLIENTS", previousBulkClients);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", previousFastRecovery);
+        }
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void FileTransferPayloadEfficiencyProfile_ReleaseOverrideRequiresUnsafeDeveloperMode()
+    {
+        var previousProfile = Environment.GetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.EnvironmentVariableName);
+
+        try
+        {
+            Environment.SetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.EnvironmentVariableName, nameof(FileTransferPayloadEfficiencyProfileKind.LargeSingle48KiB));
+
+            using (DisableUnsafeDeveloperModeForTests())
+            {
+                var safeProfile = FileTransferPayloadEfficiencyProfile.ResolveRequestedFromEnvironment(out var safeReason);
+#if DEBUG
+                Assert.Equal(FileTransferPayloadEfficiencyProfileKind.LargeSingle48KiB, safeProfile.Kind);
+#else
+                Assert.Equal(FileTransferPayloadEfficiencyProfileKind.Current, safeProfile.Kind);
+                Assert.Equal("current_default", safeReason);
+#endif
+            }
+
+            using (EnableUnsafeDeveloperModeForTests())
+            {
+                var unsafeProfile = FileTransferPayloadEfficiencyProfile.ResolveRequestedFromEnvironment(out var unsafeReason);
+                Assert.Equal(FileTransferPayloadEfficiencyProfileKind.LargeSingle48KiB, unsafeProfile.Kind);
+                Assert.Equal("env_profile", unsafeReason);
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(FileTransferPayloadEfficiencyProfile.EnvironmentVariableName, previousProfile);
+            ReleaseOverridePolicy.ResetSuppressedOverridesForTests();
+        }
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void ReleaseOverridePolicy_BridgePathOverridesRequireUnsafeDeveloperMode()
+    {
+        var previousBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", Path.Combine(Path.GetTempPath(), "unsafe-bridge.js"));
+
+            using (DisableUnsafeDeveloperModeForTests())
+            {
+                ReleaseOverridePolicy.ResetSuppressedOverridesForTests();
+                var safeValue = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", category: "bridge_runtime_path");
+#if DEBUG
+                Assert.EndsWith("unsafe-bridge.js", safeValue, StringComparison.OrdinalIgnoreCase);
+#else
+                Assert.Null(safeValue);
+                Assert.Contains("NLINK_NKN_BRIDGE_PATH:env:bridge_runtime_path=suppressed", ReleaseOverridePolicy.GetSuppressedOverrideSummaries());
+#endif
+            }
+
+            using (EnableUnsafeDeveloperModeForTests())
+            {
+                var unsafeValue = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", category: "bridge_runtime_path");
+                Assert.EndsWith("unsafe-bridge.js", unsafeValue, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", previousBridgePath);
+            ReleaseOverridePolicy.ResetSuppressedOverridesForTests();
+        }
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void InviteLegacyMode_ReleaseOverrideRequiresUnsafeDeveloperMode()
+    {
+        var previousMode = Environment.GetEnvironmentVariable(InviteTokenServiceFactory.InviteModeEnvVar);
+        var previousOptIn = Environment.GetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar);
+
+        try
+        {
+            Environment.SetEnvironmentVariable(InviteTokenServiceFactory.InviteModeEnvVar, InviteTokenServiceFactory.InviteModeLegacySigned);
+            Environment.SetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, "1");
+
+            using (DisableUnsafeDeveloperModeForTests())
+            {
+#if DEBUG
+                Assert.Equal(InviteTokenServiceFactory.InviteModeLegacySigned, InviteTokenServiceFactory.GetInviteMode());
+#else
+                Assert.Equal(InviteTokenServiceFactory.InviteModeIssuedSecret, InviteTokenServiceFactory.GetInviteMode());
+                Assert.False(InviteTokenServiceFactory.IsLegacyInviteModeExplicitlyAllowed());
+#endif
+            }
+
+            using (EnableUnsafeDeveloperModeForTests())
+            {
+                Assert.Equal(InviteTokenServiceFactory.InviteModeLegacySigned, InviteTokenServiceFactory.GetInviteMode());
+                Assert.True(InviteTokenServiceFactory.IsLegacyInviteModeExplicitlyAllowed());
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(InviteTokenServiceFactory.InviteModeEnvVar, previousMode);
+            Environment.SetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, previousOptIn);
+            ReleaseOverridePolicy.ResetSuppressedOverridesForTests();
         }
     }
 

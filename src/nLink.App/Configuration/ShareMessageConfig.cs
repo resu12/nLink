@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text.Json;
+using NLink.Core.Configuration;
 
 namespace NLink.App.Configuration;
 
@@ -34,17 +35,20 @@ public sealed class ShareMessageConfig
 
     public static ShareMessageConfig Load()
     {
-        var env = Environment.GetEnvironmentVariable("NLINK_DOWNLOAD_URL");
+        var env = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_DOWNLOAD_URL", category: "release_content_link");
         if (!string.IsNullOrWhiteSpace(env))
         {
-            var repoEnv = Environment.GetEnvironmentVariable("NLINK_REPO_URL");
+            var repoEnv = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_REPO_URL", category: "release_content_link");
             return new ShareMessageConfig(env, repoEnv);
         }
 
-        var appSettingsValue = AppSettingsJson.TryGet("NLINK_DOWNLOAD_URL") ?? AppSettingsJson.TryGet("nLink:downloadUrl");
-        var repoValue = Environment.GetEnvironmentVariable("NLINK_REPO_URL")
-                        ?? AppSettingsJson.TryGet("NLINK_REPO_URL")
-                        ?? AppSettingsJson.TryGet("nLink:repoUrl");
+        var appSettingsValue =
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_DOWNLOAD_URL", AppSettingsJson.TryGet("NLINK_DOWNLOAD_URL"), category: "release_content_link")
+            ?? ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:downloadUrl", AppSettingsJson.TryGet("nLink:downloadUrl"), category: "release_content_link");
+        var repoValue =
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_REPO_URL", category: "release_content_link")
+            ?? ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_REPO_URL", AppSettingsJson.TryGet("NLINK_REPO_URL"), category: "release_content_link")
+            ?? ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:repoUrl", AppSettingsJson.TryGet("nLink:repoUrl"), category: "release_content_link");
         return new ShareMessageConfig(appSettingsValue, repoValue);
     }
 

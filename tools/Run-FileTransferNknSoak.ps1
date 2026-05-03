@@ -974,6 +974,7 @@ else {
 
 $previousValues = @{}
 foreach ($key in @(
+        'NLINK_UNSAFE_DEVELOPER_MODE',
         'NLINK_GUI_SMOKE_SCENARIOS',
         'NLINK_TRANSPORT',
         'NLINK_FILETRANSFER_SOAK_PAYLOAD_SIZES',
@@ -1005,6 +1006,7 @@ try {
         Ensure-NknBridgeRuntimeForExe -RepoRoot $repoRoot -ResolvedExePath $resolvedExePath
     }
 
+    Set-ProcessEnvironmentValue -Name 'NLINK_UNSAFE_DEVELOPER_MODE' -Value '1'
     Set-ProcessEnvironmentValue -Name 'NLINK_GUI_SMOKE_SCENARIOS' -Value $scenario
     Set-ProcessEnvironmentValue -Name 'NLINK_TRANSPORT' -Value 'NKN'
     Set-ProcessEnvironmentValue -Name 'NLINK_FILETRANSFER_SOAK_PAYLOAD_SIZES' -Value $PayloadSizes

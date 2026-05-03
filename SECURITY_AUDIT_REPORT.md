@@ -18,6 +18,7 @@ For public-release security claims, the following message families must be treat
 - chat
 - remote control
 - screen share
+- file transfer
 - session lifecycle messages such as approve, reject, and session end
 
 At minimum, authenticated post-handshake messages must bind:
@@ -35,24 +36,25 @@ Based on the current code:
 - chat has application-layer encryption and authentication
 - remote control uses the shared post-handshake session-key secure envelope
 - screen share uses the shared post-handshake session-key secure envelope
+- file transfer uses the post-handshake session envelope, transfer/session validation, explicit accept/decline, and negotiated bulk-source binding for V4 data frames
 - lifecycle messages (`approve`, `reject`, and `session_end`) use the shared post-handshake session-key secure envelope
 
 Because of that, the current repository can support this application-layer claim:
 
-- `chat, remote control, screen share, and session lifecycle traffic are protected by nLink after session approval`
+- `chat, remote control, screen share, file transfer, and session lifecycle traffic are protected by nLink after session approval`
 
 ### NKN transport assumptions
 
 The NKN path still relies on transport and local-runtime assumptions that are distinct from nLink's own message crypto:
 
 - the bundled local bridge process is trusted to report the authoritative connected NKN address after `ready`
-- the bundled local bridge process is trusted to forward the reported inbound source identity correctly
+- the bundled local bridge process is trusted to forward transport traffic correctly; nLink file-transfer bulk data now validates against the negotiated remote bulk endpoint rather than accepting bridge-reported source identity as authoritative
 - the bundled local bridge process enforces payload-size limits before dispatch into nLink
 - the underlying NKN transport is still a separate security boundary from the nLink application envelope
 
 The current split is therefore:
 
-- `nLink app-layer security`: post-handshake session-key protection for chat, control, screen share, and lifecycle traffic
+- `nLink app-layer security`: post-handshake session-key protection for chat, control, screen share, file transfer, and lifecycle traffic
 - `transport/runtime assumptions`: bridge correctness, reported source identity fidelity, and transport delivery behavior
 
 ### Release rule
@@ -70,6 +72,9 @@ Current transport-local abuse bounds:
 
 - `NknSignalingTransport` high-priority control queue: `256`
 - `NknSignalingTransport` low-priority control queue: `256`
+- `NknSignalingTransport` file-transfer data-session queue: `512` frames and `32 MiB` estimated queued bytes per active data session
+- file-transfer queue overflow policy: fail closed with `ReceiverBufferExhausted`, log `filetransfer_data_session_overflow`, remove the active data-session registration, and require resume/reopen
+- file-transfer V4 bulk data source binding: expected sender/source comes from the negotiated remote bulk endpoint, not the bridge-reported inbound `source`
 - high-priority overflow policy:
   - `ControlStop` may evict queued non-stop work
   - `ControlDisplayInfo` and `ControlStateSnapshot` may coalesce when full
@@ -79,7 +84,7 @@ Current transport-local abuse bounds:
 
 Hard payload-size enforcement is split across lower layers and must be reviewed together with the transport:
 
-- bridge framing/input-output limits
+- bridge binary framing limits: `64 KiB` payload cap, `65,535` primary text bytes, `65,535` secondary text bytes, and `196,606` body bytes before allocation
 - secure-envelope validation limits
 - screen-share payload and chunk budgets
 
@@ -243,10 +248,16 @@ But it does **not** remove the broader dependency-risk concerns:
 
 ### Areas that still need caution in release messaging
 
-- file transfer looks partially wired rather than clearly shipped as a transport feature
 - remote clipboard looks partially wired rather than clearly shipped as a transport feature
 - the bundled NKN bridge and runtime remain an explicit trust boundary
 - dependency posture is significantly weaker on the bridge side than on the .NET side
+
+### Addressed release blockers in the current repository
+
+- `NLINK-SEC-001`: inbound file-transfer data-session queues are bounded to `512` frames / `32 MiB` and fail closed with `ReceiverBufferExhausted`.
+- `NLINK-SEC-002`: file-transfer V4 bulk data source/sender validation is bound to the negotiated remote bulk endpoint.
+- `NLINK-SEC-003`: bridge binary frame length caps are enforced before body allocation, including the `64 KiB` payload cap.
+- Release-affecting unsafe overrides now require `NLINK_UNSAFE_DEVELOPER_MODE=1` in Release builds; suppressed overrides are logged as `release_override_suppressed` and surfaced through diagnostics evidence.
 
 ## Public Release Blockers
 
@@ -289,15 +300,14 @@ Affected areas:
 
 ## Out Of Scope Features For This Release
 
-The following features do not currently appear fully shipped in the audited code and should be treated as intentionally out of scope unless separately completed and audited:
+The following feature does not currently appear fully shipped in the audited code and should be treated as intentionally out of scope unless separately completed and audited:
 
-- file transfer
 - remote clipboard
 
 Release rule:
 
-- they must not be advertised as shipped secure features in this release
-- they are not blockers if they remain intentionally unshipped and unclaimed
+- it must not be advertised as a shipped secure feature in this release
+- it is not a blocker if it remains intentionally unshipped and unclaimed
 
 ## Uncertain / Requires Manual Verification
 
@@ -393,6 +403,7 @@ Use this checklist as the final release gate for a public build.
 - [ ] Post-handshake chat traffic is application-layer protected
 - [ ] Post-handshake remote-control traffic is application-layer protected
 - [ ] Post-handshake screen-share traffic is application-layer protected
+- [ ] Post-handshake file-transfer traffic is application-layer protected and requires explicit accept/decline
 - [ ] Post-handshake lifecycle traffic (`approve`, `reject`, `session_end`) is application-layer protected
 - [ ] Execute-path authorization is enforced in runtime handlers, not only in UI
 - [ ] Remote control is disabled promptly on revoke
@@ -412,8 +423,12 @@ Use this checklist as the final release gate for a public build.
 - [ ] High-priority control queue is explicitly bounded
 - [ ] Low-priority control queue is explicitly bounded
 - [ ] Screen-share send path is bounded under transport pressure
+- [ ] File-transfer data-session queue is bounded to `512` frames / `32 MiB` and overflows fail closed
+- [ ] File-transfer V4 bulk sender/source is bound to the negotiated remote bulk endpoint
+- [ ] Bridge binary frame caps reject oversized bodies before allocation
 - [ ] Replay windows are enabled for control, lifecycle, and screen-share traffic
 - [ ] Security-relevant risky overrides are surfaced in diagnostics
+- [ ] Release build suppresses unsafe override env/appsettings values unless `NLINK_UNSAFE_DEVELOPER_MODE=1` is set
 - [ ] Release build fails closed on insecure remote-control sequence-gate override
 - [ ] Release runbook includes payload/queue limit matrix
 - [ ] Public release installer signing requirement is documented and enforced in the real release process
@@ -444,7 +459,7 @@ This means the remaining release decision is now driven primarily by the manual-
 
 ### Out-of-scope features must remain unclaimed unless separately verified
 
-- [ ] File transfer is either fully audited as shipped or omitted from release claims
+- [ ] File transfer is claimed only as the audited `0.6.1` shipped scope: V4-only, single-file, explicit accept/decline, session-envelope protected
 - [ ] Remote clipboard is either fully audited as shipped or omitted from release claims
 
 ### Manual verification before GO
@@ -452,6 +467,7 @@ This means the remaining release decision is now driven primarily by the manual-
 - [ ] Real packaged release verifies helper-bound invite flow end to end
 - [ ] Real packaged release verifies approval and remote-control consent flow end to end
 - [ ] Real packaged release verifies secure screen-share flow end to end
+- [ ] Real packaged release verifies secure file-transfer flow end to end with a live NKN soak
 - [ ] Real packaged release verifies no unexpected bridge-side logs outside audited paths
 - [ ] Real release artifacts are Authenticode-signed and signature status is `Valid`
 - [ ] Real packaged release diagnostics are reviewed for accidental identity/session leakage

@@ -724,7 +724,8 @@ public sealed class RemoteControlTransportPriorityLaneTests
             await host.HostByAddressAsync(ct);
             var (rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
                 new PeerAddress(host.LocalPeerAddress),
-                InviteCapabilities.RemoteControl | InviteCapabilities.ScreenShare);
+                InviteCapabilities.RemoteControl | InviteCapabilities.ScreenShare,
+                boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
             await helper.JoinByInviteAsync(rawToken, invite, ct);
 
             var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);

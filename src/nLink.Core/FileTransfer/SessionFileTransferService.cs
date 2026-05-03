@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
+using NLink.Core.Configuration;
 using NLink.Core.Logging;
 
 namespace NLink.Core.FileTransfer;
@@ -2553,7 +2554,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
     private static bool IsV4MixedScreenShareEnabled()
     {
-        var value = Environment.GetEnvironmentVariable(V4MixedScreenShareEnvironmentVariableName);
+        var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(V4MixedScreenShareEnvironmentVariableName, category: "filetransfer_tuning");
         if (string.IsNullOrWhiteSpace(value))
         {
             return true;

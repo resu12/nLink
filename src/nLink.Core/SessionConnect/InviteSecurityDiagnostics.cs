@@ -1,3 +1,5 @@
+using NLink.Core.Configuration;
+
 namespace NLink.Core.SessionConnect;
 
 public readonly record struct InviteSecurityStatus(
@@ -16,7 +18,8 @@ public static class InviteSecurityDiagnostics
 #if DEBUG
         return true;
 #else
-        return ReadEnabled(AllowInsecureUnboundPublicInvitesEnvVar);
+        return ReadEnabled(AllowInsecureUnboundPublicInvitesEnvVar) &&
+               ReleaseOverridePolicy.AllowUnsafeOverride(AllowInsecureUnboundPublicInvitesEnvVar, source: "env", category: "invite_unbound_public");
 #endif
     }
 

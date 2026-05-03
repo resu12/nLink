@@ -334,6 +334,7 @@ public sealed class NknIdentityStoreAndStartupCleanupTests : SessionRuntimeConne
         Directory.CreateDirectory(tempDir);
         PersistenceDiagnostics.ClearForTests();
         var previousIdentifier = Environment.GetEnvironmentVariable("NLINK_NKN_IDENTIFIER");
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         try
         {
             using var localAppDataOverride = NknTransportOptions.OverrideLocalAppDataPathForTests(tempDir);

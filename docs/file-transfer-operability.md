@@ -34,6 +34,7 @@ File-transfer evidence is classified before any tuning is proposed:
 
 - `PASS`: both visible terminal sides completed with `error_code=(none)` and no hard protocol, payload, decode, security, or bridge bulk failure evidence.
 - `FAIL_PROTOCOL_OR_INTEGRITY`: terminal failure, non-empty error code, payload rejection, data-frame decode failure, chunk rejection, file-transfer message rejection, or bridge bulk send failure/clear.
+- Post-completion live NKN sender data frames may be classified as `event=filetransfer_data_frame_ignored` with `reason=post_completion_late_sender_frame`. These are authenticated frames for a recently terminal transfer that arrived after receiver completion/teardown; count them as benign late delivery, not as `FAIL_PROTOCOL_OR_INTEGRITY`.
 - `WARN_RECOVERED_PRESSURE`: completion succeeded but repair, reorder, degraded-mode, or fallback pressure was high enough to explain risk.
 - `WARN_EXTERNAL_TRANSPORT`: completion succeeded but bridge/NKN health churn overlapped the transfer.
 - `WARN_COHABITATION_PRESSURE`: completion succeeded but screen-share media queue pressure overlapped the transfer.

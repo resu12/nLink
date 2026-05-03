@@ -1,4 +1,5 @@
 using System.Text;
+using NLink.Core.Configuration;
 
 namespace NLink.Core.SessionConnect;
 
@@ -58,12 +59,20 @@ public static class InviteTokenServiceFactory
             return InviteModeIssuedSecret;
         }
 
-        return raw.Trim() switch
+        var mode = raw.Trim() switch
         {
             InviteModeLegacySigned => InviteModeLegacySigned,
             InviteModeIssuedSecret => InviteModeIssuedSecret,
             _ => InviteModeIssuedSecret,
         };
+
+        if (string.Equals(mode, InviteModeLegacySigned, StringComparison.Ordinal) &&
+            !ReleaseOverridePolicy.AllowUnsafeOverride(InviteModeEnvVar, source: "env", category: "invite_legacy_mode"))
+        {
+            return InviteModeIssuedSecret;
+        }
+
+        return mode;
     }
 
     public static bool IsLegacySignedInviteModeEnabled()
@@ -83,7 +92,8 @@ public static class InviteTokenServiceFactory
 #if DEBUG
         return true;
 #else
-        return ReadBoolEnvironmentOverride(AllowInsecureLegacyInviteModeEnvVar);
+        return ReadBoolEnvironmentOverride(AllowInsecureLegacyInviteModeEnvVar) &&
+               ReleaseOverridePolicy.AllowUnsafeOverride(AllowInsecureLegacyInviteModeEnvVar, source: "env", category: "invite_legacy_mode");
 #endif
     }
 
@@ -119,7 +129,8 @@ public static class InviteTokenServiceFactory
 
     private static bool IsLegacyInviteSigningExplicitlyAllowed()
     {
-        return ReadBoolEnvironmentOverride(AllowInsecureLegacyInviteSigningEnvVar);
+        return ReadBoolEnvironmentOverride(AllowInsecureLegacyInviteSigningEnvVar) &&
+               ReleaseOverridePolicy.AllowUnsafeOverride(AllowInsecureLegacyInviteSigningEnvVar, source: "env", category: "invite_legacy_signing");
     }
 
     private static IInviteTokenValidator CreateInviteTokenValidator(IInviteTokenCodec codec)
@@ -139,7 +150,7 @@ public static class InviteTokenServiceFactory
 
     private static InviteSecurityStoreOptions CreateInviteSecurityStoreOptions()
     {
-        var configuredPath = Environment.GetEnvironmentVariable(InviteSecurityStorePathEnvVar);
+        var configuredPath = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(InviteSecurityStorePathEnvVar, category: "invite_security_store");
         return new InviteSecurityStoreOptions
         {
             FilePath = string.IsNullOrWhiteSpace(configuredPath) ? null : configuredPath.Trim(),

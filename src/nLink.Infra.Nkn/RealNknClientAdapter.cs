@@ -6,6 +6,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using NLink.Core;
+using NLink.Core.Configuration;
 using NLink.Core.Logging;
 using NLink.Core.Retry;
 using NLink.Core.ScreenShare;
@@ -3059,7 +3060,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
     private string ResolveBridgeScriptPath()
     {
-        var overridePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var overridePath = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", category: "bridge_runtime_path");
         if (!string.IsNullOrWhiteSpace(overridePath))
         {
             var resolved = Path.GetFullPath(overridePath);
@@ -3097,12 +3098,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 #endif
 
         throw new FileNotFoundException(
-            $"NKN bridge script not found. Expected bridge/{rid}/index.js (or macOS Resources/bridge/{rid}/index.js) in app output, or set NLINK_NKN_BRIDGE_PATH.");
+            $"NKN bridge script not found. Expected bridge/{rid}/index.js (or macOS Resources/bridge/{rid}/index.js) in app output.");
     }
 
     private string ResolveNodeExecutablePath()
     {
-        var overridePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var overridePath = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_NODE_PATH", category: "bridge_runtime_path");
         if (!string.IsNullOrWhiteSpace(overridePath))
         {
             var resolved = Path.GetFullPath(overridePath);
@@ -3142,7 +3143,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         return "node";
 #else
         throw new FileNotFoundException(
-            $"Bundled Node runtime not found. Expected bridge/{rid}/{exeName} (or macOS Resources/bridge/{rid}/{exeName}) in app output, or set NLINK_NKN_NODE_PATH.");
+            $"Bundled Node runtime not found. Expected bridge/{rid}/{exeName} (or macOS Resources/bridge/{rid}/{exeName}) in app output.");
 #endif
     }
 

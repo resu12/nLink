@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using NLink.Core;
+using NLink.Core.Configuration;
 using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
 using NLink.Core.RemoteControl;
@@ -17,6 +18,8 @@ namespace NLink.Infra.Nkn;
 
 public sealed partial class NknSignalingTransport
 {
+    private static readonly TimeSpan FileTransferTerminalTombstoneRetention = TimeSpan.FromMinutes(2);
+
     public async Task SendFileTransferOfferAsync(FileTransferOfferV2 message, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -1574,6 +1577,7 @@ public sealed partial class NknSignalingTransport
     private static bool IsBenignLateFileTransferDataFrameRejection(FileTransferDataFrame frame, string failureReason)
         => ((failureReason is "unknown_transfer_id" or "transfer_already_terminal") &&
             (IsReceiverFeedbackDataFrame(frame) || IsTerminalDataFrame(frame) || frame is FileTransferPauseControlFrameV4)) ||
+           (failureReason == "post_completion_late_sender_frame" && IsSenderDataFrame(frame)) ||
            (failureReason == "transfer_already_terminal" && IsSenderDataFrame(frame));
 
     private void HandleControlRequest(string source, Envelope env)
@@ -2952,6 +2956,7 @@ public sealed partial class NknSignalingTransport
             inboundScreenShareReplayWindow.Reset();
             inboundFileTransferReplayWindow.Reset();
             fileTransferStates.Clear();
+            fileTransferTerminalTombstones.Clear();
         }
 
         ResetInboundFileTransferDispatchQueue();
@@ -2984,6 +2989,7 @@ public sealed partial class NknSignalingTransport
             inboundScreenShareReplayWindow.Reset();
             inboundFileTransferReplayWindow.Reset();
             fileTransferStates.Clear();
+            fileTransferTerminalTombstones.Clear();
         }
 
         ResetInboundFileTransferDispatchQueue();
@@ -3290,7 +3296,9 @@ public sealed partial class NknSignalingTransport
 
         if (!hasExisting)
         {
-            failureReason = "unknown_transfer_id";
+            failureReason = IsSenderDataFrame(frame) && IsRecentTerminalFileTransferLocked(transferId, out _)
+                ? "post_completion_late_sender_frame"
+                : "unknown_transfer_id";
             return false;
         }
 
@@ -3462,11 +3470,61 @@ public sealed partial class NknSignalingTransport
     {
         if (nextState.IsTerminal)
         {
+            PruneExpiredFileTransferTerminalTombstonesLocked();
+            fileTransferTerminalTombstones[transferId] = new FileTransferTerminalTombstone(
+                nextState.Phase,
+                DateTimeOffset.UtcNow.UtcTicks);
             fileTransferStates.Remove(transferId);
             return;
         }
 
+        fileTransferTerminalTombstones.Remove(transferId);
         fileTransferStates[transferId] = nextState;
+    }
+
+    private bool IsRecentTerminalFileTransferLocked(string transferId, out FileTransferTransportPhase terminalPhase)
+    {
+        PruneExpiredFileTransferTerminalTombstonesLocked();
+
+        if (fileTransferTerminalTombstones.TryGetValue(transferId, out var tombstone))
+        {
+            terminalPhase = tombstone.Phase;
+            return true;
+        }
+
+        terminalPhase = default;
+        return false;
+    }
+
+    private void PruneExpiredFileTransferTerminalTombstonesLocked()
+    {
+        if (fileTransferTerminalTombstones.Count == 0)
+        {
+            return;
+        }
+
+        var cutoffTicks = DateTimeOffset.UtcNow.UtcTicks - FileTransferTerminalTombstoneRetention.Ticks;
+        List<string>? expiredTransferIds = null;
+        foreach (var entry in fileTransferTerminalTombstones)
+        {
+            if (entry.Value.CompletedUtcTicks > cutoffTicks)
+            {
+                continue;
+            }
+
+            expiredTransferIds ??= new List<string>();
+            expiredTransferIds.Add(entry.Key);
+        }
+
+        if (expiredTransferIds is null)
+        {
+            return;
+        }
+
+        foreach (var expiredTransferId in expiredTransferIds)
+        {
+            fileTransferTerminalTombstones.Remove(expiredTransferId);
+        }
     }
 
     private static bool CanTransitionToTerminalFileTransferState(FileTransferTransportPhase phase)
@@ -3803,6 +3861,10 @@ public sealed partial class NknSignalingTransport
                 FileTransferTransportPhase.Canceled or
                 FileTransferTransportPhase.Failed;
     }
+
+    private readonly record struct FileTransferTerminalTombstone(
+        FileTransferTransportPhase Phase,
+        long CompletedUtcTicks);
 
     private readonly record struct InboundFileTransferDispatchWork(
         long Generation,
@@ -4551,7 +4613,7 @@ public sealed partial class NknSignalingTransport
 
     private static bool IsV4ReceiverFeedbackBulkRedundancyDisabled()
     {
-        var value = Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_V4_FEEDBACK_BULK_REDUNDANCY");
+        var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_FILETRANSFER_V4_FEEDBACK_BULK_REDUNDANCY", category: "filetransfer_tuning");
         return string.Equals(value, "0", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(value, "false", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(value, "off", StringComparison.OrdinalIgnoreCase);

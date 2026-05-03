@@ -17,6 +17,7 @@ using NLink.App.ViewModels;
 using NLink.App.Views;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.Configuration;
 using NLink.Core.Diagnostics;
 using NLink.Core.FileTransfer;
 using NLink.Core.Metrics;
@@ -35,6 +36,12 @@ namespace NLink.SmokeTests;
 
 public abstract class CoreSmokeTestsBase
 {
+internal static IDisposable EnableUnsafeDeveloperModeForTests()
+    => ReleaseOverridePolicy.OverrideUnsafeDeveloperModeForTests(true);
+
+internal static IDisposable DisableUnsafeDeveloperModeForTests()
+    => ReleaseOverridePolicy.OverrideUnsafeDeveloperModeForTests(false);
+
 internal static string FindRepoRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);
@@ -1018,7 +1025,11 @@ internal static async Task<string> ApproveNknSessionAsync(
         helper.Approved += (_, _) => helperApproved.TrySetResult();
 
         await host.HostByAddressAsync(ct);
-        var invite = CreateValidatedInviteForTarget(new PeerAddress(host.LocalPeerAddress), out var rawToken, capabilities);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(host.LocalPeerAddress),
+            out var rawToken,
+            capabilities,
+            boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
         await helper.JoinByInviteAsync(rawToken, invite, ct);
 
         var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(3), ct);
@@ -1090,6 +1101,7 @@ internal static TransportRuntimeConfig CreateDevLocalTestConfig()
     {
         var previous = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
 
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         try
         {
             Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
@@ -1193,6 +1205,7 @@ internal static NknTransportOptions LoadNknOptionsWithOverrides(string keyPath, 
         var prevKeyPath = Environment.GetEnvironmentVariable("NLINK_NKN_KEY_PATH");
         var prevIdentifier = Environment.GetEnvironmentVariable("NLINK_NKN_IDENTIFIER");
 
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         try
         {
             Environment.SetEnvironmentVariable("NLINK_NKN_KEY_PATH", keyPath);
@@ -1230,6 +1243,7 @@ internal static TransportRuntimeConfig CreateNknTestConfig()
     {
         var previous = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
 
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         try
         {
             Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "NKN");

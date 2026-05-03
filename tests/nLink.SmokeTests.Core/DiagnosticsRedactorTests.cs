@@ -45,7 +45,7 @@ public sealed class DiagnosticsRedactorTests
         {
             PersistenceDiagnostics.ClearForTests();
             SessionTimeline.Clear();
-            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", null);
             NknRuntimeDiagnostics.SetLastError("walletSeed: top secret wallet seed");
             NknRuntimeDiagnostics.SetLastDisconnectReason("seedHex=deadbeefdeadbeefdeadbeefdeadbeef");
 
@@ -152,7 +152,7 @@ public sealed class DiagnosticsRedactorTests
                 reason: "UnauthorizedAccessException",
                 userWarning: "Recent targets could not be saved.");
 
-            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", null);
             var config = TransportRuntimeConfig.Select();
             var vm = new DiagnosticsPageViewModel(static () => { }, config);
 

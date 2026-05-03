@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using NLink.Core.Configuration;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -151,7 +152,7 @@ internal static class BridgeSelfTestRunner
 
     private static string ResolveBridgeScriptPath(string rid)
     {
-        var overridePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var overridePath = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", category: "bridge_runtime_path");
         if (!string.IsNullOrWhiteSpace(overridePath))
         {
             var resolved = Path.GetFullPath(overridePath);
@@ -193,7 +194,7 @@ internal static class BridgeSelfTestRunner
 
     private static string ResolveNodeExecutablePath(string rid)
     {
-        var overridePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var overridePath = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_NODE_PATH", category: "bridge_runtime_path");
         if (!string.IsNullOrWhiteSpace(overridePath))
         {
             var resolved = Path.GetFullPath(overridePath);

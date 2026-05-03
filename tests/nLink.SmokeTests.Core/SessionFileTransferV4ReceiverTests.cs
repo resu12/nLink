@@ -192,6 +192,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         const int fileSizeBytes = 8 * 1024 * 1024;
         const int chunkSizeBytes = 21 * 1024;
         var previousValue = Environment.GetEnvironmentVariable(envName);
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         Environment.SetEnvironmentVariable(envName, "1");
         try
         {
@@ -243,6 +244,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         const int fileSizeBytes = 8 * 1024 * 1024;
         const int chunkSizeBytes = 21 * 1024;
         var previousValue = Environment.GetEnvironmentVariable(envName);
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         Environment.SetEnvironmentVariable(envName, "1");
         try
         {
@@ -768,6 +770,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         const int chunkSize = 4;
         const int chunkCount = 130;
         var previousValue = Environment.GetEnvironmentVariable(envName);
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         Environment.SetEnvironmentVariable(envName, "0");
         try
         {
@@ -817,6 +820,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         const int chunkSize = 4;
         const int chunkCount = 80;
         var previousValue = Environment.GetEnvironmentVariable(envName);
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         Environment.SetEnvironmentVariable(envName, "1");
         try
         {
@@ -888,6 +892,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         const int chunkSize = 4;
         const int chunkCount = 80;
         var previousValue = Environment.GetEnvironmentVariable(envName);
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         Environment.SetEnvironmentVariable(envName, "1");
         try
         {

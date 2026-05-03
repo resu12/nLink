@@ -59,7 +59,8 @@ Notes:
 - Default screensharing uses H.264 video transport, with helper-side recovery protection for broken reference chains.
 - The helper-side cursor overlay, H.264 motion/keyframe safeguards, WGC GPU scaling, and same-apartment Win10 WGC teardown remain enabled.
 - Chat UX keeps `Enter` to send, `Shift+Enter` for a new line, stable pane sizing in chat-only and screen-sharing layouts, and message entry remains available during screen sharing.
-- File transfer in `0.6.1` is single-file only. No folders, drag-and-drop, or resume after restart yet.
+- File transfer in `0.6.1` is V4-only and single-file only. No folders, drag-and-drop, or resume after restart yet.
+- Receiving a file requires explicit accept/decline, and file-transfer data is protected by nLink's session envelope plus source/session validation rather than by assuming NKN transport alone is sufficient.
 - Active file transfers can be paused, resumed, or canceled from either side when file transfer is allowed.
 - Received files are saved into the Windows Downloads folder by default, with a numbered suffix added automatically when the target name already exists.
 - Safe-by-default file size cap for `0.6.1`: `25 GiB`
@@ -222,9 +223,11 @@ Runtime behavior:
 - `Release` builds prefer the bundled bridge runtime (`bridge/<rid>/node(.exe)` + `bridge/<rid>/index.js`)
 - `Debug` builds allow launching `node` from `PATH` for local development
 
-Advanced overrides (optional):
+Advanced overrides (developer/test only):
 - `NLINK_NKN_NODE_PATH`
 - `NLINK_NKN_BRIDGE_PATH`
+
+In `Release` builds, unsafe transport, bridge path, NKN topology/recovery, file-transfer tuning, unsafe media, and release-link environment/appsettings overrides are ignored unless `NLINK_UNSAFE_DEVELOPER_MODE=1` is set for that developer test process. Public release validation should use the bundled bridge/runtime and keep the operator shell free of unsafe override variables.
 
 ### Manual NKN Integration Test (Not CI)
 
@@ -234,6 +237,7 @@ Setup:
 1. Enable NKN transport:
    `set NLINK_TRANSPORT=NKN`
 2. (Optional) Set a seed RPC endpoint:
+   `set NLINK_UNSAFE_DEVELOPER_MODE=1`
    `set NLINK_NKN_SEED_RPC=<rpc-host:port>`
 
 Run the test (same PC, two app instances):

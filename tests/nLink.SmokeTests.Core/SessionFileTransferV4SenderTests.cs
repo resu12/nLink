@@ -49,6 +49,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         const string transferId = "transfer_v4_sender_mixed_disabled";
         const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
         var previousValue = Environment.GetEnvironmentVariable(envName);
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         Environment.SetEnvironmentVariable(envName, "0");
         try
         {
@@ -91,6 +92,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         const string transferId = "transfer_v4_sender_mixed_flag_on";
         const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
         var previousValue = Environment.GetEnvironmentVariable(envName);
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         Environment.SetEnvironmentVariable(envName, "1");
         try
         {
@@ -159,6 +161,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         const string transferId = "transfer_v4_sender_mixed_latched";
         const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
         var previousValue = Environment.GetEnvironmentVariable(envName);
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         Environment.SetEnvironmentVariable(envName, "1");
         try
         {
@@ -221,6 +224,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         const string transferId = "transfer_v4_sender_mixed_degraded";
         const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
         var previousValue = Environment.GetEnvironmentVariable(envName);
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         Environment.SetEnvironmentVariable(envName, "1");
         try
         {
@@ -491,6 +495,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         const string transferId = "transfer_v4_sender_batch_cap";
         const string envName = "NLINK_FILETRANSFER_V4_MAX_BATCH_SEGMENTS";
         var previousValue = Environment.GetEnvironmentVariable(envName);
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         Environment.SetEnvironmentVariable(envName, "2");
         try
         {

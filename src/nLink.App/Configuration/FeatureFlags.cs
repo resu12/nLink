@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using NLink.Core.Configuration;
 
 namespace NLink.App.Configuration;
 
@@ -113,7 +114,13 @@ public static class FeatureFlags
 
         if (defaultValue && !effective)
         {
-            return ReadBoolEnvironmentOverride(insecureOverrideOptInVariable, defaultValue: false)
+            if (!ReleaseOverridePolicy.AllowUnsafeOverride(variableName, source: "env", category: "remote_control_sequence_gate"))
+            {
+                return defaultValue;
+            }
+
+            return ReadBoolEnvironmentOverride(insecureOverrideOptInVariable, defaultValue: false) &&
+                   ReleaseOverridePolicy.AllowUnsafeOverride(insecureOverrideOptInVariable, source: "env", category: "remote_control_sequence_gate")
                 ? effective
                 : defaultValue;
         }

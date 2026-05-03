@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Platform.Storage;
+using NLink.Core.Configuration;
 using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
 
@@ -50,7 +51,7 @@ internal static class NativeFileTransferPicker
     {
         ct.ThrowIfCancellationRequested();
 
-        var path = Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_SOAK_AUTOPICK_FILE");
+        var path = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_FILETRANSFER_SOAK_AUTOPICK_FILE", category: "filetransfer_test_harness");
         if (string.IsNullOrWhiteSpace(path))
         {
             return null;

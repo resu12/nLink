@@ -12,6 +12,7 @@ using NLink.App.Services;
 using NLink.App.Services.ScreenCapture;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.Configuration;
 using NLink.Core.Diagnostics;
 using NLink.Core.Logging;
 using NLink.Core.Metrics;
@@ -801,6 +802,13 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private static string BuildSecurityRelevantOverridesSummary()
     {
         var riskyOverrides = new List<string>();
+
+        if (ReleaseOverridePolicy.UnsafeDeveloperModeEnabled)
+        {
+            riskyOverrides.Add("unsafe_developer_mode=on");
+        }
+
+        riskyOverrides.AddRange(ReleaseOverridePolicy.GetSuppressedOverrideSummaries());
 
         if (!FeatureFlags.RemoteControlSeqGateEnabled)
         {

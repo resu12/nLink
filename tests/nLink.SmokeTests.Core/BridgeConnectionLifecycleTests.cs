@@ -17,6 +17,7 @@ using NLink.App.ViewModels;
 using NLink.App.Views;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.Configuration;
 using NLink.Core.Diagnostics;
 using NLink.Core.FileTransfer;
 using NLink.Core.Metrics;
@@ -35,8 +36,22 @@ namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
 [Trait("Area", "Core")]
-public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTestBase
+public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTestBase, IDisposable
 {
+    private readonly string? previousUnsafeDeveloperMode = Environment.GetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar);
+    private readonly IDisposable unsafeDeveloperModeOverride = EnableUnsafeDeveloperModeForTests();
+
+    public BridgeConnectionLifecycleTests()
+    {
+        Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, "1");
+    }
+
+    public void Dispose()
+    {
+        unsafeDeveloperModeOverride.Dispose();
+        Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, previousUnsafeDeveloperMode);
+    }
+
     [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_Startup_HealthCheck()

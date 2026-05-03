@@ -10,7 +10,7 @@ namespace NLink.SmokeTests;
 
 [Trait("Area", "Core")]
 [Collection(FakeNknNetworkCollection.Name)]
-public sealed class FileTransferSoakRunnerTests
+public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
 {
     [Fact]
     public void Program_Parses_FileTransferSoak_Argument()
@@ -353,6 +353,7 @@ public sealed class FileTransferSoakRunnerTests
         Directory.CreateDirectory(artifactDir);
         const string envName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
         var previousValue = Environment.GetEnvironmentVariable(envName);
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         Environment.SetEnvironmentVariable(envName, "0");
 
         try
