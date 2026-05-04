@@ -1,12 +1,12 @@
 # nLink
 
-nLink is a private, serverless, simple screen sharing application for helping family and friends. No accounts needed.
+nLink is a private, serverless Windows remote-help app for helping family and friends with chat, screen sharing, optional remote control, and single-file transfer. No accounts needed.
 
 Created by Codex/GPT
 
 Powered by NKN. Official website: https://nkn.org/
 
-Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
+Minimal `.NET 8` / Avalonia desktop app for Windows with deterministic smoke tests.
 
 ## Current Release (0.6.2)
 
@@ -233,27 +233,23 @@ In `Release` builds, unsafe transport, bridge path, NKN topology/recovery, file-
 
 ### Manual NKN Integration Test (Not CI)
 
-Use this only as a manual test. Do not add CI tests that depend on real NKN connectivity.
+Use this only as a manual two-instance sanity check. Do not add CI tests that depend on real NKN connectivity. Release builds use the bundled NKN internet transport by default; set overrides only when intentionally testing a custom local environment.
 
 Setup:
-1. Enable NKN transport:
-   `set NLINK_TRANSPORT=NKN`
-2. (Optional) Set a seed RPC endpoint:
+1. (Optional) Set a seed RPC endpoint:
    `set NLINK_UNSAFE_DEVELOPER_MODE=1`
    `set NLINK_NKN_SEED_RPC=<rpc-host:port>`
 
 Run the test (same PC, two app instances):
 1. Start the first app instance:
    `dotnet run --project src/nLink.App -c Release`
-2. Click `I need help`
-3. Copy the helper address from the helper screen, enter that helper address on the helpee screen, and share or copy the invite shown on screen
+2. Click `I want to help` and copy the helper address.
 4. Start the second app instance:
    `dotnet run --project src/nLink.App -c Release`
-5. Click `I want to help someone`
-6. Paste the invite
-7. Click `Connect`
-8. Compare the session verification symbols on both screens, then on the first instance click `Allow`
-9. Send chat messages both ways and confirm they appear on both sides
+5. Click `I need help`, paste the helper address, and click `Request help`.
+6. Accept the incoming request on the helper side.
+7. Compare the session verification symbols on both screens, then click `Allow` on the helpee side.
+8. Send chat messages both ways and confirm they appear on both sides.
 
 If it fails (copy diagnostics):
 1. In the app, open `Diagnostics`
