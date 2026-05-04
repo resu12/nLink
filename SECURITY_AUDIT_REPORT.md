@@ -459,9 +459,12 @@ The following release exceptions are now treated as accepted for this release tr
 
 This means the remaining release decision is now driven primarily by the manual-verification checklist below, not by these exception items being unresolved.
 
-### Out-of-scope features must remain unclaimed unless separately verified
+### Shipped feature claims must stay within audited scope
 
 - [ ] File transfer is claimed only as the audited `0.6.2` shipped scope: V4-only, single-file, explicit accept/decline, session-envelope protected
+
+### Out-of-scope features must remain unclaimed unless separately verified
+
 - [ ] Remote clipboard is either fully audited as shipped or omitted from release claims
 
 ### Manual verification before GO
