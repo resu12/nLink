@@ -1,8 +1,6 @@
 using System.Buffers.Binary;
 using System.IO;
 using System.Text;
-using System.Text.Encodings.Web;
-using System.Text.Json;
 using NLink.Core.Logging;
 
 namespace NLink.Core.FileTransfer;
@@ -11,13 +9,6 @@ public static class FileTransferDataFrameCodec
 {
     private const uint BinaryMagic = 0x3246544E; // "NFT2"
     private const byte BinaryVersion = 1;
-
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-        PropertyNamingPolicy = null,
-        WriteIndented = false,
-    };
 
     public static byte[] Serialize(FileTransferDataFrame frame)
     {
@@ -47,9 +38,7 @@ public static class FileTransferDataFrameCodec
             return false;
         }
 
-        return LooksLikeJson(payload)
-            ? TryDeserializeJson(payload, out frame)
-            : TryDeserializeBinary(payload, out frame);
+        return TryDeserializeBinary(payload, out frame);
     }
 
     private static byte[] SerializeBinary(FileTransferDataFrame frame)
@@ -64,6 +53,11 @@ public static class FileTransferDataFrameCodec
         switch (frame)
         {
             case FileTransferManifestFrameV4 manifest:
+                if (!IsValidV4ManifestTuple(manifest.FileSizeBytes, manifest.ChunkSizeBytes, manifest.ChunkCount))
+                {
+                    throw new InvalidOperationException("V4 manifest chunk tuple was invalid.");
+                }
+
                 WriteString(buffer, manifest.FileName);
                 WriteInt64(buffer, manifest.FileSizeBytes);
                 WriteInt32(buffer, manifest.ChunkSizeBytes);
@@ -371,39 +365,6 @@ public static class FileTransferDataFrameCodec
         return frame is not null && TryNormalizeFrame(frame, out frame);
     }
 
-    private static bool TryDeserializeJson(ReadOnlySpan<byte> utf8Json, out FileTransferDataFrame? frame)
-    {
-        frame = null;
-
-        try
-        {
-            using var document = JsonDocument.Parse(utf8Json.ToArray());
-            if (!document.RootElement.TryGetProperty(nameof(FileTransferDataFrame.Type), out var typeElement))
-            {
-                return false;
-            }
-
-            var type = typeElement.GetString();
-            frame = type switch
-            {
-                FileTransferProtocol.ManifestFrameTypeV4 => JsonSerializer.Deserialize<FileTransferManifestFrameV4>(utf8Json, JsonOptions),
-                FileTransferProtocol.StateFrameTypeV4 => JsonSerializer.Deserialize<FileTransferStateFrameV4>(utf8Json, JsonOptions),
-                FileTransferProtocol.ChunkBatchFrameTypeV4 => JsonSerializer.Deserialize<FileTransferChunkBatchFrameV4>(utf8Json, JsonOptions),
-                FileTransferProtocol.SessionCompleteFrameTypeV4 => JsonSerializer.Deserialize<FileTransferCompleteFrameV4>(utf8Json, JsonOptions),
-                FileTransferProtocol.SessionCancelFrameTypeV4 => JsonSerializer.Deserialize<FileTransferCancelFrameV4>(utf8Json, JsonOptions),
-                FileTransferProtocol.ErrorFrameTypeV4 => JsonSerializer.Deserialize<FileTransferErrorFrameV4>(utf8Json, JsonOptions),
-                FileTransferProtocol.PauseControlFrameTypeV4 => JsonSerializer.Deserialize<FileTransferPauseControlFrameV4>(utf8Json, JsonOptions),
-                _ => null,
-            };
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
-
-        return frame is not null && TryNormalizeFrame(frame, out frame);
-    }
-
     private static bool TryNormalizeFrame(FileTransferDataFrame frame, out FileTransferDataFrame? normalized)
     {
         normalized = null;
@@ -423,10 +384,7 @@ public static class FileTransferDataFrameCodec
         {
             case FileTransferManifestFrameV4 manifest when
                 FileTransferPayloadCodec.TryNormalizeFileName(manifest.FileName, out var fileName) &&
-                manifest.FileSizeBytes > 0 &&
-                manifest.ChunkSizeBytes > 0 &&
-                manifest.ChunkSizeBytes <= FileTransferProtocol.MaxChunkRawBytes &&
-                manifest.ChunkCount > 0 &&
+                IsValidV4ManifestTuple(manifest.FileSizeBytes, manifest.ChunkSizeBytes, manifest.ChunkCount) &&
                 FileTransferPayloadCodec.TryNormalizeSha256(manifest.Sha256Base64, out var hash):
                 normalized = manifest with
                 {
@@ -544,6 +502,28 @@ public static class FileTransferDataFrameCodec
         }
     }
 
+    private static bool IsValidV4ManifestTuple(long fileSizeBytes, int chunkSizeBytes, int chunkCount)
+    {
+        if (fileSizeBytes <= 0 ||
+            chunkSizeBytes <= 0 ||
+            chunkSizeBytes > FileTransferProtocol.MaxChunkRawBytes ||
+            chunkCount <= 0 ||
+            chunkCount > FileTransferProtocol.MaxChunkCountV4)
+        {
+            return false;
+        }
+
+        try
+        {
+            var expectedChunkCount = checked((int)((fileSizeBytes + chunkSizeBytes - 1) / chunkSizeBytes));
+            return expectedChunkCount == chunkCount;
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+    }
+
     private static bool TryNormalizeV4MissingRanges(
         IReadOnlyList<FileTransferRangeV4>? ranges,
         bool allowEmpty,
@@ -625,19 +605,6 @@ public static class FileTransferDataFrameCodec
 
         normalized = merged;
         return allowEmpty || merged.Count > 0;
-    }
-
-    private static bool LooksLikeJson(ReadOnlySpan<byte> payload)
-    {
-        foreach (var value in payload)
-        {
-            if (!char.IsWhiteSpace((char)value))
-            {
-                return value == (byte)'{';
-            }
-        }
-
-        return false;
     }
 
     private static byte GetFrameCode(FileTransferDataFrame frame)

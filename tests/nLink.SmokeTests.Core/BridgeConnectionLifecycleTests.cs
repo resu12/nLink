@@ -17,6 +17,7 @@ using NLink.App.ViewModels;
 using NLink.App.Views;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.Configuration;
 using NLink.Core.Diagnostics;
 using NLink.Core.FileTransfer;
 using NLink.Core.Metrics;
@@ -35,8 +36,22 @@ namespace NLink.SmokeTests;
 
 [Collection(FakeNknNetworkCollection.Name)]
 [Trait("Area", "Core")]
-public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTestBase
+public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTestBase, IDisposable
 {
+    private readonly string? previousUnsafeDeveloperMode = Environment.GetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar);
+    private readonly IDisposable unsafeDeveloperModeOverride = EnableUnsafeDeveloperModeForTests();
+
+    public BridgeConnectionLifecycleTests()
+    {
+        Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, "1");
+    }
+
+    public void Dispose()
+    {
+        unsafeDeveloperModeOverride.Dispose();
+        Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, previousUnsafeDeveloperMode);
+    }
+
     [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task Bridge_Startup_HealthCheck()
@@ -49,9 +64,14 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var bundleDir = ResolveBridgeRuntimeDirectoryForHealthCheck(out var attemptedPath, out var runtimeDirSource);
         Assert.True(bundleDir is not null, $"Bridge runtime not found. Source={runtimeDirSource}, attempted='{attemptedPath}'. Build artifacts/bridge/win-x64 first (run installer/Build-BridgeBundle.ps1).");
         var nodePath = Path.Combine(bundleDir!, "node.exe");
-        var bridgePath = FindFileUpwards(Path.Combine("tools", "nkn-bridge", "index.js")) ?? Path.Combine(bundleDir!, "index.js");
+        var bundledBridgePath = Path.Combine(bundleDir!, "index.js");
+        var bundledManifestPath = Path.Combine(bundleDir!, "bridge-manifest.json");
+        var workspaceBridgePath = FindFileUpwards(Path.Combine("tools", "nkn-bridge", "index.js"));
+        var bridgePath = File.Exists(bundledBridgePath) && File.Exists(bundledManifestPath)
+            ? bundledBridgePath
+            : workspaceBridgePath ?? bundledBridgePath;
         Assert.True(File.Exists(nodePath), $"Bridge runtime not found. Expected bundled node at '{nodePath}'. Run installer/Build-BridgeBundle.ps1.");
-        Assert.True(File.Exists(bridgePath), $"Bridge script not found. Expected workspace tools/nkn-bridge/index.js or bundled bridge script at '{bridgePath}'.");
+        Assert.True(File.Exists(bridgePath), $"Bridge script not found. Expected bundled bridge script at '{bridgePath}' or workspace tools/nkn-bridge/index.js.");
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         try
@@ -2440,59 +2460,6 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             catch
             {
             }
-        }
-    }
-
-    [Trait("Category", "Manual")]
-    [ManualBridgeFact]
-    public async Task Bridge_ProcessKill_RestartsAndUpdatesDiagnostics()
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        var bundleDir = TryFindBridgeBundleDirectory();
-        Assert.True(bundleDir is not null, "Bridge runtime not found. Build artifacts/bridge/win-x64 first (run installer/Build-BridgeBundle.ps1).");
-        var nodePath = Path.Combine(bundleDir!, "node.exe");
-        var bridgePath = Path.Combine(bundleDir!, "index.js");
-        Assert.True(File.Exists(nodePath), $"Missing bundled node runtime: {nodePath}");
-        Assert.True(File.Exists(bridgePath), $"Missing bundled bridge script: {bridgePath}");
-        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
-        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
-        try
-        {
-            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
-            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
-            var options = NknTransportOptions.Load();
-            var identity = new NknIdentity("manual-restart", "manual-restart.fake");
-            using var adapter = new RealNknClientAdapter(identity, options);
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-            await adapter.StartBridgeAsync(cts.Token);
-            await adapter.PingBridgeAsync(cts.Token);
-            var before = NknRuntimeDiagnostics.Snapshot();
-            Assert.True(before.BridgePid > 0, "Bridge PID was not recorded after hello/ping.");
-            using (var bridgeProcess = Process.GetProcessById(before.BridgePid))
-            {
-                bridgeProcess.Kill(entireProcessTree: true);
-            }
-
-            await WaitUntilAsync(() =>
-            {
-                var snap = NknRuntimeDiagnostics.Snapshot();
-                return snap.BridgeRestartCount > before.BridgeRestartCount && snap.BridgePid > 0 && snap.BridgePid != before.BridgePid;
-            }, TimeSpan.FromSeconds(10));
-            var after = NknRuntimeDiagnostics.Snapshot();
-            Assert.True(after.BridgeRestartCount > before.BridgeRestartCount, "Bridge restart count did not increment.");
-            Assert.NotEqual(before.BridgePid, after.BridgePid);
-            Assert.Equal("crash", after.BridgeLastExitReason);
-            await adapter.DisconnectAsync();
-            await WaitUntilAsync(() => !adapter.IsBridgeProcessRunning, TimeSpan.FromSeconds(3));
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
-            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
         }
     }
 

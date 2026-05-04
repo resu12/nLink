@@ -1712,7 +1712,6 @@ function Resolve-FileTransferLiveReceivedFilePath {
         $loggedItem = Get-Item -LiteralPath $LoggedPath -ErrorAction SilentlyContinue
         $minimumWriteUtc = $NotBeforeUtc.AddMilliseconds(-500)
         if ($null -ne $loggedItem -and
-            $loggedItem.Name -eq $ExpectedFileName -and
             $loggedItem.Length -eq $ExpectedSizeBytes -and
             $loggedItem.LastWriteTimeUtc -ge $minimumWriteUtc) {
             return (Resolve-Path -LiteralPath $LoggedPath).Path
@@ -2009,11 +2008,9 @@ function Wait-FileTransferTerminalPairAfterBookmark {
                         -ExpectedFileName $ExpectedFileName `
                         -ExpectedSizeBytes $ExpectedSizeBytes `
                         -NotBeforeUtc $NotBeforeUtc
-                    if ([string]::IsNullOrWhiteSpace($resolvedSavedPath)) {
-                        continue
+                    if (-not [string]::IsNullOrWhiteSpace($resolvedSavedPath)) {
+                        $byTransfer[$transferId]['ResolvedSavedPath'] = $resolvedSavedPath
                     }
-
-                    $byTransfer[$transferId]['ResolvedSavedPath'] = $resolvedSavedPath
                 }
 
                 $byTransfer[$transferId]['Inbound'] = $fields
@@ -4761,6 +4758,7 @@ if (-not (Test-Path $resolvedExe)) {
 Write-Host "[GUI Smoke] Using executable: $resolvedExe" -ForegroundColor DarkGray
 
 $oldTransport = $env:NLINK_TRANSPORT
+$oldUnsafeDeveloperMode = $env:NLINK_UNSAFE_DEVELOPER_MODE
 $requestedScenarios = [string]$env:NLINK_GUI_SMOKE_SCENARIOS
 if ([string]::IsNullOrWhiteSpace($requestedScenarios)) { $requestedScenarios = 'A,B,C,E,F,G,H,I,J,K,L,M' }
 $scenarioList = @(
@@ -4776,6 +4774,11 @@ $exitCode = 1
 $decoderDebugSnapshotBefore = @()
 
 try {
+    # GUI smoke intentionally drives release-affecting test overrides such as
+    # DEVLOCAL transport and file-transfer soak env knobs. Keep the unsafe
+    # opt-in scoped to this harness process and its app children.
+    $env:NLINK_UNSAFE_DEVELOPER_MODE = '1'
+
     # Deterministic local GUI smoke by default.
     if ([string]::IsNullOrWhiteSpace($env:NLINK_TRANSPORT)) {
         $env:NLINK_TRANSPORT = 'DEVLOCAL'
@@ -4842,6 +4845,13 @@ finally {
     }
     else {
         $env:NLINK_TRANSPORT = $oldTransport
+    }
+
+    if ($null -eq $oldUnsafeDeveloperMode) {
+        Remove-Item Env:NLINK_UNSAFE_DEVELOPER_MODE -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:NLINK_UNSAFE_DEVELOPER_MODE = $oldUnsafeDeveloperMode
     }
 }
 

@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using NLink.App.Services;
 using NLink.Core;
+using NLink.Core.Configuration;
 using NLink.Infra.DevLocal;
 using NLink.Infra.Nkn;
 
@@ -176,7 +177,7 @@ public sealed class TransportRuntimeConfig
         var policy = ReadBridgeReusePolicy();
         return new TransportRuntimeConfig(
             key: "NKN",
-            displayName: "Internet connection",
+            displayName: "NKN internet transport",
             buildMode: buildMode,
             envVarValue: normalizedSetting,
             selectionReason: hasExplicitSetting
@@ -227,14 +228,14 @@ public sealed class TransportRuntimeConfig
     private static BridgeReusePolicy ReadBridgeReusePolicy()
     {
         var modeValue =
-            Environment.GetEnvironmentVariable("NLINK_BRIDGE_REUSE_MODE")
-            ?? AppSettingsJson.TryGet("NLINK_BRIDGE_REUSE_MODE")
-            ?? AppSettingsJson.TryGet("nLink:bridgeReuseMode");
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_BRIDGE_REUSE_MODE", category: "bridge_reuse_policy")
+            ?? ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_BRIDGE_REUSE_MODE", AppSettingsJson.TryGet("NLINK_BRIDGE_REUSE_MODE"), category: "bridge_reuse_policy")
+            ?? ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:bridgeReuseMode", AppSettingsJson.TryGet("nLink:bridgeReuseMode"), category: "bridge_reuse_policy");
 
         var timeoutValue =
-            Environment.GetEnvironmentVariable("NLINK_BRIDGE_KEEPALIVE_IDLE_TIMEOUT_SECONDS")
-            ?? AppSettingsJson.TryGet("NLINK_BRIDGE_KEEPALIVE_IDLE_TIMEOUT_SECONDS")
-            ?? AppSettingsJson.TryGet("nLink:bridgeKeepAliveIdleTimeoutSeconds");
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_BRIDGE_KEEPALIVE_IDLE_TIMEOUT_SECONDS", category: "bridge_reuse_policy")
+            ?? ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_BRIDGE_KEEPALIVE_IDLE_TIMEOUT_SECONDS", AppSettingsJson.TryGet("NLINK_BRIDGE_KEEPALIVE_IDLE_TIMEOUT_SECONDS"), category: "bridge_reuse_policy")
+            ?? ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:bridgeKeepAliveIdleTimeoutSeconds", AppSettingsJson.TryGet("nLink:bridgeKeepAliveIdleTimeoutSeconds"), category: "bridge_reuse_policy");
 
         var mode = string.Equals(modeValue, "KeepAlive", StringComparison.OrdinalIgnoreCase)
             ? BridgeReuseMode.KeepAlive
@@ -366,13 +367,27 @@ public sealed class TransportRuntimeConfig
         var envValue = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
         if (!string.IsNullOrWhiteSpace(envValue))
         {
-            return (envValue.Trim(), "env");
+            var trimmed = envValue.Trim();
+            if (string.Equals(trimmed, "DEVLOCAL", StringComparison.OrdinalIgnoreCase) &&
+                !ReleaseOverridePolicy.AllowUnsafeOverride("NLINK_TRANSPORT", source: "env", category: "transport_devlocal"))
+            {
+                return (null, "default");
+            }
+
+            return (trimmed, "env");
         }
 
         var appSettingsValue = AppSettingsJson.TryGet("NLINK_TRANSPORT") ?? AppSettingsJson.TryGet("nLink:transport");
         if (!string.IsNullOrWhiteSpace(appSettingsValue))
         {
-            return (appSettingsValue.Trim(), "appsettings");
+            var trimmed = appSettingsValue.Trim();
+            if (string.Equals(trimmed, "DEVLOCAL", StringComparison.OrdinalIgnoreCase) &&
+                !ReleaseOverridePolicy.AllowUnsafeOverride("NLINK_TRANSPORT", source: "appsettings", category: "transport_devlocal"))
+            {
+                return (null, "default");
+            }
+
+            return (trimmed, "appsettings");
         }
 
         return (null, "default");

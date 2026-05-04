@@ -154,6 +154,7 @@ function Set-ExternalTopologyProfileEnvironment {
     param([Parameter(Mandatory = $true)][string]$Profile)
 
     $keys = @(
+        "NLINK_UNSAFE_DEVELOPER_MODE",
         "NLINK_NKN_SEED_RPC",
         "NLINK_NKN_NUM_SUBCLIENTS",
         "NLINK_NKN_MEDIA_NUM_SUBCLIENTS",
@@ -173,6 +174,7 @@ function Set-ExternalTopologyProfileEnvironment {
         Set-ProcessEnvironmentValue -Name $key -Value $null
     }
 
+    Set-ProcessEnvironmentValue -Name "NLINK_UNSAFE_DEVELOPER_MODE" -Value "1"
     Set-ProcessEnvironmentValue -Name "NLINK_SCREENSHARE_EXTERNAL_TOPOLOGY_PROFILE" -Value $Profile
 
     switch ($Profile) {

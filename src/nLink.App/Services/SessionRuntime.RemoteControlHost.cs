@@ -7435,20 +7435,7 @@ public sealed partial class SessionRuntime
             return true;
         }
 
-        reason = authorization.Failure switch
-        {
-            SessionAuthorizationFailure.SecurityTransportRequired => "authorization_transport_required",
-            SessionAuthorizationFailure.InviteNotValidated => "authorization_invite_not_validated",
-            SessionAuthorizationFailure.HandshakeIncomplete => "authorization_handshake_incomplete",
-            SessionAuthorizationFailure.ApprovalMissing => "authorization_approval_missing",
-            SessionAuthorizationFailure.SessionIdMissing => "authorization_session_missing",
-            SessionAuthorizationFailure.HelperIdentityMissing => "authorization_helper_identity_missing",
-            SessionAuthorizationFailure.SessionMismatch => "authorization_session_mismatch",
-            SessionAuthorizationFailure.HelperIdentityMismatch => "authorization_helper_identity_mismatch",
-            SessionAuthorizationFailure.Expired => "authorization_expired",
-            SessionAuthorizationFailure.CapabilityMissing => "authorization_capability_missing",
-            _ => "authorization_denied",
-        };
+        reason = MapAuthorizationFailureReason(authorization.Failure);
         return false;
     }
 

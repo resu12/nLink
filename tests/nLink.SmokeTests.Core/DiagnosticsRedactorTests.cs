@@ -45,7 +45,7 @@ public sealed class DiagnosticsRedactorTests
         {
             PersistenceDiagnostics.ClearForTests();
             SessionTimeline.Clear();
-            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", null);
             NknRuntimeDiagnostics.SetLastError("walletSeed: top secret wallet seed");
             NknRuntimeDiagnostics.SetLastDisconnectReason("seedHex=deadbeefdeadbeefdeadbeefdeadbeef");
 
@@ -108,6 +108,36 @@ public sealed class DiagnosticsRedactorTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void DiagnosticsRedactor_Redacts_Runtime_Secrets_And_LocalPaths()
+    {
+        var sample = string.Join(Environment.NewLine, new[]
+        {
+            "inviteToken=invite-secret-token",
+            "rootKey=super-secret-root-key",
+            "sessionRootKey=session-root-secret",
+            "fallbackCode=FACE-B00C-1234",
+            "verification_fallback_code=CAFE-BABE-0000",
+            "bridge_script_path=C:\\Users\\Juraj\\Desktop\\Remote help\\tools\\nkn-bridge\\index.js",
+            "bridge_manifest_path=C:\\Users\\Juraj\\Desktop\\Remote help\\tools\\nkn-bridge\\bridge-manifest.json",
+            "file_path=C:\\Users\\Juraj\\Downloads\\received.exe",
+            "normal=value",
+        });
+
+        var redacted = DiagnosticsRedactor.Redact(sample);
+
+        Assert.DoesNotContain("invite-secret-token", redacted, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("super-secret-root-key", redacted, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("session-root-secret", redacted, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("FACE-B00C-1234", redacted, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("CAFE-BABE-0000", redacted, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Remote help", redacted, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("received.exe", redacted, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("normal=value", redacted, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", redacted, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void DiagnosticsCopy_IncludesBestEffortNotice_AndPersistenceSummary()
     {
         var previousTransport = Environment.GetEnvironmentVariable("NLINK_TRANSPORT");
@@ -122,7 +152,7 @@ public sealed class DiagnosticsRedactorTests
                 reason: "UnauthorizedAccessException",
                 userWarning: "Recent targets could not be saved.");
 
-            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", null);
             var config = TransportRuntimeConfig.Select();
             var vm = new DiagnosticsPageViewModel(static () => { }, config);
 

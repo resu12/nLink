@@ -174,10 +174,14 @@ function Read-FileTransferLogEvents {
 
 function Get-FileTransferEventField {
     param(
-        [Parameter(Mandatory = $true)]$Event,
+        $Event,
         [Parameter(Mandatory = $true)][string]$Name,
         [string]$Default = ''
     )
+
+    if ($null -eq $Event) {
+        return $Default
+    }
 
     if ($null -ne $Event.Fields -and $Event.Fields.ContainsKey($Name)) {
         return [string]$Event.Fields[$Name]
@@ -188,7 +192,7 @@ function Get-FileTransferEventField {
 
 function Get-FileTransferEventInt64Field {
     param(
-        [Parameter(Mandatory = $true)]$Event,
+        $Event,
         [Parameter(Mandatory = $true)][string]$Name,
         [long]$Default = 0
     )

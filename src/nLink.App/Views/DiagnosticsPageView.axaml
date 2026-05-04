@@ -229,18 +229,18 @@
                                            Text="A custom or migrated screen share preset is active. Apply Balanced to return to the default support baseline."
                                            IsVisible="{Binding ShowScreenShareResetHint}"
                                            TextWrapping="Wrap"/>
-                                <Grid ColumnDefinitions="*,*"
-                                      ColumnSpacing="8"
-                                      Margin="0,4,0,0">
-                                    <Button Grid.Column="0"
-                                            Classes="appButton secondaryButton compactButton"
-                                            Content="Apply balanced"
+                                <StackPanel Spacing="8"
+                                            Margin="0,4,0,0">
+                                    <Button Classes="appButton secondaryButton compactButton"
+                                            Content="Balanced"
                                             Command="{Binding ApplyBalancedScreenSharePresetCommand}"/>
-                                    <Button Grid.Column="1"
-                                            Classes="appButton secondaryButton compactButton"
-                                            Content="Apply CPU saver"
-                                            Command="{Binding ApplyLowEndScreenSharePresetCommand}"/>
-                                </Grid>
+                                    <Button Classes="appButton secondaryButton compactButton"
+                                            Content="High quality"
+                                            Command="{Binding ApplyHighQualityScreenSharePresetCommand}"/>
+                                    <Button Classes="appButton secondaryButton compactButton"
+                                            Content="High performance"
+                                            Command="{Binding ApplyHighPerformanceScreenSharePresetCommand}"/>
+                                </StackPanel>
                                 <TextBlock Classes="appMuted"
                                            Text="{Binding ScreenShareCaptureEnvHint}"
                                            FontSize="12"

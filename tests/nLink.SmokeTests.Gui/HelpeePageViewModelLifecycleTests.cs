@@ -14,6 +14,28 @@ namespace NLink.SmokeTests;
 [Trait("Area", "Gui")]
 public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
 {
+    private static async Task BindHelperIdentityAndWaitForShareInviteAsync(
+        SessionRuntime runtime,
+        HelpeePageViewModel helpee,
+        PeerAddress? helperIdentity = null,
+        PeerAddress? helperTarget = null,
+        string? normalizedInputOverride = null)
+    {
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Waiting && runtime.CurrentLocalPeerAddress is not null,
+            TimeSpan.FromSeconds(3));
+
+        var boundIdentity = helperIdentity ?? new PeerAddress("nlink-helper.gui-smoke." + Guid.NewGuid().ToString("N"));
+        var boundTarget = helperTarget ?? boundIdentity;
+        helpee.SetVerifiedInviteHelperIdentity(
+            boundIdentity,
+            helperTargetAddress: boundTarget,
+            refreshInvite: true,
+            normalizedInputOverride: normalizedInputOverride);
+
+        await WaitUntilAsync(() => helpee.HasShareInvite, TimeSpan.FromSeconds(3));
+    }
+
     [Trait("Category", "Smoke")]
     [Fact]
     public async Task HelpeePageViewModel_OnRemoteSessionEnded_ShowsPeerEndedStatusImmediately()
@@ -198,14 +220,13 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
         const string helperInput = "nhid1-DSP6-JVKB-5MW3-GE9M-71GK-ADHE-60VK-CE36-70WP-ARB2-CMRK-4DB1-60VP-4E9Q-75GK-4D33-6WS3-AE1N-CHJ6-2CV5-6XJ3-2E9H-6XHP-8E1Q-6GSK-GE35-74VK-8DV2-6MWP-8D9M-68W6-ASAN-JYRC-J";
         var helperTarget = new PeerAddress("nlink-helper.target");
 
-        WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
-
         helpee.InviteHelperIdentityInput = helperInput;
-        helpee.SetVerifiedInviteHelperIdentity(
+        BindHelperIdentityAndWaitForShareInviteAsync(
+            runtime,
+            helpee,
             new PeerAddress(helperInput),
-            helperTargetAddress: helperTarget,
-            refreshInvite: true,
-            normalizedInputOverride: helperInput);
+            helperTarget: helperTarget,
+            normalizedInputOverride: helperInput).GetAwaiter().GetResult();
         WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
 
         var requestTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helpee, "RequestHelpAsync"));
@@ -233,12 +254,11 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
                 helperTarget,
                 helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
 
-        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
-
-        helpee.SetVerifiedInviteHelperIdentity(
+        await BindHelperIdentityAndWaitForShareInviteAsync(
+            runtime,
+            helpee,
             helperIdentity,
-            helperTargetAddress: helperTarget,
-            refreshInvite: true,
+            helperTarget: helperTarget,
             normalizedInputOverride: helperBootstrap);
 
         await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
@@ -299,12 +319,11 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
                 helperTarget,
                 helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
 
-        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
-
-        helpee.SetVerifiedInviteHelperIdentity(
+        await BindHelperIdentityAndWaitForShareInviteAsync(
+            runtime,
+            helpee,
             helperIdentity,
-            helperTargetAddress: helperTarget,
-            refreshInvite: true,
+            helperTarget: helperTarget,
             normalizedInputOverride: helperBootstrap);
 
         await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
@@ -359,12 +378,14 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
                 helperTarget,
                 helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
 
-        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Waiting && runtime.CurrentLocalPeerAddress is not null,
+            TimeSpan.FromSeconds(3));
 
         helpee.InviteHelperIdentityInput = helperBootstrap;
-
         await WaitUntilAsync(
             () => helpee.HasVerifiedInviteHelperIdentity &&
+                  helpee.HasShareInvite &&
                   string.Equals(helpee.InviteHelperIdentityInput, helperBootstrap, StringComparison.Ordinal) &&
                   helpee.RequestHelpCommand.CanExecute(null),
             TimeSpan.FromSeconds(2));
@@ -383,10 +404,10 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
 
         const string helperInput = "nhid1-DSP6-JVKB-5MW3-GE9M-71GK-ADHE-60VK-CE36-70WP-ARB2-CMRK-4DB1-60VP-4E9Q-75GK-4D33-6WS3-AE1N-CHJ6-2CV5-6XJ3-2E9H-6XHP-8E1Q-6GSK-GE35-74VK-8DV2-6MWP-8D9M-68W6-ASAN-JYRC-J";
 
-        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
-
         helpee.InviteHelperIdentityInput = helperInput;
-        await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(
+            () => helpee.RequestHelpCommand.CanExecute(null) && helpee.HasShareInvite,
+            TimeSpan.FromSeconds(3));
 
         helpee.InviteHelperIdentityInput = string.Empty;
 
@@ -414,12 +435,11 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
                 helperTarget,
                 helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
 
-        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
-
-        helpee.SetVerifiedInviteHelperIdentity(
+        await BindHelperIdentityAndWaitForShareInviteAsync(
+            runtime,
+            helpee,
             helperIdentity,
-            helperTargetAddress: helperTarget,
-            refreshInvite: true,
+            helperTarget: helperTarget,
             normalizedInputOverride: helperBootstrap);
 
         await WaitUntilAsync(() => helpee.HasShareInvite, TimeSpan.FromSeconds(2));
@@ -654,11 +674,124 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
         Assert.Equal(verificationCode.FallbackCode, helpee.SessionVerificationFallbackCode);
     }
 
-    private static SessionVerificationCode CreateTestSessionVerificationCode()
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public void HelpeePageViewModel_SessionVerificationCode_ReplacesStalePendingApprovalCode()
+    {
+        using var runtime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateDevLocalTestConfig(), runtime);
+        var firstSessionId = new SessionId("session-verification-helpee-first");
+        var secondSessionId = new SessionId("session-verification-helpee-second");
+        var helpeeAddress = new PeerAddress("verification.helpee.freshness");
+        var firstHelperAddress = new PeerAddress("verification.helper.first");
+        var secondHelperAddress = new PeerAddress("verification.helper.second");
+        var firstCode = CreateTestSessionVerificationCode("sun moon star cloud leaf", "1111-2222-3333");
+        var secondCode = CreateTestSessionVerificationCode("key lock wave spark map", "4444-5555-6666");
+
+        SetPendingApprovalState(runtime, firstSessionId, helpeeAddress, firstHelperAddress, firstCode);
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+
+        Assert.True(helpee.ShowSessionVerificationCode);
+        Assert.Equal(firstCode.EmojiSequence, helpee.SessionVerificationEmojiSequence);
+
+        SetPendingApprovalState(runtime, secondSessionId, helpeeAddress, secondHelperAddress, secondCode);
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+
+        Assert.True(helpee.ShowSessionVerificationCode);
+        Assert.Equal(secondCode.EmojiSequence, helpee.SessionVerificationEmojiSequence);
+        Assert.DoesNotContain(firstCode.EmojiSequence, helpee.SessionVerificationEmojiSequence, StringComparison.Ordinal);
+    }
+
+    [Trait("Category", "Smoke")]
+    [Theory]
+    [InlineData(SessionFlowPhase.Ended, SessionUiPhase.Ended, SessionRuntimeState.Rejected, TransportState.Failed)]
+    [InlineData(SessionFlowPhase.Failed, SessionUiPhase.Failed, SessionRuntimeState.Disconnected, TransportState.Failed)]
+    public void HelpeePageViewModel_SessionVerificationCode_HidesAfterPendingApprovalEnds(
+        SessionFlowPhase phase,
+        SessionUiPhase uiPhase,
+        SessionRuntimeState runtimeState,
+        TransportState transportState)
+    {
+        using var runtime = new SessionRuntime(() => new DevLocalTransport());
+        using var helpee = new HelpeePageViewModel(cancelAction: static () => { }, CreateDevLocalTestConfig(), runtime);
+        var sessionId = new SessionId("session-verification-helpee-clears");
+        var helpeeAddress = new PeerAddress("verification.helpee.clears");
+        var helperAddress = new PeerAddress("verification.helper.clears");
+        var verificationCode = CreateTestSessionVerificationCode();
+
+        SetPendingApprovalState(runtime, sessionId, helpeeAddress, helperAddress, verificationCode);
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+        Assert.True(helpee.ShowSessionVerificationCode);
+
+        SetPrivateField(runtime, "state", runtimeState);
+        SetPrivateField(runtime, "transportState", transportState);
+        SetPrivateField(runtime, "pendingApprovalRequest", null);
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = phase,
+                UiPhase = uiPhase,
+                RuntimeState = runtimeState,
+                TransportState = transportState,
+                HasPendingApproval = false,
+                ShowIncomingApproval = false,
+                DisplayStatusText = "Connection ended",
+                DisplayConnectionState = "Disconnected",
+                VerificationCode = verificationCode,
+            });
+
+        InvokePrivateMethod(helpee, "SyncFromRuntime");
+
+        Assert.True(helpee.HasSessionVerificationCode);
+        Assert.False(helpee.ShowSessionVerificationCode);
+    }
+
+    private static void SetPendingApprovalState(
+        SessionRuntime runtime,
+        SessionId sessionId,
+        PeerAddress helpeeAddress,
+        PeerAddress helperAddress,
+        SessionVerificationCode verificationCode)
+    {
+        var pendingApproval = new ApprovalRequest(helperAddress, CapabilityGrant.Chat, sessionId);
+        var verifiedState = CreateVerifiedSecurityState(helpeeAddress, helperAddress, sessionId)
+            .WithVerificationCode(verificationCode);
+
+        SetPrivateField(runtime, "role", SessionRuntimeRole.Helpee);
+        SetPrivateField(runtime, "state", SessionRuntimeState.IncomingJoinRequest);
+        SetPrivateField(runtime, "transportState", TransportState.Handshake);
+        SetPrivateField(runtime, "pendingApprovalRequest", pendingApproval);
+        SetPrivateField(runtime, "sessionSecurityState", verifiedState);
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = SessionFlowPhase.PendingApproval,
+                UiPhase = SessionUiPhase.Waiting,
+                Role = SessionRuntimeRole.Helpee,
+                RuntimeState = SessionRuntimeState.IncomingJoinRequest,
+                TransportState = TransportState.Handshake,
+                HasPendingApproval = true,
+                StatusText = "Waiting for your approval…",
+                DisplayStatusText = "Waiting for your approval…",
+                DisplayConnectionState = "IncomingRequest",
+                ShowIncomingApproval = true,
+                SessionId = sessionId.Value,
+                HelperIdentity = helperAddress.Value,
+                VerificationCode = verificationCode,
+            });
+    }
+
+    private static SessionVerificationCode CreateTestSessionVerificationCode(
+        string emojiSequence = "sun moon star cloud leaf fire key",
+        string fallbackCode = "FACE-B00C-1234")
     {
         return new SessionVerificationCode(
-            "sun moon star cloud leaf fire key",
-            "FACE-B00C-1234",
+            emojiSequence,
+            fallbackCode,
             SessionVerificationCodeDerivation.SourceHandshakeTranscriptV1);
     }
 

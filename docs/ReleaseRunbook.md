@@ -29,6 +29,17 @@ Test ownership lanes are documented in `docs\test-lanes.md`. Prefer named lanes 
 
 Support evidence and bug-report expectations are documented in `docs\supportability.md`.
 
+Release-shell unsafe override preflight:
+
+```powershell
+Get-ChildItem Env:NLINK_UNSAFE_DEVELOPER_MODE,Env:NLINK_TRANSPORT,Env:NLINK_NKN_*,Env:NLINK_FILETRANSFER_*,Env:NLINK_SCREENSHARE_UNSAFE_*,Env:NLINK_BRIDGE_REUSE_MODE,Env:NLINK_BRIDGE_KEEPALIVE_IDLE_TIMEOUT_SECONDS,Env:NLINK_DOWNLOAD_URL,Env:NLINK_REPO_URL -ErrorAction SilentlyContinue
+```
+
+Expected outcome:
+- the public release shell does not have `NLINK_UNSAFE_DEVELOPER_MODE` set
+- no transport, bridge/runtime path, NKN topology/recovery, file-transfer tuning/test, unsafe media, or release-link override env vars are present
+- repo tools that intentionally need unsafe test overrides, such as GUI smoke and live file-transfer soak, set `NLINK_UNSAFE_DEVELOPER_MODE=1` only for their child test/app processes and restore the previous environment afterward
+
 ## Version Bump Locations
 
 Primary version source:
@@ -64,12 +75,16 @@ Expected outcome:
 
 Transport/app-layer security contract:
 - release notes and README must distinguish transport security from nLink application-layer security
-- current code may claim nLink application-layer protection for chat, remote control, screen share, and session lifecycle traffic after approval
+- current code may claim nLink application-layer protection for chat, remote control, screen share, file transfer, and session lifecycle traffic after approval
 - current code must still distinguish those nLink guarantees from the remaining trust placed in the bundled NKN bridge/runtime
+- current code must describe file transfer as V4-only, single-file, explicit accept/decline, and protected by nLink session envelope/source validation rather than by assuming NKN alone is sufficient
 
 Transport abuse-resistance limit matrix:
 - `NknSignalingTransport` high-priority control queue: `256` items max
 - `NknSignalingTransport` low-priority control queue: `256` items max, stale mouse-move entries coalesce to latest
+- `NknSignalingTransport` file-transfer data-session queue: `512` frames and `32 MiB` estimated queued bytes per active data session
+- file-transfer overflow policy: log `filetransfer_data_session_overflow`, fail closed with `ReceiverBufferExhausted`, remove the active data-session registration, and require resume/reopen
+- file-transfer V4 bulk path: sender/source validation is bound to the negotiated remote bulk endpoint
 - `NknSignalingTransport` screen-share outbound gate wait budget: `25 ms`
 - `NknSignalingTransport` replay windows: bounded per control, lifecycle, and screen-share family
 - `NknSignalingTransport` high-lane overflow policy:
@@ -77,10 +92,16 @@ Transport abuse-resistance limit matrix:
   - `ControlDisplayInfo` and `ControlStateSnapshot` may coalesce when full
   - other non-stop high-lane control messages are rejected at capacity
 - bridge/session payload ceilings remain enforced below this file:
-  - bridge input/output framing limits
+  - bridge binary framing: `64 KiB` payload cap, `65,535` primary text bytes, `65,535` secondary text bytes, `196,606` body bytes before allocation
   - secure-envelope validation limits
   - screen-share payload/chunk budgets
 - release validation must review both transport-local queue limits and lower-layer payload limits together
+
+File-transfer release gate:
+- run at least one live NKN file-transfer soak on the packaged app after building the bridge/runtime bundle
+- verify completion/integrity, no `filetransfer_data_session_overflow`, no `filetransfer_message_rejected`, no bridge stdout protocol violations, and no unexpected downgrade from the V4 data path
+- `post_completion_late_sender_frame` ignored frames are allowed only when they occur after terminal completion for a recently completed transfer; retain the count from the soak summary with the release evidence
+- retain `filetransfer-live-nkn-summary.txt`, `filetransfer-live-nkn-cycles.jsonl`, and the retained log slice with the release evidence
 
 ## Packaging
 
@@ -120,16 +141,19 @@ Get-AuthenticodeSignature .\artifacts\portable\helper\win-x64\nLink.exe | Format
 ```
 
 Signing policy:
-- public release artifacts must be Authenticode-signed before publish
-- at minimum:
+- preferred public release artifacts are Authenticode-signed before publish
+- at minimum, signed releases verify:
   - `artifacts\releases\<version>\nLink-Setup-win-x64-<version>.exe`
   - `artifacts\portable\helper\win-x64\nLink.exe`
-- local/manual packaging runs may remain unsigned until the signing step, but an unsigned artifact must not be published as the public release build
+- local/manual packaging runs may remain unsigned until the signing step
+- for `0.6.2`, unsigned public Windows artifacts are an accepted release exception; record that exception in release evidence and do not claim Authenticode signing for those artifacts
 
 Expected outcome:
 - package manifest checks pass
 - release staging contains no `.pdb`, `.xml`, `Avalonia.Diagnostics.dll`, or `nLink.runtimeconfig.dev.json`
-- Authenticode status is `Valid` for the public installer and installed app binary
+- packaged app contains and uses the bundled `bridge\win-x64\node.exe` and `bridge\win-x64\index.js` without relying on `NLINK_NKN_NODE_PATH` or `NLINK_NKN_BRIDGE_PATH`
+- packaged app uses the documented file-transfer queue bounds and bridge binary caps
+- Authenticode status is `Valid` for the public installer and installed app binary, or the unsigned-artifact exception is explicitly recorded for this release
 - installer remains per-user and non-admin (`{localappdata}\Programs\nLink Helper`, `PrivilegesRequired=lowest`)
 - no release packaging step depends on `NLINK_INVITE_MODE=legacy_signed`
 
@@ -204,10 +228,14 @@ Safe invite flow sanity check:
   - README and release notes may describe chat, remote control, screen share, and lifecycle traffic as nLink-managed post-approval application-layer protected traffic
   - transport-level encryption claims are kept distinct from app-layer security claims
   - docs still mention the remaining trust boundary around the bundled NKN bridge/runtime and reported source identities
-- No release validation step or smoke shell sets:
+- Outside scoped child-process harnesses, the operator's release shell has none of:
+  - `NLINK_UNSAFE_DEVELOPER_MODE`
   - `NLINK_ALLOW_INSECURE_LEGACY_INVITE_MODE`
   - `NLINK_ALLOW_INSECURE_LEGACY_INVITE_SIGNING`
   - `NLINK_ALLOW_INSECURE_UNBOUND_PUBLIC_INVITES`
+  - `NLINK_NKN_NODE_PATH`
+  - `NLINK_NKN_BRIDGE_PATH`
+  - any `NLINK_FILETRANSFER_*` tuning/test override outside the scoped soak harness child process
 
 Portable sanity check:
 

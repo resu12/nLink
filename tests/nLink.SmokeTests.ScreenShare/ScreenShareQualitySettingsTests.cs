@@ -1,4 +1,5 @@
 using NLink.App.Configuration;
+using NLink.Core.ScreenShare;
 
 namespace NLink.SmokeTests;
 
@@ -22,7 +23,8 @@ public sealed class ScreenShareQualitySettingsTests
             Assert.Equal(15, migrated.CaptureFramesPerSecond);
             Assert.Equal(8, migrated.TransportFramesPerSecond);
             Assert.Equal(1d, migrated.CaptureScale);
-            Assert.Equal(ScreenShareQualitySettings.TextFirstEffectivePresetKey, migrated.EffectivePresetKey);
+            Assert.Equal(ScreenShareQualitySettings.BalancedPreset.Key, migrated.EffectivePresetKey);
+            Assert.Equal(ScreenShareQualitySettings.BalancedPreset.DisplayName, migrated.EffectivePresetName);
             Assert.True(migrated.LegacyHigherClarityPresetMigrated);
             Assert.True(ScreenShareQualitySettings.HasPendingUserEnvironmentPersistence);
             Assert.Equal("15", Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable));
@@ -33,6 +35,69 @@ public sealed class ScreenShareQualitySettingsTests
         {
             ScreenShareQualitySettings.ResetMigrationStateForTests();
         }
+    }
+
+    [Theory]
+    [Trait("Category", "Smoke")]
+    [InlineData("balanced", "Balanced", 15, 8, 1d)]
+    [InlineData("high_quality", "High quality", 20, 12, 1d)]
+    [InlineData("high_performance", "High performance", 10, 6, 0.6d)]
+    public void GetCurrentEnvironmentState_KnownPresetTuples_ResolveToNamedProfiles(
+        string expectedKey,
+        string expectedName,
+        int captureFramesPerSecond,
+        int transportFramesPerSecond,
+        double captureScale)
+    {
+        using var captureFpsOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareMaxFpsVariable,
+            captureFramesPerSecond.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        using var transportFpsOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable,
+            transportFramesPerSecond.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        using var scaleOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareScaleVariable,
+            captureScale.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture));
+        ScreenShareQualitySettings.ResetMigrationStateForTests();
+
+        try
+        {
+            var current = ScreenShareQualitySettings.GetCurrentEnvironmentState();
+
+            Assert.Equal(captureFramesPerSecond, current.CaptureFramesPerSecond);
+            Assert.Equal(transportFramesPerSecond, current.TransportFramesPerSecond);
+            Assert.Equal(captureScale, current.CaptureScale);
+            Assert.Equal(expectedKey, current.EffectivePresetKey);
+            Assert.Equal(expectedName, current.EffectivePresetName);
+        }
+        finally
+        {
+            ScreenShareQualitySettings.ResetMigrationStateForTests();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void FeatureFlags_ScreenShareTransportMaxFps_AllowsHighQualityCapAndClampsAboveIt()
+    {
+        using var highQualityOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable,
+            "12");
+
+        Assert.Equal(12, FeatureFlags.ScreenShareTransportMaxFps);
+
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable, "30");
+
+        Assert.Equal(12, FeatureFlags.ScreenShareTransportMaxFps);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void ScreenShareProfiles_DoNotExceedTransportPipelineCap()
+    {
+        Assert.True(ScreenShareQualitySettings.BalancedPreset.TransportFramesPerSecond <= ScreenShareFrameSendPipeline.MaxFramesPerSecond);
+        Assert.True(ScreenShareQualitySettings.HighQualityPreset.TransportFramesPerSecond <= ScreenShareFrameSendPipeline.MaxFramesPerSecond);
+        Assert.True(ScreenShareQualitySettings.HighPerformancePreset.TransportFramesPerSecond <= ScreenShareFrameSendPipeline.MaxFramesPerSecond);
     }
 
     [Fact]

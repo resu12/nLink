@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using NLink.Core.Configuration;
 using NLink.Core.Resources;
 
 namespace NLink.Infra.Nkn;
@@ -175,6 +176,7 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         };
 
         startInfo.ArgumentList.Add(bridgePath);
+        ScrubUnsafeBridgeEnvironment(startInfo.Environment);
         startInfo.Environment["NLINK_BRIDGE_OWNER_PID"] = Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
         var newProcess = new Process
@@ -233,6 +235,34 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
 
         callbacks.Log($"Bridge process started (pid={newProcess.Id}, node={Path.GetFileName(nodePath)}, script={bridgePath})");
     }
+
+    private static void ScrubUnsafeBridgeEnvironment(IDictionary<string, string?> environment)
+    {
+        if (ReleaseOverridePolicy.UnsafeOverridesAllowed)
+        {
+            return;
+        }
+
+        var unsafeKeys = environment.Keys
+            .Where(IsUnsafeBridgeEnvironmentKey)
+            .ToArray();
+        foreach (var key in unsafeKeys)
+        {
+            if (!string.IsNullOrWhiteSpace(environment[key]) &&
+                !ReleaseOverridePolicy.AllowUnsafeOverride(key, source: "bridge_env", category: "bridge_child_environment"))
+            {
+                environment.Remove(key);
+            }
+        }
+    }
+
+    private static bool IsUnsafeBridgeEnvironmentKey(string key)
+        => key.StartsWith("NLINK_NKN_", StringComparison.OrdinalIgnoreCase) ||
+           key.StartsWith("NLINK_FILETRANSFER_", StringComparison.OrdinalIgnoreCase) ||
+           key.StartsWith("NLINK_SCREENSHARE_UNSAFE_", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(key, "NLINK_BRIDGE_REUSE_MODE", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(key, "NLINK_BRIDGE_KEEPALIVE_IDLE_TIMEOUT_SECONDS", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(key, "NLINK_TRANSPORT", StringComparison.OrdinalIgnoreCase);
 
     public async Task RequestShutdownAndCleanupAsync(Func<CancellationToken, Task> sendShutdownAsync, CancellationToken ct, string shutdownReason)
     {
@@ -405,8 +435,12 @@ internal sealed class BridgeSupervisor : IBridgeProcessRunner
         }
         catch (Exception ex)
         {
-            callbacks.Log($"Bridge stdout reader failed ({ex.GetType().Name})");
-            callbacks.SignalDisconnected($"stdout_reader_failed:{ex.GetType().Name}");
+            var reason = ex is InvalidDataException
+                ? "bridge_stdout_protocol_violation"
+                : "bridge_stdout_reader_failed";
+            callbacks.Log($"event=bridge_stdout_reader_failed; ex={ex.GetType().Name}; reason={reason}");
+            callbacks.RecordBridgeFailure(reason, "The local helper process wrote invalid stdout data.");
+            callbacks.OnUnexpectedExitDetected($"{reason}:{ex.GetType().Name}");
         }
         finally
         {

@@ -1,16 +1,16 @@
 # nLink
 
-nLink is a private, serverless, simple screen sharing application for helping family and friends. No accounts needed.
+nLink is a private, serverless Windows remote-help app for helping family and friends with chat, screen sharing, optional remote control, and single-file transfer. No accounts needed.
 
 Created by Codex/GPT
 
 Powered by NKN. Official website: https://nkn.org/
 
-Minimal `.NET 8` / Avalonia desktop app (Windows-first) with deterministic smoke tests.
+Minimal `.NET 8` / Avalonia desktop app for Windows with deterministic smoke tests.
 
-## Current Release (0.6.1)
+## Current Release (0.6.2)
 
-`0.6.1` is the current release. It keeps the H.264 screen-sharing default from `0.6.0`, and focuses on file-transfer reliability, session approval clarity, connection lifecycle recovery, and chat usability while screen sharing.
+`0.6.2` is the current release. It keeps the H.264 screen-sharing default from the prior release, and focuses on file-transfer reliability, session approval clarity, connection lifecycle recovery, and chat usability while screen sharing.
 
 ## Quick Start (Windows)
 
@@ -55,15 +55,18 @@ Normal release UX uses a raw helper address and an approval-time session verific
 
 Notes:
 - Windows x64 only
-- Current release (`0.6.1`)
+- Current release (`0.6.2`)
 - Default screensharing uses H.264 video transport, with helper-side recovery protection for broken reference chains.
+- Advanced Diagnostics includes Balanced, High quality, and High performance screen-share presets.
 - The helper-side cursor overlay, H.264 motion/keyframe safeguards, WGC GPU scaling, and same-apartment Win10 WGC teardown remain enabled.
 - Chat UX keeps `Enter` to send, `Shift+Enter` for a new line, stable pane sizing in chat-only and screen-sharing layouts, and message entry remains available during screen sharing.
-- File transfer in `0.6.1` is single-file only. No folders, drag-and-drop, or resume after restart yet.
+- File transfer in `0.6.2` is V4-only and single-file only. No folders, drag-and-drop, or resume after restart yet.
+- Receiving a file requires explicit accept/decline, and file-transfer data is protected by nLink's session envelope plus source/session validation rather than by assuming NKN transport alone is sufficient.
 - Active file transfers can be paused, resumed, or canceled from either side when file transfer is allowed.
 - Received files are saved into the Windows Downloads folder by default, with a numbered suffix added automatically when the target name already exists.
-- Safe-by-default file size cap for `0.6.1`: `25 GiB`
+- Safe-by-default file size cap for `0.6.2`: `25 GiB`
 - Large file transfers over NKN can still be noticeably slower than local or direct network copy. Live screenshare latency can also vary with NKN/network delivery.
+- Release exception: Windows artifacts for `0.6.2` are unsigned; verify downloads with `SHA256SUMS.txt`.
 - Installer path: `%LOCALAPPDATA%\Programs\nLink`
 
 License:
@@ -116,9 +119,9 @@ License:
   `artifacts/releases/<version>/nLink-Portable-win-x64-<version>.zip`
   `artifacts/releases/<version>/nLink-Setup-win-x64-<version>.exe`
 - Final release notes:
-  [`docs/releases/0.6.1.md`](docs/releases/0.6.1.md)
+  [`docs/releases/0.6.2.md`](docs/releases/0.6.2.md)
 - GitHub release body:
-  [`docs/releases/0.6.1-github.md`](docs/releases/0.6.1-github.md)
+  [`docs/releases/0.6.2-github.md`](docs/releases/0.6.2-github.md)
 - RC/final validation checklist:
   [`docs/release/rc-validation-checklist.md`](docs/release/rc-validation-checklist.md)
 
@@ -222,32 +225,31 @@ Runtime behavior:
 - `Release` builds prefer the bundled bridge runtime (`bridge/<rid>/node(.exe)` + `bridge/<rid>/index.js`)
 - `Debug` builds allow launching `node` from `PATH` for local development
 
-Advanced overrides (optional):
+Advanced overrides (developer/test only):
 - `NLINK_NKN_NODE_PATH`
 - `NLINK_NKN_BRIDGE_PATH`
 
+In `Release` builds, unsafe transport, bridge path, NKN topology/recovery, file-transfer tuning, unsafe media, and release-link environment/appsettings overrides are ignored unless `NLINK_UNSAFE_DEVELOPER_MODE=1` is set for that developer test process. Public release validation should use the bundled bridge/runtime and keep the operator shell free of unsafe override variables.
+
 ### Manual NKN Integration Test (Not CI)
 
-Use this only as a manual test. Do not add CI tests that depend on real NKN connectivity.
+Use this only as a manual two-instance sanity check. Do not add CI tests that depend on real NKN connectivity. Release builds use the bundled NKN internet transport by default; set overrides only when intentionally testing a custom local environment.
 
 Setup:
-1. Enable NKN transport:
-   `set NLINK_TRANSPORT=NKN`
-2. (Optional) Set a seed RPC endpoint:
+1. (Optional) Set a seed RPC endpoint:
+   `set NLINK_UNSAFE_DEVELOPER_MODE=1`
    `set NLINK_NKN_SEED_RPC=<rpc-host:port>`
 
 Run the test (same PC, two app instances):
 1. Start the first app instance:
    `dotnet run --project src/nLink.App -c Release`
-2. Click `I need help`
-3. Copy the helper address from the helper screen, enter that helper address on the helpee screen, and share or copy the invite shown on screen
+2. Click `I want to help` and copy the helper address.
 4. Start the second app instance:
    `dotnet run --project src/nLink.App -c Release`
-5. Click `I want to help someone`
-6. Paste the invite
-7. Click `Connect`
-8. Compare the session verification symbols on both screens, then on the first instance click `Allow`
-9. Send chat messages both ways and confirm they appear on both sides
+5. Click `I need help`, paste the helper address, and click `Request help`.
+6. Accept the incoming request on the helper side.
+7. Compare the session verification symbols on both screens, then click `Allow` on the helpee side.
+8. Send chat messages both ways and confirm they appear on both sides.
 
 If it fails (copy diagnostics):
 1. In the app, open `Diagnostics`

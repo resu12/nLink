@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.RegularExpressions;
+using NLink.Core.Configuration;
 using NLink.Core.SessionConnect;
 using Xunit.Abstractions;
 
@@ -37,7 +38,9 @@ internal static class GuiSmokeHarness
         var previousUnboundInviteEnv = Environment.GetEnvironmentVariable(InviteSecurityDiagnostics.AllowInsecureUnboundPublicInvitesEnvVar);
         var previousLegacyInviteModeEnv = Environment.GetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar);
         var previousLegacyInviteSigningEnv = Environment.GetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteSigningEnvVar);
+        var previousUnsafeDeveloperModeEnv = Environment.GetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar);
         Environment.SetEnvironmentVariable("NLINK_GUI_SMOKE_SCENARIOS", string.Join(",", selectedScenarios));
+        Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, "1");
         if (transportOverride is not null)
         {
             Environment.SetEnvironmentVariable("NLINK_TRANSPORT", transportOverride);
@@ -121,6 +124,7 @@ internal static class GuiSmokeHarness
             Environment.SetEnvironmentVariable(InviteSecurityDiagnostics.AllowInsecureUnboundPublicInvitesEnvVar, previousUnboundInviteEnv);
             Environment.SetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, previousLegacyInviteModeEnv);
             Environment.SetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteSigningEnvVar, previousLegacyInviteSigningEnv);
+            Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, previousUnsafeDeveloperModeEnv);
         }
     }
 

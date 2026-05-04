@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using NLink.App.Services;
 using NLink.Core;
+using NLink.Core.Configuration;
 using NLink.Core.Metrics;
 using NLink.Core.Resources;
 using NLink.Core.SessionConnect;
@@ -467,12 +468,14 @@ internal static class ResourceBenchmarkRunner
         {
             var prevKeyPath = Environment.GetEnvironmentVariable("NLINK_NKN_KEY_PATH");
             var prevIdentifier = Environment.GetEnvironmentVariable("NLINK_NKN_IDENTIFIER");
+            var prevUnsafeDeveloperMode = Environment.GetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar);
             try
             {
                 var tempDir = Path.Combine(Path.GetTempPath(), "nlink-resource-identities");
                 Directory.CreateDirectory(tempDir);
                 var keyPath = Path.Combine(tempDir, $"identity-{roleLabel}-{cycleIndex:D4}.json");
                 var identifier = $"nlink-resource-{roleLabel}-{cycleIndex:D4}";
+                Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, "1");
                 Environment.SetEnvironmentVariable("NLINK_NKN_KEY_PATH", keyPath);
                 Environment.SetEnvironmentVariable("NLINK_NKN_IDENTIFIER", identifier);
                 return new NknSignalingTransport();
@@ -481,6 +484,7 @@ internal static class ResourceBenchmarkRunner
             {
                 Environment.SetEnvironmentVariable("NLINK_NKN_KEY_PATH", prevKeyPath);
                 Environment.SetEnvironmentVariable("NLINK_NKN_IDENTIFIER", prevIdentifier);
+                Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, prevUnsafeDeveloperMode);
             }
         }
     }

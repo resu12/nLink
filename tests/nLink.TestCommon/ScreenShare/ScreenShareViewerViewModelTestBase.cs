@@ -43,6 +43,11 @@ internal static bool CurrentFrameWidthEqualsSafely(ScreenShareViewerViewModel vm
         return TryGetFrameWidth(vm.CurrentFrame, out var width) && width == expectedWidth;
     }
 
+internal static bool CurrentFrameWidthAtLeastSafely(ScreenShareViewerViewModel vm, int minimumWidth)
+    {
+        return TryGetFrameWidth(vm.CurrentFrame, out var width) && width >= minimumWidth;
+    }
+
 internal static void AssertCurrentFrameWidthSafely(ScreenShareViewerViewModel vm, int expectedWidth)
     {
         Assert.True(TryGetFrameWidth(vm.CurrentFrame, out var width), "Expected the current frame to be a readable bitmap.");

@@ -31,13 +31,13 @@ internal static partial class DiagnosticsRedactor
     [GeneratedRegex(@"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex PemPrivateKeyBlockRegex();
 
-    [GeneratedRegex(@"(?<prefix>\b(?:seedBase64|seedHex|walletSeed|wallet_seed|seedPhrase|mnemonic|privateKey|private_key|ed25519PrivateKey|walletMnemonic|walletSecret)\b\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\r\n,;]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?<prefix>\b(?:seedBase64|seedHex|walletSeed|wallet_seed|seedPhrase|mnemonic|privateKey|private_key|ed25519PrivateKey|walletMnemonic|walletSecret|inviteToken|invite_token|rootKey|root_key|sessionRootKey|session_root_key|fallbackCode|fallback_code|verificationFallbackCode|verification_fallback_code)\b\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\r\n,;]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex DiagnosticsSecretKeyValueRegex();
 
     [GeneratedRegex(@"(?<prefix>\bwallet\s+seed\b\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\r\n,;]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex WalletSeedPhraseRegex();
 
-    [GeneratedRegex(@"(?<prefix>\b(?:last_bridge_message_source|session_id|expected_session_id|helper_identity|helper|target|source|expected_source|peer_id|reply_to|expected_reply_to|msg_id|run_id)\b\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\r\n,;]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?<prefix>\b(?:last_bridge_message_source|session_id|expected_session_id|helper_identity|helper|target|source|expected_source|peer_id|reply_to|expected_reply_to|msg_id|run_id|local_path|file_path|saved_path|key_path|bridge_script_path|bridge_manifest_path)\b\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\r\n,;]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex DiagnosticsPrivacyMetadataRegex();
 
     [GeneratedRegex(@"\[(?:redacted|REDACTED)\]", RegexOptions.CultureInvariant)]

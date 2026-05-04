@@ -62,11 +62,11 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
 
             releaseUiApply.TrySetResult(true);
             await WaitUntilAsync(
-                () => vm.CurrentFrame is Bitmap current && current.PixelSize.Width >= 1 && vm.IsIdleForDiagnostics,
+                () => CurrentFrameWidthAtLeastSafely(vm, 1) && vm.IsIdleForDiagnostics,
                 TimeSpan.FromSeconds(2));
 
             var metrics = vm.GetMetricsSnapshot();
-            var current = Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
+            Assert.IsAssignableFrom<Bitmap>(vm.CurrentFrame);
             Assert.True(metrics.FramesDecoded >= 1);
             Assert.True(metrics.MaxPendingEncodedDepth >= 1);
             Assert.InRange(metrics.DecodeWorkerDroppedBeforeDecodeCount, 0, 1);
@@ -81,7 +81,7 @@ public sealed class ScreenShareViewerHelperRemoteRecoveryTests : ScreenShareView
             Assert.True(metrics.RecoveryProgressCorridorCount >= 1);
             Assert.True(metrics.RecoveryProgressCorridorAppliedCount >= 1);
             Assert.True(metrics.ProtectedRecoveryDeliveryCount >= 1);
-            Assert.True(current.PixelSize.Width >= 1);
+            Assert.True(CurrentFrameWidthAtLeastSafely(vm, 1));
             var snapshot = vm.GetFrameLossSnapshotForDiagnostics();
             Assert.DoesNotContain(
                 snapshot.RecentLosses,

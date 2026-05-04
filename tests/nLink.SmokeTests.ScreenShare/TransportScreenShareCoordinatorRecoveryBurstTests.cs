@@ -701,7 +701,7 @@ public sealed class TransportScreenShareCoordinatorRecoveryBurstTests : ScreenSh
         maybeLogFreshnessSummary!.Invoke(coordinator, new object[] { "session-recovery-burst-timeout-helper-progress", coordinator.GetMetricsSnapshot(), fakeSource.GetFreshnessMetricsSnapshot(), 0, 0, 0L, 0L, "none", 0L, 250, 70, 100 });
         Assert.Equal("timeout", GetPrivateFieldValue<string>(coordinator, "lastCompletedRecoveryCompletionKind"));
         Assert.Equal(string.Empty, GetPrivateFieldValue<string>(coordinator, "lastCompletedRecoveryAckSource"));
-        var logText = File.ReadAllText(LocalOperationalLog.LogFilePath);
+        var logText = LocalOperationalLog.GetRecentLogText();
         Assert.Contains("event=screenshare_freshness_summary", logText, StringComparison.Ordinal);
         Assert.Contains("recovery_completion_accounting_mismatch=0", logText, StringComparison.Ordinal);
     }

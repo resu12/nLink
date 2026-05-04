@@ -17,6 +17,7 @@ using NLink.App.ViewModels;
 using NLink.App.Views;
 using NLink.Core;
 using NLink.Core.Chat;
+using NLink.Core.Configuration;
 using NLink.Core.Diagnostics;
 using NLink.Core.FileTransfer;
 using NLink.Core.Metrics;
@@ -55,12 +56,13 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
         var previousScreenShareScale = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCALE");
         try
         {
+            ReleaseOverridePolicy.ResetSuppressedOverridesForTests();
             SessionTimeline.Clear();
             SessionTimeline.Record("Started");
             SessionTimeline.Record("Disconnected", "timeout; session_id=session-123; helper_identity=nlink-helper-123");
             NknRuntimeDiagnostics.SetLastError("event=failure; session_id=session-123; source=nlink-source-123");
             NknRuntimeDiagnostics.SetLastDisconnectReason("peer_id=nlink-peer-123; reply_to=req-123");
-            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", null);
             Environment.SetEnvironmentVariable(InviteTokenServiceFactory.InviteModeEnvVar, null);
             Environment.SetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, null);
             Environment.SetEnvironmentVariable(InviteTokenServiceFactory.InviteSigningKeyEnvVar, null);
@@ -102,7 +104,9 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
             Assert.Contains("current_state:", copied!, StringComparison.Ordinal);
             Assert.Contains("session_ui_state:", copied!, StringComparison.Ordinal);
             Assert.Contains("attempt:", copied!, StringComparison.Ordinal);
+            Assert.Contains("runtime_summary:", copied!, StringComparison.Ordinal);
             Assert.Contains("authorization_summary:", copied!, StringComparison.Ordinal);
+            Assert.Contains("last_authorization_denial_reason:", copied!, StringComparison.Ordinal);
             Assert.Contains("session_security_summary:", copied!, StringComparison.Ordinal);
             Assert.Contains("remote_control_summary:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_summary:", copied!, StringComparison.Ordinal);
@@ -114,6 +118,7 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
             Assert.Contains("Transport:", copied!, StringComparison.Ordinal);
             Assert.Contains("Forced by environment:", copied!, StringComparison.Ordinal);
             Assert.Contains("bridge_process_status:", copied!, StringComparison.Ordinal);
+            Assert.Contains("bridge_manifest_summary:", copied!, StringComparison.Ordinal);
             Assert.Contains($"invite_security_mode: {inviteSecurity.Mode}", copied!, StringComparison.Ordinal);
             Assert.Contains($"invite_signing_configuration: {inviteSecurity.SigningConfiguration}", copied!, StringComparison.Ordinal);
             Assert.Contains($"invite_public_flow: {inviteSecurity.PublicInviteFlow}", copied!, StringComparison.Ordinal);
@@ -124,6 +129,10 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
             Assert.Contains("screenshare_messages_sent:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_payload_bytes_sent:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_bridge_bytes_sent:", copied!, StringComparison.Ordinal);
+            Assert.Contains("screenshare_capture_presets:", copied!, StringComparison.Ordinal);
+            Assert.Contains("balanced_default: capture_fps=15, transport_fps=8, scale=1.00", copied!, StringComparison.Ordinal);
+            Assert.Contains("high_quality: capture_fps=20, transport_fps=12, scale=1.00", copied!, StringComparison.Ordinal);
+            Assert.Contains("high_performance: capture_fps=10, transport_fps=6, scale=0.60", copied!, StringComparison.Ordinal);
             Assert.Contains("Screenshare evidence", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_evidence_status:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_operator_verdict:", copied!, StringComparison.Ordinal);
@@ -425,6 +434,46 @@ public void DiagnosticsPageViewModel_UsesSupportFirstLabels_AndHidesEmptyBugRepo
 }
 
 [Fact]
+public void DiagnosticsPageViewModel_ScreenSharePresetCommands_UpdateDisplayedSummary()
+{
+    var previousMaxFps = Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable);
+    var previousTransportMaxFps = Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable);
+    var previousScale = Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareScaleVariable);
+    try
+    {
+        ScreenShareQualitySettings.ResetMigrationStateForTests();
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable, "10");
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable, "8");
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareScaleVariable, "1");
+        var config = CreateDevLocalTestConfig();
+        var changed = new List<string?>();
+        using var vm = new DiagnosticsPageViewModel(
+            static () => { },
+            config,
+            linksConfig: new ShareMessageConfig(null),
+            screenSharePresetPersistence: static (_, _, _, _) => { });
+        vm.PropertyChanged += (_, args) => changed.Add(args.PropertyName);
+
+        Assert.Equal("preset=Custom; capture_fps=10; transport_fps=8; scale=1; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
+        Assert.True(vm.ShowScreenShareResetHint);
+
+        vm.ApplyHighQualityScreenSharePresetCommand.Execute(null);
+
+        Assert.Equal("preset=High quality; capture_fps=20; transport_fps=12; scale=1; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
+        Assert.False(vm.ShowScreenShareResetHint);
+        Assert.Contains(nameof(DiagnosticsPageViewModel.AdvancedScreenShareSettingsSummary), changed);
+        Assert.Contains(nameof(DiagnosticsPageViewModel.ShowScreenShareResetHint), changed);
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable, previousMaxFps);
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable, previousTransportMaxFps);
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareScaleVariable, previousScale);
+        ScreenShareQualitySettings.ResetMigrationStateForTests();
+    }
+}
+
+[Fact]
 public void DiagnosticsPageView_KeepsPrimarySurfaceSupportFocused()
 {
     var viewPath = FindFileUpwards(Path.Combine("src", "nLink.App", "Views", "DiagnosticsPageView.axaml"));
@@ -435,9 +484,12 @@ public void DiagnosticsPageView_KeepsPrimarySurfaceSupportFocused()
     Assert.Contains("Open logs folder", xaml, StringComparison.Ordinal);
     Assert.Contains("Screen share health", xaml, StringComparison.Ordinal);
     Assert.Contains("Advanced diagnostics", xaml, StringComparison.Ordinal);
-    Assert.Contains("Apply CPU saver", xaml, StringComparison.Ordinal);
+    Assert.Contains("Balanced", xaml, StringComparison.Ordinal);
+    Assert.Contains("High quality", xaml, StringComparison.Ordinal);
+    Assert.Contains("High performance", xaml, StringComparison.Ordinal);
     Assert.DoesNotContain("Feature Flags", xaml, StringComparison.Ordinal);
     Assert.DoesNotContain("ScreenShare Capture Tuning", xaml, StringComparison.Ordinal);
+    Assert.DoesNotContain("Apply CPU saver", xaml, StringComparison.Ordinal);
     Assert.DoesNotContain("Apply sharper text", xaml, StringComparison.Ordinal);
 }
 
@@ -489,9 +541,10 @@ public void HangReport_WritesScreenshareEvidenceText()
         var previousScreenShareScale = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCALE");
         var previousScreenShareTransportAutotune = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE");
 
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         try
         {
-            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", null);
             Environment.SetEnvironmentVariable("NLINK_FEATURE_REMOTE_CONTROL_SEQ_GATE", "0");
             Environment.SetEnvironmentVariable(FeatureFlags.AllowInsecureRemoteControlSeqGateOverrideEnvVar, "1");
             Environment.SetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", "true");
@@ -591,6 +644,7 @@ public void HangReport_WritesScreenshareEvidenceText()
         Directory.CreateDirectory(tempDir);
         var keyPath = Path.Combine(tempDir, "identity.json");
 
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
         try
         {
             var uniqueIdentifier = "nkn-init-log-test-" + Guid.NewGuid().ToString("N")[..8];
@@ -694,7 +748,7 @@ public void HangReport_WritesScreenshareEvidenceText()
             Assert.DoesNotContain("identifier=", runtimeSnapshot.LastDisconnectReason, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain(uniqueChatText, runtimeSnapshot.LastDisconnectReason, StringComparison.OrdinalIgnoreCase);
 
-            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", "DEVLOCAL");
+            Environment.SetEnvironmentVariable("NLINK_TRANSPORT", null);
             var config = TransportRuntimeConfig.Select();
             var vm = new DiagnosticsPageViewModel(static () => { }, config);
             string? diagnostics = null;

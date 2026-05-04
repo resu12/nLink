@@ -5,7 +5,6 @@ using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Input;
 using Avalonia.Media;
-using Avalonia.Threading;
 using Avalonia.VisualTree;
 using CommunityToolkit.Mvvm.Input;
 using NLink.App.ViewModels;
@@ -128,7 +127,17 @@ public sealed class ChatViewScrollTests : IClassFixture<ChatViewScrollFixture>
 
                 Assert.NotNull(acceptButton);
                 Assert.True(acceptButton!.IsVisible);
+                Assert.True(acceptButton.IsEnabled);
                 Assert.Equal(transferId, acceptButton.CommandParameter);
+                var riskWarning = host.Window.GetVisualDescendants()
+                    .OfType<TextBlock>()
+                    .FirstOrDefault(textBlock => string.Equals(
+                        AutomationProperties.GetAutomationId(textBlock),
+                        "Chat.FileTransfer.RiskWarning",
+                        StringComparison.Ordinal));
+                Assert.NotNull(riskWarning);
+                Assert.True(riskWarning!.IsVisible);
+                Assert.Contains("run commands", riskWarning.Text, StringComparison.OrdinalIgnoreCase);
 
                 acceptButton.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent, acceptButton));
 
@@ -199,6 +208,65 @@ public sealed class ChatViewScrollTests : IClassFixture<ChatViewScrollFixture>
 
                 var acceptedTransferId = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(2));
                 Assert.Equal(transferId, acceptedTransferId);
+            }
+            finally
+            {
+                host.Window.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ChatView_FileTransferAccept_ClickDoesNotExecute_WhenCommandCanExecuteIsFalse()
+    {
+        await fixture.Session.Dispatch(async () =>
+        {
+            const string transferId = "transfer-pending-disabled";
+            var executeCount = 0;
+            var acceptCommand = new AsyncRelayCommand<string?>(
+                _ =>
+                {
+                    executeCount++;
+                    return Task.CompletedTask;
+                },
+                _ => false);
+            var bindings = new TestChatPanelBindings
+            {
+                InboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(
+                    new FileTransferTransferSnapshot(
+                        SessionId: "session-a",
+                        TransferId: transferId,
+                        Direction: FileTransferDirection.Inbound,
+                        State: FileTransferTransferState.PendingDecision,
+                        FileName: "report.pdf",
+                        FileSizeBytes: 2048,
+                        Sha256Base64: null,
+                        BytesTransferred: 0,
+                        ChunksTransferred: 0,
+                        ChunkCount: 0,
+                        ChunkSizeBytes: 0,
+                        ErrorCode: null,
+                        StatusMessage: null),
+                    acceptCommand,
+                    new AsyncRelayCommand<string?>(_ => Task.CompletedTask),
+                    null),
+            };
+
+            var host = await CreateHostAsync(bindings);
+            try
+            {
+                var acceptButton = GuiTestAssertions.FindVisibleByAutomationId<Button>(
+                    host.Window,
+                    "Chat.FileTransfer.Accept");
+                Assert.True(acceptButton.IsEnabled);
+                Assert.Equal(transferId, acceptButton.CommandParameter);
+
+                acceptButton.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent, acceptButton));
+                await FlushUiAsync();
+
+                Assert.Equal(0, executeCount);
             }
             finally
             {
@@ -677,12 +745,7 @@ public sealed class ChatViewScrollTests : IClassFixture<ChatViewScrollFixture>
     }
 
     private static async Task FlushUiAsync()
-    {
-        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Loaded);
-        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
-        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Render);
-        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
-    }
+        => await GuiTestAssertions.FlushUiAsync();
 
     private static double GetRemainingDistance(ScrollViewer scrollViewer)
     {

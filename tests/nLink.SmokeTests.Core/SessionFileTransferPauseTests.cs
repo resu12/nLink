@@ -187,6 +187,8 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
         Assert.Equal(FileTransferTransferState.Canceled, canceled!.State);
         Assert.True(canceled.IsTerminal);
         Assert.Equal(FileTransferResultCodes.CanceledLocal, canceled.ErrorCode);
+        Assert.False(canceled.IsPaused);
+        Assert.Null(await sender.ResumeTransferAsync(transferId, "resume_after_cancel", CancellationToken.None));
     }
 
     [Fact]
@@ -383,7 +385,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
         await WaitUntilAsync(
             () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 1),
             timeoutMs: 5000);
-        await senderSession.SendAsync(CreateChunkBatch(sessionId, transferId, payload, startChunkIndex: 1, chunkSizeBytes: 4, chunkCount: 1), CancellationToken.None);
+        await senderSession.SendAsync(CreateChunkBatch(sessionId, transferId, payload, startChunkIndex: 1, chunkSizeBytes: 4, chunkCount: 2), CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed, timeoutMs: 5000);
         Assert.Equal(payload, destination.ToArray()[..payload.Length]);
     }
@@ -506,6 +508,8 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
         Assert.NotNull(canceled);
         Assert.Equal(FileTransferTransferState.Canceled, canceled!.State);
         Assert.Contains(receiverTransport.SentCancels, cancel => cancel.TransferId == transferId);
+        Assert.False(canceled.IsPaused);
+        Assert.Null(await receiver.ResumeTransferAsync(transferId, "resume_after_cancel", CancellationToken.None));
     }
 
     [Fact]

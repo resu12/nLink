@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using System.Threading.Channels;
 using FFmpeg.AutoGen;
 using NLink.App.Configuration;
+using NLink.Core.Configuration;
 using NLink.Core.Logging;
 using NLink.Core.ScreenShare;
 
@@ -4248,13 +4249,13 @@ internal sealed partial class MediaFoundationH264FrameEncoder : IWindowsH264Fram
 
     private static bool IsUnsafeDirectNv12PreprocessEnabled()
         => string.Equals(
-            Environment.GetEnvironmentVariable(UnsafeDirectNv12EnvironmentVariableName),
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(UnsafeDirectNv12EnvironmentVariableName, category: "screenshare_unsafe_media"),
             "1",
             StringComparison.Ordinal);
 
     private static bool IsUnsafeFfmpegSwscalePreprocessEnabled()
         => string.Equals(
-            Environment.GetEnvironmentVariable(UnsafeFfmpegSwscaleEnvironmentVariableName),
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(UnsafeFfmpegSwscaleEnvironmentVariableName, category: "screenshare_unsafe_media"),
             "1",
             StringComparison.Ordinal);
 

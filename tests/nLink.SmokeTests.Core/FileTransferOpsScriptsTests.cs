@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using NLink.App.Views;
+using NLink.Core.Configuration;
 
 namespace NLink.SmokeTests;
 
@@ -205,6 +206,7 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("FILETRANSFER_NKN_SOAK", scriptText, StringComparison.Ordinal);
         Assert.Contains("FILETRANSFER_NKN_MIXED_SOAK", scriptText, StringComparison.Ordinal);
         Assert.Contains("NLINK_FILETRANSFER_SOAK_AUTOPICK_FILE", scriptText, StringComparison.Ordinal);
+        Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE", scriptText, StringComparison.Ordinal);
         Assert.Contains("Invoke-FileTransferGuiSmokeWithTimeout", scriptText, StringComparison.Ordinal);
         Assert.Contains("Stop-FileTransferProcessTree", scriptText, StringComparison.Ordinal);
         Assert.Contains("gui-smoke-stdout.log", scriptText, StringComparison.Ordinal);
@@ -228,6 +230,7 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("FILETRANSFER_NKN_MIXED_SOAK", scriptText, StringComparison.Ordinal);
         Assert.Contains("Run-ScenarioFileTransferNknSoak", scriptText, StringComparison.Ordinal);
         Assert.Contains("Run-ScenarioFileTransferNknMixedSoak", scriptText, StringComparison.Ordinal);
+        Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE", scriptText, StringComparison.Ordinal);
         Assert.Contains("filetransfer-live-nkn-cycles.jsonl", scriptText, StringComparison.Ordinal);
         Assert.Contains("NLINK_FILETRANSFER_SOAK_STARTUP_TIMEOUT_SECONDS", scriptText, StringComparison.Ordinal);
         Assert.Contains("NLINK_FILETRANSFER_SOAK_PROGRESS_TIMEOUT_SECONDS", scriptText, StringComparison.Ordinal);
@@ -275,6 +278,7 @@ public sealed class FileTransferOpsScriptsTests
     public async Task NativeFileTransferPicker_AutopickFileUsesExistingEnvPathOnly()
     {
         var previous = Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_SOAK_AUTOPICK_FILE");
+        using var unsafeDeveloperMode = ReleaseOverridePolicy.OverrideUnsafeDeveloperModeForTests(true);
         var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-filetransfer-autopick", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(tempRoot);
         var payloadPath = Path.Combine(tempRoot, "payload.bin");
@@ -1163,6 +1167,53 @@ public sealed class FileTransferOpsScriptsTests
         var lines = BuildCleanCompletedTransferFixture("transfer_reject")
             .Append(LogLine("event=filetransfer_transport_payload_rejected; transport=nkn; transfer_id=transfer_reject; message_type=file_transfer_data_frame; frame_type=filetransfer.chunk_batch.v4; lane=bulk; bridge_command_bytes=70000; max_allowed_bytes=65536"))
             .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("stability-gates-summary.txt", verdict["next_artifact"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostTerminalUnknownTransferDataFrameReject_DoesNotFailCleanCompletion()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_post_terminal_cleanup_reject";
+        var lines = BuildCleanCompletedV4TransferFixture(transferId)
+            .Append(LogLine($"event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=unknown_transfer_id; session_id=sess_a; transfer_id={transferId}; source=nlink-helper-bulk.test; msg_id=late_frame_after_terminal"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+
+        var budget = ReadArtifactReport(result.ArtifactDir, "transport-budget-summary.txt");
+        Assert.Equal("1", budget["message_rejected_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PreTerminalUnknownTransferDataFrameReject_RemainsProtocolFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_pre_terminal_unknown_reject";
+        var lines = BuildCleanCompletedV4TransferFixture(transferId).ToList();
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.Insert(
+            firstTerminalIndex,
+            LogLine($"event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=unknown_transfer_id; session_id=sess_a; transfer_id={transferId}; source=nlink-helper-bulk.test; msg_id=early_frame_before_terminal"));
 
         var result = await RunAnalyzeFixtureAsync(lines);
 

@@ -247,13 +247,15 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
         await fixture.Session.Dispatch(async () =>
         {
             EnsureAppServices();
-            var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+            var transportConfig = CreateDevLocalTestConfig();
             var network = new FakeSessionTransportNetwork();
             using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-approval-ui-" + Guid.NewGuid().ToString("N")));
             using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-approval-ui-" + Guid.NewGuid().ToString("N")));
             using var helpee = new HelpeePageViewModel(cancelAction: static () =>
             {
             }, transportConfig, helpeeRuntime);
+            var helperIdentity = new PeerAddress("helper-approval-ui-bound-" + Guid.NewGuid().ToString("N"));
+            helpee.SetVerifiedInviteHelperIdentity(helperIdentity, helperTargetAddress: helperIdentity, refreshInvite: true);
             await WaitUntilAsync(() => !string.IsNullOrWhiteSpace(helpee.ShareInvite), TimeSpan.FromSeconds(3));
             await helperRuntime.StartHelperAsync(new NLink.Core.SessionConnect.PeerAddress(helpeeRuntime.CurrentLocalPeerAddress!.Value.Value), CancellationToken.None);
             await WaitUntilAsync(() => helpee.IsIncomingRequestView && helpee.ShowIncomingRequestPanel && helpee.HasIncomingHelperVerificationCode && helpee.ShowIncomingRequestTimeout && helpee.ShowSessionVerificationCode, TimeSpan.FromSeconds(3));
@@ -297,6 +299,7 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
                 var declineButton = FindFirstVisibleControlByAutomationId(window, "Helpee.Decline") as Button;
                 Assert.NotNull(allowButton);
                 Assert.NotNull(declineButton);
+                Assert.True(allowButton!.IsEnabled);
                 Assert.True(Math.Abs(allowButton!.Bounds.Y - declineButton!.Bounds.Y) < 2, $"Expected approval actions on the same row, got Y={allowButton.Bounds.Y:N1} and {declineButton.Bounds.Y:N1}.");
                 Assert.Null(FindFirstControlByAutomationId(window, "Helpee.IncomingHelperIdentity"));
                 Assert.Null(FindFirstControlByAutomationId(window, "Helpee.IncomingSessionId"));
@@ -319,13 +322,15 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
         await fixture.Session.Dispatch(async () =>
         {
             EnsureAppServices();
-            var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+            var transportConfig = CreateDevLocalTestConfig();
             var network = new FakeSessionTransportNetwork();
             using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-approval-disable-" + Guid.NewGuid().ToString("N")));
             using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-approval-disable-" + Guid.NewGuid().ToString("N")));
             using var helpee = new HelpeePageViewModel(cancelAction: static () =>
             {
             }, transportConfig, helpeeRuntime);
+            var helperIdentity = new PeerAddress("helper-approval-disable-bound-" + Guid.NewGuid().ToString("N"));
+            helpee.SetVerifiedInviteHelperIdentity(helperIdentity, helperTargetAddress: helperIdentity, refreshInvite: true);
             await WaitUntilAsync(() => !string.IsNullOrWhiteSpace(helpee.ShareInvite), TimeSpan.FromSeconds(3));
             await helperRuntime.StartHelperAsync(new NLink.Core.SessionConnect.PeerAddress(helpeeRuntime.CurrentLocalPeerAddress!.Value.Value), CancellationToken.None);
             await WaitUntilAsync(() => helpee.IsIncomingRequestView && helpee.ShowIncomingRequestPanel, TimeSpan.FromSeconds(3));
@@ -370,7 +375,7 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
         await fixture.Session.Dispatch(async () =>
         {
             EnsureAppServices();
-            var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+            var transportConfig = CreateDevLocalTestConfig();
             var network = new FakeSessionTransportNetwork();
             using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-helper-verify-ui-" + Guid.NewGuid().ToString("N")));
             using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-verify-ui-" + Guid.NewGuid().ToString("N")));
@@ -380,6 +385,8 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
             using var helper = new HelperPageViewModel(cancelAction: static () =>
             {
             }, transportConfig, helperRuntime);
+            var helperIdentity = new PeerAddress("helper-verify-ui-bound-" + Guid.NewGuid().ToString("N"));
+            helpee.SetVerifiedInviteHelperIdentity(helperIdentity, helperTargetAddress: helperIdentity, refreshInvite: true);
             await WaitUntilAsync(() => !string.IsNullOrWhiteSpace(helpee.ShareInvite), TimeSpan.FromSeconds(3));
             _ = helperRuntime.StartHelperAsync(new NLink.Core.SessionConnect.PeerAddress(helpeeRuntime.CurrentLocalPeerAddress!.Value.Value), CancellationToken.None);
             await WaitUntilAsync(() => helpee.IsIncomingRequestView && helper.ShowHelperVerificationCode && !string.IsNullOrWhiteSpace(helper.HelperVerificationCode) && helper.ShowSessionVerificationCode, TimeSpan.FromSeconds(3));
@@ -420,7 +427,7 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
         await fixture.Session.Dispatch(async () =>
         {
             EnsureAppServices();
-            var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+            var transportConfig = CreateDevLocalTestConfig();
             var network = new FakeSessionTransportNetwork();
             using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-header-verify-ui-" + Guid.NewGuid().ToString("N")));
             using var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-header-verify-ui-" + Guid.NewGuid().ToString("N")));
@@ -430,6 +437,8 @@ public sealed class Beta3DefaultUiBootstrapSmokeTests : Beta3DefaultUiSmokeTestB
             using var helper = new HelperPageViewModel(cancelAction: static () =>
             {
             }, transportConfig, helperRuntime);
+            var helperIdentity = new PeerAddress("helper-header-verify-ui-bound-" + Guid.NewGuid().ToString("N"));
+            helpee.SetVerifiedInviteHelperIdentity(helperIdentity, helperTargetAddress: helperIdentity, refreshInvite: true);
             await WaitUntilAsync(() => !string.IsNullOrWhiteSpace(helpee.ShareInvite), TimeSpan.FromSeconds(3));
             var connectTask = helperRuntime.StartHelperAsync(new NLink.Core.SessionConnect.PeerAddress(helpeeRuntime.CurrentLocalPeerAddress!.Value.Value), CancellationToken.None);
             await WaitUntilAsync(() => helpee.IsIncomingRequestView, TimeSpan.FromSeconds(3));

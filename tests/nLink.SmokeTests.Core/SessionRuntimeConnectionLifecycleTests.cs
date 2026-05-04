@@ -37,6 +37,24 @@ namespace NLink.SmokeTests;
 [Trait("Area", "Core")]
 public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConnectionTestBase
 {
+    [Fact]
+    public void SessionRuntime_DefaultHumanApprovalTimers_AreAligned()
+    {
+        using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
+        var outboundDecisionTimeoutField = typeof(SessionRuntime).GetField(
+            "outboundHelpRequestDecisionTimeout",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.NotNull(outboundDecisionTimeoutField);
+        Assert.Equal(TimeSpan.FromSeconds(45), SessionApprovalTimeouts.DefaultHumanDecisionTimeout);
+        Assert.Equal(
+            SessionApprovalTimeouts.DefaultHumanDecisionTimeout,
+            SessionRuntimeWatchdogOptions.Default.HandshakeTimeout);
+        Assert.Equal(
+            SessionApprovalTimeouts.DefaultHumanDecisionTimeout,
+            Assert.IsType<TimeSpan>(outboundDecisionTimeoutField.GetValue(runtime)));
+    }
+
     [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task NknSignalingTransport_HelpRequest_DuplicateRequestId_IsAckedButNotSurfacedTwice()

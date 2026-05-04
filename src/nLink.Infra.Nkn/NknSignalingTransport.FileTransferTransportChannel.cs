@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using NLink.Core;
+using NLink.Core.Configuration;
 using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
 using NLink.Core.RemoteControl;
@@ -17,6 +18,8 @@ namespace NLink.Infra.Nkn;
 
 public sealed partial class NknSignalingTransport
 {
+    private static readonly TimeSpan FileTransferTerminalTombstoneRetention = TimeSpan.FromMinutes(2);
+
     public async Task SendFileTransferOfferAsync(FileTransferOfferV2 message, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -185,6 +188,7 @@ public sealed partial class NknSignalingTransport
 
         lock (gate)
         {
+            fileTransferDataSessionRemoteOpenSuppressed.Remove(normalizedTransferId);
             fileTransferDataSessions.TryGetValue(normalizedTransferId, out var existingSession);
             TransportFileTransferDataSession? session = existingSession;
             if (session is not null &&
@@ -1573,6 +1577,7 @@ public sealed partial class NknSignalingTransport
     private static bool IsBenignLateFileTransferDataFrameRejection(FileTransferDataFrame frame, string failureReason)
         => ((failureReason is "unknown_transfer_id" or "transfer_already_terminal") &&
             (IsReceiverFeedbackDataFrame(frame) || IsTerminalDataFrame(frame) || frame is FileTransferPauseControlFrameV4)) ||
+           (failureReason == "post_completion_late_sender_frame" && IsSenderDataFrame(frame)) ||
            (failureReason == "transfer_already_terminal" && IsSenderDataFrame(frame));
 
     private void HandleControlRequest(string source, Envelope env)
@@ -2818,10 +2823,9 @@ public sealed partial class NknSignalingTransport
         }
 
         if (messageType == MsgType.FileTransferDataFrame &&
-            channel == NknBridgeChannel.Bulk &&
-            PeerAddress.TryParse(source, out _))
+            channel == NknBridgeChannel.Bulk)
         {
-            return source?.Trim();
+            return ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
         }
 
         if (messageType == MsgType.FileTransferDataFrame &&
@@ -2844,10 +2848,9 @@ public sealed partial class NknSignalingTransport
         }
 
         if (string.Equals(messageType, "file_transfer_data_frame", StringComparison.Ordinal) &&
-            channel == NknBridgeChannel.Bulk &&
-            PeerAddress.TryParse(source, out _))
+            channel == NknBridgeChannel.Bulk)
         {
-            return source?.Trim();
+            return ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
         }
 
         if (string.Equals(messageType, "file_transfer_data_frame", StringComparison.Ordinal) &&
@@ -2953,8 +2956,10 @@ public sealed partial class NknSignalingTransport
             inboundScreenShareReplayWindow.Reset();
             inboundFileTransferReplayWindow.Reset();
             fileTransferStates.Clear();
+            fileTransferTerminalTombstones.Clear();
         }
 
+        ClearFileTransferDataSessionRemoteOpenSuppressed();
         ResetInboundFileTransferDispatchQueue();
     }
 
@@ -2985,9 +2990,19 @@ public sealed partial class NknSignalingTransport
             inboundScreenShareReplayWindow.Reset();
             inboundFileTransferReplayWindow.Reset();
             fileTransferStates.Clear();
+            fileTransferTerminalTombstones.Clear();
         }
 
+        ClearFileTransferDataSessionRemoteOpenSuppressed();
         ResetInboundFileTransferDispatchQueue();
+    }
+
+    private void ClearFileTransferDataSessionRemoteOpenSuppressed()
+    {
+        lock (gate)
+        {
+            fileTransferDataSessionRemoteOpenSuppressed.Clear();
+        }
     }
 
     private byte[] GetFileTransferSessionSharedKeyOrThrow()
@@ -3291,6 +3306,15 @@ public sealed partial class NknSignalingTransport
 
         if (!hasExisting)
         {
+            if (IsSenderDataFrame(frame) &&
+                IsRecentTerminalFileTransferLocked(transferId, out var terminalPhase))
+            {
+                failureReason = terminalPhase == FileTransferTransportPhase.Completed
+                    ? "post_completion_late_sender_frame"
+                    : $"post_terminal_late_sender_frame_{MapFileTransferTerminalPhase(terminalPhase)}";
+                return false;
+            }
+
             failureReason = "unknown_transfer_id";
             return false;
         }
@@ -3446,6 +3470,16 @@ public sealed partial class NknSignalingTransport
             or FileTransferCancelFrameV4
             or FileTransferErrorFrameV4;
 
+    private static string MapFileTransferTerminalPhase(FileTransferTransportPhase phase)
+        => phase switch
+        {
+            FileTransferTransportPhase.Completed => "completed",
+            FileTransferTransportPhase.Declined => "declined",
+            FileTransferTransportPhase.Canceled => "canceled",
+            FileTransferTransportPhase.Failed => "failed",
+            _ => "unknown",
+        };
+
     private bool HasActiveFileTransferLocked(bool initiatedLocally)
     {
         foreach (var state in fileTransferStates.Values)
@@ -3463,11 +3497,61 @@ public sealed partial class NknSignalingTransport
     {
         if (nextState.IsTerminal)
         {
+            PruneExpiredFileTransferTerminalTombstonesLocked();
+            fileTransferTerminalTombstones[transferId] = new FileTransferTerminalTombstone(
+                nextState.Phase,
+                DateTimeOffset.UtcNow.UtcTicks);
             fileTransferStates.Remove(transferId);
             return;
         }
 
+        fileTransferTerminalTombstones.Remove(transferId);
         fileTransferStates[transferId] = nextState;
+    }
+
+    private bool IsRecentTerminalFileTransferLocked(string transferId, out FileTransferTransportPhase terminalPhase)
+    {
+        PruneExpiredFileTransferTerminalTombstonesLocked();
+
+        if (fileTransferTerminalTombstones.TryGetValue(transferId, out var tombstone))
+        {
+            terminalPhase = tombstone.Phase;
+            return true;
+        }
+
+        terminalPhase = default;
+        return false;
+    }
+
+    private void PruneExpiredFileTransferTerminalTombstonesLocked()
+    {
+        if (fileTransferTerminalTombstones.Count == 0)
+        {
+            return;
+        }
+
+        var cutoffTicks = DateTimeOffset.UtcNow.UtcTicks - FileTransferTerminalTombstoneRetention.Ticks;
+        List<string>? expiredTransferIds = null;
+        foreach (var entry in fileTransferTerminalTombstones)
+        {
+            if (entry.Value.CompletedUtcTicks > cutoffTicks)
+            {
+                continue;
+            }
+
+            expiredTransferIds ??= new List<string>();
+            expiredTransferIds.Add(entry.Key);
+        }
+
+        if (expiredTransferIds is null)
+        {
+            return;
+        }
+
+        foreach (var expiredTransferId in expiredTransferIds)
+        {
+            fileTransferTerminalTombstones.Remove(expiredTransferId);
+        }
     }
 
     private static bool CanTransitionToTerminalFileTransferState(FileTransferTransportPhase phase)
@@ -3576,6 +3660,14 @@ public sealed partial class NknSignalingTransport
 
             if (session is null)
             {
+                if (fileTransferDataSessionRemoteOpenSuppressed.Contains(frame.TransferId))
+                {
+                    LocalOperationalLog.Warn(
+                        "SessionSecurity",
+                        $"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; reason=data_session_resume_required");
+                    return;
+                }
+
                 session = new TransportFileTransferDataSession(this, frame.SessionId, frame.TransferId);
                 fileTransferDataSessions[frame.TransferId] = session;
             }
@@ -3797,6 +3889,10 @@ public sealed partial class NknSignalingTransport
                 FileTransferTransportPhase.Failed;
     }
 
+    private readonly record struct FileTransferTerminalTombstone(
+        FileTransferTransportPhase Phase,
+        long CompletedUtcTicks);
+
     private readonly record struct InboundFileTransferDispatchWork(
         long Generation,
         long Order,
@@ -3823,17 +3919,22 @@ public sealed partial class NknSignalingTransport
         }
     }
 
-    private void RemoveFileTransferDataSession(TransportFileTransferDataSession session)
+    private void RemoveFileTransferDataSession(TransportFileTransferDataSession session, bool requireLocalOpenForRemoteDelivery = false, string reason = "disposed")
     {
         lock (gate)
         {
+            if (requireLocalOpenForRemoteDelivery)
+            {
+                fileTransferDataSessionRemoteOpenSuppressed.Add(session.TransferId);
+            }
+
             if (fileTransferDataSessions.TryGetValue(session.TransferId, out var current) &&
                 ReferenceEquals(current, session))
             {
                 fileTransferDataSessions.Remove(session.TransferId);
                 LocalOperationalLog.Info(
                     "SessionSecurity",
-                    $"event=filetransfer_data_session_removed; transport=nkn; transfer_id={session.TransferId}; session_id={session.SessionId}; reason=disposed");
+                    $"event=filetransfer_data_session_removed; transport=nkn; transfer_id={session.TransferId}; session_id={session.SessionId}; reason={reason}");
             }
         }
 
@@ -3842,14 +3943,20 @@ public sealed partial class NknSignalingTransport
 
     private sealed class TransportFileTransferDataSession : IFileTransferDataSession
     {
+        private const long QueuedControlFrameEstimatedBytes = 1024L;
+
         private readonly NknSignalingTransport owner;
-        private readonly Channel<FileTransferDataFrame> frames = Channel.CreateUnbounded<FileTransferDataFrame>(
-            new UnboundedChannelOptions
+        private readonly object queueGate = new();
+        private readonly Channel<QueuedFileTransferDataFrame> frames = Channel.CreateBounded<QueuedFileTransferDataFrame>(
+            new BoundedChannelOptions(FileTransferDataSessionMaxQueuedFrames)
             {
                 SingleReader = true,
                 SingleWriter = false,
+                FullMode = BoundedChannelFullMode.Wait,
                 AllowSynchronousContinuations = false,
             });
+        private int queuedFrameCount;
+        private long queuedBytes;
         private int disposed;
         private int activeReader;
         private int available = 1;
@@ -3883,7 +3990,9 @@ public sealed partial class NknSignalingTransport
 
             try
             {
-                return await frames.Reader.ReadAsync(ct).ConfigureAwait(false);
+                var queuedFrame = await frames.Reader.ReadAsync(ct).ConfigureAwait(false);
+                ReleaseQueuedFrame(queuedFrame.EstimatedBytes);
+                return queuedFrame.Frame;
             }
             finally
             {
@@ -4354,10 +4463,119 @@ public sealed partial class NknSignalingTransport
                 return;
             }
 
+            var estimatedBytes = EstimateQueuedFrameBytes(frame);
+            if (!TryReserveQueuedFrame(estimatedBytes, out var queuedFramesAfter, out var queuedBytesAfter))
+            {
+                FailQueueOverflow(frame, channel, estimatedBytes);
+                return;
+            }
+
+            if (!frames.Writer.TryWrite(new QueuedFileTransferDataFrame(frame, estimatedBytes)))
+            {
+                ReleaseQueuedFrame(estimatedBytes);
+                if (disposed == 0)
+                {
+                    FailQueueOverflow(frame, channel, estimatedBytes);
+                }
+
+                return;
+            }
+
             LocalOperationalLog.Info(
                 "SessionSecurity",
-                $"event=filetransfer_data_frame_dispatched; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; lane={MapBridgeChannel(channel)}");
-            frames.Writer.TryWrite(frame);
+                $"event=filetransfer_data_frame_dispatched; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; lane={MapBridgeChannel(channel)}; queued_frames={queuedFramesAfter}; queued_bytes={queuedBytesAfter}");
+        }
+
+        private bool TryReserveQueuedFrame(long estimatedBytes, out int queuedFramesAfter, out long queuedBytesAfter)
+        {
+            lock (queueGate)
+            {
+                queuedFramesAfter = queuedFrameCount;
+                queuedBytesAfter = queuedBytes;
+                if (disposed != 0)
+                {
+                    return false;
+                }
+
+                if (queuedFrameCount >= FileTransferDataSessionMaxQueuedFrames ||
+                    queuedBytes > FileTransferDataSessionMaxQueuedBytes - estimatedBytes)
+                {
+                    return false;
+                }
+
+                queuedFrameCount++;
+                queuedBytes += estimatedBytes;
+                queuedFramesAfter = queuedFrameCount;
+                queuedBytesAfter = queuedBytes;
+                return true;
+            }
+        }
+
+        private void ReleaseQueuedFrame(long estimatedBytes)
+        {
+            lock (queueGate)
+            {
+                if (queuedFrameCount > 0)
+                {
+                    queuedFrameCount--;
+                }
+
+                queuedBytes = Math.Max(0L, queuedBytes - estimatedBytes);
+            }
+        }
+
+        private void FailQueueOverflow(FileTransferDataFrame frame, NknBridgeChannel channel, long estimatedBytes)
+        {
+            if (Interlocked.Exchange(ref disposed, 1) != 0)
+            {
+                return;
+            }
+
+            int queuedFramesSnapshot;
+            long queuedBytesSnapshot;
+            lock (queueGate)
+            {
+                queuedFramesSnapshot = queuedFrameCount;
+                queuedBytesSnapshot = queuedBytes;
+            }
+
+            Interlocked.Exchange(ref available, 0);
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=filetransfer_data_session_overflow; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; lane={MapBridgeChannel(channel)}; queued_frames={queuedFramesSnapshot}; queued_bytes={queuedBytesSnapshot}; frame_estimated_bytes={estimatedBytes}; reason={FileTransferResultCodes.ReceiverBufferExhausted}");
+
+            AvailabilityChanged?.Invoke(
+                this,
+                new FileTransferDataSessionAvailabilityChangedEventArgs(
+                    isAvailable: false,
+                    reason: FileTransferResultCodes.ReceiverBufferExhausted,
+                    requiresResumeRequest: true));
+
+            frames.Writer.TryComplete(new InvalidOperationException(FileTransferResultCodes.ReceiverBufferExhausted));
+            owner.RemoveFileTransferDataSession(
+                this,
+                requireLocalOpenForRemoteDelivery: true,
+                reason: FileTransferResultCodes.ReceiverBufferExhausted);
+        }
+
+        private static long EstimateQueuedFrameBytes(FileTransferDataFrame frame)
+        {
+            if (frame is not FileTransferChunkBatchFrameV4 batch)
+            {
+                return QueuedControlFrameEstimatedBytes;
+            }
+
+            long rawBytes = QueuedControlFrameEstimatedBytes;
+            foreach (var segment in batch.DataSegments)
+            {
+                rawBytes += segment?.Length ?? 0;
+                if (rawBytes >= FileTransferDataSessionMaxQueuedBytes)
+                {
+                    return FileTransferDataSessionMaxQueuedBytes;
+                }
+            }
+
+            return rawBytes;
         }
 
         public void SetAvailability(bool isAvailable, string reason, bool requiresResumeRequest)
@@ -4392,6 +4610,8 @@ public sealed partial class NknSignalingTransport
             frames.Writer.TryComplete();
             owner.RemoveFileTransferDataSession(this);
         }
+
+        private readonly record struct QueuedFileTransferDataFrame(FileTransferDataFrame Frame, long EstimatedBytes);
     }
 
     private static string GetFileTransferDataFrameChunkIndex(FileTransferDataFrame frame)
@@ -4420,7 +4640,7 @@ public sealed partial class NknSignalingTransport
 
     private static bool IsV4ReceiverFeedbackBulkRedundancyDisabled()
     {
-        var value = Environment.GetEnvironmentVariable("NLINK_FILETRANSFER_V4_FEEDBACK_BULK_REDUNDANCY");
+        var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_FILETRANSFER_V4_FEEDBACK_BULK_REDUNDANCY", category: "filetransfer_tuning");
         return string.Equals(value, "0", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(value, "false", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(value, "off", StringComparison.OrdinalIgnoreCase);

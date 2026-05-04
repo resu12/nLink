@@ -34,7 +34,73 @@ public sealed class FileTransferPanelItemViewModelTests
         Assert.False(item.ShowResume);
         Assert.True(item.ShowActions);
         Assert.False(item.ShowProgress);
+        Assert.False(item.ShowRiskWarning);
+        Assert.Equal(string.Empty, item.RiskWarningText);
         Assert.False(item.IsTerminal);
+    }
+
+    [Theory]
+    [InlineData("installer.exe", FileTransferFileRiskLevel.ExecutableOrScript, "run commands")]
+    [InlineData("payload.zip", FileTransferFileRiskLevel.Archive, "Archives")]
+    public void InboundPendingDecision_ShowsRiskWarning_ForRiskyFileNames(
+        string fileName,
+        FileTransferFileRiskLevel expectedLevel,
+        string expectedWarningFragment)
+    {
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-a",
+                Direction: FileTransferDirection.Inbound,
+                State: FileTransferTransferState.PendingDecision,
+                FileName: fileName,
+                FileSizeBytes: 2048,
+                Sha256Base64: null,
+                BytesTransferred: 0,
+                ChunksTransferred: 0,
+                ChunkCount: 0,
+                ChunkSizeBytes: 0,
+                ErrorCode: null,
+                StatusMessage: null));
+
+        var risk = FileTransferFileRiskClassifier.Assess(fileName);
+        Assert.Equal(expectedLevel, risk.Level);
+        Assert.NotNull(item);
+        Assert.True(item!.ShowAccept);
+        Assert.True(item.ShowDecline);
+        Assert.True(item.ShowRiskWarning);
+        Assert.Contains(expectedWarningFragment, item.RiskWarningText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(FileTransferDirection.Inbound, FileTransferTransferState.PendingDecision, "report.pdf")]
+    [InlineData(FileTransferDirection.Outbound, FileTransferTransferState.AwaitingAcceptance, "installer.exe")]
+    [InlineData(FileTransferDirection.Inbound, FileTransferTransferState.Receiving, "installer.exe")]
+    [InlineData(FileTransferDirection.Inbound, FileTransferTransferState.Completed, "installer.exe")]
+    public void FileRiskWarning_ShowsOnlyForPendingInboundRiskyOffers(
+        FileTransferDirection direction,
+        FileTransferTransferState state,
+        string fileName)
+    {
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-a",
+                Direction: direction,
+                State: state,
+                FileName: fileName,
+                FileSizeBytes: 2048,
+                Sha256Base64: null,
+                BytesTransferred: state == FileTransferTransferState.Completed ? 2048 : 0,
+                ChunksTransferred: 0,
+                ChunkCount: 0,
+                ChunkSizeBytes: 0,
+                ErrorCode: null,
+                StatusMessage: null));
+
+        Assert.NotNull(item);
+        Assert.False(item!.ShowRiskWarning);
+        Assert.Equal(string.Empty, item.RiskWarningText);
     }
 
     [Fact]

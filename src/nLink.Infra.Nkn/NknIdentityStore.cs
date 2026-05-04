@@ -9,8 +9,11 @@ namespace NLink.Infra.Nkn;
 internal static class NknIdentityStore
 {
     private const int ProtectedSeedIdentityVersion = 3;
+    private const int MaxRecoveryQuarantineFiles = 20;
     private const string AutoRecoveredIdentityUserWarning = "Local protected identity storage was unreadable. nLink created a new local identity. Previous helper address and invites are no longer valid.";
+    private static readonly TimeSpan MaxRecoveryQuarantineAge = TimeSpan.FromDays(30);
     private static Func<string>? defaultSharedKeyPathOverrideForTests;
+    private static Func<string>? recoveryDirectoryOverrideForTests;
 
     public static NknIdentity LoadOrCreate(NknTransportOptions options)
     {
@@ -251,6 +254,14 @@ internal static class NknIdentityStore
         return new DelegateDisposable(() => defaultSharedKeyPathOverrideForTests = previous);
     }
 
+    internal static IDisposable OverrideRecoveryDirectoryForTests(string recoveryDir)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(recoveryDir);
+        var previous = recoveryDirectoryOverrideForTests;
+        recoveryDirectoryOverrideForTests = () => Path.GetFullPath(recoveryDir);
+        return new DelegateDisposable(() => recoveryDirectoryOverrideForTests = previous);
+    }
+
     internal static string? GetAutomaticRecoveryUserWarning()
     {
         var warning = PersistenceDiagnostics.Snapshot().LastWarning;
@@ -385,16 +396,22 @@ internal static class NknIdentityStore
     {
         var identityPath = Path.GetFullPath(keyPath);
         var secretPath = NknSecretStore.GetSecretPath(identityPath);
-        var recoveryDir = Path.Combine(
+        var recoveryDir = GetRecoveryDirectory();
+        Directory.CreateDirectory(recoveryDir);
+
+        var timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'");
+        MoveIfExists(identityPath, BuildQuarantinePath(recoveryDir, identityPath, timestamp), DateTimeOffset.UtcNow);
+        MoveIfExists(secretPath, BuildQuarantinePath(recoveryDir, secretPath, timestamp), DateTimeOffset.UtcNow);
+        PruneRecoveryDirectoryBestEffort(recoveryDir, DateTimeOffset.UtcNow);
+    }
+
+    private static string GetRecoveryDirectory()
+    {
+        return recoveryDirectoryOverrideForTests?.Invoke() ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "nLink",
             "security",
             "identity-recovery");
-        Directory.CreateDirectory(recoveryDir);
-
-        var timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'");
-        MoveIfExists(identityPath, BuildQuarantinePath(recoveryDir, identityPath, timestamp));
-        MoveIfExists(secretPath, BuildQuarantinePath(recoveryDir, secretPath, timestamp));
     }
 
     private static string BuildQuarantinePath(string recoveryDir, string sourcePath, string timestamp)
@@ -411,7 +428,7 @@ internal static class NknIdentityStore
         return Path.Combine(recoveryDir, $"{nameWithoutExtension}.{timestamp}.{Guid.NewGuid():N}.corrupt{extension}");
     }
 
-    private static void MoveIfExists(string sourcePath, string destinationPath)
+    private static void MoveIfExists(string sourcePath, string destinationPath, DateTimeOffset quarantinedAtUtc)
     {
         if (!File.Exists(sourcePath))
         {
@@ -419,6 +436,58 @@ internal static class NknIdentityStore
         }
 
         File.Move(sourcePath, destinationPath);
+        File.SetLastWriteTimeUtc(destinationPath, quarantinedAtUtc.UtcDateTime);
+    }
+
+    private static void PruneRecoveryDirectoryBestEffort(string recoveryDir, DateTimeOffset nowUtc)
+    {
+        try
+        {
+            var cutoffUtc = nowUtc - MaxRecoveryQuarantineAge;
+            var candidates = Directory.EnumerateFiles(recoveryDir)
+                .Where(IsRecoveryQuarantineFile)
+                .Select(path => new FileInfo(path))
+                .ToArray();
+
+            foreach (var candidate in candidates.Where(file => file.LastWriteTimeUtc < cutoffUtc.UtcDateTime))
+            {
+                candidate.Delete();
+            }
+
+            var remaining = Directory.EnumerateFiles(recoveryDir)
+                .Where(IsRecoveryQuarantineFile)
+                .Select(path => new FileInfo(path))
+                .OrderByDescending(file => file.LastWriteTimeUtc)
+                .ThenByDescending(file => file.Name, StringComparer.Ordinal)
+                .Skip(MaxRecoveryQuarantineFiles);
+
+            foreach (var stale in remaining)
+            {
+                stale.Delete();
+            }
+        }
+        catch (Exception ex)
+        {
+            PersistenceDiagnostics.Record(
+                domain: "nkn_identity_store",
+                operation: "cleanup_identity_recovery_quarantine",
+                severity: PersistenceDiagnosticSeverity.Warning,
+                outcome: PersistenceDiagnosticOutcome.Partial,
+                reason: ex.GetType().Name);
+        }
+    }
+
+    private static bool IsRecoveryQuarantineFile(string path)
+    {
+        var fileName = Path.GetFileName(path);
+        if (!fileName.Contains(".corrupt.", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var extension = Path.GetExtension(fileName);
+        return string.Equals(extension, ".json", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(extension, ".seed", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsDefaultSharedIdentityPath(string keyPath)

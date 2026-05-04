@@ -69,13 +69,77 @@ function Get-FileTransferUnexpectedLegacyFrameEventsDuringV4 {
     )
 }
 
+function Get-FileTransferFirstCompletedTerminalSequenceByTransferId {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    $sequences = @{}
+    foreach ($terminal in @($Summary.TerminalEvents)) {
+        if ($null -eq $terminal) {
+            continue
+        }
+
+        $transferId = [string]$terminal.TransferId
+        if ([string]::IsNullOrWhiteSpace($transferId)) {
+            continue
+        }
+
+        $state = Get-FileTransferEventField -Event $terminal -Name 'state' -Default ''
+        $errorCode = Get-FileTransferEventField -Event $terminal -Name 'error_code' -Default '(none)'
+        if ($state -ne 'Completed' -or $errorCode -ne '(none)') {
+            continue
+        }
+
+        if (-not $sequences.ContainsKey($transferId) -or $terminal.Sequence -lt [int]$sequences[$transferId]) {
+            $sequences[$transferId] = [int]$terminal.Sequence
+        }
+    }
+
+    return $sequences
+}
+
+function Test-FileTransferPostTerminalDataFrameCleanupReject {
+    param(
+        $Event,
+        [Parameter(Mandatory = $true)]$CompletedTerminalSequences
+    )
+
+    if ($null -eq $Event -or $null -eq $CompletedTerminalSequences) {
+        return $false
+    }
+
+    if ($Event.EventName -ne 'filetransfer_message_rejected') {
+        return $false
+    }
+
+    $reason = Get-FileTransferEventField -Event $Event -Name 'reason' -Default ''
+    if ($reason -ne 'unknown_transfer_id' -and $reason -ne 'transfer_already_terminal') {
+        return $false
+    }
+
+    $messageType = Get-FileTransferEventField -Event $Event -Name 'message_type' -Default ''
+    if ($messageType -ne 'file_transfer_data_frame') {
+        return $false
+    }
+
+    $transferId = [string]$Event.TransferId
+    if ([string]::IsNullOrWhiteSpace($transferId) -or -not $CompletedTerminalSequences.ContainsKey($transferId)) {
+        return $false
+    }
+
+    return $Event.Sequence -gt [int]$CompletedTerminalSequences[$transferId]
+}
+
 function Get-FileTransferHardFailureEvents {
     param([Parameter(Mandatory = $true)]$Summary)
+
+    $completedTerminalSequences = Get-FileTransferFirstCompletedTerminalSequenceByTransferId -Summary $Summary
 
     return @(
         $Summary.TransferEvents |
             Where-Object {
-                $_.EventName -eq 'filetransfer_transport_payload_rejected' -or
+                $null -ne $_ -and
+                -not (Test-FileTransferPostTerminalDataFrameCleanupReject -Event $_ -CompletedTerminalSequences $completedTerminalSequences) -and
+                ($_.EventName -eq 'filetransfer_transport_payload_rejected' -or
                 $_.EventName -eq 'filetransfer_data_frame_decode_failed' -or
                 $_.EventName -eq 'filetransfer_chunk_rejected' -or
                 $_.EventName -eq 'filetransfer_message_rejected' -or
@@ -88,7 +152,7 @@ function Get-FileTransferHardFailureEvents {
                 $_.EventName -eq 'filetransfer_sender_cache_exhausted' -or
                 $_.EventName -eq 'filetransfer_sender_repair_unavailable' -or
                 $_.EventName -eq 'filetransfer_v4_receiver_feedback_failed' -or
-                ($_.EventName -eq 'filetransfer_data_frame_ignored' -and (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -like '*session_id_mismatch*')
+                ($_.EventName -eq 'filetransfer_data_frame_ignored' -and (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -like '*session_id_mismatch*'))
             }
     )
 }

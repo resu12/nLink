@@ -39,7 +39,10 @@ public sealed class NknScreenShareMediaChannelTests : ScreenCaptureAbstractionTe
         host.ScreenShareStopped += (_, _) => stopReceived.TrySetResult();
         _ = host.HostByAddressAsync(cts.Token);
         await Task.Delay(75, cts.Token);
-        var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(new PeerAddress(hostAddress), InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+        var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+            new PeerAddress(hostAddress),
+            InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+            boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
         await helper.JoinByInviteAsync(rawToken, invite, cts.Token).WaitAsync(TimeSpan.FromSeconds(3));
         await joinRaised.Task.WaitAsync(cts.Token);
         await pendingJoin!.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
@@ -95,7 +98,10 @@ public sealed class NknScreenShareMediaChannelTests : ScreenCaptureAbstractionTe
             helper.Approved += (_, _) => helperApproved.TrySetResult();
             host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
             await host.HostByAddressAsync(cts.Token);
-            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(new PeerAddress(host.LocalPeerAddress), InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+                boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
             await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
             var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
             await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
@@ -206,7 +212,10 @@ public sealed class NknScreenShareMediaChannelTests : ScreenCaptureAbstractionTe
                 }
             };
             await host.HostByAddressAsync(cts.Token);
-            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(new PeerAddress(host.LocalPeerAddress), InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+                boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
             await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
             var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
             await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
@@ -292,7 +301,10 @@ public sealed class NknScreenShareMediaChannelTests : ScreenCaptureAbstractionTe
                 }
             };
             await host.HostByAddressAsync(cts.Token);
-            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(new PeerAddress(host.LocalPeerAddress), InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+                boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
             await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
             var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
             await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
@@ -396,7 +408,10 @@ public sealed class NknScreenShareMediaChannelTests : ScreenCaptureAbstractionTe
                 }
             };
             await host.HostByAddressAsync(cts.Token);
-            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(new PeerAddress(host.LocalPeerAddress), InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+                boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
             await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
             var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
             await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
@@ -467,7 +482,10 @@ public sealed class NknScreenShareMediaChannelTests : ScreenCaptureAbstractionTe
             helper.Approved += (_, _) => helperApproved.TrySetResult();
             host.ScreenShareVideoStreamConfigReceived += (_, e) => streamConfigReceived.TrySetResult(e.Message);
             await host.HostByAddressAsync(cts.Token);
-            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(new PeerAddress(host.LocalPeerAddress), InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+                boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
             await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
             var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
             await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
@@ -539,7 +557,10 @@ public sealed class NknScreenShareMediaChannelTests : ScreenCaptureAbstractionTe
             host.Approved += (_, _) => hostApproved.TrySetResult();
             helper.Approved += (_, _) => helperApproved.TrySetResult();
             await host.HostByAddressAsync(cts.Token);
-            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(new PeerAddress(host.LocalPeerAddress), InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+                boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
             await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
             var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
             await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
@@ -609,7 +630,10 @@ public sealed class NknScreenShareMediaChannelTests : ScreenCaptureAbstractionTe
             helper.Approved += (_, _) => helperApproved.TrySetResult();
             host.ScreenShareStopped += (_, _) => stopReceived.TrySetResult();
             await host.HostByAddressAsync(cts.Token);
-            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(new PeerAddress(host.LocalPeerAddress), InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+                boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
             await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
             var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
             await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
@@ -659,7 +683,10 @@ public sealed class NknScreenShareMediaChannelTests : ScreenCaptureAbstractionTe
             helper.Approved += (_, _) => helperApproved.TrySetResult();
             host.ScreenShareFrameCompleted += (_, _) => Interlocked.Increment(ref frameCount);
             await host.HostByAddressAsync(cts.Token);
-            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(new PeerAddress(host.LocalPeerAddress), InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+                boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
             await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
             var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
             await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
@@ -703,7 +730,10 @@ public sealed class NknScreenShareMediaChannelTests : ScreenCaptureAbstractionTe
             helper.Approved += (_, _) => helperApproved.TrySetResult();
             host.ScreenShareStopped += (_, _) => Interlocked.Increment(ref stopCount);
             await host.HostByAddressAsync(cts.Token);
-            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(new PeerAddress(host.LocalPeerAddress), InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            var(rawToken, invite) = InviteTestFactory.CreateValidatedInvite(
+                new PeerAddress(host.LocalPeerAddress),
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare,
+                boundHelperAddress: new PeerAddress(helper.LocalPeerAddress));
             await helper.JoinByInviteAsync(rawToken, invite, cts.Token);
             var pendingJoin = await joinRequestRaised.Task.WaitAsync(TimeSpan.FromSeconds(6), cts.Token);
             await pendingJoin.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);

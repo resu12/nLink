@@ -456,7 +456,16 @@ internal sealed partial class TransportScreenShareCoordinator
 
     private bool FitsScreenShareTransportPayloadBudget(byte[] payload)
     {
-        var measuredBytes = MeasureScreenShareTransportPayloadBytes(payload);
+        long measuredBytes;
+        try
+        {
+            measuredBytes = MeasureScreenShareTransportPayloadBytes(payload);
+        }
+        catch (Exception ex) when (estimateBridgeBytes is not null && ex is InvalidOperationException or OverflowException or ArgumentOutOfRangeException)
+        {
+            return false;
+        }
+
         return estimateBridgeBytes is not null
             ? measuredBytes <= ScreenShareBridgePayloadBudgetBytes
             : payload.Length <= ScreenShareFallbackBatchPayloadBudgetBytes;

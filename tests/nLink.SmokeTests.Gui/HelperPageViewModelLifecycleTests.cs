@@ -738,6 +738,85 @@ public sealed class HelperPageViewModelLifecycleTests : CoreSmokeTestsBase
         Assert.False(helper.ShowSessionVerificationCode);
     }
 
+    [Trait("Category", "Smoke")]
+    [Theory]
+    [InlineData(SessionFlowPhase.Ended, SessionUiPhase.Ended, SessionRuntimeState.Disconnected, TransportState.Failed)]
+    [InlineData(SessionFlowPhase.Failed, SessionUiPhase.Failed, SessionRuntimeState.Rejected, TransportState.Failed)]
+    public void HelperPageViewModel_SessionVerificationCode_HidesAfterConnectingStateEnds(
+        SessionFlowPhase phase,
+        SessionUiPhase uiPhase,
+        SessionRuntimeState runtimeState,
+        TransportState transportState)
+    {
+        using var runtime = new SessionRuntime(() => new DevLocalTransport());
+        using var helper = new HelperPageViewModel(
+            cancelAction: static () => { },
+            CreateDevLocalTestConfig(),
+            runtime);
+        var sessionId = new SessionId("session-verification-helper-clears");
+        var helpeeAddress = new PeerAddress("verification.helpee.helper-clears");
+        var helperAddress = new PeerAddress("verification.helper.helper-clears");
+        var verificationCode = CreateTestSessionVerificationCode();
+
+        SetHelperConnectingVerificationState(runtime, sessionId, helpeeAddress, helperAddress, verificationCode);
+        InvokePrivateMethod(helper, "SyncFromRuntime");
+        Assert.True(helper.ShowSessionVerificationCode);
+
+        SetPrivateField(runtime, "state", runtimeState);
+        SetPrivateField(runtime, "transportState", transportState);
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = phase,
+                UiPhase = uiPhase,
+                RuntimeState = runtimeState,
+                TransportState = transportState,
+                DisplayStatusText = "Connection ended",
+                DisplayConnectionState = "Disconnected",
+                VerificationCode = verificationCode,
+            });
+
+        InvokePrivateMethod(helper, "SyncFromRuntime");
+
+        Assert.True(helper.HasSessionVerificationCode);
+        Assert.False(helper.ShowSessionVerificationCode);
+    }
+
+    private static void SetHelperConnectingVerificationState(
+        SessionRuntime runtime,
+        SessionId sessionId,
+        PeerAddress helpeeAddress,
+        PeerAddress helperAddress,
+        SessionVerificationCode verificationCode)
+    {
+        var verifiedState = CreateVerifiedSecurityState(helpeeAddress, helperAddress, sessionId)
+            .WithVerificationCode(verificationCode);
+
+        SetPrivateField(runtime, "role", SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connecting);
+        SetPrivateField(runtime, "transportState", TransportState.Handshake);
+        SetPrivateField(runtime, "sessionSecurityState", verifiedState);
+        SetPrivateField(
+            runtime,
+            "currentFlowSnapshot",
+            runtime.FlowSnapshot with
+            {
+                Phase = SessionFlowPhase.Connecting,
+                UiPhase = SessionUiPhase.Connecting,
+                Role = SessionRuntimeRole.Helper,
+                RuntimeState = SessionRuntimeState.Connecting,
+                TransportState = TransportState.Handshake,
+                StatusText = "Waiting for approval…",
+                DisplayStatusText = "Waiting for approval…",
+                DisplayConnectionState = "Connecting",
+                SessionId = sessionId.Value,
+                HelperIdentity = helperAddress.Value,
+                VerificationCode = verificationCode,
+            });
+    }
+
     private static SessionVerificationCode CreateTestSessionVerificationCode()
     {
         return new SessionVerificationCode(

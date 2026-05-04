@@ -18,6 +18,12 @@ public static class NknRuntimeDiagnostics
     private static int bridgeLastExitCode = -1;
     private static string bridgeLastExitReason = "(none)";
     private static double bridgeLastUptimeMs = -1;
+    private static string bridgeManifestStatus = "(unknown)";
+    private static string bridgeManifestReason = "(unknown)";
+    private static int bridgeManifestVersion = -1;
+    private static string bridgeManifestHashPrefix = "(none)";
+    private static int bridgeManifestOwnerPidWatchdog;
+    private static int bridgeManifestKillOnCloseJob;
     private static long messagesSent;
     private static long messagesReceived;
     private static long bridgeRawMessagesReceived;
@@ -597,6 +603,30 @@ public static class NknRuntimeDiagnostics
         }
     }
 
+    internal static void SetBridgeBundleIdentity(BridgeBundleIdentity? identity)
+    {
+        lock (Gate)
+        {
+            if (identity is null)
+            {
+                bridgeManifestStatus = "(unknown)";
+                bridgeManifestReason = "(unknown)";
+                bridgeManifestVersion = -1;
+                bridgeManifestHashPrefix = "(none)";
+                bridgeManifestOwnerPidWatchdog = 0;
+                bridgeManifestKillOnCloseJob = 0;
+                return;
+            }
+
+            bridgeManifestStatus = SanitizeDiagnosticText(identity.ManifestStatus);
+            bridgeManifestReason = SanitizeDiagnosticText(identity.ManifestReason);
+            bridgeManifestVersion = identity.ManifestVersion.GetValueOrDefault(-1);
+            bridgeManifestHashPrefix = FormatHashPrefix(identity.ActualScriptSha256);
+            bridgeManifestOwnerPidWatchdog = identity.OwnerPidWatchdog ? 1 : 0;
+            bridgeManifestKillOnCloseJob = identity.KillOnCloseJob ? 1 : 0;
+        }
+    }
+
     public static void RecordFirstColdStart(double? readyTimeMs, DateTimeOffset utcTime)
     {
         if (!readyTimeMs.HasValue || readyTimeMs.Value < 0)
@@ -714,6 +744,12 @@ public static class NknRuntimeDiagnostics
                 BridgeLastExitCode: bridgeLastExitCode,
                 BridgeLastExitReason: string.IsNullOrWhiteSpace(bridgeLastExitReason) ? "(none)" : bridgeLastExitReason,
                 BridgeLastUptimeMs: bridgeLastUptimeMs,
+                BridgeManifestStatus: string.IsNullOrWhiteSpace(bridgeManifestStatus) ? "(unknown)" : bridgeManifestStatus,
+                BridgeManifestReason: string.IsNullOrWhiteSpace(bridgeManifestReason) ? "(unknown)" : bridgeManifestReason,
+                BridgeManifestVersion: bridgeManifestVersion,
+                BridgeManifestHashPrefix: string.IsNullOrWhiteSpace(bridgeManifestHashPrefix) ? "(none)" : bridgeManifestHashPrefix,
+                BridgeManifestOwnerPidWatchdog: bridgeManifestOwnerPidWatchdog != 0,
+                BridgeManifestKillOnCloseJob: bridgeManifestKillOnCloseJob != 0,
                 BridgeRawMessagesReceived: Interlocked.Read(ref bridgeRawMessagesReceived),
                 BridgeControlMessagesSent: Interlocked.Read(ref bridgeControlMessagesSent),
                 BridgeControlMessagesReceived: Interlocked.Read(ref bridgeControlMessagesReceived),
@@ -798,6 +834,17 @@ public static class NknRuntimeDiagnostics
         var sanitized = SensitiveDataRedactor.Redact(value);
         return string.IsNullOrWhiteSpace(sanitized) ? "(none)" : sanitized;
     }
+
+    private static string FormatHashPrefix(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "(none)";
+        }
+
+        var trimmed = value.Trim();
+        return trimmed.Length <= 12 ? trimmed : trimmed[..12];
+    }
 }
 
 public readonly record struct OutboundLaneDiagnosticsSummary(
@@ -870,6 +917,12 @@ public readonly record struct NknRuntimeDiagnosticsSnapshot(
     int BridgeLastExitCode,
     string BridgeLastExitReason,
     double BridgeLastUptimeMs,
+    string BridgeManifestStatus,
+    string BridgeManifestReason,
+    int BridgeManifestVersion,
+    string BridgeManifestHashPrefix,
+    bool BridgeManifestOwnerPidWatchdog,
+    bool BridgeManifestKillOnCloseJob,
     long BridgeRawMessagesReceived,
     long BridgeControlMessagesSent,
     long BridgeControlMessagesReceived,

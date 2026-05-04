@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using NLink.Core.Configuration;
 using NLink.Core.Diagnostics;
 using NLink.Core.Logging;
 
@@ -83,65 +84,65 @@ internal sealed class NknTransportOptions
         var appSettings = AppSettingsJson.Load();
 
         var seedRpc = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("NLINK_NKN_SEED_RPC"),
-            appSettings.Get("NLINK_NKN_SEED_RPC"),
-            appSettings.Get("nLink:nkn:seedRpc"));
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_SEED_RPC", category: "nkn_transport"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_SEED_RPC", appSettings.Get("NLINK_NKN_SEED_RPC"), category: "nkn_transport"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:seedRpc", appSettings.Get("nLink:nkn:seedRpc"), category: "nkn_transport"));
 
         var identifier = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("NLINK_NKN_IDENTIFIER"),
-            appSettings.Get("NLINK_NKN_IDENTIFIER"),
-            appSettings.Get("nLink:nkn:identifier"));
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_IDENTIFIER", category: "nkn_identity"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_IDENTIFIER", appSettings.Get("NLINK_NKN_IDENTIFIER"), category: "nkn_identity"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:identifier", appSettings.Get("nLink:nkn:identifier"), category: "nkn_identity"));
 
         var configuredKeyPath = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("NLINK_NKN_KEY_PATH"),
-            appSettings.Get("NLINK_NKN_KEY_PATH"),
-            appSettings.Get("nLink:nkn:keyPath"));
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_KEY_PATH", category: "nkn_identity"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_KEY_PATH", appSettings.Get("NLINK_NKN_KEY_PATH"), category: "nkn_identity"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:keyPath", appSettings.Get("nLink:nkn:keyPath"), category: "nkn_identity"));
 
         var preflightRpcEnabled = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED"),
-            appSettings.Get("NLINK_NKN_PREFLIGHT_RPC_ENABLED"),
-            appSettings.Get("nLink:nkn:preflightRpcEnabled"));
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_PREFLIGHT_RPC_ENABLED", category: "nkn_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_PREFLIGHT_RPC_ENABLED", appSettings.Get("NLINK_NKN_PREFLIGHT_RPC_ENABLED"), category: "nkn_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:preflightRpcEnabled", appSettings.Get("nLink:nkn:preflightRpcEnabled"), category: "nkn_tuning"));
 
         var preflightTimeoutMs = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS"),
-            appSettings.Get("NLINK_NKN_PREFLIGHT_TIMEOUT_MS"),
-            appSettings.Get("nLink:nkn:preflightTimeoutMs"));
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", category: "nkn_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_PREFLIGHT_TIMEOUT_MS", appSettings.Get("NLINK_NKN_PREFLIGHT_TIMEOUT_MS"), category: "nkn_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:preflightTimeoutMs", appSettings.Get("nLink:nkn:preflightTimeoutMs"), category: "nkn_tuning"));
 
         var preflightConcurrency = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CONCURRENCY"),
-            appSettings.Get("NLINK_NKN_PREFLIGHT_CONCURRENCY"),
-            appSettings.Get("nLink:nkn:preflightConcurrency"));
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_PREFLIGHT_CONCURRENCY", category: "nkn_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_PREFLIGHT_CONCURRENCY", appSettings.Get("NLINK_NKN_PREFLIGHT_CONCURRENCY"), category: "nkn_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:preflightConcurrency", appSettings.Get("nLink:nkn:preflightConcurrency"), category: "nkn_tuning"));
 
         var preflightCacheTtlMs = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("NLINK_NKN_PREFLIGHT_CACHE_TTL_MS"),
-            appSettings.Get("NLINK_NKN_PREFLIGHT_CACHE_TTL_MS"),
-            appSettings.Get("nLink:nkn:preflightCacheTtlMs"));
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_PREFLIGHT_CACHE_TTL_MS", category: "nkn_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_PREFLIGHT_CACHE_TTL_MS", appSettings.Get("NLINK_NKN_PREFLIGHT_CACHE_TTL_MS"), category: "nkn_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:preflightCacheTtlMs", appSettings.Get("nLink:nkn:preflightCacheTtlMs"), category: "nkn_tuning"));
 
         var fileTransferChunkPacingMs = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_CHUNK_PACING_MS"),
-            appSettings.Get("NLINK_NKN_FILE_TRANSFER_CHUNK_PACING_MS"),
-            appSettings.Get("nLink:nkn:fileTransferChunkPacingMs"));
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_CHUNK_PACING_MS", category: "nkn_filetransfer_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_FILE_TRANSFER_CHUNK_PACING_MS", appSettings.Get("NLINK_NKN_FILE_TRANSFER_CHUNK_PACING_MS"), category: "nkn_filetransfer_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:fileTransferChunkPacingMs", appSettings.Get("nLink:nkn:fileTransferChunkPacingMs"), category: "nkn_filetransfer_tuning"));
 
-        var numSubClients = Environment.GetEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS");
-        var mediaNumSubClients = Environment.GetEnvironmentVariable("NLINK_NKN_MEDIA_NUM_SUBCLIENTS");
-        var bulkNumSubClients = Environment.GetEnvironmentVariable("NLINK_NKN_BULK_NUM_SUBCLIENTS");
-        var bulkSendConcurrency = Environment.GetEnvironmentVariable("NLINK_NKN_BULK_SEND_CONCURRENCY");
+        var numSubClients = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS", category: "nkn_topology");
+        var mediaNumSubClients = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_MEDIA_NUM_SUBCLIENTS", category: "nkn_topology");
+        var bulkNumSubClients = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_BULK_NUM_SUBCLIENTS", category: "nkn_topology");
+        var bulkSendConcurrency = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_BULK_SEND_CONCURRENCY", category: "nkn_topology");
         var receiveStallRecovery = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY"),
-            appSettings.Get("NLINK_NKN_RECEIVE_STALL_RECOVERY"),
-            appSettings.Get("nLink:nkn:receiveStallRecovery"));
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", category: "nkn_recovery"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_RECEIVE_STALL_RECOVERY", appSettings.Get("NLINK_NKN_RECEIVE_STALL_RECOVERY"), category: "nkn_recovery"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:receiveStallRecovery", appSettings.Get("nLink:nkn:receiveStallRecovery"), category: "nkn_recovery"));
         var receiveStallFileTransferFastRecovery = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY"),
-            appSettings.Get("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY"),
-            appSettings.Get("nLink:nkn:receiveStallFileTransferFastRecovery"));
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", category: "nkn_recovery"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", appSettings.Get("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY"), category: "nkn_recovery"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:receiveStallFileTransferFastRecovery", appSettings.Get("nLink:nkn:receiveStallFileTransferFastRecovery"), category: "nkn_recovery"));
         var receiveStallControlOnlyRecovery = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY"),
-            appSettings.Get("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY"),
-            appSettings.Get("nLink:nkn:controlOnlyStallRecovery"));
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", category: "nkn_recovery"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", appSettings.Get("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY"), category: "nkn_recovery"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:controlOnlyStallRecovery", appSettings.Get("nLink:nkn:controlOnlyStallRecovery"), category: "nkn_recovery"));
         var receiveStallRecoveryFallbackDelayMs = FirstNonEmpty(
-            Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS"),
-            appSettings.Get("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS"),
-            appSettings.Get("nLink:nkn:receiveStallRecoveryFallbackDelayMs"));
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS", category: "nkn_recovery"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS", appSettings.Get("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS"), category: "nkn_recovery"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:receiveStallRecoveryFallbackDelayMs", appSettings.Get("nLink:nkn:receiveStallRecoveryFallbackDelayMs"), category: "nkn_recovery"));
         var resolvedKeyPath = ResolveKeyPath(configuredKeyPath);
         var parsedNumSubClients = ParseInt(numSubClients, defaultValue: DefaultNumSubClients, minValue: 1, maxValue: 16);
         var parsedMediaNumSubClients = ParseInt(

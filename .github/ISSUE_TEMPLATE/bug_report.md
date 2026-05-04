@@ -8,7 +8,7 @@ assignees: ''
 
 ## Version
 
-Example: `v0.6.0`
+Example: `v0.6.2`
 
 ## Install type
 

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using NLink.Core.Configuration;
 using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
@@ -79,6 +80,38 @@ public sealed class WindowsBridgeLifetimeTests
         }
     }
 
+    [Fact]
+    public void BridgeBundleManifest_DiagnosticsExposeStatusWithoutFullPathsOrHashes()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-bridge-manifest-diagnostics", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var scriptPath = Path.Combine(tempDir, "index.js");
+        File.WriteAllText(scriptPath, "console.log('bridge diagnostics');");
+
+        try
+        {
+            WriteBridgeManifest(scriptPath);
+            var identity = BridgeBundleIdentity.Load(scriptPath);
+
+            NknRuntimeDiagnostics.SetBridgeBundleIdentity(identity);
+            var snapshot = NknRuntimeDiagnostics.Snapshot();
+
+            Assert.Equal("ok", snapshot.BridgeManifestStatus);
+            Assert.Equal("ok", snapshot.BridgeManifestReason);
+            Assert.True(snapshot.BridgeManifestOwnerPidWatchdog);
+            Assert.True(snapshot.BridgeManifestKillOnCloseJob);
+            Assert.NotEqual(identity.ActualScriptSha256, snapshot.BridgeManifestHashPrefix);
+            Assert.Equal(identity.ActualScriptSha256[..12], snapshot.BridgeManifestHashPrefix);
+            Assert.DoesNotContain(tempDir, snapshot.BridgeManifestStatus, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(scriptPath, snapshot.BridgeManifestReason, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            NknRuntimeDiagnostics.SetBridgeBundleIdentity(null);
+            TryDeleteDirectory(tempDir);
+        }
+    }
+
     [Theory]
     [InlineData("ok", false)]
     [InlineData("manifest_missing", true)]
@@ -139,6 +172,7 @@ public sealed class WindowsBridgeLifetimeTests
 
         var previousBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
 
+        using var unsafeDeveloperMode = ReleaseOverridePolicy.OverrideUnsafeDeveloperModeForTests(true);
         try
         {
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", scriptPath);

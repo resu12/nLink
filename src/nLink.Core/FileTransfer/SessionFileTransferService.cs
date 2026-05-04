@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
+using NLink.Core.Configuration;
 using NLink.Core.Logging;
 
 namespace NLink.Core.FileTransfer;
@@ -202,8 +203,10 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V4SenderPumpDepth = 8;
     private const int V4SenderPumpPendingBytes = 2 * 1024 * 1024;
     private const int V4RepairRepeatIntervalMs = 750;
+    private const int V4FileOnlyFrontierRepairRepeatIntervalMs = 250;
     private const int V4RepairRequestHistoryRetentionMs = 10000;
     private const int V4RepairRedundancyEscalationStallMs = 2000;
+    private const int V4FileOnlyFirstRepairCreditStallEscalationMs = 1000;
     private const int V4RepairBurstMaxChunks = 64;
     private const int V4RepairBatchSendAttempts = 1;
     private const int V4MaxBatchSegmentsDefault = 3;
@@ -219,10 +222,13 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V4StateProgressMaxDelayMs = 250;
     private const int V4TerminalReadyStateBestEffortTimeoutMs = 250;
     private const int V4KnownFrontierRepairChunks = V4MaxBatchSegmentsDefault;
+    private const int V4FileOnlyInitialFrontierRepairChunks = 12;
     private const int V4MixedInitialFrontierRepairChunks = 12;
     private const int V4FrontierTailRetryChunks = V4MaxBatchSegmentsDefault;
+    private const int V4FileOnlyFrontierTailRetryChunks = 12;
     private const string V4MaxBatchSegmentsEnvironmentVariableName = "NLINK_FILETRANSFER_V4_MAX_BATCH_SEGMENTS";
     private const string V4MixedScreenShareEnvironmentVariableName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
+    private const string V4FileOnlyFastRepairEnvironmentVariableName = "NLINK_FILETRANSFER_V4_FILE_ONLY_FAST_REPAIR";
     private const long ReceiverBufferSoftLimitBytes = 8L * 1024L * 1024L;
     private const long ReceiverBufferSevereLimitBytes = 16L * 1024L * 1024L;
     private const long ReceiverBufferEmergencyLimitBytes = 64L * 1024L * 1024L;
@@ -2482,7 +2488,9 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static bool TryCalculateExpectedChunkCount(long fileSizeBytes, int chunkSizeBytes, out int chunkCount)
     {
         chunkCount = 0;
-        if (fileSizeBytes <= 0 || chunkSizeBytes <= 0)
+        if (fileSizeBytes <= 0 ||
+            chunkSizeBytes <= 0 ||
+            chunkSizeBytes > FileTransferProtocol.MaxChunkRawBytes)
         {
             return false;
         }
@@ -2490,7 +2498,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         try
         {
             chunkCount = checked((int)((fileSizeBytes + chunkSizeBytes - 1) / chunkSizeBytes));
-            return chunkCount > 0;
+            return chunkCount is > 0 and <= FileTransferProtocol.MaxChunkCountV4;
         }
         catch (OverflowException)
         {
@@ -2546,7 +2554,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
     private static bool IsV4MixedScreenShareEnabled()
     {
-        var value = Environment.GetEnvironmentVariable(V4MixedScreenShareEnvironmentVariableName);
+        var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(V4MixedScreenShareEnvironmentVariableName, category: "filetransfer_tuning");
         if (string.IsNullOrWhiteSpace(value))
         {
             return true;
@@ -3258,7 +3266,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         string RepairRequestKey,
         bool FrontierTailRepair,
         FileTransferV4RepairDeliveryMode DeliveryMode,
-        string DeliveryEscalationReason);
+        string DeliveryEscalationReason,
+        long CreditExhaustedTimeMsAtDecision);
 
     private sealed class V4SenderRepairRequestState
     {

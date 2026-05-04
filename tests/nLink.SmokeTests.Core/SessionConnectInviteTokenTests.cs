@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using NLink.Core.Configuration;
 using NLink.Core.SessionConnect;
 using NLink.SmokeTests.TestUtilities;
 
@@ -362,6 +363,7 @@ public sealed class SessionConnectInviteTokenTests
     [Fact]
     public void InviteTokenServiceFactory_DefaultLegacySigningMode_IsBlockedInReleaseWithoutExplicitOptIn()
     {
+        using var unsafeDeveloperMode = new ScopedEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, null);
         using var inviteMode = new ScopedEnvironmentVariable(InviteTokenServiceFactory.InviteModeEnvVar, InviteTokenServiceFactory.InviteModeLegacySigned);
         using var legacyModeOptIn = new ScopedEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, null);
         using var signingKey = new ScopedEnvironmentVariable(InviteTokenServiceFactory.InviteSigningKeyEnvVar, null);
@@ -371,17 +373,17 @@ public sealed class SessionConnectInviteTokenTests
         var keyMaterial = InviteTokenServiceFactory.ReadInviteSigningKeyMaterial();
         Assert.Equal(InviteTokenServiceFactory.DefaultInviteSigningKey, Encoding.UTF8.GetString(keyMaterial));
 #else
-        var modeEx = Assert.Throws<InvalidOperationException>(() => InviteTokenServiceFactory.CreateInviteTokenFactory());
-        Assert.Contains(InviteTokenServiceFactory.InviteModeEnvVar, modeEx.Message, StringComparison.Ordinal);
-        Assert.Contains(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, modeEx.Message, StringComparison.Ordinal);
+        Assert.Equal(InviteTokenServiceFactory.InviteModeIssuedSecret, InviteTokenServiceFactory.GetInviteMode());
+        Assert.False(InviteTokenServiceFactory.IsLegacySignedInviteModeEnabled());
+        Assert.NotNull(InviteTokenServiceFactory.CreateInviteTokenFactory());
+        Assert.NotNull(InviteTokenServiceFactory.CreateInviteTokenValidator());
+        Assert.NotNull(InviteTokenServiceFactory.CreateDefaultResolver());
 
         var ex = Assert.Throws<InvalidOperationException>(() => InviteTokenServiceFactory.ReadInviteSigningKeyMaterial());
         Assert.Contains(InviteTokenServiceFactory.InviteSigningKeyEnvVar, ex.Message, StringComparison.Ordinal);
         Assert.Contains(InviteTokenServiceFactory.AllowInsecureLegacyInviteSigningEnvVar, ex.Message, StringComparison.Ordinal);
 
-        Assert.Throws<InvalidOperationException>(() => InviteTokenServiceFactory.CreateInviteTokenValidator());
         Assert.Throws<InvalidOperationException>(() => InviteTokenServiceFactory.CreateInviteSignatureService());
-        Assert.NotNull(InviteTokenServiceFactory.CreateDefaultResolver());
 #endif
     }
 
@@ -389,6 +391,7 @@ public sealed class SessionConnectInviteTokenTests
     [Fact]
     public void InviteTokenServiceFactory_LegacySigningMode_CanBeExplicitlyEnabledForInternalUse()
     {
+        using var unsafeDeveloperMode = new ScopedEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, "1");
         using var inviteMode = new ScopedEnvironmentVariable(InviteTokenServiceFactory.InviteModeEnvVar, InviteTokenServiceFactory.InviteModeLegacySigned);
         using var legacyModeOptIn = new ScopedEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, "1");
         using var signingKey = new ScopedEnvironmentVariable(InviteTokenServiceFactory.InviteSigningKeyEnvVar, null);
