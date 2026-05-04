@@ -1095,6 +1095,34 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public void NknTransport_FileTransferSecureStateReset_ClearsRemoteOpenSuppression()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.filetransfer.suppression-reset.address");
+            var hostIdentity = new NknIdentity("host-suppression-reset-id", hostClient.Address);
+            using var host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            var suppressed = Assert.IsAssignableFrom<ISet<string>>(
+                CoreSmokeTestsBase.GetPrivateField(host, "fileTransferDataSessionRemoteOpenSuppressed"));
+
+            suppressed.Add("transfer_reused_after_overflow");
+            CoreSmokeTestsBase.InvokePrivateMethod(host, "SetControlSessionSharedKey", RandomNumberGenerator.GetBytes(32));
+            Assert.Empty(suppressed);
+
+            suppressed.Add("transfer_reused_after_disconnect");
+            CoreSmokeTestsBase.InvokePrivateMethod(host, "ResetControlSecureState");
+            Assert.Empty(suppressed);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task NknTransport_V4DataSessionComplete_ClearsSameDirectionBusyGuard()
     {
         FakeNknClient.ResetNetwork();
@@ -1241,6 +1269,87 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
+    public async Task NknTransport_FileTransfer_LateSenderFrameAfterDecline_IsRejectedAsPostTerminal()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.declined-late.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.declined-late.address");
+            NknIdentity hostIdentity = new NknIdentity("host-declined-late-id", hostClient.Address);
+            NknIdentity helperIdentity = new NknIdentity("helper-declined-late-id", helperClient.Address);
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_v4_declined_late_sender";
+
+            TaskCompletionSource<FileTransferOfferV2> offerReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferDeclineV1> declineReceived = new TaskCompletionSource<FileTransferDeclineV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.FileTransferOfferReceived += delegate (object? _, FileTransferOfferReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    offerReceived.TrySetResult(e.Message);
+                }
+            };
+            helper.FileTransferDeclineReceived += delegate (object? _, FileTransferDeclineReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    declineReceived.TrySetResult(e.Message);
+                }
+            };
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "declined.bin",
+                    FileSizeBytes = 1024L,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            await host.SendFileTransferDeclineAsync(
+                new FileTransferDeclineV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Reason = "test_decline",
+                },
+                cts.Token);
+            await declineReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+
+            int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            var lateBatch = new FileTransferChunkBatchFrameV4
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                StartChunkIndex = 0,
+                ChunkCount = 1,
+                DataSegments = new[] { new byte[1024] },
+            };
+            InjectSecureFileTransferDataFrame(host, helper, helperClient, lateBatch, NknBridgeChannel.Bulk, CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper));
+            await Task.Delay(100, cts.Token);
+
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=filetransfer_message_rejected; message_type=file_transfer_data_frame", logTail, StringComparison.Ordinal);
+            Assert.Contains(transferId, logTail, StringComparison.Ordinal);
+            Assert.Contains("file_transfer_data_frame_post_terminal_late_sender_frame_declined", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason, StringComparison.Ordinal);
+            Assert.DoesNotContain("reason=post_completion_late_sender_frame", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain($"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={transferId}", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
     public async Task NknTransport_FileTransferDataFrame_DisposedDataSessionDoesNotBlackHoleFrames()
     {
         FakeNknClient.ResetNetwork();
@@ -1340,7 +1449,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             await Task.Delay(200, cts.Token);
             IDictionary dataSessions = Assert.IsAssignableFrom<IDictionary>(CoreSmokeTestsBase.GetPrivateField(host, "fileTransferDataSessions"));
             string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
-            Assert.Equal(0, dataSessions.Count);
+            Assert.Empty(dataSessions);
             Assert.DoesNotContain("event=filetransfer_data_frame_dispatched", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_data_frame_ignored", logTail, StringComparison.Ordinal);
         }

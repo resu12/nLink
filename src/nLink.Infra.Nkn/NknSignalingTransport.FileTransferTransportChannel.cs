@@ -2959,6 +2959,7 @@ public sealed partial class NknSignalingTransport
             fileTransferTerminalTombstones.Clear();
         }
 
+        ClearFileTransferDataSessionRemoteOpenSuppressed();
         ResetInboundFileTransferDispatchQueue();
     }
 
@@ -2992,7 +2993,16 @@ public sealed partial class NknSignalingTransport
             fileTransferTerminalTombstones.Clear();
         }
 
+        ClearFileTransferDataSessionRemoteOpenSuppressed();
         ResetInboundFileTransferDispatchQueue();
+    }
+
+    private void ClearFileTransferDataSessionRemoteOpenSuppressed()
+    {
+        lock (gate)
+        {
+            fileTransferDataSessionRemoteOpenSuppressed.Clear();
+        }
     }
 
     private byte[] GetFileTransferSessionSharedKeyOrThrow()
@@ -3296,9 +3306,16 @@ public sealed partial class NknSignalingTransport
 
         if (!hasExisting)
         {
-            failureReason = IsSenderDataFrame(frame) && IsRecentTerminalFileTransferLocked(transferId, out _)
-                ? "post_completion_late_sender_frame"
-                : "unknown_transfer_id";
+            if (IsSenderDataFrame(frame) &&
+                IsRecentTerminalFileTransferLocked(transferId, out var terminalPhase))
+            {
+                failureReason = terminalPhase == FileTransferTransportPhase.Completed
+                    ? "post_completion_late_sender_frame"
+                    : $"post_terminal_late_sender_frame_{MapFileTransferTerminalPhase(terminalPhase)}";
+                return false;
+            }
+
+            failureReason = "unknown_transfer_id";
             return false;
         }
 
@@ -3452,6 +3469,16 @@ public sealed partial class NknSignalingTransport
         => frame is FileTransferCompleteFrameV4
             or FileTransferCancelFrameV4
             or FileTransferErrorFrameV4;
+
+    private static string MapFileTransferTerminalPhase(FileTransferTransportPhase phase)
+        => phase switch
+        {
+            FileTransferTransportPhase.Completed => "completed",
+            FileTransferTransportPhase.Declined => "declined",
+            FileTransferTransportPhase.Canceled => "canceled",
+            FileTransferTransportPhase.Failed => "failed",
+            _ => "unknown",
+        };
 
     private bool HasActiveFileTransferLocked(bool initiatedLocally)
     {
