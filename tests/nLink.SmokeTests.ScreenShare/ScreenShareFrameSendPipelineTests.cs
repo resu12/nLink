@@ -58,6 +58,19 @@ public sealed class ScreenShareFrameSendPipelineTests : CoreSmokeTestsBase
         Assert.True(metrics.FramesQueued >= 1);
     }
 
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task ScreenShareFrameSendPipeline_AllowsHighQualityPresetTransportFps()
+    {
+        await using var pipeline = new ScreenShareFrameSendPipeline(
+            sendFrameAsync: (_, _) => Task.FromResult(1),
+            maxFramesPerSecond: ScreenShareQualitySettings.HighQualityPreset.TransportFramesPerSecond);
+
+        pipeline.SetMaxFramesPerSecond(ScreenShareQualitySettings.HighQualityPreset.TransportFramesPerSecond);
+
+        Assert.Equal(12, ScreenShareFrameSendPipeline.MaxFramesPerSecond);
+    }
+
 [Trait("Category", "LegacySmoke")]
     [Fact]
     public async Task ScreenShareFrameSendPipeline_DeferredFrame_SendsAtNextSlotWithoutNewArrival()

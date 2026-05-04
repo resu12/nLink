@@ -141,18 +141,19 @@ Get-AuthenticodeSignature .\artifacts\portable\helper\win-x64\nLink.exe | Format
 ```
 
 Signing policy:
-- public release artifacts must be Authenticode-signed before publish
-- at minimum:
+- preferred public release artifacts are Authenticode-signed before publish
+- at minimum, signed releases verify:
   - `artifacts\releases\<version>\nLink-Setup-win-x64-<version>.exe`
   - `artifacts\portable\helper\win-x64\nLink.exe`
-- local/manual packaging runs may remain unsigned until the signing step, but an unsigned artifact must not be published as the public release build
+- local/manual packaging runs may remain unsigned until the signing step
+- for `0.6.2`, unsigned public Windows artifacts are an accepted release exception; record that exception in release evidence and do not claim Authenticode signing for those artifacts
 
 Expected outcome:
 - package manifest checks pass
 - release staging contains no `.pdb`, `.xml`, `Avalonia.Diagnostics.dll`, or `nLink.runtimeconfig.dev.json`
 - packaged app contains and uses the bundled `bridge\win-x64\node.exe` and `bridge\win-x64\index.js` without relying on `NLINK_NKN_NODE_PATH` or `NLINK_NKN_BRIDGE_PATH`
 - packaged app uses the documented file-transfer queue bounds and bridge binary caps
-- Authenticode status is `Valid` for the public installer and installed app binary
+- Authenticode status is `Valid` for the public installer and installed app binary, or the unsigned-artifact exception is explicitly recorded for this release
 - installer remains per-user and non-admin (`{localappdata}\Programs\nLink Helper`, `PrivilegesRequired=lowest`)
 - no release packaging step depends on `NLINK_INVITE_MODE=legacy_signed`
 

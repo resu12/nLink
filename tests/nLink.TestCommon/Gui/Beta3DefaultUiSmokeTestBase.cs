@@ -233,7 +233,7 @@ public abstract class Beta3DefaultUiSmokeTestBase : IClassFixture<Beta3DefaultUi
     {
         var constructor = typeof(NLink.App.Configuration.TransportRuntimeConfig).GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, binder: null, new[] { typeof(string), typeof(string), typeof(string), typeof(string), typeof(string), typeof(bool), typeof(bool), typeof(bool), typeof(bool), typeof(string), typeof(string), typeof(string), typeof(BridgeReusePolicy), typeof(Func<NLink.Core.ISignalingTransport>), }, modifiers: null);
         Assert.NotNull(constructor);
-        return (NLink.App.Configuration.TransportRuntimeConfig)constructor!.Invoke(new object? [] { "NKN", "Internet connection", "Release", "NKN", "ui-test", true, false, false, true, "ui-test", string.Empty, string.Empty, BridgeReusePolicy.Default, (Func<NLink.Core.ISignalingTransport>)(() => new NLink.Infra.DevLocal.DevLocalTransport()), });
+        return (NLink.App.Configuration.TransportRuntimeConfig)constructor!.Invoke(new object? [] { "NKN", "NKN internet transport", "Release", "NKN", "ui-test", true, false, false, true, "ui-test", string.Empty, string.Empty, BridgeReusePolicy.Default, (Func<NLink.Core.ISignalingTransport>)(() => new NLink.Infra.DevLocal.DevLocalTransport()), });
     }
 
     protected sealed class TestClipboardService : IClipboardService

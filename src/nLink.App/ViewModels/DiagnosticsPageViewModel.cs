@@ -36,6 +36,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private readonly HangReportService? hangReportService;
     private readonly Func<DateTimeOffset> nowProvider;
     private readonly Func<string> diagnosticsExportRootProvider;
+    private readonly Action<string, string, string, string> persistScreenSharePresetInBackground;
     private readonly InviteSecurityStatus inviteSecurityStatus;
     private readonly NknRuntimeDiagnosticsSnapshot nknDiagnosticsSnapshot;
     private readonly PersistenceDiagnosticsSnapshot persistenceDiagnosticsSnapshot;
@@ -51,7 +52,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         ResourceRuntimeTracker? resourceRuntimeTracker = null,
         HangReportService? hangReportService = null,
         Func<DateTimeOffset>? nowProvider = null,
-        Func<string>? diagnosticsExportRootProvider = null)
+        Func<string>? diagnosticsExportRootProvider = null,
+        Action<string, string, string, string>? screenSharePresetPersistence = null)
         : this(
             ScreenShareEvidenceLocator.CreateDefault(),
             backAction,
@@ -62,7 +64,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             resourceRuntimeTracker,
             hangReportService,
             nowProvider,
-            diagnosticsExportRootProvider)
+            diagnosticsExportRootProvider,
+            screenSharePresetPersistence)
     {
     }
 
@@ -76,7 +79,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         ResourceRuntimeTracker? resourceRuntimeTracker = null,
         HangReportService? hangReportService = null,
         Func<DateTimeOffset>? nowProvider = null,
-        Func<string>? diagnosticsExportRootProvider = null)
+        Func<string>? diagnosticsExportRootProvider = null,
+        Action<string, string, string, string>? screenSharePresetPersistence = null)
     {
         linksConfig ??= new ShareMessageConfig(null);
         BackCommand = new RelayCommand(backAction);
@@ -86,6 +90,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         this.hangReportService = hangReportService;
         this.nowProvider = nowProvider ?? DefaultNowProvider;
         this.diagnosticsExportRootProvider = diagnosticsExportRootProvider ?? DefaultDiagnosticsExportRootProvider;
+        persistScreenSharePresetInBackground = screenSharePresetPersistence ?? PersistScreenSharePresetInBackground;
         screenShareEvidenceSnapshot = screenShareEvidenceLocator.ReadLatest();
         screenShareLiveSnapshot = sessionRuntime?.GetScreenShareLiveDiagnosticsSnapshot() ?? ScreenShareLiveDiagnosticsSnapshot.Unavailable;
 
@@ -179,8 +184,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         OpenLogsFolderCommand = new RelayCommand(RequestOpenLogsFolder);
         ReportBugCommand = new RelayCommand(RequestOpenBugReport);
         ApplyBalancedScreenSharePresetCommand = new RelayCommand(ApplyBalancedScreenSharePreset);
-        ApplyLowEndScreenSharePresetCommand = new RelayCommand(ApplyLowEndScreenSharePreset);
-        ApplySharperTextScreenSharePresetCommand = new RelayCommand(ApplySharperTextScreenSharePreset);
+        ApplyHighQualityScreenSharePresetCommand = new RelayCommand(ApplyHighQualityScreenSharePreset);
+        ApplyHighPerformanceScreenSharePresetCommand = new RelayCommand(ApplyHighPerformanceScreenSharePreset);
     }
 
     public string PageTitle => "Diagnostics";
@@ -224,8 +229,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string ScreenShareEffectivePresetName => ScreenShareQualitySettings.GetCurrentEnvironmentState().EffectivePresetName;
     public string ScreenSharePresetMigrationStatus => ScreenShareQualitySettings.WasLegacyHigherClarityPresetMigrated ? "Yes" : "No";
     public string ScreenSharePresetBalanced => ScreenShareQualitySettings.BalancedPreset.Describe();
-    public string ScreenSharePresetLowEnd => ScreenShareQualitySettings.LowEndPreset.Describe();
-    public string ScreenSharePresetSharperText => ScreenShareQualitySettings.SharperTextPreset.Describe();
+    public string ScreenSharePresetHighQuality => ScreenShareQualitySettings.HighQualityPreset.Describe();
+    public string ScreenSharePresetHighPerformance => ScreenShareQualitySettings.HighPerformancePreset.Describe();
     public string ScreenShareCaptureEnvHint => "Apply preset, then restart screen sharing. Settings apply instantly and are persisted in background via env vars: NLINK_FEATURE_SCREENCAP_MAX_FPS, NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS, NLINK_FEATURE_SCREENCAP_SCALE.";
     public string ScreenShareEvidenceStatus => screenShareEvidenceSnapshot.StatusKey;
     public string ScreenShareEvidenceArtifactName => screenShareEvidenceSnapshot.ArtifactName;
@@ -370,8 +375,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public IRelayCommand ReportBugCommand { get; }
     public bool ShowReportBug => !string.IsNullOrWhiteSpace(bugReportUrl);
     public IRelayCommand ApplyBalancedScreenSharePresetCommand { get; }
-    public IRelayCommand ApplyLowEndScreenSharePresetCommand { get; }
-    public IRelayCommand ApplySharperTextScreenSharePresetCommand { get; }
+    public IRelayCommand ApplyHighQualityScreenSharePresetCommand { get; }
+    public IRelayCommand ApplyHighPerformanceScreenSharePresetCommand { get; }
 
     public IRelayCommand BackCommand { get; }
 
@@ -428,11 +433,11 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private void ApplyBalancedScreenSharePreset()
         => ApplyScreenSharePreset(ScreenShareQualitySettings.BalancedPreset);
 
-    private void ApplyLowEndScreenSharePreset()
-        => ApplyScreenSharePreset(ScreenShareQualitySettings.LowEndPreset);
+    private void ApplyHighQualityScreenSharePreset()
+        => ApplyScreenSharePreset(ScreenShareQualitySettings.HighQualityPreset);
 
-    private void ApplySharperTextScreenSharePreset()
-        => ApplyScreenSharePreset(ScreenShareQualitySettings.SharperTextPreset);
+    private void ApplyHighPerformanceScreenSharePreset()
+        => ApplyScreenSharePreset(ScreenShareQualitySettings.HighPerformancePreset);
 
     private void ApplyScreenSharePreset(ScreenSharePresetDefinition preset)
     {
@@ -449,9 +454,11 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         OnPropertyChanged(nameof(ScreenShareCaptureScale));
         OnPropertyChanged(nameof(ScreenShareEffectivePresetName));
         OnPropertyChanged(nameof(ScreenSharePresetMigrationStatus));
+        OnPropertyChanged(nameof(AdvancedScreenShareSettingsSummary));
+        OnPropertyChanged(nameof(ShowScreenShareResetHint));
 
         copyFeedback.Show($"{preset.DisplayName} preset applied");
-        PersistScreenSharePresetInBackground(preset.DisplayName, fpsText, transportFpsText, scaleText);
+        persistScreenSharePresetInBackground(preset.DisplayName, fpsText, transportFpsText, scaleText);
     }
 
     private static void PersistScreenSharePresetInBackground(
@@ -618,8 +625,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             string.Empty,
             "screenshare_capture_presets:",
             $"  balanced_default: {ScreenSharePresetBalanced}",
-            $"  low_end_cpu_network: {ScreenSharePresetLowEnd}",
-            $"  sharper_text: {ScreenSharePresetSharperText}",
+            $"  high_quality: {ScreenSharePresetHighQuality}",
+            $"  high_performance: {ScreenSharePresetHighPerformance}",
             $"  apply_hint: {ScreenShareCaptureEnvHint}",
             string.Empty,
             BuildScreenShareEvidenceText(),

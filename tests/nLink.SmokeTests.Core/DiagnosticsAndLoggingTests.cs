@@ -129,6 +129,10 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
             Assert.Contains("screenshare_messages_sent:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_payload_bytes_sent:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_bridge_bytes_sent:", copied!, StringComparison.Ordinal);
+            Assert.Contains("screenshare_capture_presets:", copied!, StringComparison.Ordinal);
+            Assert.Contains("balanced_default: capture_fps=15, transport_fps=8, scale=1.00", copied!, StringComparison.Ordinal);
+            Assert.Contains("high_quality: capture_fps=20, transport_fps=12, scale=1.00", copied!, StringComparison.Ordinal);
+            Assert.Contains("high_performance: capture_fps=10, transport_fps=6, scale=0.60", copied!, StringComparison.Ordinal);
             Assert.Contains("Screenshare evidence", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_evidence_status:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_operator_verdict:", copied!, StringComparison.Ordinal);
@@ -430,6 +434,46 @@ public void DiagnosticsPageViewModel_UsesSupportFirstLabels_AndHidesEmptyBugRepo
 }
 
 [Fact]
+public void DiagnosticsPageViewModel_ScreenSharePresetCommands_UpdateDisplayedSummary()
+{
+    var previousMaxFps = Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable);
+    var previousTransportMaxFps = Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable);
+    var previousScale = Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareScaleVariable);
+    try
+    {
+        ScreenShareQualitySettings.ResetMigrationStateForTests();
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable, "10");
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable, "8");
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareScaleVariable, "1");
+        var config = CreateDevLocalTestConfig();
+        var changed = new List<string?>();
+        using var vm = new DiagnosticsPageViewModel(
+            static () => { },
+            config,
+            linksConfig: new ShareMessageConfig(null),
+            screenSharePresetPersistence: static (_, _, _, _) => { });
+        vm.PropertyChanged += (_, args) => changed.Add(args.PropertyName);
+
+        Assert.Equal("preset=Custom; capture_fps=10; transport_fps=8; scale=1; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
+        Assert.True(vm.ShowScreenShareResetHint);
+
+        vm.ApplyHighQualityScreenSharePresetCommand.Execute(null);
+
+        Assert.Equal("preset=High quality; capture_fps=20; transport_fps=12; scale=1; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
+        Assert.False(vm.ShowScreenShareResetHint);
+        Assert.Contains(nameof(DiagnosticsPageViewModel.AdvancedScreenShareSettingsSummary), changed);
+        Assert.Contains(nameof(DiagnosticsPageViewModel.ShowScreenShareResetHint), changed);
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable, previousMaxFps);
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable, previousTransportMaxFps);
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareScaleVariable, previousScale);
+        ScreenShareQualitySettings.ResetMigrationStateForTests();
+    }
+}
+
+[Fact]
 public void DiagnosticsPageView_KeepsPrimarySurfaceSupportFocused()
 {
     var viewPath = FindFileUpwards(Path.Combine("src", "nLink.App", "Views", "DiagnosticsPageView.axaml"));
@@ -440,9 +484,12 @@ public void DiagnosticsPageView_KeepsPrimarySurfaceSupportFocused()
     Assert.Contains("Open logs folder", xaml, StringComparison.Ordinal);
     Assert.Contains("Screen share health", xaml, StringComparison.Ordinal);
     Assert.Contains("Advanced diagnostics", xaml, StringComparison.Ordinal);
-    Assert.Contains("Apply CPU saver", xaml, StringComparison.Ordinal);
+    Assert.Contains("Balanced", xaml, StringComparison.Ordinal);
+    Assert.Contains("High quality", xaml, StringComparison.Ordinal);
+    Assert.Contains("High performance", xaml, StringComparison.Ordinal);
     Assert.DoesNotContain("Feature Flags", xaml, StringComparison.Ordinal);
     Assert.DoesNotContain("ScreenShare Capture Tuning", xaml, StringComparison.Ordinal);
+    Assert.DoesNotContain("Apply CPU saver", xaml, StringComparison.Ordinal);
     Assert.DoesNotContain("Apply sharper text", xaml, StringComparison.Ordinal);
 }
 

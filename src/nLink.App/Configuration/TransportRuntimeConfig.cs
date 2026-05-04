@@ -177,7 +177,7 @@ public sealed class TransportRuntimeConfig
         var policy = ReadBridgeReusePolicy();
         return new TransportRuntimeConfig(
             key: "NKN",
-            displayName: "Internet connection",
+            displayName: "NKN internet transport",
             buildMode: buildMode,
             envVarValue: normalizedSetting,
             selectionReason: hasExplicitSetting

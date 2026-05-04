@@ -114,7 +114,8 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("`64 KiB` payload cap", runbook, StringComparison.Ordinal);
         Assert.Contains("`196,606` body bytes before allocation", runbook, StringComparison.Ordinal);
         Assert.Contains("live NKN file-transfer soak", runbook, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("public release artifacts must be Authenticode-signed before publish", runbook, StringComparison.Ordinal);
+        Assert.Contains("preferred public release artifacts are Authenticode-signed before publish", runbook, StringComparison.Ordinal);
+        Assert.Contains("unsigned public Windows artifacts are an accepted release exception", runbook, StringComparison.Ordinal);
         Assert.Contains("Authenticode status is `Valid`", runbook, StringComparison.Ordinal);
         Assert.Contains("security_relevant_overrides", runbook, StringComparison.Ordinal);
         Assert.Contains("high_priority_control_queue_overflows:", runbook, StringComparison.Ordinal);
@@ -129,8 +130,8 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
     {
         var repoRoot = FindRepoRoot();
         var checklist = File.ReadAllText(Path.Combine(repoRoot, "docs", "release", "rc-validation-checklist.md"));
-        var releaseNotes = File.ReadAllText(Path.Combine(repoRoot, "docs", "releases", "0.6.1.md"));
-        var githubNotes = File.ReadAllText(Path.Combine(repoRoot, "docs", "releases", "0.6.1-github.md"));
+        var releaseNotes = File.ReadAllText(Path.Combine(repoRoot, "docs", "releases", "0.6.2.md"));
+        var githubNotes = File.ReadAllText(Path.Combine(repoRoot, "docs", "releases", "0.6.2-github.md"));
         var readme = File.ReadAllText(Path.Combine(repoRoot, "README.md"));
 
         Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE", checklist, StringComparison.Ordinal);
@@ -138,20 +139,25 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("64 KiB", checklist, StringComparison.Ordinal);
         Assert.Contains("live NKN file-transfer soak", checklist, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("bundled `bridge/win-x64/node.exe`", checklist, StringComparison.Ordinal);
+        Assert.Contains("Unsigned public Windows artifacts are recorded as an accepted release exception", checklist, StringComparison.Ordinal);
 
         Assert.Contains("V4-only", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("explicit accept/decline", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("session envelope", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("source/session validation", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("NKN transport alone", releaseNotes, StringComparison.Ordinal);
+        Assert.Contains("Release exception: Windows artifacts for this release are unsigned", releaseNotes, StringComparison.Ordinal);
+        Assert.Contains("High quality", releaseNotes, StringComparison.Ordinal);
 
         Assert.Contains("V4-only", githubNotes, StringComparison.Ordinal);
         Assert.Contains("explicit accept/decline", githubNotes, StringComparison.Ordinal);
         Assert.Contains("session envelope", githubNotes, StringComparison.Ordinal);
+        Assert.Contains("Release exception: Windows artifacts for this release are unsigned", githubNotes, StringComparison.Ordinal);
 
         Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE=1", readme, StringComparison.Ordinal);
         Assert.Contains("session envelope", readme, StringComparison.Ordinal);
         Assert.Contains("source/session validation", readme, StringComparison.Ordinal);
+        Assert.Contains("Release exception: Windows artifacts for `0.6.2` are unsigned", readme, StringComparison.Ordinal);
     }
 
 [Trait("Category", "LegacySmoke")]
@@ -167,6 +173,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE=1", report, StringComparison.Ordinal);
         Assert.Contains("file transfer uses the post-handshake session envelope", report, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("V4-only, single-file, explicit accept/decline", report, StringComparison.Ordinal);
+        Assert.Contains("Public Windows installer and portable artifacts are unsigned for this release", report, StringComparison.Ordinal);
         Assert.Contains("remote clipboard", report, StringComparison.Ordinal);
         Assert.Contains("## Out Of Scope Features For This Release", normalizedReport, StringComparison.Ordinal);
         Assert.Contains("\n- remote clipboard\n", normalizedReport, StringComparison.OrdinalIgnoreCase);

@@ -31,17 +31,14 @@ internal static class ScreenShareQualitySettings
     internal const string ScreenShareMaxFpsVariable = "NLINK_FEATURE_SCREENCAP_MAX_FPS";
     internal const string ScreenShareTransportMaxFpsVariable = "NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS";
     internal const string ScreenShareScaleVariable = "NLINK_FEATURE_SCREENCAP_SCALE";
-    internal const string TextFirstEffectivePresetKey = "text_first_1x";
-    internal const string TextFirstEffectivePresetName = "Text-first 1.0x";
-
     internal static readonly ScreenSharePresetDefinition BalancedPreset =
         new("balanced", "Balanced", 15, 8, 1d);
 
-    internal static readonly ScreenSharePresetDefinition LowEndPreset =
-        new("low_end", "Low-end", 10, 8, 0.60d);
+    internal static readonly ScreenSharePresetDefinition HighQualityPreset =
+        new("high_quality", "High quality", 20, 12, 1d);
 
-    internal static readonly ScreenSharePresetDefinition SharperTextPreset =
-        new("sharper_text", "Sharper text", 15, 8, 1d);
+    internal static readonly ScreenSharePresetDefinition HighPerformancePreset =
+        new("high_performance", "High performance", 10, 6, 0.60d);
 
     private static readonly ScreenSharePresetDefinition LegacyHigherClarityPreset =
         new("legacy_higher_clarity", "Higher clarity", 20, 8, 0.85d);
@@ -60,12 +57,12 @@ internal static class ScreenShareQualitySettings
     {
         if (MatchesPreset(LegacyHigherClarityPreset))
         {
-            ApplyPresetToProcessEnvironment(SharperTextPreset);
+            ApplyPresetToProcessEnvironment(BalancedPreset);
             Interlocked.Exchange(ref legacyHigherClarityPresetMigrated, 1);
 
             if (persistUserEnvironment)
             {
-                if (PersistPresetToUserEnvironment(SharperTextPreset))
+                if (PersistPresetToUserEnvironment(BalancedPreset))
                 {
                     Interlocked.Exchange(ref pendingUserEnvironmentPersistence, 0);
                 }
@@ -81,7 +78,7 @@ internal static class ScreenShareQualitySettings
 
             LocalOperationalLog.Warn(
                 "ScreenShareQuality",
-                $"event=screenshare_quality_preset_migrated; from={LegacyHigherClarityPreset.Key}; to={SharperTextPreset.Key}; {SharperTextPreset.Describe()}");
+                $"event=screenshare_quality_preset_migrated; from={LegacyHigherClarityPreset.Key}; to={BalancedPreset.Key}; {BalancedPreset.Describe()}");
         }
 
         return GetCurrentEnvironmentState();
@@ -106,27 +103,27 @@ internal static class ScreenShareQualitySettings
             {
                 LocalOperationalLog.Info(
                     "ScreenShareQuality",
-                    $"event=screenshare_quality_preset_persist_async_started; to={SharperTextPreset.Key}");
+                    $"event=screenshare_quality_preset_persist_async_started; to={BalancedPreset.Key}");
 
-                if (PersistPresetToUserEnvironment(SharperTextPreset))
+                if (PersistPresetToUserEnvironment(BalancedPreset))
                 {
                     Interlocked.Exchange(ref pendingUserEnvironmentPersistence, 0);
                     LocalOperationalLog.Info(
                         "ScreenShareQuality",
-                        $"event=screenshare_quality_preset_persist_async_completed; to={SharperTextPreset.Key}; duration_ms={stopwatch.ElapsedMilliseconds}");
+                        $"event=screenshare_quality_preset_persist_async_completed; to={BalancedPreset.Key}; duration_ms={stopwatch.ElapsedMilliseconds}");
                 }
                 else
                 {
                     LocalOperationalLog.Warn(
                         "ScreenShareQuality",
-                        $"event=screenshare_quality_preset_persist_async_failed; to={SharperTextPreset.Key}; duration_ms={stopwatch.ElapsedMilliseconds}; reason=user_environment_write_failed");
+                        $"event=screenshare_quality_preset_persist_async_failed; to={BalancedPreset.Key}; duration_ms={stopwatch.ElapsedMilliseconds}; reason=user_environment_write_failed");
                 }
             }
             catch (Exception ex)
             {
                 LocalOperationalLog.Warn(
                     "ScreenShareQuality",
-                    $"event=screenshare_quality_preset_persist_async_failed; to={SharperTextPreset.Key}; duration_ms={stopwatch.ElapsedMilliseconds}; reason={ex.GetType().Name}");
+                    $"event=screenshare_quality_preset_persist_async_failed; to={BalancedPreset.Key}; duration_ms={stopwatch.ElapsedMilliseconds}; reason={ex.GetType().Name}");
             }
             finally
             {
@@ -153,15 +150,19 @@ internal static class ScreenShareQualitySettings
 
     internal static string ResolveEffectivePresetKey(int captureFramesPerSecond, int transportFramesPerSecond, double captureScale)
     {
-        if (MatchesPreset(BalancedPreset, captureFramesPerSecond, transportFramesPerSecond, captureScale) ||
-            MatchesPreset(SharperTextPreset, captureFramesPerSecond, transportFramesPerSecond, captureScale))
+        if (MatchesPreset(BalancedPreset, captureFramesPerSecond, transportFramesPerSecond, captureScale))
         {
-            return TextFirstEffectivePresetKey;
+            return BalancedPreset.Key;
         }
 
-        if (MatchesPreset(LowEndPreset, captureFramesPerSecond, transportFramesPerSecond, captureScale))
+        if (MatchesPreset(HighQualityPreset, captureFramesPerSecond, transportFramesPerSecond, captureScale))
         {
-            return LowEndPreset.Key;
+            return HighQualityPreset.Key;
+        }
+
+        if (MatchesPreset(HighPerformancePreset, captureFramesPerSecond, transportFramesPerSecond, captureScale))
+        {
+            return HighPerformancePreset.Key;
         }
 
         return "custom";
@@ -171,8 +172,9 @@ internal static class ScreenShareQualitySettings
     {
         return effectivePresetKey switch
         {
-            TextFirstEffectivePresetKey => TextFirstEffectivePresetName,
-            "low_end" => LowEndPreset.DisplayName,
+            "balanced" => BalancedPreset.DisplayName,
+            "high_quality" => HighQualityPreset.DisplayName,
+            "high_performance" => HighPerformancePreset.DisplayName,
             _ => "Custom",
         };
     }

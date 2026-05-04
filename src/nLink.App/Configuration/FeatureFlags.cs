@@ -41,7 +41,7 @@ public static class FeatureFlags
         ReadIntEnvironmentOverride("NLINK_FEATURE_SCREENCAP_MAX_FPS", defaultValue: 15, minValue: 1, maxValue: 30);
 
     public static int ScreenShareTransportMaxFps =>
-        ReadIntEnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS", defaultValue: 8, minValue: 1, maxValue: 8);
+        ReadIntEnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS", defaultValue: 8, minValue: 1, maxValue: 12);
 
     public static bool ScreenShareTransportAutoTuneEnabled =>
         ReadBoolEnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE", defaultValue: true);

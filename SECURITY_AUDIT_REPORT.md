@@ -431,12 +431,13 @@ Use this checklist as the final release gate for a public build.
 - [ ] Release build suppresses unsafe override env/appsettings values unless `NLINK_UNSAFE_DEVELOPER_MODE=1` is set
 - [ ] Release build fails closed on insecure remote-control sequence-gate override
 - [ ] Release runbook includes payload/queue limit matrix
-- [ ] Public release installer signing requirement is documented and enforced in the real release process
+- [ ] Public release installer signing requirement is documented and enforced in the real release process, unless explicitly accepted as a release exception
 
 ### Documented release exceptions
 
 These items must be either resolved before release or explicitly accepted as release exceptions.
 
+- [ ] Public Windows artifacts are unsigned for this release
 - [ ] Bridge dependency stack still relies on deprecated legacy packages through `nkn-sdk`
 - [ ] Committed `tools/nkn-bridge/node_modules` vendor tree remains part of the shipped review surface
 - [ ] `Microsoft.Windows.SDK.NET` preview dependency remains on the production Windows path
@@ -451,6 +452,7 @@ If any of the above remain unresolved:
 
 The following release exceptions are now treated as accepted for this release train:
 
+- Public Windows installer and portable artifacts are unsigned for this release
 - Bridge dependency stack still relies on deprecated legacy packages through `nkn-sdk`
 - Committed `tools/nkn-bridge/node_modules` vendor tree remains part of the shipped review surface
 - `Microsoft.Windows.SDK.NET` preview dependency remains on the production Windows path
@@ -459,7 +461,7 @@ This means the remaining release decision is now driven primarily by the manual-
 
 ### Out-of-scope features must remain unclaimed unless separately verified
 
-- [ ] File transfer is claimed only as the audited `0.6.1` shipped scope: V4-only, single-file, explicit accept/decline, session-envelope protected
+- [ ] File transfer is claimed only as the audited `0.6.2` shipped scope: V4-only, single-file, explicit accept/decline, session-envelope protected
 - [ ] Remote clipboard is either fully audited as shipped or omitted from release claims
 
 ### Manual verification before GO
@@ -469,7 +471,7 @@ This means the remaining release decision is now driven primarily by the manual-
 - [ ] Real packaged release verifies secure screen-share flow end to end
 - [ ] Real packaged release verifies secure file-transfer flow end to end with a live NKN soak
 - [ ] Real packaged release verifies no unexpected bridge-side logs outside audited paths
-- [ ] Real release artifacts are Authenticode-signed and signature status is `Valid`
+- [ ] Real release artifacts are Authenticode-signed and signature status is `Valid`, or unsigned Windows artifacts are recorded as the accepted release exception
 - [ ] Real packaged release diagnostics are reviewed for accidental identity/session leakage
 - [ ] Real packaged release uses the documented payload/queue bounds
 - [ ] If non-Windows release is in scope, protected secret storage is verified there too

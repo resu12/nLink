@@ -34,6 +34,7 @@
 - [ ] Any `post_completion_late_frame_ignored_count` evidence is reviewed as benign authenticated NKN late delivery after terminal completion, not as a protocol reject.
 - [ ] Packaged app uses bundled `bridge/win-x64/node.exe` and `bridge/win-x64/index.js`; public release does not depend on bridge path overrides.
 - [ ] Release evidence confirms file-transfer queue limits (`512` frames / `32 MiB`) and bridge binary caps (`64 KiB` payload, `196,606` body bytes before allocation).
+- [ ] Unsigned public Windows artifacts are recorded as an accepted release exception if Authenticode signature status is not `Valid`.
 
 ## Determinism
 
