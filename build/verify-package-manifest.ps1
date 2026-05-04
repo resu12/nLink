@@ -77,11 +77,40 @@ function Assert-BridgeManifestMatchesBundle {
         throw "Packaged bridge manifest is missing bridgeScriptSha256: $manifestPath"
     }
 
+    if ($manifest.nodeModulesShipped -ne $false) {
+        throw "Packaged bridge manifest must declare nodeModulesShipped=false: $manifestPath"
+    }
+
     $stagedBridgePath = Join-Path $BridgeDir 'index.js'
     $actualHash = Get-Sha256FileHash -Path $stagedBridgePath
     $expectedHash = ([string]$manifest.bridgeScriptSha256).ToLowerInvariant()
     if ($actualHash -ne $expectedHash) {
         throw "Packaged bridge script hash does not match bridge manifest for runtime '$Runtime'."
+    }
+
+    $packageLockPath = Join-Path $BridgeDir 'package-lock.json'
+    if (-not (Test-Path -Path $packageLockPath -PathType Leaf)) {
+        throw "Packaged bridge package-lock.json is missing for runtime '$Runtime': $packageLockPath"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($manifest.packageLockSha256)) {
+        throw "Packaged bridge manifest is missing packageLockSha256: $manifestPath"
+    }
+
+    $actualLockHash = Get-Sha256FileHash -Path $packageLockPath
+    $expectedLockHash = ([string]$manifest.packageLockSha256).ToLowerInvariant()
+    if ($actualLockHash -ne $expectedLockHash) {
+        throw "Packaged bridge package-lock hash does not match bridge manifest for runtime '$Runtime'."
+    }
+
+    $dependencyEvidencePath = Join-Path $BridgeDir 'bridge-dependencies.json'
+    if (-not (Test-Path -Path $dependencyEvidencePath -PathType Leaf)) {
+        throw "Packaged bridge dependency evidence is missing for runtime '$Runtime': $dependencyEvidencePath"
+    }
+
+    $dependencyEvidence = Get-Content -Path $dependencyEvidencePath -Raw | ConvertFrom-Json
+    if ($dependencyEvidence.nodeModulesShipped -ne $false) {
+        throw "Packaged bridge dependency evidence must declare nodeModulesShipped=false: $dependencyEvidencePath"
     }
 }
 
@@ -175,6 +204,11 @@ if (Test-Path -Path $bridgeRoot -PathType Container) {
 
         Assert-BridgeSupportsBulkChannel -BridgeScriptPath $stagedBridgePath
         Assert-BridgeManifestMatchesBundle -BridgeDir $bridgeRuntimeDir -Runtime $runtime
+
+        $nodeModulesPath = Join-Path $bridgeRuntimeDir 'node_modules'
+        if (Test-Path -Path $nodeModulesPath) {
+            throw "Package staging must not include bridge node_modules: $nodeModulesPath"
+        }
     }
 }
 

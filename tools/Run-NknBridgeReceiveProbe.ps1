@@ -52,7 +52,7 @@ $rid = "win-x64"
 if ([string]::IsNullOrWhiteSpace($NodePath)) {
     $NodePath = Resolve-FirstExistingPath @(
         (Join-Path $repoRoot "artifacts\bridge\$rid\node.exe"),
-        (Join-Path $repoRoot "tools\node\$rid\node-v24.13.1-win-x64\node.exe"),
+        (Join-Path $repoRoot "artifacts\toolcache\node\$rid\node-v24.13.1-win-x64\node.exe"),
         (Join-Path $repoRoot "src\nLink.App\bin\Release\net9.0-windows10.0.19041.0\win-x64\publish\bridge\$rid\node.exe")
     )
 }

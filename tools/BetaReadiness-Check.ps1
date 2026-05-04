@@ -32,6 +32,16 @@ function Assert-PathExists {
     }
 }
 
+function Assert-PathNotExists {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+    if (Test-Path $Path) {
+        throw "$Description must not be present: $Path"
+    }
+}
+
 function New-SectionResult {
     param(
         [string]$Name,
@@ -549,13 +559,17 @@ try {
         foreach ($p in @(
             (Join-Path $portableBridgeRid "node.exe"),
             (Join-Path $portableBridgeRid "index.js"),
-            (Join-Path $portableBridgeRid "node_modules"),
+            (Join-Path $portableBridgeRid "package-lock.json"),
+            (Join-Path $portableBridgeRid "bridge-dependencies.json"),
             (Join-Path $helperBridgeRid "node.exe"),
             (Join-Path $helperBridgeRid "index.js"),
-            (Join-Path $helperBridgeRid "node_modules")
+            (Join-Path $helperBridgeRid "package-lock.json"),
+            (Join-Path $helperBridgeRid "bridge-dependencies.json")
         )) {
             Assert-PathExists -Path $p -Description "Bridge bundle entry"
         }
+        Assert-PathNotExists -Path (Join-Path $portableBridgeRid "node_modules") -Description "Portable bridge node_modules"
+        Assert-PathNotExists -Path (Join-Path $helperBridgeRid "node_modules") -Description "Helper staging bridge node_modules"
 
         $checksumCheck = Verify-ChecksumsFile -ChecksumsPath $checksumsPath -AssetDir $releaseDir
         if (-not $checksumCheck.Passed) {

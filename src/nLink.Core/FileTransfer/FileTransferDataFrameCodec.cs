@@ -104,7 +104,12 @@ public static class FileTransferDataFrameCodec
                     throw new InvalidOperationException("V4 chunk batch count must match the number of data segments.");
                 }
 
-                var totalChunkBytes = 0;
+                if (!IsValidV4ChunkRange(batch.StartChunkIndex, batch.ChunkCount))
+                {
+                    throw new InvalidOperationException("V4 chunk batch range was outside protocol bounds.");
+                }
+
+                var totalChunkBytes = 0L;
                 WriteInt32(buffer, batch.StartChunkIndex);
                 WriteInt32(buffer, batch.ChunkCount);
                 WriteInt32(buffer, batch.DataSegments.Count);
@@ -399,8 +404,11 @@ public static class FileTransferDataFrameCodec
             case FileTransferStateFrameV4 state when
                 state.Epoch >= 0 &&
                 state.ContiguousCommittedChunkIndex >= 0 &&
+                state.ContiguousCommittedChunkIndex <= FileTransferProtocol.MaxChunkCountV4 &&
                 state.DurableReceivedHighestChunkIndex >= -1 &&
+                state.DurableReceivedHighestChunkIndex <= FileTransferProtocol.MaxChunkCountV4 &&
                 state.CreditUntilChunkIndexExclusive >= state.ContiguousCommittedChunkIndex &&
+                state.CreditUntilChunkIndexExclusive <= FileTransferProtocol.MaxChunkCountV4 &&
                 state.BytesCommitted >= 0 &&
                 TryNormalizeV4MissingRanges(state.MissingRanges, allowEmpty: true, out var missingRanges) &&
                 FileTransferPayloadCodec.TryNormalizeOptional(state.TransferPauseReason, FileTransferProtocol.MaxReasonLength, out var transferPauseReason):
@@ -417,11 +425,12 @@ public static class FileTransferDataFrameCodec
             case FileTransferChunkBatchFrameV4 batch when
                 batch.StartChunkIndex >= 0 &&
                 batch.ChunkCount > 0 &&
+                IsValidV4ChunkRange(batch.StartChunkIndex, batch.ChunkCount) &&
                 batch.DataSegments.Count > 0 &&
                 batch.DataSegments.Count <= FileTransferProtocol.MaxChunkBatchSegmentsV4 &&
                 batch.ChunkCount == batch.DataSegments.Count:
                 var normalizedSegments = new byte[batch.DataSegments.Count][];
-                var totalChunkBytes = 0;
+                var totalChunkBytes = 0L;
                 for (var segmentIndex = 0; segmentIndex < batch.DataSegments.Count; segmentIndex++)
                 {
                     var segment = batch.DataSegments[segmentIndex];
@@ -502,6 +511,17 @@ public static class FileTransferDataFrameCodec
         }
     }
 
+    private static bool IsValidV4ChunkRange(int startChunkIndex, int chunkCount)
+    {
+        if (startChunkIndex < 0 || chunkCount <= 0)
+        {
+            return false;
+        }
+
+        var endExclusive = (long)startChunkIndex + chunkCount;
+        return endExclusive <= FileTransferProtocol.MaxChunkCountV4;
+    }
+
     private static bool IsValidV4ManifestTuple(long fileSizeBytes, int chunkSizeBytes, int chunkCount)
     {
         if (fileSizeBytes <= 0 ||
@@ -549,7 +569,7 @@ public static class FileTransferDataFrameCodec
             }
 
             var endExclusive = (long)range.StartChunkIndex + range.ChunkCount;
-            if (endExclusive > int.MaxValue)
+            if (endExclusive > FileTransferProtocol.MaxChunkCountV4)
             {
                 return false;
             }

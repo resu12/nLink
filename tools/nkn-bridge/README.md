@@ -8,9 +8,11 @@ It reads line-delimited JSON commands from `stdin` and writes line-delimited JSO
 
 ```powershell
 cd tools\nkn-bridge
-npm install
+npm ci
 npm start
 ```
+
+Release bridge bundles are built through `installer\Build-BridgeBundle.ps1`, which restores from `package-lock.json`, bundles `index.js` with `ncc`, verifies the pinned Node runtime archive, and ships no `node_modules` tree.
 
 ## Protocol (JSONL)
 

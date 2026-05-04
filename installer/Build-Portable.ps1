@@ -229,6 +229,16 @@ function Assert-BridgeBundleRuntime {
         if (-not (Test-Path $nodeExe)) {
             throw "Bridge runtime not found. Run the bridge bundle build step first."
         }
+
+        foreach ($requiredFile in @("package.json", "package-lock.json", "bridge-manifest.json", "bridge-dependencies.json")) {
+            if (-not (Test-Path (Join-Path $BridgeDir $requiredFile))) {
+                throw "Bridge runtime not found. Run the bridge bundle build step first."
+            }
+        }
+
+        if (Test-Path (Join-Path $BridgeDir "node_modules")) {
+            throw "Bridge runtime must not ship node_modules. Rebuild the bridge bundle."
+        }
     }
 }
 
@@ -441,11 +451,13 @@ else {
 
 $bridgeRootAbs = Join-Path $canonicalOutAbs "bridge"
 $bridgeRidAbs = Join-Path $bridgeRootAbs $Runtime
-$nodeModulesAbs = Join-Path $bridgeRidAbs "node_modules"
+$bridgeScriptAbs = Join-Path $bridgeRidAbs "index.js"
+$bridgeNodeAbs = Join-Path $bridgeRidAbs "node.exe"
 
 $totalSizeBytes = Get-DirectorySizeBytes -RootDir $canonicalOutAbs
 $bridgeSizeBytes = Get-DirectorySizeBytes -RootDir $bridgeRootAbs
-$nodeModulesSizeBytes = Get-DirectorySizeBytes -RootDir $nodeModulesAbs
+$bridgeScriptSizeBytes = Get-PathSizeBytes -Path $bridgeScriptAbs
+$bridgeNodeSizeBytes = Get-PathSizeBytes -Path $bridgeNodeAbs
 $appExeSizeBytes = Get-PathSizeBytes -Path (Join-Path $canonicalOutAbs "nLink.exe")
 $ffmpegSizeBytes = Get-PathSizeBytes -Path (Join-Path $canonicalOutAbs "ffmpeg")
 $portableZipSizeBytes = Get-PathSizeBytes -Path $zipOutAbs
@@ -456,6 +468,8 @@ Write-Host ("  single-file compression: {0}" -f ($(if ($singleFileCompressionEna
 Write-Host ("  total output size: {0} ({1} bytes)" -f (Format-Size $totalSizeBytes), $totalSizeBytes)
 Write-Host ("  app executable size: {0} ({1} bytes)" -f (Format-Size $appExeSizeBytes), $appExeSizeBytes)
 Write-Host ("  bridge folder size: {0} ({1} bytes)" -f (Format-Size $bridgeSizeBytes), $bridgeSizeBytes)
+Write-Host ("  bridge/{0}/index.js size: {1} ({2} bytes)" -f $Runtime, (Format-Size $bridgeScriptSizeBytes), $bridgeScriptSizeBytes)
+Write-Host ("  bridge/{0}/node.exe size: {1} ({2} bytes)" -f $Runtime, (Format-Size $bridgeNodeSizeBytes), $bridgeNodeSizeBytes)
 Write-Host ("  ffmpeg folder size: {0} ({1} bytes)" -f (Format-Size $ffmpegSizeBytes), $ffmpegSizeBytes)
 Write-Host ("  portable ZIP size: {0} ({1} bytes)" -f (Format-Size $portableZipSizeBytes), $portableZipSizeBytes)
-Write-Host ("  bridge/{0}/node_modules size: {1} ({2} bytes)" -f $Runtime, (Format-Size $nodeModulesSizeBytes), $nodeModulesSizeBytes)
+Write-Host ("  bridge/{0}/node_modules shipped: 0" -f $Runtime)

@@ -1177,14 +1177,34 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task AnalyzeRetained_PostTerminalUnknownTransferDataFrameReject_DoesNotFailCleanCompletion()
+    public async Task AnalyzeRetained_PostCompletionLateSenderIgnored_DoesNotFailCleanCompletion()
     {
         if (!OperatingSystem.IsWindows())
         {
             return;
         }
 
-        const string transferId = "transfer_post_terminal_cleanup_reject";
+        const string transferId = "transfer_post_completion_late_sender";
+        var lines = BuildCleanCompletedV4TransferFixture(transferId)
+            .Append(LogLine($"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.chunk_batch.v4; chunk_index=0; reason=post_completion_late_sender_frame; source=nlink-helper-bulk.test; msg_id=late_frame_after_terminal"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("PASS", verdict["verdict"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostTerminalUnknownTransferDataFrameReject_RemainsProtocolFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_post_terminal_unknown_reject";
         var lines = BuildCleanCompletedV4TransferFixture(transferId)
             .Append(LogLine($"event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=unknown_transfer_id; session_id=sess_a; transfer_id={transferId}; source=nlink-helper-bulk.test; msg_id=late_frame_after_terminal"))
             .ToArray();
@@ -1192,10 +1212,29 @@ public sealed class FileTransferOpsScriptsTests
         var result = await RunAnalyzeFixtureAsync(lines);
 
         var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
-        Assert.Equal("PASS", verdict["verdict"]);
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("stability-gates-summary.txt", verdict["next_artifact"]);
+    }
 
-        var budget = ReadArtifactReport(result.ArtifactDir, "transport-budget-summary.txt");
-        Assert.Equal("1", budget["message_rejected_count"]);
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PostTerminalLateSenderReject_RemainsProtocolFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_post_terminal_declined_reject";
+        var lines = BuildCleanCompletedV4TransferFixture(transferId)
+            .Append(LogLine($"event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=post_terminal_late_sender_frame_declined; session_id=sess_a; transfer_id={transferId}; source=nlink-helper-bulk.test; msg_id=late_frame_after_decline"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+        Assert.Equal("stability-gates-summary.txt", verdict["next_artifact"]);
     }
 
     [Fact]

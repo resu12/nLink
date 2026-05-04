@@ -210,20 +210,25 @@ Canonical bridge bundle artifact (built in Step 1):
 - `artifacts/bridge/win-x64/node.exe`
 - `artifacts/bridge/win-x64/index.js`
 - `artifacts/bridge/win-x64/package.json`
-- `artifacts/bridge/win-x64/node_modules/...` (including `nkn-sdk`)
+- `artifacts/bridge/win-x64/package-lock.json`
+- `artifacts/bridge/win-x64/bridge-manifest.json`
+- `artifacts/bridge/win-x64/bridge-dependencies.json`
 
-The installer step copies this artifact into the helper app output/install, so the end user does not need Node.js installed.
+The bridge is built from a clean `npm ci` restore (`npm ci --ignore-scripts --no-audit --no-fund`) against `tools/nkn-bridge/package-lock.json`, bundled with `ncc`, and paired with a pinned Node.js runtime. The Node archive SHA-256 is verified during bootstrap, and the shipped bridge records `nodeModulesShipped=false`; there is no shipped `node_modules` tree. The installer step copies this artifact into the helper app output/install, so the end user does not need Node.js installed.
 
 Bundled runtime location inside the app output/install (required Release layout):
 
 - `bridge/win-x64/node.exe`
 - `bridge/win-x64/index.js`
 - `bridge/win-x64/package.json`
-- `bridge/win-x64/node_modules/...`
+- `bridge/win-x64/package-lock.json`
+- `bridge/win-x64/bridge-manifest.json`
+- `bridge/win-x64/bridge-dependencies.json`
 
 Runtime behavior:
 - `Release` builds prefer the bundled bridge runtime (`bridge/<rid>/node(.exe)` + `bridge/<rid>/index.js`)
 - `Debug` builds allow launching `node` from `PATH` for local development
+- `installer/Build-BridgeBundle.ps1 -UseSystemNode` exists for local experiments only; release builds use the pinned, hash-verified bootstrap path
 
 Advanced overrides (developer/test only):
 - `NLINK_NKN_NODE_PATH`

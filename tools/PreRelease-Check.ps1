@@ -32,6 +32,17 @@ function Assert-PathExists {
     }
 }
 
+function Assert-PathNotExists {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    if (Test-Path $Path) {
+        throw "$Description must not be present: $Path"
+    }
+}
+
 function Get-LatestBenchMetricsJsonPath {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot
@@ -314,11 +325,15 @@ $helperBridgeRid = Join-Path $helperStage (Join-Path "bridge" $Runtime)
 
 Assert-PathExists -Path (Join-Path $portableBridgeRid "index.js") -Description "Portable bridge index.js"
 Assert-PathExists -Path (Join-Path $portableBridgeRid "node.exe") -Description "Portable bridge node.exe"
-Assert-PathExists -Path (Join-Path $portableBridgeRid "node_modules") -Description "Portable bridge node_modules"
+Assert-PathExists -Path (Join-Path $portableBridgeRid "package-lock.json") -Description "Portable bridge package-lock.json"
+Assert-PathExists -Path (Join-Path $portableBridgeRid "bridge-dependencies.json") -Description "Portable bridge dependency evidence"
+Assert-PathNotExists -Path (Join-Path $portableBridgeRid "node_modules") -Description "Portable bridge node_modules"
 
 Assert-PathExists -Path (Join-Path $helperBridgeRid "index.js") -Description "Helper staging bridge index.js"
 Assert-PathExists -Path (Join-Path $helperBridgeRid "node.exe") -Description "Helper staging bridge node.exe"
-Assert-PathExists -Path (Join-Path $helperBridgeRid "node_modules") -Description "Helper staging bridge node_modules"
+Assert-PathExists -Path (Join-Path $helperBridgeRid "package-lock.json") -Description "Helper staging bridge package-lock.json"
+Assert-PathExists -Path (Join-Path $helperBridgeRid "bridge-dependencies.json") -Description "Helper staging bridge dependency evidence"
+Assert-PathNotExists -Path (Join-Path $helperBridgeRid "node_modules") -Description "Helper staging bridge node_modules"
 
 $portableZipAbs = (Resolve-Path $portableZip).Path
 $installerExeAbs = (Resolve-Path $installerExe).Path

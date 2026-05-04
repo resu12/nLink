@@ -1,8 +1,8 @@
-# Phase 0 Baseline - 0.6.1 Hardening
+# Phase 0 Baseline - 0.6.2 Hardening
 
 Date: 2026-05-01
 
-This note captures the pre-hardening baseline for the 0.6.1 follow-up work. It is intentionally descriptive: no production behavior was changed in Phase 0, and no tests were added to lock in behavior scheduled for Phase 1 removal.
+This note captures the pre-hardening baseline for the 0.6.2 follow-up work. It is intentionally descriptive: no production behavior was changed in Phase 0, and no tests were added to lock in behavior scheduled for Phase 1 removal.
 
 ## Commands Run
 

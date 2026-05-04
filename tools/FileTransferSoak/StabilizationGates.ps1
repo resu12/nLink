@@ -97,7 +97,7 @@ function Get-FileTransferFirstCompletedTerminalSequenceByTransferId {
     return $sequences
 }
 
-function Test-FileTransferPostTerminalDataFrameCleanupReject {
+function Test-FileTransferBenignPostCompletionLateSenderFrame {
     param(
         $Event,
         [Parameter(Mandatory = $true)]$CompletedTerminalSequences
@@ -107,17 +107,17 @@ function Test-FileTransferPostTerminalDataFrameCleanupReject {
         return $false
     }
 
-    if ($Event.EventName -ne 'filetransfer_message_rejected') {
+    if ($Event.EventName -ne 'filetransfer_data_frame_ignored') {
         return $false
     }
 
     $reason = Get-FileTransferEventField -Event $Event -Name 'reason' -Default ''
-    if ($reason -ne 'unknown_transfer_id' -and $reason -ne 'transfer_already_terminal') {
+    if ($reason -ne 'post_completion_late_sender_frame') {
         return $false
     }
 
-    $messageType = Get-FileTransferEventField -Event $Event -Name 'message_type' -Default ''
-    if ($messageType -ne 'file_transfer_data_frame') {
+    $frameType = Get-FileTransferEventField -Event $Event -Name 'frame_type' -Default ''
+    if ($frameType -ne 'filetransfer.manifest.v4' -and $frameType -ne 'filetransfer.chunk_batch.v4') {
         return $false
     }
 
@@ -138,7 +138,7 @@ function Get-FileTransferHardFailureEvents {
         $Summary.TransferEvents |
             Where-Object {
                 $null -ne $_ -and
-                -not (Test-FileTransferPostTerminalDataFrameCleanupReject -Event $_ -CompletedTerminalSequences $completedTerminalSequences) -and
+                -not (Test-FileTransferBenignPostCompletionLateSenderFrame -Event $_ -CompletedTerminalSequences $completedTerminalSequences) -and
                 ($_.EventName -eq 'filetransfer_transport_payload_rejected' -or
                 $_.EventName -eq 'filetransfer_data_frame_decode_failed' -or
                 $_.EventName -eq 'filetransfer_chunk_rejected' -or

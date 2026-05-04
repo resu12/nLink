@@ -139,6 +139,10 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("64 KiB", checklist, StringComparison.Ordinal);
         Assert.Contains("live NKN file-transfer soak", checklist, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("bundled `bridge/win-x64/node.exe`", checklist, StringComparison.Ordinal);
+        Assert.Contains("package-lock.json", checklist, StringComparison.Ordinal);
+        Assert.Contains("bridge-dependencies.json", checklist, StringComparison.Ordinal);
+        Assert.Contains("no shipped `node_modules`", checklist, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Node archive SHA-256", checklist, StringComparison.Ordinal);
         Assert.Contains("Unsigned public Windows artifacts are recorded as an accepted release exception", checklist, StringComparison.Ordinal);
 
         Assert.Contains("V4-only", releaseNotes, StringComparison.Ordinal);
@@ -158,6 +162,9 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("session envelope", readme, StringComparison.Ordinal);
         Assert.Contains("source/session validation", readme, StringComparison.Ordinal);
         Assert.Contains("Release exception: Windows artifacts for `0.6.2` are unsigned", readme, StringComparison.Ordinal);
+        Assert.Contains("no shipped `node_modules`", readme, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("package-lock.json", readme, StringComparison.Ordinal);
+        Assert.Contains("bridge-dependencies.json", readme, StringComparison.Ordinal);
     }
 
 [Trait("Category", "LegacySmoke")]
@@ -181,7 +188,42 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.DoesNotContain("file transfer looks partially wired", report, StringComparison.OrdinalIgnoreCase);
     }
 
-[Trait("Category", "LegacySmoke")]
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void BridgeSupplyChain_DocsAndScriptsRequireCleanLockedBundle()
+    {
+        var repoRoot = FindRepoRoot();
+        var bridgeScript = File.ReadAllText(Path.Combine(repoRoot, "installer", "Build-BridgeBundle.ps1"));
+        var readme = File.ReadAllText(Path.Combine(repoRoot, "README.md"));
+        var report = File.ReadAllText(Path.Combine(repoRoot, "SECURITY_AUDIT_REPORT.md"));
+
+        Assert.Contains("ci --ignore-scripts --no-audit --no-fund", bridgeScript, StringComparison.Ordinal);
+        Assert.DoesNotContain("npm install", bridgeScript, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("PinnedNodeWinX64ArchiveSha256", bridgeScript, StringComparison.Ordinal);
+        Assert.Contains("nodeModulesShipped = $false", bridgeScript, StringComparison.Ordinal);
+        Assert.Contains("bridge-dependencies.json", bridgeScript, StringComparison.Ordinal);
+
+        Assert.DoesNotContain("artifacts/bridge/win-x64/node_modules", readme, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("bridge/win-x64/node_modules", readme, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("clean `npm ci`", readme, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("no shipped `node_modules`", readme, StringComparison.OrdinalIgnoreCase);
+
+        Assert.Contains("nodeModulesShipped=false", report, StringComparison.Ordinal);
+        Assert.Contains("nkn-sdk` `1.3.6", report, StringComparison.Ordinal);
+        Assert.DoesNotContain("committed `tools/nkn-bridge/node_modules`", report, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void BridgeSupplyChain_NoGeneratedNodeRuntimeOrBridgeModulesAreTracked()
+    {
+        var repoRoot = FindRepoRoot();
+        var tracked = RunGitLsFiles(repoRoot, "tools/node", "tools/nkn-bridge/node_modules", "tools/nkn-bridge/.nlink-bundle");
+
+        Assert.Empty(tracked);
+    }
+
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void AppAssembly_InformationalVersion_Matches_VERSION_File()
     {
@@ -197,7 +239,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Equal(expected, infoVersion);
     }
 
-[Trait("Category", "LegacySmoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void Program_Parses_SelfTest_Argument()
     {
@@ -705,6 +747,39 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
             Environment.SetEnvironmentVariable(InviteTokenServiceFactory.AllowInsecureLegacyInviteModeEnvVar, previousOptIn);
             ReleaseOverridePolicy.ResetSuppressedOverridesForTests();
         }
+    }
+
+    private static string[] RunGitLsFiles(string repoRoot, params string[] paths)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "git",
+            WorkingDirectory = repoRoot,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        startInfo.ArgumentList.Add("ls-files");
+        foreach (var path in paths)
+        {
+            startInfo.ArgumentList.Add(path);
+        }
+
+        using var process = Process.Start(startInfo)
+            ?? throw new InvalidOperationException("Could not start git.");
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"git ls-files failed with exit {process.ExitCode}: {error}");
+        }
+
+        return output
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(static line => line.Trim())
+            .Where(static line => line.Length > 0)
+            .ToArray();
     }
 
 }

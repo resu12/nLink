@@ -140,6 +140,16 @@ Get-AuthenticodeSignature .\artifacts\releases\<version>\nLink-Setup-win-x64-<ve
 Get-AuthenticodeSignature .\artifacts\portable\helper\win-x64\nLink.exe | Format-List Status,StatusMessage,SignerCertificate
 ```
 
+Bridge supply-chain checks:
+- `installer\Build-BridgeBundle.ps1` must use the pinned Node runtime path unless `-UseSystemNode` is intentionally used for local experiments
+- the Node archive SHA-256 must match the pinned value before extraction
+- `tools\nkn-bridge\package-lock.json` is required; there is no `npm install` fallback
+- bridge dependencies restore with clean `npm ci --ignore-scripts --no-audit --no-fund`
+- packaged bridge output must include `package-lock.json`, `bridge-manifest.json`, and `bridge-dependencies.json`
+- packaged bridge output must have no shipped `node_modules`
+- `bridge-manifest.json` must record `nodeModulesShipped=false`, the package-lock hash, Node archive hash, npm version, ncc version, and bridge package version
+- optional online evidence may include `npm audit --omit=dev`, but advisory lookup is not mandatory for offline/local release builds
+
 Signing policy:
 - preferred public release artifacts are Authenticode-signed before publish
 - at minimum, signed releases verify:

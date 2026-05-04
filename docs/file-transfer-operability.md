@@ -33,8 +33,9 @@ The first file to read is `filetransfer-operator-verdict.txt`. Open the detailed
 File-transfer evidence is classified before any tuning is proposed:
 
 - `PASS`: both visible terminal sides completed with `error_code=(none)` and no hard protocol, payload, decode, security, or bridge bulk failure evidence.
-- `FAIL_PROTOCOL_OR_INTEGRITY`: terminal failure, non-empty error code, payload rejection, data-frame decode failure, chunk rejection, file-transfer message rejection, or bridge bulk send failure/clear.
-- Post-completion live NKN sender data frames may be classified as `event=filetransfer_data_frame_ignored` with `reason=post_completion_late_sender_frame`. These are authenticated frames for a recently terminal transfer that arrived after receiver completion/teardown; count them as benign late delivery, not as `FAIL_PROTOCOL_OR_INTEGRITY`.
+- `FAIL_PROTOCOL_OR_INTEGRITY`: terminal failure, non-empty error code, payload rejection, data-frame decode failure, chunk rejection, file-transfer message rejection, receiver-buffer exhaustion, bridge stdout protocol violation, or bridge bulk send failure/clear.
+- Post-completion live NKN sender data frames may be classified as `event=filetransfer_data_frame_ignored` with `reason=post_completion_late_sender_frame`. These are authenticated frames for a successfully completed transfer that arrived after receiver completion/teardown; count them as benign late delivery, not as `FAIL_PROTOCOL_OR_INTEGRITY`.
+- Late sender data frames after declined, canceled, or failed transfers are not benign. They should appear as `filetransfer_message_rejected` with `reason=post_terminal_late_sender_frame_*` and must be treated as protocol/integrity evidence.
 - `WARN_RECOVERED_PRESSURE`: completion succeeded but repair, reorder, degraded-mode, or fallback pressure was high enough to explain risk.
 - `WARN_EXTERNAL_TRANSPORT`: completion succeeded but bridge/NKN health churn overlapped the transfer.
 - `WARN_COHABITATION_PRESSURE`: completion succeeded but screen-share media queue pressure overlapped the transfer.
@@ -61,6 +62,7 @@ File-transfer evidence is classified before any tuning is proposed:
 - Prefer narrow fixes backed by artifacts over additive recovery logic.
 - Treat local soak modes as regression guards for core/runtime behavior, not proof of live NKN throughput.
 - Treat live NKN soak artifacts as operator evidence. They may vary with topology, so compare them only with matching safe/strong baseline artifact directories.
+- Pause/resume is active-session only. Restarting either app does not resume a partial transfer, and partial files must not be presented as resumable release artifacts.
 
 ## Support Capture
 

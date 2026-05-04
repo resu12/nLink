@@ -220,12 +220,56 @@ public sealed class FileTransferDataFrameCodecTests
             }));
     }
 
+    [Theory]
+    [InlineData(FileTransferProtocol.MaxChunkCountV4, 1)]
+    [InlineData(FileTransferProtocol.MaxChunkCountV4 - 1, 2)]
+    [InlineData(int.MaxValue, 1)]
+    public void V4ChunkBatchFrame_RejectsOutOfProtocolChunkRanges(int startChunkIndex, int chunkCount)
+    {
+        Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(
+            new FileTransferChunkBatchFrameV4
+            {
+                SessionId = "session_a",
+                TransferId = "transfer_v4_range_overflow",
+                StartChunkIndex = startChunkIndex,
+                ChunkCount = chunkCount,
+                DataSegments = Enumerable
+                    .Range(0, chunkCount)
+                    .Select(static _ => new byte[] { 1 })
+                    .ToArray(),
+            }));
+    }
+
     [Fact]
     public void V4ChunkBatchFrame_RejectsUntrustedBinarySegmentCountBeforeReadingSegments()
     {
         var payload = BuildChunkBatchHeaderWithSegmentCount(FileTransferProtocol.MaxChunkBatchSegmentsV4 + 1);
 
         Assert.False(FileTransferDataFrameCodec.TryDeserialize(payload, out _));
+    }
+
+    [Fact]
+    public void V4StateFrame_RejectsOutOfProtocolMissingRange()
+    {
+        Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(
+            new FileTransferStateFrameV4
+            {
+                SessionId = "session_a",
+                TransferId = "transfer_v4_bad_missing_range",
+                Epoch = 1,
+                ContiguousCommittedChunkIndex = 0,
+                DurableReceivedHighestChunkIndex = 0,
+                CreditUntilChunkIndexExclusive = 1,
+                MissingRanges =
+                [
+                    new FileTransferRangeV4
+                    {
+                        StartChunkIndex = FileTransferProtocol.MaxChunkCountV4,
+                        ChunkCount = 1,
+                    },
+                ],
+                BytesCommitted = 0,
+            }));
     }
 
     [Fact]

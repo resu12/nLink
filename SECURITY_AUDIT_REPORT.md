@@ -101,14 +101,16 @@ Release review must treat those queue limits and lower-layer payload limits as o
 - Node bridge manifests in:
   - `tools/nkn-bridge/package.json`
   - `tools/nkn-bridge/package-lock.json`
-- Bundled Node runtime under:
-  - `tools/node/win-x64/node-v24.13.1-win-x64`
+- Bridge bundling and package manifests in:
+  - `installer/Build-BridgeBundle.ps1`
+  - `installer/package-manifest.win-x64.txt`
+  - `build/verify-package-manifest.ps1`
 
 ### Findings
 
-#### High: Vendored bridge dependency tree includes deprecated legacy packages
+#### High: Bridge dependency stack still includes deprecated legacy packages through `nkn-sdk`
 
-The bundled NKN bridge is pinned to `nkn-sdk` `1.3.6`, and the committed lockfile shows deprecated legacy transitive packages:
+The bundled NKN bridge remains pinned to `nkn-sdk` `1.3.6`, and the committed lockfile shows deprecated legacy transitive packages:
 
 - `@babel/polyfill` `7.12.1` is explicitly marked deprecated
 - `@babel/polyfill` pulls `core-js` `2.6.12`, which is explicitly marked deprecated and no longer maintained
@@ -129,21 +131,23 @@ Recommended action:
 - update or replace the bridge dependency chain so the shipped bridge no longer relies on `@babel/polyfill` and `core-js@2`
 - if `nkn-sdk` is the blocker, track that as an explicit third-party dependency risk in release notes/checklists until removed
 
-#### High: `node_modules` is committed and shipped as a vendored dependency tree
+#### Resolved: Bridge build no longer commits or ships a `node_modules` dependency tree
 
-The repository contains a checked-in `tools/nkn-bridge/node_modules` tree rather than relying only on a clean restore from `package-lock.json`.
+The bridge dependency-tree packaging issue is corrected in the current release state:
 
-Why it matters:
+- `tools/nkn-bridge/node_modules` is ignored and not tracked
+- `tools/nkn-bridge/.nlink-bundle` is ignored and not tracked
+- the tracked portable Node runtime under `tools/node` is removed from the release source tree
+- `installer/Build-BridgeBundle.ps1` requires `tools/nkn-bridge/package-lock.json`
+- bridge bundling restores with clean `npm ci --ignore-scripts --no-audit --no-fund`
+- the pinned Node `24.13.1` archive is SHA-256 verified before extraction into ignored `artifacts/toolcache/node/<rid>/`
+- shipped bridge artifacts include `node.exe`, bundled `index.js`, `package.json`, `package-lock.json`, `bridge-manifest.json`, and `bridge-dependencies.json`
+- `bridge-manifest.json` and dependency evidence record `nodeModulesShipped=false`
 
-- vendored third-party trees are harder to review and keep fresh
-- they increase the chance of stale or locally drifted dependency contents
-- release review becomes dependent on the committed vendor tree, not only on the manifest/lock pair
+Remaining risk:
 
-Recommended action:
-
-- choose one policy and enforce it:
-  - either ship only from a clean `npm ci` / locked restore and stop committing `node_modules`
-  - or treat the vendored tree as a first-class third-party artifact with explicit review/update process
+- the bundled `ncc` output still contains the runtime code pulled from `nkn-sdk` `1.3.6`
+- deprecated transitive packages remain an accepted third-party bridge risk until the SDK is replaced or upgraded
 
 #### Medium: .NET SDK version is not pinned in-repo
 
@@ -178,16 +182,17 @@ Recommended action:
 
 #### Medium: Bridge runtime is bundled separately and must be tracked like a dependency
 
-The repository vendors a Node runtime under `tools/node/win-x64/node-v24.13.1-win-x64`.
+The release bridge bundle includes a pinned Node runtime that is bootstrapped into the ignored tool cache and copied into the packaged bridge output.
 
 Why it matters:
 
 - this is part of the shipped attack surface
 - it needs explicit update cadence and release review, not just packaging convenience
+- the build must keep proving the Node archive hash and shipped manifest metadata
 
 Recommended action:
 
-- add the bundled Node runtime version to the release checklist
+- keep the bundled Node runtime version and archive SHA-256 in the release checklist
 - treat runtime updates as dependency maintenance, not only build tooling maintenance
 
 #### Low: .NET dependency surface is comparatively small and pinned
@@ -210,29 +215,25 @@ Why it matters:
 
 Based on repository contents only:
 
-- the main dependency risk is the vendored NKN bridge stack, especially the deprecated transitive JS packages and the committed `node_modules` tree
+- the main dependency risk is now the NKN bridge SDK stack itself, especially deprecated transitive JS packages pulled through `nkn-sdk` `1.3.6`
 - the .NET dependency surface is smaller and pinned, but release reproducibility is weakened by the lack of `global.json`
-- the bundled Node runtime must be tracked as a shipped dependency, not just a build helper
+- the bundled Node runtime must be tracked as a shipped dependency, not just a build helper, but the source tree no longer vendors that runtime
 
 I am not claiming specific known CVEs from repository contents alone. That would require an external vulnerability feed or package audit outside the repo itself.
 
 ### Actual bridge/runtime dependency audit
 
-I also audited the shipped bridge/runtime tree directly:
+The current bridge supply-chain contract is:
 
-- bundled Node runtime: `v24.13.1`
-- bridge package graph resolved cleanly from the shipped tree
-- `npm audit --omit=dev --json` reported `0` current known advisories in the audited production dependency set at audit time
+- bundled Node runtime: `v24.13.1`, pinned by SHA-256
+- locked bridge restore: `npm ci --ignore-scripts --no-audit --no-fund`
+- dependency evidence: `bridge-dependencies.json`
+- manifest evidence: `nodeModulesShipped=false`
+- optional advisory evidence: `npm audit --omit=dev` may be recorded when network access is available, but online advisory lookup is not required for local/offline builds
 
-That improves the dependency picture in one narrow way:
+This improves the dependency picture in one important way:
 
-- there is no current `npm audit` hit in the shipped production bridge tree from this audit run
-
-But it does **not** remove the broader dependency-risk concerns:
-
-- the bridge still depends on deprecated legacy packages through `nkn-sdk`
-- the committed `node_modules` tree is still a supply-chain review burden
-- the bridge/runtime remains part of the trusted release boundary
+- releases are no longer reviewed against a checked-in or shipped `node_modules` tree
 
 ## Current Status
 
@@ -244,7 +245,7 @@ But it does **not** remove the broader dependency-risk concerns:
 - execute-path authorization and consent enforcement are present in runtime handlers, not only in UI
 - remote control shutdown on revoke, disconnect, and display change is enforced promptly
 - plaintext NKN seed storage at rest has been replaced with protected local storage on Windows
-- release hardening now includes explicit queue caps, diagnostics for risky overrides, and documented installer-signing expectations
+- release hardening now includes explicit queue caps, diagnostics for risky overrides, hash-verified bridge/runtime bundling, no shipped `node_modules`, and documented installer-signing expectations
 
 ### Areas that still need caution in release messaging
 
@@ -265,19 +266,18 @@ Based on the repository contents reviewed so far, the remaining likely public-re
 
 ### 1. Trusted bridge dependency stack still carries stale/deprecated packages
 
-The shipped bridge dependency chain still includes deprecated legacy packages through `nkn-sdk` and a committed vendor tree.
+The shipped bridge dependency chain still includes deprecated legacy packages through `nkn-sdk`.
 
 Why this is a blocker:
 
 - the bridge is part of the trusted runtime boundary
 - deprecated legacy packages in that path are not just maintenance debt; they are release risk
-- the committed `node_modules` tree makes dependency review and freshness harder to prove
+- the bridge remains trusted local runtime code even though the shipped dependency evidence is now cleaner
 
 Affected paths:
 
 - `tools/nkn-bridge/package.json`
 - `tools/nkn-bridge/package-lock.json`
-- `tools/nkn-bridge/node_modules`
 
 ### 2. Public release still depends on bridge/runtime assumptions that are not proven by repository code alone
 
@@ -439,7 +439,7 @@ These items must be either resolved before release or explicitly accepted as rel
 
 - [ ] Public Windows artifacts are unsigned for this release
 - [ ] Bridge dependency stack still relies on deprecated legacy packages through `nkn-sdk`
-- [ ] Committed `tools/nkn-bridge/node_modules` vendor tree remains part of the shipped review surface
+- [x] Bridge artifacts are built from lockfile restore and ship no `node_modules` tree (`nodeModulesShipped=false`)
 - [ ] `Microsoft.Windows.SDK.NET` preview dependency remains on the production Windows path
 
 If any of the above remain unresolved:
@@ -454,7 +454,7 @@ The following release exceptions are now treated as accepted for this release tr
 
 - Public Windows installer and portable artifacts are unsigned for this release
 - Bridge dependency stack still relies on deprecated legacy packages through `nkn-sdk`
-- Committed `tools/nkn-bridge/node_modules` vendor tree remains part of the shipped review surface
+- Bridge SDK replacement remains deferred; committed/shipped `node_modules` has been corrected and is no longer an accepted exception
 - `Microsoft.Windows.SDK.NET` preview dependency remains on the production Windows path
 
 This means the remaining release decision is now driven primarily by the manual-verification checklist below, not by these exception items being unresolved.

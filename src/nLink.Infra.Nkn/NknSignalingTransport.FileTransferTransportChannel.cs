@@ -3306,16 +3306,11 @@ public sealed partial class NknSignalingTransport
 
         if (!hasExisting)
         {
-            if (IsSenderDataFrame(frame) &&
-                IsRecentTerminalFileTransferLocked(transferId, out var terminalPhase))
-            {
-                failureReason = terminalPhase == FileTransferTransportPhase.Completed
-                    ? "post_completion_late_sender_frame"
-                    : $"post_terminal_late_sender_frame_{MapFileTransferTerminalPhase(terminalPhase)}";
-                return false;
-            }
-
-            failureReason = "unknown_transfer_id";
+            var hasRecentTerminal = IsRecentTerminalFileTransferLocked(transferId, out var terminalPhase);
+            failureReason = FileTransferV4TransportStateClassifier.ClassifyMissingTransferDataFrame(
+                isSenderDataFrame: IsSenderDataFrame(frame),
+                hasRecentTerminal,
+                terminalPhase);
             return false;
         }
 
@@ -3479,6 +3474,24 @@ public sealed partial class NknSignalingTransport
             FileTransferTransportPhase.Failed => "failed",
             _ => "unknown",
         };
+
+    private static class FileTransferV4TransportStateClassifier
+    {
+        public static string ClassifyMissingTransferDataFrame(
+            bool isSenderDataFrame,
+            bool hasRecentTerminal,
+            FileTransferTransportPhase terminalPhase)
+        {
+            if (!isSenderDataFrame || !hasRecentTerminal)
+            {
+                return "unknown_transfer_id";
+            }
+
+            return terminalPhase == FileTransferTransportPhase.Completed
+                ? "post_completion_late_sender_frame"
+                : $"post_terminal_late_sender_frame_{MapFileTransferTerminalPhase(terminalPhase)}";
+        }
+    }
 
     private bool HasActiveFileTransferLocked(bool initiatedLocally)
     {

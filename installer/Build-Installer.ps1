@@ -123,6 +123,16 @@ function Assert-BridgeBundleRuntime {
         if (-not (Test-Path $nodeExe)) {
             throw "Bridge runtime not found. Run the bridge bundle build step first."
         }
+
+        foreach ($requiredFile in @("package.json", "package-lock.json", "bridge-manifest.json", "bridge-dependencies.json")) {
+            if (-not (Test-Path (Join-Path $BridgeDir $requiredFile))) {
+                throw "Bridge runtime not found. Run the bridge bundle build step first."
+            }
+        }
+
+        if (Test-Path (Join-Path $BridgeDir "node_modules")) {
+            throw "Bridge runtime must not ship node_modules. Rebuild the bridge bundle."
+        }
     }
 }
 
@@ -479,18 +489,22 @@ if ($releasePublish) {
 
 $bridgeRootAbs = Join-Path $installerStageAbs "bridge"
 $bridgeRidAbs = Join-Path $bridgeRootAbs $Runtime
-$nodeModulesAbs = Join-Path $bridgeRidAbs "node_modules"
+$bridgeScriptAbs = Join-Path $bridgeRidAbs "index.js"
+$bridgeNodeAbs = Join-Path $bridgeRidAbs "node.exe"
 
 $totalSizeBytes = Get-DirectorySizeBytes -RootDir $installerStageAbs
 $bridgeSizeBytes = Get-DirectorySizeBytes -RootDir $bridgeRootAbs
-$nodeModulesSizeBytes = Get-DirectorySizeBytes -RootDir $nodeModulesAbs
+$bridgeScriptSizeBytes = Get-PathSizeBytes -Path $bridgeScriptAbs
+$bridgeNodeSizeBytes = Get-PathSizeBytes -Path $bridgeNodeAbs
 
 Write-Host "[nLink] Size summary (installer staging):" -ForegroundColor Cyan
 Write-Host ("  optimize for: {0}" -f $OptimizeFor)
 Write-Host ("  single-file compression: {0}" -f ($(if ($singleFileCompressionEnabled) { 1 } else { 0 })))
 Write-Host ("  total output size: {0} ({1} bytes)" -f (Format-Size $totalSizeBytes), $totalSizeBytes)
 Write-Host ("  bridge folder size: {0} ({1} bytes)" -f (Format-Size $bridgeSizeBytes), $bridgeSizeBytes)
-Write-Host ("  bridge/{0}/node_modules size: {1} ({2} bytes)" -f $Runtime, (Format-Size $nodeModulesSizeBytes), $nodeModulesSizeBytes)
+Write-Host ("  bridge/{0}/index.js size: {1} ({2} bytes)" -f $Runtime, (Format-Size $bridgeScriptSizeBytes), $bridgeScriptSizeBytes)
+Write-Host ("  bridge/{0}/node.exe size: {1} ({2} bytes)" -f $Runtime, (Format-Size $bridgeNodeSizeBytes), $bridgeNodeSizeBytes)
+Write-Host ("  bridge/{0}/node_modules shipped: 0" -f $Runtime)
 
 $packageSizeSummaryPath = Join-Path $installerOutAbs "package-size-summary.txt"
 Write-PackageSizeSummary `
