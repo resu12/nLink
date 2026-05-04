@@ -215,6 +215,8 @@ public sealed class SessionIdentityAndVerificationTests : SessionHeaderAndBanner
         {
         }, transportConfig, helperRuntime);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+        var helperIdentity = new PeerAddress("helper-verify-code-bound-" + Guid.NewGuid().ToString("N"));
+        helpee.SetVerifiedInviteHelperIdentity(helperIdentity, helperTargetAddress: helperIdentity, refreshInvite: true);
         _ = await WaitForShareInviteAsync(helpee);
         var connectTask = helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
         await WaitUntilAsync(() => helpee.IsIncomingRequestView && helpee.ShowIncomingRequestPanel && helpee.HasIncomingHelperVerificationCode && helper.HasHelperVerificationCode && helpee.ShowSessionVerificationCode && helper.ShowSessionVerificationCode, TimeSpan.FromSeconds(3));
@@ -247,6 +249,8 @@ public sealed class SessionIdentityAndVerificationTests : SessionHeaderAndBanner
         {
         }, transportConfig, helperRuntime);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+        var helperIdentity = new PeerAddress("helper-verify-hide-bound-" + Guid.NewGuid().ToString("N"));
+        helpee.SetVerifiedInviteHelperIdentity(helperIdentity, helperTargetAddress: helperIdentity, refreshInvite: true);
         _ = await WaitForShareInviteAsync(helpee);
         var connectTask = helperRuntime.StartHelperAsync(GetHostedAddressOrThrow(helpeeRuntime), cts.Token);
 

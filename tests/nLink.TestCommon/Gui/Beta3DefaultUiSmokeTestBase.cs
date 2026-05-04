@@ -205,7 +205,7 @@ public abstract class Beta3DefaultUiSmokeTestBase : IClassFixture<Beta3DefaultUi
 
     protected static async Task<ConnectedSessionContext> CreateConnectedSessionContextAsync(Action<HelpeePageViewModel>? configureIncomingApproval = null)
     {
-        var transportConfig = NLink.App.Configuration.TransportRuntimeConfig.Select();
+        var transportConfig = CreateNknUiTestConfig();
         var network = new FakeSessionTransportNetwork();
         var helperRuntime = new SessionRuntime(() => network.CreateTransport("helper-ui-smoke-" + Guid.NewGuid().ToString("N")));
         var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-ui-smoke-" + Guid.NewGuid().ToString("N")));
@@ -219,6 +219,9 @@ public abstract class Beta3DefaultUiSmokeTestBase : IClassFixture<Beta3DefaultUi
         }, transportConfig, helpeeRuntime, openDiagnosticsAction: static () =>
         {
         }, clipboardService: new TestClipboardService(), shareMessageConfig: new NLink.App.Configuration.ShareMessageConfig(null));
+
+        var helperIdentity = new PeerAddress("helper-ui-smoke-bound-" + Guid.NewGuid().ToString("N"));
+        helpee.SetVerifiedInviteHelperIdentity(helperIdentity, helperTargetAddress: helperIdentity, refreshInvite: true);
         await WaitUntilAsync(() => !string.IsNullOrWhiteSpace(helpee.ShareInvite), TimeSpan.FromSeconds(3));
         var connectTask = helperRuntime.StartHelperAsync(new NLink.Core.SessionConnect.PeerAddress(helpeeRuntime.CurrentLocalPeerAddress!.Value.Value), CancellationToken.None);
         await WaitUntilAsync(() => helpee.HasIncomingRequest && helpee.ConnectionState == "IncomingRequest", TimeSpan.FromSeconds(5));
@@ -234,6 +237,13 @@ public abstract class Beta3DefaultUiSmokeTestBase : IClassFixture<Beta3DefaultUi
         var constructor = typeof(NLink.App.Configuration.TransportRuntimeConfig).GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, binder: null, new[] { typeof(string), typeof(string), typeof(string), typeof(string), typeof(string), typeof(bool), typeof(bool), typeof(bool), typeof(bool), typeof(string), typeof(string), typeof(string), typeof(BridgeReusePolicy), typeof(Func<NLink.Core.ISignalingTransport>), }, modifiers: null);
         Assert.NotNull(constructor);
         return (NLink.App.Configuration.TransportRuntimeConfig)constructor!.Invoke(new object? [] { "NKN", "NKN internet transport", "Release", "NKN", "ui-test", true, false, false, true, "ui-test", string.Empty, string.Empty, BridgeReusePolicy.Default, (Func<NLink.Core.ISignalingTransport>)(() => new NLink.Infra.DevLocal.DevLocalTransport()), });
+    }
+
+    protected static NLink.App.Configuration.TransportRuntimeConfig CreateDevLocalTestConfig()
+    {
+        var constructor = typeof(NLink.App.Configuration.TransportRuntimeConfig).GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, binder: null, new[] { typeof(string), typeof(string), typeof(string), typeof(string), typeof(string), typeof(bool), typeof(bool), typeof(bool), typeof(bool), typeof(string), typeof(string), typeof(string), typeof(BridgeReusePolicy), typeof(Func<NLink.Core.ISignalingTransport>), }, modifiers: null);
+        Assert.NotNull(constructor);
+        return (NLink.App.Configuration.TransportRuntimeConfig)constructor!.Invoke(new object? [] { "DevLocal", "Same PC test mode", "Release", "DEVLOCAL", "ui-test", true, false, true, true, "ui-test", string.Empty, string.Empty, BridgeReusePolicy.Default, (Func<NLink.Core.ISignalingTransport>)(() => new NLink.Infra.DevLocal.DevLocalTransport()), });
     }
 
     protected sealed class TestClipboardService : IClipboardService

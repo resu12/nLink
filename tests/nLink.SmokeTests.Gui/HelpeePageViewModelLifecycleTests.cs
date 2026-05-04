@@ -14,6 +14,28 @@ namespace NLink.SmokeTests;
 [Trait("Area", "Gui")]
 public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
 {
+    private static async Task BindHelperIdentityAndWaitForShareInviteAsync(
+        SessionRuntime runtime,
+        HelpeePageViewModel helpee,
+        PeerAddress? helperIdentity = null,
+        PeerAddress? helperTarget = null,
+        string? normalizedInputOverride = null)
+    {
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Waiting && runtime.CurrentLocalPeerAddress is not null,
+            TimeSpan.FromSeconds(3));
+
+        var boundIdentity = helperIdentity ?? new PeerAddress("nlink-helper.gui-smoke." + Guid.NewGuid().ToString("N"));
+        var boundTarget = helperTarget ?? boundIdentity;
+        helpee.SetVerifiedInviteHelperIdentity(
+            boundIdentity,
+            helperTargetAddress: boundTarget,
+            refreshInvite: true,
+            normalizedInputOverride: normalizedInputOverride);
+
+        await WaitUntilAsync(() => helpee.HasShareInvite, TimeSpan.FromSeconds(3));
+    }
+
     [Trait("Category", "Smoke")]
     [Fact]
     public async Task HelpeePageViewModel_OnRemoteSessionEnded_ShowsPeerEndedStatusImmediately()
@@ -198,14 +220,13 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
         const string helperInput = "nhid1-DSP6-JVKB-5MW3-GE9M-71GK-ADHE-60VK-CE36-70WP-ARB2-CMRK-4DB1-60VP-4E9Q-75GK-4D33-6WS3-AE1N-CHJ6-2CV5-6XJ3-2E9H-6XHP-8E1Q-6GSK-GE35-74VK-8DV2-6MWP-8D9M-68W6-ASAN-JYRC-J";
         var helperTarget = new PeerAddress("nlink-helper.target");
 
-        WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
-
         helpee.InviteHelperIdentityInput = helperInput;
-        helpee.SetVerifiedInviteHelperIdentity(
+        BindHelperIdentityAndWaitForShareInviteAsync(
+            runtime,
+            helpee,
             new PeerAddress(helperInput),
-            helperTargetAddress: helperTarget,
-            refreshInvite: true,
-            normalizedInputOverride: helperInput);
+            helperTarget: helperTarget,
+            normalizedInputOverride: helperInput).GetAwaiter().GetResult();
         WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
 
         var requestTask = Assert.IsAssignableFrom<Task>(InvokePrivateMethod(helpee, "RequestHelpAsync"));
@@ -233,12 +254,11 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
                 helperTarget,
                 helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
 
-        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
-
-        helpee.SetVerifiedInviteHelperIdentity(
+        await BindHelperIdentityAndWaitForShareInviteAsync(
+            runtime,
+            helpee,
             helperIdentity,
-            helperTargetAddress: helperTarget,
-            refreshInvite: true,
+            helperTarget: helperTarget,
             normalizedInputOverride: helperBootstrap);
 
         await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
@@ -299,12 +319,11 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
                 helperTarget,
                 helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
 
-        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
-
-        helpee.SetVerifiedInviteHelperIdentity(
+        await BindHelperIdentityAndWaitForShareInviteAsync(
+            runtime,
+            helpee,
             helperIdentity,
-            helperTargetAddress: helperTarget,
-            refreshInvite: true,
+            helperTarget: helperTarget,
             normalizedInputOverride: helperBootstrap);
 
         await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
@@ -359,12 +378,14 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
                 helperTarget,
                 helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
 
-        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(
+            () => runtime.State == SessionRuntimeState.Waiting && runtime.CurrentLocalPeerAddress is not null,
+            TimeSpan.FromSeconds(3));
 
         helpee.InviteHelperIdentityInput = helperBootstrap;
-
         await WaitUntilAsync(
             () => helpee.HasVerifiedInviteHelperIdentity &&
+                  helpee.HasShareInvite &&
                   string.Equals(helpee.InviteHelperIdentityInput, helperBootstrap, StringComparison.Ordinal) &&
                   helpee.RequestHelpCommand.CanExecute(null),
             TimeSpan.FromSeconds(2));
@@ -383,10 +404,10 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
 
         const string helperInput = "nhid1-DSP6-JVKB-5MW3-GE9M-71GK-ADHE-60VK-CE36-70WP-ARB2-CMRK-4DB1-60VP-4E9Q-75GK-4D33-6WS3-AE1N-CHJ6-2CV5-6XJ3-2E9H-6XHP-8E1Q-6GSK-GE35-74VK-8DV2-6MWP-8D9M-68W6-ASAN-JYRC-J";
 
-        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
-
         helpee.InviteHelperIdentityInput = helperInput;
-        await WaitUntilAsync(() => helpee.RequestHelpCommand.CanExecute(null), TimeSpan.FromSeconds(2));
+        await WaitUntilAsync(
+            () => helpee.RequestHelpCommand.CanExecute(null) && helpee.HasShareInvite,
+            TimeSpan.FromSeconds(3));
 
         helpee.InviteHelperIdentityInput = string.Empty;
 
@@ -414,12 +435,11 @@ public sealed class HelpeePageViewModelLifecycleTests : CoreSmokeTestsBase
                 helperTarget,
                 helperId: HelperIdentityTokenCodec.Encode(helperIdentity)));
 
-        await WaitUntilAsync(() => runtime.State == SessionRuntimeState.Waiting && helpee.HasShareInvite, TimeSpan.FromSeconds(2));
-
-        helpee.SetVerifiedInviteHelperIdentity(
+        await BindHelperIdentityAndWaitForShareInviteAsync(
+            runtime,
+            helpee,
             helperIdentity,
-            helperTargetAddress: helperTarget,
-            refreshInvite: true,
+            helperTarget: helperTarget,
             normalizedInputOverride: helperBootstrap);
 
         await WaitUntilAsync(() => helpee.HasShareInvite, TimeSpan.FromSeconds(2));
