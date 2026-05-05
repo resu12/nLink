@@ -24,6 +24,7 @@
 ### Packaging
 
 - Windows installer and portable release assets for `0.7.0` are prepared together with `SHA256SUMS.txt`.
+- The Tuna sidecar verifier is bundled under `tuna/win-x64/` so Diagnostics wallet validation works in packaged builds while runtime acceleration remains default-off.
 - Public Windows artifacts are unsigned for this release as an accepted exception.
 
 ## [0.6.2] - 2026-05-01

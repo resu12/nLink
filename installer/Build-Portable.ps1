@@ -11,6 +11,7 @@ param(
     [ValidateSet("DownloadSize", "InstalledSize")]
     [string]$OptimizeFor = "DownloadSize",
     [switch]$SkipBridgeBundle,
+    [switch]$SkipTunaSidecarBundle,
     [switch]$CopyHelperAlias,
     [switch]$CopyHelpeeAlias,
     [switch]$LocalOnly
@@ -311,6 +312,56 @@ function Ensure-PortableConfigFile {
     Write-Host "[nLink] Staged appsettings.json into portable output: $stageAppSettings" -ForegroundColor Green
 }
 
+function Build-TunaSidecarToPortable {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$PortableOutDir,
+        [Parameter(Mandatory = $true)][string]$Runtime
+    )
+
+    if ($Runtime -ne "win-x64") {
+        throw "Tuna sidecar packaging currently supports only win-x64, got '$Runtime'."
+    }
+
+    $sidecarSourceDir = Join-Path $RepoRoot "tools\nkn-tuna-sidecar"
+    if (-not (Test-Path (Join-Path $sidecarSourceDir "go.mod"))) {
+        throw "Tuna sidecar source not found: $sidecarSourceDir"
+    }
+
+    $goCommand = Get-Command go -ErrorAction SilentlyContinue
+    if (-not $goCommand) {
+        throw "Go toolchain not found. Install Go or pass -SkipTunaSidecarBundle for local packaging without Tuna wallet validation."
+    }
+
+    $destinationDir = Join-Path (Join-Path $PortableOutDir "tuna") $Runtime
+    New-Item -ItemType Directory -Force -Path $destinationDir | Out-Null
+    $destinationExe = Join-Path $destinationDir "nlink-tuna-sidecar.exe"
+
+    Write-Host "[nLink] Building Tuna sidecar verifier: $destinationExe" -ForegroundColor Cyan
+    Push-Location $sidecarSourceDir
+    try {
+        $previousGoos = $env:GOOS
+        $previousGoarch = $env:GOARCH
+        $env:GOOS = "windows"
+        $env:GOARCH = "amd64"
+        & go build -o $destinationExe .
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
+    }
+    finally {
+        $env:GOOS = $previousGoos
+        $env:GOARCH = $previousGoarch
+        Pop-Location
+    }
+
+    if (-not (Test-Path $destinationExe)) {
+        throw "Tuna sidecar build did not produce expected executable: $destinationExe"
+    }
+
+    Write-Host "[nLink] Bundled Tuna sidecar verifier: $destinationExe" -ForegroundColor Green
+}
+
 function Copy-BridgeBundleToPortable {
     param(
         [Parameter(Mandatory = $true)][string]$BridgeDir,
@@ -395,6 +446,10 @@ if ($LASTEXITCODE -ne 0) {
 if (-not $SkipBridgeBundle) {
     Assert-BridgeBundleRuntime -BridgeDir $bridgeBundleAbs
     Copy-BridgeBundleToPortable -BridgeDir $bridgeBundleAbs -PortableOutDir $canonicalOutAbs -Runtime $Runtime
+}
+
+if (-not $SkipTunaSidecarBundle) {
+    Build-TunaSidecarToPortable -RepoRoot $repoRoot -PortableOutDir $canonicalOutAbs -Runtime $Runtime
 }
 
 Ensure-PortableConfigFile -RepoRoot $repoRoot -StageDir $canonicalOutAbs

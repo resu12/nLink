@@ -147,6 +147,7 @@ internal sealed class TunaWalletSidecarVerifier : ITunaWalletVerifier
         {
             foreach (var relative in new[]
                      {
+                         Path.Combine("tuna", "win-x64", "nlink-tuna-sidecar.exe"),
                          Path.Combine("tools", "nkn-tuna-sidecar", "nlink-tuna-sidecar.exe"),
                          Path.Combine("artifacts", "tuna-sidecar", "nlink-tuna-sidecar.exe"),
                          "nlink-tuna-sidecar.exe",
