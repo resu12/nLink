@@ -1,0 +1,511 @@
+using System.Diagnostics;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text.Json;
+using NLink.Core.Logging;
+
+namespace NLink.Infra.Nkn;
+
+internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
+{
+    private static readonly TimeSpan ProcessExitWait = TimeSpan.FromSeconds(3);
+    private readonly object gate = new();
+    private readonly NknTunaAccelerationOptions options;
+    private NknTunaSidecarClient? client;
+    private Process? dialerProcess;
+    private Task<bool>? dialerStartTask;
+    private bool disposed;
+
+    public NknTunaAccelerationLane(NknTunaAccelerationOptions options)
+    {
+        this.options = options ?? throw new ArgumentNullException(nameof(options));
+    }
+
+    public bool IsAvailable
+    {
+        get
+        {
+            lock (gate)
+            {
+                return client?.IsAvailable == true;
+            }
+        }
+    }
+
+    public NknAccelerationLaneKind ConfiguredLanes => options.Lanes;
+
+    public NknAccelerationLaneKind SupportedLanes
+    {
+        get
+        {
+            lock (gate)
+            {
+                return client is null ? options.Lanes : client.SupportedLanes;
+            }
+        }
+    }
+
+    public string? LocalTunaAddress
+    {
+        get
+        {
+            lock (gate)
+            {
+                return client?.LocalTunaAddress;
+            }
+        }
+    }
+
+    public event EventHandler<NknIncomingMessage>? MessageReceived;
+
+    public event EventHandler<AccelerationStateChangedEventArgs>? StateChanged;
+
+    public NknAccelerationLaneDiagnostics GetDiagnosticsSnapshot()
+    {
+        lock (gate)
+        {
+            return client?.GetDiagnosticsSnapshot() ?? NknAccelerationLaneDiagnostics.Empty;
+        }
+    }
+
+    public async Task<bool> EnsureListenerSidecarConnectedAsync(CancellationToken ct)
+    {
+        if (!options.Enabled || string.IsNullOrWhiteSpace(options.ListenerEndpoint))
+        {
+            return false;
+        }
+
+        if (IsAvailable)
+        {
+            return true;
+        }
+
+        var nextClient = new NknTunaSidecarClient(options.Lanes, options.QueueCapacity);
+        nextClient.MessageReceived += OnClientMessageReceived;
+        nextClient.StateChanged += OnClientStateChanged;
+        try
+        {
+            await nextClient.ConnectAsync(
+                    options.ListenerEndpoint,
+                    TimeSpan.FromMilliseconds(options.ConnectTimeoutMs),
+                    ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LocalOperationalLog.Warn("NKN.Tuna", $"event=tuna_listener_sidecar_connect_failed; error={ex.GetType().Name}");
+            nextClient.Dispose();
+            return false;
+        }
+
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            client?.Dispose();
+            client = nextClient;
+        }
+
+        return true;
+    }
+
+    public async Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct)
+    {
+        Task<bool> startTask;
+        lock (gate)
+        {
+            if (client?.IsAvailable == true)
+            {
+                return true;
+            }
+
+            if (dialerStartTask is null)
+            {
+                dialerStartTask = StartDialerSidecarCoreAsync(tunaAddress, expectedRemotePeer, ct);
+            }
+
+            startTask = dialerStartTask;
+        }
+
+        try
+        {
+            return await startTask.ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (gate)
+            {
+                if (ReferenceEquals(dialerStartTask, startTask))
+                {
+                    dialerStartTask = null;
+                }
+            }
+        }
+    }
+
+    private async Task<bool> StartDialerSidecarCoreAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct)
+    {
+        if (!options.Enabled || string.IsNullOrWhiteSpace(options.SidecarExePath))
+        {
+            return false;
+        }
+
+        if (IsAvailable)
+        {
+            return true;
+        }
+
+        if (!File.Exists(options.SidecarExePath))
+        {
+            LocalOperationalLog.Warn("NKN.Tuna", "event=tuna_dialer_sidecar_missing");
+            return false;
+        }
+
+        var ready = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        string? lastSidecarEvent = null;
+        string? lastSidecarReason = null;
+        var hasDialerSeed = !string.IsNullOrWhiteSpace(options.DialerSeedBase64);
+        var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = options.SidecarExePath,
+                UseShellExecute = false,
+                RedirectStandardInput = hasDialerSeed,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            },
+            EnableRaisingEvents = true,
+        };
+
+        process.StartInfo.ArgumentList.Add("dial");
+        process.StartInfo.ArgumentList.Add("--to");
+        process.StartInfo.ArgumentList.Add(tunaAddress);
+        process.StartInfo.ArgumentList.Add("--local-ipc");
+        process.StartInfo.ArgumentList.Add("127.0.0.1:0");
+        if (options.TunaDialTimeoutMs > 0)
+        {
+            process.StartInfo.ArgumentList.Add("--tuna-dial-timeout-ms");
+            process.StartInfo.ArgumentList.Add(options.TunaDialTimeoutMs.ToString(CultureInfo.InvariantCulture));
+        }
+
+        if (hasDialerSeed)
+        {
+            process.StartInfo.ArgumentList.Add("--seed-stdin");
+        }
+
+        process.StartInfo.ArgumentList.Add("--jsonl");
+
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (string.IsNullOrWhiteSpace(e.Data))
+            {
+                return;
+            }
+
+            if (TryHandleReadyLine(e.Data, ready))
+            {
+                Interlocked.Exchange(ref lastSidecarEvent, "ready");
+                return;
+            }
+
+            var eventName = TryExtractSidecarEvent(e.Data, out var reason);
+            if (!string.IsNullOrWhiteSpace(eventName))
+            {
+                var safeEventName = SanitizeSidecarEventName(eventName);
+                var safeReason = SanitizeSidecarReason(reason);
+                Interlocked.Exchange(ref lastSidecarEvent, safeEventName);
+                if (!string.IsNullOrWhiteSpace(safeReason))
+                {
+                    Interlocked.Exchange(ref lastSidecarReason, safeReason);
+                }
+
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=tuna_dialer_sidecar_event; sidecar_event={safeEventName}; sidecar_reason={safeReason ?? ""}; line_len={e.Data.Length}");
+                if (IsTerminalSidecarEvent(safeEventName))
+                {
+                    MarkCurrentClientUnavailable($"sidecar_{safeEventName}");
+                }
+            }
+        };
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (!string.IsNullOrWhiteSpace(e.Data))
+            {
+                LocalOperationalLog.Info("NKN.Tuna", $"event=tuna_dialer_sidecar_stderr; line_len={e.Data.Length}");
+            }
+        };
+        process.Exited += (_, _) =>
+        {
+            if (!ready.Task.IsCompleted)
+            {
+                ready.TrySetException(new InvalidOperationException("Tuna dialer sidecar exited before ready."));
+            }
+        };
+
+        try
+        {
+            if (!process.Start())
+            {
+                process.Dispose();
+                return false;
+            }
+
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            if (hasDialerSeed)
+            {
+                await WriteDialerSeedAsync(process, options.DialerSeedBase64!, ct).ConfigureAwait(false);
+            }
+
+            lock (gate)
+            {
+                ThrowIfDisposed();
+                dialerProcess = process;
+            }
+
+            using var readyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            readyCts.CancelAfter(options.DialerReadyTimeoutMs);
+            using var readyRegistration = readyCts.Token.Register(() => ready.TrySetCanceled(readyCts.Token));
+            var endpoint = await ready.Task.ConfigureAwait(false);
+            var nextClient = new NknTunaSidecarClient(options.Lanes, options.QueueCapacity);
+            nextClient.MessageReceived += OnClientMessageReceived;
+            nextClient.StateChanged += OnClientStateChanged;
+            await nextClient.ConnectAsync(
+                    endpoint,
+                    TimeSpan.FromMilliseconds(options.ConnectTimeoutMs),
+                    ct)
+                .ConfigureAwait(false);
+
+            lock (gate)
+            {
+                ThrowIfDisposed();
+                client?.Dispose();
+                client = nextClient;
+            }
+
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_dialer_sidecar_started; expected_remote_len={expectedRemotePeer?.Length ?? 0}");
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=tuna_dialer_sidecar_start_failed; error={ex.GetType().Name}; last_event={lastSidecarEvent ?? ""}; last_reason={lastSidecarReason ?? ""}");
+            TryStopProcess(process);
+            return false;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=tuna_dialer_sidecar_start_failed; error=ready_timeout; last_event={lastSidecarEvent ?? ""}; last_reason={lastSidecarReason ?? ""}");
+            TryStopProcess(process);
+            return false;
+        }
+    }
+
+    public Task<bool> TrySendAsync(NknBridgeChannel lane, byte[] envelopeBytes, CancellationToken ct)
+    {
+        NknTunaSidecarClient? current;
+        lock (gate)
+        {
+            current = client;
+        }
+
+        return current is null ? Task.FromResult(false) : current.TrySendAsync(lane, envelopeBytes, ct);
+    }
+
+    public void Dispose()
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        disposed = true;
+        NknTunaSidecarClient? clientToDispose;
+        Process? processToStop;
+        lock (gate)
+        {
+            clientToDispose = client;
+            processToStop = dialerProcess;
+            client = null;
+            dialerProcess = null;
+            dialerStartTask = null;
+        }
+
+        clientToDispose?.Dispose();
+        if (processToStop is not null)
+        {
+            TryStopProcess(processToStop);
+        }
+    }
+
+    private void OnClientMessageReceived(object? sender, NknIncomingMessage e)
+        => MessageReceived?.Invoke(this, e);
+
+    private void OnClientStateChanged(object? sender, AccelerationStateChangedEventArgs e)
+        => StateChanged?.Invoke(this, e);
+
+    private void MarkCurrentClientUnavailable(string reason)
+    {
+        NknTunaSidecarClient? current;
+        lock (gate)
+        {
+            current = client;
+        }
+
+        current?.MarkUnavailableFromSidecarEvent(reason);
+    }
+
+    private static bool TryHandleReadyLine(string line, TaskCompletionSource<string> ready)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("event", out var eventProperty) ||
+                !string.Equals(eventProperty.GetString(), "ready", StringComparison.OrdinalIgnoreCase) ||
+                !root.TryGetProperty("localIpc", out var endpointProperty) ||
+                endpointProperty.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            var endpoint = endpointProperty.GetString();
+            if (!string.IsNullOrWhiteSpace(endpoint))
+            {
+                ready.TrySetResult(endpoint.Trim());
+                return true;
+            }
+        }
+        catch (JsonException)
+        {
+            // Ignore non-JSON diagnostic output.
+        }
+
+        return false;
+    }
+
+    private static string? TryExtractSidecarEvent(string line, out string? reason)
+    {
+        reason = null;
+        try
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (root.TryGetProperty("reason", out var reasonProperty) &&
+                reasonProperty.ValueKind == JsonValueKind.String)
+            {
+                reason = reasonProperty.GetString();
+            }
+
+            return root.TryGetProperty("event", out var eventProperty) &&
+                   eventProperty.ValueKind == JsonValueKind.String
+                ? eventProperty.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool IsTerminalSidecarEvent(string eventName)
+        => string.Equals(eventName, "bridge_direction_stopped", StringComparison.Ordinal) ||
+           string.Equals(eventName, "error", StringComparison.Ordinal);
+
+    private static string SanitizeSidecarEventName(string value)
+    {
+        Span<char> buffer = stackalloc char[Math.Min(value.Length, 64)];
+        var written = 0;
+        foreach (var ch in value)
+        {
+            if (written >= buffer.Length)
+            {
+                break;
+            }
+
+            buffer[written++] = char.IsAsciiLetterOrDigit(ch) || ch is '_' or '-' ? ch : '_';
+        }
+
+        return written == 0 ? "unknown" : new string(buffer[..written]);
+    }
+
+    private static string? SanitizeSidecarReason(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var safe = value.Trim();
+        if (safe.Length > 160)
+        {
+            safe = safe[..160];
+        }
+
+        return safe
+            .Replace(";", ",", StringComparison.Ordinal)
+            .Replace("\r", " ", StringComparison.Ordinal)
+            .Replace("\n", " ", StringComparison.Ordinal);
+    }
+
+    private static async Task WriteDialerSeedAsync(Process process, string seedBase64, CancellationToken ct)
+    {
+        byte[] seedBytes;
+        try
+        {
+            seedBytes = Convert.FromBase64String(seedBase64.Trim());
+        }
+        catch (FormatException ex)
+        {
+            throw new InvalidOperationException("Tuna dialer seed is not valid base64.", ex);
+        }
+
+        try
+        {
+            if (seedBytes.Length != 32)
+            {
+                throw new InvalidOperationException("Tuna dialer seed must decode to exactly 32 bytes.");
+            }
+
+            var seedHex = Convert.ToHexString(seedBytes).ToLowerInvariant();
+            await process.StandardInput.WriteLineAsync(seedHex.AsMemory(), ct).ConfigureAwait(false);
+            process.StandardInput.Close();
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(seedBytes);
+        }
+    }
+
+    private static void TryStopProcess(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(ProcessExitWait);
+            }
+        }
+        catch
+        {
+            // Best-effort developer-only sidecar cleanup.
+        }
+        finally
+        {
+            process.Dispose();
+        }
+    }
+
+    private void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+    }
+}

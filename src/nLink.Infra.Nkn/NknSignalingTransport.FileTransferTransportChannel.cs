@@ -721,6 +721,15 @@ public sealed partial class NknSignalingTransport
             case MsgType.ScreenShareCursorState:
                 HandleScreenShareCursorState(source, env);
                 break;
+            case MsgType.TransportAccelerationOffer:
+                HandleTransportAccelerationOffer(source, env);
+                break;
+            case MsgType.TransportAccelerationAnswer:
+                HandleTransportAccelerationAnswer(source, env);
+                break;
+            case MsgType.TransportAccelerationDown:
+                HandleTransportAccelerationDown(source, env);
+                break;
             default:
                 throw new InvalidOperationException($"Control channel cannot route {env.Type}.");
         }
@@ -3606,6 +3615,9 @@ public sealed partial class NknSignalingTransport
             MsgType.ScreenShareVideoKeyframeRequest => "screenshare_video_keyframe_request",
             MsgType.ScreenShareRecoveryReceipt => "screenshare_recovery_receipt",
             MsgType.ScreenShareCursorState => "screenshare_cursor_state",
+            MsgType.TransportAccelerationOffer => "transport_acceleration_offer",
+            MsgType.TransportAccelerationAnswer => "transport_acceleration_answer",
+            MsgType.TransportAccelerationDown => "transport_acceleration_down",
             _ => throw new ArgumentOutOfRangeException(nameof(messageType), messageType, "Unsupported secure control message type."),
         };
     }

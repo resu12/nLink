@@ -43,4 +43,7 @@ internal enum MsgType
     ScreenShareVideoKeyframeRequest = 38,
     ScreenShareRecoveryReceipt = 39,
     ScreenShareCursorState = 40,
+    TransportAccelerationOffer = 41,
+    TransportAccelerationAnswer = 42,
+    TransportAccelerationDown = 43,
 }

@@ -1056,12 +1056,22 @@ internal static int GetOperationalLogLength()
         return ReadOperationalLogText().Length;
     }
 
-internal static string ReadOperationalLogTail(int startIndex)
+    internal static string ReadOperationalLogTail(int startIndex)
     {
         var logText = ReadOperationalLogText();
-        if (startIndex <= 0 || startIndex >= logText.Length)
+        if (startIndex <= 0)
         {
-            return startIndex >= logText.Length ? string.Empty : logText;
+            return logText;
+        }
+
+        if (startIndex > logText.Length)
+        {
+            return logText;
+        }
+
+        if (startIndex == logText.Length)
+        {
+            return string.Empty;
         }
 
         return logText[startIndex..];

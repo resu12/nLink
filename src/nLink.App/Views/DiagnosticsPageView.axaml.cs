@@ -1,7 +1,12 @@
 using System;
 using System.Diagnostics;
+using System.IO;
+using System.Threading.Tasks;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
+using Avalonia.Layout;
+using Avalonia.Platform.Storage;
 using NLink.App.Services;
 using NLink.App.ViewModels;
 
@@ -28,6 +33,9 @@ public partial class DiagnosticsPageView : UserControl
             subscribedViewModel.OpenBugReportRequested -= OnOpenBugReportRequested;
             subscribedViewModel.OpenMetricsExportFolderRequested -= OnOpenMetricsExportFolderRequested;
             subscribedViewModel.OpenHangReportFolderRequested -= OnOpenHangReportFolderRequested;
+            subscribedViewModel.LinkTunaWalletRequested -= OnLinkTunaWalletRequested;
+            subscribedViewModel.ValidateTunaWalletPasswordRequested -= OnValidateTunaWalletPasswordRequested;
+            subscribedViewModel.CopyTunaWalletAddressRequested -= OnCopyTunaWalletAddressRequested;
             subscribedViewModel = null;
         }
 
@@ -42,6 +50,9 @@ public partial class DiagnosticsPageView : UserControl
         subscribedViewModel.OpenBugReportRequested += OnOpenBugReportRequested;
         subscribedViewModel.OpenMetricsExportFolderRequested += OnOpenMetricsExportFolderRequested;
         subscribedViewModel.OpenHangReportFolderRequested += OnOpenHangReportFolderRequested;
+        subscribedViewModel.LinkTunaWalletRequested += OnLinkTunaWalletRequested;
+        subscribedViewModel.ValidateTunaWalletPasswordRequested += OnValidateTunaWalletPasswordRequested;
+        subscribedViewModel.CopyTunaWalletAddressRequested += OnCopyTunaWalletAddressRequested;
     }
 
     private async void OnCopyReliabilityLogRequested(object? sender, string text)
@@ -150,6 +161,177 @@ public partial class DiagnosticsPageView : UserControl
         {
             // Best-effort helper action only.
         }
+    }
+
+    private async void OnLinkTunaWalletRequested(object? sender, EventArgs e)
+    {
+        try
+        {
+            if (subscribedViewModel is null ||
+                TopLevel.GetTopLevel(this) is not TopLevel topLevel)
+            {
+                return;
+            }
+
+            var files = await topLevel.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            {
+                Title = "Link NKN wallet.json",
+                AllowMultiple = false,
+                FileTypeFilter =
+                [
+                    new FilePickerFileType("NKN wallet JSON")
+                    {
+                        Patterns = ["*.json"],
+                        MimeTypes = ["application/json"],
+                    },
+                    FilePickerFileTypes.All,
+                ],
+            });
+            var selected = files.Count > 0 ? files[0] : null;
+            if (selected?.Path.IsFile != true)
+            {
+                return;
+            }
+
+            await subscribedViewModel.LinkTunaWalletAsync(selected.Path.LocalPath);
+        }
+        catch
+        {
+            // Best-effort developer diagnostics action only.
+        }
+    }
+
+    private async void OnValidateTunaWalletPasswordRequested(object? sender, EventArgs e)
+    {
+        char[]? password = null;
+        try
+        {
+            if (subscribedViewModel is null ||
+                TopLevel.GetTopLevel(this) is not Window owner)
+            {
+                return;
+            }
+
+            password = await ShowWalletPasswordDialogAsync(owner);
+            if (password is null || password.Length == 0)
+            {
+                return;
+            }
+
+            await subscribedViewModel.ValidateTunaWalletAsync(password);
+        }
+        finally
+        {
+            if (password is not null)
+            {
+                Array.Clear(password);
+            }
+        }
+    }
+
+    private async void OnCopyTunaWalletAddressRequested(object? sender, string address)
+    {
+        try
+        {
+            if (Avalonia.Application.Current is not App app ||
+                !app.Services.TryGet<IClipboardService>(out var clipboardService) ||
+                clipboardService is null)
+            {
+                return;
+            }
+
+            BindClipboardTopLevel();
+            await clipboardService.SetTextAsync(address);
+            subscribedViewModel?.NotifyTunaWalletAddressCopied();
+        }
+        catch
+        {
+            subscribedViewModel?.NotifyTunaWalletAddressCopyFailed();
+        }
+    }
+
+    private static Task<char[]?> ShowWalletPasswordDialogAsync(Window owner)
+    {
+        var result = new TaskCompletionSource<char[]?>();
+        var passwordBox = new TextBox
+        {
+            Width = 320,
+            PasswordChar = '*',
+        };
+        var okButton = new Button
+        {
+            Classes = { "appButton", "primaryButton", "compactButton" },
+            Content = "Validate",
+            HorizontalAlignment = HorizontalAlignment.Right,
+        };
+        var cancelButton = new Button
+        {
+            Classes = { "appButton", "secondaryButton", "compactButton" },
+            Content = "Cancel",
+            HorizontalAlignment = HorizontalAlignment.Right,
+        };
+        var window = new Window
+        {
+            Title = "Wallet password",
+            Width = 420,
+            SizeToContent = SizeToContent.Height,
+            CanResize = false,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Content = new StackPanel
+            {
+                Margin = new Thickness(18),
+                Spacing = 12,
+                Children =
+                {
+                    new TextBlock
+                    {
+                        Text = "Enter wallet password",
+                        Classes = { "appSectionTitle" },
+                    },
+                    passwordBox,
+                    new StackPanel
+                    {
+                        Orientation = Orientation.Horizontal,
+                        HorizontalAlignment = HorizontalAlignment.Right,
+                        Spacing = 8,
+                        Children = { cancelButton, okButton },
+                    },
+                },
+            },
+        };
+
+        void Complete(char[]? value)
+        {
+            if (passwordBox.Text is not null)
+            {
+                passwordBox.Text = string.Empty;
+            }
+
+            if (!result.Task.IsCompleted)
+            {
+                result.SetResult(value);
+            }
+
+            window.Close();
+        }
+
+        okButton.Click += (_, _) =>
+        {
+            var text = passwordBox.Text ?? string.Empty;
+            Complete(text.Length == 0 ? Array.Empty<char>() : text.ToCharArray());
+        };
+        cancelButton.Click += (_, _) => Complete(null);
+        window.Closed += (_, _) =>
+        {
+            if (!result.Task.IsCompleted)
+            {
+                result.SetResult(null);
+            }
+        };
+
+        _ = window.ShowDialog(owner);
+        passwordBox.Focus();
+        return result.Task;
     }
 
     private void BindClipboardTopLevel()

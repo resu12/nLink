@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.7.0] - 2026-05-05
+
+### Added
+
+- Experimental NKN Tuna acceleration research artifacts, sidecar tooling, and opt-in manual benchmark coverage.
+- Diagnostics now includes a visible `Tuna (experimental)` wallet-linking section for local wallet status, balance validation, address copy, and unlinking.
+- Safe `wallet-status` validation mode in the Tuna sidecar unlocks a linked wallet for one balance check and exits without starting a paid listener or spending NKN.
+- Phase 3 benchmark artifacts and acceptance gates compare current NKN and Tuna for file, screen, and reconnect behavior.
+
+### Changed
+
+- Release version sources and packaging defaults now resolve to `0.7.0`.
+- README and release-facing documentation now reflect `0.7.0` as the current release.
+- Tuna remains default-off and developer-gated; a linked or funded wallet does not change runtime transport behavior by itself.
+- Diagnostics copy/export redaction now covers Tuna wallet paths, wallet addresses, password-like fields, seeds, and private-key material.
+
+### Fixed
+
+- Tuna negotiation is bound to the approved, verified nLink session and silently falls back to the current NKN transport on address, session, nonce, version, expiry, lane, or sidecar mismatches.
+- Sidecar and benchmark failure handling was tightened so disconnects and listener shutdowns mark acceleration unavailable without ending the approved nLink session.
+
+### Packaging
+
+- Windows installer and portable release assets for `0.7.0` are prepared together with `SHA256SUMS.txt`.
+- Public Windows artifacts are unsigned for this release as an accepted exception.
+
 ## [0.6.2] - 2026-05-01
 
 ### Added

@@ -194,6 +194,73 @@
                             Padding="14"
                             Margin="0,6,0,0">
                         <StackPanel Spacing="16">
+                            <StackPanel Spacing="10">
+                                <TextBlock Classes="appSectionTitle" Text="Tuna (experimental)"/>
+                                <Grid ColumnDefinitions="220,*"
+                                      RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                                      RowSpacing="8"
+                                      ColumnSpacing="12">
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Classes="appMuted" Text="Runtime flag"/>
+                                    <TextBlock Grid.Row="0" Grid.Column="1" Classes="appMuted" Text="{Binding TunaRuntimeFlagStatus}" TextWrapping="Wrap"/>
+
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Classes="appMuted" Text="Fallback"/>
+                                    <TextBlock Grid.Row="1" Grid.Column="1" Classes="appMuted" Text="{Binding TunaFallbackState}" TextWrapping="Wrap"/>
+
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Classes="appMuted" Text="Verifier"/>
+                                    <TextBlock Grid.Row="2" Grid.Column="1" Classes="appMuted" Text="{Binding TunaSidecarVerifierStatus, StringFormat='{}{0}'}" TextWrapping="Wrap"/>
+
+                                    <TextBlock Grid.Row="3" Grid.Column="0" Classes="appMuted" Text="Sidecar"/>
+                                    <TextBlock Grid.Row="3" Grid.Column="1" Classes="appMuted" Text="{Binding TunaSidecarVerifierDetail}" TextWrapping="Wrap"/>
+
+                                    <TextBlock Grid.Row="4" Grid.Column="0" Classes="appMuted" Text="Wallet"/>
+                                    <TextBlock Grid.Row="4" Grid.Column="1" Classes="appMuted" Text="{Binding TunaWalletFileName}" TextWrapping="Wrap"/>
+
+                                    <TextBlock Grid.Row="5" Grid.Column="0" Classes="appMuted" Text="Status"/>
+                                    <TextBlock Grid.Row="5" Grid.Column="1" Classes="appMuted" Text="{Binding TunaWalletStatus}" TextWrapping="Wrap"/>
+
+                                    <TextBlock Grid.Row="6" Grid.Column="0" Classes="appMuted" Text="Balance"/>
+                                    <TextBlock Grid.Row="6" Grid.Column="1" Classes="appMuted" Text="{Binding TunaWalletBalance}" TextWrapping="Wrap"/>
+
+                                    <TextBlock Grid.Row="7" Grid.Column="0" Classes="appMuted" Text="Last verified"/>
+                                    <TextBlock Grid.Row="7" Grid.Column="1" Classes="appMuted" Text="{Binding TunaWalletLastVerified}" TextWrapping="Wrap"/>
+                                </Grid>
+
+                                <Border Classes="appPanel"
+                                        Background="{StaticResource AppMutedPanelBrush}"
+                                        Padding="10">
+                                    <TextBlock Text="{Binding TunaWalletAddress}"
+                                               Foreground="{StaticResource AppTextBrush}"
+                                               FontFamily="Cascadia Mono,Consolas,Monaco,monospace"
+                                               FontSize="13"
+                                               TextWrapping="Wrap"/>
+                                </Border>
+
+                                <TextBlock Classes="appMuted"
+                                           Text="{Binding TunaWalletLastFailure, StringFormat='Last failure: {0}'}"
+                                           FontSize="12"
+                                           IsVisible="{Binding ShowTunaWalletFailure}"
+                                           TextWrapping="Wrap"/>
+
+                                <WrapPanel>
+                                    <Button Classes="appButton secondaryButton compactButton"
+                                            Content="Link wallet.json"
+                                            Command="{Binding LinkTunaWalletCommand}"
+                                            Margin="0,0,8,8"/>
+                                    <Button Classes="appButton secondaryButton compactButton"
+                                            Content="Validate balance"
+                                            Command="{Binding ValidateTunaWalletCommand}"
+                                            Margin="0,0,8,8"/>
+                                    <Button Classes="appButton secondaryButton compactButton"
+                                            Content="Copy address"
+                                            Command="{Binding CopyTunaWalletAddressCommand}"
+                                            Margin="0,0,8,8"/>
+                                    <Button Classes="appButton secondaryButton compactButton"
+                                            Content="Unlink"
+                                            Command="{Binding UnlinkTunaWalletCommand}"
+                                            Margin="0,0,8,8"/>
+                                </WrapPanel>
+                            </StackPanel>
+
                             <StackPanel Spacing="8">
                                 <TextBlock Classes="appSectionTitle" Text="Raw counters"/>
                                 <Grid ColumnDefinitions="*,*"

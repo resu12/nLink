@@ -5,6 +5,9 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.Input;
 using NLink.App.Configuration;
@@ -34,6 +37,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private readonly MetricsRegistry? metricsRegistry;
     private readonly ResourceRuntimeTracker? resourceRuntimeTracker;
     private readonly HangReportService? hangReportService;
+    private readonly ITunaWalletLinkStore? tunaWalletLinkStore;
+    private readonly ITunaWalletVerifier? tunaWalletVerifier;
     private readonly Func<DateTimeOffset> nowProvider;
     private readonly Func<string> diagnosticsExportRootProvider;
     private readonly Action<string, string, string, string> persistScreenSharePresetInBackground;
@@ -42,6 +47,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private readonly PersistenceDiagnosticsSnapshot persistenceDiagnosticsSnapshot;
     private readonly ScreenShareEvidenceSnapshot screenShareEvidenceSnapshot;
     private readonly ScreenShareLiveDiagnosticsSnapshot screenShareLiveSnapshot;
+    private TunaWalletLinkState tunaWalletState = TunaWalletLinkState.Unlinked;
+    private bool isTunaWalletValidating;
 
     public DiagnosticsPageViewModel(
         Action backAction,
@@ -80,7 +87,9 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         HangReportService? hangReportService = null,
         Func<DateTimeOffset>? nowProvider = null,
         Func<string>? diagnosticsExportRootProvider = null,
-        Action<string, string, string, string>? screenSharePresetPersistence = null)
+        Action<string, string, string, string>? screenSharePresetPersistence = null,
+        ITunaWalletLinkStore? tunaWalletLinkStore = null,
+        ITunaWalletVerifier? tunaWalletVerifier = null)
     {
         linksConfig ??= new ShareMessageConfig(null);
         BackCommand = new RelayCommand(backAction);
@@ -88,9 +97,12 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         this.metricsRegistry = metricsRegistry;
         this.resourceRuntimeTracker = resourceRuntimeTracker;
         this.hangReportService = hangReportService;
+        this.tunaWalletLinkStore = tunaWalletLinkStore;
+        this.tunaWalletVerifier = tunaWalletVerifier;
         this.nowProvider = nowProvider ?? DefaultNowProvider;
         this.diagnosticsExportRootProvider = diagnosticsExportRootProvider ?? DefaultDiagnosticsExportRootProvider;
         persistScreenSharePresetInBackground = screenSharePresetPersistence ?? PersistScreenSharePresetInBackground;
+        tunaWalletState = LoadTunaWalletState(tunaWalletLinkStore);
         screenShareEvidenceSnapshot = screenShareEvidenceLocator.ReadLatest();
         screenShareLiveSnapshot = sessionRuntime?.GetScreenShareLiveDiagnosticsSnapshot() ?? ScreenShareLiveDiagnosticsSnapshot.Unavailable;
 
@@ -186,6 +198,10 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         ApplyBalancedScreenSharePresetCommand = new RelayCommand(ApplyBalancedScreenSharePreset);
         ApplyHighQualityScreenSharePresetCommand = new RelayCommand(ApplyHighQualityScreenSharePreset);
         ApplyHighPerformanceScreenSharePresetCommand = new RelayCommand(ApplyHighPerformanceScreenSharePreset);
+        LinkTunaWalletCommand = new RelayCommand(RequestLinkTunaWallet);
+        ValidateTunaWalletCommand = new RelayCommand(RequestValidateTunaWallet, CanValidateTunaWallet);
+        CopyTunaWalletAddressCommand = new RelayCommand(RequestCopyTunaWalletAddress, CanCopyTunaWalletAddress);
+        UnlinkTunaWalletCommand = new RelayCommand(UnlinkTunaWallet, CanUnlinkTunaWallet);
     }
 
     public string PageTitle => "Diagnostics";
@@ -272,6 +288,56 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string PersistenceSummary => runtimeDiagnosticsSnapshot.PersistenceSummary;
     public string PersistenceWarning => runtimeDiagnosticsSnapshot.PersistenceWarning;
     public string DiagnosticsPrivacyNotice => DiagnosticsExportBuilder.BestEffortPrivacyNotice;
+    public string TunaRuntimeFlagStatus
+        => NknTunaAccelerationOptions.Load().Enabled ? "Enabled by runtime flag" : "Off";
+    public string TunaFallbackState => NknTunaAccelerationOptions.Load().Enabled
+        ? "Experimental acceleration can negotiate only after an approved secure session."
+        : "Current NKN will be used.";
+    public string TunaSidecarVerifierStatus
+    {
+        get
+        {
+            var availability = tunaWalletVerifier?.GetAvailability();
+            return availability?.IsAvailable == true ? "Available" : "Unavailable";
+        }
+    }
+    public string TunaSidecarVerifierDetail
+    {
+        get
+        {
+            var availability = tunaWalletVerifier?.GetAvailability();
+            if (availability is null)
+            {
+                return "verifier service missing";
+            }
+
+            if (availability.IsAvailable && !string.IsNullOrWhiteSpace(availability.SidecarPath))
+            {
+                return Path.GetFileName(availability.SidecarPath);
+            }
+
+            return availability.Status;
+        }
+    }
+    public string TunaWalletFileName => tunaWalletState.WalletFileName;
+    public string TunaWalletStatus => FormatTunaWalletStatus(tunaWalletState.Status, isTunaWalletValidating);
+    public string TunaWalletAddress => string.IsNullOrWhiteSpace(tunaWalletState.WalletAddress)
+        ? "(not verified)"
+        : tunaWalletState.WalletAddress;
+    public string TunaWalletBalance => string.IsNullOrWhiteSpace(tunaWalletState.BalanceNkn)
+        ? "(unknown)"
+        : $"{tunaWalletState.BalanceNkn} NKN";
+    public string TunaWalletBalanceCategory => tunaWalletState.BalanceCategory;
+    public string TunaWalletLastVerified => tunaWalletState.LastVerifiedUtc.HasValue
+        ? tunaWalletState.LastVerifiedUtc.Value.ToString("u")
+        : "(never)";
+    public string TunaWalletLastFailure => string.IsNullOrWhiteSpace(tunaWalletState.LastFailureReason)
+        ? "(none)"
+        : tunaWalletState.LastFailureReason;
+    public bool IsTunaWalletLinked => tunaWalletState.IsLinked;
+    public bool IsTunaWalletValidating => isTunaWalletValidating;
+    public bool ShowTunaWalletFailure => tunaWalletState.Status == TunaWalletLinkStatus.ValidationFailed &&
+        !string.IsNullOrWhiteSpace(tunaWalletState.LastFailureReason);
     public string AuthoritativeConnectedAddress => nknDiagnosticsSnapshot.AuthoritativeConnectedAddressResolved ? "Yes" : "No";
     public string LastRejectedMessageSummary => BuildLastRejectedMessageSummary();
     public string ConnectionStateSummary => $"session={SessionUiState}; transport={CurrentTransportState}; role_state={TransportSummary}";
@@ -377,10 +443,17 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public IRelayCommand ApplyBalancedScreenSharePresetCommand { get; }
     public IRelayCommand ApplyHighQualityScreenSharePresetCommand { get; }
     public IRelayCommand ApplyHighPerformanceScreenSharePresetCommand { get; }
+    public IRelayCommand LinkTunaWalletCommand { get; }
+    public IRelayCommand ValidateTunaWalletCommand { get; }
+    public IRelayCommand CopyTunaWalletAddressCommand { get; }
+    public IRelayCommand UnlinkTunaWalletCommand { get; }
 
     public IRelayCommand BackCommand { get; }
 
     public event EventHandler<string>? CopyReliabilityLogRequested;
+    public event EventHandler? LinkTunaWalletRequested;
+    public event EventHandler? ValidateTunaWalletPasswordRequested;
+    public event EventHandler<string>? CopyTunaWalletAddressRequested;
 
     public event EventHandler<string>? OpenLogsFolderRequested;
 
@@ -398,6 +471,74 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         copyFeedback.Show("Could not copy");
     }
 
+    public void NotifyTunaWalletAddressCopied()
+    {
+        copyFeedback.Show("Wallet address copied");
+    }
+
+    public void NotifyTunaWalletAddressCopyFailed()
+    {
+        copyFeedback.Show("Could not copy wallet address");
+    }
+
+    public async Task LinkTunaWalletAsync(string? walletPath, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(walletPath))
+        {
+            return;
+        }
+
+        try
+        {
+            var state = TunaWalletLinkState.Linked(walletPath, nowProvider());
+            await SaveTunaWalletStateAsync(state, ct);
+            copyFeedback.Show("Wallet linked");
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn("Diagnostics", $"Tuna wallet link failed: {ex.GetType().Name}");
+            copyFeedback.Show("Could not link wallet");
+        }
+    }
+
+    public async Task ValidateTunaWalletAsync(char[]? password, CancellationToken ct = default)
+    {
+        if (!tunaWalletState.IsLinked || string.IsNullOrWhiteSpace(tunaWalletState.WalletPath))
+        {
+            copyFeedback.Show("Link a wallet first");
+            return;
+        }
+
+        if (password is null || password.Length == 0)
+        {
+            copyFeedback.Show("Password required");
+            return;
+        }
+
+        if (isTunaWalletValidating)
+        {
+            return;
+        }
+
+        SetTunaWalletValidating(true);
+        try
+        {
+            var result = tunaWalletVerifier is null
+                ? TunaWalletValidationResult.Fail("verifier_service_missing", tunaWalletState.WalletFileName)
+                : await tunaWalletVerifier.ValidateAsync(tunaWalletState.WalletPath, password, ct);
+            var nextState = tunaWalletState.WithValidationResult(result, nowProvider());
+            await SaveTunaWalletStateAsync(nextState, ct);
+            copyFeedback.Show(result.Success
+                ? (nextState.Status == TunaWalletLinkStatus.VerifiedFunded ? "Wallet verified" : "Wallet is empty")
+                : "Wallet validation failed");
+        }
+        finally
+        {
+            Array.Clear(password);
+            SetTunaWalletValidating(false);
+        }
+    }
+
     private static string BuildLastBridgeExitText(int exitCode, string reason)
     {
         var safeReason = string.IsNullOrWhiteSpace(reason) ? "(none)" : reason;
@@ -411,11 +552,146 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     private static string FormatFeatureFlag(bool enabled) => enabled ? "On" : "Off";
 
+    private static TunaWalletLinkState LoadTunaWalletState(ITunaWalletLinkStore? store)
+    {
+        if (store is null)
+        {
+            return TunaWalletLinkState.Unlinked;
+        }
+
+        try
+        {
+            return store.LoadAsync().GetAwaiter().GetResult();
+        }
+        catch
+        {
+            return TunaWalletLinkState.Unlinked;
+        }
+    }
+
+    private async Task SaveTunaWalletStateAsync(TunaWalletLinkState state, CancellationToken ct)
+    {
+        if (tunaWalletLinkStore is not null)
+        {
+            await tunaWalletLinkStore.SaveAsync(state, ct);
+        }
+
+        tunaWalletState = state;
+        RefreshTunaWalletProperties();
+    }
+
+    private void SetTunaWalletValidating(bool value)
+    {
+        if (SetProperty(ref isTunaWalletValidating, value, nameof(IsTunaWalletValidating)))
+        {
+            RefreshTunaWalletProperties();
+        }
+    }
+
+    private void RefreshTunaWalletProperties()
+    {
+        OnPropertyChanged(nameof(TunaRuntimeFlagStatus));
+        OnPropertyChanged(nameof(TunaFallbackState));
+        OnPropertyChanged(nameof(TunaSidecarVerifierStatus));
+        OnPropertyChanged(nameof(TunaSidecarVerifierDetail));
+        OnPropertyChanged(nameof(TunaWalletFileName));
+        OnPropertyChanged(nameof(TunaWalletStatus));
+        OnPropertyChanged(nameof(TunaWalletAddress));
+        OnPropertyChanged(nameof(TunaWalletBalance));
+        OnPropertyChanged(nameof(TunaWalletBalanceCategory));
+        OnPropertyChanged(nameof(TunaWalletLastVerified));
+        OnPropertyChanged(nameof(TunaWalletLastFailure));
+        OnPropertyChanged(nameof(IsTunaWalletLinked));
+        OnPropertyChanged(nameof(ShowTunaWalletFailure));
+        ValidateTunaWalletCommand.NotifyCanExecuteChanged();
+        CopyTunaWalletAddressCommand.NotifyCanExecuteChanged();
+        UnlinkTunaWalletCommand.NotifyCanExecuteChanged();
+    }
+
+    private static string FormatTunaWalletStatus(TunaWalletLinkStatus status, bool validating)
+    {
+        if (validating)
+        {
+            return "Validating";
+        }
+
+        return status switch
+        {
+            TunaWalletLinkStatus.Unlinked => "Not linked",
+            TunaWalletLinkStatus.LinkedUnverified => "Linked, not verified",
+            TunaWalletLinkStatus.VerifiedFunded => "Verified, funded",
+            TunaWalletLinkStatus.VerifiedEmpty => "Verified, empty",
+            TunaWalletLinkStatus.ValidationFailed => "Validation failed",
+            _ => status.ToString(),
+        };
+    }
+
+    private static string HashForDiagnostics(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "(none)";
+        }
+
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(value.Trim()));
+        return Convert.ToHexString(hash, 0, 8).ToLowerInvariant();
+    }
+
     private void RequestCopyReliabilityLog()
     {
         var text = BuildDiagnosticsCopyText();
         CopyReliabilityLogRequested?.Invoke(this, text);
     }
+
+    private void RequestLinkTunaWallet()
+    {
+        LinkTunaWalletRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void RequestValidateTunaWallet()
+    {
+        ValidateTunaWalletPasswordRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private bool CanValidateTunaWallet() => tunaWalletState.IsLinked && !isTunaWalletValidating;
+
+    private void RequestCopyTunaWalletAddress()
+    {
+        if (!string.IsNullOrWhiteSpace(tunaWalletState.WalletAddress))
+        {
+            CopyTunaWalletAddressRequested?.Invoke(this, tunaWalletState.WalletAddress);
+        }
+    }
+
+    private bool CanCopyTunaWalletAddress()
+        => !string.IsNullOrWhiteSpace(tunaWalletState.WalletAddress) && !isTunaWalletValidating;
+
+    private void UnlinkTunaWallet()
+    {
+        _ = UnlinkTunaWalletAsync();
+    }
+
+    internal async Task UnlinkTunaWalletAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            if (tunaWalletLinkStore is not null)
+            {
+                await tunaWalletLinkStore.ClearAsync(ct);
+            }
+
+            tunaWalletState = TunaWalletLinkState.Unlinked;
+            RefreshTunaWalletProperties();
+            copyFeedback.Show("Wallet unlinked");
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn("Diagnostics", $"Tuna wallet unlink failed: {ex.GetType().Name}");
+            copyFeedback.Show("Could not unlink wallet");
+        }
+    }
+
+    private bool CanUnlinkTunaWallet() => tunaWalletState.IsLinked && !isTunaWalletValidating;
 
     private void RequestOpenLogsFolder()
     {
@@ -616,6 +892,22 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"invite_security_release_ready: {InviteSecurityReleaseReady}",
             $"invite_security_warning: {InviteSecurityWarning}",
             $"security_relevant_overrides: {BuildSecurityRelevantOverridesSummary()}",
+            string.Empty,
+            "NKN Tuna diagnostics",
+            "--------------------",
+            $"tuna_runtime_flag: {TunaRuntimeFlagStatus}",
+            $"tuna_fallback_state: {TunaFallbackState}",
+            $"tuna_sidecar_verifier: {TunaSidecarVerifierStatus}",
+            $"tuna_sidecar_verifier_detail: {TunaSidecarVerifierDetail}",
+            $"tuna_wallet_file: {TunaWalletFileName}",
+            $"tuna_wallet_status: {TunaWalletStatus}",
+            $"tuna_wallet_balance_category: {TunaWalletBalanceCategory}",
+            $"tuna_wallet_last_verified_utc: {TunaWalletLastVerified}",
+            $"tuna_wallet_address_hash: {HashForDiagnostics(tunaWalletState.WalletAddress)}",
+            $"tuna_wallet_path: {DiagnosticsExportBuilder.RedactStructuredValue("tuna_wallet_path", tunaWalletState.WalletPath)}",
+            $"tuna_wallet_address: {DiagnosticsExportBuilder.RedactStructuredValue("tuna_wallet_address", tunaWalletState.WalletAddress)}",
+            $"tuna_wallet_last_failure: {DiagnosticsExportBuilder.RedactStructuredValue("tuna_wallet_last_failure", tunaWalletState.LastFailureReason)}",
+            string.Empty,
             $"screenshare_capture_max_fps: {FeatureFlags.ScreenShareMaxFps}",
             $"screenshare_transport_max_fps: {FeatureFlags.ScreenShareTransportMaxFps}",
             $"screenshare_transport_autotune: {FormatFeatureFlag(FeatureFlags.ScreenShareTransportAutoTuneEnabled)}",
@@ -826,6 +1118,11 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         if (nknOptions.PreflightRpcEnabled)
         {
             riskyOverrides.Add("nkn_preflight_rpc=on");
+        }
+
+        if (NknTunaAccelerationOptions.Load().Enabled)
+        {
+            riskyOverrides.Add("nkn_tuna=on");
         }
 
         AddIfNonDefault(

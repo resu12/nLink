@@ -156,7 +156,7 @@ Signing policy:
   - `artifacts\releases\<version>\nLink-Setup-win-x64-<version>.exe`
   - `artifacts\portable\helper\win-x64\nLink.exe`
 - local/manual packaging runs may remain unsigned until the signing step
-- for `0.6.2`, unsigned public Windows artifacts are an accepted release exception; record that exception in release evidence and do not claim Authenticode signing for those artifacts
+- for `0.7.0`, unsigned public Windows artifacts are an accepted release exception; record that exception in release evidence and do not claim Authenticode signing for those artifacts
 
 Expected outcome:
 - package manifest checks pass

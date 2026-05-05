@@ -95,6 +95,16 @@ public partial class App : Application
             tracker.Start();
             Services.AddSingleton(tracker);
         }
+
+        if (!Services.TryGet<ITunaWalletLinkStore>(out _))
+        {
+            Services.AddSingleton<ITunaWalletLinkStore>(new JsonTunaWalletLinkStore());
+        }
+
+        if (!Services.TryGet<ITunaWalletVerifier>(out _))
+        {
+            Services.AddSingleton<ITunaWalletVerifier>(new TunaWalletSidecarVerifier());
+        }
     }
 
     private void DisableAvaloniaDataAnnotationValidation()

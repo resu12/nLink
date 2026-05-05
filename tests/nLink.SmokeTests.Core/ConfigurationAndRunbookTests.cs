@@ -130,8 +130,8 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
     {
         var repoRoot = FindRepoRoot();
         var checklist = File.ReadAllText(Path.Combine(repoRoot, "docs", "release", "rc-validation-checklist.md"));
-        var releaseNotes = File.ReadAllText(Path.Combine(repoRoot, "docs", "releases", "0.6.2.md"));
-        var githubNotes = File.ReadAllText(Path.Combine(repoRoot, "docs", "releases", "0.6.2-github.md"));
+        var releaseNotes = File.ReadAllText(Path.Combine(repoRoot, "docs", "releases", "0.7.0.md"));
+        var githubNotes = File.ReadAllText(Path.Combine(repoRoot, "docs", "releases", "0.7.0-github.md"));
         var readme = File.ReadAllText(Path.Combine(repoRoot, "README.md"));
 
         Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE", checklist, StringComparison.Ordinal);
@@ -161,7 +161,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("NLINK_UNSAFE_DEVELOPER_MODE=1", readme, StringComparison.Ordinal);
         Assert.Contains("session envelope", readme, StringComparison.Ordinal);
         Assert.Contains("source/session validation", readme, StringComparison.Ordinal);
-        Assert.Contains("Release exception: Windows artifacts for `0.6.2` are unsigned", readme, StringComparison.Ordinal);
+        Assert.Contains("Release exception: Windows artifacts for `0.7.0` are unsigned", readme, StringComparison.Ordinal);
         Assert.Contains("no shipped `node_modules`", readme, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("package-lock.json", readme, StringComparison.Ordinal);
         Assert.Contains("bridge-dependencies.json", readme, StringComparison.Ordinal);

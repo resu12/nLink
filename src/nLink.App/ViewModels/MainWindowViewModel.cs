@@ -22,6 +22,8 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
     private readonly MetricsRegistry metricsRegistry;
     private readonly DebugMetricsPanelViewModel debugPanel;
     private readonly ResourceRuntimeTracker resourceRuntimeTracker;
+    private readonly ITunaWalletLinkStore? tunaWalletLinkStore;
+    private readonly ITunaWalletVerifier? tunaWalletVerifier;
     private readonly HangReportService hangReportService;
     private readonly UiFreezeWatchdog uiFreezeWatchdog;
     private readonly INetworkEventSource networkEventSource;
@@ -41,6 +43,8 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
         qrCodeService = this.services.GetRequired<IQrCodeService>();
         metricsRegistry = this.services.GetRequired<MetricsRegistry>();
         resourceRuntimeTracker = this.services.GetRequired<ResourceRuntimeTracker>();
+        this.services.TryGet<ITunaWalletLinkStore>(out tunaWalletLinkStore);
+        this.services.TryGet<ITunaWalletVerifier>(out tunaWalletVerifier);
         sessionRuntime = new SessionRuntime(
             transportConfig.CreateTransport,
             watchdogOptions: null,
@@ -121,13 +125,16 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
     private void ShowDiagnosticsPage()
     {
         NavigateTo(new DiagnosticsPageViewModel(
+            ScreenShareEvidenceLocator.CreateDefault(),
             () => NavigateTo(lastNonDiagnosticsPage ?? homePage),
             transportConfig,
             shareMessageConfig,
             sessionRuntime,
             metricsRegistry,
             resourceRuntimeTracker,
-            hangReportService));
+            hangReportService,
+            tunaWalletLinkStore: tunaWalletLinkStore,
+            tunaWalletVerifier: tunaWalletVerifier));
     }
 
     private void ShowHomePage()

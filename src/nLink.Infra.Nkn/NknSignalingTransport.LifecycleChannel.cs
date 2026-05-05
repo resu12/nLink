@@ -2051,9 +2051,9 @@ public sealed partial class NknSignalingTransport
                     $"event=screenshare_control_bootstrap_gate_stage; stage=acquired; stream_epoch={bootstrapMetadata!.StreamEpoch}; frame_id={bootstrapMetadata.FrameId}; is_keyframe={(bootstrapMetadata.IsKeyFrame ? 1 : 0)}; msg_id={envelope.MessageId}");
             }
 
-            NknRuntimeDiagnostics.IncrementMessagesSent();
             try
             {
+                NknRuntimeDiagnostics.IncrementMessagesSent();
                 await client.SendAsync(destination, bytes, ct).ConfigureAwait(false);
             }
             finally
@@ -2088,6 +2088,16 @@ public sealed partial class NknSignalingTransport
 
         try
         {
+            if (envelope.Type == MsgType.FileTransferDataFrame &&
+                await TrySendAcceleratedEnvelopeAsync(envelope.Type, NknBridgeChannel.Bulk, bytes, ct).ConfigureAwait(false))
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=tuna_accelerated_file_frame_sent; channel=bulk; payload_bytes={bytes.Length}");
+                Log($"Bulk envelope sent via Tuna acceleration (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
+                return;
+            }
+
             NknRuntimeDiagnostics.IncrementMessagesSent();
             await client.SendBulkAsync(destination, bytes, ct).ConfigureAwait(false);
             Log($"Bulk envelope sent (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
@@ -2586,6 +2596,19 @@ public sealed partial class NknSignalingTransport
         currentSessionSecurityState = nextState;
         UpdateActiveApprovedSessionTracking(nextState);
         SessionSecurityStateChanged?.Invoke(this, new TransportSessionSecurityStateChangedEventArgs(nextState));
+        if (accelerationLane is null)
+        {
+            return;
+        }
+
+        if (IsSessionAccelerationEligible(out _))
+        {
+            ScheduleAccelerationNegotiationIfEligible("session_security_state_ready");
+        }
+        else
+        {
+            ResetAccelerationNegotiation("session_security_state_not_eligible");
+        }
     }
 
     private SessionSecurityState PreserveActiveApprovedSessionIfStale(SessionSecurityState nextState)

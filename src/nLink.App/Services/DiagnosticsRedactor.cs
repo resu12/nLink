@@ -37,7 +37,7 @@ internal static partial class DiagnosticsRedactor
     [GeneratedRegex(@"(?<prefix>\bwallet\s+seed\b\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\r\n,;]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex WalletSeedPhraseRegex();
 
-    [GeneratedRegex(@"(?<prefix>\b(?:last_bridge_message_source|session_id|expected_session_id|helper_identity|helper|target|source|expected_source|peer_id|reply_to|expected_reply_to|msg_id|run_id|local_path|file_path|saved_path|key_path|bridge_script_path|bridge_manifest_path)\b\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\r\n,;]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?<prefix>""?\b(?:last_bridge_message_source|session_id|expected_session_id|helper_identity|helper|target|source|expected_source|peer_id|reply_to|expected_reply_to|msg_id|run_id|local_path|file_path|saved_path|key_path|bridge_script_path|bridge_manifest_path|wallet_path|tuna_wallet_path|walletPath|tunaWalletPath|wallet_address|tuna_wallet_address|walletAddress|tunaWalletAddress)\b""?\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\r\n,;]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex DiagnosticsPrivacyMetadataRegex();
 
     [GeneratedRegex(@"\[(?:redacted|REDACTED)\]", RegexOptions.CultureInvariant)]

@@ -108,6 +108,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly NknFileTransferChannel fileTransferChannel;
     private readonly NknEnvelopeRouter envelopeRouter;
     private readonly ControlOutboundQueue controlOutboundQueue;
+    private readonly NknTunaAccelerationOptions tunaAccelerationOptions;
+    private readonly INknAccelerationLane? accelerationLane;
     private const bool LocalRemoteControlSupported = true;
     private const bool LocalScreenShareCursorOverlaySupported = true;
     private const int ScreenShareInboundReplayWindowSize = 4096;
@@ -188,6 +190,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         options = NknTransportOptions.Load();
         identity = NknIdentityStore.LoadOrCreate(options);
         client = new RealNknClientAdapter(identity, options);
+        tunaAccelerationOptions = NknTunaAccelerationOptions.Load();
+        accelerationLane = CreateAccelerationLane(tunaAccelerationOptions);
         inviteTokenValidator = InviteTokenServiceFactory.CreateInviteTokenValidator();
         inviteValidationThrottle = InviteTokenServiceFactory.CreateInviteValidationThrottle();
         handshakeReplayCache = new InMemorySessionHandshakeReplayCache();
@@ -212,10 +216,22 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     }
 
     internal NknSignalingTransport(INknClient client, NknTransportOptions options, NknIdentity identity)
+        : this(client, options, identity, NknTunaAccelerationOptions.Disabled, accelerationLane: null)
+    {
+    }
+
+    internal NknSignalingTransport(
+        INknClient client,
+        NknTransportOptions options,
+        NknIdentity identity,
+        NknTunaAccelerationOptions tunaAccelerationOptions,
+        INknAccelerationLane? accelerationLane)
     {
         this.client = client ?? throw new ArgumentNullException(nameof(client));
         this.options = options ?? throw new ArgumentNullException(nameof(options));
         this.identity = identity ?? throw new ArgumentNullException(nameof(identity));
+        this.tunaAccelerationOptions = tunaAccelerationOptions ?? NknTunaAccelerationOptions.Disabled;
+        this.accelerationLane = accelerationLane;
         inviteTokenValidator = InviteTokenServiceFactory.CreateInviteTokenValidator();
         inviteValidationThrottle = InviteTokenServiceFactory.CreateInviteValidationThrottle();
         handshakeReplayCache = new InMemorySessionHandshakeReplayCache();
@@ -510,6 +526,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         {
             realClient.BridgeLifecycle -= OnBridgeLifecycle;
         }
+        if (accelerationLane is not null)
+        {
+            accelerationLane.MessageReceived -= OnAccelerationMessageReceived;
+            accelerationLane.StateChanged -= OnAccelerationStateChanged;
+        }
 
         try
         {
@@ -529,6 +550,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         }
 
         DisposeEphemeralKeyState();
+        accelerationLane?.Dispose();
         client.Dispose();
         Log("Disposed");
     }
@@ -819,6 +841,17 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         try
         {
             NknRuntimeDiagnostics.SetOutboundLaneInFlight("screenshare", 1);
+            if (await TrySendAcceleratedEnvelopeAsync(MsgType.ScreenShareFrame, NknBridgeChannel.Media, payload, ct).ConfigureAwait(false))
+            {
+                Interlocked.Increment(ref screenShareMessagesSent);
+                Interlocked.Add(ref screenSharePayloadBytesSent, payload.Length);
+                NknRuntimeDiagnostics.IncrementScreenShareMessagesSent();
+                NknRuntimeDiagnostics.AddScreenSharePayloadBytesSent(payload.Length);
+                NknRuntimeDiagnostics.AddOutboundLaneSent("screenshare", payload.Length);
+                NknRuntimeDiagnostics.IncrementMediaPlaneFramesSent();
+                return;
+            }
+
             await client.SendMediaAsync(destination, payload, ct).ConfigureAwait(false);
             Interlocked.Increment(ref screenShareMessagesSent);
             Interlocked.Add(ref screenSharePayloadBytesSent, payload.Length);
@@ -998,6 +1031,17 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 }
 
                 NknRuntimeDiagnostics.SetOutboundLaneInFlight("screenshare", 1);
+                if (await TrySendAcceleratedEnvelopeAsync(MsgType.ScreenShareFrame, NknBridgeChannel.Media, next.Payload, CancellationToken.None).ConfigureAwait(false))
+                {
+                    Interlocked.Increment(ref screenShareMessagesSent);
+                    Interlocked.Add(ref screenSharePayloadBytesSent, next.Payload.Length);
+                    NknRuntimeDiagnostics.IncrementScreenShareMessagesSent();
+                    NknRuntimeDiagnostics.AddScreenSharePayloadBytesSent(next.Payload.Length);
+                    NknRuntimeDiagnostics.AddOutboundLaneSent("screenshare", next.Payload.Length);
+                    next.Completion.TrySetResult();
+                    continue;
+                }
+
                 await client.SendMediaAsync(next.Destination, next.Payload, CancellationToken.None).ConfigureAwait(false);
                 Interlocked.Increment(ref screenShareMessagesSent);
                 Interlocked.Add(ref screenSharePayloadBytesSent, next.Payload.Length);
@@ -2168,6 +2212,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         if (client is RealNknClientAdapter realClient)
         {
             realClient.BridgeLifecycle += OnBridgeLifecycle;
+        }
+        if (accelerationLane is not null)
+        {
+            accelerationLane.MessageReceived += OnAccelerationMessageReceived;
+            accelerationLane.StateChanged += OnAccelerationStateChanged;
         }
     }
 
