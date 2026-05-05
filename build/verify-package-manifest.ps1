@@ -1,10 +1,19 @@
 param(
     [Parameter(Mandatory = $true)][string]$StageDir,
-    [string]$ManifestPath = "installer/package-manifest.win-x64.txt"
+    [string]$ManifestPath = "installer/package-manifest.win-x64.txt",
+    [string]$ExpectedAppVersion = ""
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($ExpectedAppVersion)) {
+    $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+    $versionPath = Join-Path $repoRoot "VERSION"
+    if (Test-Path -Path $versionPath -PathType Leaf) {
+        $ExpectedAppVersion = (Get-Content -Path $versionPath -Raw).Trim()
+    }
+}
 
 function Get-NormalizedRelativePath {
     param(
@@ -60,7 +69,8 @@ function Get-Sha256FileHash {
 function Assert-BridgeManifestMatchesBundle {
     param(
         [Parameter(Mandatory = $true)][string]$BridgeDir,
-        [Parameter(Mandatory = $true)][string]$Runtime
+        [Parameter(Mandatory = $true)][string]$Runtime,
+        [string]$ExpectedAppVersion = ""
     )
 
     $manifestPath = Join-Path $BridgeDir 'bridge-manifest.json'
@@ -71,6 +81,13 @@ function Assert-BridgeManifestMatchesBundle {
     $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
     if ($manifest.runtime -ne $Runtime) {
         throw "Packaged bridge manifest runtime mismatch: expected '$Runtime', got '$($manifest.runtime)'."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedAppVersion)) {
+        $actualAppVersion = [string]$manifest.appVersion
+        if ($actualAppVersion -ne $ExpectedAppVersion) {
+            throw "Packaged bridge manifest appVersion mismatch: expected '$ExpectedAppVersion', got '$actualAppVersion'. Rebuild the bridge bundle after changing VERSION: $manifestPath"
+        }
     }
 
     if ([string]::IsNullOrWhiteSpace($manifest.bridgeScriptSha256)) {
@@ -203,7 +220,7 @@ if (Test-Path -Path $bridgeRoot -PathType Container) {
         }
 
         Assert-BridgeSupportsBulkChannel -BridgeScriptPath $stagedBridgePath
-        Assert-BridgeManifestMatchesBundle -BridgeDir $bridgeRuntimeDir -Runtime $runtime
+        Assert-BridgeManifestMatchesBundle -BridgeDir $bridgeRuntimeDir -Runtime $runtime -ExpectedAppVersion $ExpectedAppVersion
 
         $nodeModulesPath = Join-Path $bridgeRuntimeDir 'node_modules'
         if (Test-Path -Path $nodeModulesPath) {

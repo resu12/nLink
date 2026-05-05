@@ -30,6 +30,65 @@ internal sealed class NknTunaAccelerationOptions
 
     public string? DialerSeedBase64 { get; private init; }
 
+    public string? DialerIdentifier { get; private init; }
+
+    public bool CanOfferListener { get; private init; }
+
+    public static NknTunaAccelerationOptions CreateRuntimePilot(
+        string sidecarExePath,
+        NknAccelerationLaneKind lanes,
+        bool canOfferListener = true)
+    {
+        if (string.IsNullOrWhiteSpace(sidecarExePath))
+        {
+            return Disabled;
+        }
+
+        var normalizedPath = NormalizePathOrNull(sidecarExePath);
+        if (string.IsNullOrWhiteSpace(normalizedPath))
+        {
+            return Disabled;
+        }
+
+        return new NknTunaAccelerationOptions
+        {
+            Enabled = true,
+            SidecarExePath = normalizedPath,
+            Lanes = lanes == NknAccelerationLaneKind.None
+                ? NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen
+                : lanes,
+            CanOfferListener = canOfferListener,
+        };
+    }
+
+    public static NknTunaAccelerationOptions CreatePassiveDialer(
+        string sidecarExePath,
+        NknAccelerationLaneKind lanes)
+        => CreateRuntimePilot(sidecarExePath, lanes, canOfferListener: false);
+
+    public NknTunaAccelerationOptions WithDialerIdentity(string? identifier, string? seedBase64)
+    {
+        if (!Enabled)
+        {
+            return this;
+        }
+
+        return new NknTunaAccelerationOptions
+        {
+            Enabled = Enabled,
+            SidecarExePath = SidecarExePath,
+            ListenerEndpoint = ListenerEndpoint,
+            Lanes = Lanes,
+            QueueCapacity = QueueCapacity,
+            ConnectTimeoutMs = ConnectTimeoutMs,
+            DialerReadyTimeoutMs = DialerReadyTimeoutMs,
+            TunaDialTimeoutMs = TunaDialTimeoutMs,
+            DialerSeedBase64 = string.IsNullOrWhiteSpace(seedBase64) ? DialerSeedBase64 : seedBase64.Trim(),
+            DialerIdentifier = string.IsNullOrWhiteSpace(identifier) ? DialerIdentifier : identifier.Trim(),
+            CanOfferListener = CanOfferListener,
+        };
+    }
+
     public static NknTunaAccelerationOptions Load()
     {
         var appSettings = AppSettingsJson.Load();
@@ -50,12 +109,14 @@ internal sealed class NknTunaAccelerationOptions
             ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_TUNA_LANES", appSettings.Get("NLINK_NKN_TUNA_LANES"), category: "nkn_tuna"),
             ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:tuna:lanes", appSettings.Get("nLink:nkn:tuna:lanes"), category: "nkn_tuna"));
 
+        var isEnabled = ParseBool(enabled, defaultValue: false);
         return new NknTunaAccelerationOptions
         {
-            Enabled = ParseBool(enabled, defaultValue: false),
+            Enabled = isEnabled,
             SidecarExePath = NormalizePathOrNull(sidecarExe),
             ListenerEndpoint = string.IsNullOrWhiteSpace(listenerEndpoint) ? null : listenerEndpoint.Trim(),
             Lanes = ParseLanes(lanes),
+            CanOfferListener = isEnabled && !string.IsNullOrWhiteSpace(listenerEndpoint),
         };
     }
 

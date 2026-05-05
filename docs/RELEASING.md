@@ -1,6 +1,8 @@
 # Release Checklist
 
 1. Update `VERSION` file.
+   - `installer\Build-BridgeBundle.ps1` stamps `artifacts\bridge\<runtime>\bridge-manifest.json` from `VERSION`; rebuild the bridge bundle after every version bump.
+   - `Build-Portable.ps1`, `Build-Installer.ps1`, and `build\verify-package-manifest.ps1` reject stale bridge manifests whose `appVersion` does not match `VERSION`.
 2. Commit and push.
 3. Run pre-release check (recommended):
    - `powershell -ExecutionPolicy Bypass -File .\tools\PreRelease-Check.ps1`
@@ -16,7 +18,7 @@
    - `installer/Build-BridgeBundle.ps1`
    - `installer/Build-Portable.ps1`
    - `installer/Build-Installer.ps1`
-9. Verify bridge bundled under `bridge/win-x64`.
+9. Verify bridge bundled under `bridge/win-x64`, including `bridge-manifest.json` `appVersion=<version>`.
 10. Prepare release notes from `docs/releases/<version>.md` (include Diagnostics + Open logs folder guidance if relevant).
 11. Draft GitHub release:
    - Tag: `v<version>`

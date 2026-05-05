@@ -15,7 +15,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IAuthoritativeConnectedAddressSource
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IAuthoritativeConnectedAddressSource
 {
     private sealed class RecoveryBurstLease
     {
@@ -190,7 +190,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         options = NknTransportOptions.Load();
         identity = NknIdentityStore.LoadOrCreate(options);
         client = new RealNknClientAdapter(identity, options);
-        tunaAccelerationOptions = NknTunaAccelerationOptions.Load();
+        tunaAccelerationOptions = BindTunaDialerIdentity(NknTunaAccelerationOptions.Load(), identity, options);
         accelerationLane = CreateAccelerationLane(tunaAccelerationOptions);
         inviteTokenValidator = InviteTokenServiceFactory.CreateInviteTokenValidator();
         inviteValidationThrottle = InviteTokenServiceFactory.CreateInviteValidationThrottle();
@@ -213,6 +213,49 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             seedRpc: options.SeedRpc);
 
         Log($"Initialized | {SensitiveDataRedactor.FormatStructuredFields(" | ", ("address", identity.Address), ("identifier", identity.Identifier))}");
+    }
+
+    internal static NknSignalingTransport CreateWithTunaAcceleration(
+        NknTunaAccelerationOptions tunaAccelerationOptions,
+        INknTunaListenerSidecarSupervisor? listenerSupervisor)
+    {
+        var options = NknTransportOptions.Load();
+        var identity = NknIdentityStore.LoadOrCreate(options);
+        var client = new RealNknClientAdapter(identity, options);
+        var effectiveOptions = BindTunaDialerIdentity(tunaAccelerationOptions, identity, options);
+        var accelerationLane = CreateAccelerationLane(effectiveOptions, listenerSupervisor);
+        var transport = new NknSignalingTransport(client, options, identity, effectiveOptions, accelerationLane);
+        NknRuntimeDiagnostics.SetIdentity(
+            address: identity.Address,
+            identifier: identity.Identifier,
+            keyPath: options.KeyPath,
+            seedRpc: options.SeedRpc);
+        Log($"Initialized | {SensitiveDataRedactor.FormatStructuredFields(" | ", ("address", identity.Address), ("identifier", identity.Identifier))}");
+        return transport;
+    }
+
+    private static NknTunaAccelerationOptions BindTunaDialerIdentity(
+        NknTunaAccelerationOptions? tunaOptions,
+        NknIdentity identity,
+        NknTransportOptions transportOptions)
+    {
+        var effectiveOptions = tunaOptions ?? NknTunaAccelerationOptions.Disabled;
+        return effectiveOptions.Enabled
+            ? effectiveOptions.WithDialerIdentity(identity.Identifier, TryReadDialerSeedBase64(transportOptions.KeyPath))
+            : effectiveOptions;
+    }
+
+    private static string? TryReadDialerSeedBase64(string keyPath)
+    {
+        try
+        {
+            return NknIdentityStore.ReadSeedBase64ForConnect(keyPath);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LocalOperationalLog.Warn("NKN.Tuna", $"event=tuna_dialer_identity_seed_unavailable; error={ex.GetType().Name}");
+            return null;
+        }
     }
 
     internal NknSignalingTransport(INknClient client, NknTransportOptions options, NknIdentity identity)
@@ -261,6 +304,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
     public event EventHandler? Disconnected;
     public event EventHandler<TransportSessionSecurityStateChangedEventArgs>? SessionSecurityStateChanged;
+    public event EventHandler<TransportAccelerationStateChangedEventArgs>? TransportAccelerationStateChanged;
 
     public event EventHandler? RemoteSessionEnded;
     public event EventHandler<RemoteControlRequestReceivedEventArgs>? RemoteControlRequestReceived;
@@ -293,6 +337,17 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         client is IAuthoritativeConnectedAddressSource authoritativeConnectedAddressSource &&
         authoritativeConnectedAddressSource.HasAuthoritativeConnectedAddress;
     public SessionSecurityState CurrentSessionSecurityState => currentSessionSecurityState;
+    public bool IsTransportAccelerationActive => IsAccelerationNegotiatedAndHealthy();
+    public string TransportAccelerationStatusReason
+    {
+        get
+        {
+            lock (accelerationGate)
+            {
+                return transportAccelerationStatusReason;
+            }
+        }
+    }
     public bool CanSendSessionEnd => !disposed && !string.IsNullOrWhiteSpace(currentEnvelopeCode) && !string.IsNullOrWhiteSpace(remoteEndpoint);
     public bool CanSendPendingJoinCancel
     {

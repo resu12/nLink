@@ -55,6 +55,7 @@ internal sealed partial class TransportScreenShareCoordinator : IAsyncDisposable
     private const int StreamConfigBootstrapSendAttempts = 3;
     private const int MinAutoTuneFramesPerSecond = 2;
     private const int NormalSenderFramesPerSecond = 8;
+    private const int TunaQualitySenderFramesPerSecond = 15;
     private const int ReducedSenderFramesPerSecond = 5;
     private const int CatchUpSenderFramesPerSecond = 3;
     private static readonly TimeSpan ScreenShareStartupWarmupDuration = TimeSpan.FromSeconds(3);

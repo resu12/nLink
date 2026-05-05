@@ -251,6 +251,8 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private volatile SessionRuntimeRole role;
     private volatile SessionRuntimeState state = SessionRuntimeState.Idle;
     private volatile TransportState transportState = TransportState.Idle;
+    private volatile bool transportAccelerationActive;
+    private volatile string transportAccelerationStatusReason = "inactive";
     private PeerAddress? currentHelperTargetAddress;
     private HelperConnectOrigin helperConnectOrigin;
     private bool helperShouldReturnToListenerWaiting;
@@ -763,11 +765,14 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
 
     public event EventHandler? ChatStateChanged;
     public event EventHandler? SessionSecurityStateChanged;
+    public event EventHandler? TransportAccelerationStateChanged;
     public event EventHandler<SessionFileTransferSnapshotChangedEventArgs>? FileTransferChanged;
     public event EventHandler? HelperListenerBootstrapSnapshotChanged;
 
     public SessionRuntimeState State => state;
     public TransportState TransportLifecycleState => transportState;
+    public bool IsTransportAccelerationActive => transportAccelerationActive;
+    public string TransportAccelerationStatusReason => transportAccelerationStatusReason;
 
     public SessionRuntimeRole Role => role;
 

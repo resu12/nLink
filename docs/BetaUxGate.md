@@ -12,13 +12,13 @@ This checklist defines beta-blocking UX invariants for nLink. It covers only obs
   2. Move forward into its next state, then use the visible back/retry/end action.
   3. Confirm the app remains usable and does not strand the user on a non-actionable screen.
 
-### Diagnostics Back returns to previous page
-- Applies to: `Diagnostics`, `Home`, `Helper`, `Helpee`
-- Expectation: Opening Diagnostics must return to the prior non-Diagnostics page, not always `Home`.
+### Options Back returns to previous page
+- Applies to: `Options`, `Home`, `Helper`, `Helpee`
+- Expectation: Opening Options must return to the prior non-Options page, not always `Home`.
 - How to verify manually:
-  1. Open `Diagnostics` from `Home`, then from `Helper`, then from `Helpee`.
+  1. Open `Options` from `Home`, then from `Helper`, then from `Helpee`.
   2. Press `Back` each time.
-  3. Confirm return target matches the page Diagnostics was opened from.
+  3. Confirm return target matches the page Options was opened from.
 
 ## 2. State Consistency
 

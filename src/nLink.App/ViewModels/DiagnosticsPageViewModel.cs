@@ -13,6 +13,7 @@ using CommunityToolkit.Mvvm.Input;
 using NLink.App.Configuration;
 using NLink.App.Services;
 using NLink.App.Services.ScreenCapture;
+using NLink.App.Threading;
 using NLink.Core;
 using NLink.Core.Chat;
 using NLink.Core.Configuration;
@@ -30,6 +31,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private const string ScreenShareTransportMaxFpsVariable = ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable;
     private const string ScreenShareTransportAutotuneVariable = "NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE";
     private const string ScreenShareScaleVariable = ScreenShareQualitySettings.ScreenShareScaleVariable;
+    private const string ScreenShareQualityProfileVariable = ScreenShareQualitySettings.ScreenShareQualityProfileVariable;
 
     private readonly InlineTransientText copyFeedback = new();
     private readonly string? bugReportUrl;
@@ -39,9 +41,10 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private readonly HangReportService? hangReportService;
     private readonly ITunaWalletLinkStore? tunaWalletLinkStore;
     private readonly ITunaWalletVerifier? tunaWalletVerifier;
+    private readonly ITunaRuntimePilotService? tunaRuntimePilotService;
     private readonly Func<DateTimeOffset> nowProvider;
     private readonly Func<string> diagnosticsExportRootProvider;
-    private readonly Action<string, string, string, string> persistScreenSharePresetInBackground;
+    private readonly Action<string, string, string, string, string> persistScreenSharePresetInBackground;
     private readonly InviteSecurityStatus inviteSecurityStatus;
     private readonly NknRuntimeDiagnosticsSnapshot nknDiagnosticsSnapshot;
     private readonly PersistenceDiagnosticsSnapshot persistenceDiagnosticsSnapshot;
@@ -49,6 +52,9 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private readonly ScreenShareLiveDiagnosticsSnapshot screenShareLiveSnapshot;
     private TunaWalletLinkState tunaWalletState = TunaWalletLinkState.Unlinked;
     private bool isTunaWalletValidating;
+    private int tunaUnlockFailureCount;
+    private DateTimeOffset? tunaUnlockCooldownUntilUtc;
+    private CancellationTokenSource? tunaUnlockCooldownCts;
 
     public DiagnosticsPageViewModel(
         Action backAction,
@@ -60,7 +66,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         HangReportService? hangReportService = null,
         Func<DateTimeOffset>? nowProvider = null,
         Func<string>? diagnosticsExportRootProvider = null,
-        Action<string, string, string, string>? screenSharePresetPersistence = null)
+        Action<string, string, string, string, string>? screenSharePresetPersistence = null)
         : this(
             ScreenShareEvidenceLocator.CreateDefault(),
             backAction,
@@ -87,9 +93,10 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         HangReportService? hangReportService = null,
         Func<DateTimeOffset>? nowProvider = null,
         Func<string>? diagnosticsExportRootProvider = null,
-        Action<string, string, string, string>? screenSharePresetPersistence = null,
+        Action<string, string, string, string, string>? screenSharePresetPersistence = null,
         ITunaWalletLinkStore? tunaWalletLinkStore = null,
-        ITunaWalletVerifier? tunaWalletVerifier = null)
+        ITunaWalletVerifier? tunaWalletVerifier = null,
+        ITunaRuntimePilotService? tunaRuntimePilotService = null)
     {
         linksConfig ??= new ShareMessageConfig(null);
         BackCommand = new RelayCommand(backAction);
@@ -99,6 +106,12 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         this.hangReportService = hangReportService;
         this.tunaWalletLinkStore = tunaWalletLinkStore;
         this.tunaWalletVerifier = tunaWalletVerifier;
+        this.tunaRuntimePilotService = tunaRuntimePilotService;
+        if (this.tunaRuntimePilotService is not null)
+        {
+            this.tunaRuntimePilotService.StateChanged += OnTunaRuntimeStateChanged;
+        }
+
         this.nowProvider = nowProvider ?? DefaultNowProvider;
         this.diagnosticsExportRootProvider = diagnosticsExportRootProvider ?? DefaultDiagnosticsExportRootProvider;
         persistScreenSharePresetInBackground = screenSharePresetPersistence ?? PersistScreenSharePresetInBackground;
@@ -197,16 +210,18 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         ReportBugCommand = new RelayCommand(RequestOpenBugReport);
         ApplyBalancedScreenSharePresetCommand = new RelayCommand(ApplyBalancedScreenSharePreset);
         ApplyHighQualityScreenSharePresetCommand = new RelayCommand(ApplyHighQualityScreenSharePreset);
+        ApplyTunaQualityScreenSharePresetCommand = new RelayCommand(ApplyTunaQualityScreenSharePreset);
         ApplyHighPerformanceScreenSharePresetCommand = new RelayCommand(ApplyHighPerformanceScreenSharePreset);
         LinkTunaWalletCommand = new RelayCommand(RequestLinkTunaWallet);
         ValidateTunaWalletCommand = new RelayCommand(RequestValidateTunaWallet, CanValidateTunaWallet);
         CopyTunaWalletAddressCommand = new RelayCommand(RequestCopyTunaWalletAddress, CanCopyTunaWalletAddress);
         UnlinkTunaWalletCommand = new RelayCommand(UnlinkTunaWallet, CanUnlinkTunaWallet);
+        UnlockTunaRuntimeCommand = new RelayCommand(RequestUnlockTunaRuntime, CanUnlockTunaRuntime);
     }
 
-    public string PageTitle => "Diagnostics";
+    public string PageTitle => "Options";
 
-    public string PageSubtitle => "Support status, screen share health, and capture tools.";
+    public string PageSubtitle => "Settings, wallet, and support diagnostics.";
 
     public string ActiveTransport { get; }
 
@@ -242,12 +257,14 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public int ScreenShareCaptureMaxFps => FeatureFlags.ScreenShareMaxFps;
     public int ScreenShareTransportMaxFps => FeatureFlags.ScreenShareTransportMaxFps;
     public string ScreenShareCaptureScale => ScreenShareQualitySettings.FormatScale(FeatureFlags.ScreenShareScale);
+    public string ScreenShareQualityProfile => FeatureFlags.ScreenShareQualityProfile;
     public string ScreenShareEffectivePresetName => ScreenShareQualitySettings.GetCurrentEnvironmentState().EffectivePresetName;
     public string ScreenSharePresetMigrationStatus => ScreenShareQualitySettings.WasLegacyHigherClarityPresetMigrated ? "Yes" : "No";
     public string ScreenSharePresetBalanced => ScreenShareQualitySettings.BalancedPreset.Describe();
     public string ScreenSharePresetHighQuality => ScreenShareQualitySettings.HighQualityPreset.Describe();
+    public string ScreenSharePresetTunaQuality => ScreenShareQualitySettings.TunaQualityPreset.Describe();
     public string ScreenSharePresetHighPerformance => ScreenShareQualitySettings.HighPerformancePreset.Describe();
-    public string ScreenShareCaptureEnvHint => "Apply preset, then restart screen sharing. Settings apply instantly and are persisted in background via env vars: NLINK_FEATURE_SCREENCAP_MAX_FPS, NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS, NLINK_FEATURE_SCREENCAP_SCALE.";
+    public string ScreenShareCaptureEnvHint => "Apply preset, then restart screen sharing. Settings apply instantly and are persisted in background via env vars: NLINK_FEATURE_SCREENCAP_MAX_FPS, NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS, NLINK_FEATURE_SCREENCAP_SCALE, NLINK_FEATURE_SCREENCAP_QUALITY_PROFILE.";
     public string ScreenShareEvidenceStatus => screenShareEvidenceSnapshot.StatusKey;
     public string ScreenShareEvidenceArtifactName => screenShareEvidenceSnapshot.ArtifactName;
     public string ScreenShareEvidenceVerdict => screenShareEvidenceSnapshot.OperatorVerdict;
@@ -289,10 +306,175 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string PersistenceWarning => runtimeDiagnosticsSnapshot.PersistenceWarning;
     public string DiagnosticsPrivacyNotice => DiagnosticsExportBuilder.BestEffortPrivacyNotice;
     public string TunaRuntimeFlagStatus
-        => NknTunaAccelerationOptions.Load().Enabled ? "Enabled by runtime flag" : "Off";
+        => NknTunaAccelerationOptions.Load().Enabled
+            ? "Enabled by runtime flag"
+            : CurrentTunaRuntimePreferences().Enabled
+                ? "Advanced opt-in"
+                : "Off";
     public string TunaFallbackState => NknTunaAccelerationOptions.Load().Enabled
         ? "Experimental acceleration can negotiate only after an approved secure session."
-        : "Current NKN will be used.";
+        : CurrentTunaRuntimePreferences().Enabled
+            ? "Tuna can start only after approved session unlock; current NKN remains fallback."
+            : "Current NKN will be used.";
+    public bool IsTunaRuntimeEnabled
+    {
+        get => CurrentTunaRuntimePreferences().Enabled;
+        set
+        {
+            var current = CurrentTunaRuntimePreferences();
+            if (current.Enabled == value)
+            {
+                return;
+            }
+
+            if (!value)
+            {
+                _ = tunaRuntimePilotService?.LockOrStopForSessionAsync(
+                    "runtime_disabled",
+                    TunaRuntimeUnlockSource.Options,
+                    CancellationToken.None);
+            }
+
+            SaveTunaRuntimePreferences(new TunaRuntimePreferenceState
+            {
+                Enabled = value,
+                FileLaneEnabled = current.FileLaneEnabled,
+                ScreenLaneEnabled = current.ScreenLaneEnabled,
+                MaxPriceNknPerMb = current.MaxPriceNknPerMb,
+                MaxTotalMiB = current.MaxTotalMiB,
+                MaxDurationSec = current.MaxDurationSec,
+                LastRuntimeStatus = value ? "locked" : "off",
+            });
+        }
+    }
+
+    public bool IsTunaFileLaneEnabled
+    {
+        get => CurrentTunaRuntimePreferences().FileLaneEnabled;
+        set
+        {
+            var current = CurrentTunaRuntimePreferences();
+            if (current.FileLaneEnabled == value)
+            {
+                return;
+            }
+
+            if (!value && !current.ScreenLaneEnabled)
+            {
+                copyFeedback.Show("Choose at least one Tuna lane");
+                OnPropertyChanged(nameof(IsTunaFileLaneEnabled));
+                return;
+            }
+
+            SaveTunaRuntimePreferences(new TunaRuntimePreferenceState
+            {
+                Enabled = current.Enabled,
+                FileLaneEnabled = value,
+                ScreenLaneEnabled = current.ScreenLaneEnabled,
+                MaxPriceNknPerMb = current.MaxPriceNknPerMb,
+                MaxTotalMiB = current.MaxTotalMiB,
+                MaxDurationSec = current.MaxDurationSec,
+                LastRuntimeStatus = current.LastRuntimeStatus,
+            });
+        }
+    }
+
+    public bool IsTunaScreenLaneEnabled
+    {
+        get => CurrentTunaRuntimePreferences().ScreenLaneEnabled;
+        set
+        {
+            var current = CurrentTunaRuntimePreferences();
+            if (current.ScreenLaneEnabled == value)
+            {
+                return;
+            }
+
+            if (!value && !current.FileLaneEnabled)
+            {
+                copyFeedback.Show("Choose at least one Tuna lane");
+                OnPropertyChanged(nameof(IsTunaScreenLaneEnabled));
+                return;
+            }
+
+            SaveTunaRuntimePreferences(new TunaRuntimePreferenceState
+            {
+                Enabled = current.Enabled,
+                FileLaneEnabled = current.FileLaneEnabled,
+                ScreenLaneEnabled = value,
+                MaxPriceNknPerMb = current.MaxPriceNknPerMb,
+                MaxTotalMiB = current.MaxTotalMiB,
+                MaxDurationSec = current.MaxDurationSec,
+                LastRuntimeStatus = current.LastRuntimeStatus,
+            });
+        }
+    }
+
+    public string TunaMaxPriceNknPerMb
+    {
+        get => CurrentTunaRuntimePreferences().MaxPriceNknPerMb;
+        set
+        {
+            var current = CurrentTunaRuntimePreferences();
+            SaveTunaRuntimePreferences(new TunaRuntimePreferenceState
+            {
+                Enabled = current.Enabled,
+                FileLaneEnabled = current.FileLaneEnabled,
+                ScreenLaneEnabled = current.ScreenLaneEnabled,
+                MaxPriceNknPerMb = value,
+                MaxTotalMiB = current.MaxTotalMiB,
+                MaxDurationSec = current.MaxDurationSec,
+                LastRuntimeStatus = current.LastRuntimeStatus,
+            });
+        }
+    }
+
+    public string TunaMaxTotalMiB
+    {
+        get => CurrentTunaRuntimePreferences().MaxTotalMiB.ToString(CultureInfo.InvariantCulture);
+        set
+        {
+            var current = CurrentTunaRuntimePreferences();
+            SaveTunaRuntimePreferences(new TunaRuntimePreferenceState
+            {
+                Enabled = current.Enabled,
+                FileLaneEnabled = current.FileLaneEnabled,
+                ScreenLaneEnabled = current.ScreenLaneEnabled,
+                MaxPriceNknPerMb = current.MaxPriceNknPerMb,
+                MaxTotalMiB = int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : current.MaxTotalMiB,
+                MaxDurationSec = current.MaxDurationSec,
+                LastRuntimeStatus = current.LastRuntimeStatus,
+            });
+        }
+    }
+
+    public string TunaMaxDurationMinutes
+    {
+        get => Math.Max(1, CurrentTunaRuntimePreferences().MaxDurationSec / 60).ToString(CultureInfo.InvariantCulture);
+        set
+        {
+            var current = CurrentTunaRuntimePreferences();
+            SaveTunaRuntimePreferences(new TunaRuntimePreferenceState
+            {
+                Enabled = current.Enabled,
+                FileLaneEnabled = current.FileLaneEnabled,
+                ScreenLaneEnabled = current.ScreenLaneEnabled,
+                MaxPriceNknPerMb = current.MaxPriceNknPerMb,
+                MaxTotalMiB = current.MaxTotalMiB,
+                MaxDurationSec = int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed * 60 : current.MaxDurationSec,
+                LastRuntimeStatus = current.LastRuntimeStatus,
+            });
+        }
+    }
+
+    public string TunaRuntimeStatus => tunaRuntimePilotService?.RuntimeStatus ?? "service unavailable";
+    public string TunaStartupTiming => tunaRuntimePilotService?.StartupTimingSummary ?? "(none)";
+    public string TunaRuntimeUnlockStatus => GetTunaRuntimeUnlockState().StatusText;
+    public string TunaRuntimePayerNotice => "This computer pays while acting as the Tuna listener.";
+    public string TunaSpendByNLink => FormatTunaSpend(CurrentTunaUsage());
+    public string TunaAverageCost => FormatTunaAverageCost(CurrentTunaUsage());
+    public string TunaLastSessionCost => FormatTunaLastSessionCost(CurrentTunaUsage());
+    public string TunaExpectedImprovement => "File transfer about 1.8x in Phase 3 benchmark; screen stability improved, latency roughly similar.";
     public string TunaSidecarVerifierStatus
     {
         get
@@ -442,9 +624,11 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public bool ShowReportBug => !string.IsNullOrWhiteSpace(bugReportUrl);
     public IRelayCommand ApplyBalancedScreenSharePresetCommand { get; }
     public IRelayCommand ApplyHighQualityScreenSharePresetCommand { get; }
+    public IRelayCommand ApplyTunaQualityScreenSharePresetCommand { get; }
     public IRelayCommand ApplyHighPerformanceScreenSharePresetCommand { get; }
     public IRelayCommand LinkTunaWalletCommand { get; }
     public IRelayCommand ValidateTunaWalletCommand { get; }
+    public IRelayCommand UnlockTunaRuntimeCommand { get; }
     public IRelayCommand CopyTunaWalletAddressCommand { get; }
     public IRelayCommand UnlinkTunaWalletCommand { get; }
 
@@ -453,6 +637,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public event EventHandler<string>? CopyReliabilityLogRequested;
     public event EventHandler? LinkTunaWalletRequested;
     public event EventHandler? ValidateTunaWalletPasswordRequested;
+    public event EventHandler? UnlockTunaRuntimePasswordRequested;
     public event EventHandler<string>? CopyTunaWalletAddressRequested;
 
     public event EventHandler<string>? OpenLogsFolderRequested;
@@ -491,6 +676,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         try
         {
             var state = TunaWalletLinkState.Linked(walletPath, nowProvider());
+            ResetTunaUnlockFailureState();
             await SaveTunaWalletStateAsync(state, ct);
             copyFeedback.Show("Wallet linked");
         }
@@ -539,6 +725,47 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         }
     }
 
+    public async Task UnlockTunaRuntimeAsync(char[]? password, CancellationToken ct = default)
+    {
+        if (tunaRuntimePilotService is null)
+        {
+            copyFeedback.Show("Tuna runtime unavailable");
+            if (password is not null)
+            {
+                Array.Clear(password);
+            }
+
+            return;
+        }
+
+        if (password is null || password.Length == 0)
+        {
+            copyFeedback.Show("Password required");
+            if (password is not null)
+            {
+                Array.Clear(password);
+            }
+
+            return;
+        }
+
+        SetTunaWalletValidating(true);
+        try
+        {
+            var result = await tunaRuntimePilotService
+                .UnlockForSessionAsync(password, TunaRuntimeUnlockSource.Options, ct)
+                .ConfigureAwait(false);
+            tunaWalletState = await LoadTunaWalletStateAsync(ct).ConfigureAwait(false);
+            copyFeedback.Show(result.Message);
+            RefreshTunaRuntimeProperties();
+            RefreshTunaWalletProperties();
+        }
+        finally
+        {
+            SetTunaWalletValidating(false);
+        }
+    }
+
     private static string BuildLastBridgeExitText(int exitCode, string reason)
     {
         var safeReason = string.IsNullOrWhiteSpace(reason) ? "(none)" : reason;
@@ -569,6 +796,23 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         }
     }
 
+    private async Task<TunaWalletLinkState> LoadTunaWalletStateAsync(CancellationToken ct)
+    {
+        if (tunaWalletLinkStore is null)
+        {
+            return TunaWalletLinkState.Unlinked;
+        }
+
+        try
+        {
+            return await tunaWalletLinkStore.LoadAsync(ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            return TunaWalletLinkState.Unlinked;
+        }
+    }
+
     private async Task SaveTunaWalletStateAsync(TunaWalletLinkState state, CancellationToken ct)
     {
         if (tunaWalletLinkStore is not null)
@@ -578,6 +822,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
         tunaWalletState = state;
         RefreshTunaWalletProperties();
+        RefreshTunaRuntimeProperties();
     }
 
     private void SetTunaWalletValidating(bool value)
@@ -604,8 +849,73 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         OnPropertyChanged(nameof(IsTunaWalletLinked));
         OnPropertyChanged(nameof(ShowTunaWalletFailure));
         ValidateTunaWalletCommand.NotifyCanExecuteChanged();
+        UnlockTunaRuntimeCommand.NotifyCanExecuteChanged();
         CopyTunaWalletAddressCommand.NotifyCanExecuteChanged();
         UnlinkTunaWalletCommand.NotifyCanExecuteChanged();
+    }
+
+    private void RefreshTunaRuntimeProperties()
+    {
+        OnPropertyChanged(nameof(TunaRuntimeFlagStatus));
+        OnPropertyChanged(nameof(TunaFallbackState));
+        OnPropertyChanged(nameof(IsTunaRuntimeEnabled));
+        OnPropertyChanged(nameof(IsTunaFileLaneEnabled));
+        OnPropertyChanged(nameof(IsTunaScreenLaneEnabled));
+        OnPropertyChanged(nameof(TunaMaxPriceNknPerMb));
+        OnPropertyChanged(nameof(TunaMaxTotalMiB));
+        OnPropertyChanged(nameof(TunaMaxDurationMinutes));
+        OnPropertyChanged(nameof(TunaRuntimeStatus));
+        OnPropertyChanged(nameof(TunaStartupTiming));
+        OnPropertyChanged(nameof(TunaRuntimeUnlockStatus));
+        OnPropertyChanged(nameof(TunaSpendByNLink));
+        OnPropertyChanged(nameof(TunaAverageCost));
+        OnPropertyChanged(nameof(TunaLastSessionCost));
+        UnlockTunaRuntimeCommand.NotifyCanExecuteChanged();
+    }
+
+    private TunaRuntimePreferenceState CurrentTunaRuntimePreferences()
+        => tunaRuntimePilotService?.Preferences ?? TunaRuntimePreferenceState.Default;
+
+    private TunaUsageAccountingState CurrentTunaUsage()
+        => tunaRuntimePilotService?.Usage ?? TunaUsageAccountingState.Empty;
+
+    private TunaRuntimeUnlockState GetTunaRuntimeUnlockState()
+    {
+        if (tunaRuntimePilotService is null)
+        {
+            return new TunaRuntimeUnlockState(
+                false,
+                false,
+                false,
+                "service_unavailable",
+                "Locked",
+                "Tuna runtime unavailable.",
+                false,
+                TimeSpan.Zero);
+        }
+
+        try
+        {
+            return tunaRuntimePilotService.GetUnlockStateAsync(CancellationToken.None).GetAwaiter().GetResult();
+        }
+        catch
+        {
+            return new TunaRuntimeUnlockState(
+                false,
+                false,
+                false,
+                tunaRuntimePilotService.RuntimeStatus,
+                "Locked",
+                "Tuna runtime unavailable.",
+                false,
+                TimeSpan.Zero);
+        }
+    }
+
+    private void SaveTunaRuntimePreferences(TunaRuntimePreferenceState state)
+    {
+        tunaRuntimePilotService?.SavePreferences(state);
+        RefreshTunaRuntimeProperties();
     }
 
     private static string FormatTunaWalletStatus(TunaWalletLinkStatus status, bool validating)
@@ -655,6 +965,22 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     private bool CanValidateTunaWallet() => tunaWalletState.IsLinked && !isTunaWalletValidating;
 
+    private void RequestUnlockTunaRuntime()
+    {
+        UnlockTunaRuntimePasswordRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private bool CanUnlockTunaRuntime()
+    {
+        if (tunaRuntimePilotService is null || isTunaWalletValidating)
+        {
+            return false;
+        }
+
+        var state = GetTunaRuntimeUnlockState();
+        return state.CanToggle && !state.IsOn;
+    }
+
     private void RequestCopyTunaWalletAddress()
     {
         if (!string.IsNullOrWhiteSpace(tunaWalletState.WalletAddress))
@@ -681,7 +1007,17 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             }
 
             tunaWalletState = TunaWalletLinkState.Unlinked;
+            if (tunaRuntimePilotService is not null)
+            {
+                await tunaRuntimePilotService.LockOrStopForSessionAsync(
+                    "wallet_unlinked",
+                    TunaRuntimeUnlockSource.Options,
+                    ct).ConfigureAwait(false);
+            }
+
+            ResetTunaUnlockFailureState();
             RefreshTunaWalletProperties();
+            RefreshTunaRuntimeProperties();
             copyFeedback.Show("Wallet unlinked");
         }
         catch (Exception ex)
@@ -712,6 +1048,9 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private void ApplyHighQualityScreenSharePreset()
         => ApplyScreenSharePreset(ScreenShareQualitySettings.HighQualityPreset);
 
+    private void ApplyTunaQualityScreenSharePreset()
+        => ApplyScreenSharePreset(ScreenShareQualitySettings.TunaQualityPreset);
+
     private void ApplyHighPerformanceScreenSharePreset()
         => ApplyScreenSharePreset(ScreenShareQualitySettings.HighPerformancePreset);
 
@@ -720,28 +1059,32 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         var fpsText = preset.CaptureFramesPerSecond.ToString(CultureInfo.InvariantCulture);
         var transportFpsText = preset.TransportFramesPerSecond.ToString(CultureInfo.InvariantCulture);
         var scaleText = preset.CaptureScale.ToString("0.##", CultureInfo.InvariantCulture);
+        var profileText = preset.QualityProfile;
 
         Environment.SetEnvironmentVariable(ScreenShareMaxFpsVariable, fpsText);
         Environment.SetEnvironmentVariable(ScreenShareTransportMaxFpsVariable, transportFpsText);
         Environment.SetEnvironmentVariable(ScreenShareScaleVariable, scaleText);
+        Environment.SetEnvironmentVariable(ScreenShareQualityProfileVariable, profileText);
 
         OnPropertyChanged(nameof(ScreenShareCaptureMaxFps));
         OnPropertyChanged(nameof(ScreenShareTransportMaxFps));
         OnPropertyChanged(nameof(ScreenShareCaptureScale));
+        OnPropertyChanged(nameof(ScreenShareQualityProfile));
         OnPropertyChanged(nameof(ScreenShareEffectivePresetName));
         OnPropertyChanged(nameof(ScreenSharePresetMigrationStatus));
         OnPropertyChanged(nameof(AdvancedScreenShareSettingsSummary));
         OnPropertyChanged(nameof(ShowScreenShareResetHint));
 
         copyFeedback.Show($"{preset.DisplayName} preset applied");
-        persistScreenSharePresetInBackground(preset.DisplayName, fpsText, transportFpsText, scaleText);
+        persistScreenSharePresetInBackground(preset.DisplayName, fpsText, transportFpsText, scaleText, profileText);
     }
 
     private static void PersistScreenSharePresetInBackground(
         string presetName,
         string fpsText,
         string transportFpsText,
-        string scaleText)
+        string scaleText,
+        string profileText)
     {
         _ = Task.Run(() =>
         {
@@ -749,7 +1092,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             {
                 var persisted = TrySetUserEnvironmentVariable(ScreenShareMaxFpsVariable, fpsText) &&
                                 TrySetUserEnvironmentVariable(ScreenShareTransportMaxFpsVariable, transportFpsText) &&
-                                TrySetUserEnvironmentVariable(ScreenShareScaleVariable, scaleText);
+                                TrySetUserEnvironmentVariable(ScreenShareScaleVariable, scaleText) &&
+                                TrySetUserEnvironmentVariable(ScreenShareQualityProfileVariable, profileText);
                 if (!persisted)
                 {
                     LocalOperationalLog.Warn("Diagnostics", $"Could not persist ScreenShare preset '{presetName}' to user environment.");
@@ -829,8 +1173,18 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     public void Dispose()
     {
+        if (tunaRuntimePilotService is not null)
+        {
+            tunaRuntimePilotService.StateChanged -= OnTunaRuntimeStateChanged;
+        }
+
+        tunaUnlockCooldownCts?.Cancel();
+        tunaUnlockCooldownCts?.Dispose();
         copyFeedback.Dispose();
     }
+
+    private void OnTunaRuntimeStateChanged(object? sender, EventArgs e)
+        => _ = UiThreadDispatch.RunAsync(RefreshTunaRuntimeProperties);
 
     internal string BuildDiagnosticsCopyTextForTests() => BuildDiagnosticsCopyText();
     internal string BuildScreenShareEvidenceTextForTests() => BuildScreenShareEvidenceText();
@@ -896,6 +1250,12 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             "NKN Tuna diagnostics",
             "--------------------",
             $"tuna_runtime_flag: {TunaRuntimeFlagStatus}",
+            $"tuna_runtime_status: {TunaRuntimeStatus}",
+            $"tuna_startup_timing: {TunaStartupTiming}",
+            $"tuna_runtime_unlocked: {TunaRuntimeUnlockStatus}",
+            $"tuna_runtime_enabled: {(IsTunaRuntimeEnabled ? "yes" : "no")}",
+            $"tuna_runtime_lanes: file={(IsTunaFileLaneEnabled ? "on" : "off")}, screen={(IsTunaScreenLaneEnabled ? "on" : "off")}",
+            $"tuna_runtime_caps: max_price_nkn_per_mb={TunaMaxPriceNknPerMb}; max_total_mib={TunaMaxTotalMiB}; max_duration_minutes={TunaMaxDurationMinutes}",
             $"tuna_fallback_state: {TunaFallbackState}",
             $"tuna_sidecar_verifier: {TunaSidecarVerifierStatus}",
             $"tuna_sidecar_verifier_detail: {TunaSidecarVerifierDetail}",
@@ -903,6 +1263,10 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"tuna_wallet_status: {TunaWalletStatus}",
             $"tuna_wallet_balance_category: {TunaWalletBalanceCategory}",
             $"tuna_wallet_last_verified_utc: {TunaWalletLastVerified}",
+            $"tuna_spend_by_nlink: {TunaSpendByNLink}",
+            $"tuna_average_cost: {TunaAverageCost}",
+            $"tuna_last_session_cost: {TunaLastSessionCost}",
+            $"tuna_expected_improvement: {TunaExpectedImprovement}",
             $"tuna_wallet_address_hash: {HashForDiagnostics(tunaWalletState.WalletAddress)}",
             $"tuna_wallet_path: {DiagnosticsExportBuilder.RedactStructuredValue("tuna_wallet_path", tunaWalletState.WalletPath)}",
             $"tuna_wallet_address: {DiagnosticsExportBuilder.RedactStructuredValue("tuna_wallet_address", tunaWalletState.WalletAddress)}",
@@ -912,12 +1276,14 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"screenshare_transport_max_fps: {FeatureFlags.ScreenShareTransportMaxFps}",
             $"screenshare_transport_autotune: {FormatFeatureFlag(FeatureFlags.ScreenShareTransportAutoTuneEnabled)}",
             $"screenshare_capture_scale: {FeatureFlags.ScreenShareScale:0.###}",
+            $"screenshare_quality_profile: {FeatureFlags.ScreenShareQualityProfile}",
             $"screenshare_effective_preset: {ScreenShareEffectivePresetName}",
             $"screenshare_legacy_preset_migrated: {ScreenSharePresetMigrationStatus}",
             string.Empty,
             "screenshare_capture_presets:",
             $"  balanced_default: {ScreenSharePresetBalanced}",
             $"  high_quality: {ScreenSharePresetHighQuality}",
+            $"  tuna_quality: {ScreenSharePresetTunaQuality}",
             $"  high_performance: {ScreenSharePresetHighPerformance}",
             $"  apply_hint: {ScreenShareCaptureEnvHint}",
             string.Empty,
@@ -1143,6 +1509,12 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             FeatureFlags.ScreenShareScale.ToString("0.###", CultureInfo.InvariantCulture),
             1d.ToString("0.###", CultureInfo.InvariantCulture),
             ScreenShareScaleVariable);
+        AddIfNonDefault(
+            riskyOverrides,
+            "screenshare_quality_profile",
+            FeatureFlags.ScreenShareQualityProfile,
+            FeatureFlags.ScreenShareQualityProfileNormal,
+            ScreenShareQualityProfileVariable);
         if (!FeatureFlags.ScreenShareTransportAutoTuneEnabled &&
             !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(ScreenShareTransportAutotuneVariable)))
         {
@@ -1206,10 +1578,191 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         => $"unsafe_tail={screenShareLiveSnapshot.PreCandidateGapTailEmittedToViewerCount}; actionable_late={screenShareLiveSnapshot.ActionableLateFragmentCount}; h264_taint={(screenShareLiveSnapshot.H264ReferenceTaintActive ? 1 : 0)}; h264_quarantine={(screenShareLiveSnapshot.H264ReferenceQuarantineActive ? 1 : 0)}; taint_enter={screenShareLiveSnapshot.H264ReferenceTaintEnterCount}; taint_release={screenShareLiveSnapshot.H264ReferenceTaintReleaseCount}; reason={FormatValue(screenShareLiveSnapshot.H264ReferenceTaintLastReason)}";
 
     private string BuildAdvancedScreenShareSettingsSummary()
-        => $"preset={ScreenShareEffectivePresetName}; capture_fps={ScreenShareCaptureMaxFps}; transport_fps={ScreenShareTransportMaxFps}; scale={ScreenShareCaptureScale}; legacy_migrated={ScreenSharePresetMigrationStatus}";
+        => $"preset={ScreenShareEffectivePresetName}; capture_fps={ScreenShareCaptureMaxFps}; transport_fps={ScreenShareTransportMaxFps}; scale={ScreenShareCaptureScale}; quality_profile={ScreenShareQualityProfile}; legacy_migrated={ScreenSharePresetMigrationStatus}";
 
     private static string FormatOptionalDouble(double value)
         => value >= 0 ? value.ToString("F2", CultureInfo.InvariantCulture) : "(none)";
+
+    private static string FormatNkn(decimal value)
+        => $"{FormatDecimal(value, 8)} NKN";
+
+    private static string FormatTunaSpend(TunaUsageAccountingState usage)
+    {
+        if (usage.HasUnknownCost)
+        {
+            return usage.TotalPaidNkn > 0m
+                ? $"{FormatNkn(usage.TotalPaidNkn)} + unknown"
+                : "unknown (no payment event)";
+        }
+
+        return FormatNkn(usage.TotalPaidNkn);
+    }
+
+    private static string FormatTunaAverageCost(TunaUsageAccountingState usage)
+    {
+        if (usage.TotalAppPayloadMb <= 0m)
+        {
+            return "(none)";
+        }
+
+        return usage.HasUnknownCost
+            ? "unknown (payment telemetry missing)"
+            : $"{FormatDecimal(usage.AverageNknPerMb, 9)} NKN/MB";
+    }
+
+    private static string FormatTunaLastSessionCost(TunaUsageAccountingState usage)
+    {
+        if (usage.LastSessionPaidNkn <= 0m && usage.LastSessionAppPayloadMb <= 0m)
+        {
+            return "(none)";
+        }
+
+        if (usage.LastSessionCostUnknown)
+        {
+            return $"unknown over {FormatDecimal(usage.LastSessionAppPayloadMb, 2)} MB";
+        }
+
+        return $"{FormatNkn(usage.LastSessionPaidNkn)} over {FormatDecimal(usage.LastSessionAppPayloadMb, 2)} MB";
+    }
+
+    private TimeSpan RegisterTunaUnlockFailure(string? reason)
+    {
+        if (!IsWrongPasswordReason(reason))
+        {
+            return TimeSpan.Zero;
+        }
+
+        tunaUnlockFailureCount++;
+        var cooldown = tunaUnlockFailureCount switch
+        {
+            <= 1 => TimeSpan.Zero,
+            2 => TimeSpan.FromSeconds(2),
+            <= 4 => TimeSpan.FromSeconds(10),
+            _ => TimeSpan.FromSeconds(30),
+        };
+        if (cooldown > TimeSpan.Zero)
+        {
+            StartTunaUnlockCooldown(cooldown);
+        }
+
+        return cooldown;
+    }
+
+    private void ResetTunaUnlockFailureState()
+    {
+        tunaUnlockFailureCount = 0;
+        tunaUnlockCooldownUntilUtc = null;
+        tunaUnlockCooldownCts?.Cancel();
+        tunaUnlockCooldownCts?.Dispose();
+        tunaUnlockCooldownCts = null;
+    }
+
+    private void StartTunaUnlockCooldown(TimeSpan cooldown)
+    {
+        tunaUnlockCooldownCts?.Cancel();
+        tunaUnlockCooldownCts?.Dispose();
+        var cts = new CancellationTokenSource();
+        tunaUnlockCooldownCts = cts;
+        tunaUnlockCooldownUntilUtc = nowProvider().Add(cooldown);
+        RefreshTunaRuntimeProperties();
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(cooldown, cts.Token).ConfigureAwait(false);
+                await UiThreadDispatch.RunAsync(() =>
+                {
+                    if (!ReferenceEquals(tunaUnlockCooldownCts, cts))
+                    {
+                        return;
+                    }
+
+                    if (!IsTunaUnlockCooldownActive())
+                    {
+                        RefreshTunaRuntimeProperties();
+                    }
+                }).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // A new unlock attempt, unlink, or dispose superseded this local cooldown.
+            }
+        });
+    }
+
+    private bool IsTunaUnlockCooldownActive()
+    {
+        if (tunaUnlockCooldownUntilUtc is not { } until)
+        {
+            return false;
+        }
+
+        if (nowProvider() < until)
+        {
+            return true;
+        }
+
+        tunaUnlockCooldownUntilUtc = null;
+        return false;
+    }
+
+    private string FormatCooldownRemaining()
+    {
+        if (tunaUnlockCooldownUntilUtc is not { } until)
+        {
+            return "0 seconds";
+        }
+
+        var seconds = Math.Max(1, (int)Math.Ceiling((until - nowProvider()).TotalSeconds));
+        return seconds == 1 ? "1 second" : $"{seconds.ToString(CultureInfo.InvariantCulture)} seconds";
+    }
+
+    private static string FormatTunaUnlockFailureMessage(string? reason)
+    {
+        var normalized = string.IsNullOrWhiteSpace(reason)
+            ? string.Empty
+            : reason.Trim().ToLowerInvariant();
+        if (IsWrongPasswordReason(normalized))
+        {
+            return "Unlock failed. Check the wallet password and try again.";
+        }
+
+        if (normalized.Contains("missing", StringComparison.Ordinal) ||
+            normalized.Contains("not_found", StringComparison.Ordinal))
+        {
+            return "Unlock failed. Wallet file is missing.";
+        }
+
+        if (normalized.Contains("sidecar", StringComparison.Ordinal))
+        {
+            return "Unlock failed. Tuna sidecar is unavailable; current NKN will be used.";
+        }
+
+        if (normalized.Contains("timeout", StringComparison.Ordinal))
+        {
+            return "Unlock timed out. Current NKN will be used.";
+        }
+
+        return "Unlock failed. Current NKN will be used.";
+    }
+
+    private static bool IsWrongPasswordReason(string? reason)
+    {
+        var normalized = string.IsNullOrWhiteSpace(reason)
+            ? string.Empty
+            : reason.Trim().ToLowerInvariant();
+        return normalized.Contains("password", StringComparison.Ordinal) ||
+               normalized.Contains("decrypt", StringComparison.Ordinal) ||
+               normalized.Contains("unlock wallet", StringComparison.Ordinal);
+    }
+
+    private static string FormatDecimal(decimal value, int precision)
+    {
+        var rounded = Math.Round(Math.Max(0m, value), precision, MidpointRounding.AwayFromZero);
+        var text = rounded.ToString("0." + new string('#', precision), CultureInfo.InvariantCulture);
+        return string.IsNullOrWhiteSpace(text) ? "0" : text;
+    }
 
     private static string FormatOptionalLong(long value)
         => value >= 0 ? value.ToString(CultureInfo.InvariantCulture) : "(none)";

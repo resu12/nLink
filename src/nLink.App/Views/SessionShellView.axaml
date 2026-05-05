@@ -37,6 +37,8 @@
                                      CanControlModeToggle="{ReflectionBinding CanControlModeToggle}"
                                      ShowRemoteControlActiveStatus="{ReflectionBinding ShowRemoteControlActiveStatus}"
                                      RoleText="{Binding #Root.RoleText}"
+                                     TunaActive="{Binding #Root.TunaActive}"
+                                     TunaStatusReason="{Binding #Root.TunaStatusReason}"
                                      HorizontalAlignment="Stretch"/>
         </Border>
 

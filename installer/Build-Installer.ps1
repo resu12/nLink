@@ -100,7 +100,8 @@ function Resolve-IsccPath {
 
 function Assert-BridgeBundleRuntime {
     param(
-        [Parameter(Mandatory = $true)][string]$BridgeDir
+        [Parameter(Mandatory = $true)][string]$BridgeDir,
+        [string]$ExpectedAppVersion = ""
     )
 
     if (-not (Test-Path $BridgeDir)) {
@@ -127,6 +128,15 @@ function Assert-BridgeBundleRuntime {
         foreach ($requiredFile in @("package.json", "package-lock.json", "bridge-manifest.json", "bridge-dependencies.json")) {
             if (-not (Test-Path (Join-Path $BridgeDir $requiredFile))) {
                 throw "Bridge runtime not found. Run the bridge bundle build step first."
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedAppVersion)) {
+            $manifestPath = Join-Path $BridgeDir "bridge-manifest.json"
+            $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
+            $actualAppVersion = [string]$manifest.appVersion
+            if ($actualAppVersion -ne $ExpectedAppVersion) {
+                throw "Bridge runtime version mismatch: expected bridge-manifest.json appVersion '$ExpectedAppVersion', got '$actualAppVersion'. Rebuild the bridge bundle after changing VERSION: $manifestPath"
             }
         }
 
@@ -164,7 +174,8 @@ function Assert-NoDebugOnlyPayload {
 function Assert-InstallerStagePayload {
     param(
         [Parameter(Mandatory = $true)][string]$StageDir,
-        [Parameter(Mandatory = $true)][string]$Runtime
+        [Parameter(Mandatory = $true)][string]$Runtime,
+        [string]$ExpectedAppVersion = ""
     )
 
     $appExe = Join-Path $StageDir "nLink.exe"
@@ -177,7 +188,7 @@ function Assert-InstallerStagePayload {
         throw "Installer staging appsettings.json not found: $appSettings"
     }
 
-    Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $StageDir "bridge") $Runtime)
+    Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $StageDir "bridge") $Runtime) -ExpectedAppVersion $ExpectedAppVersion
     Assert-NoDebugOnlyPayload -StageDir $StageDir
 }
 
@@ -435,11 +446,11 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Assert-BridgeBundleRuntime -BridgeDir $bridgeBundleAbs
+Assert-BridgeBundleRuntime -BridgeDir $bridgeBundleAbs -ExpectedAppVersion $resolvedVersion
 
 $installerStageAbs = $canonicalPortableOutAbs
-Assert-InstallerStagePayload -StageDir $installerStageAbs -Runtime $Runtime
-& $verifyPackageManifestPath -StageDir $installerStageAbs -ManifestPath $packageManifestPath
+Assert-InstallerStagePayload -StageDir $installerStageAbs -Runtime $Runtime -ExpectedAppVersion $resolvedVersion
+& $verifyPackageManifestPath -StageDir $installerStageAbs -ManifestPath $packageManifestPath -ExpectedAppVersion $resolvedVersion
 
 $isccPath = Resolve-IsccPath
 if (-not $isccPath) {
@@ -458,7 +469,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Packaging validation step: inspect staging folder used for installer packaging.
-Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $installerStageAbs "bridge") $Runtime)
+Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $installerStageAbs "bridge") $Runtime) -ExpectedAppVersion $resolvedVersion
 $installerExeAbs = Join-Path $installerOutAbs ("nLink-Setup-win-x64-{0}.exe" -f $resolvedVersion)
 if ($LocalOnly) {
     $releasePublish = $null

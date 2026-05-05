@@ -20,7 +20,7 @@ For external NKN delivery/topology work, open `external-topology-summary.txt` af
 powershell -ExecutionPolicy Bypass -File .\tools\ScreenShare-Ops.ps1 -Mode ExternalTopologyAudit -ArtifactDirs "artifacts\soak\<default>;artifacts\soak\<candidate>"
 ```
 
-For support capture, copy app Diagnostics first. The Diagnostics page reads existing screenshare evidence and includes a compact `Screenshare evidence` block when `screenshare-operator-verdict.txt` is available. For hangs, use Save Hang Report; hang report folders include `screenshare-evidence.txt`. Attach the full soak artifact only when that evidence points to one or support asks for raw retained analyzer output.
+For support capture, copy Options -> Diagnostics first. The Diagnostics tab reads existing screenshare evidence and includes a compact `Screenshare evidence` block when `screenshare-operator-verdict.txt` is available. For hangs, use Save Hang Report; hang report folders include `screenshare-evidence.txt`. Attach the full soak artifact only when that evidence points to one or support asks for raw retained analyzer output.
 
 Manual long-run screenshare soak is available from the app CLI and is not intended for CI.
 

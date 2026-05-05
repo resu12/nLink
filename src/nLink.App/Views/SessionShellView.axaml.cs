@@ -25,6 +25,12 @@ public partial class SessionShellView : UserControl
     public static readonly StyledProperty<string?> RoleTextProperty =
         AvaloniaProperty.Register<SessionShellView, string?>(nameof(RoleText));
 
+    public static readonly StyledProperty<bool> TunaActiveProperty =
+        AvaloniaProperty.Register<SessionShellView, bool>(nameof(TunaActive), false);
+
+    public static readonly StyledProperty<string?> TunaStatusReasonProperty =
+        AvaloniaProperty.Register<SessionShellView, string?>(nameof(TunaStatusReason), "inactive");
+
     public static readonly DirectProperty<SessionShellView, bool> IsScreenSharePaneActiveProperty =
         AvaloniaProperty.RegisterDirect<SessionShellView, bool>(
             nameof(IsScreenSharePaneActive),
@@ -199,6 +205,18 @@ public partial class SessionShellView : UserControl
     {
         get => GetValue(RoleTextProperty);
         set => SetValue(RoleTextProperty, value);
+    }
+
+    public bool TunaActive
+    {
+        get => GetValue(TunaActiveProperty);
+        set => SetValue(TunaActiveProperty, value);
+    }
+
+    public string? TunaStatusReason
+    {
+        get => GetValue(TunaStatusReasonProperty);
+        set => SetValue(TunaStatusReasonProperty, value);
     }
 
     public bool IsScreenSharePaneActive

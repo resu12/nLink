@@ -207,7 +207,8 @@ function Publish-ReleaseAssets {
 
 function Assert-BridgeBundleRuntime {
     param(
-        [Parameter(Mandatory = $true)][string]$BridgeDir
+        [Parameter(Mandatory = $true)][string]$BridgeDir,
+        [string]$ExpectedAppVersion = ""
     )
 
     if (-not (Test-Path $BridgeDir)) {
@@ -234,6 +235,15 @@ function Assert-BridgeBundleRuntime {
         foreach ($requiredFile in @("package.json", "package-lock.json", "bridge-manifest.json", "bridge-dependencies.json")) {
             if (-not (Test-Path (Join-Path $BridgeDir $requiredFile))) {
                 throw "Bridge runtime not found. Run the bridge bundle build step first."
+            }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($ExpectedAppVersion)) {
+            $manifestPath = Join-Path $BridgeDir "bridge-manifest.json"
+            $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json
+            $actualAppVersion = [string]$manifest.appVersion
+            if ($actualAppVersion -ne $ExpectedAppVersion) {
+                throw "Bridge runtime version mismatch: expected bridge-manifest.json appVersion '$ExpectedAppVersion', got '$actualAppVersion'. Rebuild the bridge bundle after changing VERSION: $manifestPath"
             }
         }
 
@@ -272,6 +282,7 @@ function Assert-PortableStagePayload {
     param(
         [Parameter(Mandatory = $true)][string]$StageDir,
         [Parameter(Mandatory = $true)][string]$Runtime,
+        [string]$ExpectedAppVersion = "",
         [bool]$RequireBridge = $true
     )
 
@@ -286,7 +297,7 @@ function Assert-PortableStagePayload {
     }
 
     if ($RequireBridge) {
-        Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $StageDir "bridge") $Runtime)
+        Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $StageDir "bridge") $Runtime) -ExpectedAppVersion $ExpectedAppVersion
     }
 
     Assert-NoDebugOnlyPayload -StageDir $StageDir
@@ -366,7 +377,8 @@ function Copy-BridgeBundleToPortable {
     param(
         [Parameter(Mandatory = $true)][string]$BridgeDir,
         [Parameter(Mandatory = $true)][string]$PortableOutDir,
-        [Parameter(Mandatory = $true)][string]$Runtime
+        [Parameter(Mandatory = $true)][string]$Runtime,
+        [string]$ExpectedAppVersion = ""
     )
 
     $bridgeRoot = Join-Path $PortableOutDir "bridge"
@@ -382,7 +394,7 @@ function Copy-BridgeBundleToPortable {
     Invoke-WithRetry -OperationName "copy bundled bridge folder" -DelayMilliseconds 700 -Action {
         Copy-Item -Recurse -Force (Join-Path $BridgeDir "*") $destination
     }
-    Assert-BridgeBundleRuntime -BridgeDir $destination
+    Assert-BridgeBundleRuntime -BridgeDir $destination -ExpectedAppVersion $ExpectedAppVersion
     Write-Host "[nLink] Bundled bridge runtime into canonical portable: $destination" -ForegroundColor Green
 }
 
@@ -444,8 +456,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if (-not $SkipBridgeBundle) {
-    Assert-BridgeBundleRuntime -BridgeDir $bridgeBundleAbs
-    Copy-BridgeBundleToPortable -BridgeDir $bridgeBundleAbs -PortableOutDir $canonicalOutAbs -Runtime $Runtime
+    Assert-BridgeBundleRuntime -BridgeDir $bridgeBundleAbs -ExpectedAppVersion $resolvedVersion
+    Copy-BridgeBundleToPortable -BridgeDir $bridgeBundleAbs -PortableOutDir $canonicalOutAbs -Runtime $Runtime -ExpectedAppVersion $resolvedVersion
 }
 
 if (-not $SkipTunaSidecarBundle) {
@@ -456,8 +468,8 @@ Ensure-PortableConfigFile -RepoRoot $repoRoot -StageDir $canonicalOutAbs
 
 # Safe size reduction in final artifact only (keep bin/obj untouched).
 Remove-StagedDebugFiles -RootDir $canonicalOutAbs
-Assert-PortableStagePayload -StageDir $canonicalOutAbs -Runtime $Runtime -RequireBridge:(-not $SkipBridgeBundle)
-& $verifyPackageManifestPath -StageDir $canonicalOutAbs -ManifestPath $packageManifestPath
+Assert-PortableStagePayload -StageDir $canonicalOutAbs -Runtime $Runtime -ExpectedAppVersion $resolvedVersion -RequireBridge:(-not $SkipBridgeBundle)
+& $verifyPackageManifestPath -StageDir $canonicalOutAbs -ManifestPath $packageManifestPath -ExpectedAppVersion $resolvedVersion
 
 if (Test-Path $zipOutAbs) {
     Invoke-WithRetry -OperationName "remove portable zip" -Action {

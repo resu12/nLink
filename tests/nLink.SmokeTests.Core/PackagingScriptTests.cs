@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 
 namespace NLink.SmokeTests;
 
@@ -38,6 +39,72 @@ public sealed class PackagingScriptTests : CoreSmokeTestsBase
 
         Assert.Contains("Build-Installer.ps1\" -Runtime $Runtime -CopyHelperAlias", preReleaseScript, StringComparison.Ordinal);
         Assert.Contains("Build-Installer.ps1\" -Runtime $Runtime -CopyHelperAlias", betaReadinessScript, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task VerifyPackageManifest_RejectsBridgeManifestWithStaleAppVersion()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var scriptPath = RequireRepoFile(Path.Combine("build", "verify-package-manifest.ps1"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-packaging-manifest-version-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var stageDir = Path.Combine(tempRoot, "stage");
+            var bridgeDir = Path.Combine(stageDir, "bridge", "win-x64");
+            Directory.CreateDirectory(bridgeDir);
+
+            File.WriteAllText(
+                Path.Combine(bridgeDir, "index.js"),
+                "const bulkClient = true; const bulkAddress = ''; const SUPPORTED_CHANNELS = ['bulk'];");
+            File.WriteAllText(Path.Combine(bridgeDir, "package.json"), """{"name":"test-bridge"}""");
+            File.WriteAllText(Path.Combine(bridgeDir, "package-lock.json"), """{"lockfileVersion":3}""");
+            File.WriteAllText(Path.Combine(bridgeDir, "bridge-dependencies.json"), """{"nodeModulesShipped":false}""");
+
+            var manifestPath = Path.Combine(tempRoot, "package-manifest.txt");
+            File.WriteAllLines(
+                manifestPath,
+                [
+                    "bridge/win-x64/index.js",
+                    "bridge/win-x64/package.json",
+                    "bridge/win-x64/package-lock.json",
+                    "bridge/win-x64/bridge-manifest.json",
+                    "bridge/win-x64/bridge-dependencies.json",
+                ]);
+
+            WriteBridgeManifest(bridgeDir, appVersion: "1.2.2");
+            var stale = await RunPowerShellAsync(
+                scriptPath,
+                "-StageDir",
+                stageDir,
+                "-ManifestPath",
+                manifestPath,
+                "-ExpectedAppVersion",
+                "1.2.3");
+
+            Assert.NotEqual(0, stale.ExitCode);
+            Assert.Contains("appVersion mismatch", stale.Stdout + stale.Stderr, StringComparison.Ordinal);
+
+            WriteBridgeManifest(bridgeDir, appVersion: "1.2.3");
+            var current = await RunPowerShellAsync(
+                scriptPath,
+                "-StageDir",
+                stageDir,
+                "-ManifestPath",
+                manifestPath,
+                "-ExpectedAppVersion",
+                "1.2.3");
+
+            Assert.Equal(0, current.ExitCode);
+            Assert.Contains("Package manifest verified", current.Stdout, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(tempRoot);
+        }
     }
 
     [Fact]
@@ -111,6 +178,38 @@ public sealed class PackagingScriptTests : CoreSmokeTestsBase
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllBytes(path, Enumerable.Range(0, bytes).Select(i => (byte)i).ToArray());
+    }
+
+    private static void WriteBridgeManifest(string bridgeDir, string appVersion)
+    {
+        var indexHash = ComputeSha256(Path.Combine(bridgeDir, "index.js"));
+        var packageLockHash = ComputeSha256(Path.Combine(bridgeDir, "package-lock.json"));
+        File.WriteAllText(
+            Path.Combine(bridgeDir, "bridge-manifest.json"),
+            $$"""
+              {
+                "manifestVersion": 1,
+                "appVersion": "{{appVersion}}",
+                "runtime": "win-x64",
+                "buildTimestampUtc": "2026-05-05T00:00:00Z",
+                "bridgeScriptSha256": "{{indexHash}}",
+                "nodeVersion": "v24.13.1",
+                "nodeArchiveSha256": "test",
+                "packageLockSha256": "{{packageLockHash}}",
+                "npmVersion": "test",
+                "nccVersion": "test",
+                "bridgePackageVersion": "test",
+                "nodeModulesShipped": false,
+                "dependencyEvidenceFile": "bridge-dependencies.json"
+              }
+              """);
+    }
+
+    private static string ComputeSha256(string path)
+    {
+        using var sha256 = SHA256.Create();
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(sha256.ComputeHash(stream)).ToLowerInvariant();
     }
 
     private static async Task<(int ExitCode, string Stdout, string Stderr)> RunPowerShellAsync(string scriptPath, params string[] arguments)

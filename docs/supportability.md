@@ -4,8 +4,8 @@ Use this guide when collecting evidence for a bug report, RC issue, or support h
 
 ## First Evidence To Collect
 
-1. Open `Diagnostics` in the app.
-2. Click `Copy diagnostics`.
+1. Open `Options` in the app.
+2. Go to the `Diagnostics` tab and click `Copy diagnostics`.
 3. Paste the copied text into the issue or support thread.
 4. If the app is frozen or intermittently hangs, click `Save Hang Report` and attach the generated folder or ZIP when requested.
 
@@ -16,15 +16,15 @@ Diagnostics and hang reports are best-effort redacted. Review them before sharin
 - nLink version, for example `v0.7.0`.
 - Install type: Installer or Portable.
 - Your role: Helper, Helpee, or both.
-- Area affected: Connection, chat, file transfer, screen share, remote control, install/update, or diagnostics.
+- Area affected: Connection, chat, file transfer, screen share, remote control, install/update, options, or diagnostics.
 - Transport if known: NKN, DEVLOCAL, or not sure.
 - Clear steps to reproduce and what happened instead.
-- Diagnostics paste from `Diagnostics -> Copy diagnostics`.
+- Diagnostics paste from `Options -> Diagnostics -> Copy diagnostics`.
 - Hang Report path or attachment if the app froze.
 
 ## Screenshare Evidence
 
-For screenshare issues, start with the normal diagnostics paste. If a screenshare artifact has already been analyzed, Diagnostics includes a `Screenshare evidence` block with the latest operator verdict.
+For screenshare issues, start with the normal diagnostics paste. If a screenshare artifact has already been analyzed, Options -> Diagnostics includes a `Screenshare evidence` block with the latest operator verdict.
 
 Use `tools\ScreenShare-Ops.ps1` only when new screenshare evidence is needed:
 

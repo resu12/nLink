@@ -492,6 +492,7 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
         SetOption(options, "ListenerEndpoint", listenerEndpoint);
         SetOption(options, "SidecarExePath", sidecarExePath);
         SetOption(options, "Lanes", NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen);
+        SetOption(options, "CanOfferListener", !string.IsNullOrWhiteSpace(listenerEndpoint));
         SetOption(options, "ConnectTimeoutMs", 10_000);
         SetOption(options, "DialerReadyTimeoutMs", 120_000);
         SetOption(options, "TunaDialTimeoutMs", 60_000);

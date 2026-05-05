@@ -282,6 +282,9 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
     public void WindowsH264EncodePolicy_TransportNormalProfile_CapsTo1440x810_AndUsesIpOnlyBudget()
     {
         using var scaleOverride = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCALE", "1");
+        using var profileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileNormal);
 
         var profile = WindowsH264EncodePolicy.ResolveProfile(
             sourceWidth: 1920,
@@ -300,14 +303,68 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void WindowsH264EncodePolicy_TransportTunaQualityProfile_CapsTo1600x900_AndUsesTunaBudget()
+    {
+        using var scaleOverride = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCALE", "1");
+        using var profileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileTunaQuality);
+        using var transportFpsOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable,
+            "15");
+
+        var profile = WindowsH264EncodePolicy.ResolveProfile(
+            sourceWidth: 1920,
+            sourceHeight: 1080,
+            targetFramesPerSecond: FeatureFlags.ScreenShareTransportMaxFps,
+            tuningLevel: ScreenShareTransportTuningLevel.Normal,
+            transportIpOnly: true);
+
+        Assert.Equal("normal", profile.ProfileName);
+        Assert.Equal(1600, profile.Width);
+        Assert.Equal(900, profile.Height);
+        Assert.Equal(15, profile.TargetFramesPerSecond);
+        Assert.True(profile.TransportIpOnly);
+        Assert.InRange(profile.TargetBitrate, 6_000_000u, 9_000_000u);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void WindowsH264EncodePolicy_TransportBandwidthReducedProfile_CapsTo1280x720_AndUsesIpOnlyBudget()
     {
         using var scaleOverride = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCALE", "1");
+        using var profileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileNormal);
 
         var profile = WindowsH264EncodePolicy.ResolveProfile(
             sourceWidth: 1920,
             sourceHeight: 1080,
             targetFramesPerSecond: 5,
+            tuningLevel: ScreenShareTransportTuningLevel.BandwidthReduced,
+            transportIpOnly: true);
+
+        Assert.Equal("reduced", profile.ProfileName);
+        Assert.Equal(1280, profile.Width);
+        Assert.Equal(720, profile.Height);
+        Assert.Equal(5, profile.TargetFramesPerSecond);
+        Assert.True(profile.TransportIpOnly);
+        Assert.InRange(profile.TargetBitrate, 2_000_000u, 3_000_000u);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void WindowsH264EncodePolicy_TransportBandwidthReducedProfile_OverridesTunaQualityBudget()
+    {
+        using var scaleOverride = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCALE", "1");
+        using var profileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileTunaQuality);
+
+        var profile = WindowsH264EncodePolicy.ResolveProfile(
+            sourceWidth: 1920,
+            sourceHeight: 1080,
+            targetFramesPerSecond: 15,
             tuningLevel: ScreenShareTransportTuningLevel.BandwidthReduced,
             transportIpOnly: true);
 
@@ -406,6 +463,9 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
     public void WindowsH264EncodePolicy_PreviewNormalProfile_RemainsInterFrameBudget()
     {
         using var scaleOverride = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCALE", "1");
+        using var profileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileTunaQuality);
 
         var profile = WindowsH264EncodePolicy.ResolveProfile(
             sourceWidth: 1920,
@@ -418,6 +478,7 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
         Assert.False(profile.TransportIpOnly);
         Assert.Equal(1280, profile.Width);
         Assert.Equal(720, profile.Height);
+        Assert.Equal(8, profile.TargetFramesPerSecond);
         Assert.InRange(profile.TargetBitrate, 1_800_000u, 2_400_000u);
     }
 

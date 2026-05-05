@@ -35,6 +35,7 @@ public partial class DiagnosticsPageView : UserControl
             subscribedViewModel.OpenHangReportFolderRequested -= OnOpenHangReportFolderRequested;
             subscribedViewModel.LinkTunaWalletRequested -= OnLinkTunaWalletRequested;
             subscribedViewModel.ValidateTunaWalletPasswordRequested -= OnValidateTunaWalletPasswordRequested;
+            subscribedViewModel.UnlockTunaRuntimePasswordRequested -= OnUnlockTunaRuntimePasswordRequested;
             subscribedViewModel.CopyTunaWalletAddressRequested -= OnCopyTunaWalletAddressRequested;
             subscribedViewModel = null;
         }
@@ -52,6 +53,7 @@ public partial class DiagnosticsPageView : UserControl
         subscribedViewModel.OpenHangReportFolderRequested += OnOpenHangReportFolderRequested;
         subscribedViewModel.LinkTunaWalletRequested += OnLinkTunaWalletRequested;
         subscribedViewModel.ValidateTunaWalletPasswordRequested += OnValidateTunaWalletPasswordRequested;
+        subscribedViewModel.UnlockTunaRuntimePasswordRequested += OnUnlockTunaRuntimePasswordRequested;
         subscribedViewModel.CopyTunaWalletAddressRequested += OnCopyTunaWalletAddressRequested;
     }
 
@@ -212,13 +214,41 @@ public partial class DiagnosticsPageView : UserControl
                 return;
             }
 
-            password = await ShowWalletPasswordDialogAsync(owner);
+            password = await ShowWalletPasswordDialogAsync(owner, "Enter wallet password", "Validate");
             if (password is null || password.Length == 0)
             {
                 return;
             }
 
             await subscribedViewModel.ValidateTunaWalletAsync(password);
+        }
+        finally
+        {
+            if (password is not null)
+            {
+                Array.Clear(password);
+            }
+        }
+    }
+
+    private async void OnUnlockTunaRuntimePasswordRequested(object? sender, EventArgs e)
+    {
+        char[]? password = null;
+        try
+        {
+            if (subscribedViewModel is null ||
+                TopLevel.GetTopLevel(this) is not Window owner)
+            {
+                return;
+            }
+
+            password = await ShowWalletPasswordDialogAsync(owner, "Unlock Tuna for this session", "Unlock");
+            if (password is null || password.Length == 0)
+            {
+                return;
+            }
+
+            await subscribedViewModel.UnlockTunaRuntimeAsync(password);
         }
         finally
         {
@@ -250,7 +280,7 @@ public partial class DiagnosticsPageView : UserControl
         }
     }
 
-    private static Task<char[]?> ShowWalletPasswordDialogAsync(Window owner)
+    private static Task<char[]?> ShowWalletPasswordDialogAsync(Window owner, string title, string acceptText)
     {
         var result = new TaskCompletionSource<char[]?>();
         var passwordBox = new TextBox
@@ -261,7 +291,7 @@ public partial class DiagnosticsPageView : UserControl
         var okButton = new Button
         {
             Classes = { "appButton", "primaryButton", "compactButton" },
-            Content = "Validate",
+            Content = acceptText,
             HorizontalAlignment = HorizontalAlignment.Right,
         };
         var cancelButton = new Button
@@ -285,7 +315,7 @@ public partial class DiagnosticsPageView : UserControl
                 {
                     new TextBlock
                     {
-                        Text = "Enter wallet password",
+                        Text = title,
                         Classes = { "appSectionTitle" },
                     },
                     passwordBox,

@@ -49,9 +49,11 @@ internal readonly record struct NknAccelerationLaneDiagnostics(
     long MediaFramesReceived,
     long BulkFramesReceived,
     long SendRejected,
-    long QueueOverflow)
+    long QueueOverflow,
+    long SequenceGap,
+    long SequenceReordered)
 {
-    public static NknAccelerationLaneDiagnostics Empty { get; } = new(false, string.Empty, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    public static NknAccelerationLaneDiagnostics Empty { get; } = new(false, string.Empty, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 
     public long AcceptedFor(NknBridgeChannel channel)
         => channel switch
@@ -80,15 +82,53 @@ internal readonly record struct NknAccelerationLaneDiagnostics(
 
 internal interface INknTunaAccelerationSession : INknAccelerationLane
 {
+    bool CanOfferListener { get; }
+
     NknAccelerationLaneKind ConfiguredLanes { get; }
 
     NknAccelerationLaneKind SupportedLanes { get; }
 
     string? LocalTunaAddress { get; }
 
-    Task<bool> EnsureListenerSidecarConnectedAsync(CancellationToken ct);
+    Task<bool> EnsureListenerSidecarConnectedAsync(string expectedRemotePeer, CancellationToken ct);
 
     Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct);
+
+    Task StopAsync(string reason, CancellationToken ct);
+}
+
+internal sealed record NknTunaListenerStartRequest(
+    string ExpectedRemotePeer,
+    NknAccelerationLaneKind Lanes);
+
+internal sealed record NknTunaListenerSidecarEndpoint(
+    string LocalIpc,
+    string TunaAddress);
+
+internal sealed record NknTunaPaymentTelemetry(
+    decimal AmountNkn,
+    decimal CumulativeSpendNkn,
+    long BytesMoved,
+    decimal? NknPerMb);
+
+internal sealed record NknTunaSessionUsageTelemetry(
+    long BytesMoved,
+    string Reason,
+    bool PaymentTelemetryObserved,
+    decimal? CumulativeSpendNkn);
+
+internal interface INknTunaUsageTelemetrySink
+{
+    void RecordPayment(NknTunaPaymentTelemetry payment);
+
+    void RecordSummary(NknTunaSessionUsageTelemetry summary);
+}
+
+internal interface INknTunaListenerSidecarSupervisor : IDisposable
+{
+    Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct);
+
+    void Stop(string reason);
 }
 
 internal sealed record NknAccelerationLocalEndpoint(

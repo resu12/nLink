@@ -60,6 +60,8 @@
             <Grid RowDefinitions="Auto,Auto"
                   RowSpacing="8">
                 <views:SessionShellView RoleText="Helper"
+                                        TunaActive="{Binding IsTunaActive}"
+                                        TunaStatusReason="{Binding TunaStatusReason}"
                                         HorizontalAlignment="Stretch"
                                         VerticalAlignment="Stretch"
                                         ShowChatPaneRequested="{Binding ShowConnectedPanel}">
@@ -257,7 +259,7 @@
                                                         MinWidth="136"
                                                         IsVisible="{Binding ShowRetryAction}"/>
                                                 <Button Classes="appButton secondaryButton compactSecondaryAction"
-                                                        Content="Open diagnostics"
+                                                        Content="Open options"
                                                         Command="{Binding OpenDiagnosticsCommand}"
                                                         MinWidth="160"
                                                         IsVisible="{Binding ShowOpenDiagnosticsLink}"/>

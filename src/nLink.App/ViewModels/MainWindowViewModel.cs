@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using NLink.App.Configuration;
 using NLink.App.Services;
+using NLink.Core;
 using NLink.Core.Metrics;
 using NLink.Infra.Nkn;
 
@@ -24,6 +25,7 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
     private readonly ResourceRuntimeTracker resourceRuntimeTracker;
     private readonly ITunaWalletLinkStore? tunaWalletLinkStore;
     private readonly ITunaWalletVerifier? tunaWalletVerifier;
+    private readonly ITunaRuntimePilotService? tunaRuntimePilotService;
     private readonly HangReportService hangReportService;
     private readonly UiFreezeWatchdog uiFreezeWatchdog;
     private readonly INetworkEventSource networkEventSource;
@@ -36,7 +38,11 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
     public MainWindowViewModel(AppServiceRegistry services)
     {
         this.services = services ?? throw new ArgumentNullException(nameof(services));
-        transportConfig = TransportRuntimeConfig.Select();
+        this.services.TryGet<ITunaRuntimePilotService>(out tunaRuntimePilotService);
+        Func<ISignalingTransport>? nknTransportFactory = tunaRuntimePilotService is null
+            ? null
+            : tunaRuntimePilotService.CreateNknTransport;
+        transportConfig = TransportRuntimeConfig.Select(nknTransportFactory);
         shareMessageConfig = this.services.GetRequired<ShareMessageConfig>();
         clipboardService = this.services.GetRequired<IClipboardService>();
         inviteShareService = this.services.GetRequired<IInviteShareService>();
@@ -134,7 +140,8 @@ public class MainWindowViewModel : ViewModelBase, IDisposable
             resourceRuntimeTracker,
             hangReportService,
             tunaWalletLinkStore: tunaWalletLinkStore,
-            tunaWalletVerifier: tunaWalletVerifier));
+            tunaWalletVerifier: tunaWalletVerifier,
+            tunaRuntimePilotService: tunaRuntimePilotService));
     }
 
     private void ShowHomePage()

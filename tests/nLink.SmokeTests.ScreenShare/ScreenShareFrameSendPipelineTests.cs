@@ -60,15 +60,15 @@ public sealed class ScreenShareFrameSendPipelineTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
-    public async Task ScreenShareFrameSendPipeline_AllowsHighQualityPresetTransportFps()
+    public async Task ScreenShareFrameSendPipeline_AllowsTunaQualityPresetTransportFps()
     {
         await using var pipeline = new ScreenShareFrameSendPipeline(
             sendFrameAsync: (_, _) => Task.FromResult(1),
-            maxFramesPerSecond: ScreenShareQualitySettings.HighQualityPreset.TransportFramesPerSecond);
+            maxFramesPerSecond: ScreenShareQualitySettings.TunaQualityPreset.TransportFramesPerSecond);
 
-        pipeline.SetMaxFramesPerSecond(ScreenShareQualitySettings.HighQualityPreset.TransportFramesPerSecond);
+        pipeline.SetMaxFramesPerSecond(ScreenShareQualitySettings.TunaQualityPreset.TransportFramesPerSecond);
 
-        Assert.Equal(12, ScreenShareFrameSendPipeline.MaxFramesPerSecond);
+        Assert.Equal(15, ScreenShareFrameSendPipeline.MaxFramesPerSecond);
     }
 
 [Trait("Category", "LegacySmoke")]

@@ -65,6 +65,22 @@ public interface ISessionSecuritySignalingTransport
     SessionSecurityState CurrentSessionSecurityState { get; }
 }
 
+public interface ITransportAccelerationStatus
+{
+    event EventHandler<TransportAccelerationStateChangedEventArgs>? TransportAccelerationStateChanged;
+
+    bool IsTransportAccelerationActive { get; }
+
+    string TransportAccelerationStatusReason { get; }
+}
+
+public interface ITransportAccelerationControl
+{
+    Task RequestAccelerationNegotiationAsync(string reason, CancellationToken ct);
+
+    Task StopAccelerationAsync(string reason, CancellationToken ct);
+}
+
 public sealed class IncomingJoinRequestEventArgs : EventArgs
 {
     private readonly Func<ApprovalDecision?, CancellationToken, Task> approveAsync;
@@ -203,4 +219,17 @@ public sealed class TransportSessionSecurityStateChangedEventArgs : EventArgs
     }
 
     public SessionSecurityState State { get; }
+}
+
+public sealed class TransportAccelerationStateChangedEventArgs : EventArgs
+{
+    public TransportAccelerationStateChangedEventArgs(bool isActive, string reason)
+    {
+        IsActive = isActive;
+        Reason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
+    }
+
+    public bool IsActive { get; }
+
+    public string Reason { get; }
 }

@@ -93,7 +93,7 @@ public sealed class TransportRuntimeConfig
 
     public string AllowStatusText => "Connected";
 
-    public static TransportRuntimeConfig Select()
+    public static TransportRuntimeConfig Select(Func<ISignalingTransport>? nknTransportFactory = null)
     {
         var (transportSetting, settingSource) = ReadTransportSetting();
         var normalizedSetting = string.IsNullOrWhiteSpace(transportSetting) ? "(not set)" : transportSetting.Trim();
@@ -153,7 +153,7 @@ public sealed class TransportRuntimeConfig
         }
 
         var config = useNkn
-            ? CreateNknConfig(bridgeBundled, bridgeProbeReason, buildMode, normalizedSetting, hasExplicitSetting, settingSource, forcedByEnvironment, autoSelected, startupWarningText, configurationErrorText)
+            ? CreateNknConfig(bridgeBundled, bridgeProbeReason, buildMode, normalizedSetting, hasExplicitSetting, settingSource, forcedByEnvironment, autoSelected, startupWarningText, configurationErrorText, nknTransportFactory)
             : CreateDevLocalConfig(bridgeBundled, bridgeProbeReason, buildMode, normalizedSetting, hasExplicitSetting, settingSource, forcedByEnvironment, autoSelected, startupWarningText, configurationErrorText);
 
         AppLog.Info(
@@ -172,7 +172,8 @@ public sealed class TransportRuntimeConfig
         bool forcedByEnvironment,
         bool autoSelected,
         string? startupWarningText,
-        string? configurationErrorText)
+        string? configurationErrorText,
+        Func<ISignalingTransport>? nknTransportFactory)
     {
         var policy = ReadBridgeReusePolicy();
         return new TransportRuntimeConfig(
@@ -191,7 +192,7 @@ public sealed class TransportRuntimeConfig
             startupWarningText: startupWarningText,
             configurationErrorText: configurationErrorText,
             bridgeReusePolicy: policy,
-            createTransport: static () => new NknSignalingTransport());
+            createTransport: nknTransportFactory ?? (() => new NknSignalingTransport()));
     }
 
     private static TransportRuntimeConfig CreateDevLocalConfig(

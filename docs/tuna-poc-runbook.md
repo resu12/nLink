@@ -2,6 +2,8 @@
 
 This is a standalone proof of concept. It must not be treated as an nLink transport integration and it must not be used with real support-session payloads.
 
+For the integrated nLink Tuna runtime design, wallet UX, payer rules, caps, and fallback behavior, see [`docs/nkn-tuna-implementation.md`](nkn-tuna-implementation.md).
+
 ## Build
 
 ```powershell

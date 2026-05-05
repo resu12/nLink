@@ -1,5 +1,7 @@
 # File-Transfer Operability
 
+For the runtime architecture and current V4 data-session pipeline, see `docs/file-transfer-implementation.md`.
+
 Start every retained file-transfer investigation with:
 
 ```powershell

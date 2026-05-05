@@ -77,6 +77,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private string codeInput = string.Empty;
     private string statusText = string.Empty;
     private string connectionState = "Idle";
+    private bool isTunaActive;
+    private string tunaStatusReason = "inactive";
     private string chatDraft = string.Empty;
     private string failureTitle = string.Empty;
     private string failureMessage = string.Empty;
@@ -230,6 +232,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         sessionRuntime.FlowSnapshotChanged += OnFlowSnapshotChanged;
         sessionRuntime.SessionSecurityStateChanged += OnSessionSecurityStateChanged;
+        sessionRuntime.TransportAccelerationStateChanged += OnTransportAccelerationStateChanged;
         sessionRuntime.TransientStatusChanged += OnTransientStatusChanged;
         sessionRuntime.Approved += OnApproved;
         sessionRuntime.Rejected += OnRejected;
@@ -298,6 +301,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
         ApplySessionBannerPolicy();
         UpdateUiFromSnapshot();
+        SyncTunaActiveFromRuntime();
         BeginBootstrapHelperIdentityResolution();
         if (!IsStartupBlocked)
         {
@@ -723,6 +727,18 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                     _ => !string.IsNullOrWhiteSpace(StatusText) ? StatusText : "Ready",
                 });
 
+    public bool IsTunaActive
+    {
+        get => isTunaActive;
+        private set => SetProperty(ref isTunaActive, value);
+    }
+
+    public string TunaStatusReason
+    {
+        get => tunaStatusReason;
+        private set => SetProperty(ref tunaStatusReason, string.IsNullOrWhiteSpace(value) ? "inactive" : value.Trim());
+    }
+
     public SessionUiPhase EffectivePhase
     {
         get => effectivePhase;
@@ -1020,6 +1036,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         sessionRuntime.FlowSnapshotChanged -= OnFlowSnapshotChanged;
         sessionRuntime.SessionSecurityStateChanged -= OnSessionSecurityStateChanged;
+        sessionRuntime.TransportAccelerationStateChanged -= OnTransportAccelerationStateChanged;
         sessionRuntime.TransientStatusChanged -= OnTransientStatusChanged;
         sessionRuntime.Approved -= OnApproved;
         sessionRuntime.Rejected -= OnRejected;
@@ -2971,6 +2988,22 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         _ = UiThreadDispatch.RunAsync(SyncFromRuntime);
+    }
+
+    private void OnTransportAccelerationStateChanged(object? sender, EventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(SyncTunaActiveFromRuntime);
+    }
+
+    private void SyncTunaActiveFromRuntime()
+    {
+        IsTunaActive = sessionRuntime.IsTransportAccelerationActive;
+        TunaStatusReason = sessionRuntime.TransportAccelerationStatusReason;
     }
 
     private void OnHelperListenerBootstrapSnapshotChanged(object? sender, EventArgs e)

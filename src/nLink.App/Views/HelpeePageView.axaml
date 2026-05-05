@@ -46,6 +46,8 @@
                   RowSpacing="8">
 
                 <views:SessionShellView RoleText="Helpee"
+                                        TunaActive="{Binding IsTunaActive}"
+                                        TunaStatusReason="{Binding TunaStatusReason}"
                                         HorizontalAlignment="Stretch"
                                         VerticalAlignment="Stretch"
                                         ShowScreenShareAction="True"

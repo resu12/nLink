@@ -54,6 +54,7 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
         var previousScreenShareTransportMaxFps = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS");
         var previousScreenShareTransportAutotune = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE");
         var previousScreenShareScale = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCALE");
+        var previousScreenShareQualityProfile = Environment.GetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_QUALITY_PROFILE");
         try
         {
             ReleaseOverridePolicy.ResetSuppressedOverridesForTests();
@@ -74,6 +75,7 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS", null);
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE", null);
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCALE", null);
+            Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_QUALITY_PROFILE", null);
             var config = TransportRuntimeConfig.Select();
             var inviteSecurity = InviteSecurityDiagnostics.Snapshot();
             using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());
@@ -130,9 +132,11 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
             Assert.Contains("screenshare_payload_bytes_sent:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_bridge_bytes_sent:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_capture_presets:", copied!, StringComparison.Ordinal);
-            Assert.Contains("balanced_default: capture_fps=15, transport_fps=8, scale=1.00", copied!, StringComparison.Ordinal);
-            Assert.Contains("high_quality: capture_fps=20, transport_fps=12, scale=1.00", copied!, StringComparison.Ordinal);
-            Assert.Contains("high_performance: capture_fps=10, transport_fps=6, scale=0.60", copied!, StringComparison.Ordinal);
+            Assert.Contains("screenshare_quality_profile: normal", copied!, StringComparison.Ordinal);
+            Assert.Contains("balanced_default: capture_fps=15, transport_fps=8, max=1440x810, scale=1.00, quality_profile=normal", copied!, StringComparison.Ordinal);
+            Assert.Contains("high_quality: capture_fps=20, transport_fps=12, max=1440x810, scale=1.00, quality_profile=normal", copied!, StringComparison.Ordinal);
+            Assert.Contains("tuna_quality: capture_fps=30, transport_fps=15, max=1600x900, scale=1.00, quality_profile=tuna_quality", copied!, StringComparison.Ordinal);
+            Assert.Contains("high_performance: capture_fps=10, transport_fps=6, max=864x486, scale=0.60, quality_profile=normal", copied!, StringComparison.Ordinal);
             Assert.Contains("Screenshare evidence", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_evidence_status:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_operator_verdict:", copied!, StringComparison.Ordinal);
@@ -190,6 +194,7 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS", previousScreenShareTransportMaxFps);
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE", previousScreenShareTransportAutotune);
             Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_SCALE", previousScreenShareScale);
+            Environment.SetEnvironmentVariable("NLINK_FEATURE_SCREENCAP_QUALITY_PROFILE", previousScreenShareQualityProfile);
         }
     }
 
@@ -419,14 +424,13 @@ public void ScreenShareEvidenceLocator_BuildsCompactSupportSummaries_FromRetaine
 }
 
 [Fact]
-public void DiagnosticsPageViewModel_UsesSupportFirstLabels_AndHidesEmptyBugReport()
+public void DiagnosticsPageViewModel_UsesOptionsLabels_AndHidesEmptyBugReport()
 {
     var config = CreateDevLocalTestConfig();
     using var vm = new DiagnosticsPageViewModel(static () => { }, config, linksConfig: new ShareMessageConfig(null));
     using var bugVm = new DiagnosticsPageViewModel(static () => { }, config, linksConfig: new ShareMessageConfig(null, "https://example.test/repo"));
 
-    Assert.Equal("Diagnostics", vm.PageTitle);
-    Assert.Contains("Support status", vm.PageSubtitle, StringComparison.Ordinal);
+    Assert.Equal("Options", vm.PageTitle);
     Assert.False(vm.ShowReportBug);
     Assert.True(bugVm.ShowReportBug);
     Assert.Equal("(none)", vm.ScreenShareLiveProfileSummary);
@@ -439,58 +443,129 @@ public void DiagnosticsPageViewModel_ScreenSharePresetCommands_UpdateDisplayedSu
     var previousMaxFps = Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable);
     var previousTransportMaxFps = Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable);
     var previousScale = Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareScaleVariable);
+    var previousQualityProfile = Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareQualityProfileVariable);
     try
     {
         ScreenShareQualitySettings.ResetMigrationStateForTests();
         Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable, "10");
         Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable, "8");
         Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareScaleVariable, "1");
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareQualityProfileVariable, FeatureFlags.ScreenShareQualityProfileNormal);
         var config = CreateDevLocalTestConfig();
         var changed = new List<string?>();
         using var vm = new DiagnosticsPageViewModel(
             static () => { },
             config,
             linksConfig: new ShareMessageConfig(null),
-            screenSharePresetPersistence: static (_, _, _, _) => { });
+            screenSharePresetPersistence: static (_, _, _, _, _) => { });
         vm.PropertyChanged += (_, args) => changed.Add(args.PropertyName);
 
-        Assert.Equal("preset=Custom; capture_fps=10; transport_fps=8; scale=1; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
+        Assert.Equal("preset=Custom; capture_fps=10; transport_fps=8; scale=1; quality_profile=normal; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
         Assert.True(vm.ShowScreenShareResetHint);
 
         vm.ApplyHighQualityScreenSharePresetCommand.Execute(null);
 
-        Assert.Equal("preset=High quality; capture_fps=20; transport_fps=12; scale=1; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
+        Assert.Equal("preset=High quality; capture_fps=20; transport_fps=12; scale=1; quality_profile=normal; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
         Assert.False(vm.ShowScreenShareResetHint);
         Assert.Contains(nameof(DiagnosticsPageViewModel.AdvancedScreenShareSettingsSummary), changed);
         Assert.Contains(nameof(DiagnosticsPageViewModel.ShowScreenShareResetHint), changed);
+
+        vm.ApplyTunaQualityScreenSharePresetCommand.Execute(null);
+
+        Assert.Equal("preset=Tuna quality; capture_fps=30; transport_fps=15; scale=1; quality_profile=tuna_quality; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
+        Assert.Equal("30", Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable));
+        Assert.Equal("15", Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable));
+        Assert.Equal("1", Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareScaleVariable));
+        Assert.Equal(FeatureFlags.ScreenShareQualityProfileTunaQuality, Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareQualityProfileVariable));
+
+        vm.ApplyBalancedScreenSharePresetCommand.Execute(null);
+
+        Assert.Equal(FeatureFlags.ScreenShareQualityProfileNormal, Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareQualityProfileVariable));
     }
     finally
     {
         Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable, previousMaxFps);
         Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable, previousTransportMaxFps);
         Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareScaleVariable, previousScale);
+        Environment.SetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareQualityProfileVariable, previousQualityProfile);
         ScreenShareQualitySettings.ResetMigrationStateForTests();
     }
 }
 
 [Fact]
-public void DiagnosticsPageView_KeepsPrimarySurfaceSupportFocused()
+public void DiagnosticsPageView_UsesOptionsTabs()
 {
     var viewPath = FindFileUpwards(Path.Combine("src", "nLink.App", "Views", "DiagnosticsPageView.axaml"));
     var xaml = File.ReadAllText(viewPath);
 
+    Assert.Contains("Header=\"Settings\"", xaml, StringComparison.Ordinal);
+    Assert.Contains("Header=\"Wallet\"", xaml, StringComparison.Ordinal);
+    Assert.Contains("Header=\"Diagnostics\"", xaml, StringComparison.Ordinal);
     Assert.Contains("Copy diagnostics", xaml, StringComparison.Ordinal);
     Assert.Contains("Save Hang Report", xaml, StringComparison.Ordinal);
     Assert.Contains("Open logs folder", xaml, StringComparison.Ordinal);
     Assert.Contains("Screen share health", xaml, StringComparison.Ordinal);
-    Assert.Contains("Advanced diagnostics", xaml, StringComparison.Ordinal);
+    Assert.Contains("Tuna (experimental)", xaml, StringComparison.Ordinal);
+    Assert.Contains("Tuna can speed up screen sharing and file transfers", xaml, StringComparison.Ordinal);
+    Assert.Contains("if Tuna is unavailable, nLink keeps using regular NKN automatically", xaml, StringComparison.Ordinal);
+    Assert.Contains("Link wallet.json", xaml, StringComparison.Ordinal);
+    Assert.Contains("Unlock for this session", xaml, StringComparison.Ordinal);
+    Assert.DoesNotContain("Advanced diagnostics", xaml, StringComparison.Ordinal);
     Assert.Contains("Balanced", xaml, StringComparison.Ordinal);
+    Assert.Contains("ScreenSharePresetBalanced", xaml, StringComparison.Ordinal);
     Assert.Contains("High quality", xaml, StringComparison.Ordinal);
+    Assert.Contains("ScreenSharePresetHighQuality", xaml, StringComparison.Ordinal);
+    Assert.Contains("Tuna quality", xaml, StringComparison.Ordinal);
+    Assert.Contains("ScreenSharePresetTunaQuality", xaml, StringComparison.Ordinal);
     Assert.Contains("High performance", xaml, StringComparison.Ordinal);
+    Assert.Contains("ScreenSharePresetHighPerformance", xaml, StringComparison.Ordinal);
+    Assert.Contains("Tuna quality uses more bandwidth", xaml, StringComparison.Ordinal);
     Assert.DoesNotContain("Feature Flags", xaml, StringComparison.Ordinal);
     Assert.DoesNotContain("ScreenShare Capture Tuning", xaml, StringComparison.Ordinal);
     Assert.DoesNotContain("Apply CPU saver", xaml, StringComparison.Ordinal);
     Assert.DoesNotContain("Apply sharper text", xaml, StringComparison.Ordinal);
+}
+
+[Fact]
+public void SessionHeaderTunaUnlock_DialogFlowStaysOnUiThread()
+{
+    var viewPath = FindFileUpwards(Path.Combine("src", "nLink.App", "Views", "SessionHeaderView.axaml.cs"));
+    var source = File.ReadAllText(viewPath);
+    var start = source.IndexOf("private async void TunaUnlockToggle_Click", StringComparison.Ordinal);
+    var end = source.IndexOf("private void SubscribeTunaRuntimeStateChanged", StringComparison.Ordinal);
+
+    Assert.True(start >= 0, "Expected Tuna unlock click handler.");
+    Assert.True(end > start, "Expected Tuna unlock click handler to precede runtime subscription code.");
+
+    var handler = source[start..end];
+    Assert.Contains("WalletPasswordDialog.ShowAsync", handler, StringComparison.Ordinal);
+    Assert.DoesNotContain("ConfigureAwait(false)", handler, StringComparison.Ordinal);
+}
+
+[Fact]
+public void SessionHeaderTunaIcon_DoesNotPulseWhileWalletLocked()
+{
+    var viewPath = FindFileUpwards(Path.Combine("src", "nLink.App", "Views", "SessionHeaderView.axaml.cs"));
+    var source = File.ReadAllText(viewPath);
+    var applyStart = source.IndexOf("private void ApplyTunaUnlockToggleState", StringComparison.Ordinal);
+
+    Assert.True(applyStart >= 0, "Expected Tuna unlock toggle state method.");
+    Assert.Contains("var pulsing = !active && tunaUnlockToggleOn && ShouldPulseTunaStatus(reason);", source, StringComparison.Ordinal);
+    Assert.Contains("if (TunaActive || !tunaUnlockToggleOn || !ShouldPulseTunaStatus(TunaStatusReason))", source, StringComparison.Ordinal);
+    Assert.Contains("UpdateTunaVisualState();", source[applyStart..], StringComparison.Ordinal);
+}
+
+[Fact]
+public void SessionHeaderTunaSwitch_OverridesCompactButtonMinimumWidth()
+{
+    var viewPath = FindFileUpwards(Path.Combine("src", "nLink.App", "Views", "SessionHeaderView.axaml"));
+    var xaml = File.ReadAllText(viewPath);
+    var start = xaml.IndexOf("AutomationProperties.AutomationId=\"SessionHeader.TunaUnlockToggle\"", StringComparison.Ordinal);
+
+    Assert.True(start >= 0, "Expected Tuna unlock toggle markup.");
+    var toggleMarkup = xaml[start..Math.Min(xaml.Length, start + 500)];
+    Assert.Contains("MinWidth=\"0\"", toggleMarkup, StringComparison.Ordinal);
+    Assert.Contains("HorizontalContentAlignment=\"Left\"", toggleMarkup, StringComparison.Ordinal);
 }
 
 [Fact]

@@ -13,6 +13,7 @@
 
 - Release version sources and packaging defaults now resolve to `0.7.0`.
 - README and release-facing documentation now reflect `0.7.0` as the current release.
+- Packaging now rejects stale bridge manifests whose `appVersion` does not match `VERSION`, so bridge bundles must be regenerated after version bumps.
 - Tuna remains default-off and developer-gated; a linked or funded wallet does not change runtime transport behavior by itself.
 - Diagnostics copy/export redaction now covers Tuna wallet paths, wallet addresses, password-like fields, seeds, and private-key material.
 

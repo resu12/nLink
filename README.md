@@ -10,7 +10,7 @@ Minimal `.NET 8` / Avalonia desktop app for Windows with deterministic smoke tes
 
 ## Current Release (0.7.0)
 
-`0.7.0` is the current release. It keeps the H.264 screen-sharing and V4 file-transfer defaults, and adds the experimental Diagnostics Tuna wallet-linking UX while keeping Tuna runtime acceleration disabled unless explicitly enabled by developers.
+`0.7.0` is the current release. It keeps the H.264 screen-sharing and V4 file-transfer defaults, and adds the experimental Options Tuna wallet-linking UX while keeping Tuna runtime acceleration disabled unless explicitly enabled through the advanced opt-in path.
 
 ## Quick Start (Windows)
 
@@ -43,9 +43,9 @@ Remote control:
 ![Remote control session](docs/images/remote-control-0.4.5.png)
 
 If connection fails:
-Open Diagnostics -> Copy diagnostics and include it when reporting issues. If a screenshare soak artifact has already been analyzed, Diagnostics includes a compact screenshare evidence summary; for hangs or freezes, use Diagnostics -> Save Hang Report. See [`docs/supportability.md`](docs/supportability.md) for the support evidence checklist.
+Open Options -> Diagnostics -> Copy diagnostics and include it when reporting issues. If a screenshare soak artifact has already been analyzed, Options includes a compact screenshare evidence summary; for hangs or freezes, use Options -> Diagnostics -> Save Hang Report. See [`docs/supportability.md`](docs/supportability.md) for the support evidence checklist.
 
-For release-safe builds, Diagnostics should show:
+For release-safe builds, Options -> Diagnostics should show:
 - `invite_security_mode: issued_one_time_secret_invites`
 - `invite_public_flow: verified_helper_required`
 - `invite_security_release_ready: Yes`
@@ -57,7 +57,7 @@ Notes:
 - Windows x64 only
 - Current release (`0.7.0`)
 - Default screensharing uses H.264 video transport, with helper-side recovery protection for broken reference chains.
-- Advanced Diagnostics includes Balanced, High quality, and High performance screen-share presets.
+- Options -> Settings includes Balanced, High quality, Tuna quality, and High performance screen-share presets. Tuna quality is recommended for Tuna-enabled screen sharing and may use more bandwidth.
 - The helper-side cursor overlay, H.264 motion/keyframe safeguards, WGC GPU scaling, and same-apartment Win10 WGC teardown remain enabled.
 - Chat UX keeps `Enter` to send, `Shift+Enter` for a new line, stable pane sizing in chat-only and screen-sharing layouts, and message entry remains available during screen sharing.
 - File transfer in `0.7.0` is V4-only and single-file only. No folders, drag-and-drop, or resume after restart yet.
@@ -65,7 +65,7 @@ Notes:
 - Active file transfers can be paused, resumed, or canceled from either side when file transfer is allowed.
 - Received files are saved into the Windows Downloads folder by default, with a numbered suffix added automatically when the target name already exists.
 - Safe-by-default file size cap for `0.7.0`: `25 GiB`
-- Advanced Diagnostics exposes an experimental Tuna wallet-linking section for funding/status checks; linking a wallet does not start Tuna, spend NKN, or change the default transport.
+- Options -> Wallet exposes an experimental Tuna wallet-linking and runtime opt-in section; linking a wallet does not start Tuna, spend NKN, or change the default transport.
 - Large file transfers over NKN can still be noticeably slower than local or direct network copy. Live screenshare latency can also vary with NKN/network delivery.
 - Release exception: Windows artifacts for `0.7.0` are unsigned; verify downloads with `SHA256SUMS.txt`.
 - Installer path: `%LOCALAPPDATA%\Programs\nLink`
@@ -83,6 +83,12 @@ License:
   [`docs/test-lanes.md`](docs/test-lanes.md)
 - Screenshare operator guide:
   [`docs/screenshare-operability.md`](docs/screenshare-operability.md)
+- Screenshare implementation guide:
+  [`docs/screenshare-implementation.md`](docs/screenshare-implementation.md)
+- File transfer implementation guide:
+  [`docs/file-transfer-implementation.md`](docs/file-transfer-implementation.md)
+- NKN Tuna implementation guide:
+  [`docs/nkn-tuna-implementation.md`](docs/nkn-tuna-implementation.md)
 
 ## Build from source (developers)
 
@@ -215,7 +221,7 @@ Canonical bridge bundle artifact (built in Step 1):
 - `artifacts/bridge/win-x64/bridge-manifest.json`
 - `artifacts/bridge/win-x64/bridge-dependencies.json`
 
-The bridge is built from a clean `npm ci` restore (`npm ci --ignore-scripts --no-audit --no-fund`) against `tools/nkn-bridge/package-lock.json`, bundled with `ncc`, and paired with a pinned Node.js runtime. The Node archive SHA-256 is verified during bootstrap, and the shipped bridge records `nodeModulesShipped=false`; there is no shipped `node_modules` tree. The installer step copies this artifact into the helper app output/install, so the end user does not need Node.js installed.
+The bridge is built from a clean `npm ci` restore (`npm ci --ignore-scripts --no-audit --no-fund`) against `tools/nkn-bridge/package-lock.json`, bundled with `ncc`, and paired with a pinned Node.js runtime. The Node archive SHA-256 is verified during bootstrap, and the shipped bridge records `nodeModulesShipped=false`; there is no shipped `node_modules` tree. The bridge manifest also records the app release version from `VERSION`, and packaging rejects stale bridge manifests after version bumps. The installer step copies this artifact into the helper app output/install, so the end user does not need Node.js installed.
 
 Bundled runtime location inside the app output/install (required Release layout):
 
@@ -258,6 +264,6 @@ Run the test (same PC, two app instances):
 8. Send chat messages both ways and confirm they appear on both sides.
 
 If it fails (copy diagnostics):
-1. In the app, open `Diagnostics`
+1. In the app, open `Options`
 2. Click `Copy diagnostics`
 3. Include the copied text when reporting the issue

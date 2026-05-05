@@ -29,6 +29,60 @@ public sealed class TransportScreenShareCoordinatorAutoTuneTests : ScreenShareCo
 
 [Fact]
     [Trait("Category", "Smoke")]
+    public void TransportScreenShareCoordinator_NormalProfile_CapsNormalSenderTargetAtCurrentBaseline()
+    {
+        using var profileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileNormal);
+        using var transportFpsOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable,
+            "15");
+
+        var method = typeof(TransportScreenShareCoordinator).GetMethod(
+            "ResolveSenderTargetFramesPerSecond",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var target = (int)method!.Invoke(
+            null,
+            [ScreenShareSenderFreshnessMode.Normal, FeatureFlags.ScreenShareTransportMaxFps, false])!;
+
+        Assert.Equal(8, target);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
+    public void TransportScreenShareCoordinator_TunaQualityProfile_AllowsNormalSenderTarget15()
+    {
+        using var profileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileTunaQuality);
+        using var transportFpsOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable,
+            "15");
+
+        var method = typeof(TransportScreenShareCoordinator).GetMethod(
+            "ResolveSenderTargetFramesPerSecond",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var normalTarget = (int)method!.Invoke(
+            null,
+            [ScreenShareSenderFreshnessMode.Normal, FeatureFlags.ScreenShareTransportMaxFps, false])!;
+        var reducedTarget = (int)method.Invoke(
+            null,
+            [ScreenShareSenderFreshnessMode.Reduced, FeatureFlags.ScreenShareTransportMaxFps, false])!;
+        var catchUpTarget = (int)method.Invoke(
+            null,
+            [ScreenShareSenderFreshnessMode.CatchUp, FeatureFlags.ScreenShareTransportMaxFps, false])!;
+
+        Assert.Equal(15, normalTarget);
+        Assert.Equal(5, reducedTarget);
+        Assert.Equal(3, catchUpTarget);
+    }
+
+[Fact]
+    [Trait("Category", "Smoke")]
     public async Task TransportScreenShareCoordinator_AutoTuneHint_ResetsAcrossStopRestart()
     {
         using var autoTuneFlag = new EnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE", "1");

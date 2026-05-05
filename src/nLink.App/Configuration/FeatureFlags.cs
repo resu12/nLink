@@ -7,6 +7,8 @@ namespace NLink.App.Configuration;
 public static class FeatureFlags
 {
     public const string AllowInsecureRemoteControlSeqGateOverrideEnvVar = "NLINK_ALLOW_INSECURE_REMOTE_CONTROL_SEQ_GATE_OVERRIDE";
+    public const string ScreenShareQualityProfileNormal = "normal";
+    public const string ScreenShareQualityProfileTunaQuality = "tuna_quality";
 
     public static bool UsePhaseDrivenGating { get; } = false;
 
@@ -41,13 +43,20 @@ public static class FeatureFlags
         ReadIntEnvironmentOverride("NLINK_FEATURE_SCREENCAP_MAX_FPS", defaultValue: 15, minValue: 1, maxValue: 30);
 
     public static int ScreenShareTransportMaxFps =>
-        ReadIntEnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS", defaultValue: 8, minValue: 1, maxValue: 12);
+        ReadIntEnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS", defaultValue: 8, minValue: 1, maxValue: 15);
 
     public static bool ScreenShareTransportAutoTuneEnabled =>
         ReadBoolEnvironmentOverride("NLINK_FEATURE_SCREENCAP_TRANSPORT_AUTOTUNE", defaultValue: true);
 
     public static double ScreenShareScale =>
         ReadDoubleEnvironmentOverride("NLINK_FEATURE_SCREENCAP_SCALE", defaultValue: 1d, minValue: 0.25d, maxValue: 1d);
+
+    public static string ScreenShareQualityProfile =>
+        ReadStringEnvironmentOverride(
+            "NLINK_FEATURE_SCREENCAP_QUALITY_PROFILE",
+            defaultValue: ScreenShareQualityProfileNormal,
+            ScreenShareQualityProfileNormal,
+            ScreenShareQualityProfileTunaQuality);
 
     public static bool EnableSessionHeader { get; } =
         ReadBoolEnvironmentOverride("NLINK_FEATURE_SESSION_HEADER", defaultValue: true);
@@ -163,6 +172,26 @@ public static class FeatureFlags
             }
 
             return Math.Clamp(parsed, minValue, maxValue);
+        }
+
+        return defaultValue;
+    }
+
+    private static string ReadStringEnvironmentOverride(string variableName, string defaultValue, params string[] allowedValues)
+    {
+        var raw = Environment.GetEnvironmentVariable(variableName);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return defaultValue;
+        }
+
+        var normalized = raw.Trim().ToLowerInvariant();
+        foreach (var allowedValue in allowedValues)
+        {
+            if (string.Equals(normalized, allowedValue, StringComparison.Ordinal))
+            {
+                return allowedValue;
+            }
         }
 
         return defaultValue;

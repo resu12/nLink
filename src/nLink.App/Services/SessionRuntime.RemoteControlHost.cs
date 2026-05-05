@@ -2115,6 +2115,30 @@ public sealed partial class SessionRuntime
         ApplyTransportSecurityState(e.State);
     }
 
+    private void OnTransportAccelerationStateChanged(object? sender, TransportAccelerationStateChangedEventArgs e)
+    {
+        if (!IsFromCurrentTransport(sender))
+        {
+            return;
+        }
+
+        SetTransportAccelerationActive(e.IsActive, e.Reason);
+    }
+
+    private void SetTransportAccelerationActive(bool isActive, string reason)
+    {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "unknown" : reason.Trim();
+        if (transportAccelerationActive == isActive &&
+            string.Equals(transportAccelerationStatusReason, normalizedReason, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        transportAccelerationActive = isActive;
+        transportAccelerationStatusReason = normalizedReason;
+        TransportAccelerationStateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     private void ApplyTransportSecurityState(SessionSecurityState transportState)
     {
         ArgumentNullException.ThrowIfNull(transportState);

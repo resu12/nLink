@@ -14,7 +14,7 @@ namespace NLink.Core.ScreenShare;
 // 0.3.0 RC: protocol freeze - additive changes only.
 public sealed class ScreenShareFrameSendPipeline : IAsyncDisposable
 {
-    public const int MaxFramesPerSecond = 12;
+    public const int MaxFramesPerSecond = 15;
     public const int MaxBufferedFrames = 1;
     private const int MaxBufferedFramesWithRecoveryReserve = 4;
 #if DEBUG

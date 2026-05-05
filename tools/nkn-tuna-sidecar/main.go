@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"os"
@@ -54,14 +55,17 @@ const (
 	frameTypePong         byte   = 4
 	frameTypeClose        byte   = 5
 
-	bridgeTraceFirstFrames = 16
-	bridgeTraceEveryFrames = 128
-	streamHelloTimeout     = 10 * time.Second
-	providerWatchInterval  = 5 * time.Second
-	bridgeIdleGapThreshold = 2 * time.Second
-	bridgeSlowOpThreshold  = 2 * time.Second
-	providerReadyMinPaths  = 4
-	providerReadyTimeout   = 45 * time.Second
+	bridgeTraceFirstFrames  = 16
+	bridgeTraceEveryFrames  = 128
+	bridgeTraceFirstSeqGaps = 4
+	bridgeTraceEverySeqGaps = 128
+	bridgeSeqGapWarnMissing = 16
+	streamHelloTimeout      = 10 * time.Second
+	providerWatchInterval   = 5 * time.Second
+	bridgeIdleGapThreshold  = 2 * time.Second
+	bridgeSlowOpThreshold   = 2 * time.Second
+	providerReadyMinPaths   = 4
+	providerReadyTimeout    = 45 * time.Second
 )
 
 type config struct {
@@ -97,6 +101,117 @@ type emitter struct {
 
 type event map[string]any
 
+type paymentLogObserver struct {
+	emit       *emitter
+	stderr     io.Writer
+	mu         sync.Mutex
+	buffer     string
+	cumulative *big.Rat
+	eventCount int64
+	bytesMoved *atomic.Int64
+}
+
+var activePaymentObserver *paymentLogObserver
+
+func newPaymentLogObserver(emit *emitter, stderr io.Writer) *paymentLogObserver {
+	observer := &paymentLogObserver{
+		emit:       emit,
+		stderr:     stderr,
+		cumulative: new(big.Rat),
+	}
+	activePaymentObserver = observer
+	return observer
+}
+
+func (o *paymentLogObserver) Write(p []byte) (int, error) {
+	if o.stderr != nil {
+		_, _ = o.stderr.Write(p)
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.buffer += string(p)
+	for {
+		idx := strings.IndexByte(o.buffer, '\n')
+		if idx < 0 {
+			break
+		}
+
+		line := strings.TrimSpace(o.buffer[:idx])
+		o.buffer = o.buffer[idx+1:]
+		o.observeLineLocked(line)
+	}
+
+	return len(p), nil
+}
+
+func (o *paymentLogObserver) observeLineLocked(line string) {
+	const marker = "send nanopay success:"
+	idx := strings.Index(line, marker)
+	if idx < 0 {
+		return
+	}
+
+	amountText := strings.TrimSpace(line[idx+len(marker):])
+	if fields := strings.Fields(amountText); len(fields) > 0 {
+		amountText = fields[0]
+	}
+
+	amount, ok := new(big.Rat).SetString(amountText)
+	if !ok || amount.Sign() < 0 {
+		return
+	}
+
+	o.cumulative.Add(o.cumulative, amount)
+	o.eventCount++
+	var bytesMoved int64
+	if o.bytesMoved != nil {
+		bytesMoved = o.bytesMoved.Load()
+	}
+
+	payment := event{
+		"event":              "tuna_payment",
+		"amountNkn":          ratDecimalString(amount, 8),
+		"cumulativeSpendNkn": ratDecimalString(o.cumulative, 8),
+		"bytesMoved":         bytesMoved,
+	}
+	if bytesMoved > 0 {
+		mb := new(big.Rat).SetFrac(big.NewInt(bytesMoved), big.NewInt(1_000_000))
+		nknPerMb := new(big.Rat).Quo(o.cumulative, mb)
+		payment["nknPerMb"] = ratDecimalString(nknPerMb, 9)
+	}
+
+	o.emit.emit(payment)
+}
+
+func (o *paymentLogObserver) observeBytes(bytesMoved *atomic.Int64) func() {
+	if o == nil {
+		return func() {}
+	}
+
+	o.mu.Lock()
+	previous := o.bytesMoved
+	o.bytesMoved = bytesMoved
+	o.mu.Unlock()
+	return func() {
+		o.mu.Lock()
+		if o.bytesMoved == bytesMoved {
+			o.bytesMoved = previous
+		}
+		o.mu.Unlock()
+	}
+}
+
+func (o *paymentLogObserver) snapshot() (int64, *big.Rat) {
+	if o == nil {
+		return 0, new(big.Rat)
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.eventCount, new(big.Rat).Set(o.cumulative)
+}
+
 type walletInfo struct {
 	wallet  *nkn.Wallet
 	address string
@@ -126,6 +241,7 @@ type bridgeDirectionResult struct {
 	maxIdleGapMs        int64
 	seqGapCount         int64
 	seqGapMissing       int64
+	seqReorderCount     int64
 	lastFrameType       byte
 	lastFrameLane       byte
 	lastFrameSeq        uint64
@@ -134,6 +250,8 @@ type bridgeDirectionResult struct {
 
 func main() {
 	emit := &emitter{jsonl: hasArg(os.Args[1:], "--jsonl")}
+	paymentObserver := newPaymentLogObserver(emit, os.Stderr)
+	log.SetOutput(paymentObserver)
 	if err := run(os.Args[1:], emit); err != nil {
 		emit.emit(event{"event": "error", "reason": safeReason(err)})
 		os.Exit(1)
@@ -368,7 +486,7 @@ func runListen(ctx context.Context, cfg *config, emit *emitter) error {
 		return fmt.Errorf("Tuna listen failed: %w", err)
 	}
 	providerReady, providerReadyErr := waitForProviderPathReadiness(ctx, tunaClient, providerReadyMinPaths, providerReadyTimeout, emit, "listener")
-	if providerReadyErr != nil {
+	if providerReadyErr != nil && ctx.Err() != nil {
 		return providerReadyErr
 	}
 	emit.emit(event{
@@ -376,6 +494,7 @@ func runListen(ctx context.Context, cfg *config, emit *emitter) error {
 		"role":           "listener",
 		"durationMs":     time.Since(listenStarted).Milliseconds(),
 		"providerReady":  providerReady,
+		"providerReason": safeReason(providerReadyErr),
 		"minProviderCnt": providerReadyMinPaths,
 		"paths":          tunaProviderPathDiagnostics(tunaClient.GetPubAddrs()),
 	})
@@ -782,6 +901,9 @@ func bridgeConns(ctx context.Context, cfg *config, appConn net.Conn, tunaConn ne
 	ctx, cancel := context.WithTimeout(ctx, duration)
 	defer cancel()
 	var totalBytes atomic.Int64
+	if activePaymentObserver != nil {
+		defer activePaymentObserver.observeBytes(&totalBytes)()
+	}
 	errCh := make(chan bridgeDirectionResult, 2)
 	bridgeStarted := time.Now()
 	emit.emit(event{
@@ -834,16 +956,24 @@ doneCollectingBridgeResults:
 		emit.emit(stoppedEvent)
 		directionSummaries = append(directionSummaries, bridgeDirectionEvent(stopped))
 	}
+	paymentEventCount := int64(0)
+	cumulativeSpend := new(big.Rat)
+	if activePaymentObserver != nil {
+		paymentEventCount, cumulativeSpend = activePaymentObserver.snapshot()
+	}
 	emit.emit(event{
-		"event":         "summary",
-		"transport":     "tuna",
-		"role":          role,
-		"bytesMoved":    totalBytes.Load(),
-		"durationMs":    time.Since(bridgeStarted).Milliseconds(),
-		"reason":        safeReason(err),
-		"stopDirection": result.direction,
-		"stopStage":     result.stage,
-		"directions":    directionSummaries,
+		"event":              "summary",
+		"transport":          "tuna",
+		"role":               role,
+		"bytesMoved":         totalBytes.Load(),
+		"durationMs":         time.Since(bridgeStarted).Milliseconds(),
+		"reason":             safeReason(err),
+		"stopDirection":      result.direction,
+		"stopStage":          result.stage,
+		"paymentObserved":    paymentEventCount > 0,
+		"paymentEventCount":  paymentEventCount,
+		"cumulativeSpendNkn": ratDecimalString(cumulativeSpend, 8),
+		"directions":         directionSummaries,
 	})
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 		return nil
@@ -873,6 +1003,7 @@ func bridgeDirection(
 	var maxIdleGapMs int64
 	var seqGapCount int64
 	var seqGapMissing int64
+	var seqReorderCount int64
 	var lastReadAt time.Time
 	lastSeqByLane := map[byte]uint64{}
 	finish := func(stage string, err error, frame sidecarFrame) {
@@ -891,6 +1022,7 @@ func bridgeDirection(
 			maxIdleGapMs:        maxIdleGapMs,
 			seqGapCount:         seqGapCount,
 			seqGapMissing:       seqGapMissing,
+			seqReorderCount:     seqReorderCount,
 			lastFrameType:       frame.typ,
 			lastFrameLane:       frame.lane,
 			lastFrameSeq:        frame.seq,
@@ -956,26 +1088,54 @@ func bridgeDirection(
 		}
 		if frame.typ == frameTypeData && frame.seq > 0 {
 			if previous, ok := lastSeqByLane[frame.lane]; ok && frame.seq != previous+1 {
-				missing := int64(0)
-				if frame.seq > previous+1 {
-					missing = int64(frame.seq - previous - 1)
+				if frame.seq <= previous {
+					seqReorderCount++
+					if shouldTraceBridgeFrame(seqReorderCount) {
+						emit.emit(event{
+							"event":           "bridge_sequence_reordered",
+							"transport":       "tuna",
+							"role":            role,
+							"direction":       direction,
+							"frameLane":       frameLaneName(frame.lane),
+							"previousSeq":     previous,
+							"currentSeq":      frame.seq,
+							"missingCount":    0,
+							"framesForwarded": framesForwarded,
+							"payloadBytes":    payloadBytes,
+							"seqReorderCount": seqReorderCount,
+							"seqGapCount":     seqGapCount,
+							"seqGapMissing":   seqGapMissing,
+						})
+					}
+				} else {
+					missing := int64(frame.seq - previous - 1)
+					seqGapCount++
+					seqGapMissing += missing
+					if missing >= bridgeSeqGapWarnMissing || shouldTraceBridgeSequenceGap(seqGapCount) {
+						eventName := "bridge_sequence_gap_observed"
+						if missing >= bridgeSeqGapWarnMissing {
+							eventName = "bridge_sequence_gap"
+						}
+						emit.emit(event{
+							"event":           eventName,
+							"transport":       "tuna",
+							"role":            role,
+							"direction":       direction,
+							"frameLane":       frameLaneName(frame.lane),
+							"previousSeq":     previous,
+							"currentSeq":      frame.seq,
+							"missingCount":    missing,
+							"framesForwarded": framesForwarded,
+							"payloadBytes":    payloadBytes,
+							"seqGapCount":     seqGapCount,
+							"seqGapMissing":   seqGapMissing,
+						})
+					}
+					lastSeqByLane[frame.lane] = frame.seq
 				}
-				seqGapCount++
-				seqGapMissing += missing
-				emit.emit(event{
-					"event":           "bridge_sequence_gap",
-					"transport":       "tuna",
-					"role":            role,
-					"direction":       direction,
-					"frameLane":       frameLaneName(frame.lane),
-					"previousSeq":     previous,
-					"currentSeq":      frame.seq,
-					"missingCount":    missing,
-					"framesForwarded": framesForwarded,
-					"payloadBytes":    payloadBytes,
-				})
+			} else {
+				lastSeqByLane[frame.lane] = frame.seq
 			}
-			lastSeqByLane[frame.lane] = frame.seq
 		}
 		moved := int64(len(frame.payload))
 		if totalBytes.Add(moved) > limitBytes {
@@ -1048,6 +1208,7 @@ func bridgeDirectionEvent(result bridgeDirectionResult) event {
 		"maxIdleGapMs":        result.maxIdleGapMs,
 		"seqGapCount":         result.seqGapCount,
 		"seqGapMissing":       result.seqGapMissing,
+		"seqReorderCount":     result.seqReorderCount,
 		"lastFrameType":       frameTypeName(result.lastFrameType),
 		"lastFrameLane":       frameLaneName(result.lastFrameLane),
 		"lastFrameSeq":        result.lastFrameSeq,
@@ -1058,6 +1219,11 @@ func bridgeDirectionEvent(result bridgeDirectionResult) event {
 func shouldTraceBridgeFrame(framesForwarded int64) bool {
 	return framesForwarded <= bridgeTraceFirstFrames ||
 		bridgeTraceEveryFrames > 0 && framesForwarded%bridgeTraceEveryFrames == 0
+}
+
+func shouldTraceBridgeSequenceGap(gapCount int64) bool {
+	return gapCount <= bridgeTraceFirstSeqGaps ||
+		bridgeTraceEverySeqGaps > 0 && gapCount%bridgeTraceEverySeqGaps == 0
 }
 
 func frameTypeName(typ byte) string {
@@ -1591,6 +1757,21 @@ func parseDecimal(raw, name string) (*big.Rat, error) {
 		return nil, usageError("%s must be a decimal number", name)
 	}
 	return r, nil
+}
+
+func ratDecimalString(value *big.Rat, precision int) string {
+	if value == nil {
+		return "0"
+	}
+
+	text := value.FloatString(precision)
+	text = strings.TrimRight(text, "0")
+	text = strings.TrimRight(text, ".")
+	if text == "" || text == "-0" {
+		return "0"
+	}
+
+	return text
 }
 
 func (e *emitter) emit(v any) {

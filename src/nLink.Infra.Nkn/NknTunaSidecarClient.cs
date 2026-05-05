@@ -10,6 +10,9 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
 {
     private const long TraceFirstFrames = 16;
     private const long TraceEveryFrames = 128;
+    private const long TraceFirstSequenceGaps = 4;
+    private const long TraceEverySequenceGaps = 128;
+    private const ulong SequenceGapWarningMissingThreshold = 16;
     private const long IdleWarmupThresholdMs = 500;
     private const int IdleWarmupDelayMs = 20;
     private const int ControlQueueWriteTimeoutMs = 1_000;
@@ -43,6 +46,8 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
     private long bulkFramesReceived;
     private long sendRejected;
     private long queueOverflow;
+    private long sequenceGap;
+    private long sequenceReordered;
     private long lastWriteUtcMs;
     private readonly long[] lastReceivedSequenceByLane = new long[byte.MaxValue + 1];
     private string lastUnavailableReason = string.Empty;
@@ -87,7 +92,9 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
             Volatile.Read(ref mediaFramesReceived),
             Volatile.Read(ref bulkFramesReceived),
             Volatile.Read(ref sendRejected),
-            Volatile.Read(ref queueOverflow));
+            Volatile.Read(ref queueOverflow),
+            Volatile.Read(ref sequenceGap),
+            Volatile.Read(ref sequenceReordered));
 
     public async Task<NknAccelerationLocalEndpoint> ConnectAsync(string endpoint, TimeSpan statusTimeout, CancellationToken ct)
     {
@@ -342,7 +349,7 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
 
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var channel = NknAccelerationLaneCodec.FromSidecarLane(frame.Lane);
-        var sequenceGap = TryObserveReceivedSequence((byte)frame.Lane, frame.Sequence, out var previousSequence, out var missingCount);
+        var sequenceObservation = ObserveReceivedSequence((byte)frame.Lane, frame.Sequence, out var previousSequence, out var missingCount);
         var received = Interlocked.Increment(ref framesReceived);
         IncrementReceived(frame.Lane);
         if (ShouldTraceFrame(received))
@@ -352,11 +359,31 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
                 $"event=tuna_sidecar_frame_received; channel={MapSidecarLane(frame.Lane)}; seq={frame.Sequence}; payload_bytes={frame.Payload.Length}; frames_received={received}");
         }
 
-        if (sequenceGap)
+        if (sequenceObservation == SequenceObservation.Gap)
         {
-            LocalOperationalLog.Warn(
-                "NKN.Tuna",
-                $"event=tuna_sidecar_sequence_gap; channel={MapSidecarLane(frame.Lane)}; previous_seq={previousSequence}; current_seq={frame.Sequence}; missing_count={missingCount}");
+            var gaps = Interlocked.Increment(ref sequenceGap);
+            if (missingCount >= SequenceGapWarningMissingThreshold)
+            {
+                LocalOperationalLog.Warn(
+                    "NKN.Tuna",
+                    $"event=tuna_sidecar_sequence_gap; channel={MapSidecarLane(frame.Lane)}; previous_seq={previousSequence}; current_seq={frame.Sequence}; missing_count={missingCount}; gap_count={gaps}");
+            }
+            else if (ShouldTraceSequenceGap(gaps))
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=tuna_sidecar_sequence_gap_observed; channel={MapSidecarLane(frame.Lane)}; previous_seq={previousSequence}; current_seq={frame.Sequence}; missing_count={missingCount}; gap_count={gaps}");
+            }
+        }
+        else if (sequenceObservation == SequenceObservation.Reordered)
+        {
+            var reordered = Interlocked.Increment(ref sequenceReordered);
+            if (ShouldTraceFrame(reordered))
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=tuna_sidecar_sequence_reordered; channel={MapSidecarLane(frame.Lane)}; previous_seq={previousSequence}; current_seq={frame.Sequence}; missing_count=0; reordered_count={reordered}");
+            }
         }
 
         MessageReceived?.Invoke(
@@ -372,28 +399,50 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
                 binaryFrameDecodedUtcMs: nowMs));
     }
 
-    private bool TryObserveReceivedSequence(byte lane, ulong sequence, out ulong previousSequence, out ulong missingCount)
+    private SequenceObservation ObserveReceivedSequence(byte lane, ulong sequence, out ulong previousSequence, out ulong missingCount)
     {
         previousSequence = 0;
         missingCount = 0;
         if (sequence == 0)
         {
-            return false;
+            return SequenceObservation.InOrder;
         }
 
-        var previous = (ulong)Interlocked.Exchange(ref lastReceivedSequenceByLane[lane], checked((long)sequence));
-        previousSequence = previous;
-        if (previous == 0 || sequence == previous + 1)
+        var next = checked((long)sequence);
+        while (true)
         {
-            return false;
-        }
+            var previousLong = Volatile.Read(ref lastReceivedSequenceByLane[lane]);
+            var previous = (ulong)previousLong;
+            previousSequence = previous;
 
-        if (sequence > previous + 1)
-        {
+            if (previous == 0 || sequence == previous + 1)
+            {
+                if (Interlocked.CompareExchange(ref lastReceivedSequenceByLane[lane], next, previousLong) == previousLong)
+                {
+                    return SequenceObservation.InOrder;
+                }
+
+                continue;
+            }
+
+            if (sequence <= previous)
+            {
+                return SequenceObservation.Reordered;
+            }
+
             missingCount = sequence - previous - 1;
+            if (Interlocked.CompareExchange(ref lastReceivedSequenceByLane[lane], next, previousLong) == previousLong)
+            {
+                return SequenceObservation.Gap;
+            }
         }
+    }
 
-        return true;
+    private enum SequenceObservation
+    {
+        InOrder,
+        Gap,
+        Reordered,
     }
 
     private void MarkUnavailable(string reason)
@@ -516,6 +565,10 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
     private static bool ShouldTraceFrame(long count)
         => count <= TraceFirstFrames ||
            TraceEveryFrames > 0 && count % TraceEveryFrames == 0;
+
+    private static bool ShouldTraceSequenceGap(long count)
+        => count <= TraceFirstSequenceGaps ||
+           TraceEverySequenceGaps > 0 && count % TraceEverySequenceGaps == 0;
 
     private static string MapSidecarLane(NknTunaSidecarLane lane)
         => lane switch

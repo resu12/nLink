@@ -76,6 +76,8 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     private string connectionStatus = "Waiting for helper…";
     private string connectionState = "Waiting";
     private HelpeeConnectionViewState connectionViewState = HelpeeConnectionViewState.Waiting;
+    private bool isTunaActive;
+    private string tunaStatusReason = "inactive";
     private string chatDraft = string.Empty;
     private string failureTitle = string.Empty;
     private string failureMessage = string.Empty;
@@ -272,6 +274,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         sessionRuntime.FlowSnapshotChanged += OnFlowSnapshotChanged;
         sessionRuntime.SessionSecurityStateChanged += OnSessionSecurityStateChanged;
+        sessionRuntime.TransportAccelerationStateChanged += OnTransportAccelerationStateChanged;
         sessionRuntime.TransientStatusChanged += OnTransientStatusChanged;
         sessionRuntime.IncomingJoinRequestAvailable += OnIncomingJoinRequestAvailable;
         sessionRuntime.HelpRequestDecisionAvailable += OnHelpRequestDecisionAvailable;
@@ -344,6 +347,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         InitializeCaptureTargetSelection();
         ApplySessionBannerPolicy();
         UpdateUiFromSnapshot();
+        SyncTunaActiveFromRuntime();
     }
 
     public string ShareInvite => shareInviteText;
@@ -715,6 +719,18 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
     public string SecondaryActionText => IsConnectedView ? "Disconnect" : "Refresh invite";
 
     public string HeaderStatusText => BuildHeaderStatusText();
+
+    public bool IsTunaActive
+    {
+        get => isTunaActive;
+        private set => SetProperty(ref isTunaActive, value);
+    }
+
+    public string TunaStatusReason
+    {
+        get => tunaStatusReason;
+        private set => SetProperty(ref tunaStatusReason, string.IsNullOrWhiteSpace(value) ? "inactive" : value.Trim());
+    }
 
     public string FailureTitle
     {
@@ -1287,6 +1303,7 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
 
         sessionRuntime.FlowSnapshotChanged -= OnFlowSnapshotChanged;
         sessionRuntime.SessionSecurityStateChanged -= OnSessionSecurityStateChanged;
+        sessionRuntime.TransportAccelerationStateChanged -= OnTransportAccelerationStateChanged;
         sessionRuntime.TransientStatusChanged -= OnTransientStatusChanged;
         sessionRuntime.IncomingJoinRequestAvailable -= OnIncomingJoinRequestAvailable;
         sessionRuntime.HelpRequestDecisionAvailable -= OnHelpRequestDecisionAvailable;
@@ -3274,6 +3291,22 @@ public sealed class HelpeePageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         _ = UiThreadDispatch.RunAsync(SyncFromRuntime);
+    }
+
+    private void OnTransportAccelerationStateChanged(object? sender, EventArgs e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        _ = UiThreadDispatch.RunAsync(SyncTunaActiveFromRuntime);
+    }
+
+    private void SyncTunaActiveFromRuntime()
+    {
+        IsTunaActive = sessionRuntime.IsTransportAccelerationActive;
+        TunaStatusReason = sessionRuntime.TransportAccelerationStatusReason;
     }
 
     private void OnTransientStatusChanged(object? sender, SessionRuntimeTransientStatusChangedEventArgs e)

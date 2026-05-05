@@ -1521,11 +1521,18 @@ internal sealed partial class TransportScreenShareCoordinator
         int configuredCap,
         bool inStartupWarmup)
     {
+        var normalSenderCeiling = string.Equals(
+            FeatureFlags.ScreenShareQualityProfile,
+            FeatureFlags.ScreenShareQualityProfileTunaQuality,
+            StringComparison.Ordinal)
+            ? TunaQualitySenderFramesPerSecond
+            : NormalSenderFramesPerSecond;
+
         return mode switch
         {
             ScreenShareSenderFreshnessMode.CatchUp => CatchUpSenderFramesPerSecond,
             ScreenShareSenderFreshnessMode.Reduced => ReducedSenderFramesPerSecond,
-            _ => Math.Min(configuredCap, NormalSenderFramesPerSecond),
+            _ => Math.Min(configuredCap, normalSenderCeiling),
         };
     }
 

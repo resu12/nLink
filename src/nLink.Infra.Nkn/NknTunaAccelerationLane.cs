@@ -11,14 +11,18 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
     private static readonly TimeSpan ProcessExitWait = TimeSpan.FromSeconds(3);
     private readonly object gate = new();
     private readonly NknTunaAccelerationOptions options;
+    private readonly INknTunaListenerSidecarSupervisor? listenerSupervisor;
     private NknTunaSidecarClient? client;
     private Process? dialerProcess;
     private Task<bool>? dialerStartTask;
     private bool disposed;
 
-    public NknTunaAccelerationLane(NknTunaAccelerationOptions options)
+    public NknTunaAccelerationLane(
+        NknTunaAccelerationOptions options,
+        INknTunaListenerSidecarSupervisor? listenerSupervisor = null)
     {
         this.options = options ?? throw new ArgumentNullException(nameof(options));
+        this.listenerSupervisor = listenerSupervisor;
     }
 
     public bool IsAvailable
@@ -31,6 +35,8 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             }
         }
     }
+
+    public bool CanOfferListener => options.CanOfferListener;
 
     public NknAccelerationLaneKind ConfiguredLanes => options.Lanes;
 
@@ -68,9 +74,9 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         }
     }
 
-    public async Task<bool> EnsureListenerSidecarConnectedAsync(CancellationToken ct)
+    public async Task<bool> EnsureListenerSidecarConnectedAsync(string expectedRemotePeer, CancellationToken ct)
     {
-        if (!options.Enabled || string.IsNullOrWhiteSpace(options.ListenerEndpoint))
+        if (!options.Enabled)
         {
             return false;
         }
@@ -80,13 +86,31 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             return true;
         }
 
+        var endpoint = options.ListenerEndpoint;
+        if (string.IsNullOrWhiteSpace(endpoint) && listenerSupervisor is not null)
+        {
+            var started = await listenerSupervisor.EnsureStartedAsync(
+                    new NknTunaListenerStartRequest(
+                        string.IsNullOrWhiteSpace(expectedRemotePeer) ? string.Empty : expectedRemotePeer.Trim(),
+                        options.Lanes),
+                    ct)
+                .ConfigureAwait(false);
+            endpoint = started?.LocalIpc;
+        }
+
+        if (string.IsNullOrWhiteSpace(endpoint))
+        {
+            return false;
+        }
+
+        var connectEndpoint = endpoint.Trim();
         var nextClient = new NknTunaSidecarClient(options.Lanes, options.QueueCapacity);
         nextClient.MessageReceived += OnClientMessageReceived;
         nextClient.StateChanged += OnClientStateChanged;
         try
         {
             await nextClient.ConnectAsync(
-                    options.ListenerEndpoint,
+                    connectEndpoint,
                     TimeSpan.FromMilliseconds(options.ConnectTimeoutMs),
                     ct)
                 .ConfigureAwait(false);
@@ -164,6 +188,9 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         string? lastSidecarEvent = null;
         string? lastSidecarReason = null;
         var hasDialerSeed = !string.IsNullOrWhiteSpace(options.DialerSeedBase64);
+        var dialerIdentifier = string.IsNullOrWhiteSpace(options.DialerIdentifier)
+            ? null
+            : options.DialerIdentifier.Trim();
         var process = new Process
         {
             StartInfo = new ProcessStartInfo
@@ -192,6 +219,12 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         if (hasDialerSeed)
         {
             process.StartInfo.ArgumentList.Add("--seed-stdin");
+        }
+
+        if (!string.IsNullOrWhiteSpace(dialerIdentifier))
+        {
+            process.StartInfo.ArgumentList.Add("--identifier");
+            process.StartInfo.ArgumentList.Add(dialerIdentifier);
         }
 
         process.StartInfo.ArgumentList.Add("--jsonl");
@@ -319,6 +352,31 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         return current is null ? Task.FromResult(false) : current.TrySendAsync(lane, envelopeBytes, ct);
     }
 
+    public Task StopAsync(string reason, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        NknTunaSidecarClient? clientToDispose;
+        Process? processToStop;
+        lock (gate)
+        {
+            clientToDispose = client;
+            processToStop = dialerProcess;
+            client = null;
+            dialerProcess = null;
+            dialerStartTask = null;
+        }
+
+        clientToDispose?.Dispose();
+        listenerSupervisor?.Stop(string.IsNullOrWhiteSpace(reason) ? "stopped" : reason.Trim());
+        if (processToStop is not null)
+        {
+            TryStopProcess(processToStop);
+        }
+
+        LocalOperationalLog.Info("NKN.Tuna", $"event=tuna_acceleration_lane_stopped; reason={SanitizeSidecarReason(reason) ?? "unknown"}");
+        return Task.CompletedTask;
+    }
+
     public void Dispose()
     {
         if (disposed)
@@ -339,6 +397,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         }
 
         clientToDispose?.Dispose();
+        listenerSupervisor?.Dispose();
         if (processToStop is not null)
         {
             TryStopProcess(processToStop);
