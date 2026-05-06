@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,7 +12,30 @@ namespace NLink.App.Services;
 internal sealed record TunaWalletVerifierAvailability(
     bool IsAvailable,
     string Status,
-    string? SidecarPath);
+    string? SidecarPath)
+{
+    public string? ManifestPath { get; init; }
+
+    public string? ExpectedSidecarVersion { get; init; } = NknTunaSidecarCompatibility.ExpectedSidecarVersion;
+
+    public string? ActualSidecarVersion { get; init; }
+
+    public string? ExpectedRuntime { get; init; } = "win-x64";
+
+    public string? ActualRuntime { get; init; }
+
+    public int? ExpectedAppProtocolVersion { get; init; } = NknTunaSidecarCompatibility.AppProtocolVersion;
+
+    public int? ActualAppProtocolVersion { get; init; }
+
+    public int? ExpectedFrameProtocolVersion { get; init; } = NknTunaSidecarFrameProtocol.ProtocolVersion;
+
+    public int? ActualFrameProtocolVersion { get; init; }
+
+    public string? ManifestStatus { get; init; }
+
+    public string? Detail { get; init; }
+}
 
 internal interface ITunaWalletVerifier
 {
@@ -23,6 +47,7 @@ internal interface ITunaWalletVerifier
 internal sealed class TunaWalletSidecarVerifier : ITunaWalletVerifier
 {
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(35);
+    private static readonly JsonSerializerOptions ManifestJsonOptions = new(JsonSerializerDefaults.Web);
     private readonly Func<NknTunaAccelerationOptions> optionsProvider;
     private readonly Func<string> currentDirectoryProvider;
     private readonly TimeSpan timeout;
@@ -40,12 +65,72 @@ internal sealed class TunaWalletSidecarVerifier : ITunaWalletVerifier
     public TunaWalletVerifierAvailability GetAvailability()
     {
         var path = ResolveSidecarPath();
-        if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
-            return new TunaWalletVerifierAvailability(true, "available", path);
+            return Availability(
+                isAvailable: false,
+                status: "sidecar_missing",
+                sidecarPath: path,
+                manifestPath: ResolveSidecarManifestPath(path),
+                detail: "Missing: expected nlink-tuna-sidecar.exe.");
         }
 
-        return new TunaWalletVerifierAvailability(false, "sidecar_missing", path);
+        var manifestPath = ResolveSidecarManifestPath(path);
+        if (string.IsNullOrWhiteSpace(manifestPath) || !File.Exists(manifestPath))
+        {
+            return Availability(
+                isAvailable: false,
+                status: "sidecar_manifest_missing",
+                sidecarPath: path,
+                manifestPath: manifestPath,
+                detail: "Manifest invalid: tuna-sidecar-manifest.json is missing.");
+        }
+
+        TunaSidecarManifest manifest;
+        try
+        {
+            manifest = JsonSerializer.Deserialize<TunaSidecarManifest>(File.ReadAllText(manifestPath), ManifestJsonOptions) ?? new TunaSidecarManifest();
+        }
+        catch
+        {
+            return Availability(
+                isAvailable: false,
+                status: "sidecar_manifest_invalid",
+                sidecarPath: path,
+                manifestPath: manifestPath,
+                detail: "Manifest invalid: tuna-sidecar-manifest.json could not be read.");
+        }
+
+        var expectedVersion = NknTunaSidecarCompatibility.ExpectedSidecarVersion;
+        if (manifest.ManifestVersion != 1)
+        {
+            return Availability(false, "sidecar_manifest_invalid", path, manifestPath, manifest, "Manifest invalid: unsupported manifest version.");
+        }
+
+        if (!string.Equals(manifest.Runtime, "win-x64", StringComparison.OrdinalIgnoreCase))
+        {
+            return Availability(false, "sidecar_manifest_invalid", path, manifestPath, manifest, $"Manifest invalid: expected win-x64 runtime, found {FirstNonEmpty(manifest.Runtime, "(unknown)")}.");
+        }
+
+        if (!string.Equals(manifest.AppVersion, expectedVersion, StringComparison.OrdinalIgnoreCase) ||
+            !NknTunaSidecarCompatibility.IsCompatibleSidecarVersion(manifest.SidecarVersion))
+        {
+            return Availability(false, "sidecar_version_mismatch", path, manifestPath, manifest, $"Wrong version: expected {expectedVersion}, found {FirstNonEmpty(manifest.SidecarVersion, manifest.AppVersion, "(unknown)")}.");
+        }
+
+        if (manifest.AppProtocolVersion != NknTunaSidecarCompatibility.AppProtocolVersion ||
+            manifest.FrameProtocolVersion != NknTunaSidecarFrameProtocol.ProtocolVersion)
+        {
+            return Availability(false, "sidecar_protocol_mismatch", path, manifestPath, manifest, "Protocol mismatch: packaged Tuna sidecar is not compatible with this app.");
+        }
+
+        if (string.IsNullOrWhiteSpace(manifest.SidecarExeSha256) ||
+            !string.Equals(ComputeSha256(path), manifest.SidecarExeSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            return Availability(false, "sidecar_manifest_hash_mismatch", path, manifestPath, manifest, "Manifest invalid: sidecar hash does not match the packaged manifest.");
+        }
+
+        return Availability(true, "available", path, manifestPath, manifest, $"Available: {Path.GetFileName(path)} {manifest.SidecarVersion}.");
     }
 
     public async Task<TunaWalletValidationResult> ValidateAsync(string walletPath, char[] password, CancellationToken ct)
@@ -164,6 +249,11 @@ internal sealed class TunaWalletSidecarVerifier : ITunaWalletVerifier
         return null;
     }
 
+    private static string? ResolveSidecarManifestPath(string? sidecarPath)
+        => string.IsNullOrWhiteSpace(sidecarPath)
+            ? null
+            : Path.Combine(Path.GetDirectoryName(sidecarPath) ?? string.Empty, "tuna-sidecar-manifest.json");
+
     private string[] EnumerateSearchRoots()
     {
         var roots = new[]
@@ -196,6 +286,16 @@ internal sealed class TunaWalletSidecarVerifier : ITunaWalletVerifier
                 var walletFile = root.TryGetProperty("walletFile", out var fileValue) ? fileValue.GetString() : null;
                 var address = root.TryGetProperty("walletAddress", out var addressValue) ? addressValue.GetString() : null;
                 var balance = root.TryGetProperty("balanceNkn", out var balanceValue) ? balanceValue.GetString() : null;
+                var compatibility = NknTunaSidecarCompatibility.Validate(
+                    TryGetInt(root, "appProtocolVersion"),
+                    TryGetInt(root, "frameProtocolVersion"),
+                    TryGetString(root, "sidecarVersion"));
+                if (!compatibility.IsCompatible)
+                {
+                    result = TunaWalletValidationResult.Fail(compatibility.Reason, walletFile);
+                    return true;
+                }
+
                 if (!string.IsNullOrWhiteSpace(walletFile) &&
                     !string.IsNullOrWhiteSpace(address) &&
                     !string.IsNullOrWhiteSpace(balance))
@@ -213,6 +313,16 @@ internal sealed class TunaWalletSidecarVerifier : ITunaWalletVerifier
         result = TunaWalletValidationResult.Fail("wallet_ready_missing");
         return false;
     }
+
+    private static string? TryGetString(JsonElement root, string propertyName)
+        => root.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.String
+            ? prop.GetString()
+            : null;
+
+    private static int? TryGetInt(JsonElement root, string propertyName)
+        => root.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var value)
+            ? value
+            : null;
 
     private static string? TryParseSidecarError(string text)
     {
@@ -252,5 +362,77 @@ internal sealed class TunaWalletSidecarVerifier : ITunaWalletVerifier
         }
 
         return DiagnosticsRedactor.Redact(safe);
+    }
+
+    private static TunaWalletVerifierAvailability Availability(
+        bool isAvailable,
+        string status,
+        string? sidecarPath,
+        string? manifestPath,
+        string detail)
+        => new(isAvailable, status, sidecarPath)
+        {
+            ManifestPath = manifestPath,
+            ManifestStatus = status,
+            Detail = detail,
+        };
+
+    private static TunaWalletVerifierAvailability Availability(
+        bool isAvailable,
+        string status,
+        string sidecarPath,
+        string manifestPath,
+        TunaSidecarManifest manifest,
+        string detail)
+        => new(isAvailable, status, sidecarPath)
+        {
+            ManifestPath = manifestPath,
+            ExpectedSidecarVersion = NknTunaSidecarCompatibility.ExpectedSidecarVersion,
+            ActualSidecarVersion = FirstNonEmpty(manifest.SidecarVersion, manifest.AppVersion),
+            ExpectedRuntime = "win-x64",
+            ActualRuntime = manifest.Runtime,
+            ExpectedAppProtocolVersion = NknTunaSidecarCompatibility.AppProtocolVersion,
+            ActualAppProtocolVersion = manifest.AppProtocolVersion,
+            ExpectedFrameProtocolVersion = NknTunaSidecarFrameProtocol.ProtocolVersion,
+            ActualFrameProtocolVersion = manifest.FrameProtocolVersion,
+            ManifestStatus = status,
+            Detail = detail,
+        };
+
+    private static string ComputeSha256(string path)
+    {
+        using var stream = File.OpenRead(path);
+        using var sha256 = SHA256.Create();
+        return Convert.ToHexString(sha256.ComputeHash(stream)).ToLowerInvariant();
+    }
+
+    private static string FirstNonEmpty(params string?[] values)
+    {
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return value.Trim();
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private sealed class TunaSidecarManifest
+    {
+        public int ManifestVersion { get; set; }
+
+        public string? AppVersion { get; set; }
+
+        public string? SidecarVersion { get; set; }
+
+        public string? Runtime { get; set; }
+
+        public int AppProtocolVersion { get; set; }
+
+        public int FrameProtocolVersion { get; set; }
+
+        public string? SidecarExeSha256 { get; set; }
     }
 }

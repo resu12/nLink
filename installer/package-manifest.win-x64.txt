@@ -10,3 +10,4 @@ bridge/win-x64/bridge-manifest.json
 bridge/win-x64/bridge-dependencies.json
 tuna/win-x64/
 tuna/win-x64/nlink-tuna-sidecar.exe
+tuna/win-x64/tuna-sidecar-manifest.json

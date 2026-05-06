@@ -88,7 +88,7 @@ public static partial class SensitiveDataRedactor
     [GeneratedRegex(@"\bevent=(?<value>[A-Za-z0-9._/-]+)", RegexOptions.CultureInvariant)]
     private static partial Regex EventKeyValueRegex();
 
-    [GeneratedRegex(@"(?<prefix>(?:^|[\s|,;]))(?<key>[A-Za-z_][A-Za-z0-9._/-]{1,127})=", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?<prefix>(?:^|[\s|,;]))(?<key>[A-Za-z_][A-Za-z0-9._/-]{1,127})(?<separator>\s*[:=])", RegexOptions.CultureInvariant)]
     private static partial Regex StructuredKeyRegex();
 
     private static string ProtectStructuredEventValues(string text, List<string> protectedEventValues)
@@ -123,7 +123,7 @@ public static partial class SensitiveDataRedactor
         {
             var placeholder = $"SKP{protectedStructuredKeys.Count}";
             protectedStructuredKeys.Add(match.Groups["key"].Value);
-            return $"{match.Groups["prefix"].Value}{placeholder}=";
+            return $"{match.Groups["prefix"].Value}{placeholder}{match.Groups["separator"].Value}";
         });
     }
 
@@ -135,9 +135,9 @@ public static partial class SensitiveDataRedactor
         }
 
         var restored = text;
-        for (var i = 0; i < protectedStructuredKeys.Count; i++)
+        for (var i = protectedStructuredKeys.Count - 1; i >= 0; i--)
         {
-            restored = restored.Replace($"SKP{i}=", $"{protectedStructuredKeys[i]}=", StringComparison.Ordinal);
+            restored = restored.Replace($"SKP{i}", protectedStructuredKeys[i], StringComparison.Ordinal);
         }
 
         return restored;

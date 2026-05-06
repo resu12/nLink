@@ -826,6 +826,7 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
     [Trait("Category", "Smoke")]
     public async Task WindowsH264ScreenCaptureSource_TransportRawCapture_AppliesUpstreamRawCadenceTarget()
     {
+        using var screenShareQuality = UseBalancedScreenShareQualityForTest();
         await using var rawSource = new FakeWindowsRawCaptureSource();
         await using var encoder = new FakeWindowsH264FrameEncoder();
         await using var source = new WindowsH264ScreenCaptureSource(
@@ -849,6 +850,7 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
     [Trait("Category", "Smoke")]
     public async Task WindowsH264ScreenCaptureSource_TransportRawCapture_AppliesUpstreamRawOutputSizeHint()
     {
+        using var screenShareQuality = UseBalancedScreenShareQualityForTest();
         await using var rawSource = new FakeWindowsRawCaptureSource();
         await using var encoder = new FakeWindowsH264FrameEncoder();
         await using var source = new WindowsH264ScreenCaptureSource(
@@ -2083,6 +2085,31 @@ public sealed class WindowsH264InfrastructureTests : IClassFixture<ScreenShareCo
     {
         using var stream = new MemoryStream(Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/a5kAAAAASUVORK5CYII="), writable: false);
         return new AvaloniaBitmap(stream);
+    }
+
+    private static IDisposable UseBalancedScreenShareQualityForTest()
+        => new CompositeDisposable(
+            new EnvironmentOverride(ScreenShareQualitySettings.ScreenShareMaxFpsVariable, "15"),
+            new EnvironmentOverride(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable, "8"),
+            new EnvironmentOverride(ScreenShareQualitySettings.ScreenShareScaleVariable, "1"),
+            new EnvironmentOverride(ScreenShareQualitySettings.ScreenShareQualityProfileVariable, FeatureFlags.ScreenShareQualityProfileNormal));
+
+    private sealed class CompositeDisposable : IDisposable
+    {
+        private readonly IDisposable[] disposables;
+
+        public CompositeDisposable(params IDisposable[] disposables)
+        {
+            this.disposables = disposables;
+        }
+
+        public void Dispose()
+        {
+            for (var i = disposables.Length - 1; i >= 0; i--)
+            {
+                disposables[i].Dispose();
+            }
+        }
     }
 
     private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)

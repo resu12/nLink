@@ -1590,6 +1590,12 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        RecordTunaFallbackNknFrameReceived(
+            MsgType.ScreenShareFrame,
+            inboundContext.Channel,
+            inboundContext.Envelope.Payload.Length,
+            chunk.SessionId);
+
         foreach (var fragment in fragments)
         {
             ScreenShareFrameLossAttributionRegistry.ObserveInboundReceivePath(
@@ -2055,6 +2061,7 @@ public sealed partial class NknSignalingTransport
             {
                 NknRuntimeDiagnostics.IncrementMessagesSent();
                 await client.SendAsync(destination, bytes, ct).ConfigureAwait(false);
+                RecordTunaFallbackNknControlSent(envelope.Type);
             }
             finally
             {
@@ -2100,6 +2107,10 @@ public sealed partial class NknSignalingTransport
 
             NknRuntimeDiagnostics.IncrementMessagesSent();
             await client.SendBulkAsync(destination, bytes, ct).ConfigureAwait(false);
+            if (envelope.Type == MsgType.FileTransferDataFrame)
+            {
+                RecordTunaFallbackNknFrameSent(envelope.Type, NknBridgeChannel.Bulk, bytes.Length);
+            }
             Log($"Bulk envelope sent (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
         }
         catch (Exception ex)
@@ -2211,6 +2222,7 @@ public sealed partial class NknSignalingTransport
 
     private void ResetSessionTracking()
     {
+        CompleteTunaFallbackProof("reset_session_tracking");
         FlushAllControlOutboundQueues("reset_session_tracking");
         ClearScreenShareOutboundQueue("reset_session_tracking");
         ResetControlSecureState();

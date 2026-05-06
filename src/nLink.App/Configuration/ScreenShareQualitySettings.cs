@@ -40,7 +40,7 @@ internal static class ScreenShareQualitySettings
         new("balanced", "Balanced", 15, 8, 1d, 1440, 810, FeatureFlags.ScreenShareQualityProfileNormal);
 
     internal static readonly ScreenSharePresetDefinition HighQualityPreset =
-        new("high_quality", "High quality", 20, 12, 1d, 1440, 810, FeatureFlags.ScreenShareQualityProfileNormal);
+        new("high_quality", "High quality", 24, 15, 1d, 1440, 810, FeatureFlags.ScreenShareQualityProfileNormal);
 
     internal static readonly ScreenSharePresetDefinition TunaQualityPreset =
         new("tuna_quality", "Tuna quality", 30, 15, 1d, 1600, 900, FeatureFlags.ScreenShareQualityProfileTunaQuality);
@@ -196,6 +196,18 @@ internal static class ScreenShareQualitySettings
             "tuna_quality" => TunaQualityPreset.DisplayName,
             "high_performance" => HighPerformancePreset.DisplayName,
             _ => "Custom",
+        };
+    }
+
+    internal static ScreenSharePresetDefinition? ResolvePresetDefinition(string effectivePresetKey)
+    {
+        return effectivePresetKey switch
+        {
+            "balanced" => BalancedPreset,
+            "high_quality" => HighQualityPreset,
+            "tuna_quality" => TunaQualityPreset,
+            "high_performance" => HighPerformancePreset,
+            _ => null,
         };
     }
 

@@ -31,4 +31,18 @@ public sealed class SensitiveDataRedactorTests
         Assert.Contains("recovery_progress_corridor_applied_count=23", redacted, StringComparison.Ordinal);
         Assert.DoesNotContain("0123456789abcdef0123456789abcdef", redacted, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void SensitiveDataRedactor_Preserves_Long_Colon_Diagnostic_Keys()
+    {
+        const string input =
+            "tuna_last_session_completed_from_summary: yes\r\n" +
+            "tuna_last_session_run_id_hash: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        var redacted = SensitiveDataRedactor.Redact(input);
+
+        Assert.Contains("tuna_last_session_completed_from_summary: yes", redacted, StringComparison.Ordinal);
+        Assert.Contains("tuna_last_session_run_id_hash: [redacted]", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("0123456789abcdef", redacted, StringComparison.Ordinal);
+    }
 }

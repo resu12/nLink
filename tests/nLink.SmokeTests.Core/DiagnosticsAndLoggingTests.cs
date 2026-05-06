@@ -134,7 +134,7 @@ public sealed class DiagnosticsAndLoggingTests : CoreSmokeTestsBase
             Assert.Contains("screenshare_capture_presets:", copied!, StringComparison.Ordinal);
             Assert.Contains("screenshare_quality_profile: normal", copied!, StringComparison.Ordinal);
             Assert.Contains("balanced_default: capture_fps=15, transport_fps=8, max=1440x810, scale=1.00, quality_profile=normal", copied!, StringComparison.Ordinal);
-            Assert.Contains("high_quality: capture_fps=20, transport_fps=12, max=1440x810, scale=1.00, quality_profile=normal", copied!, StringComparison.Ordinal);
+            Assert.Contains("high_quality: capture_fps=24, transport_fps=15, max=1440x810, scale=1.00, quality_profile=normal", copied!, StringComparison.Ordinal);
             Assert.Contains("tuna_quality: capture_fps=30, transport_fps=15, max=1600x900, scale=1.00, quality_profile=tuna_quality", copied!, StringComparison.Ordinal);
             Assert.Contains("high_performance: capture_fps=10, transport_fps=6, max=864x486, scale=0.60, quality_profile=normal", copied!, StringComparison.Ordinal);
             Assert.Contains("Screenshare evidence", copied!, StringComparison.Ordinal);
@@ -437,6 +437,62 @@ public void DiagnosticsPageViewModel_UsesOptionsLabels_AndHidesEmptyBugReport()
     Assert.Contains("sender_cpu_pct=(none)", vm.ScreenShareLiveCpuSummary, StringComparison.Ordinal);
 }
 
+[Theory]
+[InlineData("locked", "Tuna wallet is locked. Regular NKN is being used.", false)]
+[InlineData("waiting_for_approved_session", "Tuna is unlocked and waiting for an approved session.", false)]
+[InlineData("checking_payer_priority", "Choosing which side will pay for Tuna.", true)]
+[InlineData("listener_starting", "Starting Tuna listener. Regular NKN stays connected until ready.", true)]
+[InlineData("provider_paths_ready", "Tuna relay paths are ready. Waiting for peer connection.", true)]
+[InlineData("waiting_for_peer_dial", "Waiting for the other side to connect to Tuna.", true)]
+[InlineData("waiting_for_answer", "Negotiating Tuna acceleration.", true)]
+[InlineData("dialer_starting", "Negotiating Tuna acceleration.", true)]
+[InlineData("dialer_ready", "Negotiating Tuna acceleration.", true)]
+[InlineData("negotiation_scheduled_runtime_unlock", "Negotiating Tuna acceleration.", true)]
+[InlineData("listener_sidecar_unavailable", "Tuna sidecar is unavailable. Regular NKN is being used.", false)]
+[InlineData("fallback_current_nkn", "Tuna is unavailable. Regular NKN is being used.", false)]
+public void TunaStatusPresentationMapper_FormatsFriendlyStatus(string runtimeStatus, string expectedText, bool expectedConnecting)
+{
+    var presentation = TunaStatusPresentationMapper.FromRuntimeStatus(runtimeStatus);
+
+    Assert.Equal(expectedText, presentation.Text);
+    Assert.Equal(expectedConnecting, presentation.IsConnecting);
+}
+
+[Fact]
+public void TunaStatusPresentationMapper_ActiveTransportWins()
+{
+    var presentation = TunaStatusPresentationMapper.FromState(
+        transportActive: true,
+        transportReason: "listener_starting",
+        runtimeStatus: "locked",
+        sessionUnlockOn: false);
+
+    Assert.Equal("Tuna acceleration is active.", presentation.Text);
+    Assert.False(presentation.IsConnecting);
+}
+
+[Fact]
+public void TunaStatusPresentationMapper_HeaderReasonCanShowLiveNegotiationButLockedSuppressesPulse()
+{
+    var connecting = TunaStatusPresentationMapper.FromState(
+        transportActive: false,
+        transportReason: "listener_starting",
+        runtimeStatus: "waiting_for_approved_session",
+        sessionUnlockOn: true);
+
+    Assert.Equal("Starting Tuna listener. Regular NKN stays connected until ready.", connecting.Text);
+    Assert.True(connecting.IsConnecting);
+
+    var locked = TunaStatusPresentationMapper.FromState(
+        transportActive: false,
+        transportReason: "listener_starting",
+        runtimeStatus: "locked",
+        sessionUnlockOn: false);
+
+    Assert.Equal("Tuna wallet is locked. Regular NKN is being used.", locked.Text);
+    Assert.False(locked.IsConnecting);
+}
+
 [Fact]
 public void DiagnosticsPageViewModel_ScreenSharePresetCommands_UpdateDisplayedSummary()
 {
@@ -460,19 +516,19 @@ public void DiagnosticsPageViewModel_ScreenSharePresetCommands_UpdateDisplayedSu
             screenSharePresetPersistence: static (_, _, _, _, _) => { });
         vm.PropertyChanged += (_, args) => changed.Add(args.PropertyName);
 
-        Assert.Equal("preset=Custom; capture_fps=10; transport_fps=8; scale=1; quality_profile=normal; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
+        Assert.Equal("preset=Custom; capture_fps=10; transport_fps=8; max=(custom); scale=1; quality_profile=normal; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
         Assert.True(vm.ShowScreenShareResetHint);
 
         vm.ApplyHighQualityScreenSharePresetCommand.Execute(null);
 
-        Assert.Equal("preset=High quality; capture_fps=20; transport_fps=12; scale=1; quality_profile=normal; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
+        Assert.Equal("preset=High quality; capture_fps=24; transport_fps=15; max=1440x810; scale=1; quality_profile=normal; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
         Assert.False(vm.ShowScreenShareResetHint);
         Assert.Contains(nameof(DiagnosticsPageViewModel.AdvancedScreenShareSettingsSummary), changed);
         Assert.Contains(nameof(DiagnosticsPageViewModel.ShowScreenShareResetHint), changed);
 
         vm.ApplyTunaQualityScreenSharePresetCommand.Execute(null);
 
-        Assert.Equal("preset=Tuna quality; capture_fps=30; transport_fps=15; scale=1; quality_profile=tuna_quality; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
+        Assert.Equal("preset=Tuna quality; capture_fps=30; transport_fps=15; max=1600x900; scale=1; quality_profile=tuna_quality; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
         Assert.Equal("30", Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable));
         Assert.Equal("15", Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable));
         Assert.Equal("1", Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareScaleVariable));
@@ -508,6 +564,11 @@ public void DiagnosticsPageView_UsesOptionsTabs()
     Assert.Contains("Tuna (experimental)", xaml, StringComparison.Ordinal);
     Assert.Contains("Tuna can speed up screen sharing and file transfers", xaml, StringComparison.Ordinal);
     Assert.Contains("if Tuna is unavailable, nLink keeps using regular NKN automatically", xaml, StringComparison.Ordinal);
+    Assert.Contains("Current Tuna state", xaml, StringComparison.Ordinal);
+    Assert.Contains("TunaCurrentState", xaml, StringComparison.Ordinal);
+    Assert.Contains("Last session reason", xaml, StringComparison.Ordinal);
+    Assert.Contains("TunaLastSessionReason", xaml, StringComparison.Ordinal);
+    Assert.DoesNotContain("Runtime status", xaml, StringComparison.Ordinal);
     Assert.Contains("Link wallet.json", xaml, StringComparison.Ordinal);
     Assert.Contains("Unlock for this session", xaml, StringComparison.Ordinal);
     Assert.DoesNotContain("Advanced diagnostics", xaml, StringComparison.Ordinal);
@@ -550,8 +611,9 @@ public void SessionHeaderTunaIcon_DoesNotPulseWhileWalletLocked()
     var applyStart = source.IndexOf("private void ApplyTunaUnlockToggleState", StringComparison.Ordinal);
 
     Assert.True(applyStart >= 0, "Expected Tuna unlock toggle state method.");
-    Assert.Contains("var pulsing = !active && tunaUnlockToggleOn && ShouldPulseTunaStatus(reason);", source, StringComparison.Ordinal);
-    Assert.Contains("if (TunaActive || !tunaUnlockToggleOn || !ShouldPulseTunaStatus(TunaStatusReason))", source, StringComparison.Ordinal);
+    Assert.Contains("var pulsing = !active && tunaUnlockToggleOn && presentation.IsConnecting;", source, StringComparison.Ordinal);
+    Assert.Contains("!tunaUnlockToggleOn", source, StringComparison.Ordinal);
+    Assert.DoesNotContain("ShouldPulseTunaStatus", source, StringComparison.Ordinal);
     Assert.Contains("UpdateTunaVisualState();", source[applyStart..], StringComparison.Ordinal);
 }
 

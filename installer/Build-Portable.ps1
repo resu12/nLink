@@ -327,7 +327,8 @@ function Build-TunaSidecarToPortable {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$PortableOutDir,
-        [Parameter(Mandatory = $true)][string]$Runtime
+        [Parameter(Mandatory = $true)][string]$Runtime,
+        [Parameter(Mandatory = $true)][string]$Version
     )
 
     if ($Runtime -ne "win-x64") {
@@ -341,7 +342,7 @@ function Build-TunaSidecarToPortable {
 
     $goCommand = Get-Command go -ErrorAction SilentlyContinue
     if (-not $goCommand) {
-        throw "Go toolchain not found. Install Go or pass -SkipTunaSidecarBundle for local packaging without Tuna wallet validation."
+        throw "Go toolchain not found. Install Go; Tuna sidecar packaging is required for release and installer builds."
     }
 
     $destinationDir = Join-Path (Join-Path $PortableOutDir "tuna") $Runtime
@@ -355,7 +356,8 @@ function Build-TunaSidecarToPortable {
         $previousGoarch = $env:GOARCH
         $env:GOOS = "windows"
         $env:GOARCH = "amd64"
-        & go build -o $destinationExe .
+        $ldflags = "-X main.sidecarVersion=$Version"
+        & go build -ldflags $ldflags -o $destinationExe .
         if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
         }
@@ -370,7 +372,56 @@ function Build-TunaSidecarToPortable {
         throw "Tuna sidecar build did not produce expected executable: $destinationExe"
     }
 
+    $versionLines = @(& $destinationExe version --jsonl)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Tuna sidecar version probe failed for '$destinationExe'."
+    }
+
+    $versionEvent = $null
+    foreach ($line in $versionLines) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+
+        $candidate = $line | ConvertFrom-Json
+        if ([string]$candidate.event -eq "sidecar_version") {
+            $versionEvent = $candidate
+            break
+        }
+    }
+
+    if ($null -eq $versionEvent) {
+        throw "Tuna sidecar version probe did not emit sidecar_version JSONL."
+    }
+
+    if ([string]$versionEvent.sidecarVersion -ne $Version) {
+        throw "Tuna sidecar version mismatch: expected '$Version', got '$($versionEvent.sidecarVersion)'."
+    }
+
+    if ([string]$versionEvent.runtime -ne $Runtime) {
+        throw "Tuna sidecar runtime mismatch: expected '$Runtime', got '$($versionEvent.runtime)'."
+    }
+
+    if ([int]$versionEvent.appProtocolVersion -ne 1 -or [int]$versionEvent.frameProtocolVersion -ne 1) {
+        throw "Tuna sidecar protocol mismatch: app='$($versionEvent.appProtocolVersion)', frame='$($versionEvent.frameProtocolVersion)'."
+    }
+
+    $manifestPath = Join-Path $destinationDir "tuna-sidecar-manifest.json"
+    $manifest = [ordered]@{
+        manifestVersion      = 1
+        appVersion           = $Version
+        sidecarVersion       = [string]$versionEvent.sidecarVersion
+        runtime              = $Runtime
+        appProtocolVersion   = [int]$versionEvent.appProtocolVersion
+        frameProtocolVersion = [int]$versionEvent.frameProtocolVersion
+        sidecarExeSha256     = Get-Sha256FileHash -Path $destinationExe
+        buildTimestampUtc    = [DateTimeOffset]::UtcNow.ToString("O")
+    }
+    $manifestJson = $manifest | ConvertTo-Json -Depth 4
+    [System.IO.File]::WriteAllText($manifestPath, $manifestJson, [System.Text.UTF8Encoding]::new($false))
+
     Write-Host "[nLink] Bundled Tuna sidecar verifier: $destinationExe" -ForegroundColor Green
+    Write-Host "[nLink] Bundled Tuna sidecar manifest: $manifestPath" -ForegroundColor Green
 }
 
 function Copy-BridgeBundleToPortable {
@@ -461,7 +512,7 @@ if (-not $SkipBridgeBundle) {
 }
 
 if (-not $SkipTunaSidecarBundle) {
-    Build-TunaSidecarToPortable -RepoRoot $repoRoot -PortableOutDir $canonicalOutAbs -Runtime $Runtime
+    Build-TunaSidecarToPortable -RepoRoot $repoRoot -PortableOutDir $canonicalOutAbs -Runtime $Runtime -Version $resolvedVersion
 }
 
 Ensure-PortableConfigFile -RepoRoot $repoRoot -StageDir $canonicalOutAbs

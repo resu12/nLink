@@ -47,7 +47,7 @@ public sealed class ScreenShareQualitySettingsTests
     [Theory]
     [Trait("Category", "Smoke")]
     [InlineData("balanced", "Balanced", 15, 8, 1d, FeatureFlags.ScreenShareQualityProfileNormal)]
-    [InlineData("high_quality", "High quality", 20, 12, 1d, FeatureFlags.ScreenShareQualityProfileNormal)]
+    [InlineData("high_quality", "High quality", 24, 15, 1d, FeatureFlags.ScreenShareQualityProfileNormal)]
     [InlineData("tuna_quality", "Tuna quality", 30, 15, 1d, FeatureFlags.ScreenShareQualityProfileTunaQuality)]
     [InlineData("high_performance", "High performance", 10, 6, 0.6d, FeatureFlags.ScreenShareQualityProfileNormal)]
     public void GetCurrentEnvironmentState_KnownPresetTuples_ResolveToNamedProfiles(

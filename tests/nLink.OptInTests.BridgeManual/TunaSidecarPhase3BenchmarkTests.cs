@@ -21,6 +21,7 @@ public sealed partial class TunaSidecarLiveManualTests
     private const string Phase3VerboseScreenDiagnosticsEnv = "NLINK_PHASE3_BENCHMARK_VERBOSE_SCREEN_DIAGNOSTICS";
     private const string Phase3MaxPriceNknPerMb = "0.0002";
     private static readonly TimeSpan Phase3DrainTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan Phase3FallbackDrainTimeout = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan Phase3FallbackTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan Phase3ScreenSmokeFrameTimeout = TimeSpan.FromSeconds(20);
     private const int Phase3ScreenSmokeFrameCount = 3;
@@ -116,6 +117,8 @@ public sealed partial class TunaSidecarLiveManualTests
             ListenerMaxDurationSec: 180,
             ListenerAcceptTimeoutSec: 180,
             TunaSetupAttempts: 1,
+            FileSendPacingMbps: Phase3FileSendPacingMbps,
+            FileFallbackPacingMbps: Phase3FileSendPacingMbps,
             FileThroughputPassRatio: 1.25,
             ScreenSmokeOnly: false,
             VerboseScreenDiagnostics: false);
@@ -150,6 +153,8 @@ public sealed partial class TunaSidecarLiveManualTests
             ListenerMaxDurationSec: 180,
             ListenerAcceptTimeoutSec: 180,
             TunaSetupAttempts: 1,
+            FileSendPacingMbps: Phase3FileSendPacingMbps,
+            FileFallbackPacingMbps: Phase3FileSendPacingMbps,
             FileThroughputPassRatio: 1.25,
             ScreenSmokeOnly: false,
             VerboseScreenDiagnostics: false);
@@ -210,6 +215,8 @@ public sealed partial class TunaSidecarLiveManualTests
             ListenerMaxDurationSec: 180,
             ListenerAcceptTimeoutSec: 180,
             TunaSetupAttempts: 1,
+            FileSendPacingMbps: Phase3FileSendPacingMbps,
+            FileFallbackPacingMbps: Phase3FileSendPacingMbps,
             FileThroughputPassRatio: 1.25,
             ScreenSmokeOnly: false,
             VerboseScreenDiagnostics: false);
@@ -819,7 +826,7 @@ public sealed partial class TunaSidecarLiveManualTests
                 sentBytes += payloadBytes;
                 sentFrames++;
                 chunkIndex++;
-                await PacePhase3FileSendAsync(started, sentBytes, ct);
+                await PacePhase3FileSendAsync(started, sentBytes, GetPhase3FilePacingMbps(context, options), ct);
                 if (context.Mode == Phase3TransportMode.Tuna &&
                     !context.Host.IsAccelerationAvailableForTests &&
                     context.Helper.IsAccelerationAvailableForTests)
@@ -830,7 +837,7 @@ public sealed partial class TunaSidecarLiveManualTests
                 }
             }
 
-            var drainDeadline = DateTimeOffset.UtcNow + Phase3DrainTimeout;
+            var drainDeadline = DateTimeOffset.UtcNow + GetPhase3FileDrainTimeout(context);
             while (DateTimeOffset.UtcNow < drainDeadline && Volatile.Read(ref progress.BytesReceived) < sentBytes)
             {
                 await Task.Delay(100, ct);
@@ -903,13 +910,25 @@ public sealed partial class TunaSidecarLiveManualTests
         };
     }
 
-    private static async Task PacePhase3FileSendAsync(Stopwatch started, long sentBytes, CancellationToken ct)
+    private static double GetPhase3FilePacingMbps(Phase3LiveRunContext context, Phase3BenchmarkOptions options)
+        => context.Mode == Phase3TransportMode.Tuna &&
+           (!context.Host.IsAccelerationAvailableForTests || !context.Helper.IsAccelerationAvailableForTests)
+            ? Math.Min(options.FileSendPacingMbps, options.FileFallbackPacingMbps)
+            : options.FileSendPacingMbps;
+
+    private static TimeSpan GetPhase3FileDrainTimeout(Phase3LiveRunContext context)
+        => context.Mode == Phase3TransportMode.Tuna &&
+           (!context.Host.IsAccelerationAvailableForTests || !context.Helper.IsAccelerationAvailableForTests)
+            ? Phase3FallbackDrainTimeout
+            : Phase3DrainTimeout;
+
+    private static async Task PacePhase3FileSendAsync(Stopwatch started, long sentBytes, double fileSendPacingMbps, CancellationToken ct)
     {
-        var targetElapsedMs = sentBytes * 8d / (Phase3FileSendPacingMbps * 1000d);
+        var targetElapsedMs = sentBytes * 8d / (Math.Max(1, fileSendPacingMbps) * 1000d);
         var delayMs = targetElapsedMs - started.Elapsed.TotalMilliseconds;
         if (delayMs > 1)
         {
-            await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(delayMs, 50)), ct);
+            await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(delayMs, 250)), ct);
         }
     }
 
@@ -2425,6 +2444,8 @@ public sealed partial class TunaSidecarLiveManualTests
         int ListenerMaxDurationSec,
         int ListenerAcceptTimeoutSec,
         int TunaSetupAttempts,
+        double FileSendPacingMbps,
+        double FileFallbackPacingMbps,
         double FileThroughputPassRatio,
         bool ScreenSmokeOnly,
         bool VerboseScreenDiagnostics)
@@ -2446,7 +2467,8 @@ public sealed partial class TunaSidecarLiveManualTests
                 listenerAcceptTimeoutSec = ListenerAcceptTimeoutSec,
                 tunaSetupAttempts = TunaSetupAttempts,
                 maxPriceNknPerMb = Phase3MaxPriceNknPerMb,
-                fileSendPacingMbps = Phase3FileSendPacingMbps,
+                fileSendPacingMbps = FileSendPacingMbps,
+                fileFallbackPacingMbps = FileFallbackPacingMbps,
                 fileThroughputPassRatio = FileThroughputPassRatio,
                 screenSmokeOnly = ScreenSmokeOnly,
                 verboseScreenDiagnostics = VerboseScreenDiagnostics,
@@ -2466,6 +2488,8 @@ public sealed partial class TunaSidecarLiveManualTests
                 ListenerMaxDurationSec: ReadInt("NLINK_PHASE3_BENCHMARK_LISTENER_MAX_DURATION_SEC", 180, min: 30, max: 3600),
                 ListenerAcceptTimeoutSec: ReadInt("NLINK_PHASE3_BENCHMARK_LISTENER_ACCEPT_TIMEOUT_SEC", 180, min: 30, max: 3600),
                 TunaSetupAttempts: ReadInt("NLINK_PHASE3_BENCHMARK_TUNA_SETUP_ATTEMPTS", 3, min: 1, max: 5),
+                FileSendPacingMbps: Phase3FileSendPacingMbps,
+                FileFallbackPacingMbps: Phase3FileSendPacingMbps,
                 FileThroughputPassRatio: 1.25,
                 ScreenSmokeOnly: ReadBool(Phase3ScreenSmokeOnlyEnv),
                 VerboseScreenDiagnostics: ReadBool(Phase3VerboseScreenDiagnosticsEnv));

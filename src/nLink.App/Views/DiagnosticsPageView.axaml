@@ -113,14 +113,14 @@
                                                Text="Tuna can speed up screen sharing and file transfers by opening an encrypted high-performance NKN relay path after a session is approved. This computer pays only when its wallet is unlocked and selected as the listener; if Tuna is unavailable, nLink keeps using regular NKN automatically."
                                                TextWrapping="Wrap"/>
                                     <Grid ColumnDefinitions="220,*"
-                                          RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                                          RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
                                           RowSpacing="8"
                                           ColumnSpacing="12">
                                         <TextBlock Grid.Row="0" Grid.Column="0" Classes="appMuted" Text="Runtime flag"/>
                                         <TextBlock Grid.Row="0" Grid.Column="1" Classes="appMuted" Text="{Binding TunaRuntimeFlagStatus}" TextWrapping="Wrap"/>
 
-                                        <TextBlock Grid.Row="1" Grid.Column="0" Classes="appMuted" Text="Runtime status"/>
-                                        <TextBlock Grid.Row="1" Grid.Column="1" Classes="appMuted" Text="{Binding TunaRuntimeStatus}" TextWrapping="Wrap"/>
+                                        <TextBlock Grid.Row="1" Grid.Column="0" Classes="appMuted" Text="Current Tuna state"/>
+                                        <TextBlock Grid.Row="1" Grid.Column="1" Classes="appMuted" Text="{Binding TunaCurrentState}" TextWrapping="Wrap"/>
 
                                         <TextBlock Grid.Row="2" Grid.Column="0" Classes="appMuted" Text="Startup timing"/>
                                         <TextBlock Grid.Row="2" Grid.Column="1" Classes="appMuted" Text="{Binding TunaStartupTiming}" TextWrapping="Wrap"/>
@@ -158,8 +158,11 @@
                                         <TextBlock Grid.Row="13" Grid.Column="0" Classes="appMuted" Text="Last session cost"/>
                                         <TextBlock Grid.Row="13" Grid.Column="1" Classes="appMuted" Text="{Binding TunaLastSessionCost}" TextWrapping="Wrap"/>
 
-                                        <TextBlock Grid.Row="14" Grid.Column="0" Classes="appMuted" Text="Expected improvement"/>
-                                        <TextBlock Grid.Row="14" Grid.Column="1" Classes="appMuted" Text="{Binding TunaExpectedImprovement}" TextWrapping="Wrap"/>
+                                        <TextBlock Grid.Row="14" Grid.Column="0" Classes="appMuted" Text="Last session reason"/>
+                                        <TextBlock Grid.Row="14" Grid.Column="1" Classes="appMuted" Text="{Binding TunaLastSessionReason}" TextWrapping="Wrap"/>
+
+                                        <TextBlock Grid.Row="15" Grid.Column="0" Classes="appMuted" Text="Expected improvement"/>
+                                        <TextBlock Grid.Row="15" Grid.Column="1" Classes="appMuted" Text="{Binding TunaExpectedImprovement}" TextWrapping="Wrap"/>
                                     </Grid>
 
                                     <StackPanel Spacing="8">

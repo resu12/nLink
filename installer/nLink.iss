@@ -43,6 +43,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 
 [InstallDelete]
 Type: filesandordirs; Name: "{app}\bridge"
+Type: filesandordirs; Name: "{app}\tuna"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "bridge\*"

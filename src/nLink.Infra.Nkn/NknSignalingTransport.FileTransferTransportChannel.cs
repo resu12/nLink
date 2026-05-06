@@ -1470,6 +1470,11 @@ public sealed partial class NknSignalingTransport
             frame.TransferId,
             () =>
             {
+                RecordTunaFallbackNknFrameReceived(
+                    MsgType.FileTransferDataFrame,
+                    channel,
+                    env.Payload.Length,
+                    frame.SessionId);
                 DeliverFileTransferDataFrame(frame, channel);
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferDataFrame, frame.TransferId, source);
             });
@@ -2281,6 +2286,74 @@ public sealed partial class NknSignalingTransport
         return SessionSecureEnvelopeCodec.Encrypt(key, metadata, plaintextPayload);
     }
 
+    private static bool IsExpectedControlReplayDuplicate(MsgType messageType)
+        => messageType is MsgType.ScreenSharePressureState or
+            MsgType.ScreenShareCursorState or
+            MsgType.ControlDisplayInfo;
+
+    private bool TrySuppressExpectedControlReplayDuplicate(
+        MsgType messageType,
+        string mappedMessageType,
+        string sessionId,
+        string? source,
+        long sequence,
+        string messageId)
+    {
+        if (!IsExpectedControlReplayDuplicate(messageType))
+        {
+            return false;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var normalizedSource = string.IsNullOrWhiteSpace(source) ? "(none)" : source.Trim();
+        var key = $"{mappedMessageType}|{sessionId}|{normalizedSource}";
+        long suppressedCount = 0;
+        long sampleWindowMs = 0;
+        long lastSequence = sequence;
+        string lastMessageId = messageId;
+        string lastSource = normalizedSource;
+        var shouldLogSummary = false;
+
+        lock (expectedControlReplayDuplicateLogGate)
+        {
+            if (!expectedControlReplayDuplicateSuppressions.TryGetValue(key, out var state))
+            {
+                state = new ExpectedControlReplayDuplicateSuppressionState
+                {
+                    WindowStartedUtc = now,
+                };
+                expectedControlReplayDuplicateSuppressions[key] = state;
+            }
+
+            state.SuppressedCount++;
+            state.LastSequence = sequence;
+            state.LastMessageId = messageId;
+            state.LastSource = normalizedSource;
+
+            var elapsed = now - state.WindowStartedUtc;
+            if (elapsed >= ExpectedControlReplayDuplicateSummaryWindow)
+            {
+                shouldLogSummary = true;
+                suppressedCount = state.SuppressedCount;
+                sampleWindowMs = Math.Max(0, (long)elapsed.TotalMilliseconds);
+                lastSequence = state.LastSequence;
+                lastMessageId = state.LastMessageId;
+                lastSource = state.LastSource;
+                state.SuppressedCount = 0;
+                state.WindowStartedUtc = now;
+            }
+        }
+
+        if (shouldLogSummary)
+        {
+            LocalOperationalLog.Info(
+                "SessionSecurity",
+                $"event=control_duplicate_replay_suppressed; message_type={mappedMessageType}; reason=replay_duplicate; session_id={sessionId}; source={lastSource}; suppressed_count={suppressedCount}; sample_window_ms={sampleWindowMs}; last_sequence={lastSequence}; last_msg_id={lastMessageId}");
+        }
+
+        return true;
+    }
+
     private bool TryDecryptControlPayload(
         string? source,
         Envelope env,
@@ -2349,6 +2422,7 @@ public sealed partial class NknSignalingTransport
 
         if (replay != SessionReplaySequenceResult.Accepted)
         {
+            var mappedMessageType = MapSecureControlMessageType(messageType);
             var replayReason = replay switch
             {
                 SessionReplaySequenceResult.Duplicate => "replay_duplicate",
@@ -2356,11 +2430,24 @@ public sealed partial class NknSignalingTransport
                 SessionReplaySequenceResult.TooFarAhead => "replay_too_far_ahead",
                 _ => "replay_invalid",
             };
-            NknRuntimeDiagnostics.SetLastError($"{MapSecureControlMessageType(messageType)}_{replayReason}");
-            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{MapSecureControlMessageType(messageType)}_{replayReason}");
+            if (replay == SessionReplaySequenceResult.Duplicate &&
+                TrySuppressExpectedControlReplayDuplicate(
+                    messageType,
+                    mappedMessageType,
+                    sessionId.Value,
+                    source,
+                    securePayload.Metadata.Sequence,
+                    env.MessageId))
+            {
+                NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{mappedMessageType}_duplicate_suppressed");
+                return false;
+            }
+
+            NknRuntimeDiagnostics.SetLastError($"{mappedMessageType}_{replayReason}");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason($"{mappedMessageType}_{replayReason}");
             LocalOperationalLog.Warn(
                 "SessionSecurity",
-                $"event=control_message_rejected; message_type={MapSecureControlMessageType(messageType)}; reason={replayReason}; session_id={sessionId.Value}; source={source ?? "(none)"}; sequence={securePayload.Metadata.Sequence}; msg_id={env.MessageId}");
+                $"event=control_message_rejected; message_type={mappedMessageType}; reason={replayReason}; session_id={sessionId.Value}; source={source ?? "(none)"}; sequence={securePayload.Metadata.Sequence}; msg_id={env.MessageId}");
             Log($"Control secure envelope rejected (type={messageType}, msg_id={env.MessageId}, reason={replayReason}, seq={securePayload.Metadata.Sequence})");
             return false;
         }

@@ -83,6 +83,90 @@ public sealed class NknScreenShareAccelerationTransportTests : ScreenCaptureAbst
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task ScreenShareFrame_FallsBackToNknAfterAccelerationDownAndLogsProof()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tuna.screen.fallback.address");
+            var helperClient = new FakeNknClient("helper.tuna.screen.fallback.address");
+            var hostLane = new FakeNknAccelerationLane();
+            var helperLane = new FakeNknAccelerationLane();
+            using var host = new NknSignalingTransport(
+                hostClient,
+                options,
+                new NknIdentity("host-tuna-screen-fallback-id", hostClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                hostLane);
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-tuna-screen-fallback-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                helperLane);
+            var rawNknFrames = new ConcurrentQueue<NknIncomingMessage>();
+            var configReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var frameReceived = new TaskCompletionSource<ScreenShareFrameCompletedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+            hostClient.MessageReceived += (_, e) =>
+            {
+                if (!e.IsTopic &&
+                    EnvelopeCodec.TryDeserialize(e.Payload, out var env) &&
+                    env.Type == MsgType.ScreenShareFrame)
+                {
+                    rawNknFrames.Enqueue(e);
+                }
+            };
+            host.ScreenShareVideoStreamConfigReceived += (_, _) => configReceived.TrySetResult();
+            host.ScreenShareFrameCompleted += (_, e) => frameReceived.TrySetResult(e);
+
+            var sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.ScreenShare);
+            await helper.SendScreenShareVideoStreamConfigAsync(CreateVideoStreamConfig(sessionId, streamEpoch: 1), cts.Token);
+            await configReceived.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            host.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.Screen, sessionId);
+            helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.Screen, sessionId);
+            var logStart = CoreSmokeTestsBase.GetOperationalLogLength();
+            hostLane.SetAvailable(false, "read_failed");
+            await CoreSmokeTestsBase.WaitUntilAsync(
+                () => !host.IsAccelerationAvailableForTests && !helper.IsAccelerationAvailableForTests,
+                TimeSpan.FromSeconds(3));
+            var payload = CreateVideoFragmentPayload(
+                sessionId,
+                frameId: 31,
+                width: 640,
+                height: 360,
+                frameBytes: new byte[] { 9, 8, 7 },
+                streamEpoch: 1,
+                capturedTsUtcMs: 2000,
+                isKeyFrame: true);
+
+            await helper.SendScreenSharePayloadAsync(payload, cts.Token);
+
+            await CoreSmokeTestsBase.WaitUntilAsync(() => rawNknFrames.Count == 1, TimeSpan.FromSeconds(2));
+            var received = await frameReceived.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
+            Assert.Equal(31, received.FrameId);
+            Assert.Equal(new byte[] { 9, 8, 7 }, received.EncodedFrameBytes);
+            Assert.Empty(hostLane.Sent);
+            Assert.Empty(helperLane.Sent);
+            Assert.Equal(NknBridgeChannel.Media, rawNknFrames.Single().Channel);
+            var logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStart);
+            Assert.Contains("event=tuna_fallback_started;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_fallback_nkn_frame_sent; message_type=screenshare_frame; channel=media", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_fallback_nkn_frame_received; message_type=screenshare_frame; channel=media", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task ScreenShareControlMessages_DoNotUseAccelerationLane()
     {
         FakeNknClient.ResetNetwork();

@@ -54,7 +54,7 @@ internal sealed partial class TransportScreenShareCoordinator : IAsyncDisposable
     private const int ScreenShareFallbackBatchPayloadBudgetBytes = 60 * 1024;
     private const int StreamConfigBootstrapSendAttempts = 3;
     private const int MinAutoTuneFramesPerSecond = 2;
-    private const int NormalSenderFramesPerSecond = 8;
+    private const int NormalSenderFramesPerSecond = 15;
     private const int TunaQualitySenderFramesPerSecond = 15;
     private const int ReducedSenderFramesPerSecond = 5;
     private const int CatchUpSenderFramesPerSecond = 3;

@@ -33,6 +33,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private static readonly TimeSpan AckWaitTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan PendingJoinTimeout = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan ControlInputReceiveLogWindow = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan ExpectedControlReplayDuplicateSummaryWindow = TimeSpan.FromSeconds(10);
     private const int ControlInputReceiveLogBurst = 5;
     // Transport-local abuse bounds. Hard payload-size ceilings still also exist
     // below this layer in the bridge/session envelope/screen-share codecs.
@@ -87,6 +88,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly Queue<(long UtcTicks, int DroppedFrames)> screenShareLaneRecentDropWindow = new();
     private readonly object gate = new();
     private readonly object controlSecureStateGate = new();
+    private readonly object expectedControlReplayDuplicateLogGate = new();
     private readonly ScreenShareVideoFrameReassembler secureScreenShareFrameReassembler = new();
     private readonly SessionReplayWindow inboundChatReplayWindow = new();
     private readonly SessionReplayWindow inboundControlReplayWindow = new();
@@ -98,6 +100,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         windowSize: FileTransferInboundReplayWindowSize,
         maxForwardAdvance: FileTransferInboundReplayMaxForwardAdvance);
     private readonly Dictionary<string, FileTransferTransportState> fileTransferStates = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ExpectedControlReplayDuplicateSuppressionState> expectedControlReplayDuplicateSuppressions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferTerminalTombstone> fileTransferTerminalTombstones = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
     private readonly HashSet<string> fileTransferDataSessionRemoteOpenSuppressed = new(StringComparer.Ordinal);
@@ -120,6 +123,19 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     public bool SupportsFileTransferV4Streaming => true;
 
     public FileTransferTransportProfileKind FileTransferTransportProfileKind => FileTransferTransportProfileKind.ConservativeNknStartup;
+
+    private sealed class ExpectedControlReplayDuplicateSuppressionState
+    {
+        public DateTimeOffset WindowStartedUtc { get; set; }
+
+        public long SuppressedCount { get; set; }
+
+        public long LastSequence { get; set; }
+
+        public string LastMessageId { get; set; } = string.Empty;
+
+        public string LastSource { get; set; } = string.Empty;
+    }
 
     private string? currentEnvelopeCode;
     private string? remoteEndpoint;
@@ -587,6 +603,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             accelerationLane.StateChanged -= OnAccelerationStateChanged;
         }
 
+        CompleteTunaFallbackProof("dispose");
         try
         {
             CleanupAsync()
@@ -908,6 +925,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             }
 
             await client.SendMediaAsync(destination, payload, ct).ConfigureAwait(false);
+            RecordTunaFallbackNknFrameSent(MsgType.ScreenShareFrame, NknBridgeChannel.Media, payload.Length);
             Interlocked.Increment(ref screenShareMessagesSent);
             Interlocked.Add(ref screenSharePayloadBytesSent, payload.Length);
             NknRuntimeDiagnostics.IncrementScreenShareMessagesSent();
@@ -1098,6 +1116,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                 }
 
                 await client.SendMediaAsync(next.Destination, next.Payload, CancellationToken.None).ConfigureAwait(false);
+                RecordTunaFallbackNknFrameSent(MsgType.ScreenShareFrame, NknBridgeChannel.Media, next.Payload.Length);
                 Interlocked.Increment(ref screenShareMessagesSent);
                 Interlocked.Add(ref screenSharePayloadBytesSent, next.Payload.Length);
                 NknRuntimeDiagnostics.IncrementScreenShareMessagesSent();

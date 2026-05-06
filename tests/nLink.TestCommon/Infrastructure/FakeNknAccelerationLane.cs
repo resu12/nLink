@@ -48,7 +48,9 @@ internal sealed class FakeNknAccelerationLane : INknAccelerationLane
             Volatile.Read(ref sendRejected),
             QueueOverflow: 0,
             SequenceGap: 0,
-            SequenceReordered: 0);
+            SequenceReordered: 0,
+            TerminalSidecarReason: string.Empty,
+            FallbackEpoch: 0);
 
     public Task<bool> TrySendAsync(NknBridgeChannel lane, byte[] envelopeBytes, CancellationToken ct)
     {

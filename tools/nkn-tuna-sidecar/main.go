@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,7 @@ import (
 const (
 	appName               = "nlink-tuna-sidecar"
 	modeAddress           = "address"
+	modeVersion           = "version"
 	modeWalletStatus      = "wallet-status"
 	modeListen            = "listen"
 	modeDial              = "dial"
@@ -41,11 +43,12 @@ const (
 	defaultConnectTimeout = 30 * time.Second
 	defaultMinBalanceNKN  = "0.00000001"
 	defaultLocalIPC       = "127.0.0.1:0"
-	defaultMaxTotalMiB    = 256
-	defaultMaxDurationSec = 600
+	defaultMaxTotalMiB    = 0
+	defaultMaxDurationSec = 0
 
 	frameMagic            uint32 = 0x4e4c5453 // NLTS
 	frameVersion          byte   = 1
+	appProtocolVersion           = 1
 	frameHeaderSize              = 32
 	frameMaxPayloadSize          = 4 * 1024 * 1024
 	frameMaxSyncSkipBytes        = 64 * 1024
@@ -55,18 +58,19 @@ const (
 	frameTypePong         byte   = 4
 	frameTypeClose        byte   = 5
 
-	bridgeTraceFirstFrames  = 16
-	bridgeTraceEveryFrames  = 128
-	bridgeTraceFirstSeqGaps = 4
-	bridgeTraceEverySeqGaps = 128
-	bridgeSeqGapWarnMissing = 16
-	streamHelloTimeout      = 10 * time.Second
-	providerWatchInterval   = 5 * time.Second
-	bridgeIdleGapThreshold  = 2 * time.Second
-	bridgeSlowOpThreshold   = 2 * time.Second
-	providerReadyMinPaths   = 4
-	providerReadyTimeout    = 45 * time.Second
+	bridgeTraceFirstFrames   = 16
+	bridgeTraceEveryFrames   = 128
+	bridgeSeqGapWarnMissing  = 16
+	streamHelloTimeout       = 10 * time.Second
+	providerWatchInterval    = 5 * time.Second
+	bridgeIdleGapThreshold   = 2 * time.Second
+	bridgeSlowOpThreshold    = 2 * time.Second
+	providerReadyMinPaths    = 4
+	providerDegradedMinPaths = 3
+	providerReadyTimeout     = 45 * time.Second
 )
+
+var sidecarVersion = "dev"
 
 type config struct {
 	mode              string
@@ -96,6 +100,7 @@ type config struct {
 
 type emitter struct {
 	jsonl bool
+	out   io.Writer
 	mu    sync.Mutex
 }
 
@@ -230,6 +235,7 @@ type bridgeDirectionResult struct {
 	direction           string
 	stage               string
 	err                 error
+	terminalReason      string
 	durationMs          int64
 	framesForwarded     int64
 	payloadBytes        int64
@@ -242,10 +248,44 @@ type bridgeDirectionResult struct {
 	seqGapCount         int64
 	seqGapMissing       int64
 	seqReorderCount     int64
+	laneGapSummaries    []event
 	lastFrameType       byte
 	lastFrameLane       byte
 	lastFrameSeq        uint64
 	lastFramePayload    int
+}
+
+type bridgeLaneSequenceStats struct {
+	lane            byte
+	gapCount        int64
+	gapMissing      int64
+	reorderCount    int64
+	lastPreviousSeq uint64
+	lastCurrentSeq  uint64
+}
+
+type bridgeSequenceObservationKind string
+
+const (
+	bridgeSequenceInOrder   bridgeSequenceObservationKind = ""
+	bridgeSequenceGap       bridgeSequenceObservationKind = "gap"
+	bridgeSequenceReordered bridgeSequenceObservationKind = "reordered"
+)
+
+type bridgeSequenceObservation struct {
+	kind         bridgeSequenceObservationKind
+	previousSeq  uint64
+	currentSeq   uint64
+	missingCount int64
+}
+
+type bridgeSequenceTracker struct {
+	seen            bool
+	lastSeq         uint64
+	seqGapCount     int64
+	seqGapMissing   int64
+	seqReorderCount int64
+	laneStats       map[byte]*bridgeLaneSequenceStats
 }
 
 func main() {
@@ -260,7 +300,7 @@ func main() {
 
 func run(args []string, emit *emitter) error {
 	if len(args) == 0 {
-		return usageError("missing mode: use address, wallet-status, listen, or dial")
+		return usageError("missing mode: use address, version, wallet-status, listen, or dial")
 	}
 	cfg, err := parseArgs(args)
 	if err != nil {
@@ -274,6 +314,8 @@ func run(args []string, emit *emitter) error {
 	switch cfg.mode {
 	case modeAddress:
 		return runAddress(ctx, cfg, emit)
+	case modeVersion:
+		return runVersion(emit)
 	case modeWalletStatus:
 		return runWalletStatus(cfg, emit)
 	case modeListen:
@@ -308,7 +350,7 @@ func parseArgs(args []string) (*config, error) {
 	fs.StringVar(&cfg.localIPC, "local-ipc", defaultLocalIPC, "local app IPC endpoint host:port")
 
 	switch args[0] {
-	case modeAddress:
+	case modeAddress, modeVersion:
 	case modeWalletStatus:
 		fs.StringVar(&cfg.walletPath, "wallet", "", "linked NKN wallet.json path")
 		fs.BoolVar(&cfg.passwordStdin, "password-stdin", false, "read wallet password from stdin")
@@ -326,6 +368,8 @@ func parseArgs(args []string) (*config, error) {
 		fs.IntVar(&cfg.acceptTimeoutSec, "accept-timeout-sec", 0, "optional timeout while waiting for app/Tuna connections")
 	case modeDial:
 		fs.StringVar(&cfg.to, "to", "", "remote Tuna/NKN listener address")
+		fs.IntVar(&cfg.maxTotalMiB, "max-total-mib", defaultMaxTotalMiB, "optional local byte cap in MiB; 0 disables")
+		fs.IntVar(&cfg.maxDurationSec, "max-duration-sec", defaultMaxDurationSec, "optional local duration cap in seconds; 0 disables")
 		fs.IntVar(&cfg.tunaDialTimeoutMs, "tuna-dial-timeout-ms", 0, "Tuna dial timeout override in milliseconds")
 	default:
 		return nil, usageError("unsupported mode %q", args[0])
@@ -359,7 +403,7 @@ func validateConfig(cfg *config) error {
 	}
 
 	switch cfg.mode {
-	case modeAddress:
+	case modeAddress, modeVersion:
 	case modeWalletStatus:
 		if cfg.seedHex != "" || cfg.seedStdin {
 			return usageError("wallet-status identity comes from --wallet; seed flags are only supported for dial")
@@ -402,10 +446,23 @@ func validateConfig(cfg *config) error {
 		if strings.TrimSpace(cfg.to) == "" {
 			return usageError("dial requires --to")
 		}
+		if cfg.maxTotalMiB < 0 {
+			return usageError("--max-total-mib must not be negative")
+		}
+		if cfg.maxDurationSec < 0 {
+			return usageError("--max-duration-sec must not be negative")
+		}
 		if cfg.tunaDialTimeoutMs < 0 {
 			return usageError("--tuna-dial-timeout-ms must not be negative")
 		}
 	}
+	return nil
+}
+
+func runVersion(emit *emitter) error {
+	metadata := sidecarMetadata()
+	metadata["event"] = "sidecar_version"
+	emit.emit(metadata)
 	return nil
 }
 
@@ -426,6 +483,7 @@ func runAddress(ctx context.Context, cfg *config, emit *emitter) error {
 		"identifier": cfg.identifier,
 		"address":    client.Address(),
 		"addressLen": len(client.Address()),
+		"sidecar":    sidecarMetadata(),
 	})
 	return nil
 }
@@ -508,17 +566,21 @@ func runListen(ctx context.Context, cfg *config, emit *emitter) error {
 	defer localListener.Close()
 
 	emit.emit(event{
-		"event":          "ready",
-		"role":           "listener",
-		"transport":      "tuna",
-		"address":        tunaClient.Address(),
-		"localIpc":       localListener.Addr().String(),
-		"walletAddress":  wallet.address,
-		"walletFile":     filepath.Base(cfg.walletPath),
-		"balanceNkn":     wallet.balance,
-		"maxTotalMiB":    cfg.maxTotalMiB,
-		"maxDurationSec": cfg.maxDurationSec,
-		"providerPaths":  tunaProviderPathDiagnostics(tunaClient.GetPubAddrs()),
+		"event":                "ready",
+		"role":                 "listener",
+		"transport":            "tuna",
+		"address":              tunaClient.Address(),
+		"localIpc":             localListener.Addr().String(),
+		"appProtocolVersion":   appProtocolVersion,
+		"frameProtocolVersion": int(frameVersion),
+		"protocolVersion":      int(frameVersion),
+		"sidecarVersion":       sidecarVersion,
+		"walletAddress":        wallet.address,
+		"walletFile":           filepath.Base(cfg.walletPath),
+		"balanceNkn":           wallet.balance,
+		"maxTotalMiB":          cfg.maxTotalMiB,
+		"maxDurationSec":       cfg.maxDurationSec,
+		"providerPaths":        tunaProviderPathDiagnostics(tunaClient.GetPubAddrs()),
 	})
 
 	go exitOnCancel(ctx, 130)
@@ -555,7 +617,7 @@ func runListen(ctx context.Context, cfg *config, emit *emitter) error {
 		"paths":      tunaProviderPathDiagnostics(tunaClient.GetPubAddrs()),
 	})
 
-	return bridgeConns(ctx, cfg, appConn, tunaConn, emit, "listener")
+	return bridgeConns(ctx, cfg, appConn, tunaConn, emit, "listener", tunaProviderPathDiagnostics(tunaClient.GetPubAddrs()))
 }
 
 func runDial(ctx context.Context, cfg *config, emit *emitter) error {
@@ -642,12 +704,16 @@ func runDial(ctx context.Context, cfg *config, emit *emitter) error {
 	})
 
 	emit.emit(event{
-		"event":     "ready",
-		"role":      "dialer",
-		"transport": "tuna",
-		"address":   tunaClient.Address(),
-		"to":        cfg.to,
-		"localIpc":  localListener.Addr().String(),
+		"event":                "ready",
+		"role":                 "dialer",
+		"transport":            "tuna",
+		"address":              tunaClient.Address(),
+		"to":                   cfg.to,
+		"localIpc":             localListener.Addr().String(),
+		"appProtocolVersion":   appProtocolVersion,
+		"frameProtocolVersion": int(frameVersion),
+		"protocolVersion":      int(frameVersion),
+		"sidecarVersion":       sidecarVersion,
 	})
 
 	localAcceptStarted := time.Now()
@@ -666,7 +732,7 @@ func runDial(ctx context.Context, cfg *config, emit *emitter) error {
 	if err := writeStatus(appConn, tunaClient.Address()); err != nil {
 		return err
 	}
-	return bridgeConns(ctx, cfg, appConn, conn, emit, "dialer")
+	return bridgeConns(ctx, cfg, appConn, conn, emit, "dialer", nil)
 }
 
 func dialTuna(ctx context.Context, tunaClient *ts.TunaSessionClient, cfg *config) (net.Conn, error) {
@@ -843,10 +909,13 @@ func acceptOne(ctx context.Context, timeout time.Duration, accept func() (net.Co
 
 func writeSidecarHello(conn net.Conn, role string, address string) error {
 	payload, _ := json.Marshal(event{
-		"event":           "sidecar_hello",
-		"role":            role,
-		"protocolVersion": int(frameVersion),
-		"addressLen":      len(address),
+		"event":                "sidecar_hello",
+		"role":                 role,
+		"appProtocolVersion":   appProtocolVersion,
+		"frameProtocolVersion": int(frameVersion),
+		"protocolVersion":      int(frameVersion),
+		"sidecarVersion":       sidecarVersion,
+		"addressLen":           len(address),
 	})
 	return writeFrame(conn, frameTypeStatus, 0, 0, time.Now().UnixMilli(), payload)
 }
@@ -862,8 +931,11 @@ func readSidecarHello(conn net.Conn) error {
 		return fmt.Errorf("unexpected sidecar hello frame type=%s lane=%s", frameTypeName(frame.typ), frameLaneName(frame.lane))
 	}
 	var hello struct {
-		Event           string `json:"event"`
-		ProtocolVersion int    `json:"protocolVersion"`
+		Event                string `json:"event"`
+		AppProtocolVersion   int    `json:"appProtocolVersion"`
+		FrameProtocolVersion int    `json:"frameProtocolVersion"`
+		ProtocolVersion      int    `json:"protocolVersion"`
+		SidecarVersion       string `json:"sidecarVersion"`
 	}
 	if err := json.Unmarshal(frame.payload, &hello); err != nil {
 		return fmt.Errorf("decode sidecar hello failed: %w", err)
@@ -871,25 +943,60 @@ func readSidecarHello(conn net.Conn) error {
 	if hello.Event != "sidecar_hello" {
 		return fmt.Errorf("unexpected sidecar hello event")
 	}
-	if hello.ProtocolVersion != int(frameVersion) {
-		return fmt.Errorf("unsupported sidecar hello protocol version")
+	if hello.AppProtocolVersion != appProtocolVersion {
+		return fmt.Errorf("unsupported sidecar hello app protocol version")
+	}
+	if hello.FrameProtocolVersion != int(frameVersion) || hello.ProtocolVersion != int(frameVersion) {
+		return fmt.Errorf("unsupported sidecar hello frame protocol version")
+	}
+	if !compatibleSidecarVersion(hello.SidecarVersion) {
+		return fmt.Errorf("unsupported sidecar hello version")
 	}
 	return nil
 }
 
 func writeStatus(conn net.Conn, address string) error {
 	payload, _ := json.Marshal(event{
-		"event":           "status",
-		"role":            "sidecar",
-		"transport":       "tuna",
-		"address":         address,
-		"protocolVersion": 1,
-		"lanes":           []string{"file", "screen"},
+		"event":                "status",
+		"role":                 "sidecar",
+		"transport":            "tuna",
+		"address":              address,
+		"appProtocolVersion":   appProtocolVersion,
+		"frameProtocolVersion": int(frameVersion),
+		"protocolVersion":      int(frameVersion),
+		"sidecarVersion":       sidecarVersion,
+		"lanes":                []string{"file", "screen"},
 	})
 	return writeFrame(conn, frameTypeStatus, 0, 0, time.Now().UnixMilli(), payload)
 }
 
-func bridgeConns(ctx context.Context, cfg *config, appConn net.Conn, tunaConn net.Conn, emit *emitter, role string) error {
+func sidecarMetadata() event {
+	return event{
+		"appProtocolVersion":   appProtocolVersion,
+		"frameProtocolVersion": int(frameVersion),
+		"protocolVersion":      int(frameVersion),
+		"sidecarVersion":       sidecarVersion,
+		"runtime":              sidecarRuntime(),
+	}
+}
+
+func sidecarRuntime() string {
+	if runtime.GOOS == "windows" && runtime.GOARCH == "amd64" {
+		return "win-x64"
+	}
+
+	return runtime.GOOS + "-" + runtime.GOARCH
+}
+
+func compatibleSidecarVersion(peerVersion string) bool {
+	peerVersion = strings.TrimSpace(peerVersion)
+	if peerVersion == "" {
+		return false
+	}
+	return peerVersion == sidecarVersion || peerVersion == "dev" || sidecarVersion == "dev"
+}
+
+func bridgeConns(ctx context.Context, cfg *config, appConn net.Conn, tunaConn net.Conn, emit *emitter, role string, providerInfo event) error {
 	limitBytes := int64(cfg.maxTotalMiB) * 1024 * 1024
 	duration := time.Duration(cfg.maxDurationSec) * time.Second
 	if limitBytes <= 0 {
@@ -961,20 +1068,94 @@ doneCollectingBridgeResults:
 	if activePaymentObserver != nil {
 		paymentEventCount, cumulativeSpend = activePaymentObserver.snapshot()
 	}
-	emit.emit(event{
-		"event":              "summary",
-		"transport":          "tuna",
-		"role":               role,
-		"bytesMoved":         totalBytes.Load(),
-		"durationMs":         time.Since(bridgeStarted).Milliseconds(),
-		"reason":             safeReason(err),
-		"stopDirection":      result.direction,
-		"stopStage":          result.stage,
-		"paymentObserved":    paymentEventCount > 0,
-		"paymentEventCount":  paymentEventCount,
-		"cumulativeSpendNkn": ratDecimalString(cumulativeSpend, 8),
-		"directions":         directionSummaries,
-	})
+	bytesMoved := totalBytes.Load()
+	paymentStatus := "none"
+	if paymentEventCount > 0 {
+		paymentStatus = "reported"
+	} else if bytesMoved > 0 {
+		paymentStatus = "no_payment_telemetry_reported"
+	}
+	capReached := false
+	capReason := ""
+	if result.stage == "cap" {
+		capReached = true
+		capReason = "byte_cap_reached"
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		capReached = true
+		capReason = "duration_cap_reached"
+	}
+	fallbackReason := ""
+	if !capReached && err != nil {
+		fallbackReason = safeReason(err)
+	}
+	providerUsableCount := -1
+	if providerInfo != nil {
+		providerUsableCount = eventInt(providerInfo, "usableCount")
+	}
+	terminalReason := result.terminalReason
+	if terminalReason == "" {
+		terminalReason = bridgeTerminalReason(result.direction, result.stage, err)
+	}
+	terminal := event{
+		"event":               "tuna_bridge_terminal",
+		"transport":           "tuna",
+		"role":                role,
+		"direction":           result.direction,
+		"stage":               result.stage,
+		"terminalReason":      terminalReason,
+		"rawReason":           safeReason(err),
+		"durationMs":          time.Since(bridgeStarted).Milliseconds(),
+		"framesForwarded":     result.framesForwarded,
+		"bytesMoved":          bytesMoved,
+		"payloadBytes":        result.payloadBytes,
+		"trafficFlowed":       bytesMoved > 0 || result.framesForwarded > 0,
+		"lastFrameType":       frameTypeName(result.lastFrameType),
+		"lastFrameLane":       frameLaneName(result.lastFrameLane),
+		"lastFrameSeq":        result.lastFrameSeq,
+		"lastFramePayload":    result.lastFramePayload,
+		"maxReadMs":           result.maxReadMs,
+		"maxWriteMs":          result.maxWriteMs,
+		"idleGapCount":        result.idleGapCount,
+		"maxIdleGapMs":        result.maxIdleGapMs,
+		"seqGapCount":         result.seqGapCount,
+		"seqGapMissing":       result.seqGapMissing,
+		"seqReorderCount":     result.seqReorderCount,
+		"providerUsableCount": providerUsableCount,
+		"minProviderCnt":      providerReadyMinPaths,
+		"paymentStatus":       paymentStatus,
+		"paymentEventCount":   paymentEventCount,
+	}
+	if len(result.laneGapSummaries) > 0 {
+		terminal["sequenceGapsByLane"] = result.laneGapSummaries
+	}
+	emit.emit(terminal)
+	summary := event{
+		"event":               "summary",
+		"transport":           "tuna",
+		"role":                role,
+		"bytesMoved":          bytesMoved,
+		"durationMs":          time.Since(bridgeStarted).Milliseconds(),
+		"reason":              safeReason(err),
+		"terminalReason":      terminalReason,
+		"stopDirection":       result.direction,
+		"stopStage":           result.stage,
+		"paymentObserved":     paymentEventCount > 0,
+		"paymentStatus":       paymentStatus,
+		"paymentEventCount":   paymentEventCount,
+		"cumulativeSpendNkn":  ratDecimalString(cumulativeSpend, 8),
+		"capReached":          capReached,
+		"capReason":           capReason,
+		"fallbackReason":      fallbackReason,
+		"providerUsableCount": providerUsableCount,
+		"minProviderCnt":      providerReadyMinPaths,
+		"directions":          directionSummaries,
+	}
+	if bytesMoved > 0 && cumulativeSpend.Sign() > 0 {
+		mb := new(big.Rat).SetFrac(big.NewInt(bytesMoved), big.NewInt(1_000_000))
+		nknPerMb := new(big.Rat).Quo(cumulativeSpend, mb)
+		summary["nknPerMb"] = ratDecimalString(nknPerMb, 9)
+	}
+	emit.emit(summary)
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
 		return nil
 	}
@@ -1001,16 +1182,22 @@ func bridgeDirection(
 	var maxWriteMs int64
 	var idleGapCount int64
 	var maxIdleGapMs int64
-	var seqGapCount int64
-	var seqGapMissing int64
-	var seqReorderCount int64
 	var lastReadAt time.Time
-	lastSeqByLane := map[byte]uint64{}
+	sequenceTracker := &bridgeSequenceTracker{}
 	finish := func(stage string, err error, frame sidecarFrame) {
+		laneSummaries := bridgeLaneSequenceSummaries(sequenceTracker.laneStats)
+		for _, summary := range laneSummaries {
+			summary["event"] = "bridge_sequence_gap_summary"
+			summary["transport"] = "tuna"
+			summary["role"] = role
+			summary["direction"] = direction
+			emit.emit(summary)
+		}
 		errCh <- bridgeDirectionResult{
 			direction:           direction,
 			stage:               stage,
 			err:                 err,
+			terminalReason:      bridgeTerminalReason(direction, stage, err),
 			durationMs:          time.Since(startedAt).Milliseconds(),
 			framesForwarded:     framesForwarded,
 			payloadBytes:        payloadBytes,
@@ -1020,9 +1207,10 @@ func bridgeDirection(
 			maxWriteMs:          maxWriteMs,
 			idleGapCount:        idleGapCount,
 			maxIdleGapMs:        maxIdleGapMs,
-			seqGapCount:         seqGapCount,
-			seqGapMissing:       seqGapMissing,
-			seqReorderCount:     seqReorderCount,
+			seqGapCount:         sequenceTracker.seqGapCount,
+			seqGapMissing:       sequenceTracker.seqGapMissing,
+			seqReorderCount:     sequenceTracker.seqReorderCount,
+			laneGapSummaries:    laneSummaries,
 			lastFrameType:       frame.typ,
 			lastFrameLane:       frame.lane,
 			lastFrameSeq:        frame.seq,
@@ -1086,56 +1274,40 @@ func bridgeDirection(
 				"payloadBytes":    payloadBytes,
 			})
 		}
-		if frame.typ == frameTypeData && frame.seq > 0 {
-			if previous, ok := lastSeqByLane[frame.lane]; ok && frame.seq != previous+1 {
-				if frame.seq <= previous {
-					seqReorderCount++
-					if shouldTraceBridgeFrame(seqReorderCount) {
-						emit.emit(event{
-							"event":           "bridge_sequence_reordered",
-							"transport":       "tuna",
-							"role":            role,
-							"direction":       direction,
-							"frameLane":       frameLaneName(frame.lane),
-							"previousSeq":     previous,
-							"currentSeq":      frame.seq,
-							"missingCount":    0,
-							"framesForwarded": framesForwarded,
-							"payloadBytes":    payloadBytes,
-							"seqReorderCount": seqReorderCount,
-							"seqGapCount":     seqGapCount,
-							"seqGapMissing":   seqGapMissing,
-						})
-					}
-				} else {
-					missing := int64(frame.seq - previous - 1)
-					seqGapCount++
-					seqGapMissing += missing
-					if missing >= bridgeSeqGapWarnMissing || shouldTraceBridgeSequenceGap(seqGapCount) {
-						eventName := "bridge_sequence_gap_observed"
-						if missing >= bridgeSeqGapWarnMissing {
-							eventName = "bridge_sequence_gap"
-						}
-						emit.emit(event{
-							"event":           eventName,
-							"transport":       "tuna",
-							"role":            role,
-							"direction":       direction,
-							"frameLane":       frameLaneName(frame.lane),
-							"previousSeq":     previous,
-							"currentSeq":      frame.seq,
-							"missingCount":    missing,
-							"framesForwarded": framesForwarded,
-							"payloadBytes":    payloadBytes,
-							"seqGapCount":     seqGapCount,
-							"seqGapMissing":   seqGapMissing,
-						})
-					}
-					lastSeqByLane[frame.lane] = frame.seq
-				}
-			} else {
-				lastSeqByLane[frame.lane] = frame.seq
+		sequenceObservation := sequenceTracker.observe(frame)
+		if sequenceObservation.kind == bridgeSequenceReordered {
+			if shouldTraceBridgeFrame(sequenceTracker.seqReorderCount) {
+				emit.emit(event{
+					"event":           "bridge_sequence_reordered",
+					"transport":       "tuna",
+					"role":            role,
+					"direction":       direction,
+					"frameLane":       frameLaneName(frame.lane),
+					"previousSeq":     sequenceObservation.previousSeq,
+					"currentSeq":      sequenceObservation.currentSeq,
+					"missingCount":    0,
+					"framesForwarded": framesForwarded,
+					"payloadBytes":    payloadBytes,
+					"seqReorderCount": sequenceTracker.seqReorderCount,
+					"seqGapCount":     sequenceTracker.seqGapCount,
+					"seqGapMissing":   sequenceTracker.seqGapMissing,
+				})
 			}
+		} else if sequenceObservation.kind == bridgeSequenceGap && sequenceObservation.missingCount >= bridgeSeqGapWarnMissing {
+			emit.emit(event{
+				"event":           "bridge_sequence_gap",
+				"transport":       "tuna",
+				"role":            role,
+				"direction":       direction,
+				"frameLane":       frameLaneName(frame.lane),
+				"previousSeq":     sequenceObservation.previousSeq,
+				"currentSeq":      sequenceObservation.currentSeq,
+				"missingCount":    sequenceObservation.missingCount,
+				"framesForwarded": framesForwarded,
+				"payloadBytes":    payloadBytes,
+				"seqGapCount":     sequenceTracker.seqGapCount,
+				"seqGapMissing":   sequenceTracker.seqGapMissing,
+			})
 		}
 		moved := int64(len(frame.payload))
 		if totalBytes.Add(moved) > limitBytes {
@@ -1197,6 +1369,7 @@ func bridgeDirectionEvent(result bridgeDirectionResult) event {
 		"direction":           result.direction,
 		"stage":               result.stage,
 		"reason":              safeReason(result.err),
+		"terminalReason":      result.terminalReason,
 		"durationMs":          result.durationMs,
 		"framesForwarded":     result.framesForwarded,
 		"payloadBytes":        result.payloadBytes,
@@ -1209,6 +1382,7 @@ func bridgeDirectionEvent(result bridgeDirectionResult) event {
 		"seqGapCount":         result.seqGapCount,
 		"seqGapMissing":       result.seqGapMissing,
 		"seqReorderCount":     result.seqReorderCount,
+		"sequenceGapsByLane":  result.laneGapSummaries,
 		"lastFrameType":       frameTypeName(result.lastFrameType),
 		"lastFrameLane":       frameLaneName(result.lastFrameLane),
 		"lastFrameSeq":        result.lastFrameSeq,
@@ -1216,14 +1390,122 @@ func bridgeDirectionEvent(result bridgeDirectionResult) event {
 	}
 }
 
+func bridgeTerminalReason(direction, stage string, err error) string {
+	if stage == "cap" {
+		return "byte_cap_reached"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "duration_cap_reached"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "context_cancelled"
+	}
+	if stage == "write" {
+		if direction == "app_to_tuna" {
+			return "tuna_write_failed"
+		}
+		return "local_write_failed"
+	}
+	if stage == "read" {
+		if direction == "app_to_tuna" {
+			return "local_ipc_eof"
+		}
+		return "tuna_stream_eof"
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return "context_cancelled"
+	}
+	if stage == "context" {
+		return "context_cancelled"
+	}
+	if err == nil {
+		return "normal_close"
+	}
+	return "unknown_close"
+}
+
+func bridgeLaneStatsFor(stats map[byte]*bridgeLaneSequenceStats, lane byte) *bridgeLaneSequenceStats {
+	if current, ok := stats[lane]; ok {
+		return current
+	}
+	current := &bridgeLaneSequenceStats{lane: lane}
+	stats[lane] = current
+	return current
+}
+
+func (tracker *bridgeSequenceTracker) observe(frame sidecarFrame) bridgeSequenceObservation {
+	if frame.typ != frameTypeData || frame.seq == 0 {
+		return bridgeSequenceObservation{}
+	}
+
+	if !tracker.seen {
+		tracker.seen = true
+		tracker.lastSeq = frame.seq
+		return bridgeSequenceObservation{}
+	}
+
+	previous := tracker.lastSeq
+	if frame.seq == previous+1 {
+		tracker.lastSeq = frame.seq
+		return bridgeSequenceObservation{}
+	}
+
+	if tracker.laneStats == nil {
+		tracker.laneStats = map[byte]*bridgeLaneSequenceStats{}
+	}
+	stats := bridgeLaneStatsFor(tracker.laneStats, frame.lane)
+	stats.lastPreviousSeq = previous
+	stats.lastCurrentSeq = frame.seq
+
+	if frame.seq <= previous {
+		tracker.seqReorderCount++
+		stats.reorderCount++
+		return bridgeSequenceObservation{
+			kind:        bridgeSequenceReordered,
+			previousSeq: previous,
+			currentSeq:  frame.seq,
+		}
+	}
+
+	missing := int64(frame.seq - previous - 1)
+	tracker.seqGapCount++
+	tracker.seqGapMissing += missing
+	stats.gapCount++
+	stats.gapMissing += missing
+	tracker.lastSeq = frame.seq
+
+	return bridgeSequenceObservation{
+		kind:         bridgeSequenceGap,
+		previousSeq:  previous,
+		currentSeq:   frame.seq,
+		missingCount: missing,
+	}
+}
+
+func bridgeLaneSequenceSummaries(stats map[byte]*bridgeLaneSequenceStats) []event {
+	if len(stats) == 0 {
+		return nil
+	}
+	summaries := make([]event, 0, len(stats))
+	for _, stat := range stats {
+		if stat.gapCount == 0 && stat.reorderCount == 0 {
+			continue
+		}
+		summaries = append(summaries, event{
+			"frameLane":       frameLaneName(stat.lane),
+			"seqGapCount":     stat.gapCount,
+			"seqGapMissing":   stat.gapMissing,
+			"seqReorderCount": stat.reorderCount,
+			"previousSeq":     stat.lastPreviousSeq,
+			"currentSeq":      stat.lastCurrentSeq,
+		})
+	}
+	return summaries
+}
+
 func shouldTraceBridgeFrame(framesForwarded int64) bool {
 	return framesForwarded <= bridgeTraceFirstFrames ||
 		bridgeTraceEveryFrames > 0 && framesForwarded%bridgeTraceEveryFrames == 0
-}
-
-func shouldTraceBridgeSequenceGap(gapCount int64) bool {
-	return gapCount <= bridgeTraceFirstSeqGaps ||
-		bridgeTraceEverySeqGaps > 0 && gapCount%bridgeTraceEverySeqGaps == 0
 }
 
 func frameTypeName(typ byte) string {
@@ -1321,8 +1603,12 @@ func waitForProviderPathReadiness(
 			return true, nil
 		}
 		if time.Now().After(deadline) {
+			eventName := "tuna_provider_paths_ready_timeout"
+			if usableCount >= providerDegradedMinPaths {
+				eventName = "provider_paths_degraded"
+			}
 			emit.emit(event{
-				"event":          "tuna_provider_paths_ready_timeout",
+				"event":          eventName,
 				"role":           role,
 				"usableCount":    usableCount,
 				"minProviderCnt": minUsablePaths,
@@ -1562,10 +1848,14 @@ func openLinkedWallet(cfg *config, emit *emitter) (*walletInfo, error) {
 	}
 	info := &walletInfo{wallet: wallet, address: wallet.Address(), balance: balance.String()}
 	emit.emit(event{
-		"event":         "wallet_ready",
-		"walletFile":    filepath.Base(cfg.walletPath),
-		"walletAddress": info.address,
-		"balanceNkn":    info.balance,
+		"event":                "wallet_ready",
+		"walletFile":           filepath.Base(cfg.walletPath),
+		"walletAddress":        info.address,
+		"balanceNkn":           info.balance,
+		"appProtocolVersion":   appProtocolVersion,
+		"frameProtocolVersion": int(frameVersion),
+		"protocolVersion":      int(frameVersion),
+		"sidecarVersion":       sidecarVersion,
 	})
 	return info, nil
 }
@@ -1778,7 +2068,11 @@ func (e *emitter) emit(v any) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.jsonl {
-		_ = json.NewEncoder(os.Stdout).Encode(v)
+		out := e.out
+		if out == nil {
+			out = os.Stdout
+		}
+		_ = json.NewEncoder(out).Encode(v)
 		return
 	}
 	fmt.Fprintf(os.Stderr, "%v\n", v)
@@ -1834,11 +2128,13 @@ func usageError(format string, args ...any) error {
 func usage() string {
 	return strings.TrimSpace(`Usage:
   nlink-tuna-sidecar.exe address --seed-stdin --jsonl
+  nlink-tuna-sidecar.exe version --jsonl
   nlink-tuna-sidecar.exe wallet-status --wallet wallet.json --password-stdin --jsonl
   nlink-tuna-sidecar.exe listen --wallet wallet.json --password-prompt --allow-remote <addr> --max-price-nkn-per-mb <nkn> --max-total-mib 256 --max-duration-sec 600 --local-ipc 127.0.0.1:0 --jsonl
   nlink-tuna-sidecar.exe dial --to <listener-tuna-address> --local-ipc 127.0.0.1:0 --seed-stdin --jsonl
 
 Notes:
+  version emits sidecar compatibility metadata and exits without NKN, wallet, listen, dial, or payment.
   wallet-status unlocks the linked wallet, emits public address/balance, and exits without Tuna listen/dial/payment.
   listen uses a linked low-balance wallet and never logs the full wallet path.
   dial does not need a wallet; --seed-stdin is for deterministic developer test identity only.

@@ -52,9 +52,6 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private readonly ScreenShareLiveDiagnosticsSnapshot screenShareLiveSnapshot;
     private TunaWalletLinkState tunaWalletState = TunaWalletLinkState.Unlinked;
     private bool isTunaWalletValidating;
-    private int tunaUnlockFailureCount;
-    private DateTimeOffset? tunaUnlockCooldownUntilUtc;
-    private CancellationTokenSource? tunaUnlockCooldownCts;
 
     public DiagnosticsPageViewModel(
         Action backAction,
@@ -468,21 +465,45 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     }
 
     public string TunaRuntimeStatus => tunaRuntimePilotService?.RuntimeStatus ?? "service unavailable";
+    public string TunaCurrentState => TunaStatusPresentationMapper.FromRuntimeStatus(TunaRuntimeStatus).Text;
     public string TunaStartupTiming => tunaRuntimePilotService?.StartupTimingSummary ?? "(none)";
     public string TunaRuntimeUnlockStatus => GetTunaRuntimeUnlockState().StatusText;
     public string TunaRuntimePayerNotice => "This computer pays while acting as the Tuna listener.";
     public string TunaSpendByNLink => FormatTunaSpend(CurrentTunaUsage());
     public string TunaAverageCost => FormatTunaAverageCost(CurrentTunaUsage());
     public string TunaLastSessionCost => FormatTunaLastSessionCost(CurrentTunaUsage());
+    public string TunaLastSessionReason => FormatTunaLastSessionReason(CurrentTunaUsage());
     public string TunaExpectedImprovement => "File transfer about 1.8x in Phase 3 benchmark; screen stability improved, latency roughly similar.";
     public string TunaSidecarVerifierStatus
     {
         get
         {
             var availability = tunaWalletVerifier?.GetAvailability();
-            return availability?.IsAvailable == true ? "Available" : "Unavailable";
+            if (availability is null)
+            {
+                return "Unavailable";
+            }
+
+            if (availability.IsAvailable)
+            {
+                return "Available";
+            }
+
+            return availability.Status switch
+            {
+                "sidecar_missing" => "Missing",
+                "sidecar_version_mismatch" => "Wrong version",
+                "sidecar_protocol_mismatch" or
+                "sidecar_app_protocol_mismatch" or
+                "sidecar_frame_protocol_mismatch" => "Protocol mismatch",
+                "sidecar_manifest_missing" or
+                "sidecar_manifest_invalid" or
+                "sidecar_manifest_hash_mismatch" => "Manifest invalid",
+                _ => "Unavailable",
+            };
         }
     }
+
     public string TunaSidecarVerifierDetail
     {
         get
@@ -491,6 +512,11 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             if (availability is null)
             {
                 return "verifier service missing";
+            }
+
+            if (!string.IsNullOrWhiteSpace(availability.Detail))
+            {
+                return availability.Detail;
             }
 
             if (availability.IsAvailable && !string.IsNullOrWhiteSpace(availability.SidecarPath))
@@ -676,7 +702,6 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         try
         {
             var state = TunaWalletLinkState.Linked(walletPath, nowProvider());
-            ResetTunaUnlockFailureState();
             await SaveTunaWalletStateAsync(state, ct);
             copyFeedback.Show("Wallet linked");
         }
@@ -837,6 +862,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     {
         OnPropertyChanged(nameof(TunaRuntimeFlagStatus));
         OnPropertyChanged(nameof(TunaFallbackState));
+        OnPropertyChanged(nameof(TunaCurrentState));
         OnPropertyChanged(nameof(TunaSidecarVerifierStatus));
         OnPropertyChanged(nameof(TunaSidecarVerifierDetail));
         OnPropertyChanged(nameof(TunaWalletFileName));
@@ -865,11 +891,13 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         OnPropertyChanged(nameof(TunaMaxTotalMiB));
         OnPropertyChanged(nameof(TunaMaxDurationMinutes));
         OnPropertyChanged(nameof(TunaRuntimeStatus));
+        OnPropertyChanged(nameof(TunaCurrentState));
         OnPropertyChanged(nameof(TunaStartupTiming));
         OnPropertyChanged(nameof(TunaRuntimeUnlockStatus));
         OnPropertyChanged(nameof(TunaSpendByNLink));
         OnPropertyChanged(nameof(TunaAverageCost));
         OnPropertyChanged(nameof(TunaLastSessionCost));
+        OnPropertyChanged(nameof(TunaLastSessionReason));
         UnlockTunaRuntimeCommand.NotifyCanExecuteChanged();
     }
 
@@ -1015,7 +1043,6 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
                     ct).ConfigureAwait(false);
             }
 
-            ResetTunaUnlockFailureState();
             RefreshTunaWalletProperties();
             RefreshTunaRuntimeProperties();
             copyFeedback.Show("Wallet unlinked");
@@ -1178,8 +1205,6 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             tunaRuntimePilotService.StateChanged -= OnTunaRuntimeStateChanged;
         }
 
-        tunaUnlockCooldownCts?.Cancel();
-        tunaUnlockCooldownCts?.Dispose();
         copyFeedback.Dispose();
     }
 
@@ -1197,6 +1222,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     {
         var metricsSnapshot = metricsRegistry?.Snapshot();
         var timelineText = BuildSessionTimelineText(SessionTimeline.SnapshotRecent(30));
+        var tunaAvailability = tunaWalletVerifier?.GetAvailability();
         var lines = new List<string>
         {
             "Privacy notice",
@@ -1259,6 +1285,16 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"tuna_fallback_state: {TunaFallbackState}",
             $"tuna_sidecar_verifier: {TunaSidecarVerifierStatus}",
             $"tuna_sidecar_verifier_detail: {TunaSidecarVerifierDetail}",
+            $"tuna_sidecar_expected_app_protocol: {NknTunaSidecarCompatibility.AppProtocolVersion}",
+            $"tuna_sidecar_expected_frame_protocol: {NknTunaSidecarFrameProtocol.ProtocolVersion}",
+            $"tuna_sidecar_expected_version: {NknTunaSidecarCompatibility.ExpectedSidecarVersion}",
+            $"tuna_sidecar_actual_app_protocol: {tunaAvailability?.ActualAppProtocolVersion?.ToString(CultureInfo.InvariantCulture) ?? "(none)"}",
+            $"tuna_sidecar_actual_frame_protocol: {tunaAvailability?.ActualFrameProtocolVersion?.ToString(CultureInfo.InvariantCulture) ?? "(none)"}",
+            $"tuna_sidecar_actual_version: {tunaAvailability?.ActualSidecarVersion ?? "(none)"}",
+            $"tuna_sidecar_actual_runtime: {tunaAvailability?.ActualRuntime ?? "(none)"}",
+            $"tuna_sidecar_manifest_status: {tunaAvailability?.ManifestStatus ?? "(none)"}",
+            $"tuna_sidecar_path: {DiagnosticsExportBuilder.RedactStructuredValue("tuna_sidecar_path", tunaAvailability?.SidecarPath)}",
+            $"tuna_sidecar_manifest_path: {DiagnosticsExportBuilder.RedactStructuredValue("tuna_sidecar_manifest_path", tunaAvailability?.ManifestPath)}",
             $"tuna_wallet_file: {TunaWalletFileName}",
             $"tuna_wallet_status: {TunaWalletStatus}",
             $"tuna_wallet_balance_category: {TunaWalletBalanceCategory}",
@@ -1266,6 +1302,17 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"tuna_spend_by_nlink: {TunaSpendByNLink}",
             $"tuna_average_cost: {TunaAverageCost}",
             $"tuna_last_session_cost: {TunaLastSessionCost}",
+            $"tuna_last_session_reason: {TunaLastSessionReason}",
+            $"tuna_last_session_payment_status: {CurrentTunaUsage().LastSessionRecord?.PaymentTelemetryStatus ?? "(none)"}",
+            $"tuna_last_session_run_id_hash: {HashForDiagnostics(CurrentTunaUsage().LastSessionRecord?.SessionRunId)}",
+            $"tuna_last_session_bytes: {CurrentTunaUsage().LastSessionRecord?.BytesMoved.ToString(CultureInfo.InvariantCulture) ?? "0"}",
+            $"tuna_last_session_mb: {FormatDecimal(CurrentTunaUsage().LastSessionRecord?.AppPayloadMb ?? 0m, 6)}",
+            $"tuna_last_session_paid_nkn: {FormatDecimal(CurrentTunaUsage().LastSessionRecord?.PaidNkn ?? 0m, 8)}",
+            $"tuna_last_session_average_nkn_per_mb: {FormatDecimal(CurrentTunaUsage().LastSessionRecord?.AverageNknPerMb ?? 0m, 9)}",
+            $"tuna_last_session_payment_event_count: {CurrentTunaUsage().LastSessionRecord?.PaymentEventCount.ToString(CultureInfo.InvariantCulture) ?? "0"}",
+            $"tuna_last_session_cap_reason: {CurrentTunaUsage().LastSessionRecord?.CapReason ?? string.Empty}",
+            $"tuna_last_session_fallback_reason: {CurrentTunaUsage().LastSessionRecord?.FallbackReason ?? string.Empty}",
+            $"tuna_last_session_completed_from_summary: {(CurrentTunaUsage().LastSessionRecord?.CompletedFromSummary == true ? "yes" : "no")}",
             $"tuna_expected_improvement: {TunaExpectedImprovement}",
             $"tuna_wallet_address_hash: {HashForDiagnostics(tunaWalletState.WalletAddress)}",
             $"tuna_wallet_path: {DiagnosticsExportBuilder.RedactStructuredValue("tuna_wallet_path", tunaWalletState.WalletPath)}",
@@ -1578,7 +1625,15 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         => $"unsafe_tail={screenShareLiveSnapshot.PreCandidateGapTailEmittedToViewerCount}; actionable_late={screenShareLiveSnapshot.ActionableLateFragmentCount}; h264_taint={(screenShareLiveSnapshot.H264ReferenceTaintActive ? 1 : 0)}; h264_quarantine={(screenShareLiveSnapshot.H264ReferenceQuarantineActive ? 1 : 0)}; taint_enter={screenShareLiveSnapshot.H264ReferenceTaintEnterCount}; taint_release={screenShareLiveSnapshot.H264ReferenceTaintReleaseCount}; reason={FormatValue(screenShareLiveSnapshot.H264ReferenceTaintLastReason)}";
 
     private string BuildAdvancedScreenShareSettingsSummary()
-        => $"preset={ScreenShareEffectivePresetName}; capture_fps={ScreenShareCaptureMaxFps}; transport_fps={ScreenShareTransportMaxFps}; scale={ScreenShareCaptureScale}; quality_profile={ScreenShareQualityProfile}; legacy_migrated={ScreenSharePresetMigrationStatus}";
+    {
+        var currentState = ScreenShareQualitySettings.GetCurrentEnvironmentState();
+        var preset = ScreenShareQualitySettings.ResolvePresetDefinition(currentState.EffectivePresetKey);
+        var maxTransportTarget = preset is { } resolvedPreset
+            ? $"{resolvedPreset.MaxTransportWidth}x{resolvedPreset.MaxTransportHeight}"
+            : "(custom)";
+
+        return $"preset={ScreenShareEffectivePresetName}; capture_fps={ScreenShareCaptureMaxFps}; transport_fps={ScreenShareTransportMaxFps}; max={maxTransportTarget}; scale={ScreenShareCaptureScale}; quality_profile={ScreenShareQualityProfile}; legacy_migrated={ScreenSharePresetMigrationStatus}";
+    }
 
     private static string FormatOptionalDouble(double value)
         => value >= 0 ? value.ToString("F2", CultureInfo.InvariantCulture) : "(none)";
@@ -1588,11 +1643,11 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     private static string FormatTunaSpend(TunaUsageAccountingState usage)
     {
-        if (usage.HasUnknownCost)
+        if (usage.HasPaymentTelemetryGaps)
         {
             return usage.TotalPaidNkn > 0m
-                ? $"{FormatNkn(usage.TotalPaidNkn)} + unknown"
-                : "unknown (no payment event)";
+                ? $"{FormatNkn(usage.TotalPaidNkn)} (some sessions missing payment telemetry)"
+                : "no payment telemetry reported";
         }
 
         return FormatNkn(usage.TotalPaidNkn);
@@ -1605,13 +1660,33 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             return "(none)";
         }
 
-        return usage.HasUnknownCost
-            ? "unknown (payment telemetry missing)"
-            : $"{FormatDecimal(usage.AverageNknPerMb, 9)} NKN/MB";
+        if (usage.TotalKnownAppPayloadMb <= 0m)
+        {
+            return "no payment telemetry reported";
+        }
+
+        var suffix = usage.HasPaymentTelemetryGaps ? " (known sessions only)" : string.Empty;
+        return $"{FormatDecimal(usage.AverageNknPerMb, 9)} NKN/MB{suffix}";
     }
 
     private static string FormatTunaLastSessionCost(TunaUsageAccountingState usage)
     {
+        var record = usage.LastSessionRecord;
+        if (record is not null)
+        {
+            if (record.PaidNkn <= 0m && record.AppPayloadMb <= 0m)
+            {
+                return "(none)";
+            }
+
+            if (string.Equals(record.PaymentTelemetryStatus, TunaPaymentTelemetryStatus.Reported, StringComparison.Ordinal))
+            {
+                return $"{FormatNkn(record.PaidNkn)} over {FormatDecimal(record.AppPayloadMb, 2)} MB";
+            }
+
+            return $"{FormatPaymentTelemetryStatus(record.PaymentTelemetryStatus)} over {FormatDecimal(record.AppPayloadMb, 2)} MB";
+        }
+
         if (usage.LastSessionPaidNkn <= 0m && usage.LastSessionAppPayloadMb <= 0m)
         {
             return "(none)";
@@ -1619,142 +1694,71 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
         if (usage.LastSessionCostUnknown)
         {
-            return $"unknown over {FormatDecimal(usage.LastSessionAppPayloadMb, 2)} MB";
+            return $"no payment telemetry reported over {FormatDecimal(usage.LastSessionAppPayloadMb, 2)} MB";
         }
 
         return $"{FormatNkn(usage.LastSessionPaidNkn)} over {FormatDecimal(usage.LastSessionAppPayloadMb, 2)} MB";
     }
 
-    private TimeSpan RegisterTunaUnlockFailure(string? reason)
+    private static string FormatTunaLastSessionReason(TunaUsageAccountingState usage)
     {
-        if (!IsWrongPasswordReason(reason))
+        var record = usage.LastSessionRecord;
+        if (record is null)
         {
-            return TimeSpan.Zero;
+            return "(none)";
         }
 
-        tunaUnlockFailureCount++;
-        var cooldown = tunaUnlockFailureCount switch
+        if (string.Equals(record.CapReason, "byte_cap_reached", StringComparison.Ordinal))
         {
-            <= 1 => TimeSpan.Zero,
-            2 => TimeSpan.FromSeconds(2),
-            <= 4 => TimeSpan.FromSeconds(10),
-            _ => TimeSpan.FromSeconds(30),
+            return "byte cap reached";
+        }
+
+        if (string.Equals(record.CapReason, "duration_cap_reached", StringComparison.Ordinal))
+        {
+            return "duration cap reached";
+        }
+
+        if (!string.IsNullOrWhiteSpace(record.FallbackReason))
+        {
+            return FriendlyTunaReason(record.FallbackReason);
+        }
+
+        if (!string.IsNullOrWhiteSpace(record.StopReason))
+        {
+            return FriendlyTunaReason(record.StopReason);
+        }
+
+        return record.CompletedFromSummary ? "fallback to NKN" : "sidecar exited before summary";
+    }
+
+    private static string FormatPaymentTelemetryStatus(string? status)
+        => status switch
+        {
+            TunaPaymentTelemetryStatus.Reported => "payment telemetry reported",
+            TunaPaymentTelemetryStatus.AccountingIncomplete => "accounting incomplete",
+            TunaPaymentTelemetryStatus.None => "(none)",
+            _ => "no payment telemetry reported",
         };
-        if (cooldown > TimeSpan.Zero)
-        {
-            StartTunaUnlockCooldown(cooldown);
-        }
 
-        return cooldown;
-    }
-
-    private void ResetTunaUnlockFailureState()
+    private static string FriendlyTunaReason(string reason)
     {
-        tunaUnlockFailureCount = 0;
-        tunaUnlockCooldownUntilUtc = null;
-        tunaUnlockCooldownCts?.Cancel();
-        tunaUnlockCooldownCts?.Dispose();
-        tunaUnlockCooldownCts = null;
-    }
-
-    private void StartTunaUnlockCooldown(TimeSpan cooldown)
-    {
-        tunaUnlockCooldownCts?.Cancel();
-        tunaUnlockCooldownCts?.Dispose();
-        var cts = new CancellationTokenSource();
-        tunaUnlockCooldownCts = cts;
-        tunaUnlockCooldownUntilUtc = nowProvider().Add(cooldown);
-        RefreshTunaRuntimeProperties();
-
-        _ = Task.Run(async () =>
+        var normalized = string.IsNullOrWhiteSpace(reason) ? string.Empty : reason.Trim();
+        return normalized switch
         {
-            try
-            {
-                await Task.Delay(cooldown, cts.Token).ConfigureAwait(false);
-                await UiThreadDispatch.RunAsync(() =>
-                {
-                    if (!ReferenceEquals(tunaUnlockCooldownCts, cts))
-                    {
-                        return;
-                    }
-
-                    if (!IsTunaUnlockCooldownActive())
-                    {
-                        RefreshTunaRuntimeProperties();
-                    }
-                }).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                // A new unlock attempt, unlink, or dispose superseded this local cooldown.
-            }
-        });
-    }
-
-    private bool IsTunaUnlockCooldownActive()
-    {
-        if (tunaUnlockCooldownUntilUtc is not { } until)
-        {
-            return false;
-        }
-
-        if (nowProvider() < until)
-        {
-            return true;
-        }
-
-        tunaUnlockCooldownUntilUtc = null;
-        return false;
-    }
-
-    private string FormatCooldownRemaining()
-    {
-        if (tunaUnlockCooldownUntilUtc is not { } until)
-        {
-            return "0 seconds";
-        }
-
-        var seconds = Math.Max(1, (int)Math.Ceiling((until - nowProvider()).TotalSeconds));
-        return seconds == 1 ? "1 second" : $"{seconds.ToString(CultureInfo.InvariantCulture)} seconds";
-    }
-
-    private static string FormatTunaUnlockFailureMessage(string? reason)
-    {
-        var normalized = string.IsNullOrWhiteSpace(reason)
-            ? string.Empty
-            : reason.Trim().ToLowerInvariant();
-        if (IsWrongPasswordReason(normalized))
-        {
-            return "Unlock failed. Check the wallet password and try again.";
-        }
-
-        if (normalized.Contains("missing", StringComparison.Ordinal) ||
-            normalized.Contains("not_found", StringComparison.Ordinal))
-        {
-            return "Unlock failed. Wallet file is missing.";
-        }
-
-        if (normalized.Contains("sidecar", StringComparison.Ordinal))
-        {
-            return "Unlock failed. Tuna sidecar is unavailable; current NKN will be used.";
-        }
-
-        if (normalized.Contains("timeout", StringComparison.Ordinal))
-        {
-            return "Unlock timed out. Current NKN will be used.";
-        }
-
-        return "Unlock failed. Current NKN will be used.";
-    }
-
-    private static bool IsWrongPasswordReason(string? reason)
-    {
-        var normalized = string.IsNullOrWhiteSpace(reason)
-            ? string.Empty
-            : reason.Trim().ToLowerInvariant();
-        return normalized.Contains("password", StringComparison.Ordinal) ||
-               normalized.Contains("decrypt", StringComparison.Ordinal) ||
-               normalized.Contains("unlock wallet", StringComparison.Ordinal);
+            "byte_cap_reached" => "byte cap reached",
+            "duration_cap_reached" => "duration cap reached",
+            "user_disabled" or "user_locked" or "test_lock" => "user stopped Tuna",
+            "sidecar_exited_before_summary" => "sidecar exited before summary",
+            "listener_ready_timeout" => "listener ready timeout",
+            "listener_failed" or "listener_start_failed" => "listener failed",
+            "context_deadline_exceeded" => "duration cap reached",
+            "" => "(none)",
+            _ when normalized.Contains("deadline", StringComparison.OrdinalIgnoreCase) => "duration cap reached",
+            _ when normalized.Contains("cap", StringComparison.OrdinalIgnoreCase) => "cap reached",
+            _ when normalized.Contains("closed", StringComparison.OrdinalIgnoreCase) ||
+                   normalized.Contains("eof", StringComparison.OrdinalIgnoreCase) => "fallback to NKN",
+            _ => normalized.Replace('_', ' '),
+        };
     }
 
     private static string FormatDecimal(decimal value, int precision)

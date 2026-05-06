@@ -1,5 +1,4 @@
 using System;
-using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
@@ -42,10 +41,8 @@ public partial class SessionHeaderView : UserControl
     private Thickness tunaUnlockThumbMargin = new(2, 0, 0, 0);
     private string tunaUnlockTip = "Unlock Tuna wallet";
     private bool tunaUnlockBusy;
-    private int tunaUnlockFailureCount;
     private int tunaUnlockRefreshVersion;
-    private DateTimeOffset? tunaUnlockCooldownUntilUtc;
-    private CancellationTokenSource? tunaUnlockCooldownCts;
+    private string tunaRuntimeStatus = "unknown";
     private string? tunaUnlockMessage;
     private DateTimeOffset? tunaUnlockMessageUntilUtc;
     private ITunaRuntimePilotService? subscribedTunaRuntime;
@@ -436,7 +433,12 @@ public partial class SessionHeaderView : UserControl
 
     private void OnAttachedToVisualTree(object? sender, VisualTreeAttachmentEventArgs e)
     {
-        if (tunaUnlockToggleOn && ShouldPulseTunaStatus(TunaStatusReason))
+        if (tunaUnlockToggleOn &&
+            TunaStatusPresentationMapper.FromState(
+                transportActive: TunaActive,
+                transportReason: TunaStatusReason,
+                runtimeStatus: tunaRuntimeStatus,
+                sessionUnlockOn: true).IsConnecting)
         {
             StartTunaPulse();
         }
@@ -467,7 +469,12 @@ public partial class SessionHeaderView : UserControl
     {
         var active = TunaActive;
         var reason = string.IsNullOrWhiteSpace(TunaStatusReason) ? "inactive" : TunaStatusReason.Trim();
-        var pulsing = !active && tunaUnlockToggleOn && ShouldPulseTunaStatus(reason);
+        var presentation = TunaStatusPresentationMapper.FromState(
+            active,
+            reason,
+            tunaRuntimeStatus,
+            tunaUnlockToggleOn);
+        var pulsing = !active && tunaUnlockToggleOn && presentation.IsConnecting;
         var highlighted = active || pulsing;
         var nextPictogramBrush = highlighted ? TunaActiveBrush : TunaInactiveBrush;
         var nextGlowBrush = highlighted ? TunaActiveGlowBrush : TunaInactiveGlowBrush;
@@ -475,11 +482,7 @@ public partial class SessionHeaderView : UserControl
         var nextGlowOpacity = active ? 0.38d : pulsing ? 0.55d : 0d;
         var nextInnerGlowOpacity = active ? 0.2d : pulsing ? 0.28d : 0d;
         var nextGillOpacity = highlighted ? 0.92d : 0.55d;
-        var nextTip = active
-            ? "Tuna acceleration active"
-            : pulsing
-                ? $"Tuna acceleration connecting ({reason})"
-            : $"Tuna acceleration inactive ({reason})";
+        var nextTip = presentation.Text;
 
         SetAndRaise(TunaPictogramBrushProperty, ref tunaPictogramBrush, nextPictogramBrush);
         SetAndRaise(TunaGlowBrushProperty, ref tunaGlowBrush, nextGlowBrush);
@@ -498,23 +501,6 @@ public partial class SessionHeaderView : UserControl
         {
             StopTunaPulse();
         }
-    }
-
-    private static bool ShouldPulseTunaStatus(string? reason)
-    {
-        if (string.IsNullOrWhiteSpace(reason))
-        {
-            return false;
-        }
-
-        var normalized = reason.Trim();
-        return normalized.StartsWith("negotiation_scheduled_", StringComparison.Ordinal) ||
-               normalized.Equals("checking_payer_priority", StringComparison.Ordinal) ||
-               normalized.Equals("listener_starting", StringComparison.Ordinal) ||
-               normalized.Equals("listener_ready", StringComparison.Ordinal) ||
-               normalized.Equals("waiting_for_answer", StringComparison.Ordinal) ||
-               normalized.Equals("dialer_starting", StringComparison.Ordinal) ||
-               normalized.Equals("dialer_ready", StringComparison.Ordinal);
     }
 
     private void StartTunaPulse()
@@ -536,7 +522,13 @@ public partial class SessionHeaderView : UserControl
 
     private void OnTunaPulseTimerTick(object? sender, EventArgs e)
     {
-        if (TunaActive || !tunaUnlockToggleOn || !ShouldPulseTunaStatus(TunaStatusReason))
+        if (TunaActive ||
+            !tunaUnlockToggleOn ||
+            !TunaStatusPresentationMapper.FromState(
+                transportActive: false,
+                transportReason: TunaStatusReason,
+                runtimeStatus: tunaRuntimeStatus,
+                sessionUnlockOn: true).IsConnecting)
         {
             StopTunaPulse();
             UpdateTunaVisualState();
@@ -670,7 +662,8 @@ public partial class SessionHeaderView : UserControl
                 show: false,
                 canToggle: false,
                 unlocked: false,
-                tip: "Tuna wallet unavailable"));
+                tip: "Tuna wallet unavailable",
+                runtimeStatus: "service_unavailable"));
             return;
         }
 
@@ -682,17 +675,28 @@ public partial class SessionHeaderView : UserControl
 
         await Dispatcher.UIThread.InvokeAsync(() =>
         {
-            var tip = GetPendingTunaUnlockMessage() ?? state.UserMessage;
-            ApplyTunaUnlockToggleState(state.IsVisible, state.CanToggle && !tunaUnlockBusy, state.IsOn, tip);
+            var presentation = TunaStatusPresentationMapper.FromState(
+                TunaActive,
+                TunaStatusReason,
+                state.RuntimeStatus,
+                state.IsOn);
+            var tip = GetPendingTunaUnlockMessage() ?? presentation.Text;
+            ApplyTunaUnlockToggleState(
+                state.IsVisible,
+                state.CanToggle && !tunaUnlockBusy,
+                state.IsOn,
+                tip,
+                state.RuntimeStatus);
         });
     }
 
-    private void ApplyTunaUnlockToggleState(bool show, bool canToggle, bool unlocked, string tip)
+    private void ApplyTunaUnlockToggleState(bool show, bool canToggle, bool unlocked, string tip, string runtimeStatus)
     {
         SetAndRaise(ShowTunaUnlockToggleProperty, ref showTunaUnlockToggle, show);
         SetAndRaise(CanTunaUnlockToggleProperty, ref canTunaUnlockToggle, canToggle);
         SetAndRaise(TunaUnlockToggleOnProperty, ref tunaUnlockToggleOn, unlocked);
         SetAndRaise(TunaUnlockTipProperty, ref tunaUnlockTip, string.IsNullOrWhiteSpace(tip) ? "Unlock Tuna wallet" : tip);
+        tunaRuntimeStatus = string.IsNullOrWhiteSpace(runtimeStatus) ? "unknown" : runtimeStatus.Trim();
 
         var track = unlocked
             ? TunaUnlockTrackOnBrush
@@ -719,64 +723,6 @@ public partial class SessionHeaderView : UserControl
             return TunaWalletLinkState.Unlinked;
         }
     }
-
-    private static string BuildTunaUnlockTip(
-        bool walletFunded,
-        bool runtimeEnabled,
-        bool sidecarAvailable,
-        bool unlocked,
-        bool engaged,
-        string? runtimeStatus)
-    {
-        if (unlocked)
-        {
-            return "Tuna wallet unlocked for the next approved session. Click to lock.";
-        }
-
-        if (engaged)
-        {
-            return $"Tuna is starting for this session ({NormalizeRuntimeStatus(runtimeStatus)}). Password has been cleared from memory.";
-        }
-
-        if (!walletFunded)
-        {
-            return "Link and validate a funded Tuna wallet in Options.";
-        }
-
-        if (!runtimeEnabled)
-        {
-            return "Enable Tuna acceleration in Options first.";
-        }
-
-        if (!sidecarAvailable)
-        {
-            return "Tuna sidecar is unavailable.";
-        }
-
-        return "Unlock Tuna wallet for this session.";
-    }
-
-    private static bool IsTunaRuntimeSessionEngaged(string? runtimeStatus)
-    {
-        var normalized = NormalizeRuntimeStatus(runtimeStatus);
-        return normalized.Equals("checking_payer_priority", StringComparison.Ordinal) ||
-               normalized.StartsWith("negotiation_scheduled_", StringComparison.Ordinal) ||
-               normalized.Equals("listener_starting", StringComparison.Ordinal) ||
-               normalized.Equals("provider_paths_ready", StringComparison.Ordinal) ||
-               normalized.Equals("provider_paths_wait_timeout", StringComparison.Ordinal) ||
-               normalized.Equals("listener_ready", StringComparison.Ordinal) ||
-               normalized.Equals("waiting_for_peer_dial", StringComparison.Ordinal) ||
-               normalized.Equals("peer_connected", StringComparison.Ordinal) ||
-               normalized.Equals("waiting_for_answer", StringComparison.Ordinal) ||
-               normalized.Equals("dialer_starting", StringComparison.Ordinal) ||
-               normalized.Equals("dialer_ready", StringComparison.Ordinal) ||
-               normalized.Equals("active", StringComparison.Ordinal);
-    }
-
-    private static string NormalizeRuntimeStatus(string? runtimeStatus)
-        => string.IsNullOrWhiteSpace(runtimeStatus)
-            ? "unknown"
-            : runtimeStatus.Trim();
 
     private static bool TryGetAppService<T>(out T? service)
         where T : class
@@ -811,132 +757,6 @@ public partial class SessionHeaderView : UserControl
         }
 
         return tunaUnlockMessage;
-    }
-
-    private TimeSpan RegisterTunaUnlockFailure(string? reason)
-    {
-        if (!IsWrongPasswordReason(reason))
-        {
-            return TimeSpan.Zero;
-        }
-
-        tunaUnlockFailureCount++;
-        var cooldown = tunaUnlockFailureCount switch
-        {
-            <= 1 => TimeSpan.Zero,
-            2 => TimeSpan.FromSeconds(2),
-            <= 4 => TimeSpan.FromSeconds(10),
-            _ => TimeSpan.FromSeconds(30),
-        };
-        if (cooldown > TimeSpan.Zero)
-        {
-            StartTunaUnlockCooldown(cooldown);
-        }
-
-        return cooldown;
-    }
-
-    private void ResetTunaUnlockFailureState()
-    {
-        tunaUnlockFailureCount = 0;
-        tunaUnlockCooldownUntilUtc = null;
-        tunaUnlockCooldownCts?.Cancel();
-        tunaUnlockCooldownCts?.Dispose();
-        tunaUnlockCooldownCts = null;
-    }
-
-    private void StartTunaUnlockCooldown(TimeSpan cooldown)
-    {
-        tunaUnlockCooldownCts?.Cancel();
-        tunaUnlockCooldownCts?.Dispose();
-        var cts = new CancellationTokenSource();
-        tunaUnlockCooldownCts = cts;
-        tunaUnlockCooldownUntilUtc = DateTimeOffset.UtcNow.Add(cooldown);
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(cooldown, cts.Token).ConfigureAwait(false);
-                await Dispatcher.UIThread.InvokeAsync(() =>
-                {
-                    if (ReferenceEquals(tunaUnlockCooldownCts, cts))
-                    {
-                        _ = RefreshTunaUnlockToggleAsync();
-                    }
-                });
-            }
-            catch (OperationCanceledException)
-            {
-                // Superseded by a later unlock attempt or view disposal.
-            }
-        });
-    }
-
-    private bool IsTunaUnlockCooldownActive()
-    {
-        if (tunaUnlockCooldownUntilUtc is not { } until)
-        {
-            return false;
-        }
-
-        if (DateTimeOffset.UtcNow < until)
-        {
-            return true;
-        }
-
-        tunaUnlockCooldownUntilUtc = null;
-        return false;
-    }
-
-    private string FormatCooldownRemaining()
-    {
-        if (tunaUnlockCooldownUntilUtc is not { } until)
-        {
-            return "0 seconds";
-        }
-
-        var seconds = Math.Max(1, (int)Math.Ceiling((until - DateTimeOffset.UtcNow).TotalSeconds));
-        return seconds == 1 ? "1 second" : $"{seconds.ToString(CultureInfo.InvariantCulture)} seconds";
-    }
-
-    private static string FormatTunaUnlockFailureMessage(string? reason)
-    {
-        var normalized = string.IsNullOrWhiteSpace(reason)
-            ? string.Empty
-            : reason.Trim().ToLowerInvariant();
-        if (IsWrongPasswordReason(normalized))
-        {
-            return "Unlock failed. Check the wallet password and try again.";
-        }
-
-        if (normalized.Contains("missing", StringComparison.Ordinal) ||
-            normalized.Contains("not_found", StringComparison.Ordinal))
-        {
-            return "Unlock failed. Wallet file is missing.";
-        }
-
-        if (normalized.Contains("sidecar", StringComparison.Ordinal))
-        {
-            return "Unlock failed. Tuna sidecar is unavailable.";
-        }
-
-        if (normalized.Contains("timeout", StringComparison.Ordinal))
-        {
-            return "Unlock timed out. Current NKN will be used.";
-        }
-
-        return "Unlock failed. Current NKN will be used.";
-    }
-
-    private static bool IsWrongPasswordReason(string? reason)
-    {
-        var normalized = string.IsNullOrWhiteSpace(reason)
-            ? string.Empty
-            : reason.Trim().ToLowerInvariant();
-        return normalized.Contains("password", StringComparison.Ordinal) ||
-               normalized.Contains("decrypt", StringComparison.Ordinal) ||
-               normalized.Contains("unlock wallet", StringComparison.Ordinal);
     }
 
     private void ShareScreenButton_Click(object? sender, RoutedEventArgs e)

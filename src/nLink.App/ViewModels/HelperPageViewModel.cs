@@ -38,6 +38,8 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private static readonly TimeSpan EndSessionAfterControlStopGuard = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan RemoteControlSnapshotKeepAliveInterval = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan PeerEndedNoticeDuration = TimeSpan.FromSeconds(4);
+    private const int FileTransferUiRefreshMinIntervalMs = 125;
+    private const int FileTransferUiRefreshCoalescedLogThreshold = 8;
     private static readonly Regex AttemptLabelRegex = new(@"\s*\(?attempt\s+\d+(?:,\s*next retry in \d+s)?\)?", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly bool RemoteControlDebugPanelEnabled =
 #if DEBUG
@@ -73,6 +75,10 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private Bitmap? helperBootstrapQrBitmap;
     private string lastChatPanelStateLog = string.Empty;
     private long chatSendAttemptCounter;
+    private int fileTransferUiRefreshScheduled;
+    private int fileTransferUiRefreshPendingCount;
+    private int fileTransferUiRefreshUrgent;
+    private long lastFileTransferUiRefreshUtcMs;
 
     private string codeInput = string.Empty;
     private string statusText = string.Empty;
@@ -2930,7 +2936,84 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             return;
         }
 
-        _ = UiThreadDispatch.RunAsync(() => UpdateUiFromSnapshot("file_transfer_changed"));
+        ScheduleFileTransferUiRefresh(e as SessionFileTransferSnapshotChangedEventArgs);
+    }
+
+    private void ScheduleFileTransferUiRefresh(SessionFileTransferSnapshotChangedEventArgs? e)
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref fileTransferUiRefreshPendingCount);
+        if (IsUrgentFileTransferSnapshot(e?.Snapshot))
+        {
+            Volatile.Write(ref fileTransferUiRefreshUrgent, 1);
+        }
+
+        if (Interlocked.CompareExchange(ref fileTransferUiRefreshScheduled, 1, 0) != 0)
+        {
+            return;
+        }
+
+        _ = RunFileTransferUiRefreshLoopAsync();
+    }
+
+    private async Task RunFileTransferUiRefreshLoopAsync()
+    {
+        try
+        {
+            while (!disposed)
+            {
+                var urgent = Interlocked.Exchange(ref fileTransferUiRefreshUrgent, 0) != 0;
+                if (!urgent)
+                {
+                    var elapsedMs = Environment.TickCount64 - Volatile.Read(ref lastFileTransferUiRefreshUtcMs);
+                    var delayMs = FileTransferUiRefreshMinIntervalMs - Math.Max(0, elapsedMs);
+                    if (delayMs > 0)
+                    {
+                        await Task.Delay((int)delayMs).ConfigureAwait(false);
+                    }
+                }
+
+                var coalescedCount = Interlocked.Exchange(ref fileTransferUiRefreshPendingCount, 0);
+                if (coalescedCount > 0)
+                {
+                    await UiThreadDispatch.RunAsync(() =>
+                    {
+                        if (disposed)
+                        {
+                            return;
+                        }
+
+                        UpdateUiFromSnapshot(coalescedCount > 1 ? "file_transfer_changed_coalesced" : "file_transfer_changed");
+                    }).ConfigureAwait(false);
+                    Volatile.Write(ref lastFileTransferUiRefreshUtcMs, Environment.TickCount64);
+                    if (coalescedCount >= FileTransferUiRefreshCoalescedLogThreshold)
+                    {
+                        LocalOperationalLog.Info(
+                            "HelperUi",
+                            $"event=file_transfer_ui_refresh_coalesced; role=Helper; coalesced_count={coalescedCount}; min_interval_ms={FileTransferUiRefreshMinIntervalMs}");
+                    }
+                }
+
+                if (Volatile.Read(ref fileTransferUiRefreshPendingCount) == 0)
+                {
+                    Interlocked.Exchange(ref fileTransferUiRefreshScheduled, 0);
+                    if (Volatile.Read(ref fileTransferUiRefreshPendingCount) == 0 ||
+                        Interlocked.CompareExchange(ref fileTransferUiRefreshScheduled, 1, 0) != 0)
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Interlocked.Exchange(ref fileTransferUiRefreshScheduled, 0);
+            LocalOperationalLog.Warn("HelperUi", $"event=file_transfer_ui_refresh_failed; role=Helper; error={ex.GetType().Name}");
+        }
     }
 
     private void OnRemoteControlStateChanged(object? sender, EventArgs e)
@@ -3880,6 +3963,24 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     {
         UpdateUiFromSnapshot("refresh");
     }
+
+    private static bool IsUrgentFileTransferSnapshot(SessionFileTransferSnapshot? snapshot)
+        => IsUrgentFileTransferItem(snapshot?.Inbound) ||
+           IsUrgentFileTransferItem(snapshot?.Outbound);
+
+    private static bool IsUrgentFileTransferItem(FileTransferTransferSnapshot? snapshot)
+        => snapshot is not null &&
+           (snapshot.IsTerminal ||
+            snapshot.State is FileTransferTransferState.Offering
+                or FileTransferTransferState.AwaitingAcceptance
+                or FileTransferTransferState.PendingDecision
+                or FileTransferTransferState.AwaitingMetadata
+                or FileTransferTransferState.PreparingMetadata
+                or FileTransferTransferState.AwaitingStart
+                or FileTransferTransferState.AwaitingCompletion
+                or FileTransferTransferState.Verifying ||
+            snapshot.IsPaused ||
+            snapshot.IsPeerPaused);
 
     private void UpdateUiFromSnapshot(string source)
     {

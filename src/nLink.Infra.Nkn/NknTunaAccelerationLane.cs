@@ -8,13 +8,13 @@ namespace NLink.Infra.Nkn;
 
 internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 {
-    private static readonly TimeSpan ProcessExitWait = TimeSpan.FromSeconds(3);
     private readonly object gate = new();
     private readonly NknTunaAccelerationOptions options;
     private readonly INknTunaListenerSidecarSupervisor? listenerSupervisor;
     private NknTunaSidecarClient? client;
-    private Process? dialerProcess;
+    private NknTunaSidecarProcessOwner? dialerProcessOwner;
     private Task<bool>? dialerStartTask;
+    private NknAccelerationLaneDiagnostics lastDiagnostics = NknAccelerationLaneDiagnostics.Empty;
     private bool disposed;
 
     public NknTunaAccelerationLane(
@@ -70,7 +70,13 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
     {
         lock (gate)
         {
-            return client?.GetDiagnosticsSnapshot() ?? NknAccelerationLaneDiagnostics.Empty;
+            if (client is null)
+            {
+                return lastDiagnostics;
+            }
+
+            lastDiagnostics = client.GetDiagnosticsSnapshot();
+            return lastDiagnostics;
         }
     }
 
@@ -125,6 +131,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         lock (gate)
         {
             ThrowIfDisposed();
+            CaptureClientDiagnostics_NoLock(client);
             client?.Dispose();
             client = nextClient;
         }
@@ -187,6 +194,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         var ready = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         string? lastSidecarEvent = null;
         string? lastSidecarReason = null;
+        NknTunaSidecarProcessOwner? owner = null;
         var hasDialerSeed = !string.IsNullOrWhiteSpace(options.DialerSeedBase64);
         var dialerIdentifier = string.IsNullOrWhiteSpace(options.DialerIdentifier)
             ? null
@@ -258,7 +266,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
                     $"event=tuna_dialer_sidecar_event; sidecar_event={safeEventName}; sidecar_reason={safeReason ?? ""}; line_len={e.Data.Length}");
                 if (IsTerminalSidecarEvent(safeEventName))
                 {
-                    MarkCurrentClientUnavailable($"sidecar_{safeEventName}");
+                    MarkCurrentClientUnavailable($"sidecar_{safeReason ?? safeEventName}");
                 }
             }
         };
@@ -275,6 +283,11 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             {
                 ready.TrySetException(new InvalidOperationException("Tuna dialer sidecar exited before ready."));
             }
+
+            if (IsCurrentDialerOwner(owner))
+            {
+                MarkCurrentClientUnavailable("dialer_exited");
+            }
         };
 
         try
@@ -285,17 +298,18 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
                 return false;
             }
 
+            owner = NknTunaSidecarProcessOwner.Attach("dialer", process);
+            lock (gate)
+            {
+                ThrowIfDisposed();
+                dialerProcessOwner = owner;
+            }
+
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
             if (hasDialerSeed)
             {
                 await WriteDialerSeedAsync(process, options.DialerSeedBase64!, ct).ConfigureAwait(false);
-            }
-
-            lock (gate)
-            {
-                ThrowIfDisposed();
-                dialerProcess = process;
             }
 
             using var readyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -314,6 +328,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             lock (gate)
             {
                 ThrowIfDisposed();
+                CaptureClientDiagnostics_NoLock(client);
                 client?.Dispose();
                 client = nextClient;
             }
@@ -328,7 +343,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event=tuna_dialer_sidecar_start_failed; error={ex.GetType().Name}; last_event={lastSidecarEvent ?? ""}; last_reason={lastSidecarReason ?? ""}");
-            TryStopProcess(process);
+            StopDialerOwnerIfCurrent(owner, "dialer_start_failed");
             return false;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
@@ -336,8 +351,13 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event=tuna_dialer_sidecar_start_failed; error=ready_timeout; last_event={lastSidecarEvent ?? ""}; last_reason={lastSidecarReason ?? ""}");
-            TryStopProcess(process);
+            StopDialerOwnerIfCurrent(owner, "dialer_ready_timeout");
             return false;
+        }
+        catch (OperationCanceledException)
+        {
+            StopDialerOwnerIfCurrent(owner, "dialer_canceled");
+            throw;
         }
     }
 
@@ -356,13 +376,14 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
     {
         ct.ThrowIfCancellationRequested();
         NknTunaSidecarClient? clientToDispose;
-        Process? processToStop;
+        NknTunaSidecarProcessOwner? processToStop;
         lock (gate)
         {
             clientToDispose = client;
-            processToStop = dialerProcess;
+            processToStop = dialerProcessOwner;
+            CaptureClientDiagnostics_NoLock(clientToDispose);
             client = null;
-            dialerProcess = null;
+            dialerProcessOwner = null;
             dialerStartTask = null;
         }
 
@@ -370,7 +391,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         listenerSupervisor?.Stop(string.IsNullOrWhiteSpace(reason) ? "stopped" : reason.Trim());
         if (processToStop is not null)
         {
-            TryStopProcess(processToStop);
+            processToStop.Stop(reason);
         }
 
         LocalOperationalLog.Info("NKN.Tuna", $"event=tuna_acceleration_lane_stopped; reason={SanitizeSidecarReason(reason) ?? "unknown"}");
@@ -386,13 +407,14 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 
         disposed = true;
         NknTunaSidecarClient? clientToDispose;
-        Process? processToStop;
+        NknTunaSidecarProcessOwner? processToStop;
         lock (gate)
         {
             clientToDispose = client;
-            processToStop = dialerProcess;
+            processToStop = dialerProcessOwner;
+            CaptureClientDiagnostics_NoLock(clientToDispose);
             client = null;
-            dialerProcess = null;
+            dialerProcessOwner = null;
             dialerStartTask = null;
         }
 
@@ -400,7 +422,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         listenerSupervisor?.Dispose();
         if (processToStop is not null)
         {
-            TryStopProcess(processToStop);
+            processToStop.Stop("disposed");
         }
     }
 
@@ -408,7 +430,28 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         => MessageReceived?.Invoke(this, e);
 
     private void OnClientStateChanged(object? sender, AccelerationStateChangedEventArgs e)
-        => StateChanged?.Invoke(this, e);
+    {
+        if (sender is NknTunaSidecarClient sidecarClient)
+        {
+            lock (gate)
+            {
+                if (ReferenceEquals(client, sidecarClient))
+                {
+                    lastDiagnostics = sidecarClient.GetDiagnosticsSnapshot();
+                }
+            }
+        }
+
+        StateChanged?.Invoke(this, e);
+    }
+
+    private void CaptureClientDiagnostics_NoLock(NknTunaSidecarClient? sidecarClient)
+    {
+        if (sidecarClient is not null)
+        {
+            lastDiagnostics = sidecarClient.GetDiagnosticsSnapshot();
+        }
+    }
 
     private void MarkCurrentClientUnavailable(string reason)
     {
@@ -457,7 +500,12 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         {
             using var document = JsonDocument.Parse(line);
             var root = document.RootElement;
-            if (root.TryGetProperty("reason", out var reasonProperty) &&
+            if (root.TryGetProperty("terminalReason", out var terminalReasonProperty) &&
+                terminalReasonProperty.ValueKind == JsonValueKind.String)
+            {
+                reason = terminalReasonProperty.GetString();
+            }
+            else if (root.TryGetProperty("reason", out var reasonProperty) &&
                 reasonProperty.ValueKind == JsonValueKind.String)
             {
                 reason = reasonProperty.GetString();
@@ -475,7 +523,8 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
     }
 
     private static bool IsTerminalSidecarEvent(string eventName)
-        => string.Equals(eventName, "bridge_direction_stopped", StringComparison.Ordinal) ||
+        => string.Equals(eventName, "tuna_bridge_terminal", StringComparison.Ordinal) ||
+           string.Equals(eventName, "bridge_direction_stopped", StringComparison.Ordinal) ||
            string.Equals(eventName, "error", StringComparison.Ordinal);
 
     private static string SanitizeSidecarEventName(string value)
@@ -511,7 +560,8 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         return safe
             .Replace(";", ",", StringComparison.Ordinal)
             .Replace("\r", " ", StringComparison.Ordinal)
-            .Replace("\n", " ", StringComparison.Ordinal);
+            .Replace("\n", " ", StringComparison.Ordinal)
+            .Replace(" ", "_", StringComparison.Ordinal);
     }
 
     private static async Task WriteDialerSeedAsync(Process process, string seedBase64, CancellationToken ct)
@@ -543,23 +593,39 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         }
     }
 
-    private static void TryStopProcess(Process process)
+    private bool IsCurrentDialerOwner(NknTunaSidecarProcessOwner? owner)
     {
-        try
+        if (owner is null)
         {
-            if (!process.HasExited)
+            return false;
+        }
+
+        lock (gate)
+        {
+            return ReferenceEquals(dialerProcessOwner, owner);
+        }
+    }
+
+    private void StopDialerOwnerIfCurrent(NknTunaSidecarProcessOwner? owner, string reason)
+    {
+        if (owner is null)
+        {
+            return;
+        }
+
+        var shouldStop = false;
+        lock (gate)
+        {
+            if (ReferenceEquals(dialerProcessOwner, owner))
             {
-                process.Kill(entireProcessTree: true);
-                process.WaitForExit(ProcessExitWait);
+                dialerProcessOwner = null;
+                shouldStop = true;
             }
         }
-        catch
+
+        if (shouldStop || owner.IsRunning)
         {
-            // Best-effort developer-only sidecar cleanup.
-        }
-        finally
-        {
-            process.Dispose();
+            owner.Stop(reason);
         }
     }
 

@@ -44,6 +44,12 @@ public sealed class QrCodeService : IQrCodeService
         decodedText = null;
         errorMessage = null;
 
+        if (!OperatingSystem.IsWindowsVersionAtLeast(6, 1))
+        {
+            errorMessage = "QR image decoding is supported on Windows.";
+            return false;
+        }
+
         if (imageStream is null)
         {
             errorMessage = "No image stream provided.";

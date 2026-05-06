@@ -57,7 +57,7 @@ Notes:
 - Windows x64 only
 - Current release (`0.7.0`)
 - Default screensharing uses H.264 video transport, with helper-side recovery protection for broken reference chains.
-- Options -> Settings includes Balanced, High quality, Tuna quality, and High performance screen-share presets. Tuna quality is recommended for Tuna-enabled screen sharing and may use more bandwidth.
+- Options -> Settings includes Balanced, High quality, Tuna quality, and High performance screen-share presets. High quality now opts into 24 capture FPS / 15 transport FPS over normal NKN, while Tuna quality remains the higher-bandwidth preset recommended for Tuna-enabled screen sharing.
 - The helper-side cursor overlay, H.264 motion/keyframe safeguards, WGC GPU scaling, and same-apartment Win10 WGC teardown remain enabled.
 - Chat UX keeps `Enter` to send, `Shift+Enter` for a new line, stable pane sizing in chat-only and screen-sharing layouts, and message entry remains available during screen sharing.
 - File transfer in `0.7.0` is V4-only and single-file only. No folders, drag-and-drop, or resume after restart yet.

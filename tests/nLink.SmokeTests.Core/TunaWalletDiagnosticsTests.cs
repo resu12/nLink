@@ -4,6 +4,8 @@ using NLink.App.ViewModels;
 using NLink.Core;
 using NLink.Core.Diagnostics;
 using NLink.Infra.Nkn;
+using System.Diagnostics;
+using System.Reflection;
 
 namespace NLink.SmokeTests;
 
@@ -133,6 +135,105 @@ public sealed class TunaWalletDiagnosticsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void DiagnosticsTunaWallet_SidecarCompatibilityStatusUsesFriendlyLabelsAndRedactedExport()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var cases = new[]
+            {
+                (
+                    Availability: new TunaWalletVerifierAvailability(false, "sidecar_missing", Path.Combine(root, "tuna", "win-x64", "nlink-tuna-sidecar.exe"))
+                    {
+                        ManifestStatus = "sidecar_missing",
+                        Detail = "Missing: expected nlink-tuna-sidecar.exe.",
+                    },
+                    ExpectedStatus: "Missing"
+                ),
+                (
+                    Availability: new TunaWalletVerifierAvailability(false, "sidecar_version_mismatch", Path.Combine(root, "tuna", "win-x64", "nlink-tuna-sidecar.exe"))
+                    {
+                        ManifestPath = Path.Combine(root, "tuna", "win-x64", "tuna-sidecar-manifest.json"),
+                        ActualSidecarVersion = "0.6.9",
+                        ActualRuntime = "win-x64",
+                        ActualAppProtocolVersion = NknTunaSidecarCompatibility.AppProtocolVersion,
+                        ActualFrameProtocolVersion = NknTunaSidecarFrameProtocol.ProtocolVersion,
+                        ManifestStatus = "sidecar_version_mismatch",
+                        Detail = $"Wrong version: expected {NknTunaSidecarCompatibility.ExpectedSidecarVersion}, found 0.6.9.",
+                    },
+                    ExpectedStatus: "Wrong version"
+                ),
+                (
+                    Availability: new TunaWalletVerifierAvailability(false, "sidecar_protocol_mismatch", Path.Combine(root, "tuna", "win-x64", "nlink-tuna-sidecar.exe"))
+                    {
+                        ManifestPath = Path.Combine(root, "tuna", "win-x64", "tuna-sidecar-manifest.json"),
+                        ActualSidecarVersion = NknTunaSidecarCompatibility.ExpectedSidecarVersion,
+                        ActualRuntime = "win-x64",
+                        ActualAppProtocolVersion = NknTunaSidecarCompatibility.AppProtocolVersion + 1,
+                        ActualFrameProtocolVersion = NknTunaSidecarFrameProtocol.ProtocolVersion,
+                        ManifestStatus = "sidecar_protocol_mismatch",
+                        Detail = "Protocol mismatch: packaged Tuna sidecar is not compatible with this app.",
+                    },
+                    ExpectedStatus: "Protocol mismatch"
+                ),
+                (
+                    Availability: new TunaWalletVerifierAvailability(false, "sidecar_manifest_hash_mismatch", Path.Combine(root, "tuna", "win-x64", "nlink-tuna-sidecar.exe"))
+                    {
+                        ManifestPath = Path.Combine(root, "tuna", "win-x64", "tuna-sidecar-manifest.json"),
+                        ActualSidecarVersion = NknTunaSidecarCompatibility.ExpectedSidecarVersion,
+                        ActualRuntime = "win-x64",
+                        ActualAppProtocolVersion = NknTunaSidecarCompatibility.AppProtocolVersion,
+                        ActualFrameProtocolVersion = NknTunaSidecarFrameProtocol.ProtocolVersion,
+                        ManifestStatus = "sidecar_manifest_hash_mismatch",
+                        Detail = "Manifest invalid: sidecar hash does not match the packaged manifest.",
+                    },
+                    ExpectedStatus: "Manifest invalid"
+                ),
+            };
+
+            foreach (var testCase in cases)
+            {
+                var store = new JsonTunaWalletLinkStore(() => Path.Combine(root, Guid.NewGuid().ToString("N") + ".json"));
+                var verifier = new FakeTunaWalletVerifier(
+                    TunaWalletValidationResult.Fail("not_used"),
+                    availability: testCase.Availability);
+                var vm = CreateViewModel(store, verifier);
+
+                Assert.Equal(testCase.ExpectedStatus, vm.TunaSidecarVerifierStatus);
+                Assert.Equal(testCase.Availability.Detail, vm.TunaSidecarVerifierDetail);
+            }
+
+            var exportAvailability = new TunaWalletVerifierAvailability(false, "sidecar_version_mismatch", Path.Combine(root, "tuna", "win-x64", "nlink-tuna-sidecar.exe"))
+            {
+                ManifestPath = Path.Combine(root, "tuna", "win-x64", "tuna-sidecar-manifest.json"),
+                ActualSidecarVersion = "0.6.9",
+                ActualRuntime = "win-x64",
+                ActualAppProtocolVersion = 77,
+                ActualFrameProtocolVersion = 88,
+                ManifestStatus = "sidecar_version_mismatch",
+                Detail = "Wrong version: expected current, found 0.6.9.",
+            };
+            var exportVerifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Fail("not_used"), availability: exportAvailability);
+            var exportVm = CreateViewModel(new JsonTunaWalletLinkStore(() => Path.Combine(root, "export.json")), exportVerifier);
+            var copied = exportVm.BuildDiagnosticsCopyTextForTests();
+
+            Assert.Contains("tuna_sidecar_actual_app_protocol: 77", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_sidecar_actual_frame_protocol: 88", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_sidecar_actual_version: 0.6.9", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_sidecar_actual_runtime: win-x64", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_sidecar_manifest_status: sidecar_version_mismatch", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_sidecar_path: [REDACTED]", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_sidecar_manifest_path: [REDACTED]", copied, StringComparison.Ordinal);
+            Assert.DoesNotContain(root, copied, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void TunaRuntimePreferenceStore_PersistsOptInCapsWithoutSecrets()
     {
         var root = CreateTempRoot();
@@ -199,6 +300,13 @@ public sealed class TunaWalletDiagnosticsTests
             Assert.Equal(0.0001m, loaded.LastSessionAverageNknPerMb);
             Assert.False(loaded.HasUnknownCost);
             Assert.False(loaded.LastSessionCostUnknown);
+            var session = Assert.Single(loaded.SessionRecords);
+            Assert.Equal(TunaPaymentTelemetryStatus.Reported, session.PaymentTelemetryStatus);
+            Assert.Equal(2, session.PaymentEventCount);
+            Assert.Equal(100_000_000, session.BytesMoved);
+            Assert.Equal(100m, session.AppPayloadMb);
+            Assert.Equal(0.010m, session.PaidNkn);
+            Assert.True(session.CompletedFromSummary);
             Assert.DoesNotContain("wallet", content, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("password", content, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("seed", content, StringComparison.OrdinalIgnoreCase);
@@ -231,11 +339,112 @@ public sealed class TunaWalletDiagnosticsTests
             Assert.Equal(61.112208m, loaded.TotalAppPayloadMb);
             Assert.True(loaded.HasUnknownCost);
             Assert.True(loaded.LastSessionCostUnknown);
+            var session = Assert.Single(loaded.SessionRecords);
+            Assert.Equal(TunaPaymentTelemetryStatus.NoPaymentTelemetryReported, session.PaymentTelemetryStatus);
+            Assert.Equal(61.112208m, session.AppPayloadMb);
+            Assert.Equal(0, session.PaymentEventCount);
         }
         finally
         {
             DeleteTempRoot(root);
         }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void TunaUsageAccountingStore_ZeroByteSummaryWithoutPaymentDoesNotWarnAboutUnknownCost()
+    {
+        var now = DateTimeOffset.Parse("2026-05-05T12:00:00Z");
+
+        var usage = TunaUsageAccountingState.Empty
+            .StartNewSession("run-zero", "listener", now)
+            .CompleteSession("run-zero", 0, paymentTelemetryObserved: false, null, "none", 0, "normal_close", string.Empty, string.Empty, completedFromSummary: true, now);
+
+        Assert.Equal(0m, usage.TotalPaidNkn);
+        Assert.Equal(0m, usage.TotalAppPayloadMb);
+        Assert.False(usage.HasUnknownCost);
+        Assert.False(usage.LastSessionCostUnknown);
+        Assert.Equal(TunaPaymentTelemetryStatus.None, Assert.Single(usage.SessionRecords).PaymentTelemetryStatus);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void TunaUsageAccountingState_CumulativeSummaryAddsOnlyUnseenPaymentDelta()
+    {
+        var now = DateTimeOffset.Parse("2026-05-05T12:00:00Z");
+
+        var usage = TunaUsageAccountingState.Empty
+            .StartNewSession("run-cumulative", "listener", now)
+            .AddPayment("run-cumulative", 0.006m, 10_000_000, now)
+            .CompleteSession(
+                "run-cumulative",
+                20_000_000,
+                paymentTelemetryObserved: true,
+                cumulativeSpendNkn: 0.010m,
+                paymentTelemetryStatus: TunaPaymentTelemetryStatus.Reported,
+                paymentEventCount: 1,
+                stopReason: "normal_close",
+                capReason: string.Empty,
+                fallbackReason: "connection_closed",
+                completedFromSummary: true,
+                now);
+
+        Assert.Equal(0.010m, usage.TotalPaidNkn);
+        Assert.Equal(20m, usage.TotalAppPayloadMb);
+        Assert.Equal(20m, usage.TotalKnownAppPayloadMb);
+        Assert.Equal(0.0005m, usage.AverageNknPerMb);
+        var session = Assert.Single(usage.SessionRecords);
+        Assert.Equal(0.010m, session.PaidNkn);
+        Assert.Equal(20m, session.AppPayloadMb);
+        Assert.Equal(TunaPaymentTelemetryStatus.Reported, session.PaymentTelemetryStatus);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void TunaUsageAccountingState_IncompleteSessionRecordsAccountingIncomplete()
+    {
+        var now = DateTimeOffset.Parse("2026-05-05T12:00:00Z");
+
+        var usage = TunaUsageAccountingState.Empty
+            .StartNewSession("run-incomplete", "listener", now)
+            .CompleteSession(
+                "run-incomplete",
+                12_500_000,
+                paymentTelemetryObserved: false,
+                cumulativeSpendNkn: null,
+                paymentTelemetryStatus: TunaPaymentTelemetryStatus.AccountingIncomplete,
+                paymentEventCount: 0,
+                stopReason: "sidecar_exited_before_summary",
+                capReason: string.Empty,
+                fallbackReason: "sidecar_exited_before_summary",
+                completedFromSummary: false,
+                now);
+
+        var session = Assert.Single(usage.SessionRecords);
+        Assert.Equal(TunaPaymentTelemetryStatus.AccountingIncomplete, session.PaymentTelemetryStatus);
+        Assert.False(session.CompletedFromSummary);
+        Assert.Equal("sidecar_exited_before_summary", session.StopReason);
+        Assert.True(usage.HasUnknownCost);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void TunaUsageAccountingState_RetainsNewestOneHundredSessionRecords()
+    {
+        var now = DateTimeOffset.Parse("2026-05-05T12:00:00Z");
+        var usage = TunaUsageAccountingState.Empty;
+
+        for (var i = 0; i < 105; i++)
+        {
+            var runId = $"run-{i:000}";
+            usage = usage
+                .StartNewSession(runId, "listener", now.AddSeconds(i))
+                .CompleteSession(runId, 0, paymentTelemetryObserved: false, null, "none", 0, "normal_close", string.Empty, string.Empty, completedFromSummary: true, now.AddSeconds(i));
+        }
+
+        Assert.Equal(100, usage.SessionRecords.Count);
+        Assert.Equal("run-005", usage.SessionRecords[0].SessionRunId);
+        Assert.Equal("run-104", usage.SessionRecords[^1].SessionRunId);
     }
 
     [Fact]
@@ -258,6 +467,7 @@ public sealed class TunaWalletDiagnosticsTests
         Assert.Equal(0.010m, usage.LastSessionPaidNkn);
         Assert.False(usage.HasUnknownCost);
         Assert.False(usage.LastSessionCostUnknown);
+        Assert.Equal(TunaPaymentTelemetryStatus.Reported, Assert.Single(usage.SessionRecords).PaymentTelemetryStatus);
     }
 
     [Fact]
@@ -308,6 +518,7 @@ public sealed class TunaWalletDiagnosticsTests
             Assert.True(runtimeService.HasSessionUnlock);
             Assert.Equal("Unlocked for next session", vm.TunaRuntimeUnlockStatus);
             Assert.Equal("waiting_for_approved_session", runtimeService.RuntimeStatus);
+            Assert.Equal("Tuna is unlocked and waiting for an approved session.", vm.TunaCurrentState);
             Assert.Contains("waiting for approved session", vm.TunaStartupTiming, StringComparison.Ordinal);
             Assert.Equal(2, verifier.PasswordsSeen.Count);
             Assert.Equal("runtime-pass", new string(verifier.PasswordsSeen[1]));
@@ -505,6 +716,140 @@ public sealed class TunaWalletDiagnosticsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task TunaRuntimeUnlockCoordinator_EmptyPasswordDoesNotValidateOrStartCooldown()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new SequenceTunaWalletVerifier(
+                TunaWalletValidationResult.Ok("wallet-test-nkn.json", "NKN0123456789PUBLICADDRESS", "1.2500"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+
+            var result = await context.RuntimeService.UnlockForSessionAsync(
+                [],
+                TunaRuntimeUnlockSource.Header);
+            var state = await context.RuntimeService.GetUnlockStateAsync();
+
+            Assert.False(result.Success);
+            Assert.Equal("Password required.", result.Message);
+            Assert.False(result.IsCooldownActive);
+            Assert.False(state.IsCooldownActive);
+            Assert.True(state.CanToggle);
+            Assert.False(context.RuntimeService.HasSessionUnlock);
+            Assert.Empty(verifier.PasswordsSeen);
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TunaRuntimeUnlockCoordinator_LockWhileActiveStopsAccelerationOnce()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var context = await CreateVerifiedRuntimeContextAsync(
+                root,
+                new FakeTunaWalletVerifier(
+                    TunaWalletValidationResult.Ok("wallet-test-nkn.json", "NKN0123456789PUBLICADDRESS", "1.2500")));
+            var control = new RecordingTransportAccelerationControl();
+            SetPrivateField(context.RuntimeService, "currentTransportControl", control);
+            SetPrivateField(context.RuntimeService, "runtimeStatus", "active");
+
+            var first = await context.RuntimeService.LockOrStopForSessionAsync(
+                "header_switch_off",
+                TunaRuntimeUnlockSource.Header);
+            var second = await context.RuntimeService.LockOrStopForSessionAsync(
+                "header_switch_off",
+                TunaRuntimeUnlockSource.Header);
+
+            Assert.True(first.Success);
+            Assert.True(second.Success);
+            Assert.False(context.RuntimeService.HasSessionUnlock);
+            Assert.Equal("locked", context.RuntimeService.RuntimeStatus);
+            Assert.Equal(1, control.StopCalls);
+            Assert.Equal("header_switch_off", control.StopReasons.Single());
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task TunaRuntimeUnlockCoordinator_RuntimeDisableWhileActiveStopsAccelerationAndPersistsOff()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var context = await CreateVerifiedRuntimeContextAsync(
+                root,
+                new FakeTunaWalletVerifier(
+                    TunaWalletValidationResult.Ok("wallet-test-nkn.json", "NKN0123456789PUBLICADDRESS", "1.2500")));
+            var control = new RecordingTransportAccelerationControl();
+            SetPrivateField(context.RuntimeService, "currentTransportControl", control);
+            SetPrivateField(context.RuntimeService, "runtimeStatus", "active");
+
+            context.RuntimeService.SavePreferences(new TunaRuntimePreferenceState
+            {
+                Enabled = false,
+                FileLaneEnabled = true,
+                ScreenLaneEnabled = true,
+                MaxPriceNknPerMb = TunaRuntimePreferenceState.DefaultMaxPriceNknPerMb,
+                MaxTotalMiB = TunaRuntimePreferenceState.DefaultMaxTotalMiB,
+                MaxDurationSec = TunaRuntimePreferenceState.DefaultMaxDurationSec,
+                LastRuntimeStatus = "off",
+            });
+
+            await WaitUntilAsync(() => control.StopCalls == 1, TimeSpan.FromSeconds(2));
+            Assert.False(context.RuntimeService.Preferences.Enabled);
+            Assert.Equal("off", context.RuntimeService.RuntimeStatus);
+            Assert.False(context.RuntimeService.HasSessionUnlock);
+            Assert.Equal("runtime_disabled", control.StopReasons.Single());
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task DiagnosticsTunaWallet_UnlinkWhileActiveStopsAccelerationAndClearsWallet()
+    {
+        var root = CreateTempRoot();
+        try
+        {
+            var verifier = new FakeTunaWalletVerifier(
+                TunaWalletValidationResult.Ok("wallet-test-nkn.json", "NKN0123456789PUBLICADDRESS", "1.2500"));
+            var context = await CreateVerifiedRuntimeContextAsync(root, verifier);
+            var control = new RecordingTransportAccelerationControl();
+            SetPrivateField(context.RuntimeService, "currentTransportControl", control);
+            SetPrivateField(context.RuntimeService, "runtimeStatus", "active");
+            var vm = CreateViewModel(context.WalletStore, verifier, context.RuntimeService);
+
+            await vm.UnlinkTunaWalletAsync();
+
+            Assert.False(vm.IsTunaWalletLinked);
+            Assert.Equal("Not linked", vm.TunaWalletStatus);
+            Assert.False(context.RuntimeService.HasSessionUnlock);
+            Assert.Equal("locked", context.RuntimeService.RuntimeStatus);
+            Assert.Equal(1, control.StopCalls);
+            Assert.Equal("wallet_unlinked", control.StopReasons.Single());
+            Assert.False(File.Exists(Path.Combine(root, "tuna-wallet-link.json")));
+        }
+        finally
+        {
+            DeleteTempRoot(root);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task TunaRuntimeListenerSupervisor_CanUseUnlockAddedAfterTransportCreation()
     {
         var root = CreateTempRoot();
@@ -629,6 +974,52 @@ public sealed class TunaWalletDiagnosticsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void TunaListenerSidecarSupervisor_ParsesSummaryPaymentAndCapConfidence()
+    {
+        var sink = new RecordingTunaUsageSink();
+        using var supervisor = CreateSupervisorWithUsageSink(sink);
+        var json = """
+            {"event":"summary","bytesMoved":20971520,"reason":"context deadline exceeded","paymentObserved":true,"paymentStatus":"reported","paymentEventCount":2,"cumulativeSpendNkn":"0.0042","nknPerMb":"0.0002","capReached":true,"capReason":"duration_cap_reached","fallbackReason":""}
+            """;
+
+        InvokeSupervisorStdout(supervisor, json);
+
+        var summary = Assert.Single(sink.Summaries);
+        Assert.Equal(20_971_520, summary.BytesMoved);
+        Assert.Equal("context deadline exceeded", summary.Reason);
+        Assert.True(summary.PaymentTelemetryObserved);
+        Assert.Equal("reported", summary.PaymentStatus);
+        Assert.Equal(2, summary.PaymentEventCount);
+        Assert.Equal(0.0042m, summary.CumulativeSpendNkn);
+        Assert.Equal(0.0002m, summary.NknPerMb);
+        Assert.True(summary.CapReached);
+        Assert.Equal("duration_cap_reached", summary.CapReason);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void TunaListenerSidecarSupervisor_ParsesMissingPaymentSummaryAsNoTelemetry()
+    {
+        var sink = new RecordingTunaUsageSink();
+        using var supervisor = CreateSupervisorWithUsageSink(sink);
+        var json = """
+            {"event":"summary","bytesMoved":61112208,"reason":"EOF","paymentObserved":false,"paymentStatus":"no_payment_telemetry_reported","paymentEventCount":0,"cumulativeSpendNkn":"not-a-number","capReached":false,"capReason":"","fallbackReason":"EOF"}
+            """;
+
+        InvokeSupervisorStdout(supervisor, json);
+
+        var summary = Assert.Single(sink.Summaries);
+        Assert.Equal(61_112_208, summary.BytesMoved);
+        Assert.False(summary.PaymentTelemetryObserved);
+        Assert.Equal("no_payment_telemetry_reported", summary.PaymentStatus);
+        Assert.Equal(0, summary.PaymentEventCount);
+        Assert.Null(summary.CumulativeSpendNkn);
+        Assert.False(summary.CapReached);
+        Assert.Equal("EOF", summary.FallbackReason);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void DiagnosticsTunaRuntimeCopy_IncludesSpendCostAndBenchmarkEstimate()
     {
         var root = CreateTempRoot();
@@ -668,6 +1059,8 @@ public sealed class TunaWalletDiagnosticsTests
             Assert.Contains("tuna_spend_by_nlink: 0.01 NKN", copied, StringComparison.Ordinal);
             Assert.Contains("tuna_average_cost: 0.0001 NKN/MB", copied, StringComparison.Ordinal);
             Assert.Contains("tuna_last_session_cost: 0.004 NKN over 40 MB", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_last_session_reason: (none)", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_last_session_payment_status: (none)", copied, StringComparison.Ordinal);
             Assert.Contains("tuna_expected_improvement: File transfer about 1.8x", copied, StringComparison.Ordinal);
         }
         finally
@@ -687,17 +1080,32 @@ public sealed class TunaWalletDiagnosticsTests
             var preferenceStore = new JsonTunaRuntimePreferenceStore(() => Path.Combine(root, "tuna-runtime-preferences.json"));
             var usageStore = new JsonTunaUsageAccountingStore(() => Path.Combine(root, "tuna-usage-accounting.json"));
             var verifier = new FakeTunaWalletVerifier(TunaWalletValidationResult.Fail("not_used"));
+            var now = DateTimeOffset.Parse("2026-05-05T12:00:00Z");
             usageStore.Save(TunaUsageAccountingState.Empty
-                .StartNewSession()
-                .CompleteSession(61_112_208, paymentTelemetryObserved: false, DateTimeOffset.Parse("2026-05-05T12:00:00Z")));
+                .StartNewSession("run-missing-payment", "listener", now)
+                .CompleteSession(
+                    "run-missing-payment",
+                    61_112_208,
+                    paymentTelemetryObserved: false,
+                    cumulativeSpendNkn: null,
+                    paymentTelemetryStatus: TunaPaymentTelemetryStatus.NoPaymentTelemetryReported,
+                    paymentEventCount: 0,
+                    stopReason: "EOF",
+                    capReason: string.Empty,
+                    fallbackReason: "EOF",
+                    completedFromSummary: true,
+                    now));
             var runtimeService = new TunaRuntimePilotService(preferenceStore, usageStore, walletStore, verifier);
             var vm = CreateViewModel(walletStore, verifier, runtimeService);
 
             var copied = vm.BuildDiagnosticsCopyTextForTests();
 
-            Assert.Contains("tuna_spend_by_nlink: unknown (no payment event)", copied, StringComparison.Ordinal);
-            Assert.Contains("tuna_average_cost: unknown (payment telemetry missing)", copied, StringComparison.Ordinal);
-            Assert.Contains("tuna_last_session_cost: unknown over 61.11 MB", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_spend_by_nlink: no payment telemetry reported", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_average_cost: no payment telemetry reported", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_last_session_cost: no payment telemetry reported over 61.11 MB", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_last_session_reason: fallback to NKN", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_last_session_payment_status: no_payment_telemetry_reported", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_last_session_completed_from_summary: yes", copied, StringComparison.Ordinal);
         }
         finally
         {
@@ -776,6 +1184,33 @@ public sealed class TunaWalletDiagnosticsTests
         Assert.False(options.Enabled);
     }
 
+    private static NknTunaListenerSidecarSupervisor CreateSupervisorWithUsageSink(INknTunaUsageTelemetrySink sink)
+        => new(new NknTunaListenerSidecarOptions
+        {
+            SidecarExePath = Path.Combine(Path.GetTempPath(), "nlink-tuna-sidecar.exe"),
+            WalletPath = Path.Combine(Path.GetTempPath(), "wallet-test-nkn.json"),
+            TakeWalletPassword = static () => "unused".ToCharArray(),
+            MaxPriceNknPerMb = TunaRuntimePreferenceState.DefaultMaxPriceNknPerMb,
+            MaxTotalMiB = TunaRuntimePreferenceState.DefaultMaxTotalMiB,
+            MaxDurationSec = TunaRuntimePreferenceState.DefaultMaxDurationSec,
+            UsageSink = sink,
+        });
+
+    private static void InvokeSupervisorStdout(NknTunaListenerSidecarSupervisor supervisor, string line)
+    {
+        var method = typeof(NknTunaListenerSidecarSupervisor).GetMethod(
+            "HandleStdoutLine",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method.Invoke(
+            supervisor,
+            [
+                line,
+                new TaskCompletionSource<NknTunaListenerSidecarEndpoint>(TaskCreationOptions.RunContinuationsAsynchronously),
+                Stopwatch.StartNew(),
+            ]);
+    }
+
     private static DiagnosticsPageViewModel CreateViewModel(
         ITunaWalletLinkStore store,
         ITunaWalletVerifier verifier,
@@ -797,6 +1232,57 @@ public sealed class TunaWalletDiagnosticsTests
         {
             Environment.SetEnvironmentVariable("NLINK_TRANSPORT", previousTransport);
         }
+    }
+
+    private static async Task<VerifiedRuntimeContext> CreateVerifiedRuntimeContextAsync(
+        string root,
+        ITunaWalletVerifier verifier,
+        bool enabled = true)
+    {
+        var walletPath = Path.Combine(root, "wallet-test-nkn.json");
+        await File.WriteAllTextAsync(walletPath, "{}");
+        var walletStore = new JsonTunaWalletLinkStore(() => Path.Combine(root, "tuna-wallet-link.json"));
+        await walletStore.SaveAsync(TunaWalletLinkState.Linked(walletPath, DateTimeOffset.Parse("2026-05-05T10:00:00Z"))
+            .WithValidationResult(
+                TunaWalletValidationResult.Ok("wallet-test-nkn.json", "NKN0123456789PUBLICADDRESS", "1.2500"),
+                DateTimeOffset.Parse("2026-05-05T10:01:00Z")));
+        var preferenceStore = new JsonTunaRuntimePreferenceStore(() => Path.Combine(root, "tuna-runtime-preferences.json"));
+        preferenceStore.Save(new TunaRuntimePreferenceState
+        {
+            Enabled = enabled,
+            FileLaneEnabled = true,
+            ScreenLaneEnabled = true,
+            MaxPriceNknPerMb = TunaRuntimePreferenceState.DefaultMaxPriceNknPerMb,
+            MaxTotalMiB = TunaRuntimePreferenceState.DefaultMaxTotalMiB,
+            MaxDurationSec = TunaRuntimePreferenceState.DefaultMaxDurationSec,
+            LastRuntimeStatus = enabled ? "locked" : "off",
+        });
+        var usageStore = new JsonTunaUsageAccountingStore(() => Path.Combine(root, "tuna-usage-accounting.json"));
+        var runtimeService = new TunaRuntimePilotService(preferenceStore, usageStore, walletStore, verifier);
+        return new VerifiedRuntimeContext(walletStore, preferenceStore, usageStore, runtimeService, walletPath);
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (predicate())
+            {
+                return;
+            }
+
+            await Task.Delay(25);
+        }
+
+        Assert.True(predicate(), "Condition was not met before timeout.");
+    }
+
+    private static void SetPrivateField<T>(object target, string fieldName, T value)
+    {
+        var field = target.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        field.SetValue(target, value);
     }
 
     private static string CreateTempRoot()
@@ -822,21 +1308,84 @@ public sealed class TunaWalletDiagnosticsTests
         }
     }
 
+    private sealed class RecordingTunaUsageSink : INknTunaUsageTelemetrySink
+    {
+        public List<NknTunaPaymentTelemetry> Payments { get; } = new();
+
+        public List<NknTunaSessionUsageTelemetry> Summaries { get; } = new();
+
+        public List<string> IncompleteReasons { get; } = new();
+
+        public void RecordPayment(NknTunaPaymentTelemetry payment) => Payments.Add(payment);
+
+        public void RecordSummary(NknTunaSessionUsageTelemetry summary) => Summaries.Add(summary);
+
+        public void RecordIncomplete(string reason) => IncompleteReasons.Add(reason);
+    }
+
+    private sealed record VerifiedRuntimeContext(
+        JsonTunaWalletLinkStore WalletStore,
+        JsonTunaRuntimePreferenceStore PreferenceStore,
+        JsonTunaUsageAccountingStore UsageStore,
+        TunaRuntimePilotService RuntimeService,
+        string WalletPath);
+
+    private sealed class RecordingTransportAccelerationControl : ITransportAccelerationControl
+    {
+        private int requestCalls;
+        private int stopCalls;
+
+        public int RequestCalls => Volatile.Read(ref requestCalls);
+
+        public int StopCalls => Volatile.Read(ref stopCalls);
+
+        public List<string> RequestReasons { get; } = new();
+
+        public List<string> StopReasons { get; } = new();
+
+        public Task RequestAccelerationNegotiationAsync(string reason, CancellationToken ct)
+        {
+            Interlocked.Increment(ref requestCalls);
+            lock (RequestReasons)
+            {
+                RequestReasons.Add(reason);
+            }
+
+            return Task.CompletedTask;
+        }
+
+        public Task StopAccelerationAsync(string reason, CancellationToken ct)
+        {
+            Interlocked.Increment(ref stopCalls);
+            lock (StopReasons)
+            {
+                StopReasons.Add(reason);
+            }
+
+            return Task.CompletedTask;
+        }
+    }
+
     private sealed class FakeTunaWalletVerifier : ITunaWalletVerifier
     {
         private readonly TunaWalletValidationResult result;
         private readonly string sidecarPath;
+        private readonly TunaWalletVerifierAvailability? availability;
 
-        public FakeTunaWalletVerifier(TunaWalletValidationResult result, string sidecarPath = "nlink-tuna-sidecar.exe")
+        public FakeTunaWalletVerifier(
+            TunaWalletValidationResult result,
+            string sidecarPath = "nlink-tuna-sidecar.exe",
+            TunaWalletVerifierAvailability? availability = null)
         {
             this.result = result;
             this.sidecarPath = sidecarPath;
+            this.availability = availability;
         }
 
         public List<char[]> PasswordsSeen { get; } = new();
 
         public TunaWalletVerifierAvailability GetAvailability()
-            => new(true, "available", sidecarPath);
+            => availability ?? new(true, "available", sidecarPath);
 
         public Task<TunaWalletValidationResult> ValidateAsync(string walletPath, char[] password, CancellationToken ct)
         {

@@ -973,7 +973,7 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
         Assert.DoesNotContain(snapshot.Counters, c => c.Name == "transport_failure_total" && c.Tags.FailureCategory == nameof(TransportFailureCategory.Unknown) && c.Value > 0);
     }
 
-[Trait("Category", "LegacySmoke")]
+    [Trait("Category", "LegacySmoke")]
     [Fact]
     public void UserErrorMapper_KeyMessages_AreShortAndUserFriendly()
     {
@@ -1112,6 +1112,7 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
             var logger = new RollingFileLogger(logPath, maxFileBytes: 1024 * 1024);
             logger.WriteLine("app start | version=0.1.0-alpha.test");
 
+            Assert.Equal(20, logger.RetainedFileCount);
             Assert.True(File.Exists(logPath));
             var text = File.ReadAllText(logPath);
             Assert.Contains("app start", text, StringComparison.OrdinalIgnoreCase);
@@ -1142,6 +1143,40 @@ public sealed class MetricsAndReliabilityTests : CoreSmokeTestsBase
             var rotated = File.ReadAllText(Path.Combine(tempDir, "nlink.1.log"));
             Assert.Contains("second line", current, StringComparison.Ordinal);
             Assert.Contains("AAA", rotated, StringComparison.Ordinal);
+        }
+        finally
+        {
+            CleanupDirectoryIfExists(tempDir);
+        }
+    }
+
+[Trait("Category", "LegacySmoke")]
+    [Fact]
+    public void RollingFileLogger_DefaultRetention_KeepsTwentyTotalFiles()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-smoke-logs", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var logPath = Path.Combine(tempDir, "nlink.log");
+
+        try
+        {
+            var logger = new RollingFileLogger(logPath, maxFileBytes: 1);
+
+            for (var i = 0; i < 25; i++)
+            {
+                logger.WriteLine("entry-" + i.ToString("D2"));
+            }
+
+            var retainedLogs = Directory.GetFiles(tempDir, "nlink*.log", SearchOption.TopDirectoryOnly);
+
+            Assert.Equal(20, logger.RetainedFileCount);
+            Assert.Equal(20, retainedLogs.Length);
+            Assert.True(File.Exists(logPath));
+            Assert.True(File.Exists(Path.Combine(tempDir, "nlink.1.log")));
+            Assert.True(File.Exists(Path.Combine(tempDir, "nlink.19.log")));
+            Assert.False(File.Exists(Path.Combine(tempDir, "nlink.20.log")));
+            Assert.Contains("entry-24", File.ReadAllText(logPath), StringComparison.Ordinal);
+            Assert.Contains("entry-23", File.ReadAllText(Path.Combine(tempDir, "nlink.1.log")), StringComparison.Ordinal);
         }
         finally
         {

@@ -288,11 +288,23 @@ Caps are user-visible in `Options > Wallet`. From the user's perspective:
 
 Total spend is best-effort because provider accounting can have in-flight usage. nLink keeps local accounting for its own Tuna sessions, not wallet lifetime accounting.
 
+Each app-started paid listener session is also recorded in the local Tuna usage file as a bounded session ledger. A session record includes a run id, start/end time, role, bytes moved, app-payload MB, paid NKN, average NKN/MB when known, payment event count, payment telemetry status, cap reason, fallback reason, and whether the sidecar summary was observed. The ledger keeps the newest 100 session records.
+
+Payment confidence is explicit:
+
+- `reported`: at least one sidecar payment event or cumulative spend summary was observed.
+- `no_payment_telemetry_reported`: Tuna moved app payload bytes, but the sidecar reported no payment events.
+- `accounting_incomplete`: the listener exited or was stopped before a sidecar summary was observed.
+- `none`: no Tuna payload moved in that session.
+
+If Tuna moves data but no payment event is reported, the UI must say `no payment telemetry reported`; it must not imply the traffic was free.
+
 `Options > Wallet` shows:
 
 - Spent by nLink,
 - Average cost,
 - Last session cost,
+- Last session reason,
 - Expected improvement.
 
 `Spent by nLink` means locally tracked Tuna spend from nLink sidecar telemetry on this device. It does not mean total NKN spent by the wallet on chain.
@@ -354,7 +366,8 @@ dotnet build src\nLink.App\nLink.App.csproj -c Release
 Build the Tuna sidecar:
 
 ```powershell
-go -C tools\nkn-tuna-sidecar build -o ..\..\artifacts\tuna-sidecar\nlink-tuna-sidecar.exe .
+$version = (Get-Content VERSION -Raw).Trim()
+go -C tools\nkn-tuna-sidecar build -ldflags "-X main.sidecarVersion=$version" -o ..\..\artifacts\tuna-sidecar\nlink-tuna-sidecar.exe .
 ```
 
 Build the installer:
@@ -370,6 +383,21 @@ Useful environment overrides for developer tests:
 - `NLINK_NKN_TUNA_LANES=file,screen`
 
 The advanced Options runtime pilot can also enable Tuna locally without changing default startup behavior.
+
+Run the opt-in Tuna soak matrix from a developer machine:
+
+```powershell
+$env:NLINK_RUN_MANUAL_BRIDGE = "1"
+$env:NLINK_RUN_TUNA_SOAK_MATRIX = "1"
+$env:NLINK_TUNA_TEST_WALLET_PASSWORD = "<session-only test wallet password>"
+$env:NLINK_TUNA_SOAK_TIERS = "core,extended"
+$env:NLINK_TUNA_SOAK_DURATION_MIN = "15"
+dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj --filter "FullyQualifiedName~TunaSidecar_SoakMatrix_FileScreenAcrossPayersPresetsFaults"
+```
+
+The soak matrix writes artifacts under `artifacts/tuna-sidecar/soak-matrix-<timestamp>/`. It covers baseline NKN, Tuna helpee-paid, Tuna helper-paid, both-unlocked payer selection, app-restart setup, sidecar crash, switch-off fallback, provider-timeout cells, and both High quality and Tuna quality screen presets. `NLINK_TUNA_SOAK_FILE_PACING_MBPS` defaults to `8` so mixed file-plus-screen soak traffic is sustained without intentionally saturating the Tuna sidecar queues; Phase 3 file-only benchmark traffic still uses its separate 45 Mbps pacing. During a Tuna-down fallback, the soak file stream slows to an NKN-safe fallback pace and gets a longer drain window so the test proves fallback progress instead of flooding the fallback path. If Tuna drops unexpectedly near the tail of a long no-fault or restart-before-traffic cell, the cell may pass with an `unexpected_tuna_drop_recovered` warning only when NKN fallback proof is complete for file and screen and at least 98% of the file stream was received. Soak readiness uses live app-side Tuna counters first, then sidecar `bridge_frame_forwarded` log evidence as a fallback when the lane has already reset and live counters are unavailable. Use `NLINK_TUNA_SOAK_CELL_FILTER=core-tuna-high-helpee-none` or a comma-separated list of cell ids to rerun one failing cell before spending on the full matrix.
+
+The app-side Tuna IPC queue defaults to 1024 frames. Bulk/file queue timeout is still treated as a hard acceleration failure because mixing file chunk order across Tuna and NKN is risky. Media/screen queue timeout is treated as per-frame backpressure: that frame falls back to NKN, Tuna remains available, and logs record `tuna_sidecar_queue_backpressure`.
 
 ## Test Coverage Checklist
 

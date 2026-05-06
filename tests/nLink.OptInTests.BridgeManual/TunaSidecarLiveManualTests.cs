@@ -592,6 +592,34 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
         return count;
     }
 
+    private static string ExtractLastLogToken(string text, string prefix)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(prefix))
+        {
+            return string.Empty;
+        }
+
+        var index = text.LastIndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+        if (index < 0)
+        {
+            return string.Empty;
+        }
+
+        var start = index + prefix.Length;
+        var end = start;
+        while (end < text.Length &&
+               !char.IsWhiteSpace(text[end]) &&
+               text[end] != ';' &&
+               text[end] != ',' &&
+               text[end] != '"' &&
+               text[end] != '}')
+        {
+            end++;
+        }
+
+        return end <= start ? string.Empty : text[start..end].Trim();
+    }
+
     private static async Task<bool> WaitUntilOrFalseAsync(Func<bool> condition, TimeSpan timeout)
     {
         var deadline = DateTimeOffset.UtcNow + timeout;

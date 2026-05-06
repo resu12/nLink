@@ -36,6 +36,10 @@ public sealed class PackagingScriptTests : CoreSmokeTestsBase
         Assert.Contains("Previous package comparison", installerScript, StringComparison.Ordinal);
         Assert.DoesNotContain("`n    -CopyHelperAlias`r", installerScript, StringComparison.Ordinal);
         Assert.Contains("package-size-summary.txt", installerScript, StringComparison.Ordinal);
+        Assert.Contains("tuna-sidecar-manifest.json", portableScript, StringComparison.Ordinal);
+        Assert.Contains("sidecarVersion=$Version", portableScript, StringComparison.Ordinal);
+        Assert.Contains("Installer staging Tuna sidecar runtime not found", installerScript, StringComparison.Ordinal);
+        Assert.Contains("""{app}\tuna""", File.ReadAllText(RequireRepoFile(Path.Combine("installer", "nLink.iss"))), StringComparison.Ordinal);
 
         Assert.Contains("Build-Installer.ps1\" -Runtime $Runtime -CopyHelperAlias", preReleaseScript, StringComparison.Ordinal);
         Assert.Contains("Build-Installer.ps1\" -Runtime $Runtime -CopyHelperAlias", betaReadinessScript, StringComparison.Ordinal);
@@ -89,6 +93,94 @@ public sealed class PackagingScriptTests : CoreSmokeTestsBase
             Assert.Contains("appVersion mismatch", stale.Stdout + stale.Stderr, StringComparison.Ordinal);
 
             WriteBridgeManifest(bridgeDir, appVersion: "1.2.3");
+            var current = await RunPowerShellAsync(
+                scriptPath,
+                "-StageDir",
+                stageDir,
+                "-ManifestPath",
+                manifestPath,
+                "-ExpectedAppVersion",
+                "1.2.3");
+
+            Assert.Equal(0, current.ExitCode);
+            Assert.Contains("Package manifest verified", current.Stdout, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(tempRoot);
+        }
+    }
+
+    [Fact]
+    public async Task VerifyPackageManifest_RejectsTunaSidecarManifestWithStaleVersionOrHash()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var scriptPath = RequireRepoFile(Path.Combine("build", "verify-package-manifest.ps1"));
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-packaging-tuna-manifest-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var stageDir = Path.Combine(tempRoot, "stage");
+            var bridgeDir = Path.Combine(stageDir, "bridge", "win-x64");
+            var tunaDir = Path.Combine(stageDir, "tuna", "win-x64");
+            Directory.CreateDirectory(bridgeDir);
+            Directory.CreateDirectory(tunaDir);
+
+            File.WriteAllText(
+                Path.Combine(bridgeDir, "index.js"),
+                "const bulkClient = true; const bulkAddress = ''; const SUPPORTED_CHANNELS = ['bulk'];");
+            File.WriteAllText(Path.Combine(bridgeDir, "package.json"), """{"name":"test-bridge"}""");
+            File.WriteAllText(Path.Combine(bridgeDir, "package-lock.json"), """{"lockfileVersion":3}""");
+            File.WriteAllText(Path.Combine(bridgeDir, "bridge-dependencies.json"), """{"nodeModulesShipped":false}""");
+            WriteBridgeManifest(bridgeDir, appVersion: "1.2.3");
+
+            var sidecarExe = Path.Combine(tunaDir, "nlink-tuna-sidecar.exe");
+            File.WriteAllBytes(sidecarExe, [1, 2, 3, 4]);
+
+            var manifestPath = Path.Combine(tempRoot, "package-manifest.txt");
+            File.WriteAllLines(
+                manifestPath,
+                [
+                    "bridge/win-x64/index.js",
+                    "bridge/win-x64/package.json",
+                    "bridge/win-x64/package-lock.json",
+                    "bridge/win-x64/bridge-manifest.json",
+                    "bridge/win-x64/bridge-dependencies.json",
+                    "tuna/win-x64/nlink-tuna-sidecar.exe",
+                    "tuna/win-x64/tuna-sidecar-manifest.json",
+                ]);
+
+            WriteTunaSidecarManifest(tunaDir, appVersion: "1.2.2", sidecarVersion: "1.2.2");
+            var stale = await RunPowerShellAsync(
+                scriptPath,
+                "-StageDir",
+                stageDir,
+                "-ManifestPath",
+                manifestPath,
+                "-ExpectedAppVersion",
+                "1.2.3");
+
+            Assert.NotEqual(0, stale.ExitCode);
+            Assert.Contains("Tuna sidecar manifest appVersion mismatch", stale.Stdout + stale.Stderr, StringComparison.Ordinal);
+
+            WriteTunaSidecarManifest(tunaDir, appVersion: "1.2.3", sidecarVersion: "1.2.3");
+            File.WriteAllBytes(sidecarExe, [9, 9, 9, 9]);
+            var hashMismatch = await RunPowerShellAsync(
+                scriptPath,
+                "-StageDir",
+                stageDir,
+                "-ManifestPath",
+                manifestPath,
+                "-ExpectedAppVersion",
+                "1.2.3");
+
+            Assert.NotEqual(0, hashMismatch.ExitCode);
+            Assert.Contains("Tuna sidecar hash does not match", hashMismatch.Stdout + hashMismatch.Stderr, StringComparison.Ordinal);
+
+            WriteTunaSidecarManifest(tunaDir, appVersion: "1.2.3", sidecarVersion: "1.2.3");
             var current = await RunPowerShellAsync(
                 scriptPath,
                 "-StageDir",
@@ -201,6 +293,25 @@ public sealed class PackagingScriptTests : CoreSmokeTestsBase
                 "bridgePackageVersion": "test",
                 "nodeModulesShipped": false,
                 "dependencyEvidenceFile": "bridge-dependencies.json"
+              }
+              """);
+    }
+
+    private static void WriteTunaSidecarManifest(string tunaDir, string appVersion, string sidecarVersion)
+    {
+        var sidecarHash = ComputeSha256(Path.Combine(tunaDir, "nlink-tuna-sidecar.exe"));
+        File.WriteAllText(
+            Path.Combine(tunaDir, "tuna-sidecar-manifest.json"),
+            $$"""
+              {
+                "manifestVersion": 1,
+                "appVersion": "{{appVersion}}",
+                "sidecarVersion": "{{sidecarVersion}}",
+                "runtime": "win-x64",
+                "appProtocolVersion": 1,
+                "frameProtocolVersion": 1,
+                "sidecarExeSha256": "{{sidecarHash}}",
+                "buildTimestampUtc": "2026-05-05T00:00:00Z"
               }
               """);
     }

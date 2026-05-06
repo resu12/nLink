@@ -146,7 +146,7 @@ Options -> Settings exposes four screen-share presets:
 | Preset | Capture FPS | Transport FPS | Max transport target | Scale | Quality profile |
 |---|---:|---:|---:|---:|---|
 | Balanced | 15 | 8 | 1440x810 | 1.0 | `normal` |
-| High quality | 20 | 12 | 1440x810 | 1.0 | `normal` |
+| High quality | 24 | 15 | 1440x810 | 1.0 | `normal` |
 | Tuna quality | 30 | 15 | 1600x900 | 1.0 | `tuna_quality` |
 | High performance | 10 | 6 | 864x486 | 0.6 | `normal` |
 

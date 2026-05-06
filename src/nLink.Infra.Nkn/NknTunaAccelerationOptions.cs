@@ -20,7 +20,7 @@ internal sealed class NknTunaAccelerationOptions
     public NknAccelerationLaneKind Lanes { get; private init; } =
         NknAccelerationLaneKind.File | NknAccelerationLaneKind.Screen;
 
-    public int QueueCapacity { get; private init; } = 256;
+    public int QueueCapacity { get; private init; } = 1024;
 
     public int ConnectTimeoutMs { get; private init; } = 5_000;
 

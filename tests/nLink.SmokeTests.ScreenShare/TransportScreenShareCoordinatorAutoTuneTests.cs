@@ -21,15 +21,40 @@ namespace NLink.SmokeTests;
 
 [Collection(AvaloniaHeadlessUiCollection.Name)]
 [Trait("Area", "ScreenShare")]
-public sealed class TransportScreenShareCoordinatorAutoTuneTests : ScreenShareCoordinatorTestBase, IClassFixture<ScreenShareCoordinatorFixture>
+public sealed class TransportScreenShareCoordinatorAutoTuneTests : ScreenShareCoordinatorTestBase, IClassFixture<ScreenShareCoordinatorFixture>, IDisposable
 {
+    private readonly EnvironmentOverride defaultCaptureFpsOverride;
+    private readonly EnvironmentOverride defaultTransportFpsOverride;
+    private readonly EnvironmentOverride defaultScaleOverride;
+    private readonly EnvironmentOverride defaultQualityProfileOverride;
+
     public TransportScreenShareCoordinatorAutoTuneTests(ScreenShareCoordinatorFixture fixture) : base(fixture)
     {
+        defaultCaptureFpsOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareMaxFpsVariable,
+            "15");
+        defaultTransportFpsOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable,
+            "8");
+        defaultScaleOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareScaleVariable,
+            "1");
+        defaultQualityProfileOverride = new EnvironmentOverride(
+            ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
+            FeatureFlags.ScreenShareQualityProfileNormal);
+    }
+
+    public void Dispose()
+    {
+        defaultQualityProfileOverride.Dispose();
+        defaultScaleOverride.Dispose();
+        defaultTransportFpsOverride.Dispose();
+        defaultCaptureFpsOverride.Dispose();
     }
 
 [Fact]
     [Trait("Category", "Smoke")]
-    public void TransportScreenShareCoordinator_NormalProfile_CapsNormalSenderTargetAtCurrentBaseline()
+    public void TransportScreenShareCoordinator_NormalProfile_AllowsHighQualitySenderTarget15()
     {
         using var profileOverride = new EnvironmentOverride(
             ScreenShareQualitySettings.ScreenShareQualityProfileVariable,
@@ -47,7 +72,7 @@ public sealed class TransportScreenShareCoordinatorAutoTuneTests : ScreenShareCo
             null,
             [ScreenShareSenderFreshnessMode.Normal, FeatureFlags.ScreenShareTransportMaxFps, false])!;
 
-        Assert.Equal(8, target);
+        Assert.Equal(15, target);
     }
 
 [Fact]

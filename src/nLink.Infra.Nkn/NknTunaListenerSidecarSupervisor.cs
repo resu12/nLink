@@ -30,12 +30,12 @@ internal sealed class NknTunaListenerSidecarOptions
 
 internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecarSupervisor
 {
-    private static readonly TimeSpan ProcessExitWait = TimeSpan.FromSeconds(3);
     private readonly object gate = new();
     private readonly NknTunaListenerSidecarOptions options;
-    private Process? process;
+    private NknTunaSidecarProcessOwner? processOwner;
     private NknTunaListenerSidecarEndpoint? endpoint;
     private string? expectedRemotePeer;
+    private bool summaryObserved;
     private bool disposed;
 
     public NknTunaListenerSidecarSupervisor(NknTunaListenerSidecarOptions options)
@@ -55,7 +55,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         {
             ThrowIfDisposed();
             if (endpoint is not null &&
-                process?.HasExited == false &&
+                processOwner?.IsRunning == true &&
                 string.Equals(expectedRemotePeer, request.ExpectedRemotePeer, StringComparison.Ordinal))
             {
                 return endpoint;
@@ -99,6 +99,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         SetStatus("listener_starting");
         var startupStopwatch = Stopwatch.StartNew();
         var ready = new TaskCompletionSource<NknTunaListenerSidecarEndpoint>(TaskCreationOptions.RunContinuationsAsynchronously);
+        NknTunaSidecarProcessOwner? owner = null;
         var nextProcess = new Process
         {
             StartInfo = new ProcessStartInfo
@@ -149,35 +150,47 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         };
         nextProcess.Exited += (_, _) =>
         {
-            SetStatus("listener_exited");
-            if (!ready.Task.IsCompleted)
+            if (IsCurrentProcessOwner(owner, nextProcess))
             {
-                ready.TrySetException(new InvalidOperationException("Tuna listener sidecar exited before ready."));
+                SetStatus("listener_exited");
+                CompleteIncompleteSession("sidecar_exited_before_summary");
+                if (!ready.Task.IsCompleted)
+                {
+                    ready.TrySetException(new InvalidOperationException("Tuna listener sidecar exited before ready."));
+                }
             }
         };
 
         try
         {
+            lock (gate)
+            {
+                ThrowIfDisposed();
+                StopProcess_NoLock("listener_replaced");
+                endpoint = null;
+                expectedRemotePeer = request.ExpectedRemotePeer.Trim();
+                summaryObserved = false;
+            }
+
             if (!nextProcess.Start())
             {
                 nextProcess.Dispose();
                 SetStatus("listener_start_failed");
+                CompleteIncompleteSession("listener_start_failed");
                 return null;
+            }
+
+            owner = NknTunaSidecarProcessOwner.Attach("listener", nextProcess);
+            lock (gate)
+            {
+                ThrowIfDisposed();
+                processOwner = owner;
             }
 
             nextProcess.BeginOutputReadLine();
             nextProcess.BeginErrorReadLine();
             await nextProcess.StandardInput.WriteLineAsync(password.AsMemory(), ct).ConfigureAwait(false);
             nextProcess.StandardInput.Close();
-
-            lock (gate)
-            {
-                ThrowIfDisposed();
-                StopProcess_NoLock();
-                process = nextProcess;
-                endpoint = null;
-                expectedRemotePeer = request.ExpectedRemotePeer.Trim();
-            }
 
             using var readyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             readyCts.CancelAfter(options.ReadyTimeoutMs);
@@ -196,15 +209,24 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         {
             LocalOperationalLog.Warn("NKN.Tuna", $"event=tuna_listener_sidecar_start_failed; error={ex.GetType().Name}");
             SetStatus("listener_failed");
-            TryStopProcess(nextProcess);
+            CompleteIncompleteSession("listener_failed");
+            StopOwnerIfCurrent(owner, "listener_failed");
             return null;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             LocalOperationalLog.Warn("NKN.Tuna", "event=tuna_listener_sidecar_start_failed; error=ready_timeout");
             SetStatus("listener_ready_timeout");
-            TryStopProcess(nextProcess);
+            CompleteIncompleteSession("listener_ready_timeout");
+            StopOwnerIfCurrent(owner, "listener_ready_timeout");
             return null;
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus("listener_canceled");
+            CompleteIncompleteSession("listener_canceled");
+            StopOwnerIfCurrent(owner, "listener_canceled");
+            throw;
         }
     }
 
@@ -239,6 +261,18 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                 case "ready":
                     var localIpc = TryGetString(root, "localIpc");
                     var address = TryGetString(root, "address");
+                    var compatibility = NknTunaSidecarCompatibility.Validate(
+                        TryGetInt32(root, "appProtocolVersion"),
+                        TryGetInt32(root, "frameProtocolVersion"),
+                        TryGetString(root, "sidecarVersion"));
+                    LogCompatibilityCheck(compatibility);
+                    if (!compatibility.IsCompatible)
+                    {
+                        SetStatus(compatibility.Reason);
+                        ready.TrySetException(new InvalidOperationException(compatibility.Reason));
+                        break;
+                    }
+
                     if (!string.IsNullOrWhiteSpace(localIpc) && !string.IsNullOrWhiteSpace(address))
                     {
                         ready.TrySetResult(new NknTunaListenerSidecarEndpoint(localIpc.Trim(), address.Trim()));
@@ -250,7 +284,13 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                     break;
                 case "summary":
                     HandleSummary(root);
-                    SetStatus("session_summary");
+                    SetStatus((TryGetBool(root, "capReached") ?? false)
+                        ? (TryGetString(root, "capReason") ?? "cap_reached")
+                        : "session_summary");
+                    break;
+                case "tuna_bridge_terminal":
+                    var terminalReason = TryGetString(root, "terminalReason") ?? TryGetString(root, "reason") ?? "unknown";
+                    SetStatus("terminal_" + SanitizeLogToken(terminalReason));
                     break;
                 case "error":
                     SetStatus("sidecar_error");
@@ -268,6 +308,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         {
             "tuna_listen_start" => "listener_starting",
             "tuna_provider_paths_ready" => "provider_paths_ready",
+            "provider_paths_degraded" => "provider_paths_degraded",
             "tuna_provider_paths_ready_timeout" => "provider_paths_wait_timeout",
             "tuna_listen_started" => "provider_paths_ready",
             "ready" => "listener_ready",
@@ -302,12 +343,40 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         }
 
         var bytesMoved = TryGetInt64(root, "bytesMoved") ?? 0L;
-        var reason = TryGetString(root, "reason") ?? "unknown";
+        var reason = TryGetString(root, "terminalReason") ?? TryGetString(root, "reason") ?? "unknown";
         var paymentObserved = TryGetBool(root, "paymentObserved") ?? false;
+        var paymentEventCount = (int)Math.Clamp(TryGetInt64(root, "paymentEventCount") ?? 0L, 0L, int.MaxValue);
+        var paymentStatus = TryGetString(root, "paymentStatus") ?? string.Empty;
+        var capReached = TryGetBool(root, "capReached") ?? false;
+        var capReason = TryGetString(root, "capReason") ?? string.Empty;
+        var fallbackReason = TryGetString(root, "fallbackReason") ?? string.Empty;
         var cumulativeSpend = TryGetDecimal(root, "cumulativeSpendNkn", out var parsedCumulativeSpend)
             ? parsedCumulativeSpend
             : (decimal?)null;
-        options.UsageSink.RecordSummary(new NknTunaSessionUsageTelemetry(bytesMoved, reason, paymentObserved, cumulativeSpend));
+        var nknPerMb = TryGetDecimal(root, "nknPerMb", out var parsedNknPerMb)
+            ? parsedNknPerMb
+            : (decimal?)null;
+        lock (gate)
+        {
+            if (summaryObserved)
+            {
+                return;
+            }
+
+            summaryObserved = true;
+        }
+
+        options.UsageSink.RecordSummary(new NknTunaSessionUsageTelemetry(
+            bytesMoved,
+            reason,
+            paymentObserved,
+            cumulativeSpend,
+            paymentEventCount,
+            paymentStatus,
+            capReached,
+            capReason,
+            fallbackReason,
+            nknPerMb));
     }
 
     public void Dispose()
@@ -320,7 +389,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         disposed = true;
         lock (gate)
         {
-            StopProcess_NoLock();
+            StopProcess_NoLock("disposed");
             endpoint = null;
         }
     }
@@ -329,7 +398,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
     {
         lock (gate)
         {
-            StopProcess_NoLock();
+            StopProcess_NoLock(string.IsNullOrWhiteSpace(reason) ? "listener_stopped" : reason.Trim());
             endpoint = null;
             expectedRemotePeer = null;
         }
@@ -337,13 +406,40 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         SetStatus(string.IsNullOrWhiteSpace(reason) ? "listener_stopped" : $"listener_stopped_{reason.Trim()}");
     }
 
-    private void StopProcess_NoLock()
+    private void StopProcess_NoLock(string reason)
     {
-        var current = process;
-        process = null;
+        var current = processOwner;
+        processOwner = null;
         if (current is not null)
         {
-            TryStopProcess(current);
+            CompleteIncompleteSession_NoLock(reason);
+            current.Stop(reason);
+        }
+    }
+
+    private void CompleteIncompleteSession(string reason)
+    {
+        lock (gate)
+        {
+            CompleteIncompleteSession_NoLock(reason);
+        }
+    }
+
+    private void CompleteIncompleteSession_NoLock(string reason)
+    {
+        if (summaryObserved)
+        {
+            return;
+        }
+
+        summaryObserved = true;
+        try
+        {
+            options.UsageSink?.RecordIncomplete(string.IsNullOrWhiteSpace(reason) ? "accounting_incomplete" : reason.Trim());
+        }
+        catch
+        {
+            // Accounting telemetry is diagnostic only.
         }
     }
 
@@ -359,25 +455,63 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         }
     }
 
-    private static void TryStopProcess(Process process)
+    private bool IsCurrentProcessOwner(NknTunaSidecarProcessOwner? owner, Process process)
     {
-        try
+        if (owner is null)
         {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-                process.WaitForExit(ProcessExitWait);
-            }
+            return false;
         }
-        catch
+
+        lock (gate)
         {
-            // Best-effort sidecar cleanup.
-        }
-        finally
-        {
-            process.Dispose();
+            return ReferenceEquals(processOwner, owner) && owner.Owns(process);
         }
     }
+
+    private void StopOwnerIfCurrent(NknTunaSidecarProcessOwner? owner, string reason)
+    {
+        if (owner is null)
+        {
+            return;
+        }
+
+        var shouldStop = false;
+        lock (gate)
+        {
+            if (ReferenceEquals(processOwner, owner))
+            {
+                processOwner = null;
+                endpoint = null;
+                shouldStop = true;
+            }
+        }
+
+        if (shouldStop || owner.IsRunning)
+        {
+            owner.Stop(reason);
+        }
+    }
+
+    private static void LogCompatibilityCheck(NknTunaSidecarCompatibilityResult compatibility)
+    {
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_sidecar_version_checked; compatible={FormatBool(compatibility.IsCompatible)}; reason={SanitizeLogToken(compatibility.Reason)}; expected_app_protocol={NknTunaSidecarCompatibility.AppProtocolVersion}; expected_frame_protocol={NknTunaSidecarFrameProtocol.ProtocolVersion}; expected_version={SanitizeLogToken(NknTunaSidecarCompatibility.ExpectedSidecarVersion)}; sidecar_version={SanitizeLogToken(compatibility.SidecarVersion)}");
+        if (!compatibility.IsCompatible)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=tuna_sidecar_version_mismatch; reason={SanitizeLogToken(compatibility.Reason)}; expected_app_protocol={NknTunaSidecarCompatibility.AppProtocolVersion}; expected_frame_protocol={NknTunaSidecarFrameProtocol.ProtocolVersion}; expected_version={SanitizeLogToken(NknTunaSidecarCompatibility.ExpectedSidecarVersion)}");
+        }
+    }
+
+    private static string FormatBool(bool value)
+        => value ? "true" : "false";
+
+    private static int? TryGetInt32(JsonElement root, string propertyName)
+        => root.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var value)
+            ? value
+            : null;
 
     private static string? TryGetString(JsonElement root, string propertyName)
         => root.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.String

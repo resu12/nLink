@@ -2,6 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -170,11 +173,199 @@ internal sealed class TunaRuntimePreferenceState
     }
 }
 
+internal static class TunaPaymentTelemetryStatus
+{
+    public const string Pending = "pending";
+    public const string Reported = "reported";
+    public const string NoPaymentTelemetryReported = "no_payment_telemetry_reported";
+    public const string AccountingIncomplete = "accounting_incomplete";
+    public const string None = "none";
+}
+
+internal sealed record TunaUsageSessionRecord
+{
+    public string SessionRunId { get; init; } = string.Empty;
+
+    public DateTimeOffset StartedUtc { get; init; }
+
+    public DateTimeOffset? EndedUtc { get; init; }
+
+    public string Role { get; init; } = "listener";
+
+    public long BytesMoved { get; init; }
+
+    public decimal AppPayloadMb { get; init; }
+
+    public decimal PaidNkn { get; init; }
+
+    public decimal AverageNknPerMb { get; init; }
+
+    public int PaymentEventCount { get; init; }
+
+    public string PaymentTelemetryStatus { get; init; } = TunaPaymentTelemetryStatus.Pending;
+
+    public string StopReason { get; init; } = string.Empty;
+
+    public string CapReason { get; init; } = string.Empty;
+
+    public string FallbackReason { get; init; } = string.Empty;
+
+    public bool CompletedFromSummary { get; init; }
+
+    public TunaUsageSessionRecord Normalized()
+    {
+        var bytes = Math.Max(0, BytesMoved);
+        var mb = AppPayloadMb > 0m ? AppPayloadMb : bytes / 1_000_000m;
+        var paid = Math.Max(0m, PaidNkn);
+        var status = NormalizeStatus(PaymentTelemetryStatus, bytes, paid, PaymentEventCount, CompletedFromSummary);
+        return this with
+        {
+            SessionRunId = string.IsNullOrWhiteSpace(SessionRunId) ? Guid.NewGuid().ToString("N") : SessionRunId.Trim(),
+            Role = string.IsNullOrWhiteSpace(Role) ? "listener" : SanitizeStatusValue(Role),
+            BytesMoved = bytes,
+            AppPayloadMb = Math.Max(0m, mb),
+            PaidNkn = paid,
+            AverageNknPerMb = mb > 0m && paid > 0m ? paid / mb : 0m,
+            PaymentEventCount = Math.Max(0, PaymentEventCount),
+            PaymentTelemetryStatus = status,
+            StopReason = SanitizeStatusValue(StopReason),
+            CapReason = SanitizeStatusValue(CapReason),
+            FallbackReason = SanitizeStatusValue(FallbackReason),
+        };
+    }
+
+    public TunaUsageSessionRecord AddPayment(decimal amountNkn, long bytesMoved, DateTimeOffset now)
+    {
+        var nextBytes = Math.Max(BytesMoved, bytesMoved);
+        var nextMb = Math.Max(AppPayloadMb, nextBytes / 1_000_000m);
+        var nextPaid = Math.Max(0m, PaidNkn + Math.Max(0m, amountNkn));
+        return (this with
+        {
+            BytesMoved = nextBytes,
+            AppPayloadMb = nextMb,
+            PaidNkn = nextPaid,
+            AverageNknPerMb = nextMb > 0m && nextPaid > 0m ? nextPaid / nextMb : 0m,
+            PaymentEventCount = Math.Max(0, PaymentEventCount) + 1,
+            PaymentTelemetryStatus = TunaPaymentTelemetryStatus.Reported,
+        }).Normalized();
+    }
+
+    public TunaUsageSessionRecord Complete(
+        long bytesMoved,
+        decimal paidNkn,
+        int paymentEventCount,
+        bool paymentTelemetryObserved,
+        string? paymentTelemetryStatus,
+        string? stopReason,
+        string? capReason,
+        string? fallbackReason,
+        bool completedFromSummary,
+        DateTimeOffset now)
+    {
+        var nextBytes = Math.Max(BytesMoved, bytesMoved);
+        var nextMb = Math.Max(AppPayloadMb, nextBytes / 1_000_000m);
+        var nextPaid = Math.Max(PaidNkn, paidNkn);
+        var nextPaymentEventCount = Math.Max(PaymentEventCount, paymentEventCount);
+        var status = NormalizeStatus(
+            paymentTelemetryStatus,
+            nextBytes,
+            nextPaid,
+            nextPaymentEventCount,
+            completedFromSummary);
+        if (paymentTelemetryObserved && status is not TunaPaymentTelemetryStatus.NoPaymentTelemetryReported)
+        {
+            status = TunaPaymentTelemetryStatus.Reported;
+        }
+
+        return (this with
+        {
+            EndedUtc = now,
+            BytesMoved = nextBytes,
+            AppPayloadMb = nextMb,
+            PaidNkn = nextPaid,
+            AverageNknPerMb = nextMb > 0m && nextPaid > 0m ? nextPaid / nextMb : 0m,
+            PaymentEventCount = nextPaymentEventCount,
+            PaymentTelemetryStatus = status,
+            StopReason = SanitizeStatusValue(stopReason),
+            CapReason = SanitizeStatusValue(capReason),
+            FallbackReason = SanitizeStatusValue(fallbackReason),
+            CompletedFromSummary = completedFromSummary,
+        }).Normalized();
+    }
+
+    internal static string NormalizeStatus(
+        string? value,
+        long bytesMoved,
+        decimal paidNkn,
+        int paymentEventCount,
+        bool completedFromSummary)
+    {
+        var normalized = SanitizeStatusValue(value);
+        if (normalized is TunaPaymentTelemetryStatus.Reported or
+            TunaPaymentTelemetryStatus.NoPaymentTelemetryReported or
+            TunaPaymentTelemetryStatus.AccountingIncomplete or
+            TunaPaymentTelemetryStatus.None or
+            TunaPaymentTelemetryStatus.Pending)
+        {
+            if (normalized is TunaPaymentTelemetryStatus.Pending && completedFromSummary && bytesMoved <= 0 && paidNkn <= 0m)
+            {
+                return TunaPaymentTelemetryStatus.None;
+            }
+
+            return normalized;
+        }
+
+        if (paymentEventCount > 0 || paidNkn > 0m)
+        {
+            return TunaPaymentTelemetryStatus.Reported;
+        }
+
+        if (!completedFromSummary)
+        {
+            return bytesMoved > 0
+                ? TunaPaymentTelemetryStatus.AccountingIncomplete
+                : TunaPaymentTelemetryStatus.None;
+        }
+
+        return bytesMoved > 0
+            ? TunaPaymentTelemetryStatus.NoPaymentTelemetryReported
+            : TunaPaymentTelemetryStatus.None;
+    }
+
+    private static string SanitizeStatusValue(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        Span<char> buffer = stackalloc char[Math.Min(value.Length, 96)];
+        var written = 0;
+        foreach (var ch in value.Trim())
+        {
+            if (written >= buffer.Length)
+            {
+                break;
+            }
+
+            buffer[written++] = char.IsAsciiLetterOrDigit(ch) || ch is '_' or '-' ? ch : '_';
+        }
+
+        return written == 0 ? string.Empty : new string(buffer[..written]);
+    }
+}
+
 internal sealed class TunaUsageAccountingState
 {
+    private const int MaxSessionRecords = 100;
+
     public decimal TotalPaidNkn { get; init; }
 
     public decimal TotalAppPayloadMb { get; init; }
+
+    public decimal TotalKnownAppPayloadMb { get; init; }
+
+    public decimal TotalUnknownAppPayloadMb { get; init; }
 
     public bool HasUnknownCost { get; init; }
 
@@ -186,73 +377,239 @@ internal sealed class TunaUsageAccountingState
 
     public DateTimeOffset? LastUpdatedUtc { get; init; }
 
+    public List<TunaUsageSessionRecord> SessionRecords { get; init; } = [];
+
     [JsonIgnore]
-    public decimal AverageNknPerMb => TotalAppPayloadMb > 0m ? TotalPaidNkn / TotalAppPayloadMb : 0m;
+    public TunaUsageSessionRecord? LastSessionRecord => SessionRecords.Count == 0 ? null : SessionRecords[^1].Normalized();
+
+    [JsonIgnore]
+    public decimal AverageNknPerMb => TotalKnownAppPayloadMb > 0m ? TotalPaidNkn / TotalKnownAppPayloadMb : 0m;
 
     [JsonIgnore]
     public decimal LastSessionAverageNknPerMb => LastSessionAppPayloadMb > 0m ? LastSessionPaidNkn / LastSessionAppPayloadMb : 0m;
 
+    [JsonIgnore]
+    public bool HasPaymentTelemetryGaps => HasUnknownCost || TotalUnknownAppPayloadMb > 0m;
+
     public static TunaUsageAccountingState Empty { get; } = new();
 
     public TunaUsageAccountingState AddPayment(decimal amountNkn, DateTimeOffset now)
-        => new()
-        {
-            TotalPaidNkn = Math.Max(0m, TotalPaidNkn + Math.Max(0m, amountNkn)),
-            TotalAppPayloadMb = TotalAppPayloadMb,
-            HasUnknownCost = HasUnknownCost,
-            LastSessionPaidNkn = Math.Max(0m, LastSessionPaidNkn + Math.Max(0m, amountNkn)),
-            LastSessionAppPayloadMb = LastSessionAppPayloadMb,
-            LastSessionCostUnknown = false,
-            LastUpdatedUtc = now,
-        };
+        => AddPayment(null, amountNkn, 0, now);
 
-    public TunaUsageAccountingState CompleteSession(long bytesMoved, bool paymentTelemetryObserved, DateTimeOffset now)
+    public TunaUsageAccountingState AddPayment(string? sessionRunId, decimal amountNkn, long bytesMoved, DateTimeOffset now)
     {
+        var sanitizedAmount = Math.Max(0m, amountNkn);
         var mb = Math.Max(0m, bytesMoved / 1_000_000m);
         var currentSessionMb = Math.Max(0m, LastSessionAppPayloadMb);
         var deltaMb = Math.Max(0m, mb - currentSessionMb);
-        var unknownCost = mb > 0m && !paymentTelemetryObserved;
         return new TunaUsageAccountingState
         {
-            TotalPaidNkn = TotalPaidNkn,
+            TotalPaidNkn = Math.Max(0m, TotalPaidNkn + sanitizedAmount),
             TotalAppPayloadMb = Math.Max(0m, TotalAppPayloadMb + deltaMb),
-            HasUnknownCost = paymentTelemetryObserved ? HasUnknownCost : HasUnknownCost || unknownCost,
-            LastSessionPaidNkn = LastSessionPaidNkn,
+            TotalKnownAppPayloadMb = Math.Max(0m, TotalKnownAppPayloadMb + deltaMb),
+            TotalUnknownAppPayloadMb = TotalUnknownAppPayloadMb,
+            HasUnknownCost = HasUnknownCost,
+            LastSessionPaidNkn = Math.Max(0m, LastSessionPaidNkn + sanitizedAmount),
             LastSessionAppPayloadMb = Math.Max(currentSessionMb, mb),
-            LastSessionCostUnknown = paymentTelemetryObserved ? false : LastSessionCostUnknown || unknownCost,
+            LastSessionCostUnknown = false,
             LastUpdatedUtc = now,
-        };
+            SessionRecords = UpdateSessionRecord(
+                sessionRunId,
+                record => record.AddPayment(sanitizedAmount, bytesMoved, now)),
+        }.Normalized();
+    }
+
+    public TunaUsageAccountingState CompleteSession(long bytesMoved, bool paymentTelemetryObserved, DateTimeOffset now)
+        => CompleteSession(
+            null,
+            bytesMoved,
+            paymentTelemetryObserved,
+            null,
+            null,
+            0,
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            completedFromSummary: true,
+            now);
+
+    public TunaUsageAccountingState CompleteSession(
+        string? sessionRunId,
+        long bytesMoved,
+        bool paymentTelemetryObserved,
+        decimal? cumulativeSpendNkn,
+        string? paymentTelemetryStatus,
+        int paymentEventCount,
+        string? stopReason,
+        string? capReason,
+        string? fallbackReason,
+        bool completedFromSummary,
+        DateTimeOffset now)
+    {
+        var paidNkn = LastSessionPaidNkn;
+        if (cumulativeSpendNkn is { } cumulativeSpend && cumulativeSpend > paidNkn)
+        {
+            paidNkn = cumulativeSpend;
+        }
+
+        var status = TunaUsageSessionRecord.NormalizeStatus(
+            paymentTelemetryStatus,
+            bytesMoved,
+            paidNkn,
+            Math.Max(0, paymentEventCount),
+            completedFromSummary);
+        if (paymentTelemetryObserved &&
+            status is not TunaPaymentTelemetryStatus.NoPaymentTelemetryReported &&
+            status is not TunaPaymentTelemetryStatus.AccountingIncomplete)
+        {
+            status = TunaPaymentTelemetryStatus.Reported;
+        }
+
+        var mb = Math.Max(0m, bytesMoved / 1_000_000m);
+        var currentSessionMb = Math.Max(0m, LastSessionAppPayloadMb);
+        var deltaMb = Math.Max(0m, mb - currentSessionMb);
+        var paidDelta = Math.Max(0m, paidNkn - LastSessionPaidNkn);
+        var isKnownCost = string.Equals(status, TunaPaymentTelemetryStatus.Reported, StringComparison.Ordinal);
+        var isUnknownCost = mb > 0m && !isKnownCost;
+        return new TunaUsageAccountingState
+        {
+            TotalPaidNkn = Math.Max(0m, TotalPaidNkn + paidDelta),
+            TotalAppPayloadMb = Math.Max(0m, TotalAppPayloadMb + deltaMb),
+            TotalKnownAppPayloadMb = Math.Max(0m, TotalKnownAppPayloadMb + (isKnownCost ? deltaMb : 0m)),
+            TotalUnknownAppPayloadMb = Math.Max(0m, TotalUnknownAppPayloadMb + (isUnknownCost ? deltaMb : 0m)),
+            HasUnknownCost = HasUnknownCost || isUnknownCost,
+            LastSessionPaidNkn = Math.Max(0m, paidNkn),
+            LastSessionAppPayloadMb = Math.Max(currentSessionMb, mb),
+            LastSessionCostUnknown = isUnknownCost,
+            LastUpdatedUtc = now,
+            SessionRecords = UpdateSessionRecord(
+                sessionRunId,
+                record => record.Complete(
+                    bytesMoved,
+                    paidNkn,
+                    paymentEventCount,
+                    paymentTelemetryObserved,
+                    status,
+                    stopReason,
+                    capReason,
+                    fallbackReason,
+                    completedFromSummary,
+                    now)),
+        }.Normalized();
     }
 
     public TunaUsageAccountingState StartNewSession()
-        => new()
+        => StartNewSession(Guid.NewGuid().ToString("N"), "listener", DateTimeOffset.UtcNow);
+
+    public TunaUsageAccountingState StartNewSession(string sessionRunId, string role, DateTimeOffset now)
+        => new TunaUsageAccountingState
         {
             TotalPaidNkn = TotalPaidNkn,
             TotalAppPayloadMb = TotalAppPayloadMb,
+            TotalKnownAppPayloadMb = TotalKnownAppPayloadMb,
+            TotalUnknownAppPayloadMb = TotalUnknownAppPayloadMb,
             HasUnknownCost = HasUnknownCost,
             LastSessionPaidNkn = 0m,
             LastSessionAppPayloadMb = 0m,
             LastSessionCostUnknown = false,
-            LastUpdatedUtc = LastUpdatedUtc,
-        };
+            LastUpdatedUtc = now,
+            SessionRecords = AppendSessionRecord(new TunaUsageSessionRecord
+            {
+                SessionRunId = string.IsNullOrWhiteSpace(sessionRunId) ? Guid.NewGuid().ToString("N") : sessionRunId.Trim(),
+                StartedUtc = now,
+                Role = string.IsNullOrWhiteSpace(role) ? "listener" : role.Trim(),
+                PaymentTelemetryStatus = TunaPaymentTelemetryStatus.Pending,
+            }),
+        }.Normalized();
 
     public TunaUsageAccountingState Normalized()
     {
-        var hasUnknownCost = HasUnknownCost ||
-                             (TotalAppPayloadMb > 0m && TotalPaidNkn <= 0m);
+        var records = NormalizeSessionRecords(SessionRecords);
+        var knownMb = Math.Max(0m, TotalKnownAppPayloadMb);
+        var unknownMb = Math.Max(0m, TotalUnknownAppPayloadMb);
+        if (knownMb <= 0m && unknownMb <= 0m && TotalAppPayloadMb > 0m)
+        {
+            if (HasUnknownCost || (TotalPaidNkn <= 0m && LastSessionCostUnknown))
+            {
+                unknownMb = Math.Max(0m, TotalAppPayloadMb);
+            }
+            else
+            {
+                knownMb = Math.Max(0m, TotalAppPayloadMb);
+            }
+        }
+
+        var totalAppPayloadMb = Math.Max(Math.Max(0m, TotalAppPayloadMb), knownMb + unknownMb);
+        var hasUnknownCost = HasUnknownCost || unknownMb > 0m;
         var lastSessionCostUnknown = LastSessionCostUnknown ||
-                                     (LastSessionAppPayloadMb > 0m && LastSessionPaidNkn <= 0m);
+                                     (LastSessionAppPayloadMb > 0m && LastSessionPaidNkn <= 0m && records.LastOrDefault()?.PaymentTelemetryStatus is not TunaPaymentTelemetryStatus.Reported);
         return new TunaUsageAccountingState
         {
             TotalPaidNkn = Math.Max(0m, TotalPaidNkn),
-            TotalAppPayloadMb = Math.Max(0m, TotalAppPayloadMb),
+            TotalAppPayloadMb = totalAppPayloadMb,
+            TotalKnownAppPayloadMb = knownMb,
+            TotalUnknownAppPayloadMb = unknownMb,
             HasUnknownCost = hasUnknownCost,
             LastSessionPaidNkn = Math.Max(0m, LastSessionPaidNkn),
             LastSessionAppPayloadMb = Math.Max(0m, LastSessionAppPayloadMb),
             LastSessionCostUnknown = lastSessionCostUnknown,
             LastUpdatedUtc = LastUpdatedUtc,
+            SessionRecords = records,
         };
     }
+
+    private List<TunaUsageSessionRecord> UpdateSessionRecord(
+        string? sessionRunId,
+        Func<TunaUsageSessionRecord, TunaUsageSessionRecord> update)
+    {
+        var records = NormalizeSessionRecords(SessionRecords);
+        var resolvedRunId = ResolveSessionRunId(sessionRunId, records);
+        var index = records.FindIndex(record => string.Equals(record.SessionRunId, resolvedRunId, StringComparison.Ordinal));
+        if (index < 0)
+        {
+            records.Add(new TunaUsageSessionRecord
+            {
+                SessionRunId = resolvedRunId,
+                StartedUtc = DateTimeOffset.UtcNow,
+                Role = "listener",
+            }.Normalized());
+            index = records.Count - 1;
+        }
+
+        records[index] = update(records[index]).Normalized();
+        return RetainSessionRecords(records);
+    }
+
+    private List<TunaUsageSessionRecord> AppendSessionRecord(TunaUsageSessionRecord record)
+    {
+        var records = NormalizeSessionRecords(SessionRecords);
+        records.Add(record.Normalized());
+        return RetainSessionRecords(records);
+    }
+
+    private static string ResolveSessionRunId(string? sessionRunId, List<TunaUsageSessionRecord> records)
+    {
+        if (!string.IsNullOrWhiteSpace(sessionRunId))
+        {
+            return sessionRunId.Trim();
+        }
+
+        var active = records.LastOrDefault(static record => record.EndedUtc is null);
+        if (active is not null)
+        {
+            return active.SessionRunId;
+        }
+
+        return records.LastOrDefault()?.SessionRunId ?? Guid.NewGuid().ToString("N");
+    }
+
+    private static List<TunaUsageSessionRecord> NormalizeSessionRecords(IEnumerable<TunaUsageSessionRecord>? records)
+        => RetainSessionRecords((records ?? []).Select(static record => (record ?? new TunaUsageSessionRecord()).Normalized()).ToList());
+
+    private static List<TunaUsageSessionRecord> RetainSessionRecords(List<TunaUsageSessionRecord> records)
+        => records.Count <= MaxSessionRecords
+            ? records
+            : records.Skip(records.Count - MaxSessionRecords).ToList();
 }
 
 internal sealed class JsonTunaRuntimePreferenceStore : ITunaRuntimePreferenceStore
@@ -375,6 +732,8 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     private CancellationTokenSource? unlockCooldownCts;
     private bool currentSessionPaymentTelemetryObserved;
     private long currentSessionObservedBytesMoved;
+    private string? currentSessionRunId;
+    private int currentSessionPaymentEventCount;
     private DateTimeOffset? waitingForApprovedSessionStartedUtc;
     private DateTimeOffset? listenerStartUtc;
     private DateTimeOffset? providerReadyUtc;
@@ -549,10 +908,10 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
 
             ResetUnlockFailureState();
             UnlockForNextSession(nextWallet, password);
+            var unlockedState = await GetUnlockStateAsync(ct).ConfigureAwait(false);
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=tuna_runtime_unlocked; source={source.ToString().ToLowerInvariant()}");
-            var unlockedState = await GetUnlockStateAsync(ct).ConfigureAwait(false);
+                $"event=tuna_runtime_unlocked; source={source.ToString().ToLowerInvariant()}; status={SanitizeStatusToken(unlockedState.RuntimeStatus)}; startup_timing={SanitizeStatusToken(StartupTimingSummary)}");
             return TunaRuntimeUnlockResult.FromState(true, unlockedState, "Tuna unlocked for the next approved session.");
         }
         finally
@@ -847,12 +1206,12 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
 
         if (unlocked)
         {
-            return "Tuna wallet unlocked for the next approved session. Click to lock.";
+            return TunaStatusPresentationMapper.FromRuntimeStatus("waiting_for_approved_session").Text;
         }
 
         if (engaged)
         {
-            return $"Tuna is starting for this session ({SanitizeStatusToken(runtimeStatus)}). Click to stop Tuna and use current NKN.";
+            return TunaStatusPresentationMapper.FromRuntimeStatus(runtimeStatus).Text;
         }
 
         if (wallet.Status != TunaWalletLinkStatus.VerifiedFunded ||
@@ -934,11 +1293,14 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             }
 
             unlockedPassword = null;
+            var now = DateTimeOffset.UtcNow;
+            currentSessionRunId = Guid.NewGuid().ToString("N");
+            currentSessionPaymentEventCount = 0;
             runtimeStatus = "listener_starting";
             preferences = preferences.WithStatus(runtimeStatus);
-            UpdateStartupTiming_NoLock(runtimeStatus, DateTimeOffset.UtcNow);
+            UpdateStartupTiming_NoLock(runtimeStatus, now);
             preferenceStore.Save(preferences);
-            usage = usage.StartNewSession();
+            usage = usage.StartNewSession(currentSessionRunId, "listener", now);
             currentSessionPaymentTelemetryObserved = false;
             currentSessionObservedBytesMoved = 0;
             usageStore.Save(usage);
@@ -980,12 +1342,12 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         lock (gate)
         {
             var now = DateTimeOffset.UtcNow;
-            usage = usage.AddPayment(payment.AmountNkn, now);
+            currentSessionPaymentEventCount++;
+            usage = usage.AddPayment(currentSessionRunId, payment.AmountNkn, payment.BytesMoved, now);
             currentSessionPaymentTelemetryObserved = true;
             if (payment.BytesMoved > currentSessionObservedBytesMoved)
             {
                 currentSessionObservedBytesMoved = payment.BytesMoved;
-                usage = usage.CompleteSession(currentSessionObservedBytesMoved, paymentTelemetryObserved: true, now);
             }
 
             usageStore.Save(usage);
@@ -996,43 +1358,125 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
 
     private void RecordSummary(NknTunaSessionUsageTelemetry summary)
     {
+        TunaUsageSessionRecord? recordedSession;
         lock (gate)
         {
             var now = DateTimeOffset.UtcNow;
             var paymentObserved = currentSessionPaymentTelemetryObserved || summary.PaymentTelemetryObserved;
-            if (summary.CumulativeSpendNkn is { } cumulativeSpend &&
-                cumulativeSpend > usage.LastSessionPaidNkn)
-            {
-                usage = usage.AddPayment(cumulativeSpend - usage.LastSessionPaidNkn, now);
-                paymentObserved = true;
-            }
-
             var sessionBytesMoved = Math.Max(summary.BytesMoved, currentSessionObservedBytesMoved);
             currentSessionObservedBytesMoved = Math.Max(currentSessionObservedBytesMoved, sessionBytesMoved);
-            usage = usage.CompleteSession(sessionBytesMoved, paymentObserved, now);
+            var paymentEventCount = Math.Max(currentSessionPaymentEventCount, summary.PaymentEventCount);
+            usage = usage.CompleteSession(
+                currentSessionRunId,
+                sessionBytesMoved,
+                paymentObserved,
+                summary.CumulativeSpendNkn,
+                summary.PaymentStatus,
+                paymentEventCount,
+                summary.Reason,
+                summary.CapReason,
+                summary.FallbackReason,
+                completedFromSummary: true,
+                now);
+            recordedSession = usage.LastSessionRecord;
             usageStore.Save(usage);
-            runtimeStatus = string.Equals(summary.Reason, "context deadline exceeded", StringComparison.OrdinalIgnoreCase)
+            runtimeStatus = summary.CapReached || !string.IsNullOrWhiteSpace(summary.CapReason) || string.Equals(summary.Reason, "context deadline exceeded", StringComparison.OrdinalIgnoreCase)
                 ? "cap_reached"
                 : "fallback_current_nkn";
             preferences = preferences.WithStatus(runtimeStatus);
             UpdateStartupTiming_NoLock(runtimeStatus, now);
             preferenceStore.Save(preferences);
+            currentSessionRunId = null;
+            currentSessionPaymentEventCount = 0;
+            currentSessionPaymentTelemetryObserved = false;
+            currentSessionObservedBytesMoved = 0;
         }
 
+        LogUsageSessionRecorded(recordedSession);
         NotifyStateChanged();
+    }
+
+    private void RecordIncompleteSession(string reason)
+    {
+        TunaUsageSessionRecord? recordedSession = null;
+        lock (gate)
+        {
+            if (string.IsNullOrWhiteSpace(currentSessionRunId))
+            {
+                return;
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            usage = usage.CompleteSession(
+                currentSessionRunId,
+                currentSessionObservedBytesMoved,
+                currentSessionPaymentTelemetryObserved,
+                null,
+                TunaPaymentTelemetryStatus.AccountingIncomplete,
+                currentSessionPaymentEventCount,
+                reason,
+                string.Empty,
+                reason,
+                completedFromSummary: false,
+                now);
+            recordedSession = usage.LastSessionRecord;
+            usageStore.Save(usage);
+            currentSessionRunId = null;
+            currentSessionPaymentEventCount = 0;
+            currentSessionPaymentTelemetryObserved = false;
+            currentSessionObservedBytesMoved = 0;
+        }
+
+        LogUsageSessionRecorded(recordedSession);
+        NotifyStateChanged();
+    }
+
+    private static void LogUsageSessionRecorded(TunaUsageSessionRecord? record)
+    {
+        if (record is null)
+        {
+            return;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            "event=tuna_usage_session_recorded; " +
+            $"session_run_id_hash={HashForLog(record.SessionRunId)}; " +
+            $"payment_status={SanitizeStatusToken(record.PaymentTelemetryStatus)}; " +
+            $"bytes_moved={record.BytesMoved}; " +
+            $"app_payload_mb={record.AppPayloadMb.ToString("0.######", CultureInfo.InvariantCulture)}; " +
+            $"paid_nkn={record.PaidNkn.ToString("0.########", CultureInfo.InvariantCulture)}; " +
+            $"payment_event_count={record.PaymentEventCount}; " +
+            $"cap_reason={SanitizeStatusToken(record.CapReason)}; " +
+            $"fallback_reason={SanitizeStatusToken(record.FallbackReason)}; " +
+            $"completed_from_summary={(record.CompletedFromSummary ? 1 : 0)}");
     }
 
     private void SetRuntimeStatus(string status)
     {
+        string previousStatus;
+        string nextStatus;
+        string timingSummary;
+        bool changed;
         lock (gate)
         {
+            previousStatus = runtimeStatus;
             runtimeStatus = string.IsNullOrWhiteSpace(status) ? "unknown" : status.Trim();
+            nextStatus = runtimeStatus;
             preferences = preferences.WithStatus(runtimeStatus);
             UpdateStartupTiming_NoLock(runtimeStatus, DateTimeOffset.UtcNow);
+            timingSummary = BuildStartupTimingSummary_NoLock(DateTimeOffset.UtcNow);
             preferenceStore.Save(preferences);
+            changed = !string.Equals(previousStatus, nextStatus, StringComparison.Ordinal);
         }
 
         NotifyStateChanged();
+        if (changed)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_runtime_timeline; previous_status={SanitizeStatusToken(previousStatus)}; status={SanitizeStatusToken(nextStatus)}; startup_timing={SanitizeStatusToken(timingSummary)}");
+        }
     }
 
     private void ClearSessionUnlock_NoLock()
@@ -1384,6 +1828,17 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         return written == 0 ? "unknown" : new string(buffer[..written]);
     }
 
+    private static string HashForLog(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "(none)";
+        }
+
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value.Trim()));
+        return Convert.ToHexString(bytes.AsSpan(0, 6)).ToLowerInvariant();
+    }
+
     private void NotifyStateChanged()
         => StateChanged?.Invoke(this, EventArgs.Empty);
 
@@ -1410,6 +1865,8 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         public void RecordPayment(NknTunaPaymentTelemetry payment) => owner.RecordPayment(payment);
 
         public void RecordSummary(NknTunaSessionUsageTelemetry summary) => owner.RecordSummary(summary);
+
+        public void RecordIncomplete(string reason) => owner.RecordIncompleteSession(reason);
     }
 
     private sealed class RuntimeListenerSupervisor : INknTunaListenerSidecarSupervisor

@@ -10,15 +10,14 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
 {
     private const long TraceFirstFrames = 16;
     private const long TraceEveryFrames = 128;
-    private const long TraceFirstSequenceGaps = 4;
-    private const long TraceEverySequenceGaps = 128;
     private const ulong SequenceGapWarningMissingThreshold = 16;
     private const long IdleWarmupThresholdMs = 500;
     private const int IdleWarmupDelayMs = 20;
     private const int ControlQueueWriteTimeoutMs = 1_000;
-    private const int MediaQueueWriteTimeoutMs = 250;
+    private const int MediaQueueWriteTimeoutMs = 2_000;
     private const int BulkQueueWriteTimeoutMs = 30_000;
     internal static int? BulkQueueWriteTimeoutOverrideForTests;
+    internal static int? MediaQueueWriteTimeoutOverrideForTests;
     private readonly NknAccelerationLaneKind configuredLanes;
     private readonly int queueCapacity;
     private readonly object gate = new();
@@ -49,8 +48,9 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
     private long sequenceGap;
     private long sequenceReordered;
     private long lastWriteUtcMs;
-    private readonly long[] lastReceivedSequenceByLane = new long[byte.MaxValue + 1];
+    private long lastReceivedSequence;
     private string lastUnavailableReason = string.Empty;
+    private string terminalSidecarReason = string.Empty;
 
     public NknTunaSidecarClient(NknAccelerationLaneKind configuredLanes, int queueCapacity)
     {
@@ -94,7 +94,9 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
             Volatile.Read(ref sendRejected),
             Volatile.Read(ref queueOverflow),
             Volatile.Read(ref sequenceGap),
-            Volatile.Read(ref sequenceReordered));
+            Volatile.Read(ref sequenceReordered),
+            Volatile.Read(ref terminalSidecarReason) ?? string.Empty,
+            FallbackEpoch: 0);
 
     public async Task<NknAccelerationLocalEndpoint> ConnectAsync(string endpoint, TimeSpan statusTimeout, CancellationToken ct)
     {
@@ -143,10 +145,18 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
         {
             Interlocked.Increment(ref sendRejected);
             Interlocked.Increment(ref queueOverflow);
-            if (sidecarLane != NknTunaSidecarLane.Bulk)
+            if (sidecarLane == NknTunaSidecarLane.Media)
             {
-                MarkUnavailable("queue_overflow");
+                LocalOperationalLog.Warn(
+                    "NKN.Tuna",
+                    $"event=tuna_sidecar_queue_backpressure; channel={MapSidecarLane(sidecarLane)}; payload_bytes={envelopeBytes.Length}; reason=media_queue_timeout; action=nkn_frame_fallback");
+                return false;
             }
+
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=tuna_sidecar_queue_overflow; channel={MapSidecarLane(sidecarLane)}; payload_bytes={envelopeBytes.Length}; reason=queue_overflow");
+            MarkUnavailable("queue_overflow");
 
             return false;
         }
@@ -156,7 +166,11 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
     }
 
     internal void MarkUnavailableFromSidecarEvent(string reason)
-        => MarkUnavailable(string.IsNullOrWhiteSpace(reason) ? "sidecar_event" : reason.Trim());
+    {
+        var normalized = string.IsNullOrWhiteSpace(reason) ? "sidecar_event" : reason.Trim();
+        Volatile.Write(ref terminalSidecarReason, normalized);
+        MarkUnavailable(normalized);
+    }
 
     public void Dispose()
     {
@@ -277,7 +291,7 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
         => lane switch
         {
             NknTunaSidecarLane.Bulk => BulkQueueWriteTimeoutOverrideForTests ?? BulkQueueWriteTimeoutMs,
-            NknTunaSidecarLane.Media => MediaQueueWriteTimeoutMs,
+            NknTunaSidecarLane.Media => MediaQueueWriteTimeoutOverrideForTests ?? MediaQueueWriteTimeoutMs,
             _ => ControlQueueWriteTimeoutMs,
         };
 
@@ -314,23 +328,35 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
             using var document = JsonDocument.Parse(payload);
             var root = document.RootElement;
             var address = TryGetString(root, "address");
-            var protocolVersion = TryGetInt(root, "protocolVersion") ?? NknTunaSidecarFrameProtocol.ProtocolVersion;
+            var compatibility = NknTunaSidecarCompatibility.Validate(
+                TryGetInt(root, "appProtocolVersion"),
+                TryGetInt(root, "frameProtocolVersion"),
+                TryGetString(root, "sidecarVersion"));
             var sidecarLanes = TryGetStringArray(root, "lanes");
             var lanes = NknAccelerationLaneCodec.FromNames(sidecarLanes);
             lanes &= configuredLanes;
+            LogCompatibilityCheck(compatibility);
             if (string.IsNullOrWhiteSpace(address) ||
-                protocolVersion != NknTunaSidecarFrameProtocol.ProtocolVersion ||
+                !compatibility.IsCompatible ||
                 lanes == NknAccelerationLaneKind.None)
             {
-                MarkUnavailable("invalid_status");
-                statusReady.TrySetException(new InvalidOperationException("Invalid Tuna sidecar status."));
+                var reason = string.IsNullOrWhiteSpace(address)
+                    ? "invalid_status"
+                    : !compatibility.IsCompatible
+                        ? compatibility.Reason
+                        : "unsupported_lane";
+                MarkUnavailable(reason);
+                statusReady.TrySetException(new InvalidOperationException(reason));
                 return;
             }
 
             LocalTunaAddress = address.Trim();
             SupportedLanes = lanes;
             Volatile.Write(ref available, 1);
-            statusReady.TrySetResult(new NknAccelerationLocalEndpoint(LocalTunaAddress, lanes, protocolVersion));
+            statusReady.TrySetResult(new NknAccelerationLocalEndpoint(
+                LocalTunaAddress,
+                lanes,
+                NknTunaSidecarFrameProtocol.ProtocolVersion));
             StateChanged?.Invoke(this, new AccelerationStateChangedEventArgs(true, "ready"));
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException)
@@ -349,7 +375,7 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
 
         var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var channel = NknAccelerationLaneCodec.FromSidecarLane(frame.Lane);
-        var sequenceObservation = ObserveReceivedSequence((byte)frame.Lane, frame.Sequence, out var previousSequence, out var missingCount);
+        var sequenceObservation = ObserveReceivedSequence(frame.Sequence, out var previousSequence, out var missingCount);
         var received = Interlocked.Increment(ref framesReceived);
         IncrementReceived(frame.Lane);
         if (ShouldTraceFrame(received))
@@ -367,12 +393,6 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
                 LocalOperationalLog.Warn(
                     "NKN.Tuna",
                     $"event=tuna_sidecar_sequence_gap; channel={MapSidecarLane(frame.Lane)}; previous_seq={previousSequence}; current_seq={frame.Sequence}; missing_count={missingCount}; gap_count={gaps}");
-            }
-            else if (ShouldTraceSequenceGap(gaps))
-            {
-                LocalOperationalLog.Info(
-                    "NKN.Tuna",
-                    $"event=tuna_sidecar_sequence_gap_observed; channel={MapSidecarLane(frame.Lane)}; previous_seq={previousSequence}; current_seq={frame.Sequence}; missing_count={missingCount}; gap_count={gaps}");
             }
         }
         else if (sequenceObservation == SequenceObservation.Reordered)
@@ -399,7 +419,7 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
                 binaryFrameDecodedUtcMs: nowMs));
     }
 
-    private SequenceObservation ObserveReceivedSequence(byte lane, ulong sequence, out ulong previousSequence, out ulong missingCount)
+    private SequenceObservation ObserveReceivedSequence(ulong sequence, out ulong previousSequence, out ulong missingCount)
     {
         previousSequence = 0;
         missingCount = 0;
@@ -411,13 +431,13 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
         var next = checked((long)sequence);
         while (true)
         {
-            var previousLong = Volatile.Read(ref lastReceivedSequenceByLane[lane]);
+            var previousLong = Volatile.Read(ref lastReceivedSequence);
             var previous = (ulong)previousLong;
             previousSequence = previous;
 
             if (previous == 0 || sequence == previous + 1)
             {
-                if (Interlocked.CompareExchange(ref lastReceivedSequenceByLane[lane], next, previousLong) == previousLong)
+                if (Interlocked.CompareExchange(ref lastReceivedSequence, next, previousLong) == previousLong)
                 {
                     return SequenceObservation.InOrder;
                 }
@@ -431,7 +451,7 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
             }
 
             missingCount = sequence - previous - 1;
-            if (Interlocked.CompareExchange(ref lastReceivedSequenceByLane[lane], next, previousLong) == previousLong)
+            if (Interlocked.CompareExchange(ref lastReceivedSequence, next, previousLong) == previousLong)
             {
                 return SequenceObservation.Gap;
             }
@@ -543,6 +563,36 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
             : null;
     }
 
+    private static void LogCompatibilityCheck(NknTunaSidecarCompatibilityResult compatibility)
+    {
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_sidecar_version_checked; compatible={FormatBool(compatibility.IsCompatible)}; reason={SanitizeLogToken(compatibility.Reason)}; expected_app_protocol={NknTunaSidecarCompatibility.AppProtocolVersion}; expected_frame_protocol={NknTunaSidecarFrameProtocol.ProtocolVersion}; expected_version={SanitizeLogToken(NknTunaSidecarCompatibility.ExpectedSidecarVersion)}; sidecar_version={SanitizeLogToken(compatibility.SidecarVersion)}");
+        if (!compatibility.IsCompatible)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=tuna_sidecar_version_mismatch; reason={SanitizeLogToken(compatibility.Reason)}; expected_app_protocol={NknTunaSidecarCompatibility.AppProtocolVersion}; expected_frame_protocol={NknTunaSidecarFrameProtocol.ProtocolVersion}; expected_version={SanitizeLogToken(NknTunaSidecarCompatibility.ExpectedSidecarVersion)}");
+        }
+    }
+
+    private static string FormatBool(bool value)
+        => value ? "true" : "false";
+
+    private static string SanitizeLogToken(string? value)
+    {
+        var safe = string.IsNullOrWhiteSpace(value) ? "none" : value.Trim();
+        if (safe.Length > 80)
+        {
+            safe = safe[..80];
+        }
+
+        return safe
+            .Replace(";", "_", StringComparison.Ordinal)
+            .Replace("\r", "_", StringComparison.Ordinal)
+            .Replace("\n", "_", StringComparison.Ordinal);
+    }
+
     private static string[] TryGetStringArray(JsonElement root, string propertyName)
     {
         if (!root.TryGetProperty(propertyName, out var prop) || prop.ValueKind != JsonValueKind.Array)
@@ -565,10 +615,6 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
     private static bool ShouldTraceFrame(long count)
         => count <= TraceFirstFrames ||
            TraceEveryFrames > 0 && count % TraceEveryFrames == 0;
-
-    private static bool ShouldTraceSequenceGap(long count)
-        => count <= TraceFirstSequenceGaps ||
-           TraceEverySequenceGaps > 0 && count % TraceEverySequenceGaps == 0;
 
     private static string MapSidecarLane(NknTunaSidecarLane lane)
         => lane switch

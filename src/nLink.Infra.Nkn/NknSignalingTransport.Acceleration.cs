@@ -9,12 +9,16 @@ namespace NLink.Infra.Nkn;
 
 public sealed partial class NknSignalingTransport
 {
-    private const int TunaSidecarProtocolVersion = 1;
+    private const int TunaSidecarProtocolVersion = NknTunaSidecarCompatibility.AppProtocolVersion;
     private const int AccelerationNegotiationMaxRetryAttempts = 3;
     private static readonly TimeSpan AccelerationOfferLifetime = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan AccelerationOfferAnswerTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan AccelerationNegotiationRetryBaseDelay = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan HelperPaidOfferHelpeePriorityDelay = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan TunaFallbackProofLogWindow = TimeSpan.FromSeconds(5);
+    private const long TunaFallbackProofLogEveryFrames = 100;
+    [ThreadStatic]
+    private static bool handlingTunaAcceleratedInboundMessage;
     internal static TimeSpan? AccelerationOfferAnswerTimeoutOverrideForTests;
     internal static TimeSpan? HelperPaidOfferHelpeePriorityDelayOverrideForTests;
     private readonly object accelerationGate = new();
@@ -27,6 +31,43 @@ public sealed partial class NknSignalingTransport
     private int remoteHelpeeAccelerationOfferObserved;
     private int transportAccelerationActivePublished;
     private string transportAccelerationStatusReason = "inactive";
+    private string? accelerationUserStoppedSessionId;
+    private long tunaFallbackProofNextEpoch;
+    private TunaFallbackProofState? tunaFallbackProofState;
+
+    private sealed class TunaFallbackProofState
+    {
+        public required long Epoch { get; init; }
+
+        public required string SessionId { get; init; }
+
+        public required string Reason { get; init; }
+
+        public required DateTimeOffset StartedUtc { get; init; }
+
+        public required NknAccelerationLaneKind Lanes { get; init; }
+
+        public long ScreenNknFramesSent { get; set; }
+
+        public long ScreenNknFramesReceived { get; set; }
+
+        public long FileNknFramesSent { get; set; }
+
+        public long FileNknFramesReceived { get; set; }
+
+        public long ControlNknMessagesSent { get; set; }
+
+        public bool AccelerationUsedAfterFallback { get; set; }
+
+        public Dictionary<string, TunaFallbackProofLogState> LogStates { get; } = new(StringComparer.Ordinal);
+    }
+
+    private sealed class TunaFallbackProofLogState
+    {
+        public long CountSinceLastLog { get; set; }
+
+        public DateTimeOffset LastLoggedUtc { get; set; } = DateTimeOffset.MinValue;
+    }
 
     private readonly record struct AccelerationValidationResult(
         bool IsHardReject,
@@ -64,7 +105,18 @@ public sealed partial class NknSignalingTransport
     }
 
     internal NknAccelerationLaneDiagnostics AccelerationDiagnosticsForTests
-        => accelerationLane?.GetDiagnosticsSnapshot() ?? NknAccelerationLaneDiagnostics.Empty;
+    {
+        get
+        {
+            var diagnostics = accelerationLane?.GetDiagnosticsSnapshot() ?? NknAccelerationLaneDiagnostics.Empty;
+            lock (accelerationGate)
+            {
+                return diagnostics with { FallbackEpoch = tunaFallbackProofState?.Epoch ?? diagnostics.FallbackEpoch };
+            }
+        }
+    }
+
+    internal bool IsAccelerationUserStoppedForCurrentSessionForTests => IsAccelerationUserStoppedForCurrentSession();
 
     internal void SetAccelerationAcceptedForTests(NknAccelerationLaneKind lanes, string? sessionId = null)
     {
@@ -77,6 +129,271 @@ public sealed partial class NknSignalingTransport
         }
 
         NotifyTransportAccelerationStateChanged("test_accept");
+    }
+
+    private void StartTunaFallbackProofIfNeeded(string reason, string? sessionId, NknAccelerationLaneKind lanes)
+    {
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? null : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId) || lanes == NknAccelerationLaneKind.None)
+        {
+            return;
+        }
+
+        var normalizedReason = SanitizeLogToken(reason);
+        TunaFallbackProofState? stateToLog = null;
+        lock (accelerationGate)
+        {
+            if (tunaFallbackProofState is { } existing &&
+                string.Equals(existing.SessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                !existing.AccelerationUsedAfterFallback)
+            {
+                return;
+            }
+
+            var epoch = Interlocked.Increment(ref tunaFallbackProofNextEpoch);
+            tunaFallbackProofState = new TunaFallbackProofState
+            {
+                Epoch = epoch,
+                SessionId = normalizedSessionId,
+                Reason = normalizedReason,
+                StartedUtc = DateTimeOffset.UtcNow,
+                Lanes = lanes,
+            };
+            stateToLog = tunaFallbackProofState;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_fallback_started; session_id={stateToLog.SessionId}; fallback_epoch={stateToLog.Epoch}; reason={stateToLog.Reason}; lanes={FormatAccelerationLanesForLog(stateToLog.Lanes)}");
+    }
+
+    private void CompleteTunaFallbackProof(string reason)
+    {
+        TunaFallbackProofState? state;
+        lock (accelerationGate)
+        {
+            state = tunaFallbackProofState;
+            tunaFallbackProofState = null;
+        }
+
+        if (state is null)
+        {
+            return;
+        }
+
+        var elapsedMs = Math.Max(0, (long)(DateTimeOffset.UtcNow - state.StartedUtc).TotalMilliseconds);
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_fallback_summary; session_id={state.SessionId}; fallback_epoch={state.Epoch}; reason={state.Reason}; completed_reason={SanitizeLogToken(reason)}; elapsed_ms={elapsedMs}; lanes={FormatAccelerationLanesForLog(state.Lanes)}; screen_nkn_frames_sent={state.ScreenNknFramesSent}; screen_nkn_frames_received={state.ScreenNknFramesReceived}; file_nkn_frames_sent={state.FileNknFramesSent}; file_nkn_frames_received={state.FileNknFramesReceived}; control_nkn_messages_sent={state.ControlNknMessagesSent}; acceleration_used_after_fallback={(state.AccelerationUsedAfterFallback ? 1 : 0)}");
+    }
+
+    private void MarkTunaFallbackAccelerationUsedAfterProof()
+    {
+        lock (accelerationGate)
+        {
+            if (tunaFallbackProofState is { } state)
+            {
+                state.AccelerationUsedAfterFallback = true;
+            }
+        }
+    }
+
+    private void RecordTunaFallbackNknFrameSent(MsgType messageType, NknBridgeChannel channel, int payloadBytes)
+        => RecordTunaFallbackNknFrame(
+            direction: "sent",
+            messageType,
+            channel,
+            payloadBytes,
+            currentSessionSecurityState.SessionId?.Value);
+
+    private void RecordTunaFallbackNknFrameReceived(MsgType messageType, NknBridgeChannel channel, int payloadBytes, string? sessionId)
+    {
+        if (handlingTunaAcceleratedInboundMessage)
+        {
+            return;
+        }
+
+        RecordTunaFallbackNknFrame("received", messageType, channel, payloadBytes, sessionId);
+    }
+
+    private void RecordTunaFallbackNknControlSent(MsgType messageType)
+    {
+        if (messageType is MsgType.ScreenShareFrame or MsgType.FileTransferDataFrame)
+        {
+            return;
+        }
+
+        lock (accelerationGate)
+        {
+            if (TryGetCurrentTunaFallbackProofStateUnsafe(currentSessionSecurityState.SessionId?.Value, out var state))
+            {
+                state.ControlNknMessagesSent++;
+            }
+        }
+    }
+
+    private void RecordTunaFallbackNknFrame(
+        string direction,
+        MsgType messageType,
+        NknBridgeChannel channel,
+        int payloadBytes,
+        string? sessionId)
+    {
+        if (!IsTunaFallbackProofFrame(messageType, channel))
+        {
+            return;
+        }
+
+        TunaFallbackProofState? snapshot;
+        bool shouldLog;
+        lock (accelerationGate)
+        {
+            if (!TryGetCurrentTunaFallbackProofStateUnsafe(sessionId, out var state))
+            {
+                return;
+            }
+
+            if (direction == "sent")
+            {
+                if (messageType == MsgType.ScreenShareFrame)
+                {
+                    state.ScreenNknFramesSent++;
+                }
+                else
+                {
+                    state.FileNknFramesSent++;
+                }
+            }
+            else
+            {
+                if (messageType == MsgType.ScreenShareFrame)
+                {
+                    state.ScreenNknFramesReceived++;
+                }
+                else
+                {
+                    state.FileNknFramesReceived++;
+                }
+            }
+
+            shouldLog = ShouldLogTunaFallbackProofMarkerUnsafe(state, $"{direction}:{messageType}:{channel}", DateTimeOffset.UtcNow);
+            snapshot = state;
+        }
+
+        if (!shouldLog || snapshot is null)
+        {
+            return;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_fallback_nkn_frame_{direction}; message_type={MapTunaFallbackProofMessageType(messageType)}; channel={MapBridgeChannel(channel)}; session_id={snapshot.SessionId}; fallback_epoch={snapshot.Epoch}; payload_bytes={Math.Max(0, payloadBytes)}; reason={snapshot.Reason}");
+    }
+
+    private bool TryGetCurrentTunaFallbackProofStateUnsafe(string? sessionId, out TunaFallbackProofState state)
+    {
+        state = default!;
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? currentSessionSecurityState.SessionId?.Value : sessionId.Trim();
+        if (tunaFallbackProofState is null ||
+            string.IsNullOrWhiteSpace(normalizedSessionId) ||
+            !string.Equals(tunaFallbackProofState.SessionId, normalizedSessionId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        state = tunaFallbackProofState;
+        return true;
+    }
+
+    private static bool ShouldLogTunaFallbackProofMarkerUnsafe(TunaFallbackProofState state, string key, DateTimeOffset now)
+    {
+        if (!state.LogStates.TryGetValue(key, out var logState))
+        {
+            state.LogStates[key] = new TunaFallbackProofLogState
+            {
+                LastLoggedUtc = now,
+            };
+            return true;
+        }
+
+        logState.CountSinceLastLog++;
+        if (logState.CountSinceLastLog < TunaFallbackProofLogEveryFrames &&
+            now - logState.LastLoggedUtc < TunaFallbackProofLogWindow)
+        {
+            return false;
+        }
+
+        logState.CountSinceLastLog = 0;
+        logState.LastLoggedUtc = now;
+        return true;
+    }
+
+    private static bool IsTunaFallbackProofFrame(MsgType messageType, NknBridgeChannel channel)
+        => (messageType == MsgType.ScreenShareFrame && channel == NknBridgeChannel.Media) ||
+           (messageType == MsgType.FileTransferDataFrame && channel == NknBridgeChannel.Bulk);
+
+    private static string MapTunaFallbackProofMessageType(MsgType messageType)
+        => messageType switch
+        {
+            MsgType.ScreenShareFrame => "screenshare_frame",
+            MsgType.FileTransferDataFrame => "file_transfer_data_frame",
+            _ => MapEnvelopeTypeForDiagnostics(messageType),
+        };
+
+    internal static bool ShouldStartTunaFallbackProofForResetReason(string? reason)
+    {
+        var normalized = SanitizeLogToken(reason);
+        if (normalized is "(none)" or
+            "dispose" or
+            "disposed" or
+            "reset_session_tracking" or
+            "session_security_state_not_eligible")
+        {
+            return false;
+        }
+
+        if (normalized.StartsWith("remote_", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (IsUserRequestedAccelerationStopReason(normalized))
+        {
+            return true;
+        }
+
+        return normalized is
+            "cap_reached" or
+            "byte_cap_reached" or
+            "duration_cap_reached" or
+            "sidecar_read_failed" or
+            "sidecar_write_failed" or
+            "sidecar_remote_closed" or
+            "sidecar_queue_overflow" or
+            "sidecar_status_timeout" or
+            "sidecar_invalid_status" or
+            "sidecar_status_parse_failed" or
+            "sidecar_local_ipc_eof" or
+            "sidecar_tuna_stream_eof" or
+            "sidecar_local_write_failed" or
+            "sidecar_tuna_write_failed" or
+            "sidecar_byte_cap_reached" or
+            "sidecar_duration_cap_reached" or
+            "sidecar_provider_timeout" or
+            "sidecar_listener_exited" or
+            "sidecar_dialer_exited" or
+            "sidecar_process_exited" or
+            "sidecar_unexpected_exit";
+    }
+
+    internal static bool ShouldCompleteTunaFallbackProofForResetReason(string? reason)
+    {
+        var normalized = SanitizeLogToken(reason);
+        return normalized is
+            "dispose" or
+            "disposed" or
+            "reset_session_tracking" or
+            "session_security_state_not_eligible";
     }
 
     private static INknAccelerationLane? CreateAccelerationLane(
@@ -131,23 +448,32 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        OnClientMessageReceived(
-            sender,
-            new NknIncomingMessage(
-                source,
-                e.Payload,
-                isTopic: false,
-                topic: null,
-                channel: e.Channel,
-                bridgeIngressObservedUtcMs: e.BridgeIngressObservedUtcMs,
-                bridgeMessageObservedUtcMs: e.BridgeMessageObservedUtcMs,
-                binaryFrameDecodedUtcMs: e.BinaryFrameDecodedUtcMs,
-                socketDataEventEmittedUtcMs: e.SocketDataEventEmittedUtcMs,
-                wsReceiverWriteEnteredUtcMs: e.WsReceiverWriteEnteredUtcMs,
-                wsMessageEmittedUtcMs: e.WsMessageEmittedUtcMs,
-                sdkHandleMsgEnteredUtcMs: e.SdkHandleMsgEnteredUtcMs,
-                clientMessageDispatchUtcMs: e.ClientMessageDispatchUtcMs,
-                multiClientMessageDispatchUtcMs: e.MultiClientMessageDispatchUtcMs));
+        var previousAcceleratedInbound = handlingTunaAcceleratedInboundMessage;
+        handlingTunaAcceleratedInboundMessage = true;
+        try
+        {
+            OnClientMessageReceived(
+                sender,
+                new NknIncomingMessage(
+                    source,
+                    e.Payload,
+                    isTopic: false,
+                    topic: null,
+                    channel: e.Channel,
+                    bridgeIngressObservedUtcMs: e.BridgeIngressObservedUtcMs,
+                    bridgeMessageObservedUtcMs: e.BridgeMessageObservedUtcMs,
+                    binaryFrameDecodedUtcMs: e.BinaryFrameDecodedUtcMs,
+                    socketDataEventEmittedUtcMs: e.SocketDataEventEmittedUtcMs,
+                    wsReceiverWriteEnteredUtcMs: e.WsReceiverWriteEnteredUtcMs,
+                    wsMessageEmittedUtcMs: e.WsMessageEmittedUtcMs,
+                    sdkHandleMsgEnteredUtcMs: e.SdkHandleMsgEnteredUtcMs,
+                    clientMessageDispatchUtcMs: e.ClientMessageDispatchUtcMs,
+                    multiClientMessageDispatchUtcMs: e.MultiClientMessageDispatchUtcMs));
+        }
+        finally
+        {
+            handlingTunaAcceleratedInboundMessage = previousAcceleratedInbound;
+        }
     }
 
     private string? ResolveSyntheticAccelerationSource(NknBridgeChannel channel)
@@ -162,6 +488,7 @@ public sealed partial class NknSignalingTransport
     {
         if (disposed ||
             accelerationLane is not INknTunaAccelerationSession ||
+            IsAccelerationUserStoppedForCurrentSession() ||
             !IsSessionAccelerationEligible(out _))
         {
             return;
@@ -316,6 +643,20 @@ public sealed partial class NknSignalingTransport
         if (validation.IsHardReject)
         {
             RejectAccelerationEnvelope("transport_acceleration_offer", validation.Reason ?? "invalid", messageId);
+            return;
+        }
+
+        if (validation.IsValid && IsAccelerationUserStoppedForCurrentSession())
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                "event=tuna_acceleration_offer_rejected; reason=user_stopped_tuna");
+            await SendAccelerationAnswerAsync(
+                offer,
+                accepted: false,
+                lanes: NknAccelerationLaneKind.None,
+                rejectReason: "user_stopped_tuna",
+                ct).ConfigureAwait(false);
             return;
         }
 
@@ -503,6 +844,11 @@ public sealed partial class NknSignalingTransport
 
         if (IsAccelerationNegotiatedAndHealthy())
         {
+            if (IsUserRequestedAccelerationStopReason(down.Reason))
+            {
+                MarkAccelerationUserStoppedForCurrentSession();
+            }
+
             ResetAccelerationNegotiation($"remote_{down.Reason}");
             ScheduleAccelerationLaneStop($"remote_{down.Reason}");
         }
@@ -724,7 +1070,7 @@ public sealed partial class NknSignalingTransport
 
         if (offer.SidecarProtocolVersion != TunaSidecarProtocolVersion)
         {
-            return AccelerationValidationResult.HardReject("unsupported_version");
+            return AccelerationValidationResult.HardReject("sidecar_app_protocol_mismatch");
         }
 
         if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= offer.ExpiresAtUnixMs)
@@ -773,7 +1119,7 @@ public sealed partial class NknSignalingTransport
 
         if (answer.SidecarProtocolVersion != TunaSidecarProtocolVersion)
         {
-            return AccelerationValidationResult.HardReject("unsupported_version");
+            return AccelerationValidationResult.HardReject("sidecar_app_protocol_mismatch");
         }
 
         if (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() >= answer.ExpiresAtUnixMs)
@@ -814,7 +1160,7 @@ public sealed partial class NknSignalingTransport
 
         if (down.SidecarProtocolVersion != TunaSidecarProtocolVersion)
         {
-            return "unsupported_version";
+            return "sidecar_app_protocol_mismatch";
         }
 
         if (!IsAccelerationNonceValid(down.Nonce))
@@ -909,9 +1255,18 @@ public sealed partial class NknSignalingTransport
             _ => NknAccelerationLaneKind.None,
         };
         if (lane == NknAccelerationLaneKind.None ||
-            accelerationLane is null ||
-            !IsAccelerationNegotiatedAndHealthy())
+            accelerationLane is null)
         {
+            return false;
+        }
+
+        if (!IsAccelerationNegotiatedAndHealthy())
+        {
+            if (TryCaptureAccelerationNegotiation(out var unavailableSessionId, out var unavailableLanes))
+            {
+                StartTunaFallbackProofIfNeeded("tuna_unavailable_before_send", unavailableSessionId, unavailableLanes);
+            }
+
             return false;
         }
 
@@ -928,10 +1283,16 @@ public sealed partial class NknSignalingTransport
             var sent = await accelerationLane.TrySendAsync(channel, envelopeBytes, ct).ConfigureAwait(false);
             if (sent)
             {
+                MarkTunaFallbackAccelerationUsedAfterProof();
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
                     $"event=tuna_accelerated_envelope_sent; message_type={MapEnvelopeTypeForDiagnostics(messageType)}; channel={MapBridgeChannel(channel)}; payload_bytes={envelopeBytes.Length}");
                 return true;
+            }
+
+            if (TryCaptureAccelerationNegotiation(out var rejectedSessionId, out var rejectedLanes))
+            {
+                StartTunaFallbackProofIfNeeded("tuna_send_rejected", rejectedSessionId, rejectedLanes);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -939,6 +1300,10 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event=tuna_accelerated_envelope_send_failed; message_type={MapEnvelopeTypeForDiagnostics(messageType)}; channel={MapBridgeChannel(channel)}; error={ex.GetType().Name}");
+            if (TryCaptureAccelerationNegotiation(out var failedSessionId, out var failedLanes))
+            {
+                StartTunaFallbackProofIfNeeded("tuna_send_failed", failedSessionId, failedLanes);
+            }
         }
 
         return false;
@@ -946,10 +1311,16 @@ public sealed partial class NknSignalingTransport
 
     public Task RequestAccelerationNegotiationAsync(string reason, CancellationToken ct)
     {
+        if (IsRuntimeUnlockNegotiationReason(reason))
+        {
+            ClearAccelerationUserStoppedForCurrentSession();
+        }
+
         if (ct.IsCancellationRequested ||
             disposed ||
             accelerationLane is not INknTunaAccelerationSession ||
             IsAccelerationNegotiatedAndHealthy() ||
+            IsAccelerationUserStoppedForCurrentSession() ||
             !IsSessionAccelerationEligible(out _))
         {
             return Task.CompletedTask;
@@ -974,6 +1345,11 @@ public sealed partial class NknSignalingTransport
     {
         var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "user_locked" : SanitizeLogToken(reason);
         var shouldNotifyRemoteDown = TryCaptureAccelerationNegotiation(out var downSessionId, out var downLanes);
+        if (shouldNotifyRemoteDown && IsUserRequestedAccelerationStopReason(normalizedReason))
+        {
+            MarkAccelerationUserStoppedForCurrentSession(downSessionId);
+        }
+
         ResetAccelerationNegotiation(normalizedReason);
         if (accelerationLane is INknTunaAccelerationSession tunaSession)
         {
@@ -1021,11 +1397,24 @@ public sealed partial class NknSignalingTransport
 
     private void ResetAccelerationNegotiation(string reason)
     {
+        string? fallbackSessionId;
+        NknAccelerationLaneKind fallbackLanes;
         lock (accelerationGate)
         {
+            fallbackSessionId = accelerationSessionId;
+            fallbackLanes = accelerationNegotiatedLanes;
             outboundAccelerationOfferNonce = null;
             accelerationSessionId = null;
             accelerationNegotiatedLanes = NknAccelerationLaneKind.None;
+        }
+
+        if (ShouldStartTunaFallbackProofForResetReason(reason))
+        {
+            StartTunaFallbackProofIfNeeded(reason, fallbackSessionId, fallbackLanes);
+        }
+        else if (ShouldCompleteTunaFallbackProofForResetReason(reason))
+        {
+            CompleteTunaFallbackProof(reason);
         }
 
         Interlocked.Exchange(ref accelerationNegotiationScheduled, 0);
@@ -1058,9 +1447,79 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        string? sessionId;
+        NknAccelerationLaneKind lanes;
+        lock (accelerationGate)
+        {
+            sessionId = accelerationSessionId ?? currentSessionSecurityState.SessionId?.Value;
+            lanes = accelerationNegotiatedLanes;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_acceleration_timeline; status={normalizedReason}; active={activeValue}; session_id={sessionId ?? "(none)"}; lanes={FormatAccelerationLanesForLog(lanes)}");
         TransportAccelerationStateChanged?.Invoke(
             this,
             new TransportAccelerationStateChangedEventArgs(active, normalizedReason));
+    }
+
+    private bool IsAccelerationUserStoppedForCurrentSession()
+    {
+        var currentSessionId = currentSessionSecurityState.SessionId?.Value;
+        lock (accelerationGate)
+        {
+            return !string.IsNullOrWhiteSpace(currentSessionId) &&
+                   string.Equals(accelerationUserStoppedSessionId, currentSessionId, StringComparison.Ordinal);
+        }
+    }
+
+    private void MarkAccelerationUserStoppedForCurrentSession(string? sessionId = null)
+    {
+        var stoppedSessionId = string.IsNullOrWhiteSpace(sessionId)
+            ? currentSessionSecurityState.SessionId?.Value
+            : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(stoppedSessionId))
+        {
+            return;
+        }
+
+        lock (accelerationGate)
+        {
+            accelerationUserStoppedSessionId = stoppedSessionId;
+        }
+    }
+
+    private void ClearAccelerationUserStoppedForCurrentSession()
+    {
+        var currentSessionId = currentSessionSecurityState.SessionId?.Value;
+        lock (accelerationGate)
+        {
+            if (string.IsNullOrWhiteSpace(currentSessionId) ||
+                string.Equals(accelerationUserStoppedSessionId, currentSessionId, StringComparison.Ordinal))
+            {
+                accelerationUserStoppedSessionId = null;
+            }
+        }
+    }
+
+    private static bool IsRuntimeUnlockNegotiationReason(string? reason)
+        => string.Equals(SanitizeLogToken(reason), "runtime_unlock", StringComparison.Ordinal);
+
+    private static bool IsUserRequestedAccelerationStopReason(string? reason)
+    {
+        var normalized = SanitizeLogToken(reason);
+        return normalized is "header_switch_off" or
+            "runtime_disabled" or
+            "wallet_unlinked" or
+            "user_locked" or
+            "user_disabled" or
+            "user_stopped_tuna";
+    }
+
+    private static string FormatAccelerationLanesForLog(NknAccelerationLaneKind lanes)
+    {
+        var names = NknAccelerationLaneCodec.ToNames(lanes);
+        return names.Length == 0 ? "(none)" : string.Join(",", names);
     }
 
     private async Task<bool> ShouldSuppressLocalPaidOfferForHelpeePriorityAsync(

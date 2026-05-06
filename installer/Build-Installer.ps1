@@ -189,6 +189,12 @@ function Assert-InstallerStagePayload {
     }
 
     Assert-BridgeBundleRuntime -BridgeDir (Join-Path (Join-Path $StageDir "bridge") $Runtime) -ExpectedAppVersion $ExpectedAppVersion
+    $tunaDir = Join-Path (Join-Path $StageDir "tuna") $Runtime
+    if (-not (Test-Path (Join-Path $tunaDir "nlink-tuna-sidecar.exe")) -or
+        -not (Test-Path (Join-Path $tunaDir "tuna-sidecar-manifest.json"))) {
+        throw "Installer staging Tuna sidecar runtime not found or incomplete: $tunaDir"
+    }
+
     Assert-NoDebugOnlyPayload -StageDir $StageDir
 }
 

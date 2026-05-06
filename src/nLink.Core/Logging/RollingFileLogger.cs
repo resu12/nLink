@@ -5,16 +5,25 @@ namespace NLink.Core.Logging;
 
 public sealed class RollingFileLogger
 {
+    public const int DefaultRetainedFileCount = 20;
+
     private readonly object gate = new();
     private readonly string logFilePath;
     private readonly long maxFileBytes;
+    private readonly int retainedFileCount;
 
-    public RollingFileLogger(string logFilePath, long maxFileBytes = 2 * 1024 * 1024)
+    public RollingFileLogger(
+        string logFilePath,
+        long maxFileBytes = 2 * 1024 * 1024,
+        int retainedFileCount = DefaultRetainedFileCount)
     {
         this.logFilePath = string.IsNullOrWhiteSpace(logFilePath)
             ? throw new ArgumentException("Log file path is required.", nameof(logFilePath))
             : Path.GetFullPath(logFilePath);
         this.maxFileBytes = maxFileBytes > 0 ? maxFileBytes : throw new ArgumentOutOfRangeException(nameof(maxFileBytes));
+        this.retainedFileCount = retainedFileCount > 0
+            ? retainedFileCount
+            : throw new ArgumentOutOfRangeException(nameof(retainedFileCount));
     }
 
     public string LogFilePath => logFilePath;
@@ -22,6 +31,8 @@ public sealed class RollingFileLogger
     public string LogsDirectoryPath => Path.GetDirectoryName(logFilePath) ?? Environment.CurrentDirectory;
 
     public long MaxFileBytes => maxFileBytes;
+
+    public int RetainedFileCount => retainedFileCount;
 
     public void WriteLine(string line)
     {
@@ -75,20 +86,30 @@ public sealed class RollingFileLogger
             return;
         }
 
-        var log2 = GetRotatedPath(2);
-        var log1 = GetRotatedPath(1);
-
-        if (File.Exists(log2))
+        if (retainedFileCount <= 1)
         {
-            File.Delete(log2);
+            File.Delete(logFilePath);
+            return;
         }
 
-        if (File.Exists(log1))
+        var oldestRotatedIndex = retainedFileCount - 1;
+        var oldestRotatedPath = GetRotatedPath(oldestRotatedIndex);
+
+        if (File.Exists(oldestRotatedPath))
         {
-            File.Move(log1, log2);
+            File.Delete(oldestRotatedPath);
         }
 
-        File.Move(logFilePath, log1);
+        for (var index = oldestRotatedIndex - 1; index >= 1; index--)
+        {
+            var currentPath = GetRotatedPath(index);
+            if (File.Exists(currentPath))
+            {
+                File.Move(currentPath, GetRotatedPath(index + 1));
+            }
+        }
+
+        File.Move(logFilePath, GetRotatedPath(1));
     }
 
     private string GetRotatedPath(int index)

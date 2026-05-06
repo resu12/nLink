@@ -51,9 +51,11 @@ internal readonly record struct NknAccelerationLaneDiagnostics(
     long SendRejected,
     long QueueOverflow,
     long SequenceGap,
-    long SequenceReordered)
+    long SequenceReordered,
+    string TerminalSidecarReason,
+    long FallbackEpoch)
 {
-    public static NknAccelerationLaneDiagnostics Empty { get; } = new(false, string.Empty, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    public static NknAccelerationLaneDiagnostics Empty { get; } = new(false, string.Empty, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, string.Empty, 0);
 
     public long AcceptedFor(NknBridgeChannel channel)
         => channel switch
@@ -115,13 +117,21 @@ internal sealed record NknTunaSessionUsageTelemetry(
     long BytesMoved,
     string Reason,
     bool PaymentTelemetryObserved,
-    decimal? CumulativeSpendNkn);
+    decimal? CumulativeSpendNkn,
+    int PaymentEventCount = 0,
+    string PaymentStatus = "",
+    bool CapReached = false,
+    string CapReason = "",
+    string FallbackReason = "",
+    decimal? NknPerMb = null);
 
 internal interface INknTunaUsageTelemetrySink
 {
     void RecordPayment(NknTunaPaymentTelemetry payment);
 
     void RecordSummary(NknTunaSessionUsageTelemetry summary);
+
+    void RecordIncomplete(string reason);
 }
 
 internal interface INknTunaListenerSidecarSupervisor : IDisposable
