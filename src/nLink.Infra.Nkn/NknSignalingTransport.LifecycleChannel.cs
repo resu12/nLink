@@ -2090,7 +2090,7 @@ public sealed partial class NknSignalingTransport
         await SendBulkEnvelopeAsync(destination, envelope, bytes, ct).ConfigureAwait(false);
     }
 
-    private async Task SendBulkEnvelopeAsync(string destination, Envelope envelope, byte[] bytes, CancellationToken ct)
+    private async Task<bool> SendBulkEnvelopeAsync(string destination, Envelope envelope, byte[] bytes, CancellationToken ct)
     {
 
         try
@@ -2102,7 +2102,7 @@ public sealed partial class NknSignalingTransport
                     "NKN.Tuna",
                     $"event=tuna_accelerated_file_frame_sent; channel=bulk; payload_bytes={bytes.Length}");
                 Log($"Bulk envelope sent via Tuna acceleration (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
-                return;
+                return true;
             }
 
             NknRuntimeDiagnostics.IncrementMessagesSent();
@@ -2112,6 +2112,7 @@ public sealed partial class NknSignalingTransport
                 RecordTunaFallbackNknFrameSent(envelope.Type, NknBridgeChannel.Bulk, bytes.Length);
             }
             Log($"Bulk envelope sent (type={envelope.Type}, payload_len={envelope.Payload.Length}, msg_id={envelope.MessageId})");
+            return false;
         }
         catch (Exception ex)
         {

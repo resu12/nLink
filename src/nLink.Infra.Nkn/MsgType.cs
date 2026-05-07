@@ -46,4 +46,5 @@ internal enum MsgType
     TransportAccelerationOffer = 41,
     TransportAccelerationAnswer = 42,
     TransportAccelerationDown = 43,
+    TransportAccelerationPayerIntent = 44,
 }

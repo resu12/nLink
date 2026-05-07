@@ -356,7 +356,7 @@ function Build-TunaSidecarToPortable {
         $previousGoarch = $env:GOARCH
         $env:GOOS = "windows"
         $env:GOARCH = "amd64"
-        $ldflags = "-X main.sidecarVersion=$Version"
+        $ldflags = "-s -w -X main.sidecarVersion=$Version"
         & go build -ldflags $ldflags -o $destinationExe .
         if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE

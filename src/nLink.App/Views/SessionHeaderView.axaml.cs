@@ -14,8 +14,10 @@ namespace NLink.App.Views;
 public partial class SessionHeaderView : UserControl
 {
     private static readonly IBrush TunaActiveBrush = new SolidColorBrush(Color.FromRgb(125, 220, 255));
+    private static readonly IBrush TunaPayerBrush = new SolidColorBrush(Color.FromRgb(255, 211, 91));
     private static readonly IBrush TunaInactiveBrush = new SolidColorBrush(Color.FromRgb(111, 122, 136));
     private static readonly IBrush TunaActiveGlowBrush = new SolidColorBrush(Color.FromRgb(94, 209, 255));
+    private static readonly IBrush TunaPayerGlowBrush = new SolidColorBrush(Color.FromRgb(255, 194, 55));
     private static readonly IBrush TunaInactiveGlowBrush = new SolidColorBrush(Colors.Transparent);
     private static readonly IBrush TunaUnlockTrackOnBrush = new SolidColorBrush(Color.FromRgb(20, 142, 210));
     private static readonly IBrush TunaUnlockTrackOffBrush = new SolidColorBrush(Color.FromRgb(54, 64, 78));
@@ -476,13 +478,16 @@ public partial class SessionHeaderView : UserControl
             tunaUnlockToggleOn);
         var pulsing = !active && tunaUnlockToggleOn && presentation.IsConnecting;
         var highlighted = active || pulsing;
-        var nextPictogramBrush = highlighted ? TunaActiveBrush : TunaInactiveBrush;
-        var nextGlowBrush = highlighted ? TunaActiveGlowBrush : TunaInactiveGlowBrush;
+        var paying = highlighted && presentation.IsLocalPayer;
+        var nextPictogramBrush = highlighted ? (paying ? TunaPayerBrush : TunaActiveBrush) : TunaInactiveBrush;
+        var nextGlowBrush = highlighted ? (paying ? TunaPayerGlowBrush : TunaActiveGlowBrush) : TunaInactiveGlowBrush;
         var nextPictogramOpacity = highlighted ? 1d : 0.58d;
         var nextGlowOpacity = active ? 0.38d : pulsing ? 0.55d : 0d;
         var nextInnerGlowOpacity = active ? 0.2d : pulsing ? 0.28d : 0d;
         var nextGillOpacity = highlighted ? 0.92d : 0.55d;
-        var nextTip = presentation.Text;
+        var nextTip = paying
+            ? $"{presentation.Text} This computer is the Tuna listener and pays for Tuna traffic while active."
+            : presentation.Text;
 
         SetAndRaise(TunaPictogramBrushProperty, ref tunaPictogramBrush, nextPictogramBrush);
         SetAndRaise(TunaGlowBrushProperty, ref tunaGlowBrush, nextGlowBrush);

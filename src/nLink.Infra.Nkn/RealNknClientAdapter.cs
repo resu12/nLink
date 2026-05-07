@@ -25,11 +25,13 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private static readonly TimeSpan ScreenShareBridgeLogInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan BridgeTrafficLogInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ReceiveStallRecoveryCooldown = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan ReceiveStallActiveFileTransferExtendedRecoveryCooldown = TimeSpan.FromSeconds(10);
     private const int ReceiveStallRequiredConsecutiveWindows = 3;
     private const int ReceiveStallFastRequiredConsecutiveWindows = 2;
     private const int ReceiveStallControlAgeThresholdMs = 8_000;
     private const int ReceiveStallBulkAgeThresholdMs = 6_000;
     private const int ReceiveStallMaxRecoveriesPerSession = 4;
+    private const int ReceiveStallMaxActiveFileTransferRecoveriesPerSession = 16;
     private static readonly string[] RequiredBridgeChannels = ["control", "media", "bulk"];
     internal const string BridgeProtocolOutdatedBulkMissingCode = "bridge_protocol_outdated_bulk_missing";
     private static readonly RetryPolicyOptions UnexpectedExitRestartRetryOptions = new(
@@ -1268,17 +1270,39 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             return;
         }
 
+        var nowTick = Stopwatch.GetTimestamp();
+        var lastRecoveryTick = Volatile.Read(ref receiveStallLastRecoveryStartedTick);
         var recoveryCount = Volatile.Read(ref receiveStallRecoveryCount);
         if (recoveryCount >= ReceiveStallMaxRecoveriesPerSession)
         {
+            if (!fileTransferActive ||
+                recoveryCount >= ReceiveStallMaxActiveFileTransferRecoveriesPerSession)
+            {
+                Log(
+                    "event=nkn_bridge_receive_stall_recovery_failed; reason=max_restarts_reached; " +
+                    $"connect_key={connectKey}; stall_reason={stallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; recovery_count={recoveryCount}; max_restarts={ReceiveStallMaxRecoveriesPerSession}; active_file_transfer_max_restarts={ReceiveStallMaxActiveFileTransferRecoveriesPerSession}; active_file_transfer_sessions={fileTransferActiveSessionCount}");
+                return;
+            }
+
+            var elapsedSinceLastRecovery = lastRecoveryTick > 0
+                ? Stopwatch.GetElapsedTime(lastRecoveryTick, nowTick)
+                : ReceiveStallActiveFileTransferExtendedRecoveryCooldown;
+            if (elapsedSinceLastRecovery < ReceiveStallActiveFileTransferExtendedRecoveryCooldown)
+            {
+                var cooldownRemainingMs = Math.Max(
+                    0,
+                    (long)(ReceiveStallActiveFileTransferExtendedRecoveryCooldown - elapsedSinceLastRecovery).TotalMilliseconds);
+                Log(
+                    "event=nkn_bridge_receive_stall_recovery_failed; reason=active_filetransfer_extended_cooldown; " +
+                    $"connect_key={connectKey}; stall_reason={stallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; recovery_count={recoveryCount}; max_restarts={ReceiveStallMaxRecoveriesPerSession}; active_file_transfer_max_restarts={ReceiveStallMaxActiveFileTransferRecoveriesPerSession}; active_file_transfer_sessions={fileTransferActiveSessionCount}; cooldown_remaining_ms={cooldownRemainingMs}");
+                return;
+            }
+
             Log(
-                "event=nkn_bridge_receive_stall_recovery_failed; reason=max_restarts_reached; " +
-                $"connect_key={connectKey}; stall_reason={stallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; recovery_count={recoveryCount}; max_restarts={ReceiveStallMaxRecoveriesPerSession}");
-            return;
+                "event=nkn_bridge_receive_stall_recovery_budget_extended; " +
+                $"connect_key={connectKey}; stall_reason={stallReason}; consecutive_zero_receive_windows={qualifiedConsecutiveWindows}; recovery_count={recoveryCount}; base_max_restarts={ReceiveStallMaxRecoveriesPerSession}; active_file_transfer_max_restarts={ReceiveStallMaxActiveFileTransferRecoveriesPerSession}; active_file_transfer_sessions={fileTransferActiveSessionCount}");
         }
 
-        var nowTick = Stopwatch.GetTimestamp();
-        var lastRecoveryTick = Volatile.Read(ref receiveStallLastRecoveryStartedTick);
         var awaitingReceiveProof = Volatile.Read(ref receiveStallRecoveryAwaitingReceiveProof) != 0;
         var withinCooldown = lastRecoveryTick > 0 && Stopwatch.GetElapsedTime(lastRecoveryTick, nowTick) < ReceiveStallRecoveryCooldown;
         if (withinCooldown && !awaitingReceiveProof)
@@ -1340,6 +1364,17 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
 
         try
         {
+            EmitBridgeLifecycle(new BridgeLifecycleEvent(
+                BridgeLifecycleEventKind.ReceiveStallRecoveryStarted,
+                StartMode: null,
+                Pid: bridgeSupervisor.CurrentPid,
+                ReadyTimeMs: null,
+                PingRttMs: null,
+                UptimeMs: ElapsedSinceTicksMilliseconds(bridgeSupervisor.CurrentSpawnTicks),
+                ExitCode: null,
+                ExitReasonKind: null,
+                ExitReasonText: stallReason));
+
             lock (gate)
             {
                 suppressBridgeDisconnectDuringReceiveStallRecovery = true;

@@ -19,6 +19,9 @@ internal readonly record struct ScreenSharePresetDefinition(
 {
     public string Describe()
         => $"capture_fps={CaptureFramesPerSecond}, transport_fps={TransportFramesPerSecond}, max={MaxTransportWidth}x{MaxTransportHeight}, scale={CaptureScale:0.00}, quality_profile={QualityProfile}";
+
+    public string DescribeForOptions()
+        => $"Capture {CaptureFramesPerSecond} FPS, send {TransportFramesPerSecond} FPS, resolution up to {MaxTransportWidth}x{MaxTransportHeight}, scale {CaptureScale * 100d:0}%";
 }
 
 internal readonly record struct ScreenShareQualityEnvironmentState(

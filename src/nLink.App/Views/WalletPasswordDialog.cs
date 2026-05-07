@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Layout;
 
 namespace NLink.App.Views;
@@ -75,10 +76,22 @@ internal static class WalletPasswordDialog
             window.Close();
         }
 
-        okButton.Click += (_, _) =>
+        void Accept()
         {
             var text = passwordBox.Text ?? string.Empty;
             Complete(text.Length == 0 ? Array.Empty<char>() : text.ToCharArray());
+        }
+
+        okButton.Click += (_, _) => Accept();
+        passwordBox.KeyDown += (_, e) =>
+        {
+            if (e.Key != Key.Enter)
+            {
+                return;
+            }
+
+            e.Handled = true;
+            Accept();
         };
         cancelButton.Click += (_, _) => Complete(null);
         window.Closed += (_, _) =>

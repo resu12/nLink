@@ -23,9 +23,15 @@ internal sealed class NknTunaListenerSidecarOptions
 
     public int ReadyTimeoutMs { get; init; } = 75_000;
 
+    public bool RequireProviderReady { get; init; }
+
+    public int ProviderReadyAttempts { get; init; } = 1;
+
     public INknTunaUsageTelemetrySink? UsageSink { get; init; }
 
     public Action<string>? StatusChanged { get; init; }
+
+    public Func<bool>? CanTakeWalletPassword { get; init; }
 }
 
 internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecarSupervisor
@@ -41,6 +47,29 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
     public NknTunaListenerSidecarSupervisor(NknTunaListenerSidecarOptions options)
     {
         this.options = options ?? throw new ArgumentNullException(nameof(options));
+    }
+
+    public bool CanOfferListener
+    {
+        get
+        {
+            lock (gate)
+            {
+                if (processOwner?.IsRunning == true)
+                {
+                    return true;
+                }
+            }
+
+            try
+            {
+                return options.CanTakeWalletPassword?.Invoke() ?? true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
     }
 
     public async Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct)
@@ -130,6 +159,17 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         nextProcess.StartInfo.ArgumentList.Add(options.AcceptTimeoutSec.ToString(CultureInfo.InvariantCulture));
         nextProcess.StartInfo.ArgumentList.Add("--local-ipc");
         nextProcess.StartInfo.ArgumentList.Add("127.0.0.1:0");
+        if (options.RequireProviderReady)
+        {
+            nextProcess.StartInfo.ArgumentList.Add("--require-provider-ready");
+        }
+
+        if (options.ProviderReadyAttempts > 1)
+        {
+            nextProcess.StartInfo.ArgumentList.Add("--provider-ready-attempts");
+            nextProcess.StartInfo.ArgumentList.Add(options.ProviderReadyAttempts.ToString(CultureInfo.InvariantCulture));
+        }
+
         nextProcess.StartInfo.ArgumentList.Add("--jsonl");
 
         nextProcess.OutputDataReceived += (_, e) =>
@@ -247,13 +287,13 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
 
             var safeEvent = SanitizeLogToken(eventName);
             LocalOperationalLog.Info("NKN.Tuna", $"event=tuna_listener_sidecar_event; sidecar_event={safeEvent}; line_len={line.Length}");
-            var stageStatus = RuntimeStatusForSidecarEvent(eventName);
+            var stageStatus = RuntimeStatusForSidecarEvent(eventName, root);
             if (!string.IsNullOrWhiteSpace(stageStatus))
             {
                 SetStatus(stageStatus);
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
-                    $"event=tuna_listener_startup_stage; stage={stageStatus}; elapsed_ms={startupStopwatch.ElapsedMilliseconds}; sidecar_duration_ms={TryGetInt64(root, "durationMs") ?? -1}");
+                    $"event=tuna_listener_startup_stage; stage={stageStatus}; elapsed_ms={startupStopwatch.ElapsedMilliseconds}; sidecar_duration_ms={TryGetInt64(root, "durationMs") ?? -1}; attempt={TryGetInt64(root, "attempt") ?? -1}; max_attempts={TryGetInt64(root, "maxAttempts") ?? -1}; will_retry={FormatBool(TryGetBool(root, "willRetry") ?? false)}; usable_provider_count={TryGetInt64(root, "usableCount") ?? -1}; min_provider_count={TryGetInt64(root, "minProviderCnt") ?? -1}");
             }
 
             switch (eventName)
@@ -290,6 +330,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                     break;
                 case "tuna_bridge_terminal":
                     var terminalReason = TryGetString(root, "terminalReason") ?? TryGetString(root, "reason") ?? "unknown";
+                    LogBridgeTerminal(root);
                     SetStatus("terminal_" + SanitizeLogToken(terminalReason));
                     break;
                 case "error":
@@ -303,14 +344,20 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         }
     }
 
-    private static string? RuntimeStatusForSidecarEvent(string eventName)
+    private static string? RuntimeStatusForSidecarEvent(string eventName, JsonElement root)
         => eventName switch
         {
             "tuna_listen_start" => "listener_starting",
             "tuna_provider_paths_ready" => "provider_paths_ready",
-            "provider_paths_degraded" => "provider_paths_degraded",
-            "tuna_provider_paths_ready_timeout" => "provider_paths_wait_timeout",
-            "tuna_listen_started" => "provider_paths_ready",
+            "provider_paths_degraded" => (TryGetBool(root, "willRetry") ?? false)
+                ? "provider_paths_retrying"
+                : "provider_paths_degraded",
+            "tuna_provider_paths_ready_timeout" => (TryGetBool(root, "willRetry") ?? false)
+                ? "provider_paths_retrying"
+                : "provider_paths_wait_timeout",
+            "tuna_listen_started" => (TryGetBool(root, "providerReady") ?? false)
+                ? "provider_paths_ready"
+                : "provider_paths_degraded",
             "ready" => "listener_ready",
             "local_ipc_connected" => "waiting_for_peer_dial",
             "tuna_accept_connected" => "peer_connected",
@@ -507,6 +554,28 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
 
     private static string FormatBool(bool value)
         => value ? "true" : "false";
+
+    private static void LogBridgeTerminal(JsonElement root)
+    {
+        LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            "event=tuna_listener_bridge_terminal" +
+            $"; terminal_reason={SanitizeLogToken(TryGetString(root, "terminalReason") ?? TryGetString(root, "reason"))}" +
+            $"; role={SanitizeLogToken(TryGetString(root, "role"))}" +
+            $"; direction={SanitizeLogToken(TryGetString(root, "direction"))}" +
+            $"; stage={SanitizeLogToken(TryGetString(root, "stage"))}" +
+            $"; frames_forwarded={TryGetInt64(root, "framesForwarded") ?? -1}" +
+            $"; bytes_moved={TryGetInt64(root, "bytesMoved") ?? -1}" +
+            $"; payload_bytes={TryGetInt64(root, "payloadBytes") ?? -1}" +
+            $"; traffic_flowed={FormatBool(TryGetBool(root, "trafficFlowed") ?? false)}" +
+            $"; last_lane={SanitizeLogToken(TryGetString(root, "lastFrameLane"))}" +
+            $"; last_sequence={TryGetInt64(root, "lastFrameSeq") ?? -1}" +
+            $"; max_read_ms={TryGetInt64(root, "maxReadMs") ?? -1}" +
+            $"; max_write_ms={TryGetInt64(root, "maxWriteMs") ?? -1}" +
+            $"; provider_usable_count={TryGetInt64(root, "providerUsableCount") ?? -1}" +
+            $"; payment_status={SanitizeLogToken(TryGetString(root, "paymentStatus"))}" +
+            $"; payment_event_count={TryGetInt64(root, "paymentEventCount") ?? -1}");
+    }
 
     private static int? TryGetInt32(JsonElement root, string propertyName)
         => root.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var value)

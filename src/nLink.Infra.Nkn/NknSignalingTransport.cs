@@ -2296,6 +2296,14 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
     private void OnBridgeLifecycle(object? sender, BridgeLifecycleEvent e)
     {
+        if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryStarted)
+        {
+            SetFileTransferDataSessionsAvailability(
+                isAvailable: false,
+                reason: "receive_stall_recovery",
+                requiresResumeRequest: true);
+        }
+
         if (e.Kind == BridgeLifecycleEventKind.Ready)
         {
             SetFileTransferDataSessionsAvailability(

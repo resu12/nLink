@@ -730,6 +730,8 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     private int unlockFailureCount;
     private DateTimeOffset? unlockCooldownUntilUtc;
     private CancellationTokenSource? unlockCooldownCts;
+    private int stopInProgress;
+    private int unlockAttemptInProgress;
     private bool currentSessionPaymentTelemetryObserved;
     private long currentSessionObservedBytesMoved;
     private string? currentSessionRunId;
@@ -757,7 +759,10 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         this.nowProvider = nowProvider ?? (() => DateTimeOffset.UtcNow);
         preferences = this.preferenceStore.Load();
         usage = this.usageStore.Load();
-        runtimeStatus = preferences.LastRuntimeStatus;
+        runtimeStatus = string.Equals(preferences.LastRuntimeStatus, "switching_to_regular_nkn", StringComparison.Ordinal)
+            ? preferences.Enabled ? "locked" : "off"
+            : preferences.LastRuntimeStatus;
+        preferences = preferences.WithStatus(runtimeStatus);
         UpdateStartupTiming_NoLock(runtimeStatus, this.nowProvider());
     }
 
@@ -831,6 +836,22 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         TunaRuntimeUnlockSource source,
         CancellationToken ct = default)
     {
+        var acquiredUnlockAttempt = false;
+        if (password is { Length: > 0 } &&
+            Interlocked.CompareExchange(ref unlockAttemptInProgress, 1, 0) != 0)
+        {
+            try
+            {
+                var state = await GetUnlockStateAsync(ct).ConfigureAwait(false);
+                return TunaRuntimeUnlockResult.FromState(false, state, "Tuna unlock is already in progress.");
+            }
+            finally
+            {
+                Array.Clear(password);
+            }
+        }
+
+        acquiredUnlockAttempt = password is { Length: > 0 };
         try
         {
             if (password is null || password.Length == 0)
@@ -916,6 +937,11 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         }
         finally
         {
+            if (acquiredUnlockAttempt)
+            {
+                Interlocked.Exchange(ref unlockAttemptInProgress, 0);
+            }
+
             if (password is not null)
             {
                 Array.Clear(password);
@@ -931,11 +957,21 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         var normalizedReason = string.IsNullOrWhiteSpace(reason) ? "user_locked" : reason.Trim();
         ITransportAccelerationControl? control;
         var shouldStop = false;
+        var shouldQueueStop = false;
         lock (gate)
         {
             shouldStop = IsTunaRuntimeSessionEngaged(runtimeStatus);
             ClearSessionUnlock_NoLock();
-            runtimeStatus = preferences.Enabled ? "locked" : "off";
+            if (shouldStop && currentTransportControl is not null)
+            {
+                runtimeStatus = "switching_to_regular_nkn";
+                shouldQueueStop = Interlocked.CompareExchange(ref stopInProgress, 1, 0) == 0;
+            }
+            else
+            {
+                runtimeStatus = preferences.Enabled ? "locked" : "off";
+            }
+
             preferences = preferences.WithStatus(runtimeStatus);
             UpdateStartupTiming_NoLock(runtimeStatus, nowProvider());
             preferenceStore.Save(preferences);
@@ -944,26 +980,54 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
 
         NotifyStateChanged();
 
-        if (shouldStop && control is not null)
+        if (shouldQueueStop && control is not null)
         {
-            try
-            {
-                await control.StopAccelerationAsync(normalizedReason, ct).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                LocalOperationalLog.Warn(
-                    "NKN.Tuna",
-                    $"event=tuna_runtime_stop_failed; source={source.ToString().ToLowerInvariant()}; reason={SanitizeStatusToken(normalizedReason)}; error={ex.GetType().Name}");
-            }
+            _ = Task.Run(
+                async () =>
+                {
+                    try
+                    {
+                        await control.StopAccelerationAsync(normalizedReason, CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        LocalOperationalLog.Warn(
+                            "NKN.Tuna",
+                            $"event=tuna_runtime_stop_failed; source={source.ToString().ToLowerInvariant()}; reason={SanitizeStatusToken(normalizedReason)}; error={ex.GetType().Name}");
+                    }
+                    finally
+                    {
+                        lock (gate)
+                        {
+                            Interlocked.Exchange(ref stopInProgress, 0);
+                            if (string.Equals(runtimeStatus, "switching_to_regular_nkn", StringComparison.Ordinal))
+                            {
+                                runtimeStatus = preferences.Enabled ? "locked" : "off";
+                                preferences = preferences.WithStatus(runtimeStatus);
+                                UpdateStartupTiming_NoLock(runtimeStatus, nowProvider());
+                                preferenceStore.Save(preferences);
+                            }
+                        }
+
+                        NotifyStateChanged();
+                        LocalOperationalLog.Info(
+                            "NKN.Tuna",
+                            $"event=tuna_runtime_locked; source={source.ToString().ToLowerInvariant()}; stop_requested=1; reason={SanitizeStatusToken(normalizedReason)}");
+                    }
+                },
+                CancellationToken.None);
         }
 
-        LocalOperationalLog.Info(
-            "NKN.Tuna",
-            $"event=tuna_runtime_locked; source={source.ToString().ToLowerInvariant()}; stop_requested={(shouldStop ? 1 : 0)}; reason={SanitizeStatusToken(normalizedReason)}");
+        if (!shouldQueueStop)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_runtime_locked; source={source.ToString().ToLowerInvariant()}; stop_requested={(shouldStop ? 1 : 0)}; reason={SanitizeStatusToken(normalizedReason)}");
+        }
+
         var state = await GetUnlockStateAsync(ct).ConfigureAwait(false);
         return TunaRuntimeUnlockResult.FromState(true, state, shouldStop
-            ? "Tuna stopped for this session. Current NKN remains connected."
+            ? "Switching Tuna off. Current NKN remains connected."
             : "Tuna wallet locked for this session.");
     }
 
@@ -1159,24 +1223,30 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         var cooldownRemaining = GetCooldownRemaining_NoLock(now);
         var cooldownActive = cooldownRemaining > TimeSpan.Zero;
         var engaged = IsTunaRuntimeSessionEngaged(runtimeStatus);
+        var switchingToNkn = string.Equals(SanitizeStatusToken(runtimeStatus), "switching_to_regular_nkn", StringComparison.Ordinal);
         var unlocked = unlockedPassword is { Length: > 0 };
-        var toggleOn = unlocked || engaged;
+        var unlockAttemptInProgressNow = Volatile.Read(ref unlockAttemptInProgress) != 0;
+        var toggleOn = unlocked || engaged || unlockAttemptInProgressNow;
         var visible = walletFunded || toggleOn;
-        var canUnlock = walletFunded && runtimeEnabled && sidecarAvailable && !cooldownActive;
-        var canToggle = toggleOn || canUnlock;
+        var canUnlock = walletFunded && runtimeEnabled && sidecarAvailable && !cooldownActive && !switchingToNkn && !unlockAttemptInProgressNow;
+        var canToggle = !switchingToNkn && !unlockAttemptInProgressNow && (toggleOn || canUnlock);
         var statusText = cooldownActive
             ? $"Try again in {FormatCooldownRemaining(cooldownRemaining)}"
-            : unlocked
-                ? "Unlocked for next session"
-                : engaged
-                    ? "Tuna starting/active"
-                    : "Locked";
+            : switchingToNkn
+                ? "Switching to regular NKN"
+                : unlockAttemptInProgressNow
+                    ? "Unlocking..."
+                    : unlocked
+                    ? "Unlocked for next session"
+                    : engaged
+                        ? "Tuna starting/active"
+                        : "Locked";
         var message = BuildUnlockUserMessage(
             wallet,
             runtimeEnabled,
             sidecarAvailable,
             unlocked,
-            engaged,
+            engaged || switchingToNkn || unlockAttemptInProgressNow,
             runtimeStatus,
             cooldownRemaining);
         return new TunaRuntimeUnlockState(
@@ -1271,8 +1341,12 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             MaxTotalMiB = currentPreferences.MaxTotalMiB,
             MaxDurationSec = currentPreferences.MaxDurationSec,
             AcceptTimeoutSec = 120,
+            ReadyTimeoutMs = 120_000,
+            RequireProviderReady = true,
+            ProviderReadyAttempts = 2,
             UsageSink = usageSink,
             StatusChanged = SetRuntimeStatus,
+            CanTakeWalletPassword = () => HasSessionUnlock,
         };
     }
 
@@ -1586,12 +1660,15 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                normalized.StartsWith("negotiation_scheduled_", StringComparison.Ordinal) ||
                normalized.Equals("unlock_validating", StringComparison.Ordinal) ||
                normalized.Equals("listener_starting", StringComparison.Ordinal) ||
+               normalized.Equals("provider_paths_retrying", StringComparison.Ordinal) ||
                normalized.Equals("provider_paths_ready", StringComparison.Ordinal) ||
+               normalized.Equals("provider_paths_degraded", StringComparison.Ordinal) ||
                normalized.Equals("provider_paths_wait_timeout", StringComparison.Ordinal) ||
                normalized.Equals("listener_ready", StringComparison.Ordinal) ||
                normalized.Equals("waiting_for_peer_dial", StringComparison.Ordinal) ||
                normalized.Equals("peer_connected", StringComparison.Ordinal) ||
                normalized.Equals("waiting_for_answer", StringComparison.Ordinal) ||
+               normalized.Equals("renegotiating_after_user_unlock", StringComparison.Ordinal) ||
                normalized.Equals("dialer_starting", StringComparison.Ordinal) ||
                normalized.Equals("dialer_ready", StringComparison.Ordinal) ||
                normalized.Equals("negotiated", StringComparison.Ordinal) ||
@@ -1687,7 +1764,12 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 peerConnectedUtc = null;
                 completedUtc = null;
                 break;
+            case "provider_paths_retrying":
+                waitingForApprovedSessionStartedUtc ??= now;
+                listenerStartUtc ??= now;
+                break;
             case "provider_paths_ready":
+            case "provider_paths_degraded":
                 providerReadyUtc ??= now;
                 break;
             case "provider_paths_wait_timeout":
@@ -1880,6 +1962,22 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         public RuntimeListenerSupervisor(TunaRuntimePilotService owner)
         {
             this.owner = owner;
+        }
+
+        public bool CanOfferListener
+        {
+            get
+            {
+                lock (gate)
+                {
+                    if (supervisor?.CanOfferListener == true)
+                    {
+                        return true;
+                    }
+                }
+
+                return owner.HasSessionUnlock;
+            }
         }
 
         public async Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct)

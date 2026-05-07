@@ -5,6 +5,7 @@ internal enum BridgeLifecycleEventKind
     Spawned,
     Ready,
     Exited,
+    ReceiveStallRecoveryStarted,
 }
 
 internal enum BridgeStartMode

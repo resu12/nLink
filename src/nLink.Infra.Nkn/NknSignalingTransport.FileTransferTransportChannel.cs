@@ -370,9 +370,10 @@ public sealed partial class NknSignalingTransport
                 $"Bridge payload too large for 'send' (max {FileTransferMaxBridgePayloadBytes} bytes).");
         }
 
+        var sentViaAcceleration = false;
         if (useBulkLane)
         {
-            await SendBulkEnvelopeAsync(destination, envelope, transportPayload, ct).ConfigureAwait(false);
+            sentViaAcceleration = await SendBulkEnvelopeAsync(destination, envelope, transportPayload, ct).ConfigureAwait(false);
         }
         else
         {
@@ -383,7 +384,8 @@ public sealed partial class NknSignalingTransport
             "sent",
             messageType,
             normalizedTransferId,
-            source: useBulkLane ? client.BulkAddress : LocalPeerAddress);
+            source: useBulkLane ? client.BulkAddress : LocalPeerAddress,
+            effectiveTransport: sentViaAcceleration ? "tuna" : "nkn");
     }
 
     private bool DoesFileTransferDataFrameFitTransportBudget(
@@ -729,6 +731,9 @@ public sealed partial class NknSignalingTransport
                 break;
             case MsgType.TransportAccelerationDown:
                 HandleTransportAccelerationDown(source, env);
+                break;
+            case MsgType.TransportAccelerationPayerIntent:
+                HandleTransportAccelerationPayerIntent(source, env);
                 break;
             default:
                 throw new InvalidOperationException($"Control channel cannot route {env.Type}.");
@@ -3705,6 +3710,7 @@ public sealed partial class NknSignalingTransport
             MsgType.TransportAccelerationOffer => "transport_acceleration_offer",
             MsgType.TransportAccelerationAnswer => "transport_acceleration_answer",
             MsgType.TransportAccelerationDown => "transport_acceleration_down",
+            MsgType.TransportAccelerationPayerIntent => "transport_acceleration_payer_intent",
             _ => throw new ArgumentOutOfRangeException(nameof(messageType), messageType, "Unsupported secure control message type."),
         };
     }
@@ -3795,16 +3801,23 @@ public sealed partial class NknSignalingTransport
         session!.Deliver(frame, channel);
     }
 
-    private static void LogFileTransferEnvelopeEvent(string direction, MsgType messageType, string transferId, string? source)
+    private static void LogFileTransferEnvelopeEvent(
+        string direction,
+        MsgType messageType,
+        string transferId,
+        string? source,
+        string? effectiveTransport = null)
     {
         if (messageType == MsgType.FileTransferChunk)
         {
             return;
         }
 
+        effectiveTransport ??= handlingTunaAcceleratedInboundMessage ? "tuna" : "nkn";
+        var accelerated = string.Equals(effectiveTransport, "tuna", StringComparison.Ordinal) ? 1 : 0;
         LocalOperationalLog.Info(
             "SessionSecurity",
-            $"event=filetransfer_envelope_{direction}; transport=nkn; message_type={MapSecureFileTransferMessageType(messageType)}; transfer_id={transferId}; source={source ?? "(none)"}");
+            $"event=filetransfer_envelope_{direction}; transport=nkn; effective_transport={effectiveTransport}; accelerated={accelerated}; message_type={MapSecureFileTransferMessageType(messageType)}; transfer_id={transferId}; source={source ?? "(none)"}");
     }
 
     private static void LogFileTransferChunkIngress(string transferId, int chunkIndex, int payloadBytes, NknBridgeChannel channel)

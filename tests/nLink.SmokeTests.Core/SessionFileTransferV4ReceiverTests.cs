@@ -75,6 +75,64 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
     }
 
     [Fact]
+    public async Task V4SparseReceiver_TransportRebind_RepeatsMissingFrontierRequest()
+    {
+        const string transferId = "transfer_v4_sparse_receiver_rebind_missing";
+        const string sessionId = "session_v4_sparse_receiver_rebind_missing";
+        var payload = Enumerable.Range(1, 12).Select(static value => (byte)value).ToArray();
+        var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
+        using var destination = new NonDisposingMemoryStream();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.Connect(receiverTransport);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(receiverTransport);
+
+        var senderSession = await StartInboundV4ReceiverAsync(
+            senderTransport,
+            receiver,
+            transferId,
+            sessionId,
+            "v4-rebind-missing.bin",
+            payload.Length,
+            sha256,
+            (_, _) => Task.FromResult<Stream>(destination));
+
+        await senderSession.SendAsync(CreateManifest(sessionId, transferId, "v4-rebind-missing.bin", payload.Length, chunkSizeBytes: 4, sha256), CancellationToken.None);
+        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0));
+
+        await senderSession.SendAsync(
+            new FileTransferChunkBatchFrameV4
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                StartChunkIndex = 1,
+                ChunkCount = 2,
+                DataSegments =
+                [
+                    payload.Skip(4).Take(4).ToArray(),
+                    payload.Skip(8).Take(4).ToArray(),
+                ],
+            },
+            CancellationToken.None);
+        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Any(static frame =>
+            frame.ContiguousCommittedChunkIndex == 0 &&
+            frame.DurableReceivedHighestChunkIndex == 2 &&
+            frame.MissingRanges.Any(static range => range.StartChunkIndex == 0 && range.ChunkCount == 1)));
+        var stateCountBeforeRebind = receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Count();
+
+        receiverTransport.RaiseDisconnected();
+        receiverTransport.RaiseReconnected();
+
+        await WaitUntilAsync(
+            () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Skip(stateCountBeforeRebind).Any(static frame =>
+                frame.ContiguousCommittedChunkIndex == 0 &&
+                frame.DurableReceivedHighestChunkIndex == 2 &&
+                frame.MissingRanges.Any(range => range.StartChunkIndex == 0 && range.ChunkCount == 1)),
+            timeoutMs: 5000);
+    }
+
+    [Fact]
     public async Task V4SparseReceiver_TerminalReadyStateSendStall_DoesNotBlockCompleteFrame()
     {
         const string transferId = "transfer_v4_terminal_state_stall";

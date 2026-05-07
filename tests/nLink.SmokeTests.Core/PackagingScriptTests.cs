@@ -38,6 +38,7 @@ public sealed class PackagingScriptTests : CoreSmokeTestsBase
         Assert.Contains("package-size-summary.txt", installerScript, StringComparison.Ordinal);
         Assert.Contains("tuna-sidecar-manifest.json", portableScript, StringComparison.Ordinal);
         Assert.Contains("sidecarVersion=$Version", portableScript, StringComparison.Ordinal);
+        Assert.Contains("-s -w -X main.sidecarVersion=$Version", portableScript, StringComparison.Ordinal);
         Assert.Contains("Installer staging Tuna sidecar runtime not found", installerScript, StringComparison.Ordinal);
         Assert.Contains("""{app}\tuna""", File.ReadAllText(RequireRepoFile(Path.Combine("installer", "nLink.iss"))), StringComparison.Ordinal);
 

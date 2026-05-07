@@ -215,6 +215,9 @@ internal sealed partial class TransportScreenShareCoordinator : IAsyncDisposable
     private long bridgeBytesSent;
     private DateTimeOffset? lastSenderFreshnessKeyFrameRequestedUtc;
     private DateTimeOffset? remotePressureAppliedUtc;
+    private long transportRebindGeneration;
+    private long transportRebindPendingGeneration;
+    private string transportRebindReason = string.Empty;
     private bool lastLocalLaneCongestionActive;
     private bool lastLocalLaneSevereCongestionActive;
     private bool lastLocalLaneRecentDropActive;

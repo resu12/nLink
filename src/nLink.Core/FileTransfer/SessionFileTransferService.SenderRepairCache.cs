@@ -19,6 +19,10 @@ public sealed partial class SessionFileTransferService
             context.PullSentChunkCache.Clear();
             context.PullSentChunkCacheBytes = 0;
             context.PullSenderCachePressureActive = false;
+            context.PullSenderCachePressureEnterLogged = false;
+            context.PullSenderCachePressureLastWarnUtc = null;
+            context.PullSenderCachePressureLastWarnAcceptedChunks = 0;
+            context.PullSenderCachePressureSuppressedCount = 0;
         }
 
         LocalOperationalLog.Info(
@@ -144,9 +148,25 @@ public sealed partial class SessionFileTransferService
         }
 
         context.PullSenderCachePressureActive = true;
+        var now = DateTimeOffset.UtcNow;
+        var acceptedChunkDelta = Math.Abs(context.ChunksAcceptedForTransport - context.PullSenderCachePressureLastWarnAcceptedChunks);
+        var shouldWarn = context.PullSenderCachePressureLastWarnUtc is not DateTimeOffset lastWarnUtc ||
+                         now - lastWarnUtc >= TimeSpan.FromMilliseconds(SenderRepairCachePressureWarnMinIntervalMs) ||
+                         acceptedChunkDelta >= SenderRepairCachePressureWarnMinAcceptedChunkDelta;
+        context.PullSenderCachePressureEnterLogged = shouldWarn;
+        if (!shouldWarn)
+        {
+            context.PullSenderCachePressureSuppressedCount++;
+            return;
+        }
+
+        var suppressedCount = context.PullSenderCachePressureSuppressedCount;
+        context.PullSenderCachePressureSuppressedCount = 0;
+        context.PullSenderCachePressureLastWarnUtc = now;
+        context.PullSenderCachePressureLastWarnAcceptedChunks = context.ChunksAcceptedForTransport;
         LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_sender_repair_cache_pressure_entered; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={reason}; source_can_seek={(context.PullSourceCanSeek ? 1 : 0)}; cache_chunk_count={context.PullSentChunkCache.Count}; cache_bytes={context.PullSentChunkCacheBytes}; cache_hard_limit_bytes={GetSenderRepairCacheHardLimitBytes(context.PullSourceCanSeek)}; cache_target_bytes={SenderRepairCacheSeekableTargetBytes}; remote_next_expected_chunk_index={context.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}");
+            $"event=filetransfer_sender_repair_cache_pressure_entered; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={reason}; source_can_seek={(context.PullSourceCanSeek ? 1 : 0)}; cache_chunk_count={context.PullSentChunkCache.Count}; cache_bytes={context.PullSentChunkCacheBytes}; cache_hard_limit_bytes={GetSenderRepairCacheHardLimitBytes(context.PullSourceCanSeek)}; cache_target_bytes={SenderRepairCacheSeekableTargetBytes}; remote_next_expected_chunk_index={context.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; suppressed_count={suppressedCount}");
     }
 
     private void MaybeLogSenderRepairCachePressureExitLocked(OutboundTransferContext context)
@@ -157,9 +177,15 @@ public sealed partial class SessionFileTransferService
         }
 
         context.PullSenderCachePressureActive = false;
+        if (!context.PullSenderCachePressureEnterLogged)
+        {
+            return;
+        }
+
+        context.PullSenderCachePressureEnterLogged = false;
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_sender_repair_cache_pressure_exited; transfer_id={context.TransferId}; session_id={context.SessionId}; source_can_seek={(context.PullSourceCanSeek ? 1 : 0)}; cache_chunk_count={context.PullSentChunkCache.Count}; cache_bytes={context.PullSentChunkCacheBytes}; cache_target_bytes={SenderRepairCacheSeekableTargetBytes}; remote_next_expected_chunk_index={context.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}");
+            $"event=filetransfer_sender_repair_cache_pressure_exited; transfer_id={context.TransferId}; session_id={context.SessionId}; source_can_seek={(context.PullSourceCanSeek ? 1 : 0)}; cache_chunk_count={context.PullSentChunkCache.Count}; cache_bytes={context.PullSentChunkCacheBytes}; cache_target_bytes={SenderRepairCacheSeekableTargetBytes}; remote_next_expected_chunk_index={context.RemoteNextExpectedChunkIndex}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; suppressed_count={context.PullSenderCachePressureSuppressedCount}");
     }
 
     private void LogSenderRepairCacheFailureLocked(OutboundTransferContext context, int chunkIndex, string errorCode, string reason)

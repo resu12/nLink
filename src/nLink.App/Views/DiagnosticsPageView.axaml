@@ -106,14 +106,20 @@
                     <TabItem Header="Wallet">
                         <StackPanel Spacing="16"
                                     Margin="0,16,0,0">
-                            <Border Classes="appCard" Padding="20">
-                                <StackPanel Spacing="10">
+                            <Border Classes="appCard" Padding="16">
+                                <StackPanel Spacing="8">
                                     <TextBlock Classes="appSectionTitle" Text="Tuna (experimental)"/>
-                                    <TextBlock Classes="appMuted"
+                                    <TextBlock Classes="appBody"
                                                Text="Tuna can speed up screen sharing and file transfers by opening an encrypted high-performance NKN relay path after a session is approved. This computer pays only when its wallet is unlocked and selected as the listener; if Tuna is unavailable, nLink keeps using regular NKN automatically."
                                                TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Classes="appCard" Padding="20">
+                                <StackPanel Spacing="10">
+                                    <TextBlock Classes="appSectionTitle" Text="Wallet and runtime"/>
                                     <Grid ColumnDefinitions="220,*"
-                                          RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                                          RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
                                           RowSpacing="8"
                                           ColumnSpacing="12">
                                         <TextBlock Grid.Row="0" Grid.Column="0" Classes="appMuted" Text="Runtime flag"/>
@@ -160,9 +166,6 @@
 
                                         <TextBlock Grid.Row="14" Grid.Column="0" Classes="appMuted" Text="Last session reason"/>
                                         <TextBlock Grid.Row="14" Grid.Column="1" Classes="appMuted" Text="{Binding TunaLastSessionReason}" TextWrapping="Wrap"/>
-
-                                        <TextBlock Grid.Row="15" Grid.Column="0" Classes="appMuted" Text="Expected improvement"/>
-                                        <TextBlock Grid.Row="15" Grid.Column="1" Classes="appMuted" Text="{Binding TunaExpectedImprovement}" TextWrapping="Wrap"/>
                                     </Grid>
 
                                     <StackPanel Spacing="8">
@@ -171,9 +174,11 @@
                                         <WrapPanel>
                                             <CheckBox Content="File lane"
                                                       IsChecked="{Binding IsTunaFileLaneEnabled}"
+                                                      IsEnabled="{Binding IsTunaRuntimeEnabled}"
                                                       Margin="0,0,14,8"/>
                                             <CheckBox Content="Screen lane"
                                                       IsChecked="{Binding IsTunaScreenLaneEnabled}"
+                                                      IsEnabled="{Binding IsTunaRuntimeEnabled}"
                                                       Margin="0,0,14,8"/>
                                         </WrapPanel>
                                         <Grid ColumnDefinitions="*,*,*"
@@ -213,28 +218,41 @@
                                                IsVisible="{Binding ShowTunaWalletFailure}"
                                                TextWrapping="Wrap"/>
 
-                                    <WrapPanel>
-                                        <Button Classes="appButton secondaryButton compactButton"
+                                    <Grid ColumnDefinitions="*,*,*"
+                                          RowDefinitions="Auto,Auto"
+                                          ColumnSpacing="8"
+                                          RowSpacing="8">
+                                        <Button Grid.Column="0"
+                                                Grid.Row="0"
+                                                Classes="appButton secondaryButton compactButton"
                                                 Content="Link wallet.json"
                                                 Command="{Binding LinkTunaWalletCommand}"
-                                                Margin="0,0,8,8"/>
-                                        <Button Classes="appButton secondaryButton compactButton"
+                                                HorizontalAlignment="Stretch"/>
+                                        <Button Grid.Column="1"
+                                                Grid.Row="0"
+                                                Classes="appButton secondaryButton compactButton"
                                                 Content="Validate balance"
                                                 Command="{Binding ValidateTunaWalletCommand}"
-                                                Margin="0,0,8,8"/>
-                                        <Button Classes="appButton secondaryButton compactButton"
+                                                HorizontalAlignment="Stretch"/>
+                                        <Button Grid.Column="2"
+                                                Grid.Row="0"
+                                                Classes="appButton secondaryButton compactButton"
                                                 Content="Unlock for this session"
                                                 Command="{Binding UnlockTunaRuntimeCommand}"
-                                                Margin="0,0,8,8"/>
-                                        <Button Classes="appButton secondaryButton compactButton"
+                                                HorizontalAlignment="Stretch"/>
+                                        <Button Grid.Column="0"
+                                                Grid.Row="1"
+                                                Classes="appButton secondaryButton compactButton"
                                                 Content="Copy address"
                                                 Command="{Binding CopyTunaWalletAddressCommand}"
-                                                Margin="0,0,8,8"/>
-                                        <Button Classes="appButton secondaryButton compactButton"
+                                                HorizontalAlignment="Stretch"/>
+                                        <Button Grid.Column="1"
+                                                Grid.Row="1"
+                                                Classes="appButton secondaryButton compactButton"
                                                 Content="Unlink"
                                                 Command="{Binding UnlinkTunaWalletCommand}"
-                                                Margin="0,0,8,8"/>
-                                    </WrapPanel>
+                                                HorizontalAlignment="Stretch"/>
+                                    </Grid>
                                 </StackPanel>
                             </Border>
                         </StackPanel>

@@ -123,6 +123,28 @@ internal sealed partial class TransportScreenShareCoordinator
                 return;
             }
 
+            if (e.IsKeyFrame)
+            {
+                long rebindGenerationToLog = 0;
+                string rebindReasonToLog = string.Empty;
+                lock (gate)
+                {
+                    if (transportRebindPendingGeneration > 0)
+                    {
+                        rebindGenerationToLog = transportRebindPendingGeneration;
+                        rebindReasonToLog = transportRebindReason;
+                        transportRebindPendingGeneration = 0;
+                    }
+                }
+
+                if (rebindGenerationToLog > 0)
+                {
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_transport_rebind_keyframe_sent; direction=outbound; session_id={currentSessionId}; stream_epoch={e.StreamEpoch}; reason={(string.IsNullOrWhiteSpace(rebindReasonToLog) ? "transport_rebind" : rebindReasonToLog)}; rebind_generation={rebindGenerationToLog}");
+                }
+            }
+
             await currentPipeline.EnqueueFrameAsync(
                 currentSessionId,
                 e.Width,

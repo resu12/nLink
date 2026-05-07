@@ -1076,10 +1076,12 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             statusPresenter.Dispose();
         }
         sessionRuntime.SetReliabilityAttempt(null);
+        var windowCloseAlreadyRequested =
+            Interlocked.CompareExchange(ref windowCloseDisconnectStarted, 0, 0) != 0;
         var skipDisconnectForListenerRecovery =
             helperListenerReturnToWaitingRequested &&
-            Interlocked.CompareExchange(ref windowCloseDisconnectStarted, 0, 0) == 0;
-        if (!skipDisconnectForListenerRecovery)
+            !windowCloseAlreadyRequested;
+        if (!skipDisconnectForListenerRecovery && !windowCloseAlreadyRequested)
         {
             RunBoundedSynchronousCleanup(() => sessionRuntime.DisconnectAsync(), DisposeOperationTimeout);
         }

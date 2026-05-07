@@ -476,6 +476,9 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
     private long helperRemoteLastFirstVisibleApplyToPressureSendMs = -1;
     private DateTimeOffset helperRemoteLastRecoveryKeyframeRequestUtc;
     private long helperRemoteLastRecoveryKeyframeRequestEpoch;
+    private long helperRemoteTransportRebindGeneration;
+    private long helperRemoteTransportRebindRecoveredGeneration;
+    private string helperRemoteTransportRebindSessionId = string.Empty;
     private ScreenSharePressureMode lastSentScreenSharePressureMode = ScreenSharePressureMode.Normal;
     private string lastSentScreenSharePressureReason = ScreenSharePressureProtocol.PressureReasonHealthy;
     private long lastSentScreenSharePressureAgeMs;

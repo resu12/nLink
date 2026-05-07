@@ -234,4 +234,31 @@ func TestPaidListenStillRequiresExplicitCaps(t *testing.T) {
 	if cfg.maxDurationSec != 900 {
 		t.Fatalf("listen maxDurationSec = %d, want 900", cfg.maxDurationSec)
 	}
+	if cfg.providerReadyAttempts != 1 {
+		t.Fatalf("listen providerReadyAttempts = %d, want 1", cfg.providerReadyAttempts)
+	}
+}
+
+func TestPaidListenProviderReadyAttempts(t *testing.T) {
+	cfg, err := parseArgs([]string{
+		modeListen,
+		"--wallet", "wallet.json",
+		"--password-stdin",
+		"--allow-remote", "remote-address",
+		"--max-price-nkn-per-mb", "0.0002",
+		"--max-total-mib", "512",
+		"--max-duration-sec", "900",
+		"--require-provider-ready",
+		"--provider-ready-attempts", "2",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs(listen with provider attempts) error = %v", err)
+	}
+
+	if !cfg.requireProviderReady {
+		t.Fatal("requireProviderReady = false, want true")
+	}
+	if cfg.providerReadyAttempts != 2 {
+		t.Fatalf("providerReadyAttempts = %d, want 2", cfg.providerReadyAttempts)
+	}
 }

@@ -442,9 +442,12 @@ public void DiagnosticsPageViewModel_UsesOptionsLabels_AndHidesEmptyBugReport()
 [InlineData("waiting_for_approved_session", "Tuna is unlocked and waiting for an approved session.", false)]
 [InlineData("checking_payer_priority", "Choosing which side will pay for Tuna.", true)]
 [InlineData("listener_starting", "Starting Tuna listener. Regular NKN stays connected until ready.", true)]
+[InlineData("provider_paths_retrying", "Looking for enough Tuna relay paths. Regular NKN stays connected while Tuna retries.", true)]
 [InlineData("provider_paths_ready", "Tuna relay paths are ready. Waiting for peer connection.", true)]
+[InlineData("provider_paths_degraded", "Tuna relay paths are limited but usable. Waiting for peer connection.", true)]
 [InlineData("waiting_for_peer_dial", "Waiting for the other side to connect to Tuna.", true)]
 [InlineData("waiting_for_answer", "Negotiating Tuna acceleration.", true)]
+[InlineData("renegotiating_after_user_unlock", "Trying Tuna again for this session.", true)]
 [InlineData("dialer_starting", "Negotiating Tuna acceleration.", true)]
 [InlineData("dialer_ready", "Negotiating Tuna acceleration.", true)]
 [InlineData("negotiation_scheduled_runtime_unlock", "Negotiating Tuna acceleration.", true)]
@@ -458,6 +461,26 @@ public void TunaStatusPresentationMapper_FormatsFriendlyStatus(string runtimeSta
     Assert.Equal(expectedConnecting, presentation.IsConnecting);
 }
 
+[Theory]
+[InlineData("listener_starting", true)]
+[InlineData("provider_paths_retrying", true)]
+[InlineData("provider_paths_ready", true)]
+[InlineData("provider_paths_degraded", true)]
+[InlineData("listener_ready", true)]
+[InlineData("waiting_for_peer_dial", true)]
+[InlineData("peer_connected", true)]
+[InlineData("checking_payer_priority", false)]
+[InlineData("waiting_for_answer", false)]
+[InlineData("dialer_starting", false)]
+[InlineData("dialer_ready", false)]
+[InlineData("locked", false)]
+public void TunaStatusPresentationMapper_MarksLocalPayerForListenerSide(string runtimeStatus, bool expectedLocalPayer)
+{
+    var presentation = TunaStatusPresentationMapper.FromRuntimeStatus(runtimeStatus);
+
+    Assert.Equal(expectedLocalPayer, presentation.IsLocalPayer);
+}
+
 [Fact]
 public void TunaStatusPresentationMapper_ActiveTransportWins()
 {
@@ -469,6 +492,48 @@ public void TunaStatusPresentationMapper_ActiveTransportWins()
 
     Assert.Equal("Tuna acceleration is active.", presentation.Text);
     Assert.False(presentation.IsConnecting);
+}
+
+[Fact]
+public void TunaStatusPresentationMapper_ActiveTransportPreservesLocalPayerSignal()
+{
+    var payer = TunaStatusPresentationMapper.FromState(
+        transportActive: true,
+        transportReason: "negotiated",
+        runtimeStatus: "peer_connected",
+        sessionUnlockOn: true);
+    var dialer = TunaStatusPresentationMapper.FromState(
+        transportActive: true,
+        transportReason: "negotiated",
+        runtimeStatus: "dialer_ready",
+        sessionUnlockOn: true);
+
+    Assert.True(payer.IsLocalPayer);
+    Assert.False(dialer.IsLocalPayer);
+}
+
+[Theory]
+[InlineData("waiting_for_answer")]
+[InlineData("dialer_starting")]
+[InlineData("dialer_ready")]
+[InlineData("negotiated")]
+public void TunaStatusPresentationMapper_PreservesLocalPayerThroughGenericNegotiationReason(string transportReason)
+{
+    var payer = TunaStatusPresentationMapper.FromState(
+        transportActive: false,
+        transportReason: transportReason,
+        runtimeStatus: "waiting_for_peer_dial",
+        sessionUnlockOn: true);
+    var dialer = TunaStatusPresentationMapper.FromState(
+        transportActive: false,
+        transportReason: transportReason,
+        runtimeStatus: "waiting_for_approved_session",
+        sessionUnlockOn: true);
+
+    Assert.Equal("Negotiating Tuna acceleration.", payer.Text);
+    Assert.True(payer.IsConnecting);
+    Assert.True(payer.IsLocalPayer);
+    Assert.False(dialer.IsLocalPayer);
 }
 
 [Fact]
@@ -516,19 +581,19 @@ public void DiagnosticsPageViewModel_ScreenSharePresetCommands_UpdateDisplayedSu
             screenSharePresetPersistence: static (_, _, _, _, _) => { });
         vm.PropertyChanged += (_, args) => changed.Add(args.PropertyName);
 
-        Assert.Equal("preset=Custom; capture_fps=10; transport_fps=8; max=(custom); scale=1; quality_profile=normal; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
+        Assert.Equal("Current preset: Custom. Capture 10 FPS, send 8 FPS, resolution up to (custom), scale 100%.", vm.AdvancedScreenShareSettingsSummary);
         Assert.True(vm.ShowScreenShareResetHint);
 
         vm.ApplyHighQualityScreenSharePresetCommand.Execute(null);
 
-        Assert.Equal("preset=High quality; capture_fps=24; transport_fps=15; max=1440x810; scale=1; quality_profile=normal; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
+        Assert.Equal("Current preset: High quality. Capture 24 FPS, send 15 FPS, resolution up to 1440x810, scale 100%.", vm.AdvancedScreenShareSettingsSummary);
         Assert.False(vm.ShowScreenShareResetHint);
         Assert.Contains(nameof(DiagnosticsPageViewModel.AdvancedScreenShareSettingsSummary), changed);
         Assert.Contains(nameof(DiagnosticsPageViewModel.ShowScreenShareResetHint), changed);
 
         vm.ApplyTunaQualityScreenSharePresetCommand.Execute(null);
 
-        Assert.Equal("preset=Tuna quality; capture_fps=30; transport_fps=15; max=1600x900; scale=1; quality_profile=tuna_quality; legacy_migrated=No", vm.AdvancedScreenShareSettingsSummary);
+        Assert.Equal("Current preset: Tuna quality. Capture 30 FPS, send 15 FPS, resolution up to 1600x900, scale 100%.", vm.AdvancedScreenShareSettingsSummary);
         Assert.Equal("30", Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareMaxFpsVariable));
         Assert.Equal("15", Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareTransportMaxFpsVariable));
         Assert.Equal("1", Environment.GetEnvironmentVariable(ScreenShareQualitySettings.ScreenShareScaleVariable));
@@ -562,12 +627,15 @@ public void DiagnosticsPageView_UsesOptionsTabs()
     Assert.Contains("Open logs folder", xaml, StringComparison.Ordinal);
     Assert.Contains("Screen share health", xaml, StringComparison.Ordinal);
     Assert.Contains("Tuna (experimental)", xaml, StringComparison.Ordinal);
+    Assert.Contains("Wallet and runtime", xaml, StringComparison.Ordinal);
     Assert.Contains("Tuna can speed up screen sharing and file transfers", xaml, StringComparison.Ordinal);
     Assert.Contains("if Tuna is unavailable, nLink keeps using regular NKN automatically", xaml, StringComparison.Ordinal);
     Assert.Contains("Current Tuna state", xaml, StringComparison.Ordinal);
     Assert.Contains("TunaCurrentState", xaml, StringComparison.Ordinal);
     Assert.Contains("Last session reason", xaml, StringComparison.Ordinal);
     Assert.Contains("TunaLastSessionReason", xaml, StringComparison.Ordinal);
+    Assert.Contains("IsEnabled=\"{Binding IsTunaRuntimeEnabled}\"", xaml, StringComparison.Ordinal);
+    Assert.DoesNotContain("Expected improvement", xaml, StringComparison.Ordinal);
     Assert.DoesNotContain("Runtime status", xaml, StringComparison.Ordinal);
     Assert.Contains("Link wallet.json", xaml, StringComparison.Ordinal);
     Assert.Contains("Unlock for this session", xaml, StringComparison.Ordinal);
@@ -612,6 +680,8 @@ public void SessionHeaderTunaIcon_DoesNotPulseWhileWalletLocked()
 
     Assert.True(applyStart >= 0, "Expected Tuna unlock toggle state method.");
     Assert.Contains("var pulsing = !active && tunaUnlockToggleOn && presentation.IsConnecting;", source, StringComparison.Ordinal);
+    Assert.Contains("TunaPayerBrush", source, StringComparison.Ordinal);
+    Assert.Contains("presentation.IsLocalPayer", source, StringComparison.Ordinal);
     Assert.Contains("!tunaUnlockToggleOn", source, StringComparison.Ordinal);
     Assert.DoesNotContain("ShouldPulseTunaStatus", source, StringComparison.Ordinal);
     Assert.Contains("UpdateTunaVisualState();", source[applyStart..], StringComparison.Ordinal);

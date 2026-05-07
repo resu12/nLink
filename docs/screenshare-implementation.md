@@ -152,6 +152,8 @@ Options -> Settings exposes four screen-share presets:
 
 `Tuna quality` uses more bandwidth and is recommended only when Tuna acceleration is enabled. Current NKN remains available as fallback, and the sender can still auto-reduce if delivery becomes congested.
 
+The Options UI intentionally shows only the user-facing parts of each preset: capture FPS, send/transport FPS, maximum transport resolution, and scale. The lower-level profile name and setting keys are kept here and in diagnostics exports for support.
+
 The presets write the same process/user settings used by the runtime:
 
 - `NLINK_FEATURE_SCREENCAP_MAX_FPS`

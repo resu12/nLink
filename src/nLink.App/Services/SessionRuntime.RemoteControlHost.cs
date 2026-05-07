@@ -59,6 +59,15 @@ public sealed partial class SessionRuntime
     private static readonly TimeSpan HelperRemoteScreenShareRecoveryReceiptRetryDelay = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan HelperRemoteScreenShareCadenceStallTriggerWindow = TimeSpan.FromMilliseconds(800);
     private static readonly TimeSpan HelperRemoteScreenShareBridgeHealthQuarantineWindow = TimeSpan.FromMilliseconds(1500);
+    private static readonly TimeSpan[] ScreenShareTransportRebindKeyframeRetryDelays =
+    [
+        TimeSpan.Zero,
+        TimeSpan.FromMilliseconds(500),
+        TimeSpan.FromMilliseconds(1500),
+        TimeSpan.FromMilliseconds(3500),
+        TimeSpan.FromMilliseconds(7000),
+        TimeSpan.FromMilliseconds(12000),
+    ];
     private long helperRemoteLastReportedAppliedFrameEpoch = -1;
     private long helperRemoteLastReportedAppliedFrameId = -1;
     private HelperRemoteSessionSnapshot helperRemoteLastReportedSessionSnapshot = default;
@@ -2122,7 +2131,12 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        var wasActive = transportAccelerationActive;
         SetTransportAccelerationActive(e.IsActive, e.Reason);
+        if (wasActive && !e.IsActive && ShouldStartScreenShareTransportRebindForAccelerationReason(e.Reason))
+        {
+            BeginScreenShareTransportRebindRecovery(e.Reason);
+        }
     }
 
     private void SetTransportAccelerationActive(bool isActive, string reason)
@@ -2137,6 +2151,44 @@ public sealed partial class SessionRuntime
         transportAccelerationActive = isActive;
         transportAccelerationStatusReason = normalizedReason;
         TransportAccelerationStateChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private static bool ShouldStartScreenShareTransportRebindForAccelerationReason(string? reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            return false;
+        }
+
+        var normalized = reason.Trim();
+        return normalized.StartsWith("remote_", StringComparison.OrdinalIgnoreCase) ||
+               normalized.StartsWith("sidecar_", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("switch_off", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("user_locked", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("runtime_disabled", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("cap_reached", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("tuna_send_", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void BeginScreenShareTransportRebindRecovery(string reason)
+    {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason)
+            ? "tuna_fallback"
+            : reason.Trim();
+        if (!IsSessionScreenShareActive())
+        {
+            return;
+        }
+
+        if (transportScreenShareCoordinator.IsActive)
+        {
+            _ = transportScreenShareCoordinator.BeginTransportRebindRecovery(normalizedReason);
+        }
+
+        if (screenShareControlHost.RemoteScreenShareActive)
+        {
+            BeginHelperRemoteScreenShareTransportRebindRecovery(normalizedReason);
+        }
     }
 
     private void ApplyTransportSecurityState(SessionSecurityState transportState)
@@ -2951,6 +3003,7 @@ public sealed partial class SessionRuntime
         lastScreenShareStopSuppressedLogTick = 0;
         CancelRemoteControlScreenShareStopGrace("screenshare_frame_resumed");
         screenShareControlHost.ObserveAcceptedFrame(e);
+        ObserveHelperRemoteScreenShareTransportRebindFrameApplied(e);
         try
         {
             TrackHelperRemoteScreenShareAcceptedFrameCore(e);
@@ -5337,6 +5390,82 @@ public sealed partial class SessionRuntime
         }
 
         screenShareControlHost.NotifyRemoteScreenShareStopped("transport_screen_share_stopped", sender, localStop: false);
+    }
+
+    private void BeginHelperRemoteScreenShareTransportRebindRecovery(string reason)
+    {
+        if (disposed ||
+            role != SessionRuntimeRole.Helper ||
+            state != SessionRuntimeState.Connected ||
+            !screenShareControlHost.RemoteScreenShareActive)
+        {
+            return;
+        }
+
+        var streamEpoch = Math.Max(
+            1,
+            Math.Max(
+                Interlocked.Read(ref helperRemoteScreenShareLastAcceptedEpoch),
+                helperRemoteLastReportedSessionSnapshot.CurrentEpoch));
+        var generation = Interlocked.Increment(ref helperRemoteTransportRebindGeneration);
+        var normalizedReason = string.IsNullOrWhiteSpace(reason)
+            ? "tuna_fallback"
+            : reason.Trim();
+        var activeSessionId = currentSessionGrant?.SessionId.Value ?? sessionSecurityState.SessionId?.Value ?? sessionId;
+        helperRemoteTransportRebindSessionId = string.IsNullOrWhiteSpace(activeSessionId) ? string.Empty : activeSessionId;
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_transport_rebind_generation_started; direction=inbound; session_id={(string.IsNullOrWhiteSpace(activeSessionId) ? "(none)" : activeSessionId)}; stream_epoch={streamEpoch}; reason={normalizedReason}; rebind_generation={generation}");
+
+        RunCountedBackgroundTask(
+            async () =>
+            {
+                foreach (var delay in ScreenShareTransportRebindKeyframeRetryDelays)
+                {
+                    if (delay > TimeSpan.Zero)
+                    {
+                        await Task.Delay(delay).ConfigureAwait(false);
+                    }
+
+                    if (disposed ||
+                        state != SessionRuntimeState.Connected ||
+                        !screenShareControlHost.RemoteScreenShareActive ||
+                        Interlocked.Read(ref helperRemoteTransportRebindRecoveredGeneration) >= generation)
+                    {
+                        return;
+                    }
+
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_transport_rebind_keyframe_requested; direction=inbound; session_id={(string.IsNullOrWhiteSpace(activeSessionId) ? "(none)" : activeSessionId)}; stream_epoch={streamEpoch}; reason={normalizedReason}; rebind_generation={generation}; retry_delay_ms={(long)delay.TotalMilliseconds}");
+                    RequestHelperRemoteRecoveryKeyframe(
+                        streamEpoch,
+                        "transport_rebind_recovery_" + normalizedReason,
+                        currentEpochNeedMoreInputCount: 0);
+                }
+            },
+            countAsTransportTask: false);
+    }
+
+    private void ObserveHelperRemoteScreenShareTransportRebindFrameApplied(ScreenShareFrameCompletedEventArgs e)
+    {
+        var generation = Interlocked.Read(ref helperRemoteTransportRebindGeneration);
+        var expectedSessionId = helperRemoteTransportRebindSessionId;
+        if (generation <= 0 ||
+            string.IsNullOrWhiteSpace(expectedSessionId) ||
+            !string.Equals(expectedSessionId, e.SessionId, StringComparison.Ordinal) ||
+            Interlocked.Read(ref helperRemoteTransportRebindRecoveredGeneration) >= generation)
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref helperRemoteTransportRebindRecoveredGeneration, generation);
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_transport_rebind_frame_applied; direction=inbound; session_id={e.SessionId ?? GetSessionIdForLog()}; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; is_keyframe={(e.IsKeyFrame ? 1 : 0)}; rebind_generation={generation}");
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_transport_rebind_recovered; direction=inbound; session_id={e.SessionId ?? GetSessionIdForLog()}; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; rebind_generation={generation}");
     }
 
     private void RequestHelperRemoteRecoveryKeyframe(

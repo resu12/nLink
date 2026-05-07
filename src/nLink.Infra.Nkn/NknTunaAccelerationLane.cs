@@ -36,7 +36,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         }
     }
 
-    public bool CanOfferListener => options.CanOfferListener;
+    public bool CanOfferListener => options.CanOfferListener && (listenerSupervisor?.CanOfferListener ?? true);
 
     public NknAccelerationLaneKind ConfiguredLanes => options.Lanes;
 
@@ -264,6 +264,11 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
                     $"event=tuna_dialer_sidecar_event; sidecar_event={safeEventName}; sidecar_reason={safeReason ?? ""}; line_len={e.Data.Length}");
+                if (string.Equals(safeEventName, "tuna_bridge_terminal", StringComparison.Ordinal))
+                {
+                    LogBridgeTerminal(e.Data);
+                }
+
                 if (IsTerminalSidecarEvent(safeEventName))
                 {
                     MarkCurrentClientUnavailable($"sidecar_{safeReason ?? safeEventName}");
@@ -431,6 +436,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 
     private void OnClientStateChanged(object? sender, AccelerationStateChangedEventArgs e)
     {
+        NknTunaSidecarProcessOwner? processToStop = null;
         if (sender is NknTunaSidecarClient sidecarClient)
         {
             lock (gate)
@@ -438,10 +444,18 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
                 if (ReferenceEquals(client, sidecarClient))
                 {
                     lastDiagnostics = sidecarClient.GetDiagnosticsSnapshot();
+                    if (!e.IsAvailable)
+                    {
+                        client = null;
+                        dialerStartTask = null;
+                        processToStop = dialerProcessOwner;
+                        dialerProcessOwner = null;
+                    }
                 }
             }
         }
 
+        processToStop?.Stop(string.IsNullOrWhiteSpace(e.Reason) ? "client_unavailable" : e.Reason);
         StateChanged?.Invoke(this, e);
     }
 
@@ -521,6 +535,55 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             return null;
         }
     }
+
+    private static void LogBridgeTerminal(string line)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                "event=tuna_dialer_bridge_terminal" +
+                $"; terminal_reason={SanitizeSidecarReason(TryGetString(root, "terminalReason") ?? TryGetString(root, "reason")) ?? "unknown"}" +
+                $"; role={SanitizeSidecarReason(TryGetString(root, "role")) ?? "unknown"}" +
+                $"; direction={SanitizeSidecarReason(TryGetString(root, "direction")) ?? "unknown"}" +
+                $"; stage={SanitizeSidecarReason(TryGetString(root, "stage")) ?? "unknown"}" +
+                $"; frames_forwarded={TryGetLong(root, "framesForwarded") ?? -1}" +
+                $"; bytes_moved={TryGetLong(root, "bytesMoved") ?? -1}" +
+                $"; payload_bytes={TryGetLong(root, "payloadBytes") ?? -1}" +
+                $"; traffic_flowed={FormatBool(TryGetBool(root, "trafficFlowed") ?? false)}" +
+                $"; last_lane={SanitizeSidecarReason(TryGetString(root, "lastFrameLane")) ?? "unknown"}" +
+                $"; last_sequence={TryGetLong(root, "lastFrameSeq") ?? -1}" +
+                $"; max_read_ms={TryGetLong(root, "maxReadMs") ?? -1}" +
+                $"; max_write_ms={TryGetLong(root, "maxWriteMs") ?? -1}" +
+                $"; provider_usable_count={TryGetLong(root, "providerUsableCount") ?? -1}" +
+                $"; payment_status={SanitizeSidecarReason(TryGetString(root, "paymentStatus")) ?? "unknown"}" +
+                $"; payment_event_count={TryGetLong(root, "paymentEventCount") ?? -1}");
+        }
+        catch (JsonException)
+        {
+            // Best-effort diagnostics only.
+        }
+    }
+
+    private static long? TryGetLong(JsonElement root, string propertyName)
+        => root.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt64(out var value)
+            ? value
+            : null;
+
+    private static string? TryGetString(JsonElement root, string propertyName)
+        => root.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.String
+            ? prop.GetString()
+            : null;
+
+    private static bool? TryGetBool(JsonElement root, string propertyName)
+        => root.TryGetProperty(propertyName, out var prop) && prop.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? prop.GetBoolean()
+            : null;
+
+    private static string FormatBool(bool value)
+        => value ? "true" : "false";
 
     private static bool IsTerminalSidecarEvent(string eventName)
         => string.Equals(eventName, "tuna_bridge_terminal", StringComparison.Ordinal) ||

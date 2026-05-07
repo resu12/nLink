@@ -145,6 +145,18 @@ public sealed partial class SessionFileTransferService
             normalizedErrorCode = context.ErrorCode;
         }
 
+        if (terminalState == FileTransferTransferState.Completed &&
+            context.PullTransportRebindGeneration > 0)
+        {
+            LogInboundTransportRebindRecovered(
+                context,
+                "terminal_completed",
+                context.PullTransportRebindGeneration,
+                context.NextChunkIndex,
+                context.PullHighestReceivedChunkIndex,
+                context.BytesTransferred);
+        }
+
         context.DisposeResources();
         RaiseTransferChanged(snapshot);
         LogTransferInfo(

@@ -223,6 +223,10 @@ Wrong passwords are handled as a recoverable unlock failure:
 - a shared cooldown applies to both Options and the header switch,
 - no password is persisted, logged, or exposed through diagnostics.
 
+Unlock attempts are serialized. If the user clicks the header switch or Options unlock button again while a password validation or listener request is already in progress, nLink keeps the existing attempt, clears the extra password buffer, and reports that Tuna unlock is already in progress.
+
+Explicit re-enable is allowed in an approved session after Tuna has fallen back to regular NKN. A fresh successful unlock publishes the friendly state "Trying Tuna again for this session", clears the local user-stopped guard for that new attempt, and sends a new session-bound offer without resetting chat, screen sharing, remote control, or active file transfers. If the peer still has a stale `user_stopped_tuna` rejection from the previous stop, the transport retries quickly while the local listener is already ready. Regular NKN continues to carry eligible frames until the new Tuna negotiation is accepted and healthy.
+
 ## Payer Selection
 
 The side that listens pays Tuna providers. The peer dials for free.
@@ -304,8 +308,7 @@ If Tuna moves data but no payment event is reported, the UI must say `no payment
 - Spent by nLink,
 - Average cost,
 - Last session cost,
-- Last session reason,
-- Expected improvement.
+- Last session reason.
 
 `Spent by nLink` means locally tracked Tuna spend from nLink sidecar telemetry on this device. It does not mean total NKN spent by the wallet on chain.
 
@@ -321,7 +324,8 @@ The session header shows a small Tuna pictogram next to the role label:
 
 - gray means inactive or unavailable,
 - pulsing means negotiation/start is in progress,
-- light blue means Tuna is active.
+- light blue means Tuna is connecting or active on the non-paying dialing side,
+- yellow means this computer is the paid Tuna listener side. The tooltip also explains that this computer pays for Tuna traffic while active.
 
 The session header switch is placed next to the pictogram because it controls the session-only wallet unlock for Tuna.
 

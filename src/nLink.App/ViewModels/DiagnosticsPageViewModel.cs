@@ -257,11 +257,11 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string ScreenShareQualityProfile => FeatureFlags.ScreenShareQualityProfile;
     public string ScreenShareEffectivePresetName => ScreenShareQualitySettings.GetCurrentEnvironmentState().EffectivePresetName;
     public string ScreenSharePresetMigrationStatus => ScreenShareQualitySettings.WasLegacyHigherClarityPresetMigrated ? "Yes" : "No";
-    public string ScreenSharePresetBalanced => ScreenShareQualitySettings.BalancedPreset.Describe();
-    public string ScreenSharePresetHighQuality => ScreenShareQualitySettings.HighQualityPreset.Describe();
-    public string ScreenSharePresetTunaQuality => ScreenShareQualitySettings.TunaQualityPreset.Describe();
-    public string ScreenSharePresetHighPerformance => ScreenShareQualitySettings.HighPerformancePreset.Describe();
-    public string ScreenShareCaptureEnvHint => "Apply preset, then restart screen sharing. Settings apply instantly and are persisted in background via env vars: NLINK_FEATURE_SCREENCAP_MAX_FPS, NLINK_FEATURE_SCREENCAP_TRANSPORT_MAX_FPS, NLINK_FEATURE_SCREENCAP_SCALE, NLINK_FEATURE_SCREENCAP_QUALITY_PROFILE.";
+    public string ScreenSharePresetBalanced => $"Good default for most sessions. {ScreenShareQualitySettings.BalancedPreset.DescribeForOptions()}.";
+    public string ScreenSharePresetHighQuality => $"Smoother motion over regular NKN. {ScreenShareQualitySettings.HighQualityPreset.DescribeForOptions()}.";
+    public string ScreenSharePresetTunaQuality => $"Highest quality; recommended with Tuna. {ScreenShareQualitySettings.TunaQualityPreset.DescribeForOptions()}.";
+    public string ScreenSharePresetHighPerformance => $"Lower bandwidth for slower connections. {ScreenShareQualitySettings.HighPerformancePreset.DescribeForOptions()}.";
+    public string ScreenShareCaptureEnvHint => "Apply a preset, then restart screen sharing if it is already running. nLink may still reduce quality automatically if the connection is congested.";
     public string ScreenShareEvidenceStatus => screenShareEvidenceSnapshot.StatusKey;
     public string ScreenShareEvidenceArtifactName => screenShareEvidenceSnapshot.ArtifactName;
     public string ScreenShareEvidenceVerdict => screenShareEvidenceSnapshot.OperatorVerdict;
@@ -473,7 +473,6 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     public string TunaAverageCost => FormatTunaAverageCost(CurrentTunaUsage());
     public string TunaLastSessionCost => FormatTunaLastSessionCost(CurrentTunaUsage());
     public string TunaLastSessionReason => FormatTunaLastSessionReason(CurrentTunaUsage());
-    public string TunaExpectedImprovement => "File transfer about 1.8x in Phase 3 benchmark; screen stability improved, latency roughly similar.";
     public string TunaSidecarVerifierStatus
     {
         get
@@ -852,6 +851,12 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
 
     private void SetTunaWalletValidating(bool value)
     {
+        if (!UiThreadDispatch.CheckAccess())
+        {
+            _ = UiThreadDispatch.RunAsync(() => SetTunaWalletValidating(value));
+            return;
+        }
+
         if (SetProperty(ref isTunaWalletValidating, value, nameof(IsTunaWalletValidating)))
         {
             RefreshTunaWalletProperties();
@@ -859,6 +864,17 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     }
 
     private void RefreshTunaWalletProperties()
+    {
+        if (!UiThreadDispatch.CheckAccess())
+        {
+            _ = UiThreadDispatch.RunAsync(RefreshTunaWalletPropertiesCore);
+            return;
+        }
+
+        RefreshTunaWalletPropertiesCore();
+    }
+
+    private void RefreshTunaWalletPropertiesCore()
     {
         OnPropertyChanged(nameof(TunaRuntimeFlagStatus));
         OnPropertyChanged(nameof(TunaFallbackState));
@@ -881,6 +897,17 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     }
 
     private void RefreshTunaRuntimeProperties()
+    {
+        if (!UiThreadDispatch.CheckAccess())
+        {
+            _ = UiThreadDispatch.RunAsync(RefreshTunaRuntimePropertiesCore);
+            return;
+        }
+
+        RefreshTunaRuntimePropertiesCore();
+    }
+
+    private void RefreshTunaRuntimePropertiesCore()
     {
         OnPropertyChanged(nameof(TunaRuntimeFlagStatus));
         OnPropertyChanged(nameof(TunaFallbackState));
@@ -1313,7 +1340,6 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"tuna_last_session_cap_reason: {CurrentTunaUsage().LastSessionRecord?.CapReason ?? string.Empty}",
             $"tuna_last_session_fallback_reason: {CurrentTunaUsage().LastSessionRecord?.FallbackReason ?? string.Empty}",
             $"tuna_last_session_completed_from_summary: {(CurrentTunaUsage().LastSessionRecord?.CompletedFromSummary == true ? "yes" : "no")}",
-            $"tuna_expected_improvement: {TunaExpectedImprovement}",
             $"tuna_wallet_address_hash: {HashForDiagnostics(tunaWalletState.WalletAddress)}",
             $"tuna_wallet_path: {DiagnosticsExportBuilder.RedactStructuredValue("tuna_wallet_path", tunaWalletState.WalletPath)}",
             $"tuna_wallet_address: {DiagnosticsExportBuilder.RedactStructuredValue("tuna_wallet_address", tunaWalletState.WalletAddress)}",
@@ -1328,10 +1354,10 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"screenshare_legacy_preset_migrated: {ScreenSharePresetMigrationStatus}",
             string.Empty,
             "screenshare_capture_presets:",
-            $"  balanced_default: {ScreenSharePresetBalanced}",
-            $"  high_quality: {ScreenSharePresetHighQuality}",
-            $"  tuna_quality: {ScreenSharePresetTunaQuality}",
-            $"  high_performance: {ScreenSharePresetHighPerformance}",
+            $"  balanced_default: {ScreenShareQualitySettings.BalancedPreset.Describe()}",
+            $"  high_quality: {ScreenShareQualitySettings.HighQualityPreset.Describe()}",
+            $"  tuna_quality: {ScreenShareQualitySettings.TunaQualityPreset.Describe()}",
+            $"  high_performance: {ScreenShareQualitySettings.HighPerformancePreset.Describe()}",
             $"  apply_hint: {ScreenShareCaptureEnvHint}",
             string.Empty,
             BuildScreenShareEvidenceText(),
@@ -1632,7 +1658,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             ? $"{resolvedPreset.MaxTransportWidth}x{resolvedPreset.MaxTransportHeight}"
             : "(custom)";
 
-        return $"preset={ScreenShareEffectivePresetName}; capture_fps={ScreenShareCaptureMaxFps}; transport_fps={ScreenShareTransportMaxFps}; max={maxTransportTarget}; scale={ScreenShareCaptureScale}; quality_profile={ScreenShareQualityProfile}; legacy_migrated={ScreenSharePresetMigrationStatus}";
+        var scalePercent = (FeatureFlags.ScreenShareScale * 100d).ToString("0", CultureInfo.InvariantCulture) + "%";
+        return $"Current preset: {ScreenShareEffectivePresetName}. Capture {ScreenShareCaptureMaxFps} FPS, send {ScreenShareTransportMaxFps} FPS, resolution up to {maxTransportTarget}, scale {scalePercent}.";
     }
 
     private static string FormatOptionalDouble(double value)

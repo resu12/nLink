@@ -58,16 +58,17 @@ const (
 	frameTypePong         byte   = 4
 	frameTypeClose        byte   = 5
 
-	bridgeTraceFirstFrames   = 16
-	bridgeTraceEveryFrames   = 128
-	bridgeSeqGapWarnMissing  = 16
-	streamHelloTimeout       = 10 * time.Second
-	providerWatchInterval    = 5 * time.Second
-	bridgeIdleGapThreshold   = 2 * time.Second
-	bridgeSlowOpThreshold    = 2 * time.Second
-	providerReadyMinPaths    = 4
-	providerDegradedMinPaths = 3
-	providerReadyTimeout     = 45 * time.Second
+	bridgeTraceFirstFrames    = 16
+	bridgeTraceEveryFrames    = 128
+	bridgeSeqGapWarnMissing   = 16
+	streamHelloTimeout        = 10 * time.Second
+	providerWatchInterval     = 5 * time.Second
+	providerReadyPollInterval = 500 * time.Millisecond
+	bridgeIdleGapThreshold    = 2 * time.Second
+	bridgeSlowOpThreshold     = 2 * time.Second
+	providerReadyMinPaths     = 4
+	providerDegradedMinPaths  = 3
+	providerReadyTimeout      = 45 * time.Second
 )
 
 var sidecarVersion = "dev"
@@ -82,17 +83,19 @@ type config struct {
 	connectTimeoutSec int
 	localIPC          string
 
-	walletPath       string
-	passwordPrompt   bool
-	passwordStdin    bool
-	allowRemote      string
-	allowRemoteRegex bool
-	unsafeAllowAny   bool
-	maxPriceNKNPerMB string
-	minBalanceNKN    string
-	maxTotalMiB      int
-	maxDurationSec   int
-	acceptTimeoutSec int
+	walletPath            string
+	passwordPrompt        bool
+	passwordStdin         bool
+	allowRemote           string
+	allowRemoteRegex      bool
+	unsafeAllowAny        bool
+	maxPriceNKNPerMB      string
+	minBalanceNKN         string
+	maxTotalMiB           int
+	maxDurationSec        int
+	acceptTimeoutSec      int
+	requireProviderReady  bool
+	providerReadyAttempts int
 
 	to                string
 	tunaDialTimeoutMs int
@@ -366,6 +369,8 @@ func parseArgs(args []string) (*config, error) {
 		fs.IntVar(&cfg.maxTotalMiB, "max-total-mib", defaultMaxTotalMiB, "local byte cap in MiB")
 		fs.IntVar(&cfg.maxDurationSec, "max-duration-sec", defaultMaxDurationSec, "local duration cap in seconds")
 		fs.IntVar(&cfg.acceptTimeoutSec, "accept-timeout-sec", 0, "optional timeout while waiting for app/Tuna connections")
+		fs.BoolVar(&cfg.requireProviderReady, "require-provider-ready", false, "fail listener startup unless full Tuna provider path readiness is reached")
+		fs.IntVar(&cfg.providerReadyAttempts, "provider-ready-attempts", 1, "provider readiness wait attempts before failing listener startup")
 	case modeDial:
 		fs.StringVar(&cfg.to, "to", "", "remote Tuna/NKN listener address")
 		fs.IntVar(&cfg.maxTotalMiB, "max-total-mib", defaultMaxTotalMiB, "optional local byte cap in MiB; 0 disables")
@@ -438,6 +443,9 @@ func validateConfig(cfg *config) error {
 		}
 		if cfg.maxDurationSec < 1 {
 			return usageError("--max-duration-sec must be positive")
+		}
+		if cfg.providerReadyAttempts < 1 || cfg.providerReadyAttempts > 5 {
+			return usageError("--provider-ready-attempts must be between 1 and 5")
 		}
 		if err := validateAllowRemote(cfg); err != nil {
 			return err
@@ -543,8 +551,16 @@ func runListen(ctx context.Context, cfg *config, emit *emitter) error {
 	if err := tunaClient.Listen(allow); err != nil {
 		return fmt.Errorf("Tuna listen failed: %w", err)
 	}
-	providerReady, providerReadyErr := waitForProviderPathReadiness(ctx, tunaClient, providerReadyMinPaths, providerReadyTimeout, emit, "listener")
-	if providerReadyErr != nil && ctx.Err() != nil {
+	providerReady, providerReadyErr := waitForProviderPathReadiness(
+		ctx,
+		tunaClient,
+		providerReadyMinPaths,
+		providerReadyTimeout,
+		emit,
+		"listener",
+		!cfg.requireProviderReady,
+		cfg.providerReadyAttempts)
+	if providerReadyErr != nil && (ctx.Err() != nil || cfg.requireProviderReady) {
 		return providerReadyErr
 	}
 	emit.emit(event{
@@ -1582,47 +1598,81 @@ func waitForProviderPathReadiness(
 	minUsablePaths int,
 	timeout time.Duration,
 	emit *emitter,
-	role string) (bool, error) {
+	role string,
+	allowDegradedReady bool,
+	attempts int) (bool, error) {
 	if minUsablePaths <= 0 {
 		return true, nil
 	}
-	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		paths := tunaProviderPathDiagnostics(tunaClient.GetPubAddrs())
-		usableCount := eventInt(paths, "usableCount")
-		if usableCount >= minUsablePaths {
-			emit.emit(event{
-				"event":          "tuna_provider_paths_ready",
-				"role":           role,
-				"usableCount":    usableCount,
-				"minProviderCnt": minUsablePaths,
-				"paths":          paths,
-			})
-			return true, nil
-		}
-		if time.Now().After(deadline) {
-			eventName := "tuna_provider_paths_ready_timeout"
-			if usableCount >= providerDegradedMinPaths {
-				eventName = "provider_paths_degraded"
+	if attempts < 1 {
+		attempts = 1
+	}
+	for attempt := 1; attempt <= attempts; attempt++ {
+		started := time.Now()
+		deadline := started.Add(timeout)
+		ticker := time.NewTicker(providerReadyPollInterval)
+		for {
+			paths := tunaProviderPathDiagnostics(tunaClient.GetPubAddrs())
+			usableCount := eventInt(paths, "usableCount")
+			if usableCount >= minUsablePaths {
+				ticker.Stop()
+				emit.emit(event{
+					"event":          "tuna_provider_paths_ready",
+					"role":           role,
+					"usableCount":    usableCount,
+					"minProviderCnt": minUsablePaths,
+					"attempt":        attempt,
+					"maxAttempts":    attempts,
+					"paths":          paths,
+				})
+				return true, nil
 			}
-			emit.emit(event{
-				"event":          eventName,
-				"role":           role,
-				"usableCount":    usableCount,
-				"minProviderCnt": minUsablePaths,
-				"timeoutMs":      timeout.Milliseconds(),
-				"paths":          paths,
-			})
-			return false, fmt.Errorf("Tuna provider path readiness timed out: usable=%d min=%d", usableCount, minUsablePaths)
-		}
-		select {
-		case <-ctx.Done():
-			return false, ctx.Err()
-		case <-ticker.C:
+			if allowDegradedReady && usableCount >= providerDegradedMinPaths {
+				ticker.Stop()
+				emit.emit(event{
+					"event":               "provider_paths_degraded",
+					"role":                role,
+					"usableCount":         usableCount,
+					"minProviderCnt":      minUsablePaths,
+					"degradedProviderCnt": providerDegradedMinPaths,
+					"elapsedMs":           time.Since(started).Milliseconds(),
+					"attempt":             attempt,
+					"maxAttempts":         attempts,
+					"paths":               paths,
+				})
+				return false, fmt.Errorf("Tuna provider path readiness degraded: usable=%d min=%d", usableCount, minUsablePaths)
+			}
+			if time.Now().After(deadline) {
+				eventName := "tuna_provider_paths_ready_timeout"
+				if usableCount >= providerDegradedMinPaths {
+					eventName = "provider_paths_degraded"
+				}
+				emit.emit(event{
+					"event":          eventName,
+					"role":           role,
+					"usableCount":    usableCount,
+					"minProviderCnt": minUsablePaths,
+					"timeoutMs":      timeout.Milliseconds(),
+					"attempt":        attempt,
+					"maxAttempts":    attempts,
+					"willRetry":      attempt < attempts,
+					"paths":          paths,
+				})
+				ticker.Stop()
+				if attempt < attempts {
+					break
+				}
+				return false, fmt.Errorf("Tuna provider path readiness timed out: usable=%d min=%d attempts=%d", usableCount, minUsablePaths, attempts)
+			}
+			select {
+			case <-ctx.Done():
+				ticker.Stop()
+				return false, ctx.Err()
+			case <-ticker.C:
+			}
 		}
 	}
+	return false, fmt.Errorf("Tuna provider path readiness failed")
 }
 
 func tunaProviderPathDiagnostics(pubAddrs *ts.PubAddrs) event {

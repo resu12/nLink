@@ -136,6 +136,8 @@ internal interface INknTunaUsageTelemetrySink
 
 internal interface INknTunaListenerSidecarSupervisor : IDisposable
 {
+    bool CanOfferListener { get; }
+
     Task<NknTunaListenerSidecarEndpoint?> EnsureStartedAsync(NknTunaListenerStartRequest request, CancellationToken ct);
 
     void Stop(string reason);
@@ -159,6 +161,12 @@ internal sealed class TransportAccelerationOfferPayload
 
     [JsonPropertyName("supportedLanes")]
     public string[] SupportedLanes { get; set; } = [];
+
+    [JsonPropertyName("trigger")]
+    public string Trigger { get; set; } = string.Empty;
+
+    [JsonPropertyName("sentAtUnixMs")]
+    public long SentAtUnixMs { get; set; }
 
     [JsonPropertyName("expiresAtUnixMs")]
     public long ExpiresAtUnixMs { get; set; }
@@ -213,6 +221,36 @@ internal sealed class TransportAccelerationDownPayload
 
     [JsonPropertyName("reason")]
     public string Reason { get; set; } = string.Empty;
+}
+
+internal sealed class TransportAccelerationPayerIntentPayload
+{
+    [JsonPropertyName("sessionId")]
+    public string SessionId { get; set; } = string.Empty;
+
+    [JsonPropertyName("senderRole")]
+    public string SenderRole { get; set; } = string.Empty;
+
+    [JsonPropertyName("intent")]
+    public string Intent { get; set; } = string.Empty;
+
+    [JsonPropertyName("supportedLanes")]
+    public string[] SupportedLanes { get; set; } = [];
+
+    [JsonPropertyName("trigger")]
+    public string Trigger { get; set; } = string.Empty;
+
+    [JsonPropertyName("sentAtUnixMs")]
+    public long SentAtUnixMs { get; set; }
+
+    [JsonPropertyName("expiresAtUnixMs")]
+    public long ExpiresAtUnixMs { get; set; }
+
+    [JsonPropertyName("nonce")]
+    public string Nonce { get; set; } = string.Empty;
+
+    [JsonPropertyName("sidecarProtocolVersion")]
+    public int SidecarProtocolVersion { get; set; }
 }
 
 internal static class NknAccelerationLaneCodec

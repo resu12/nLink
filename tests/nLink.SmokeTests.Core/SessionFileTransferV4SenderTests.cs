@@ -338,6 +338,140 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public async Task V4Sender_TransportRebind_QueuesBoundedSafetyReplayFromPeerFrontier()
+    {
+        const string transferId = "transfer_v4_sender_transport_rebind_replay";
+        var logStart = ReadOperationalLogText().Length;
+        var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 227)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_v4_sender_transport_rebind_replay");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_v4_sender_transport_rebind_replay");
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("v4-transport-rebind-replay.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+        await WaitUntilAsync(() => senderTransport.SentOffers.TryPeek(out _), timeoutMs: 5000);
+        var offer = senderTransport.SentOffers.Single();
+        await receiverTransport.SendFileTransferAcceptAsync(
+            new FileTransferAcceptV1
+            {
+                SessionId = offer.SessionId,
+                TransferId = transferId,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+            },
+            CancellationToken.None);
+        await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV4>().Any(), timeoutMs: 5000);
+
+        var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
+        await receiverSession.SendAsync(
+            new FileTransferStateFrameV4
+            {
+                SessionId = offer.SessionId,
+                TransferId = transferId,
+                Epoch = 1,
+                ContiguousCommittedChunkIndex = 0,
+                DurableReceivedHighestChunkIndex = -1,
+                CreditUntilChunkIndexExclusive = 16,
+                MissingRanges = [],
+                BytesCommitted = 0,
+            },
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV4>().Count(static batch => batch.StartChunkIndex == 0) == 1,
+            timeoutMs: 5000);
+
+        var batchCountBeforeRebind = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV4>().Count();
+        senderTransport.RaiseDisconnected();
+        senderTransport.RaiseReconnected();
+
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains(
+                "event=filetransfer_transport_rebind_safety_replay_started;",
+                StringComparison.Ordinal),
+            timeoutMs: 5000);
+        await WaitUntilAsync(
+            () => senderTransport.SentDataFrames
+                .OfType<FileTransferChunkBatchFrameV4>()
+                .Skip(batchCountBeforeRebind)
+                .Any(static batch =>
+                    batch.StartChunkIndex == 0 &&
+                    batch.BatchProfile == "v4_repair_21k" &&
+                    batch.RepairDeliveryMode == FileTransferV4RepairDeliveryMode.BulkOnly),
+            timeoutMs: 5000);
+
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_transport_rebind_generation_started; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_transport_rebind_safety_replay_started;", log, StringComparison.Ordinal);
+        Assert.Contains("requested_chunk_count=16", log, StringComparison.Ordinal);
+        Assert.Contains("replay_chunk_cap=64", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task V4FileOnlyTransfer_TransportRebindSafetyReplay_FillsDroppedFrontierAndCompletes()
+    {
+        const string transferId = "transfer_v4_transport_rebind_e2e";
+        var logStart = ReadOperationalLogText().Length;
+        var payload = Enumerable.Range(0, 768_000).Select(static index => (byte)(index % 229)).ToArray();
+        var allowFrontierChunk = 0;
+        var droppedFrontierBatchCount = 0;
+        using var senderTransport = new LoopbackFileTransferTransport("session_v4_transport_rebind_e2e");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_v4_transport_rebind_e2e");
+        senderTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
+        {
+            if (frame is FileTransferChunkBatchFrameV4 { StartChunkIndex: 0 } &&
+                Volatile.Read(ref allowFrontierChunk) == 0)
+            {
+                Interlocked.Increment(ref droppedFrontierBatchCount);
+                return Task.FromResult(true);
+            }
+
+            return Task.FromResult(false);
+        };
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+        using var destination = new NonDisposingMemoryStream();
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("v4-transport-rebind-e2e.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV4>().Any(static state =>
+                state.MissingRanges.Any(static range =>
+                    range.StartChunkIndex == 0 &&
+                    range.ChunkCount > 0)),
+            timeoutMs: 10000);
+        Assert.True(Volatile.Read(ref droppedFrontierBatchCount) > 0);
+
+        Volatile.Write(ref allowFrontierChunk, 1);
+        senderTransport.RaiseDisconnected();
+        senderTransport.RaiseReconnected();
+
+        await WaitUntilAsync(
+            () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
+                  receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
+            timeoutMs: 20000);
+
+        Assert.Equal(payload, destination.ToArray()[..payload.Length]);
+        var log = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_transport_rebind_generation_started; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_transport_rebind_generation_started; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_transport_rebind_state_forced; direction=inbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_transport_rebind_safety_replay_started;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_transport_rebind_recovered; direction=inbound;", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task V4Sender_SuppressesDuplicateMissingRangeRepairKeys()
     {
         const string transferId = "transfer_v4_sender_repair_dedupe";

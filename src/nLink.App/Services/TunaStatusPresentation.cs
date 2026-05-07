@@ -4,7 +4,8 @@ namespace NLink.App.Services;
 
 internal sealed record TunaStatusPresentation(
     string Text,
-    bool IsConnecting);
+    bool IsConnecting,
+    bool IsLocalPayer = false);
 
 internal static class TunaStatusPresentationMapper
 {
@@ -16,23 +17,31 @@ internal static class TunaStatusPresentationMapper
     {
         if (transportActive)
         {
-            return new TunaStatusPresentation("Tuna acceleration is active.", IsConnecting: false);
+            return new TunaStatusPresentation(
+                "Tuna acceleration is active.",
+                IsConnecting: false,
+                IsLocalPayer: IsLocalPayerRuntimeStatus(runtimeStatus));
         }
 
         var token = ResolveToken(transportReason, runtimeStatus, sessionUnlockOn);
+        var localPayer = sessionUnlockOn && IsLocalPayerRuntimeStatus(runtimeStatus);
         return token switch
         {
             "locked" => new TunaStatusPresentation("Tuna wallet is locked. Regular NKN is being used.", false),
             "waiting_for_approved_session" => new TunaStatusPresentation("Tuna is unlocked and waiting for an approved session.", false),
             "checking_payer_priority" => new TunaStatusPresentation("Choosing which side will pay for Tuna.", true),
-            "listener_starting" => new TunaStatusPresentation("Starting Tuna listener. Regular NKN stays connected until ready.", true),
-            "provider_paths_ready" => new TunaStatusPresentation("Tuna relay paths are ready. Waiting for peer connection.", true),
+            "listener_starting" => new TunaStatusPresentation("Starting Tuna listener. Regular NKN stays connected until ready.", true, true),
+            "provider_paths_retrying" => new TunaStatusPresentation("Looking for enough Tuna relay paths. Regular NKN stays connected while Tuna retries.", true, true),
+            "provider_paths_ready" => new TunaStatusPresentation("Tuna relay paths are ready. Waiting for peer connection.", true, true),
+            "provider_paths_degraded" => new TunaStatusPresentation("Tuna relay paths are limited but usable. Waiting for peer connection.", true, true),
             "listener_ready" or "waiting_for_peer_dial" or "peer_connected"
-                => new TunaStatusPresentation("Waiting for the other side to connect to Tuna.", true),
+                => new TunaStatusPresentation("Waiting for the other side to connect to Tuna.", true, true),
             "waiting_for_answer" or "dialer_starting" or "dialer_ready" or "negotiated"
-                => new TunaStatusPresentation("Negotiating Tuna acceleration.", true),
+                => new TunaStatusPresentation("Negotiating Tuna acceleration.", true, localPayer),
+            "renegotiating_after_user_unlock"
+                => new TunaStatusPresentation("Trying Tuna again for this session.", true, localPayer),
             _ when token.StartsWith("negotiation_scheduled_", StringComparison.Ordinal)
-                => new TunaStatusPresentation("Negotiating Tuna acceleration.", true),
+                => new TunaStatusPresentation("Negotiating Tuna acceleration.", true, localPayer),
             "off" or "inactive" or "transport_without_acceleration" or "transport_unwired"
                 => new TunaStatusPresentation("Tuna acceleration is off. Regular NKN is being used.", false),
             "wallet_empty_dialer_only"
@@ -49,6 +58,8 @@ internal static class TunaStatusPresentationMapper
                 => new TunaStatusPresentation("Tuna relay path discovery timed out. Regular NKN is being used.", false),
             "cap_reached"
                 => new TunaStatusPresentation("Tuna cap was reached. Regular NKN is being used.", false),
+            "switching_to_regular_nkn"
+                => new TunaStatusPresentation("Switching Tuna off. Regular NKN will continue the session.", false),
             "user_stopped_tuna" or "header_switch_off" or "remote_header_switch_off"
                 => new TunaStatusPresentation("Tuna was turned off for this session. Regular NKN is being used.", false),
             _ when IsFallbackOrFailure(token)
@@ -93,15 +104,30 @@ internal static class TunaStatusPresentationMapper
         return normalized is "waiting_for_approved_session" or
             "checking_payer_priority" or
             "listener_starting" or
+            "provider_paths_retrying" or
             "provider_paths_ready" or
+            "provider_paths_degraded" or
             "listener_ready" or
             "waiting_for_peer_dial" or
             "peer_connected" or
             "waiting_for_answer" or
+            "renegotiating_after_user_unlock" or
             "dialer_starting" or
             "dialer_ready" or
             "negotiated" or
             "active";
+    }
+
+    private static bool IsLocalPayerRuntimeStatus(string? runtimeStatus)
+    {
+        var normalized = Normalize(runtimeStatus);
+        return normalized is "listener_starting" or
+            "provider_paths_retrying" or
+            "provider_paths_ready" or
+            "provider_paths_degraded" or
+            "listener_ready" or
+            "waiting_for_peer_dial" or
+            "peer_connected";
     }
 
     private static bool IsLockedLike(string value)

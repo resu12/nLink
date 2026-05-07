@@ -30,6 +30,42 @@ internal sealed partial class TransportScreenShareCoordinator
         OnAutoTuneTimerTick();
     }
 
+    internal bool BeginTransportRebindRecovery(string reason)
+    {
+        string currentSessionId;
+        long generation;
+        var normalizedReason = string.IsNullOrWhiteSpace(reason)
+            ? "transport_rebind"
+            : reason.Trim();
+
+        lock (gate)
+        {
+            if (captureSource is null ||
+                sendPipeline is null ||
+                string.IsNullOrWhiteSpace(sessionId))
+            {
+                return false;
+            }
+
+            currentSessionId = sessionId;
+            generation = ++transportRebindGeneration;
+            transportRebindPendingGeneration = generation;
+            transportRebindReason = normalizedReason;
+        }
+
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_transport_rebind_generation_started; direction=outbound; session_id={currentSessionId}; reason={normalizedReason}; rebind_generation={generation}");
+
+        flushTransportQueue?.Invoke("transport_rebind_" + normalizedReason);
+
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_transport_rebind_keyframe_requested; direction=outbound; session_id={currentSessionId}; reason={normalizedReason}; rebind_generation={generation}");
+        RequestKeyFrame("transport_rebind_recovery_" + normalizedReason);
+        return true;
+    }
+
     internal void RequestKeyFrame(string reason)
     {
         IScreenCaptureSource? currentCaptureSource;

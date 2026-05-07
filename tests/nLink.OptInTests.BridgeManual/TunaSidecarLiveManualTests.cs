@@ -185,7 +185,7 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
             TryKill(listenerProcess);
             listenerProcess = null;
             await WaitUntilAsync(
-                () => !host.IsAccelerationAvailableForTests || !helper.IsAccelerationAvailableForTests,
+                () => !host.IsAccelerationAvailableForTests && !helper.IsAccelerationAvailableForTests,
                 TimeSpan.FromSeconds(30));
 
             await senderSession.SendAsync(CreateChunkFrame(sessionId, transferId, chunkIndex: 1, fill: 0x42), cts.Token);
