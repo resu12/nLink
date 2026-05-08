@@ -1,3 +1,5 @@
+using NLink.Core.Logging;
+
 namespace NLink.Core.FileTransfer;
 
 public sealed partial class SessionFileTransferService
@@ -42,6 +44,10 @@ public sealed partial class SessionFileTransferService
     {
         SessionFileTransferSnapshot? snapshot = null;
         bool shouldNotifyPeer;
+        IFileTransferDataSession? dataSessionForCancel = null;
+        string sessionId;
+        string transferId;
+        string? normalizedCancelReason;
 
         lock (gate)
         {
@@ -70,10 +76,48 @@ public sealed partial class SessionFileTransferService
 
             snapshot = CreateSnapshotLocked();
             shouldNotifyPeer = notifyPeer;
+            sessionId = context.SessionId;
+            transferId = context.TransferId;
+            normalizedCancelReason = NormalizeReason(cancelReason) ?? CanceledReason;
+            if (terminalState == FileTransferTransferState.Canceled && shouldNotifyPeer)
+            {
+                dataSessionForCancel = context.DataSession;
+            }
         }
 
         RaiseTransferChanged(snapshot);
-        context.DisposeResources();
+        try
+        {
+            if (shouldNotifyPeer)
+            {
+                if (terminalState == FileTransferTransferState.Canceled)
+                {
+                    await SendCancelAsync(sessionId, transferId, normalizedCancelReason, CancellationToken.None).ConfigureAwait(false);
+                }
+                else if (terminalState == FileTransferTransferState.Failed)
+                {
+                    await SendErrorAsync(sessionId, transferId, context.ErrorCode ?? InvalidStateErrorCode, context.StatusMessage, CancellationToken.None).ConfigureAwait(false);
+                }
+            }
+
+            if (dataSessionForCancel is not null)
+            {
+                await TrySendV4CancelFrameAsync(
+                        dataSessionForCancel,
+                        sessionId,
+                        transferId,
+                        normalizedCancelReason,
+                        FileTransferDirection.Outbound,
+                        "outbound_terminal",
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            context.DisposeResources();
+        }
+
         LogTransferInfo(
             "transfer_terminal",
             FileTransferDirection.Outbound,
@@ -86,22 +130,6 @@ public sealed partial class SessionFileTransferService
             bytesTransferred: context.BytesTransferred,
             chunksTransferred: context.ChunksTransferred,
             chunkCount: context.ChunkCount);
-
-        if (!shouldNotifyPeer)
-        {
-            return;
-        }
-
-        if (terminalState == FileTransferTransferState.Canceled)
-        {
-            await SendCancelAsync(context.SessionId, context.TransferId, cancelReason, ct).ConfigureAwait(false);
-            return;
-        }
-
-        if (terminalState == FileTransferTransferState.Failed)
-        {
-            await SendErrorAsync(context.SessionId, context.TransferId, context.ErrorCode ?? InvalidStateErrorCode, context.StatusMessage, ct).ConfigureAwait(false);
-        }
     }
 
     private async Task TransitionInboundToTerminalAsync(
@@ -119,6 +147,8 @@ public sealed partial class SessionFileTransferService
         string sessionId;
         string transferId;
         string? normalizedErrorCode;
+        IFileTransferDataSession? dataSessionForCancel = null;
+        string? normalizedCancelReason;
 
         lock (gate)
         {
@@ -143,6 +173,11 @@ public sealed partial class SessionFileTransferService
             sessionId = context.SessionId;
             transferId = context.TransferId;
             normalizedErrorCode = context.ErrorCode;
+            normalizedCancelReason = NormalizeReason(cancelReason) ?? CanceledReason;
+            if (terminalState == FileTransferTransferState.Canceled)
+            {
+                dataSessionForCancel = context.DataSession;
+            }
         }
 
         if (terminalState == FileTransferTransferState.Completed &&
@@ -157,8 +192,40 @@ public sealed partial class SessionFileTransferService
                 context.BytesTransferred);
         }
 
-        context.DisposeResources();
         RaiseTransferChanged(snapshot);
+        try
+        {
+            if (terminalState == FileTransferTransferState.Declined)
+            {
+                await SendDeclineAsync(sessionId, transferId, cancelReason ?? DeclinedReason, ct).ConfigureAwait(false);
+            }
+            else if (terminalState == FileTransferTransferState.Canceled)
+            {
+                await SendCancelAsync(sessionId, transferId, normalizedCancelReason, CancellationToken.None).ConfigureAwait(false);
+            }
+            else if (shouldSendError)
+            {
+                await SendErrorAsync(sessionId, transferId, normalizedErrorCode ?? InvalidStateErrorCode, errorMessage ?? statusMessage, CancellationToken.None).ConfigureAwait(false);
+            }
+
+            if (dataSessionForCancel is not null)
+            {
+                await TrySendV4CancelFrameAsync(
+                        dataSessionForCancel,
+                        sessionId,
+                        transferId,
+                        normalizedCancelReason,
+                        FileTransferDirection.Inbound,
+                        "inbound_terminal",
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            context.DisposeResources();
+        }
+
         LogTransferInfo(
             "transfer_terminal",
             FileTransferDirection.Inbound,
@@ -172,23 +239,6 @@ public sealed partial class SessionFileTransferService
             chunksTransferred: context.ChunksTransferred,
             chunkCount: context.ChunkCount,
             savedPath: context.SavedFilePath);
-
-        if (terminalState == FileTransferTransferState.Declined)
-        {
-            await SendDeclineAsync(sessionId, transferId, cancelReason ?? DeclinedReason, ct).ConfigureAwait(false);
-            return;
-        }
-
-        if (terminalState == FileTransferTransferState.Canceled)
-        {
-            await SendCancelAsync(sessionId, transferId, cancelReason ?? CanceledReason, ct).ConfigureAwait(false);
-            return;
-        }
-
-        if (shouldSendError)
-        {
-            await SendErrorAsync(sessionId, transferId, normalizedErrorCode ?? InvalidStateErrorCode, errorMessage ?? statusMessage, ct).ConfigureAwait(false);
-        }
     }
 
     private void UpdateOutboundState(
@@ -257,6 +307,54 @@ public sealed partial class SessionFileTransferService
 
     private async Task SendCancelAsync(string sessionId, string transferId, string? reason, CancellationToken ct)
     {
+        var normalizedReason = NormalizeReason(reason) ?? CanceledReason;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(LifecyclePrioritySendTimeoutMs));
+            await TrySendCancelControlOnceAsync(sessionId, transferId, normalizedReason, attempt: 1, timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_lifecycle_priority_send_failed; kind=cancel; transfer_id={transferId}; session_id={sessionId}; reason={FormatProtocolLogValue(normalizedReason)}; path=control; error=timeout");
+        }
+
+        _ = Task.Run(
+            () => RunCancelControlRetryLoopAsync(sessionId, transferId, normalizedReason),
+            CancellationToken.None);
+    }
+
+    private async Task RunCancelControlRetryLoopAsync(string sessionId, string transferId, string? reason)
+    {
+        for (var index = 0; index < CancelRetryDelaysMs.Length; index++)
+        {
+            try
+            {
+                await Task.Delay(CancelRetryDelaysMs[index]).ConfigureAwait(false);
+                await TrySendCancelControlOnceAsync(
+                        sessionId,
+                        transferId,
+                        reason,
+                        attempt: index + 2,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Warn($"cancel retry loop failed: {ex.Message}");
+                return;
+            }
+        }
+    }
+
+    private async Task TrySendCancelControlOnceAsync(
+        string sessionId,
+        string transferId,
+        string? reason,
+        int attempt,
+        CancellationToken ct)
+    {
         try
         {
             var currentTransport = GetTransportOrThrow();
@@ -268,10 +366,70 @@ public sealed partial class SessionFileTransferService
                     Reason = NormalizeReason(reason),
                 },
                 ct).ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_cancel_control_sent; transfer_id={transferId}; session_id={sessionId}; attempt={attempt}");
+            if (attempt == 1)
+            {
+                LocalOperationalLog.Info(
+                    "FileTransferService",
+                    $"event=filetransfer_lifecycle_priority_sent; kind=cancel; transfer_id={transferId}; session_id={sessionId}; reason={FormatProtocolLogValue(reason ?? CanceledReason)}; path=control; attempt={attempt}");
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            Warn($"cancel send failed: {ex.Message}");
+            Warn($"cancel send failed (attempt={attempt}): {ex.Message}");
+            if (attempt == 1)
+            {
+                LocalOperationalLog.Warn(
+                    "FileTransferService",
+                    $"event=filetransfer_lifecycle_priority_send_failed; kind=cancel; transfer_id={transferId}; session_id={sessionId}; reason={FormatProtocolLogValue(reason ?? CanceledReason)}; path=control; error={ex.GetType().Name}");
+            }
+        }
+    }
+
+    private async Task TrySendV4CancelFrameAsync(
+        IFileTransferDataSession dataSession,
+        string sessionId,
+        string transferId,
+        string? reason,
+        FileTransferDirection direction,
+        string source,
+        CancellationToken ct)
+    {
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(CancelDataFrameBestEffortTimeoutMs));
+            await dataSession.SendAsync(
+                    new FileTransferCancelFrameV5
+                    {
+                        SessionId = sessionId,
+                        TransferId = transferId,
+                        Reason = NormalizeReason(reason),
+                    },
+                    timeout.Token)
+                .ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v4_cancel_frame_sent; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; source={source}");
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_lifecycle_priority_sent; kind=cancel; transfer_id={transferId}; session_id={sessionId}; reason={FormatProtocolLogValue(reason ?? CanceledReason)}; path=redundant_data_frame; direction={direction.ToString().ToLowerInvariant()}; source={source}");
+        }
+        catch (OperationCanceledException)
+        {
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_lifecycle_priority_send_failed; kind=cancel; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; source={source}; path=redundant_data_frame; error=timeout");
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_v4_cancel_frame_send_failed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; source={source}; error={FormatProtocolLogValue(ex.Message)}");
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_lifecycle_priority_send_failed; kind=cancel; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; source={source}; path=redundant_data_frame; error={ex.GetType().Name}");
         }
     }
 
@@ -279,6 +437,7 @@ public sealed partial class SessionFileTransferService
     {
         try
         {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(LifecyclePrioritySendTimeoutMs));
             var currentTransport = GetTransportOrThrow();
             await currentTransport.SendFileTransferErrorAsync(
                 new FileTransferErrorV1
@@ -288,11 +447,23 @@ public sealed partial class SessionFileTransferService
                     ErrorCode = NormalizeErrorCode(errorCode) ?? InvalidStateErrorCode,
                     Message = NormalizeReason(message),
                 },
-                ct).ConfigureAwait(false);
+                timeout.Token).ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_lifecycle_priority_sent; kind=error; transfer_id={transferId}; session_id={sessionId}; reason={FormatProtocolLogValue(NormalizeReason(message) ?? "(none)")}; path=control; error_code={NormalizeErrorCode(errorCode) ?? InvalidStateErrorCode}");
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException)
+        {
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_lifecycle_priority_send_failed; kind=error; transfer_id={transferId}; session_id={sessionId}; reason={FormatProtocolLogValue(NormalizeReason(message) ?? "(none)")}; path=control; error=timeout");
+        }
+        catch (Exception ex)
         {
             Warn($"error send failed: {ex.Message}");
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_lifecycle_priority_send_failed; kind=error; transfer_id={transferId}; session_id={sessionId}; reason={FormatProtocolLogValue(NormalizeReason(message) ?? "(none)")}; path=control; error={ex.GetType().Name}");
         }
     }
 

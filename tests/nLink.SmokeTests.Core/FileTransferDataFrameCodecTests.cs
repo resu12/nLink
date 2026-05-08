@@ -23,15 +23,15 @@ public sealed class FileTransferDataFrameCodecTests
     }
 
     [Fact]
-    public void V4ManifestFrame_RoundTrips_AndNormalizesEnvelope()
+    public void V5ManifestFrame_RoundTrips_AndNormalizesEnvelope()
     {
         var hash = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
         var payload = FileTransferDataFrameCodec.Serialize(
-            new FileTransferManifestFrameV4
+            new FileTransferManifestFrameV5
             {
                 SessionId = " session_a ",
-                TransferId = " transfer_v4_manifest ",
-                FileName = " v4.bin ",
+                TransferId = " transfer_v5_manifest ",
+                FileName = " v5.bin ",
                 FileSizeBytes = 8192,
                 ChunkSizeBytes = 2048,
                 ChunkCount = 4,
@@ -40,12 +40,12 @@ public sealed class FileTransferDataFrameCodecTests
 
         var parsed = FileTransferDataFrameCodec.TryDeserialize(payload, out var frame);
 
-        var manifest = Assert.IsType<FileTransferManifestFrameV4>(frame);
+        var manifest = Assert.IsType<FileTransferManifestFrameV5>(frame);
         Assert.True(parsed);
         Assert.Equal("session_a", manifest.SessionId);
-        Assert.Equal("transfer_v4_manifest", manifest.TransferId);
-        Assert.Equal(FileTransferProtocol.ManifestFrameTypeV4, manifest.Type);
-        Assert.Equal("v4.bin", manifest.FileName);
+        Assert.Equal("transfer_v5_manifest", manifest.TransferId);
+        Assert.Equal(FileTransferProtocol.ManifestFrameTypeV5, manifest.Type);
+        Assert.Equal("v5.bin", manifest.FileName);
         Assert.Equal(hash, manifest.Sha256Base64);
     }
 
@@ -56,7 +56,7 @@ public sealed class FileTransferDataFrameCodecTests
     [InlineData(4096, 1024, 0)]
     [InlineData(4096, 1024, 3)]
     [InlineData(FileTransferProtocol.MaxChunkCountV4 + 1L, 1, FileTransferProtocol.MaxChunkCountV4 + 1)]
-    public void V4ManifestFrame_RejectsInvalidChunkTuple(long fileSizeBytes, int chunkSizeBytes, int chunkCount)
+    public void V5ManifestFrame_RejectsInvalidChunkTuple(long fileSizeBytes, int chunkSizeBytes, int chunkCount)
     {
         var payload = BuildManifestFrame(fileSizeBytes, chunkSizeBytes, chunkCount);
 
@@ -64,10 +64,10 @@ public sealed class FileTransferDataFrameCodecTests
     }
 
     [Fact]
-    public void V4ManifestFrame_RejectsInvalidChunkTupleOnSerialize()
+    public void V5ManifestFrame_RejectsInvalidChunkTupleOnSerialize()
     {
         Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(
-            new FileTransferManifestFrameV4
+            new FileTransferManifestFrameV5
             {
                 SessionId = "session_a",
                 TransferId = "transfer_v4_bad_manifest_serialize",
@@ -80,10 +80,10 @@ public sealed class FileTransferDataFrameCodecTests
     }
 
     [Fact]
-    public void V4StateFrame_RoundTrips_AndNormalizesMissingRanges()
+    public void V5StateFrame_RoundTrips_AndNormalizesMissingRanges()
     {
         var payload = FileTransferDataFrameCodec.Serialize(
-            new FileTransferStateFrameV4
+            new FileTransferStateFrameV5
             {
                 SessionId = " session_a ",
                 TransferId = " transfer_v4_state ",
@@ -107,7 +107,7 @@ public sealed class FileTransferDataFrameCodecTests
 
         var parsed = FileTransferDataFrameCodec.TryDeserialize(payload, out var frame);
 
-        var state = Assert.IsType<FileTransferStateFrameV4>(frame);
+        var state = Assert.IsType<FileTransferStateFrameV5>(frame);
         Assert.True(parsed);
         Assert.Equal("session_a", state.SessionId);
         Assert.Equal("transfer_v4_state", state.TransferId);
@@ -132,10 +132,10 @@ public sealed class FileTransferDataFrameCodecTests
     }
 
     [Fact]
-    public void V4StateFrame_DecodesLegacyPayloadWithoutPeerPauseFields()
+    public void V5StateFrame_RejectsTruncatedPayload()
     {
         var payload = FileTransferDataFrameCodec.Serialize(
-            new FileTransferStateFrameV4
+            new FileTransferStateFrameV5
             {
                 SessionId = "session_a",
                 TransferId = "transfer_v4_legacy_state",
@@ -145,26 +145,29 @@ public sealed class FileTransferDataFrameCodecTests
                 CreditUntilChunkIndexExclusive = 4,
                 BytesCommitted = 0,
             });
-        var legacyPayload = payload[..^2];
+        var truncatedPayload = payload[..^3];
 
-        var parsed = FileTransferDataFrameCodec.TryDeserialize(legacyPayload, out var frame);
+        var parsed = FileTransferDataFrameCodec.TryDeserialize(truncatedPayload, out var frame);
 
-        var state = Assert.IsType<FileTransferStateFrameV4>(frame);
-        Assert.True(parsed);
-        Assert.False(state.TransferPaused);
-        Assert.Null(state.TransferPauseReason);
+        Assert.False(parsed);
+        Assert.Null(frame);
     }
 
     [Fact]
-    public void V4ChunkBatchFrame_RoundTrips_WithinBudget()
+    public void V5ChunkBatchFrame_RoundTrips_WithinBudget()
     {
         var payload = FileTransferDataFrameCodec.Serialize(
-            new FileTransferChunkBatchFrameV4
+            new FileTransferChunkBatchFrameV5
             {
                 SessionId = "session_a",
                 TransferId = "transfer_v4_batch",
                 StartChunkIndex = 4,
                 ChunkCount = 2,
+                TransportEpoch = 42,
+                BatchId = " batch-a ",
+                RepairRequestId = " repair-a ",
+                Priority = " frontier ",
+                RecoveryMode = " frontier_repair_only ",
                 DataSegments =
                 [
                     new byte[] { 1, 2, 3 },
@@ -174,22 +177,116 @@ public sealed class FileTransferDataFrameCodecTests
 
         var parsed = FileTransferDataFrameCodec.TryDeserialize(payload, out var frame);
 
-        var batch = Assert.IsType<FileTransferChunkBatchFrameV4>(frame);
+        var batch = Assert.IsType<FileTransferChunkBatchFrameV5>(frame);
         Assert.True(parsed);
-        Assert.Equal(FileTransferProtocol.ChunkBatchFrameTypeV4, batch.Type);
+        Assert.Equal(FileTransferProtocol.ChunkBatchFrameTypeV5, batch.Type);
         Assert.Equal(4, batch.StartChunkIndex);
         Assert.Equal(2, batch.ChunkCount);
+        Assert.Equal(42, batch.TransportEpoch);
+        Assert.Equal("batch-a", batch.BatchId);
+        Assert.Equal("repair-a", batch.RepairRequestId);
+        Assert.Equal("frontier", batch.Priority);
+        Assert.Equal("frontier_repair_only", batch.RecoveryMode);
         Assert.Equal(2, batch.DataSegments.Count);
         Assert.Equal(new byte[] { 1, 2, 3 }, batch.DataSegments[0]);
         Assert.Equal(new byte[] { 4, 5 }, batch.DataSegments[1]);
-        Assert.InRange(payload.Length, 1, FileTransferProtocol.MaxSerializedChunkBatchPayloadBytesV4);
+        Assert.InRange(payload.Length, 1, FileTransferProtocol.MaxSerializedChunkBatchPayloadBytesV5);
     }
 
     [Fact]
-    public void V4ChunkBatchFrame_RejectsMismatchedBatchCount()
+    public void V5RecoveryFrames_RoundTrip()
+    {
+        var handoffPayload = FileTransferDataFrameCodec.Serialize(
+            new FileTransferHandoffFrameV5
+            {
+                SessionId = " session_a ",
+                TransferId = " transfer_handoff ",
+                TransportEpoch = 12,
+                RecoveryMode = " nkn_proof_pending ",
+            });
+        var requestPayload = FileTransferDataFrameCodec.Serialize(
+            new FileTransferRepairRequestFrameV5
+            {
+                SessionId = "session_a",
+                TransferId = "transfer_handoff",
+                TransportEpoch = 12,
+                RepairRequestId = " repair-1 ",
+                Priority = " frontier ",
+                RecoveryMode = " frontier_repair_only ",
+                MissingRanges =
+                [
+                    new FileTransferRangeV4 { StartChunkIndex = 10, ChunkCount = 1 },
+                    new FileTransferRangeV4 { StartChunkIndex = 11, ChunkCount = 2 },
+                ],
+            });
+        var proofPayload = FileTransferDataFrameCodec.Serialize(
+            new FileTransferRepairProofFrameV5
+            {
+                SessionId = "session_a",
+                TransferId = "transfer_handoff",
+                TransportEpoch = 12,
+                RepairRequestId = " repair-1 ",
+                AppliedChunkCount = 3,
+                CommittedChunkIndex = 13,
+                RecoveryMode = " backfill_repair ",
+            });
+
+        Assert.True(FileTransferDataFrameCodec.TryDeserialize(handoffPayload, out var handoffFrame));
+        var handoff = Assert.IsType<FileTransferHandoffFrameV5>(handoffFrame);
+        Assert.Equal("session_a", handoff.SessionId);
+        Assert.Equal(12, handoff.TransportEpoch);
+        Assert.Equal("nkn_proof_pending", handoff.RecoveryMode);
+
+        Assert.True(FileTransferDataFrameCodec.TryDeserialize(requestPayload, out var requestFrame));
+        var request = Assert.IsType<FileTransferRepairRequestFrameV5>(requestFrame);
+        Assert.Equal(12, request.TransportEpoch);
+        Assert.Equal("repair-1", request.RepairRequestId);
+        Assert.Equal("frontier", request.Priority);
+        var range = Assert.Single(request.MissingRanges);
+        Assert.Equal(10, range.StartChunkIndex);
+        Assert.Equal(3, range.ChunkCount);
+
+        Assert.True(FileTransferDataFrameCodec.TryDeserialize(proofPayload, out var proofFrame));
+        var proof = Assert.IsType<FileTransferRepairProofFrameV5>(proofFrame);
+        Assert.Equal(12, proof.TransportEpoch);
+        Assert.Equal("repair-1", proof.RepairRequestId);
+        Assert.Equal(3, proof.AppliedChunkCount);
+        Assert.Equal(13, proof.CommittedChunkIndex);
+        Assert.Equal("backfill_repair", proof.RecoveryMode);
+    }
+
+    [Fact]
+    public void V5RecoveryFrames_RejectMalformedPayloads()
     {
         Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(
-            new FileTransferChunkBatchFrameV4
+            new FileTransferRepairRequestFrameV5
+            {
+                SessionId = "session_a",
+                TransferId = "transfer_handoff",
+                TransportEpoch = 12,
+                RepairRequestId = "repair-1",
+                MissingRanges = [],
+            }));
+
+        var invalidProofPayload = FileTransferDataFrameCodec.Serialize(
+            new FileTransferRepairProofFrameV5
+            {
+                SessionId = "session_a",
+                TransferId = "transfer_handoff",
+                TransportEpoch = 12,
+                RepairRequestId = "repair-1",
+                AppliedChunkCount = 1,
+                CommittedChunkIndex = 2,
+            });
+
+        Assert.False(FileTransferDataFrameCodec.TryDeserialize(invalidProofPayload[..^1], out _));
+    }
+
+    [Fact]
+    public void V5ChunkBatchFrame_RejectsMismatchedBatchCount()
+    {
+        Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(
+            new FileTransferChunkBatchFrameV5
             {
                 SessionId = "session_a",
                 TransferId = "transfer_v4_mismatch_batch",
@@ -204,17 +301,17 @@ public sealed class FileTransferDataFrameCodecTests
     }
 
     [Fact]
-    public void V4ChunkBatchFrame_RejectsSegmentCountAboveProtocolMaximum()
+    public void V5ChunkBatchFrame_RejectsSegmentCountAboveProtocolMaximum()
     {
         Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(
-            new FileTransferChunkBatchFrameV4
+            new FileTransferChunkBatchFrameV5
             {
                 SessionId = "session_a",
                 TransferId = "transfer_v4_too_many_segments",
                 StartChunkIndex = 0,
-                ChunkCount = FileTransferProtocol.MaxChunkBatchSegmentsV4 + 1,
+                ChunkCount = FileTransferProtocol.MaxChunkBatchSegmentsV5 + 1,
                 DataSegments = Enumerable
-                    .Range(0, FileTransferProtocol.MaxChunkBatchSegmentsV4 + 1)
+                    .Range(0, FileTransferProtocol.MaxChunkBatchSegmentsV5 + 1)
                     .Select(static _ => new byte[] { 1 })
                     .ToArray(),
             }));
@@ -224,10 +321,10 @@ public sealed class FileTransferDataFrameCodecTests
     [InlineData(FileTransferProtocol.MaxChunkCountV4, 1)]
     [InlineData(FileTransferProtocol.MaxChunkCountV4 - 1, 2)]
     [InlineData(int.MaxValue, 1)]
-    public void V4ChunkBatchFrame_RejectsOutOfProtocolChunkRanges(int startChunkIndex, int chunkCount)
+    public void V5ChunkBatchFrame_RejectsOutOfProtocolChunkRanges(int startChunkIndex, int chunkCount)
     {
         Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(
-            new FileTransferChunkBatchFrameV4
+            new FileTransferChunkBatchFrameV5
             {
                 SessionId = "session_a",
                 TransferId = "transfer_v4_range_overflow",
@@ -241,18 +338,18 @@ public sealed class FileTransferDataFrameCodecTests
     }
 
     [Fact]
-    public void V4ChunkBatchFrame_RejectsUntrustedBinarySegmentCountBeforeReadingSegments()
+    public void V5ChunkBatchFrame_RejectsUntrustedBinarySegmentCountBeforeReadingSegments()
     {
-        var payload = BuildChunkBatchHeaderWithSegmentCount(FileTransferProtocol.MaxChunkBatchSegmentsV4 + 1);
+        var payload = BuildChunkBatchHeaderWithSegmentCount(FileTransferProtocol.MaxChunkBatchSegmentsV5 + 1);
 
         Assert.False(FileTransferDataFrameCodec.TryDeserialize(payload, out _));
     }
 
     [Fact]
-    public void V4StateFrame_RejectsOutOfProtocolMissingRange()
+    public void V5StateFrame_RejectsOutOfProtocolMissingRange()
     {
         Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(
-            new FileTransferStateFrameV4
+            new FileTransferStateFrameV5
             {
                 SessionId = "session_a",
                 TransferId = "transfer_v4_bad_missing_range",
@@ -273,11 +370,11 @@ public sealed class FileTransferDataFrameCodecTests
     }
 
     [Fact]
-    public void V4CompleteCancelAndErrorFrames_RoundTrip()
+    public void V5CompleteCancelAndErrorFrames_RoundTrip()
     {
         var hash = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
         var completePayload = FileTransferDataFrameCodec.Serialize(
-            new FileTransferCompleteFrameV4
+            new FileTransferCompleteFrameV5
             {
                 SessionId = "session_a",
                 TransferId = "transfer_v4_complete",
@@ -285,14 +382,14 @@ public sealed class FileTransferDataFrameCodecTests
                 Sha256Base64 = hash,
             });
         var cancelPayload = FileTransferDataFrameCodec.Serialize(
-            new FileTransferCancelFrameV4
+            new FileTransferCancelFrameV5
             {
                 SessionId = "session_a",
                 TransferId = "transfer_v4_cancel",
                 Reason = "user_canceled",
             });
         var errorPayload = FileTransferDataFrameCodec.Serialize(
-            new FileTransferErrorFrameV4
+            new FileTransferErrorFrameV5
             {
                 SessionId = "session_a",
                 TransferId = "transfer_v4_error",
@@ -301,32 +398,32 @@ public sealed class FileTransferDataFrameCodecTests
             });
 
         Assert.True(FileTransferDataFrameCodec.TryDeserialize(completePayload, out var completeFrame));
-        Assert.Equal(hash, Assert.IsType<FileTransferCompleteFrameV4>(completeFrame).Sha256Base64);
+        Assert.Equal(hash, Assert.IsType<FileTransferCompleteFrameV5>(completeFrame).Sha256Base64);
         Assert.True(FileTransferDataFrameCodec.TryDeserialize(cancelPayload, out var cancelFrame));
-        Assert.Equal("user_canceled", Assert.IsType<FileTransferCancelFrameV4>(cancelFrame).Reason);
+        Assert.Equal("user_canceled", Assert.IsType<FileTransferCancelFrameV5>(cancelFrame).Reason);
         Assert.True(FileTransferDataFrameCodec.TryDeserialize(errorPayload, out var errorFrame));
-        var error = Assert.IsType<FileTransferErrorFrameV4>(errorFrame);
+        var error = Assert.IsType<FileTransferErrorFrameV5>(errorFrame);
         Assert.Equal("runtime_unavailable", error.ErrorCode);
         Assert.Equal("not ready", error.Message);
     }
 
     [Fact]
-    public void V4StateFrame_RejectsInvalidOrOversizedMissingRanges()
+    public void V5StateFrame_RejectsInvalidOrOversizedMissingRanges()
     {
         var invalidRangePayload = BuildStateFrameWithSingleMissingRange(-1, 1);
         var tooManyChunksPayload = BuildStateFrameWithSingleMissingRange(
             10,
-            FileTransferProtocol.MaxStateMissingChunksV4 + 1);
+            FileTransferProtocol.MaxStateMissingChunksV5 + 1);
 
         Assert.False(FileTransferDataFrameCodec.TryDeserialize(invalidRangePayload, out _));
         Assert.False(FileTransferDataFrameCodec.TryDeserialize(tooManyChunksPayload, out _));
     }
 
     [Fact]
-    public void V4ChunkBatchFrame_RejectsOversizedPackedBatch()
+    public void V5ChunkBatchFrame_RejectsOversizedPackedBatch()
     {
         Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(
-            new FileTransferChunkBatchFrameV4
+            new FileTransferChunkBatchFrameV5
             {
                 SessionId = "session_a",
                 TransferId = "transfer_v4_oversized_batch",
@@ -334,7 +431,7 @@ public sealed class FileTransferDataFrameCodecTests
                 ChunkCount = 2,
                 DataSegments =
                 [
-                    new byte[FileTransferProtocol.MaxChunkBatchRawBytesV4],
+                    new byte[FileTransferProtocol.MaxChunkBatchRawBytesV5],
                     new byte[1],
                 ],
             }));
@@ -352,6 +449,26 @@ public sealed class FileTransferDataFrameCodecTests
         });
 
         Assert.False(FileTransferDataFrameCodec.TryDeserialize(payload, out _));
+    }
+
+    [Theory]
+    [InlineData(18)]
+    [InlineData(19)]
+    [InlineData(20)]
+    [InlineData(21)]
+    [InlineData(22)]
+    [InlineData(23)]
+    [InlineData(24)]
+    public void V4BinaryFrameCodes_AreRejected(byte frameCode)
+    {
+        using var buffer = new MemoryStream();
+        WriteUInt32(buffer, 0x3246544E);
+        buffer.WriteByte(1);
+        buffer.WriteByte(frameCode);
+        WriteString(buffer, "session_a");
+        WriteString(buffer, "transfer_v4_binary_rejected");
+
+        Assert.False(FileTransferDataFrameCodec.TryDeserialize(buffer.ToArray(), out _));
     }
 
     [Theory]
@@ -395,9 +512,10 @@ public sealed class FileTransferDataFrameCodecTests
         using var buffer = new MemoryStream();
         WriteUInt32(buffer, 0x3246544E);
         buffer.WriteByte(1);
-        buffer.WriteByte(20);
+        buffer.WriteByte(27);
         WriteString(buffer, "session_a");
         WriteString(buffer, "transfer_v4_malicious_segment_count");
+        WriteV5Metadata(buffer);
         WriteInt32(buffer, 0);
         WriteInt32(buffer, segmentCount);
         WriteInt32(buffer, segmentCount);
@@ -409,9 +527,10 @@ public sealed class FileTransferDataFrameCodecTests
         using var buffer = new MemoryStream();
         WriteUInt32(buffer, 0x3246544E);
         buffer.WriteByte(1);
-        buffer.WriteByte(18);
+        buffer.WriteByte(25);
         WriteString(buffer, "session_a");
         WriteString(buffer, "transfer_v4_bad_manifest_tuple");
+        WriteV5Metadata(buffer);
         WriteString(buffer, "bad.bin");
         WriteInt64(buffer, fileSizeBytes);
         WriteInt32(buffer, chunkSizeBytes);
@@ -425,9 +544,10 @@ public sealed class FileTransferDataFrameCodecTests
         using var buffer = new MemoryStream();
         WriteUInt32(buffer, 0x3246544E);
         buffer.WriteByte(1);
-        buffer.WriteByte(19);
+        buffer.WriteByte(26);
         WriteString(buffer, "session_a");
         WriteString(buffer, "transfer_v4_bad_state");
+        WriteV5Metadata(buffer);
         WriteInt32(buffer, 1);
         WriteInt32(buffer, 0);
         WriteInt32(buffer, 1000);
@@ -449,6 +569,15 @@ public sealed class FileTransferDataFrameCodecTests
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
         stream.Write(bytes);
+    }
+
+    private static void WriteV5Metadata(Stream stream)
+    {
+        WriteInt64(stream, 0);
+        stream.WriteByte(0);
+        stream.WriteByte(0);
+        stream.WriteByte(0);
+        stream.WriteByte(0);
     }
 
     private static void WriteInt32(Stream stream, int value)

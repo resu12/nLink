@@ -113,10 +113,10 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, helperIdentity);
             string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
             IFileTransferChunkBudgetProvider budgetProvider = Assert.IsAssignableFrom<IFileTransferChunkBudgetProvider>(helper);
-            FileTransferChunkBudgetRequest request = new FileTransferChunkBudgetRequest("transfer_nkn_payload_budget", 88100000L, 49152, FileTransferProtocol.ProtocolVersionV4);
+            FileTransferChunkBudgetRequest request = new FileTransferChunkBudgetRequest("transfer_nkn_payload_budget", 88100000L, 49152, FileTransferProtocol.ProtocolVersionV5);
             int safeChunkSize = budgetProvider.ResolveSafeOutboundChunkSize(request);
             int chunkCount = (int)((request.FileSizeBytes + safeChunkSize - 1) / safeChunkSize);
-            Envelope envelope = CoreSmokeTestsBase.BuildSecureFileTransferDataFrameEnvelope(helper, new FileTransferChunkBatchFrameV4 { SessionId = sessionId, TransferId = request.TransferId, StartChunkIndex = chunkCount - 1, ChunkCount = 1, DataSegments = new[] { new byte[safeChunkSize] }, BatchProfile = "v4_default_21k" }, 1L);
+            Envelope envelope = CoreSmokeTestsBase.BuildSecureFileTransferDataFrameEnvelope(helper, new FileTransferChunkBatchFrameV5 { SessionId = sessionId, TransferId = request.TransferId, StartChunkIndex = chunkCount - 1, ChunkCount = 1, DataSegments = new[] { new byte[safeChunkSize] }, BatchProfile = "v4_default_21k" }, 1L);
             Assert.InRange(safeChunkSize, 1, 49152);
             Assert.InRange(EnvelopeCodec.Serialize(envelope).Length, 1, 65536);
         }
@@ -277,7 +277,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                         }
                     }
                 };
-                FileTransferChunkBatchFrameV4 batch = new FileTransferChunkBatchFrameV4
+                FileTransferChunkBatchFrameV5 batch = new FileTransferChunkBatchFrameV5
                 {
                     SessionId = sessionId,
                     TransferId = "transfer_nkn_repairbatch_v4",
@@ -296,7 +296,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 Assert.Equal(NknBridgeChannel.Bulk, rawBulkMessages.Single().Channel);
 
                 FileTransferDataFrame frame = DecodeNknDataFrame(host, helper, rawBulkMessages.Single(), sessionId);
-                FileTransferChunkBatchFrameV4 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV4>(frame);
+                FileTransferChunkBatchFrameV5 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV5>(frame);
                 Assert.Equal(9, receivedBatch.StartChunkIndex);
                 Assert.Equal(3, receivedBatch.ChunkCount);
                 Assert.Equal(3, receivedBatch.DataSegments.Count);
@@ -304,7 +304,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
                 string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
                 Assert.Contains("event=filetransfer_chunk_batch_sent_as_batch", logTail, StringComparison.Ordinal);
-                Assert.Contains("frame_type=filetransfer.chunk_batch.v4", logTail, StringComparison.Ordinal);
+                Assert.Contains("frame_type=filetransfer.chunk_batch.v5", logTail, StringComparison.Ordinal);
                 Assert.Contains("batch_profile=v4_repair_21k", logTail, StringComparison.Ordinal);
                 Assert.Contains("repair_delivery_mode=bulk_only", logTail, StringComparison.Ordinal);
                 Assert.Contains("lane=bulk", logTail, StringComparison.Ordinal);
@@ -364,7 +364,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                         }
                     }
                 };
-                FileTransferChunkBatchFrameV4 batch = new FileTransferChunkBatchFrameV4
+                FileTransferChunkBatchFrameV5 batch = new FileTransferChunkBatchFrameV5
                 {
                     SessionId = sessionId,
                     TransferId = "transfer_nkn_repairbatch_escalated_v4",
@@ -388,7 +388,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 foreach (var message in rawControlMessages.Concat(rawBulkMessages))
                 {
                     FileTransferDataFrame frame = DecodeNknDataFrame(host, helper, message, sessionId);
-                    FileTransferChunkBatchFrameV4 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV4>(frame);
+                    FileTransferChunkBatchFrameV5 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV5>(frame);
                     Assert.Equal(9, receivedBatch.StartChunkIndex);
                     Assert.Equal(3, receivedBatch.ChunkCount);
                     Assert.Equal(3, receivedBatch.DataSegments.Count);
@@ -397,7 +397,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
                 string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
                 Assert.Contains("event=filetransfer_chunk_batch_sent_as_batch", logTail, StringComparison.Ordinal);
-                Assert.Contains("frame_type=filetransfer.chunk_batch.v4", logTail, StringComparison.Ordinal);
+                Assert.Contains("frame_type=filetransfer.chunk_batch.v5", logTail, StringComparison.Ordinal);
                 Assert.Contains("batch_profile=v4_repair_21k", logTail, StringComparison.Ordinal);
                 Assert.Contains("repair_delivery_mode=control_bulk_escalated", logTail, StringComparison.Ordinal);
                 Assert.Contains("lane=control_bulk", logTail, StringComparison.Ordinal);
@@ -448,7 +448,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                         rawBulkMessages.Enqueue(e);
                     }
                 };
-                FileTransferChunkBatchFrameV4 batch = new FileTransferChunkBatchFrameV4
+                FileTransferChunkBatchFrameV5 batch = new FileTransferChunkBatchFrameV5
                 {
                     SessionId = sessionId,
                     TransferId = "transfer_nkn_batchlimit_v4",
@@ -463,7 +463,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
                 NknIncomingMessage rawBulkMessage = Assert.Single(rawBulkMessages);
                 FileTransferDataFrame frame = DecodeNknDataFrame(host, helper, rawBulkMessage, sessionId);
-                FileTransferChunkBatchFrameV4 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV4>(frame);
+                FileTransferChunkBatchFrameV5 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV5>(frame);
                 Assert.Equal(3, receivedBatch.ChunkCount);
                 Assert.Equal(3, receivedBatch.DataSegments.Count);
                 Assert.All(receivedBatch.DataSegments, segment => Assert.Equal(21 * 1024, segment.Length));
@@ -471,7 +471,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
                 string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
                 Assert.Contains("event=filetransfer_chunk_batch_sent_as_batch", logTail, StringComparison.Ordinal);
-                Assert.Contains("frame_type=filetransfer.chunk_batch.v4", logTail, StringComparison.Ordinal);
+                Assert.Contains("frame_type=filetransfer.chunk_batch.v5", logTail, StringComparison.Ordinal);
                 Assert.Contains("batch_profile=v4_default_21k", logTail, StringComparison.Ordinal);
                 Assert.Contains("bridge_payload_fill_percent=", logTail, StringComparison.Ordinal);
                 Assert.DoesNotContain("event=filetransfer_chunk_batch_split_for_transport; transport=nkn; transfer_id=transfer_nkn_batchlimit_v4", logTail, StringComparison.Ordinal);
@@ -519,7 +519,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                         rawBulkMessages.Enqueue(e);
                     }
                 };
-                FileTransferChunkBatchFrameV4 oversizedBatch = new FileTransferChunkBatchFrameV4
+                FileTransferChunkBatchFrameV5 oversizedBatch = new FileTransferChunkBatchFrameV5
                 {
                     SessionId = sessionId,
                     TransferId = "transfer_nkn_batchfallback_v4",
@@ -533,14 +533,14 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 await CoreSmokeTestsBase.WaitUntilAsync(() => rawBulkMessages.Count >= 2, TimeSpan.FromSeconds(2.0));
 
                 var frames = rawBulkMessages.Select(message => DecodeNknDataFrame(host, helper, message, sessionId)).ToArray();
-                Assert.All(frames, frame => Assert.IsType<FileTransferChunkBatchFrameV4>(frame));
-                var batches = frames.Cast<FileTransferChunkBatchFrameV4>().OrderBy(static frame => frame.StartChunkIndex).ToArray();
+                Assert.All(frames, frame => Assert.IsType<FileTransferChunkBatchFrameV5>(frame));
+                var batches = frames.Cast<FileTransferChunkBatchFrameV5>().OrderBy(static frame => frame.StartChunkIndex).ToArray();
                 Assert.Equal(new[] { 0, 3 }, batches.Select(static frame => frame.StartChunkIndex).ToArray());
                 Assert.Equal(4, batches.Sum(static frame => frame.DataSegments.Count));
                 string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
                 Assert.Contains("event=filetransfer_chunk_batch_split_for_transport", logTail, StringComparison.Ordinal);
-                Assert.Contains("original_frame_type=filetransfer.chunk_batch.v4", logTail, StringComparison.Ordinal);
-                Assert.Contains("frame_type=filetransfer.chunk_batch.v4", logTail, StringComparison.Ordinal);
+                Assert.Contains("original_frame_type=filetransfer.chunk_batch.v5", logTail, StringComparison.Ordinal);
+                Assert.Contains("frame_type=filetransfer.chunk_batch.v5", logTail, StringComparison.Ordinal);
                 Assert.DoesNotContain("event=filetransfer_transport_payload_rejected", logTail, StringComparison.Ordinal);
             }
             finally
@@ -591,7 +591,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 }
             };
 
-            var state = new FileTransferStateFrameV4
+            var state = new FileTransferStateFrameV5
             {
                 SessionId = sessionId,
                 TransferId = "transfer_nkn_v4_feedback",
@@ -614,7 +614,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
             foreach (var message in rawControlMessages.Concat(rawBulkMessages))
             {
-                var receivedState = Assert.IsType<FileTransferStateFrameV4>(DecodeNknDataFrame(helper, host, message, sessionId));
+                var receivedState = Assert.IsType<FileTransferStateFrameV5>(DecodeNknDataFrame(helper, host, message, sessionId));
                 Assert.Equal(1, receivedState.Epoch);
                 Assert.Equal(64, receivedState.CreditUntilChunkIndexExclusive);
             }
@@ -622,7 +622,155 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
             Assert.Contains("event=filetransfer_v4_feedback_first_success", logTail, StringComparison.Ordinal);
             Assert.Contains("event=filetransfer_v4_feedback_secondary_completed", logTail, StringComparison.Ordinal);
-            Assert.Contains("frame_type=filetransfer.state.v4", logTail, StringComparison.Ordinal);
+            Assert.Contains("frame_type=filetransfer.state.v5", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferDataSession_RoutesV5RecoveryFramesOnRegularNkn()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.v5.recovery.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.v5.recovery.address");
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-v5-recovery-id", hostClient.Address));
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, new NknIdentity("helper-v5-recovery-id", helperClient.Address));
+
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            TaskCompletionSource<FileTransferOfferV2> offerReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferAcceptV1> acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferSessionOpenV2> sessionOpenReceived = new TaskCompletionSource<FileTransferSessionOpenV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.FileTransferOfferReceived += delegate (object? _, FileTransferOfferReceivedEventArgs e)
+            {
+                offerReceived.TrySetResult(e.Message);
+            };
+            helper.FileTransferAcceptReceived += delegate (object? _, FileTransferAcceptReceivedEventArgs e)
+            {
+                acceptReceived.TrySetResult(e.Message);
+            };
+            host.FileTransferSessionOpenReceived += delegate (object? _, FileTransferSessionOpenReceivedEventArgs e)
+            {
+                sessionOpenReceived.TrySetResult(e.Message);
+            };
+
+            const string transferId = "transfer_nkn_v5_recovery_frames";
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "recovery.bin",
+                    FileSizeBytes = 8 * 1024L,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                },
+                cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            await helper.SendFileTransferSessionOpenAsync(
+                new FileTransferSessionOpenV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                    SessionRole = FileTransferProtocol.SessionRoleSender,
+                    ChunkSizeBytes = 1024,
+                    InitialPipelineDepth = 8,
+                },
+                cts.Token);
+            await sessionOpenReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+
+            IFileTransferDataSession receiverRecoverySession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            IFileTransferDataSession senderRecoverySession = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            ConcurrentQueue<NknIncomingMessage> rawControlMessages = new ConcurrentQueue<NknIncomingMessage>();
+            ConcurrentQueue<NknIncomingMessage> rawBulkMessages = new ConcurrentQueue<NknIncomingMessage>();
+            helperClient.MessageReceived += delegate (object? _, NknIncomingMessage e)
+            {
+                if (!e.IsTopic && EnvelopeCodec.TryDeserialize(e.Payload, out Envelope env) && env.Type == MsgType.FileTransferDataFrame)
+                {
+                    if (e.Channel == NknBridgeChannel.Control)
+                    {
+                        rawControlMessages.Enqueue(e);
+                    }
+                    else if (e.Channel == NknBridgeChannel.Bulk)
+                    {
+                        rawBulkMessages.Enqueue(e);
+                    }
+                }
+            };
+
+            await receiverRecoverySession.SendAsync(
+                new FileTransferHandoffFrameV5
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = 7,
+                    RecoveryMode = "nkn_proof_pending",
+                },
+                cts.Token);
+            await receiverRecoverySession.SendAsync(
+                new FileTransferRepairRequestFrameV5
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = 7,
+                    RepairRequestId = "v5:7:42:1",
+                    MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 42, ChunkCount = 1 }],
+                    Priority = "frontier",
+                    RecoveryMode = "frontier_repair_only",
+                },
+                cts.Token);
+            await receiverRecoverySession.SendAsync(
+                new FileTransferRepairProofFrameV5
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = 7,
+                    RepairRequestId = "v5:7:42:1",
+                    AppliedChunkCount = 1,
+                    CommittedChunkIndex = 43,
+                    RecoveryMode = "backfill_repair",
+                },
+                cts.Token);
+
+            await CoreSmokeTestsBase.WaitUntilAsync(
+                () => rawControlMessages.Count >= 3 && rawBulkMessages.Count >= 3,
+                TimeSpan.FromSeconds(3.0));
+
+            HashSet<string> deliveredTypes = [];
+            for (var i = 0; i < 6 && deliveredTypes.Count < 3; i++)
+            {
+                var deliveredFrame = await senderRecoverySession.ReceiveAsync(cts.Token);
+                deliveredTypes.Add(deliveredFrame.Type);
+            }
+
+            Assert.Contains(FileTransferProtocol.HandoffFrameTypeV5, deliveredTypes);
+            Assert.Contains(FileTransferProtocol.RepairRequestFrameTypeV5, deliveredTypes);
+            Assert.Contains(FileTransferProtocol.RepairProofFrameTypeV5, deliveredTypes);
+            Assert.True(rawControlMessages.Count >= 3);
+            Assert.True(rawBulkMessages.Count >= 3);
+
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("frame_type=filetransfer.handoff.v5", logTail, StringComparison.Ordinal);
+            Assert.Contains("frame_type=filetransfer.repair_request.v5", logTail, StringComparison.Ordinal);
+            Assert.Contains("frame_type=filetransfer.repair_proof.v5", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("reason=unsupported_data_frame_type", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -670,7 +818,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                     TransferId = transferId,
                     FileName = "sender-pause.bin",
                     FileSizeBytes = 2048L,
-                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                 },
                 cts.Token);
             await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
@@ -679,7 +827,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 {
                     SessionId = sessionId,
                     TransferId = transferId,
-                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                 },
                 cts.Token);
             await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
@@ -688,7 +836,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 {
                     SessionId = sessionId,
                     TransferId = transferId,
-                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                     SessionRole = FileTransferProtocol.SessionRoleSender,
                     ChunkSizeBytes = 1024,
                     InitialPipelineDepth = 8,
@@ -697,7 +845,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             await sessionOpenReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
 
             IFileTransferDataSession inboundSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
-            var pauseState = new FileTransferStateFrameV4
+            var pauseState = new FileTransferStateFrameV5
             {
                 SessionId = sessionId,
                 TransferId = transferId,
@@ -731,11 +879,11 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
             FileTransferDataFrame receivedFrame = await inboundSession.ReceiveAsync(cts.Token);
             string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
-            FileTransferStateFrameV4 receivedState = Assert.IsType<FileTransferStateFrameV4>(receivedFrame);
+            FileTransferStateFrameV5 receivedState = Assert.IsType<FileTransferStateFrameV5>(receivedFrame);
             Assert.True(receivedState.TransferPaused);
             Assert.Equal("ui_pause", receivedState.TransferPauseReason);
             Assert.Contains("event=filetransfer_data_frame_dispatched; transport=nkn; transfer_id=transfer_nkn_v4_sender_pause_state; session_id=", logTail, StringComparison.Ordinal);
-            Assert.Contains("frame_type=filetransfer.state.v4; chunk_index=(none); lane=control", logTail, StringComparison.Ordinal);
+            Assert.Contains("frame_type=filetransfer.state.v5; chunk_index=(none); lane=control", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=", logTail, StringComparison.Ordinal);
         }
         finally
@@ -781,7 +929,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             };
 
             await receiverFeedbackSession.SendAsync(
-                new FileTransferStateFrameV4
+                new FileTransferStateFrameV5
                 {
                     SessionId = sessionId,
                     TransferId = "transfer_nkn_v4_feedback_rollback",
@@ -794,7 +942,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
             Assert.Single(rawControlMessages);
             Assert.Empty(rawBulkMessages);
-            Assert.IsType<FileTransferStateFrameV4>(DecodeNknDataFrame(helper, host, rawControlMessages.Single(), sessionId));
+            Assert.IsType<FileTransferStateFrameV5>(DecodeNknDataFrame(helper, host, rawControlMessages.Single(), sessionId));
         }
         finally
         {
@@ -835,14 +983,14 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             {
                 sessionOpenReceived.TrySetResult(e.Message);
             };
-            await helper.SendFileTransferOfferAsync(new FileTransferOfferV2 { SessionId = sessionId, TransferId = "transfer_nkn_inbound_chunk_batch", FileName = "inbound-batch.bin", FileSizeBytes = 2048L, PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4 }, cts.Token);
+            await helper.SendFileTransferOfferAsync(new FileTransferOfferV2 { SessionId = sessionId, TransferId = "transfer_nkn_inbound_chunk_batch", FileName = "inbound-batch.bin", FileSizeBytes = 2048L, PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5 }, cts.Token);
             await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
-            await host.SendFileTransferAcceptAsync(new FileTransferAcceptV1 { SessionId = sessionId, TransferId = "transfer_nkn_inbound_chunk_batch", AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4 }, cts.Token);
+            await host.SendFileTransferAcceptAsync(new FileTransferAcceptV1 { SessionId = sessionId, TransferId = "transfer_nkn_inbound_chunk_batch", AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5 }, cts.Token);
             await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
-            await helper.SendFileTransferSessionOpenAsync(new FileTransferSessionOpenV2 { SessionId = sessionId, TransferId = "transfer_nkn_inbound_chunk_batch", ProtocolVersion = FileTransferProtocol.ProtocolVersionV4, SessionRole = FileTransferProtocol.SessionRoleSender, ChunkSizeBytes = 1024, InitialPipelineDepth = 8 }, cts.Token);
+            await helper.SendFileTransferSessionOpenAsync(new FileTransferSessionOpenV2 { SessionId = sessionId, TransferId = "transfer_nkn_inbound_chunk_batch", ProtocolVersion = FileTransferProtocol.ProtocolVersionV5, SessionRole = FileTransferProtocol.SessionRoleSender, ChunkSizeBytes = 1024, InitialPipelineDepth = 8 }, cts.Token);
             await sessionOpenReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
             IFileTransferDataSession inboundSession = await host.OpenFileTransferDataSessionAsync(sessionId, "transfer_nkn_inbound_chunk_batch", cts.Token);
-            FileTransferChunkBatchFrameV4 batchFrame = new FileTransferChunkBatchFrameV4
+            FileTransferChunkBatchFrameV5 batchFrame = new FileTransferChunkBatchFrameV5
             {
                 SessionId = sessionId,
                 TransferId = "transfer_nkn_inbound_chunk_batch",
@@ -853,14 +1001,14 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             CoreSmokeTestsBase.InvokeNknIncomingMessage(host, helperClient, new NknIncomingMessage(payload: EnvelopeCodec.Serialize(CoreSmokeTestsBase.BuildSecureFileTransferDataFrameEnvelope(helper, batchFrame, CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper), useBulkSenderIdentity: true)), source: helperClient.ConnectedBulkAddress, isTopic: false, topic: null, channel: NknBridgeChannel.Bulk, bridgeIngressObservedUtcMs: 0L, bridgeMessageObservedUtcMs: 0L, binaryFrameDecodedUtcMs: 0L, socketDataEventEmittedUtcMs: 0L, wsReceiverWriteEnteredUtcMs: 0L, wsMessageEmittedUtcMs: 0L, sdkHandleMsgEnteredUtcMs: 0L, clientMessageDispatchUtcMs: 0L, multiClientMessageDispatchUtcMs: 0L));
             FileTransferDataFrame receivedFrame = await inboundSession.ReceiveAsync(cts.Token);
             string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
-            FileTransferChunkBatchFrameV4 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV4>(receivedFrame);
+            FileTransferChunkBatchFrameV5 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV5>(receivedFrame);
             Assert.Equal(batchFrame.TransferId, receivedBatch.TransferId);
             Assert.Equal(batchFrame.SessionId, receivedBatch.SessionId);
             Assert.Equal(batchFrame.StartChunkIndex, receivedBatch.StartChunkIndex);
             Assert.Equal(batchFrame.ChunkCount, receivedBatch.ChunkCount);
             Assert.Equal(batchFrame.DataSegments.Count, receivedBatch.DataSegments.Count);
             Assert.Contains("event=filetransfer_data_frame_dispatched; transport=nkn; transfer_id=transfer_nkn_inbound_chunk_batch; session_id=", logTail, StringComparison.Ordinal);
-            Assert.Contains("frame_type=filetransfer.chunk_batch.v4; chunk_index=12-13; lane=bulk", logTail, StringComparison.Ordinal);
+            Assert.Contains("frame_type=filetransfer.chunk_batch.v5; chunk_index=12-13; lane=bulk", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_data_frame_decode_failed", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_data_frame_ignored", logTail, StringComparison.Ordinal);
             Assert.DoesNotContain("event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=", logTail, StringComparison.Ordinal);
@@ -906,11 +1054,11 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 sessionOpenReceived.TrySetResult(e.Message);
             };
 
-            await helper.SendFileTransferOfferAsync(new FileTransferOfferV2 { SessionId = sessionId, TransferId = transferId, FileName = "spoofed-bulk.bin", FileSizeBytes = 2048L, PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4 }, cts.Token);
+            await helper.SendFileTransferOfferAsync(new FileTransferOfferV2 { SessionId = sessionId, TransferId = transferId, FileName = "spoofed-bulk.bin", FileSizeBytes = 2048L, PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5 }, cts.Token);
             await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
-            await host.SendFileTransferAcceptAsync(new FileTransferAcceptV1 { SessionId = sessionId, TransferId = transferId, AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4 }, cts.Token);
+            await host.SendFileTransferAcceptAsync(new FileTransferAcceptV1 { SessionId = sessionId, TransferId = transferId, AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5 }, cts.Token);
             await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
-            await helper.SendFileTransferSessionOpenAsync(new FileTransferSessionOpenV2 { SessionId = sessionId, TransferId = transferId, ProtocolVersion = FileTransferProtocol.ProtocolVersionV4, SessionRole = FileTransferProtocol.SessionRoleSender, ChunkSizeBytes = 1024, InitialPipelineDepth = 8 }, cts.Token);
+            await helper.SendFileTransferSessionOpenAsync(new FileTransferSessionOpenV2 { SessionId = sessionId, TransferId = transferId, ProtocolVersion = FileTransferProtocol.ProtocolVersionV5, SessionRole = FileTransferProtocol.SessionRoleSender, ChunkSizeBytes = 1024, InitialPipelineDepth = 8 }, cts.Token);
             await sessionOpenReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
 
             IFileTransferDataSession inboundSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
@@ -918,7 +1066,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             Assert.NotEqual(helperClient.ConnectedBulkAddress, spoofSource);
 
             long nextSequence = CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper);
-            FileTransferChunkBatchFrameV4 spoofSignedFrame = new FileTransferChunkBatchFrameV4
+            FileTransferChunkBatchFrameV5 spoofSignedFrame = new FileTransferChunkBatchFrameV5
             {
                 SessionId = sessionId,
                 TransferId = transferId,
@@ -930,7 +1078,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             InjectSecureFileTransferDataFrameEnvelope(host, spoofClient, spoofSignedEnvelope, spoofSource, NknBridgeChannel.Bulk);
             await AssertNoFileTransferFrameAvailableAsync(inboundSession, TimeSpan.FromMilliseconds(150));
 
-            FileTransferChunkBatchFrameV4 sourceMismatchFrame = new FileTransferChunkBatchFrameV4
+            FileTransferChunkBatchFrameV5 sourceMismatchFrame = new FileTransferChunkBatchFrameV5
             {
                 SessionId = sessionId,
                 TransferId = transferId,
@@ -998,7 +1146,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                     TransferId = transferId,
                     FileName = "queue-overflow.bin",
                     FileSizeBytes = 4096L,
-                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                 },
                 cts.Token);
             await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
@@ -1007,7 +1155,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 {
                     SessionId = sessionId,
                     TransferId = transferId,
-                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                 },
                 cts.Token);
             await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
@@ -1016,7 +1164,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 {
                     SessionId = sessionId,
                     TransferId = transferId,
-                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                     SessionRole = FileTransferProtocol.SessionRoleSender,
                     ChunkSizeBytes = 1024,
                     InitialPipelineDepth = 8,
@@ -1034,7 +1182,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             var nextFileTransferSequence = CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper);
             for (var i = 0; i <= NknSignalingTransport.FileTransferDataSessionMaxQueuedFrames; i++)
             {
-                var batchFrame = new FileTransferChunkBatchFrameV4
+                var batchFrame = new FileTransferChunkBatchFrameV5
                 {
                     SessionId = sessionId,
                     TransferId = transferId,
@@ -1053,7 +1201,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             Assert.Equal(FileTransferResultCodes.ReceiverBufferExhausted, availabilityChange.Reason);
             Assert.True(availabilityChange.RequiresResumeRequest);
 
-            var postOverflowFrame = new FileTransferChunkBatchFrameV4
+            var postOverflowFrame = new FileTransferChunkBatchFrameV5
             {
                 SessionId = sessionId,
                 TransferId = transferId,
@@ -1074,7 +1222,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             Assert.NotSame(inboundSession, replacementSession);
             Assert.True(replacementSession.IsAvailable);
 
-            var resumedFrame = new FileTransferChunkBatchFrameV4
+            var resumedFrame = new FileTransferChunkBatchFrameV5
             {
                 SessionId = sessionId,
                 TransferId = transferId,
@@ -1084,7 +1232,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             };
             InjectSecureFileTransferDataFrame(host, helper, helperClient, resumedFrame, NknBridgeChannel.Bulk, nextFileTransferSequence++);
             FileTransferDataFrame receivedFrame = await replacementSession.ReceiveAsync(cts.Token);
-            FileTransferChunkBatchFrameV4 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV4>(receivedFrame);
+            FileTransferChunkBatchFrameV5 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV5>(receivedFrame);
             Assert.Equal(resumedFrame.StartChunkIndex, receivedBatch.StartChunkIndex);
         }
         finally
@@ -1114,6 +1262,239 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             suppressed.Add("transfer_reused_after_disconnect");
             CoreSmokeTestsBase.InvokePrivateMethod(host, "ResetControlSecureState");
             Assert.Empty(suppressed);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_V4CancelDataFrame_DispatchesAsPriorityCancelWithoutWaitingForQueuedChunks()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.v4-priority-cancel.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.v4-priority-cancel.address");
+            NknIdentity hostIdentity = new NknIdentity("host-v4-priority-cancel-id", hostClient.Address);
+            NknIdentity helperIdentity = new NknIdentity("helper-v4-priority-cancel-id", helperClient.Address);
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_v4_priority_cancel";
+
+            TaskCompletionSource<FileTransferOfferV2> offerReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferAcceptV1> acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferSessionOpenV2> sessionOpenReceived = new TaskCompletionSource<FileTransferSessionOpenV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferCancelV1> cancelReceived = new TaskCompletionSource<FileTransferCancelV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.FileTransferOfferReceived += delegate (object? _, FileTransferOfferReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    offerReceived.TrySetResult(e.Message);
+                }
+            };
+            helper.FileTransferAcceptReceived += delegate (object? _, FileTransferAcceptReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    acceptReceived.TrySetResult(e.Message);
+                }
+            };
+            host.FileTransferSessionOpenReceived += delegate (object? _, FileTransferSessionOpenReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    sessionOpenReceived.TrySetResult(e.Message);
+                }
+            };
+            host.FileTransferCancelReceived += delegate (object? _, FileTransferCancelReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    cancelReceived.TrySetResult(e.Message);
+                }
+            };
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "priority-cancel.bin",
+                    FileSizeBytes = 4096L,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                },
+                cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            await helper.SendFileTransferSessionOpenAsync(
+                new FileTransferSessionOpenV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                    SessionRole = FileTransferProtocol.SessionRoleSender,
+                    ChunkSizeBytes = 1024,
+                    InitialPipelineDepth = 8,
+                },
+                cts.Token);
+            await sessionOpenReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+
+            IFileTransferDataSession hostDataSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            var nextSequence = CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper);
+            InjectSecureFileTransferDataFrame(
+                host,
+                helper,
+                helperClient,
+                new FileTransferChunkBatchFrameV5
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    StartChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataSegments = new[] { new byte[1024] },
+                },
+                NknBridgeChannel.Bulk,
+                nextSequence++);
+
+            InjectSecureFileTransferDataFrame(
+                host,
+                helper,
+                helperClient,
+                new FileTransferCancelFrameV5
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Reason = "sender_canceled",
+                },
+                NknBridgeChannel.Bulk,
+                nextSequence++);
+
+            FileTransferCancelV1 cancel = await cancelReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            Assert.Equal("sender_canceled", cancel.Reason);
+
+            FileTransferDataFrame queuedBeforeCancel = await hostDataSession.ReceiveAsync(cts.Token);
+            Assert.IsType<FileTransferChunkBatchFrameV5>(queuedBeforeCancel);
+
+            InjectSecureFileTransferDataFrame(
+                host,
+                helper,
+                helperClient,
+                new FileTransferChunkBatchFrameV5
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    StartChunkIndex = 1,
+                    ChunkCount = 1,
+                    DataSegments = new[] { new byte[1024] },
+                },
+                NknBridgeChannel.Bulk,
+                nextSequence++);
+
+            await Task.Delay(100, cts.Token);
+            string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=filetransfer_v4_cancel_frame_received", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_message_rejected; message_type=file_transfer_data_frame", logTail, StringComparison.Ordinal);
+            Assert.Contains("post_terminal_late_sender_frame_canceled", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
+    public async Task NknTransport_FileTransferCancelBulkCopy_AcceptsBulkSenderIdentity()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.bulk-cancel.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.bulk-cancel.address");
+            NknIdentity hostIdentity = new NknIdentity("host-bulk-cancel-id", hostClient.Address);
+            NknIdentity helperIdentity = new NknIdentity("helper-bulk-cancel-id", helperClient.Address);
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_bulk_cancel_copy";
+
+            TaskCompletionSource<FileTransferOfferV2> offerReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferCancelV1> cancelReceived = new TaskCompletionSource<FileTransferCancelV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            host.FileTransferOfferReceived += delegate (object? _, FileTransferOfferReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    offerReceived.TrySetResult(e.Message);
+                }
+            };
+            host.FileTransferCancelReceived += delegate (object? _, FileTransferCancelReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    cancelReceived.TrySetResult(e.Message);
+                }
+            };
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "bulk-cancel.bin",
+                    FileSizeBytes = 4096L,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+
+            var cancelEnvelope = BuildSecureFileTransferCancelEnvelopeForSenderIdentity(
+                helper,
+                new FileTransferCancelV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Reason = "bulk_cancel_copy",
+                },
+                CoreSmokeTestsBase.GetNextFileTransferSecureSequence(helper),
+                helperClient.BulkAddress);
+            CoreSmokeTestsBase.InvokeNknIncomingMessage(
+                host,
+                helperClient,
+                new NknIncomingMessage(
+                    payload: EnvelopeCodec.Serialize(cancelEnvelope),
+                    source: helperClient.ConnectedBulkAddress,
+                    isTopic: false,
+                    topic: null,
+                    channel: NknBridgeChannel.Bulk,
+                    bridgeIngressObservedUtcMs: 0L,
+                    bridgeMessageObservedUtcMs: 0L,
+                    binaryFrameDecodedUtcMs: 0L,
+                    socketDataEventEmittedUtcMs: 0L,
+                    wsReceiverWriteEnteredUtcMs: 0L,
+                    wsMessageEmittedUtcMs: 0L,
+                    sdkHandleMsgEnteredUtcMs: 0L,
+                    clientMessageDispatchUtcMs: 0L,
+                    multiClientMessageDispatchUtcMs: 0L));
+
+            FileTransferCancelV1 cancel = await cancelReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            Assert.Equal("bulk_cancel_copy", cancel.Reason);
         }
         finally
         {
@@ -1170,7 +1551,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                     TransferId = "transfer_nkn_v4_repeat_1",
                     FileName = "first.bin",
                     FileSizeBytes = 1024L,
-                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                 },
                 cts.Token);
             await firstOfferReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
@@ -1179,7 +1560,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 {
                     SessionId = sessionId,
                     TransferId = "transfer_nkn_v4_repeat_1",
-                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                 },
                 cts.Token);
             await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
@@ -1189,7 +1570,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 {
                     SessionId = sessionId,
                     TransferId = "transfer_nkn_v4_repeat_1",
-                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                     SessionRole = FileTransferProtocol.SessionRoleSender,
                     ChunkSizeBytes = 21 * 1024,
                     InitialPipelineDepth = 8,
@@ -1200,7 +1581,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             IFileTransferDataSession hostDataSession = await host.OpenFileTransferDataSessionAsync(sessionId, "transfer_nkn_v4_repeat_1", cts.Token);
             IFileTransferDataSession helperDataSession = await helper.OpenFileTransferDataSessionAsync(sessionId, "transfer_nkn_v4_repeat_1", cts.Token);
             await hostDataSession.SendAsync(
-                new FileTransferCompleteFrameV4
+                new FileTransferCompleteFrameV5
                 {
                     SessionId = sessionId,
                     TransferId = "transfer_nkn_v4_repeat_1",
@@ -1209,7 +1590,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 },
                 cts.Token);
             FileTransferDataFrame terminalFrame = await helperDataSession.ReceiveAsync(cts.Token);
-            Assert.IsType<FileTransferCompleteFrameV4>(terminalFrame);
+            Assert.IsType<FileTransferCompleteFrameV5>(terminalFrame);
             IDictionary hostTransferStates = Assert.IsAssignableFrom<IDictionary>(CoreSmokeTestsBase.GetPrivateField(host, "fileTransferStates"));
             IDictionary helperTransferStates = Assert.IsAssignableFrom<IDictionary>(CoreSmokeTestsBase.GetPrivateField(helper, "fileTransferStates"));
             Assert.False(hostTransferStates.Contains("transfer_nkn_v4_repeat_1"));
@@ -1222,13 +1603,13 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                     TransferId = "transfer_nkn_v4_repeat_2",
                     FileName = "second.bin",
                     FileSizeBytes = 1024L,
-                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                 },
                 cts.Token);
             FileTransferOfferV2 secondOffer = await secondOfferReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
             Assert.Equal("transfer_nkn_v4_repeat_2", secondOffer.TransferId);
 
-            var lateBatch = new FileTransferChunkBatchFrameV4
+            var lateBatch = new FileTransferChunkBatchFrameV5
             {
                 SessionId = sessionId,
                 TransferId = "transfer_nkn_v4_repeat_1",
@@ -1331,7 +1712,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                     TransferId = transferId,
                     FileName = "declined.bin",
                     FileSizeBytes = 1024L,
-                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                 },
                 cts.Token);
             await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
@@ -1375,7 +1756,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             await terminalReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
 
             int logStartIndex = CoreSmokeTestsBase.GetOperationalLogLength();
-            var lateBatch = new FileTransferChunkBatchFrameV4
+            var lateBatch = new FileTransferChunkBatchFrameV5
             {
                 SessionId = sessionId,
                 TransferId = transferId,
@@ -1433,17 +1814,17 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 sessionOpenReceived.TrySetResult(e.Message);
             };
 
-            await helper.SendFileTransferOfferAsync(new FileTransferOfferV2 { SessionId = sessionId, TransferId = transferId, FileName = "disposed-session.bin", FileSizeBytes = 2048L, PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4 }, cts.Token);
+            await helper.SendFileTransferOfferAsync(new FileTransferOfferV2 { SessionId = sessionId, TransferId = transferId, FileName = "disposed-session.bin", FileSizeBytes = 2048L, PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5 }, cts.Token);
             await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
-            await host.SendFileTransferAcceptAsync(new FileTransferAcceptV1 { SessionId = sessionId, TransferId = transferId, AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4 }, cts.Token);
+            await host.SendFileTransferAcceptAsync(new FileTransferAcceptV1 { SessionId = sessionId, TransferId = transferId, AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5 }, cts.Token);
             await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
-            await helper.SendFileTransferSessionOpenAsync(new FileTransferSessionOpenV2 { SessionId = sessionId, TransferId = transferId, ProtocolVersion = FileTransferProtocol.ProtocolVersionV4, SessionRole = FileTransferProtocol.SessionRoleSender, ChunkSizeBytes = 1024, InitialPipelineDepth = 8 }, cts.Token);
+            await helper.SendFileTransferSessionOpenAsync(new FileTransferSessionOpenV2 { SessionId = sessionId, TransferId = transferId, ProtocolVersion = FileTransferProtocol.ProtocolVersionV5, SessionRole = FileTransferProtocol.SessionRoleSender, ChunkSizeBytes = 1024, InitialPipelineDepth = 8 }, cts.Token);
             await sessionOpenReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
 
             IFileTransferDataSession staleSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             staleSession.Dispose();
 
-            FileTransferChunkBatchFrameV4 batchFrame = new FileTransferChunkBatchFrameV4
+            FileTransferChunkBatchFrameV5 batchFrame = new FileTransferChunkBatchFrameV5
             {
                 SessionId = sessionId,
                 TransferId = transferId,
@@ -1456,7 +1837,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             IFileTransferDataSession replacementSession = await host.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
             FileTransferDataFrame receivedFrame = await replacementSession.ReceiveAsync(cts.Token);
             string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
-            FileTransferChunkBatchFrameV4 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV4>(receivedFrame);
+            FileTransferChunkBatchFrameV5 receivedBatch = Assert.IsType<FileTransferChunkBatchFrameV5>(receivedFrame);
             Assert.Equal(batchFrame.StartChunkIndex, receivedBatch.StartChunkIndex);
             Assert.Equal(batchFrame.DataSegments.Count, receivedBatch.DataSegments.Count);
             Assert.Contains("event=filetransfer_data_session_removed; transport=nkn; transfer_id=transfer_nkn_disposed_data_session", logTail, StringComparison.Ordinal);
@@ -1486,7 +1867,7 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, hostIdentity);
             using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, helperIdentity);
             string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
-            FileTransferManifestFrameV4 frame = new FileTransferManifestFrameV4
+            FileTransferManifestFrameV5 frame = new FileTransferManifestFrameV5
             {
                 SessionId = sessionId,
                 TransferId = "transfer_nkn_unknown_data_frame",
@@ -1622,6 +2003,37 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             Code: envelopeCode,
             MessageId: Guid.NewGuid().ToString("N"),
             Type: MsgType.FileTransferDataFrame,
+            Payload: securePayload,
+            UnixTimeMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            ReplyTo: null);
+    }
+
+    private static Envelope BuildSecureFileTransferCancelEnvelopeForSenderIdentity(
+        NknSignalingTransport senderTransport,
+        FileTransferCancelV1 cancel,
+        long sequence,
+        string senderIdentity)
+    {
+        var key = Assert.IsType<byte[]>(CoreSmokeTestsBase.GetPrivateField(senderTransport, "fileTransferSessionSharedKey")).AsSpan().ToArray();
+        var envelopeCode = Assert.IsType<string>(CoreSmokeTestsBase.GetPrivateField(senderTransport, "currentEnvelopeCode"));
+        var sessionId = Assert.IsType<SessionId>(senderTransport.CurrentSessionSecurityState.SessionId);
+        var plaintext = FileTransferPayloadCodec.Serialize(cancel);
+        var securePayload = SessionSecureEnvelopeCodec.Encrypt(
+            key,
+            new SessionSecureEnvelopeMetadata(
+                Family: SessionSecureMessageFamily.FileTransfer,
+                MessageType: "file_transfer_cancel",
+                SessionId: sessionId,
+                SenderIdentity: new PeerAddress(senderIdentity),
+                Sequence: sequence,
+                RequestId: cancel.TransferId),
+            plaintext);
+
+        return new Envelope(
+            Version: 1,
+            Code: envelopeCode,
+            MessageId: Guid.NewGuid().ToString("N"),
+            Type: MsgType.FileTransferCancel,
             Payload: securePayload,
             UnixTimeMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             ReplyTo: null);

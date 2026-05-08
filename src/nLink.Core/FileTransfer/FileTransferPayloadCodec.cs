@@ -62,7 +62,7 @@ public static class FileTransferPayloadCodec
             !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.OfferTypeV2, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
             !TryNormalizeFileName(parsed.FileName, out var fileName) ||
             parsed.FileSizeBytes <= 0 ||
-            !TryNormalizeOptionalProtocolVersion(parsed.PreferredDataProtocolVersion, out var preferredDataProtocolVersion))
+            !TryNormalizeRequiredProtocolVersion(parsed.PreferredDataProtocolVersion, out var preferredDataProtocolVersion))
         {
             return false;
         }
@@ -85,7 +85,7 @@ public static class FileTransferPayloadCodec
         if (!TryDeserialize(utf8Json, out FileTransferAcceptV1? parsed) ||
             parsed is null ||
             !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.AcceptTypeV1, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
-            !TryNormalizeOptionalProtocolVersion(parsed.AcceptedDataProtocolVersion, out var acceptedDataProtocolVersion))
+            !TryNormalizeRequiredProtocolVersion(parsed.AcceptedDataProtocolVersion, out var acceptedDataProtocolVersion))
         {
             return false;
         }
@@ -172,7 +172,19 @@ public static class FileTransferPayloadCodec
     }
 
     internal static bool IsSupportedDataProtocolVersion(int protocolVersion)
-        => protocolVersion == FileTransferProtocol.ProtocolVersionV4;
+        => protocolVersion == FileTransferProtocol.ProtocolVersionV5;
+
+    internal static bool TryNormalizeRequiredProtocolVersion(int? protocolVersion, out int normalizedProtocolVersion)
+    {
+        normalizedProtocolVersion = 0;
+        if (protocolVersion is null || !IsSupportedDataProtocolVersion(protocolVersion.Value))
+        {
+            return false;
+        }
+
+        normalizedProtocolVersion = protocolVersion.Value;
+        return true;
+    }
 
     internal static bool TryNormalizeOptionalProtocolVersion(int? protocolVersion, out int? normalizedProtocolVersion)
     {

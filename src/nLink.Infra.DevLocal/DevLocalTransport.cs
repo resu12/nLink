@@ -90,7 +90,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private SessionId? activeApprovedSessionId;
     private PeerAddress? activeApprovedHelperAddress;
 
-    public bool SupportsFileTransferV4Streaming => true;
+    public bool SupportsFileTransferV5Streaming => true;
     public FileTransferTransportProfileKind FileTransferTransportProfileKind => FileTransferTransportProfileKind.Default;
     private byte[]? controlSessionSharedKey;
     private long nextOutboundChatSecureSequence;
@@ -3052,6 +3052,13 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
         if (currentState.IsTerminal)
         {
+            if (string.Equals(frameType, FileTransferCancelFrameType, StringComparison.Ordinal) &&
+                currentState.Phase == FileTransferTransportPhase.Canceled)
+            {
+                nextState = currentState;
+                return true;
+            }
+
             failureReason = "transfer_already_terminal";
             return false;
         }
@@ -3243,6 +3250,13 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
         if (currentState.IsTerminal)
         {
+            if (frame is FileTransferCancelFrameV4 &&
+                currentState.Phase == FileTransferTransportPhase.Canceled)
+            {
+                nextState = currentState;
+                return true;
+            }
+
             failureReason = "transfer_already_terminal";
             return false;
         }
@@ -3254,6 +3268,20 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
                 and not FileTransferTransportPhase.Transferring)
             {
                 failureReason = "pause_control_requires_start";
+                return false;
+            }
+
+            nextState = currentState with { Phase = FileTransferTransportPhase.Transferring };
+            return true;
+        }
+
+        if (IsV5RecoveryControlDataFrame(frame))
+        {
+            if (currentState.Phase is not FileTransferTransportPhase.Accepted
+                and not FileTransferTransportPhase.Started
+                and not FileTransferTransportPhase.Transferring)
+            {
+                failureReason = "recovery_control_requires_start";
                 return false;
             }
 
@@ -3370,6 +3398,11 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
     private static bool IsReceiverFeedbackDataFrame(FileTransferDataFrame frame)
         => frame is FileTransferStateFrameV4;
 
+    private static bool IsV5RecoveryControlDataFrame(FileTransferDataFrame frame)
+        => frame is FileTransferHandoffFrameV5
+            or FileTransferRepairRequestFrameV5
+            or FileTransferRepairProofFrameV5;
+
     private static bool IsSenderStateControlDataFrame(
         FileTransferDataFrame frame,
         FileTransferTransportState currentState,
@@ -3385,7 +3418,7 @@ public sealed class DevLocalTransport : ISignalingTransport, IAddressTargetSigna
 
     private static bool IsBenignLateFileTransferDataFrameRejection(FileTransferDataFrame frame, string failureReason)
         => ((failureReason is "unknown_transfer_id" or "transfer_already_terminal") &&
-            (IsReceiverFeedbackDataFrame(frame) || IsTerminalDataFrame(frame) || frame is FileTransferPauseControlFrameV4)) ||
+            (IsReceiverFeedbackDataFrame(frame) || IsV5RecoveryControlDataFrame(frame) || IsTerminalDataFrame(frame) || frame is FileTransferPauseControlFrameV4)) ||
            (failureReason == "transfer_already_terminal" && IsSenderDataFrame(frame));
 
     private static void LogFileTransferFrameEvent(string direction, string frameType, string transferId)
