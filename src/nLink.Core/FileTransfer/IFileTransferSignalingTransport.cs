@@ -24,7 +24,7 @@ public interface IFileTransferTransportProfileProvider
 
 public interface IFileTransferProtocolCapabilities
 {
-    bool SupportsFileTransferV4Streaming { get; }
+    bool SupportsFileTransferV5Streaming { get; }
 }
 
 public interface IFileTransferSignalingTransport
@@ -64,11 +64,18 @@ public interface IFileTransferDataSession : IDisposable
 
 public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventArgs
 {
-    public FileTransferDataSessionAvailabilityChangedEventArgs(bool isAvailable, string reason, bool requiresResumeRequest)
+    public FileTransferDataSessionAvailabilityChangedEventArgs(
+        bool isAvailable,
+        string reason,
+        bool requiresResumeRequest,
+        FileTransferTransportHandoffKind handoffKind = FileTransferTransportHandoffKind.None,
+        FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown)
     {
         IsAvailable = isAvailable;
         Reason = string.IsNullOrWhiteSpace(reason) ? "transport_state_changed" : reason.Trim();
         RequiresResumeRequest = requiresResumeRequest;
+        HandoffKind = handoffKind;
+        TargetTransport = targetTransport;
     }
 
     public bool IsAvailable { get; }
@@ -76,6 +83,10 @@ public sealed class FileTransferDataSessionAvailabilityChangedEventArgs : EventA
     public string Reason { get; }
 
     public bool RequiresResumeRequest { get; }
+
+    public FileTransferTransportHandoffKind HandoffKind { get; }
+
+    public FileTransferTransportKind TargetTransport { get; }
 }
 
 public sealed class FileTransferOfferReceivedEventArgs : EventArgs

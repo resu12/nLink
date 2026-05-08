@@ -179,13 +179,14 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             this.sessionId = sessionId;
         }
 
-        public bool SupportsFileTransferV4Streaming { get; set; } = true;
+        public bool SupportsFileTransferV5Streaming { get; set; } = true;
         public FileTransferTransportProfileKind FileTransferTransportProfileKind { get; set; } = FileTransferTransportProfileKind.Default;
         public int DataSessionSendDelayMs { get; set; }
         public int DataSessionSendFailureAfterCount { get; set; }
         public int MaxConcurrentDataSessionSends => Volatile.Read(ref maxConcurrentDataSessionSends);
         public Func<LoopbackFileTransferTransport, FileTransferDataFrame, CancellationToken, Task<bool>>? OutboundDataFrameDeliveryOverrideAsync { get; set; }
         public Func<LoopbackFileTransferTransport, FileTransferDataFrame, bool, CancellationToken, Task<bool>>? OutboundDataFrameDeliveryOverrideWithLaneAsync { get; set; }
+        public Func<LoopbackFileTransferTransport, FileTransferCancelV1, CancellationToken, Task<bool>>? OutboundCancelDeliveryOverrideAsync { get; set; }
         public Func<LoopbackFileTransferTransport, FileTransferSessionOpenV2, CancellationToken, Task<bool>>? OutboundSessionOpenDeliveryOverrideAsync { get; set; }
         public Func<FileTransferCompleteV1, CancellationToken, Task>? BeforeCompleteDeliveredAsync { get; set; }
         public Exception? OfferSendException { get; init; }
@@ -254,7 +255,15 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             SentSessionOpens.Enqueue(payload);
             return DeliverMaybeAsync(payload, static (transport, delivered, token) => transport.OutboundSessionOpenDeliveryOverrideAsync?.Invoke(transport.peer!, delivered, token) ?? Task.FromResult(false), (target, delivered) => target.FileTransferSessionOpenReceived?.Invoke(target, new FileTransferSessionOpenReceivedEventArgs(delivered, "loopback-peer")), ct);
         }
-        public Task SendFileTransferCancelAsync(FileTransferCancelV1 message, CancellationToken ct) => DeliverAsync(TrackCancel(message with { SessionId = NormalizeSessionId(message.SessionId) }), (target, payload) => target.FileTransferCancelReceived?.Invoke(target, new FileTransferCancelReceivedEventArgs(payload, "loopback-peer")), ct);
+        public Task SendFileTransferCancelAsync(FileTransferCancelV1 message, CancellationToken ct)
+        {
+            var payload = TrackCancel(message with { SessionId = NormalizeSessionId(message.SessionId) });
+            return DeliverMaybeAsync(
+                payload,
+                static (transport, delivered, token) => transport.OutboundCancelDeliveryOverrideAsync?.Invoke(transport.peer!, delivered, token) ?? Task.FromResult(false),
+                (target, delivered) => target.FileTransferCancelReceived?.Invoke(target, new FileTransferCancelReceivedEventArgs(delivered, "loopback-peer")),
+                ct);
+        }
         public Task SendFileTransferErrorAsync(FileTransferErrorV1 message, CancellationToken ct) => DeliverAsync(TrackError(message with { SessionId = NormalizeSessionId(message.SessionId) }), (target, payload) => target.FileTransferErrorReceived?.Invoke(target, new FileTransferErrorReceivedEventArgs(payload, "loopback-peer")), ct);
         public async Task SendFileTransferCompleteAsync(FileTransferCompleteV1 message, CancellationToken ct)
         {
@@ -356,6 +365,17 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             foreach (var session in dataSessions.Values)
             {
                 session.SetAvailability(isAvailable, reason, requiresResumeRequest);
+            }
+        }
+
+        public void RequestAllDataSessionHandoffs(
+            string reason,
+            FileTransferTransportHandoffKind handoffKind,
+            FileTransferTransportKind targetTransport)
+        {
+            foreach (var session in dataSessions.Values)
+            {
+                session.RequestHandoff(reason, handoffKind, targetTransport);
             }
         }
 
@@ -496,6 +516,26 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 }
 
                 AvailabilityChanged?.Invoke(this, new FileTransferDataSessionAvailabilityChangedEventArgs(isAvailable, reason, requiresResumeRequest));
+            }
+
+            public void RequestHandoff(
+                string reason,
+                FileTransferTransportHandoffKind handoffKind,
+                FileTransferTransportKind targetTransport)
+            {
+                if (disposed != 0)
+                {
+                    return;
+                }
+
+                AvailabilityChanged?.Invoke(
+                    this,
+                    new FileTransferDataSessionAvailabilityChangedEventArgs(
+                        IsAvailable,
+                        reason,
+                        requiresResumeRequest: true,
+                        handoffKind,
+                        targetTransport));
             }
 
             public void Dispose()

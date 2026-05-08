@@ -128,8 +128,7 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        await SendFileTransferEnvelopeAsync(
-                MsgType.FileTransferCancel,
+        await SendFileTransferCancelEnvelopeAsync(
                 message.TransferId,
                 FileTransferPayloadCodec.Serialize(message),
                 ct)
@@ -219,9 +218,9 @@ public sealed partial class NknSignalingTransport
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        if (request.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
+        if (request.NegotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV5)
         {
-            throw new InvalidOperationException("Only V4 file-transfer data frames are supported.");
+            throw new InvalidOperationException("Only V5 file-transfer data frames are supported.");
         }
 
         if (request.FileSizeBytes <= 0)
@@ -307,6 +306,116 @@ public sealed partial class NknSignalingTransport
             source: messageType == MsgType.FileTransferChunk ? client.BulkAddress : LocalPeerAddress);
         Log($"SendFileTransfer{messageType}Async sent (msg_id={envelope.MessageId}, transfer_id_len={normalizedTransferId.Length})");
     }
+
+    private async Task SendFileTransferCancelEnvelopeAsync(
+        string transferId,
+        byte[] plaintextPayload,
+        CancellationToken ct)
+    {
+        var normalizedTransferId = NormalizeRequiredFileTransferId(transferId);
+
+        if (!TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            NknRuntimeDiagnostics.SetLastError("file_transfer_cancel_no_session_context");
+            Log("SendFileTransferCancelAsync failed (reason=no_session_context)");
+            throw new InvalidOperationException("Session context is not set.");
+        }
+
+        if (string.IsNullOrWhiteSpace(remoteEndpoint))
+        {
+            NknRuntimeDiagnostics.SetLastError("file_transfer_cancel_no_remote_endpoint");
+            Log("SendFileTransferCancelAsync failed (reason=no_remote_endpoint)");
+            throw new InvalidOperationException("Remote endpoint is not known yet.");
+        }
+
+        if (!TryValidateAndTrackFileTransferMessage(MsgType.FileTransferCancel, normalizedTransferId, inbound: false, applyStateChange: false, out var failureReason))
+        {
+            NknRuntimeDiagnostics.SetLastError($"file_transfer_cancel_{failureReason}");
+            Log($"SendFileTransferCancelAsync failed (reason={failureReason}, transfer_id={normalizedTransferId})");
+            throw new InvalidOperationException($"File-transfer state rejected message '{MsgType.FileTransferCancel}': {failureReason}.");
+        }
+
+        var controlPayload = CreateSecureFileTransferPayload(MsgType.FileTransferCancel, normalizedTransferId, plaintextPayload);
+        var controlEnvelope = CreateEnvelope(envelopeCode, MsgType.FileTransferCancel, controlPayload, replyTo: null);
+        var controlTask = SendFileTransferCancelCopyAsync(
+            remoteEndpoint,
+            controlEnvelope,
+            useBulkLane: false,
+            lane: "control",
+            ct);
+
+        Task<CancelCopySendResult>? bulkTask = null;
+        if (!string.IsNullOrWhiteSpace(remoteBulkEndpoint))
+        {
+            var bulkPayload = CreateSecureFileTransferPayload(
+                MsgType.FileTransferCancel,
+                normalizedTransferId,
+                plaintextPayload,
+                useBulkIdentity: true);
+            var bulkEnvelope = CreateEnvelope(envelopeCode, MsgType.FileTransferCancel, bulkPayload, replyTo: null);
+            bulkTask = SendFileTransferCancelCopyAsync(
+                remoteBulkEndpoint,
+                bulkEnvelope,
+                useBulkLane: true,
+                lane: "bulk",
+                ct);
+        }
+
+        var controlResult = await controlTask.ConfigureAwait(false);
+        var bulkResult = bulkTask is null
+            ? new CancelCopySendResult("bulk", false, null)
+            : await bulkTask.ConfigureAwait(false);
+        if (!controlResult.Succeeded && !bulkResult.Succeeded)
+        {
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=filetransfer_cancel_redundant_both_failed; transport=nkn; transfer_id={normalizedTransferId}; control_error={controlResult.Error?.GetType().Name ?? "(none)"}; bulk_error={bulkResult.Error?.GetType().Name ?? "(none)"}");
+            throw controlResult.Error ?? bulkResult.Error ?? new InvalidOperationException("File-transfer cancel send failed on both lanes.");
+        }
+
+        if (!TryValidateAndTrackFileTransferMessage(MsgType.FileTransferCancel, normalizedTransferId, inbound: false, applyStateChange: true, out _))
+        {
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=filetransfer_message_state_race; message_type={MapSecureFileTransferMessageType(MsgType.FileTransferCancel)}; transfer_id={normalizedTransferId}; source={LocalPeerAddress}");
+        }
+
+        LogFileTransferEnvelopeEvent("sent", MsgType.FileTransferCancel, normalizedTransferId, source: LocalPeerAddress);
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=filetransfer_cancel_redundant_sent; transport=nkn; transfer_id={normalizedTransferId}; control_sent={(controlResult.Succeeded ? 1 : 0)}; bulk_sent={(bulkResult.Succeeded ? 1 : 0)}");
+    }
+
+    private async Task<CancelCopySendResult> SendFileTransferCancelCopyAsync(
+        string destination,
+        Envelope envelope,
+        bool useBulkLane,
+        string lane,
+        CancellationToken ct)
+    {
+        try
+        {
+            if (useBulkLane)
+            {
+                await SendBulkEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                await SendEnvelopeAsync(destination, envelope, ct).ConfigureAwait(false);
+            }
+
+            return new CancelCopySendResult(lane, true, null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=filetransfer_cancel_redundant_{lane}_failed; transport=nkn; error={ex.GetType().Name}");
+            return new CancelCopySendResult(lane, false, ex);
+        }
+    }
+
+    private readonly record struct CancelCopySendResult(string Lane, bool Succeeded, Exception? Error);
 
     private async Task SendFileTransferEnvelopeRawAsync(
         MsgType messageType,
@@ -516,12 +625,12 @@ public sealed partial class NknSignalingTransport
         int chunkCount,
         int rawChunkSize)
     {
-        if (negotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV4)
+        if (negotiatedDataProtocolVersion != FileTransferProtocol.ProtocolVersionV5)
         {
-            throw new InvalidOperationException("Only V4 file-transfer data frames are supported.");
+            throw new InvalidOperationException("Only V5 file-transfer data frames are supported.");
         }
 
-        return new FileTransferChunkBatchFrameV4
+        return new FileTransferChunkBatchFrameV5
         {
             SessionId = sessionId,
             TransferId = transferId,
@@ -551,7 +660,12 @@ public sealed partial class NknSignalingTransport
         }
     }
 
-    private void SetFileTransferDataSessionsAvailability(bool isAvailable, string reason, bool requiresResumeRequest)
+    private void SetFileTransferDataSessionsAvailability(
+        bool isAvailable,
+        string reason,
+        bool requiresResumeRequest,
+        FileTransferTransportHandoffKind handoffKind = FileTransferTransportHandoffKind.None,
+        FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown)
     {
         TransportFileTransferDataSession[] sessions;
         lock (gate)
@@ -566,7 +680,29 @@ public sealed partial class NknSignalingTransport
 
         foreach (var session in sessions)
         {
-            session.SetAvailability(isAvailable, reason, requiresResumeRequest);
+            session.SetAvailability(isAvailable, reason, requiresResumeRequest, handoffKind, targetTransport);
+        }
+    }
+
+    private void RequestFileTransferDataSessionsHandoff(
+        string reason,
+        FileTransferTransportHandoffKind handoffKind,
+        FileTransferTransportKind targetTransport)
+    {
+        TransportFileTransferDataSession[] sessions;
+        lock (gate)
+        {
+            if (fileTransferDataSessions.Count == 0)
+            {
+                return;
+            }
+
+            sessions = fileTransferDataSessions.Values.ToArray();
+        }
+
+        foreach (var session in sessions)
+        {
+            session.RequestHandoff(reason, handoffKind, targetTransport);
         }
     }
 
@@ -1083,7 +1219,7 @@ public sealed partial class NknSignalingTransport
             case MsgType.FileTransferPressureState:
                 return TryPrepareFileTransferPressureStateDispatch(source, env, out work);
             case MsgType.FileTransferCancel:
-                return TryPrepareFileTransferCancelDispatch(source, env, out work);
+                return TryPrepareFileTransferCancelDispatch(source, channel, env, out work);
             case MsgType.FileTransferError:
                 return TryPrepareFileTransferErrorDispatch(source, env, out work);
             case MsgType.FileTransferComplete:
@@ -1277,10 +1413,10 @@ public sealed partial class NknSignalingTransport
         return false;
     }
 
-    private bool TryPrepareFileTransferCancelDispatch(string source, Envelope env, out InboundFileTransferDispatchWork work)
+    private bool TryPrepareFileTransferCancelDispatch(string source, NknBridgeChannel channel, Envelope env, out InboundFileTransferDispatchWork work)
     {
         work = default;
-        if (!TryDecryptFileTransferPayload(source, env, MsgType.FileTransferCancel, out var securePayload))
+        if (!TryDecryptFileTransferPayload(source, env, MsgType.FileTransferCancel, out var securePayload, channel))
         {
             return false;
         }
@@ -1294,7 +1430,7 @@ public sealed partial class NknSignalingTransport
         }
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_cancel", securePayload.Metadata, message.TransferId, env.MessageId) ||
-            !TryValidateFileTransferMessageSession("file_transfer_cancel", message.SessionId, message.TransferId, env.MessageId, source) ||
+            !TryValidateFileTransferMessageSession("file_transfer_cancel", message.SessionId, message.TransferId, env.MessageId, source, channel) ||
             !TryValidateFileTransferDispatchState("file_transfer_cancel", MsgType.FileTransferCancel, message.TransferId, env.MessageId, source))
         {
             return false;
@@ -1470,6 +1606,57 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        if (frame is FileTransferCancelFrameV4 cancelFrame)
+        {
+            work = CreateInboundFileTransferDispatchWork(
+                MsgType.FileTransferCancel,
+                frame.TransferId,
+                () =>
+                {
+                    LocalOperationalLog.Info(
+                        "SessionSecurity",
+                        $"event=filetransfer_v4_cancel_frame_received; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; source={source}; msg_id={env.MessageId}; lane={MapBridgeChannel(channel)}");
+                    LogFileTransferEnvelopeEvent("received", MsgType.FileTransferDataFrame, frame.TransferId, source);
+                    FileTransferCancelReceived?.Invoke(
+                        this,
+                        new FileTransferCancelReceivedEventArgs(
+                            new FileTransferCancelV1
+                            {
+                                SessionId = cancelFrame.SessionId,
+                                TransferId = cancelFrame.TransferId,
+                                Reason = cancelFrame.Reason,
+                            },
+                            source));
+                });
+            return true;
+        }
+
+        if (frame is FileTransferErrorFrameV4 errorFrame)
+        {
+            work = CreateInboundFileTransferDispatchWork(
+                MsgType.FileTransferError,
+                frame.TransferId,
+                () =>
+                {
+                    LocalOperationalLog.Info(
+                        "SessionSecurity",
+                        $"event=filetransfer_v4_error_frame_received; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; source={source}; msg_id={env.MessageId}; lane={MapBridgeChannel(channel)}; error_code={errorFrame.ErrorCode ?? "(none)"}");
+                    LogFileTransferEnvelopeEvent("received", MsgType.FileTransferDataFrame, frame.TransferId, source);
+                    FileTransferErrorReceived?.Invoke(
+                        this,
+                        new FileTransferErrorReceivedEventArgs(
+                            new FileTransferErrorV1
+                            {
+                                SessionId = errorFrame.SessionId,
+                                TransferId = errorFrame.TransferId,
+                                ErrorCode = errorFrame.ErrorCode ?? "remote_error",
+                                Message = errorFrame.Message,
+                            },
+                            source));
+                });
+            return true;
+        }
+
         work = CreateInboundFileTransferDispatchWork(
             MsgType.FileTransferDataFrame,
             frame.TransferId,
@@ -1595,7 +1782,7 @@ public sealed partial class NknSignalingTransport
 
     private static bool IsBenignLateFileTransferDataFrameRejection(FileTransferDataFrame frame, string failureReason)
         => ((failureReason is "unknown_transfer_id" or "transfer_already_terminal") &&
-            (IsReceiverFeedbackDataFrame(frame) || IsTerminalDataFrame(frame) || frame is FileTransferPauseControlFrameV4)) ||
+            (IsReceiverFeedbackDataFrame(frame) || IsV5RecoveryControlDataFrame(frame) || IsTerminalDataFrame(frame) || frame is FileTransferPauseControlFrameV4)) ||
            (failureReason == "post_completion_late_sender_frame" && IsSenderDataFrame(frame)) ||
            (failureReason == "transfer_already_terminal" && IsSenderDataFrame(frame));
 
@@ -2935,6 +3122,18 @@ public sealed partial class NknSignalingTransport
             return ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
         }
 
+        if (messageType == MsgType.FileTransferCancel &&
+            channel == NknBridgeChannel.Bulk)
+        {
+            return ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
+        }
+
+        if (messageType == MsgType.FileTransferCancel &&
+            SourceMatchesExpectedRemoteBulkPeer(source))
+        {
+            return ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
+        }
+
         return ResolveExpectedRemotePeerAddressForCurrentSession();
     }
 
@@ -2955,6 +3154,12 @@ public sealed partial class NknSignalingTransport
         }
 
         if (string.Equals(messageType, "file_transfer_data_frame", StringComparison.Ordinal) &&
+            SourceMatchesExpectedRemoteBulkPeer(source))
+        {
+            return ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
+        }
+
+        if (string.Equals(messageType, "file_transfer_cancel", StringComparison.Ordinal) &&
             SourceMatchesExpectedRemoteBulkPeer(source))
         {
             return ResolveExpectedRemoteBulkPeerAddressForCurrentSession();
@@ -3218,12 +3423,29 @@ public sealed partial class NknSignalingTransport
 
         if (!hasExisting)
         {
+            if (messageType == MsgType.FileTransferCancel &&
+                IsRecentTerminalFileTransferLocked(transferId, out var terminalPhase) &&
+                terminalPhase == FileTransferTransportPhase.Canceled)
+            {
+                NknRuntimeDiagnostics.IncrementFileTransferDuplicateCancelAcked();
+                nextState = new FileTransferTransportState(InitiatedLocally: !inbound, FileTransferTransportPhase.Canceled);
+                return true;
+            }
+
             failureReason = "unknown_transfer_id";
             return false;
         }
 
         if (currentState.IsTerminal)
         {
+            if (messageType == MsgType.FileTransferCancel &&
+                currentState.Phase == FileTransferTransportPhase.Canceled)
+            {
+                NknRuntimeDiagnostics.IncrementFileTransferDuplicateCancelAcked();
+                nextState = currentState;
+                return true;
+            }
+
             failureReason = "transfer_already_terminal";
             return false;
         }
@@ -3435,6 +3657,20 @@ public sealed partial class NknSignalingTransport
             return true;
         }
 
+        if (IsV5RecoveryControlDataFrame(frame))
+        {
+            if (currentState.Phase is not FileTransferTransportPhase.Accepted
+                and not FileTransferTransportPhase.Started
+                and not FileTransferTransportPhase.Transferring)
+            {
+                failureReason = "recovery_control_requires_start";
+                return false;
+            }
+
+            nextState = currentState with { Phase = FileTransferTransportPhase.Transferring };
+            return true;
+        }
+
         if (IsSenderStateControlDataFrame(frame, currentState, inbound))
         {
             if (currentState.Phase is not FileTransferTransportPhase.Accepted
@@ -3560,6 +3796,11 @@ public sealed partial class NknSignalingTransport
 
     private static bool IsReceiverFeedbackDataFrame(FileTransferDataFrame frame)
         => frame is FileTransferStateFrameV4;
+
+    private static bool IsV5RecoveryControlDataFrame(FileTransferDataFrame frame)
+        => frame is FileTransferHandoffFrameV5
+            or FileTransferRepairRequestFrameV5
+            or FileTransferRepairProofFrameV5;
 
     private static bool IsTerminalDataFrame(FileTransferDataFrame frame)
         => frame is FileTransferCompleteFrameV4
@@ -4147,8 +4388,8 @@ public sealed partial class NknSignalingTransport
                 return SendDataFrameWithBulkRedundancyAsync(
                     frame,
                     serializedFrame,
-                    protocolVersion: FileTransferProtocol.ProtocolVersionV4,
-                    bothFailedMessage: "V4 redundant feedback send failed on both lanes.",
+                    protocolVersion: FileTransferProtocol.ProtocolVersionV5,
+                    bothFailedMessage: "V5 redundant feedback send failed on both lanes.",
                     ct);
             }
 
@@ -4521,7 +4762,7 @@ public sealed partial class NknSignalingTransport
                         .Skip(startOffset)
                         .Take(candidateEndExclusive - startOffset)
                         .ToArray();
-                    var candidateBatch = new FileTransferChunkBatchFrameV4
+                    var candidateBatch = new FileTransferChunkBatchFrameV5
                     {
                         SessionId = batch.SessionId,
                         TransferId = batch.TransferId,
@@ -4703,7 +4944,12 @@ public sealed partial class NknSignalingTransport
             return rawBytes;
         }
 
-        public void SetAvailability(bool isAvailable, string reason, bool requiresResumeRequest)
+        public void SetAvailability(
+            bool isAvailable,
+            string reason,
+            bool requiresResumeRequest,
+            FileTransferTransportHandoffKind handoffKind = FileTransferTransportHandoffKind.None,
+            FileTransferTransportKind targetTransport = FileTransferTransportKind.Unknown)
         {
             if (disposed != 0)
             {
@@ -4722,7 +4968,30 @@ public sealed partial class NknSignalingTransport
                 new FileTransferDataSessionAvailabilityChangedEventArgs(
                     isAvailable,
                     reason,
-                    requiresResumeRequest));
+                    requiresResumeRequest,
+                    handoffKind,
+                    targetTransport));
+        }
+
+        public void RequestHandoff(
+            string reason,
+            FileTransferTransportHandoffKind handoffKind,
+            FileTransferTransportKind targetTransport)
+        {
+            if (disposed != 0 ||
+                handoffKind == FileTransferTransportHandoffKind.None)
+            {
+                return;
+            }
+
+            AvailabilityChanged?.Invoke(
+                this,
+                new FileTransferDataSessionAvailabilityChangedEventArgs(
+                    IsAvailable,
+                    reason,
+                    requiresResumeRequest: true,
+                    handoffKind,
+                    targetTransport));
         }
 
         public void Dispose()
@@ -4760,7 +5029,10 @@ public sealed partial class NknSignalingTransport
             or FileTransferPauseControlFrameV4
             or FileTransferCompleteFrameV4
             or FileTransferCancelFrameV4
-            or FileTransferErrorFrameV4;
+            or FileTransferErrorFrameV4
+            or FileTransferHandoffFrameV5
+            or FileTransferRepairRequestFrameV5
+            or FileTransferRepairProofFrameV5;
     }
 
     private static bool IsV4ReceiverFeedbackBulkRedundancyDisabled()
@@ -4808,7 +5080,7 @@ public sealed partial class NknSignalingTransport
         bool rejected)
     {
         if (messageType != MsgType.FileTransferDataFrame ||
-            !string.Equals(frameType, FileTransferProtocol.ChunkBatchFrameTypeV4, StringComparison.Ordinal))
+            !string.Equals(frameType, FileTransferProtocol.ChunkBatchFrameTypeV5, StringComparison.Ordinal))
         {
             return;
         }

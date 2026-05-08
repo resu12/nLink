@@ -63,6 +63,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private static readonly TimeSpan ScreenShareControlBootstrapKeyframeRetryDelay = TimeSpan.FromMilliseconds(80);
     private static readonly TimeSpan ScreenShareControlBootstrapFollowerRetryDelay = TimeSpan.FromMilliseconds(140);
     private static readonly TimeSpan ScreenShareLaneRecentDropWindow = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan FileTransferFallbackUnprovenProbeDelay = TimeSpan.FromSeconds(3);
 
     private readonly NknTransportOptions options;
     private readonly NknIdentity identity;
@@ -104,6 +105,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly Dictionary<string, FileTransferTerminalTombstone> fileTransferTerminalTombstones = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
     private readonly HashSet<string> fileTransferDataSessionRemoteOpenSuppressed = new(StringComparer.Ordinal);
+    private readonly object fileTransferFallbackProofGate = new();
     private readonly SortedDictionary<long, InboundFileTransferDispatchWork> pendingInboundFileTransferControlDispatch = new();
     private readonly NknLifecycleChannel lifecycleChannel;
     private readonly NknSecureControlChannel controlChannel;
@@ -120,7 +122,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private const int FileTransferInboundReplayWindowSize = 32768;
     private const long FileTransferInboundReplayMaxForwardAdvance = 131072;
 
-    public bool SupportsFileTransferV4Streaming => true;
+    public bool SupportsFileTransferV5Streaming => true;
 
     public FileTransferTransportProfileKind FileTransferTransportProfileKind => FileTransferTransportProfileKind.ConservativeNknStartup;
 
@@ -154,6 +156,12 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private bool remoteSupportsScreenShareCursorOverlay;
     private RemoteControlSessionState transportRemoteControlState = RemoteControlSessionState.Default;
     private SessionSecurityState currentSessionSecurityState = SessionSecurityState.Empty;
+    private bool fileTransferFallbackProofPending;
+    private string fileTransferFallbackProofReason = "none";
+    private string? fileTransferFallbackProofSessionId;
+    private NknAccelerationLaneKind fileTransferFallbackProofLanes;
+    private long fileTransferFallbackProofGeneration;
+    private bool fileTransferFallbackProofProbeScheduled;
     private SessionId? activeApprovedSessionId;
     private PeerAddress? activeApprovedHelperAddress;
     private LinkedListNode<QueuedControlEnvelope>? queuedLowPriorityMouseMoveNode;
@@ -2298,18 +2306,61 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     {
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryStarted)
         {
+            MarkFileTransferFallbackNknProofPending(
+                reason: string.IsNullOrWhiteSpace(e.ExitReasonText) ? "receive_stall_recovery" : e.ExitReasonText,
+                sessionId: currentSessionSecurityState.SessionId?.Value,
+                lanes: NknAccelerationLaneKind.File);
             SetFileTransferDataSessionsAvailability(
                 isAvailable: false,
                 reason: "receive_stall_recovery",
-                requiresResumeRequest: true);
+                requiresResumeRequest: true,
+                handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+                targetTransport: FileTransferTransportKind.RegularNkn);
         }
 
         if (e.Kind == BridgeLifecycleEventKind.Ready)
         {
-            SetFileTransferDataSessionsAvailability(
-                isAvailable: true,
-                reason: "transport_recovered",
-                requiresResumeRequest: true);
+            if (IsFileTransferFallbackNknProofPending())
+            {
+                var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_fallback_nkn_ready_unproven; session_id={sessionId}; reason=bridge_ready_waiting_for_receive_proof");
+                SetFileTransferDataSessionsAvailability(
+                    isAvailable: false,
+                    reason: "transport_recovered_unproven",
+                    requiresResumeRequest: true,
+                    handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+                    targetTransport: FileTransferTransportKind.RegularNkn);
+                ScheduleFileTransferFallbackNknProbeIfPending("bridge_ready_unproven");
+            }
+            else
+            {
+                SetFileTransferDataSessionsAvailability(
+                    isAvailable: true,
+                    reason: "transport_recovered",
+                    requiresResumeRequest: true,
+                    handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+                    targetTransport: FileTransferTransportKind.RegularNkn);
+            }
+        }
+
+        if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryReceiveResumed)
+        {
+            if (IsFileTransferFallbackNknProofPending())
+            {
+                var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_fallback_nkn_receive_resumed_unproven; session_id={sessionId}; reason=waiting_for_file_transfer_bulk_receive_proof");
+                SetFileTransferDataSessionsAvailability(
+                    isAvailable: false,
+                    reason: "transport_recovered_unproven",
+                    requiresResumeRequest: true,
+                    handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+                    targetTransport: FileTransferTransportKind.RegularNkn);
+                ScheduleFileTransferFallbackNknProbeIfPending("receive_resumed_unproven");
+            }
         }
 
         BridgeLifecycle?.Invoke(this, e);
@@ -2325,6 +2376,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
 
         try
         {
+            MarkScreenTunaHandoffFrameApplied(e);
             var metrics = secureScreenShareFrameReassembler.GetMetricsSnapshot();
             NknRuntimeDiagnostics.SetMediaPlaneFramesDroppedForFreshness(metrics.FramesDropped);
             ScreenShareFrameCompleted?.Invoke(
@@ -2378,7 +2430,9 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
         SetFileTransferDataSessionsAvailability(
             isAvailable: false,
             reason: "transport_disconnected",
-            requiresResumeRequest: true);
+            requiresResumeRequest: true,
+            handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+            targetTransport: FileTransferTransportKind.RegularNkn);
         NknRuntimeDiagnostics.SetLastError("nkn_client_disconnected");
         UpdateSessionSecurityState(currentSessionSecurityState.Invalidate("transport_disconnected"));
         Log("Client disconnected");
