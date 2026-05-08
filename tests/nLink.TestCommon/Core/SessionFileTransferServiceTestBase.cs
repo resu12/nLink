@@ -305,6 +305,16 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             peer?.SetAllDataSessionsAvailability(isAvailable: true, "transport_recovered", requiresResumeRequest: true);
         }
 
+        public void SetLocalDataSessionsUnavailableForTests(string reason)
+        {
+            SetAllDataSessionsAvailability(isAvailable: false, reason, requiresResumeRequest: true);
+        }
+
+        public void SetLocalDataSessionsAvailableForTests(string reason)
+        {
+            SetAllDataSessionsAvailability(isAvailable: true, reason, requiresResumeRequest: true);
+        }
+
         public void ReceiveDeliveredSessionOpen(FileTransferSessionOpenV2 payload)
         {
             FileTransferSessionOpenReceived?.Invoke(this, new FileTransferSessionOpenReceivedEventArgs(payload, "loopback-peer"));

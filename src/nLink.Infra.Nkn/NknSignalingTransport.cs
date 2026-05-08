@@ -64,6 +64,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private static readonly TimeSpan ScreenShareControlBootstrapFollowerRetryDelay = TimeSpan.FromMilliseconds(140);
     private static readonly TimeSpan ScreenShareLaneRecentDropWindow = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan FileTransferFallbackUnprovenProbeDelay = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan FileTransferCancelEchoMinInterval = TimeSpan.FromMilliseconds(750);
 
     private readonly NknTransportOptions options;
     private readonly NknIdentity identity;
@@ -103,6 +104,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly Dictionary<string, FileTransferTransportState> fileTransferStates = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ExpectedControlReplayDuplicateSuppressionState> expectedControlReplayDuplicateSuppressions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FileTransferTerminalTombstone> fileTransferTerminalTombstones = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTimeOffset> fileTransferCancelEchoLastSent = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
     private readonly HashSet<string> fileTransferDataSessionRemoteOpenSuppressed = new(StringComparer.Ordinal);
     private readonly object fileTransferFallbackProofGate = new();
@@ -162,6 +164,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private NknAccelerationLaneKind fileTransferFallbackProofLanes;
     private long fileTransferFallbackProofGeneration;
     private bool fileTransferFallbackProofProbeScheduled;
+    private bool fileTransferFallbackBulkProofObserved;
+    private bool fileTransferFallbackControlProofObserved;
     private SessionId? activeApprovedSessionId;
     private PeerAddress? activeApprovedHelperAddress;
     private LinkedListNode<QueuedControlEnvelope>? queuedLowPriorityMouseMoveNode;

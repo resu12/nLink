@@ -202,6 +202,7 @@ public sealed partial class SessionFileTransferService
         OutboundTransferContext context,
         IEnumerable<int> requestedChunkIndices,
         bool allowEmergencyCreditRepair,
+        int emergencyCreditEndExclusive,
         out RepairChunkFilterStats stats)
     {
         var valid = new List<int>();
@@ -236,8 +237,12 @@ public sealed partial class SessionFileTransferService
                     continue;
                 }
 
-                if (chunkIndex >= accepted &&
-                    !(allowEmergencyCreditRepair && chunkIndex == remoteNextExpected))
+                var emergencyCreditAllowed = allowEmergencyCreditRepair &&
+                    (chunkIndex == remoteNextExpected ||
+                     (emergencyCreditEndExclusive > remoteNextExpected &&
+                      chunkIndex >= remoteNextExpected &&
+                      chunkIndex < emergencyCreditEndExclusive));
+                if (chunkIndex >= accepted && !emergencyCreditAllowed)
                 {
                     skippedFuture++;
                     LogSenderRepairChunkSkippedLocked(context, chunkIndex, "not_yet_sent");

@@ -526,7 +526,12 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                     StartChunkIndex = 0,
                     ChunkCount = 4,
                     DataSegments = new byte[4][] { new byte[21 * 1024], new byte[21 * 1024], new byte[21 * 1024], new byte[21 * 1024] },
-                    BatchProfile = "v4_default_21k"
+                    BatchProfile = "v4_default_21k",
+                    TransportEpoch = 7,
+                    BatchId = "batch-7",
+                    RepairRequestId = "repair-7",
+                    Priority = "frontier",
+                    RecoveryMode = "frontier_repair_only"
                 };
 
                 await outboundSession.SendAsync(oversizedBatch, cts.Token);
@@ -537,6 +542,14 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
                 var batches = frames.Cast<FileTransferChunkBatchFrameV5>().OrderBy(static frame => frame.StartChunkIndex).ToArray();
                 Assert.Equal(new[] { 0, 3 }, batches.Select(static frame => frame.StartChunkIndex).ToArray());
                 Assert.Equal(4, batches.Sum(static frame => frame.DataSegments.Count));
+                Assert.All(batches, batch =>
+                {
+                    Assert.Equal(7, batch.TransportEpoch);
+                    Assert.Equal("batch-7", batch.BatchId);
+                    Assert.Equal("repair-7", batch.RepairRequestId);
+                    Assert.Equal("frontier", batch.Priority);
+                    Assert.Equal("frontier_repair_only", batch.RecoveryMode);
+                });
                 string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
                 Assert.Contains("event=filetransfer_chunk_batch_split_for_transport", logTail, StringComparison.Ordinal);
                 Assert.Contains("original_frame_type=filetransfer.chunk_batch.v5", logTail, StringComparison.Ordinal);
@@ -1408,8 +1421,8 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             await Task.Delay(100, cts.Token);
             string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
             Assert.Contains("event=filetransfer_v4_cancel_frame_received", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_message_rejected; message_type=file_transfer_data_frame", logTail, StringComparison.Ordinal);
-            Assert.Contains("post_terminal_late_sender_frame_canceled", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_data_frame_ignored; transport=nkn", logTail, StringComparison.Ordinal);
+            Assert.Contains("post_terminal_late_frame_canceled", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -1768,11 +1781,20 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             await Task.Delay(100, cts.Token);
 
             string logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
-            Assert.Contains("event=filetransfer_message_rejected; message_type=file_transfer_data_frame", logTail, StringComparison.Ordinal);
             Assert.Contains(transferId, logTail, StringComparison.Ordinal);
-            Assert.Contains($"file_transfer_data_frame_{expectedReason}", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason, StringComparison.Ordinal);
+            if (string.Equals(terminalKind, "canceled", StringComparison.Ordinal))
+            {
+                Assert.Contains("event=filetransfer_data_frame_ignored; transport=nkn", logTail, StringComparison.Ordinal);
+                Assert.Contains("post_terminal_late_frame_canceled", logTail, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains("event=filetransfer_message_rejected; message_type=file_transfer_data_frame", logTail, StringComparison.Ordinal);
+                Assert.Contains($"file_transfer_data_frame_{expectedReason}", NknRuntimeDiagnostics.Snapshot().LastEnvelopeDropReason, StringComparison.Ordinal);
+                Assert.DoesNotContain($"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={transferId}", logTail, StringComparison.Ordinal);
+            }
+
             Assert.DoesNotContain("reason=post_completion_late_sender_frame", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain($"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={transferId}", logTail, StringComparison.Ordinal);
         }
         finally
         {

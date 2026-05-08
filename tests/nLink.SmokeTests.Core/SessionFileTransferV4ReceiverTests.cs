@@ -195,6 +195,61 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
     }
 
     [Fact]
+    public async Task V4Receiver_PeerSilenceDuringTunaRecoveryPause_TerminalsInsteadOfReceivingForever()
+    {
+        const string transferId = "transfer_v4_receiver_peer_silence_tuna_recovery";
+        const string sessionId = "session_v4_receiver_peer_silence_tuna_recovery";
+        var previousTimeout = SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests;
+        SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = TimeSpan.FromMilliseconds(300);
+        try
+        {
+            var payload = Enumerable.Range(1, 12).Select(static value => (byte)value).ToArray();
+            var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
+            using var destination = new NonDisposingMemoryStream();
+            using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+            using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+            senderTransport.Connect(receiverTransport);
+            using var receiver = new SessionFileTransferService();
+            receiver.AttachTransport(receiverTransport);
+
+            var senderSession = await StartInboundV4ReceiverAsync(
+                senderTransport,
+                receiver,
+                transferId,
+                sessionId,
+                "v4-peer-silence-tuna-recovery.bin",
+                payload.Length,
+                sha256,
+                (_, _) => Task.FromResult<Stream>(destination));
+
+            await senderSession.SendAsync(CreateManifest(sessionId, transferId, "v4-peer-silence-tuna-recovery.bin", payload.Length, chunkSizeBytes: 4, sha256), CancellationToken.None);
+            await senderSession.SendAsync(
+                new FileTransferChunkBatchFrameV5
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    StartChunkIndex = 0,
+                    ChunkCount = 1,
+                    DataSegments = [payload.Take(4).ToArray()],
+                },
+                CancellationToken.None);
+
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.BytesTransferred == 4, timeoutMs: 5000);
+
+            receiverTransport.SetLocalDataSessionsUnavailableForTests("receive_stall_recovery");
+
+            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.Failed, timeoutMs: 5000);
+
+            Assert.Equal(FileTransferResultCodes.TransportDisconnected, receiver.Snapshot.Inbound!.ErrorCode);
+            Assert.Contains("Sender stopped responding", receiver.Snapshot.Inbound.StatusMessage, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = previousTimeout;
+        }
+    }
+
+    [Fact]
     public async Task V4SparseReceiver_FrontierAdvance_ClearsObsoleteRepairStateBeforeStaleBatch()
     {
         const string transferId = "transfer_v4_repair_obsolete_after_frontier";
@@ -853,7 +908,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
     }
 
     [Fact]
-    public async Task V4SparseReceiver_PostFallbackFrontierRepairKeepsExactFrontierUntilHandoffRecovered()
+    public async Task V4SparseReceiver_PostFallbackFrontierRepairWidensAfterFirstV5Proof()
     {
         const string transferId = "transfer_v4_post_fallback_backfill_widens";
         const string sessionId = "session_v4_post_fallback_backfill_widens";
@@ -911,23 +966,22 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         await WaitUntilAsync(
             () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Skip(stateCountBeforeRebind).Any(static frame =>
                 frame.ContiguousCommittedChunkIndex == 3 &&
-                frame.MissingRanges.Any(range => range.StartChunkIndex == 3 && range.ChunkCount == 1)),
+                frame.MissingRanges.Any(range => range.StartChunkIndex == 3 && range.ChunkCount == 3)),
             timeoutMs: 5000);
 
         await senderSession.SendAsync(CreateBatch(3, 3), CancellationToken.None);
         await WaitUntilAsync(
             () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Skip(stateCountBeforeRebind).Any(static frame =>
                 frame.ContiguousCommittedChunkIndex == 7 &&
-                frame.MissingRanges.Any(range => range.StartChunkIndex == 7 && range.ChunkCount == 1)),
+                frame.MissingRanges.Any(range => range.StartChunkIndex == 7 && range.ChunkCount >= 3)),
             timeoutMs: 5000);
 
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_v4_emergency_frontier_repair_requested;", log, StringComparison.Ordinal);
         Assert.Contains("requested_chunk_count=1", log, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=filetransfer_v4_post_fallback_frontier_backfill_requested;", log, StringComparison.Ordinal);
-        Assert.DoesNotContain("requested_chunk_count=3", log, StringComparison.Ordinal);
-        Assert.DoesNotContain("requested_chunk_count=12", log, StringComparison.Ordinal);
-        Assert.DoesNotContain("requested_chunk_count=32", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v4_post_fallback_frontier_backfill_window_changed;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v4_post_fallback_frontier_backfill_requested;", log, StringComparison.Ordinal);
+        Assert.Contains("requested_chunk_count=3", log, StringComparison.Ordinal);
     }
 
     [Fact]

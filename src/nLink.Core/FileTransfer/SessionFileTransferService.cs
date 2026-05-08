@@ -157,6 +157,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static readonly TimeSpan PullV4PostFallbackPeerSilenceTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan PullV4PeerSilenceTimeout = TimeSpan.FromSeconds(90);
     private static readonly int[] CancelRetryDelaysMs = [250, 750, 1500, 3000, 7000, 12000, 20000, 30000];
+    private static readonly int[] CancelDataFrameRetryDelaysMs = [250, 750, 1500, 3000, 7000, 12000];
     private const int CancelDataFrameBestEffortTimeoutMs = 750;
     private const int PullV4GrantLowWatermarkDivisor = 2;
     private const int PullV4HealthyDefaultChunkSizeBytes = 40 * 1024;
@@ -239,7 +240,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V4PostFallbackFrontierBackfillStep1Chunks = 3;
     private const int V4PostFallbackFrontierBackfillStep2Chunks = 12;
     private const int V4PostFallbackFrontierBackfillStep3Chunks = 32;
-    private const int V4PostFallbackFrontierBackfillStep1AfterCommittedChunks = 2;
+    private const int V4PostFallbackFrontierBackfillStep1AfterCommittedChunks = 1;
     private const int V4PostFallbackFrontierBackfillStep2AfterCommittedChunks = 4;
     private const int V4PostFallbackFrontierBackfillStep3AfterCommittedChunks = 8;
     private const int V4FrontierTailRetryChunks = V4MaxBatchSegmentsDefault;
@@ -3416,6 +3417,13 @@ public sealed partial class SessionFileTransferService : IDisposable
             DataSession = null;
         }
 
+        public IFileTransferDataSession? DetachDataSession()
+        {
+            var dataSession = DataSession;
+            DataSession = null;
+            return dataSession;
+        }
+
         public Task ResetAndGetControlSignalTask()
         {
             controlSignal = CreateSignal();
@@ -3449,6 +3457,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         int SkippedFutureCount,
         int SkippedOutOfBoundsCount,
         string RepairRequestKey,
+        string? ProtocolRepairRequestId,
+        string? ProtocolPriority,
+        string? ProtocolRecoveryMode,
         bool FrontierTailRepair,
         bool EmergencyCreditRepair,
         FileTransferV4RepairDeliveryMode DeliveryMode,
@@ -4017,6 +4028,13 @@ public sealed partial class SessionFileTransferService : IDisposable
             WriteStream = null;
             Hash = null;
             DataSession = null;
+        }
+
+        public IFileTransferDataSession? DetachDataSession()
+        {
+            var dataSession = DataSession;
+            DataSession = null;
+            return dataSession;
         }
 
         private static TaskCompletionSource<bool> CreateSignal()

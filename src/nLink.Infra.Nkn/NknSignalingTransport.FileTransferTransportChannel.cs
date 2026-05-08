@@ -1140,6 +1140,7 @@ public sealed partial class NknSignalingTransport
         }
 
         LogFileTransferEnvelopeEvent("received", MsgType.FileTransferCancel, message.TransferId, source);
+        RecordTunaFallbackNknControlReceived(MsgType.FileTransferCancel, message.SessionId, env.Payload.Length);
         Log($"FileTransferCancel received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, has_reason={message.Reason is not null})");
         FileTransferCancelReceived?.Invoke(this, new FileTransferCancelReceivedEventArgs(message, source));
     }
@@ -1167,6 +1168,7 @@ public sealed partial class NknSignalingTransport
         }
 
         LogFileTransferEnvelopeEvent("received", MsgType.FileTransferError, message.TransferId, source);
+        RecordTunaFallbackNknControlReceived(MsgType.FileTransferError, message.SessionId, env.Payload.Length);
         Log($"FileTransferError received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, error_code={message.ErrorCode})");
         FileTransferErrorReceived?.Invoke(this, new FileTransferErrorReceivedEventArgs(message, source));
     }
@@ -1194,6 +1196,7 @@ public sealed partial class NknSignalingTransport
         }
 
         LogFileTransferEnvelopeEvent("received", MsgType.FileTransferComplete, message.TransferId, source);
+        RecordTunaFallbackNknControlReceived(MsgType.FileTransferComplete, message.SessionId, env.Payload.Length);
         Log($"FileTransferComplete received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, size_bytes={message.FileSizeBytes})");
         FileTransferCompleteReceived?.Invoke(this, new FileTransferCompleteReceivedEventArgs(message, source));
     }
@@ -1442,6 +1445,7 @@ public sealed partial class NknSignalingTransport
             () =>
             {
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferCancel, message.TransferId, source);
+                RecordTunaFallbackNknControlReceived(MsgType.FileTransferCancel, message.SessionId, env.Payload.Length);
                 Log($"FileTransferCancel received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, has_reason={message.Reason is not null})");
                 FileTransferCancelReceived?.Invoke(this, new FileTransferCancelReceivedEventArgs(message, source));
             });
@@ -1477,6 +1481,7 @@ public sealed partial class NknSignalingTransport
             () =>
             {
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferError, message.TransferId, source);
+                RecordTunaFallbackNknControlReceived(MsgType.FileTransferError, message.SessionId, env.Payload.Length);
                 Log($"FileTransferError received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, error_code={message.ErrorCode})");
                 FileTransferErrorReceived?.Invoke(this, new FileTransferErrorReceivedEventArgs(message, source));
             });
@@ -1512,6 +1517,7 @@ public sealed partial class NknSignalingTransport
             () =>
             {
                 LogFileTransferEnvelopeEvent("received", MsgType.FileTransferComplete, message.TransferId, source);
+                RecordTunaFallbackNknControlReceived(MsgType.FileTransferComplete, message.SessionId, env.Payload.Length);
                 Log($"FileTransferComplete received (msg_id={env.MessageId}, transfer_id_len={message.TransferId.Length}, size_bytes={message.FileSizeBytes})");
                 FileTransferCompleteReceived?.Invoke(this, new FileTransferCompleteReceivedEventArgs(message, source));
             });
@@ -1588,6 +1594,11 @@ public sealed partial class NknSignalingTransport
 
         if (!TryValidateAndTrackFileTransferDataFrame(frame, inbound: true, applyStateChange: true, out var failureReason))
         {
+            if (ShouldEchoCancelForLateFileTransferDataFrame(frame, failureReason))
+            {
+                ScheduleFileTransferCancelEcho(frame, source, channel, failureReason);
+            }
+
             if (IsBenignLateFileTransferDataFrameRejection(frame, failureReason))
             {
                 LocalOperationalLog.Info(
@@ -1662,8 +1673,8 @@ public sealed partial class NknSignalingTransport
             frame.TransferId,
             () =>
             {
-                RecordTunaFallbackNknFrameReceived(
-                    MsgType.FileTransferDataFrame,
+                RecordTunaFallbackFileTransferDataFrameReceived(
+                    frame,
                     channel,
                     env.Payload.Length,
                     frame.SessionId);
@@ -1783,6 +1794,7 @@ public sealed partial class NknSignalingTransport
     private static bool IsBenignLateFileTransferDataFrameRejection(FileTransferDataFrame frame, string failureReason)
         => ((failureReason is "unknown_transfer_id" or "transfer_already_terminal") &&
             (IsReceiverFeedbackDataFrame(frame) || IsV5RecoveryControlDataFrame(frame) || IsTerminalDataFrame(frame) || frame is FileTransferPauseControlFrameV4)) ||
+           failureReason == "post_terminal_late_frame_canceled" ||
            (failureReason == "post_completion_late_sender_frame" && IsSenderDataFrame(frame)) ||
            (failureReason == "transfer_already_terminal" && IsSenderDataFrame(frame));
 
@@ -3775,6 +3787,77 @@ public sealed partial class NknSignalingTransport
         return false;
     }
 
+    private bool ShouldEchoCancelForLateFileTransferDataFrame(FileTransferDataFrame frame, string failureReason)
+    {
+        if (frame is FileTransferCancelFrameV4)
+        {
+            return false;
+        }
+
+        if (failureReason == "post_terminal_late_frame_canceled")
+        {
+            return true;
+        }
+
+        return failureReason == "transfer_already_terminal" &&
+               IsRecentTerminalFileTransferLocked(frame.TransferId, out var terminalPhase) &&
+               terminalPhase == FileTransferTransportPhase.Canceled;
+    }
+
+    private void ScheduleFileTransferCancelEcho(
+        FileTransferDataFrame frame,
+        string? source,
+        NknBridgeChannel channel,
+        string triggerReason)
+    {
+        var normalizedTransferId = NormalizeRequiredFileTransferId(frame.TransferId);
+        var normalizedSessionId = string.IsNullOrWhiteSpace(frame.SessionId) ? CurrentSessionSecurityState.SessionId?.Value : frame.SessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        lock (controlSecureStateGate)
+        {
+            if (fileTransferCancelEchoLastSent.TryGetValue(normalizedTransferId, out var lastSent) &&
+                now - lastSent < FileTransferCancelEchoMinInterval)
+            {
+                return;
+            }
+
+            fileTransferCancelEchoLastSent[normalizedTransferId] = now;
+        }
+
+        _ = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    using var timeout = new CancellationTokenSource(AckWaitTimeout);
+                    await SendFileTransferCancelAsync(
+                            new FileTransferCancelV1
+                            {
+                                SessionId = normalizedSessionId,
+                                TransferId = normalizedTransferId,
+                                Reason = FileTransferResultCodes.CanceledLocal,
+                            },
+                            timeout.Token)
+                        .ConfigureAwait(false);
+                    LocalOperationalLog.Info(
+                        "SessionSecurity",
+                        $"event=filetransfer_cancel_echo_sent; transport=nkn; transfer_id={normalizedTransferId}; session_id={normalizedSessionId}; trigger_reason={triggerReason}; late_frame_type={frame.Type}; source={source ?? "(none)"}; lane={MapBridgeChannel(channel)}");
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    LocalOperationalLog.Warn(
+                        "SessionSecurity",
+                        $"event=filetransfer_cancel_echo_failed; transport=nkn; transfer_id={normalizedTransferId}; session_id={normalizedSessionId}; trigger_reason={triggerReason}; late_frame_type={frame.Type}; error={ex.GetType().Name}");
+                }
+            },
+            CancellationToken.None);
+    }
+
     private static bool IsSenderDataFrame(FileTransferDataFrame frame)
         => frame is FileTransferManifestFrameV4
             or FileTransferChunkBatchFrameV4;
@@ -3824,6 +3907,12 @@ public sealed partial class NknSignalingTransport
             bool hasRecentTerminal,
             FileTransferTransportPhase terminalPhase)
         {
+            if (hasRecentTerminal &&
+                terminalPhase == FileTransferTransportPhase.Canceled)
+            {
+                return "post_terminal_late_frame_canceled";
+            }
+
             if (!isSenderDataFrame || !hasRecentTerminal)
             {
                 return "unknown_transfer_id";
@@ -4748,6 +4837,7 @@ public sealed partial class NknSignalingTransport
                 "SessionSecurity",
                 $"event=filetransfer_chunk_batch_split_for_transport; transport=nkn; transfer_id={batch.TransferId}; session_id={batch.SessionId}; original_frame_type={batch.Type}; split_chunk_range={batch.StartChunkIndex}-{finalChunkIndex}; chunk_frame_count={batch.DataSegments.Count}; per_frame_raw_bytes={perFrameRawBytes}; lane=bulk; reason={reason}");
 
+            var v5MetadataBatch = batch as FileTransferChunkBatchFrameV5;
             var startOffset = 0;
             while (startOffset < batch.DataSegments.Count)
             {
@@ -4771,6 +4861,11 @@ public sealed partial class NknSignalingTransport
                         DataSegments = candidateSegments,
                         BatchProfile = ResolveBatchProfileNameForDiagnostics(batch),
                         RepairDeliveryMode = batch.RepairDeliveryMode,
+                        TransportEpoch = v5MetadataBatch?.TransportEpoch ?? 0,
+                        BatchId = v5MetadataBatch?.BatchId,
+                        RepairRequestId = v5MetadataBatch?.RepairRequestId,
+                        Priority = v5MetadataBatch?.Priority,
+                        RecoveryMode = v5MetadataBatch?.RecoveryMode,
                     };
                     byte[] candidatePayload;
                     try

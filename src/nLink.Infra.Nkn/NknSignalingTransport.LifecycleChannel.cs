@@ -1491,6 +1491,7 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        RecordTunaFallbackNknControlReceived(MsgType.Chat, currentSessionSecurityState.SessionId?.Value, env.Payload.Length);
         ChatMessageReceived?.Invoke(this, new TransportChatMessageEventArgs(securePayload.Plaintext));
         Log($"Chat dispatched (msg_id={env.MessageId}, payload_len={securePayload.Plaintext.Length})");
     }
@@ -1538,6 +1539,7 @@ public sealed partial class NknSignalingTransport
             SendAckFireAndForget(source, env.Code, env.MessageId);
         }
 
+        RecordTunaFallbackNknControlReceived(MsgType.SessionEnd, currentSessionSecurityState.SessionId?.Value, env.Payload.Length);
         Log($"SessionEnd dispatched (msg_id={env.MessageId})");
         RemoteSessionEnded?.Invoke(this, EventArgs.Empty);
     }
@@ -1825,6 +1827,7 @@ public sealed partial class NknSignalingTransport
             removed.TryComplete(AckWaitOutcome.Acknowledged, reason: null);
         }
 
+        RecordTunaFallbackNknControlReceived(MsgType.Ack, currentSessionSecurityState.SessionId?.Value, env.Payload.Length);
         Log($"Ack handled (msg_id={env.MessageId}, reply_to={env.ReplyTo})");
     }
 

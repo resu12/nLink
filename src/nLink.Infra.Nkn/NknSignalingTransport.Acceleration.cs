@@ -375,6 +375,20 @@ public sealed partial class NknSignalingTransport
         RecordTunaFallbackNknFrame("received", messageType, channel, payloadBytes, sessionId);
     }
 
+    private void RecordTunaFallbackFileTransferDataFrameReceived(FileTransferDataFrame frame, NknBridgeChannel channel, int payloadBytes, string? sessionId)
+    {
+        if (handlingTunaAcceleratedInboundMessage)
+        {
+            return;
+        }
+
+        RecordTunaFallbackNknFrame("received", MsgType.FileTransferDataFrame, channel, payloadBytes, sessionId);
+        if (TryMapFileTransferFallbackNknProofKind(frame, out var proofKind))
+        {
+            _ = CompleteFileTransferFallbackNknProofIfPending(proofKind, sessionId);
+        }
+    }
+
     private void RecordTunaFallbackNknControlSent(MsgType messageType)
     {
         if (messageType is MsgType.ScreenShareFrame or MsgType.FileTransferDataFrame)
@@ -391,6 +405,18 @@ public sealed partial class NknSignalingTransport
         }
     }
 
+    private void RecordTunaFallbackNknControlReceived(MsgType messageType, string? sessionId, int payloadBytes = 0)
+    {
+        if (messageType is MsgType.ScreenShareFrame or MsgType.FileTransferDataFrame)
+        {
+            return;
+        }
+
+        _ = CompleteFileTransferFallbackNknProofIfPending(
+            $"nkn_control_{MapSecureMessageTypeForProof(messageType)}_received",
+            sessionId);
+    }
+
     private void RecordTunaFallbackNknFrame(
         string direction,
         MsgType messageType,
@@ -403,7 +429,6 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        var completesFileProof = direction == "received" && messageType == MsgType.FileTransferDataFrame;
         TunaFallbackProofState? snapshot;
         bool shouldLog;
         bool shouldLogScreenHandoffFrame = false;
@@ -469,13 +494,6 @@ public sealed partial class NknSignalingTransport
                 LogMixedFallbackLaneState(snapshot, "screen_media_ready");
             }
         }
-
-        if (completesFileProof)
-        {
-            _ = CompleteFileTransferFallbackNknProofIfPending(
-                proofKind: "file_transfer_bulk_frame_received",
-                sessionId);
-        }
     }
 
     private void MarkFileTransferFallbackNknProofPending(
@@ -500,6 +518,8 @@ public sealed partial class NknSignalingTransport
             fileTransferFallbackProofLanes = lanes;
             fileTransferFallbackProofGeneration++;
             fileTransferFallbackProofProbeScheduled = false;
+            fileTransferFallbackBulkProofObserved = false;
+            fileTransferFallbackControlProofObserved = false;
         }
 
         LocalOperationalLog.Info(
@@ -520,6 +540,12 @@ public sealed partial class NknSignalingTransport
         string reason;
         string? pendingSessionId;
         NknAccelerationLaneKind lanes;
+        bool bulkProofObserved;
+        bool controlProofObserved;
+        bool shouldLogUnconfirmed = false;
+        bool completed = false;
+        var normalizedProofKind = SanitizeLogToken(proofKind);
+        var authoritativeProof = IsAuthoritativeFileTransferFallbackNknProof(normalizedProofKind);
         lock (fileTransferFallbackProofGate)
         {
             if (!fileTransferFallbackProofPending)
@@ -535,26 +561,57 @@ public sealed partial class NknSignalingTransport
                 return false;
             }
 
-            fileTransferFallbackProofPending = false;
-            reason = fileTransferFallbackProofReason;
-            pendingSessionId = fileTransferFallbackProofSessionId ?? normalizedSessionId;
-            lanes = fileTransferFallbackProofLanes;
-            fileTransferFallbackProofReason = "none";
-            fileTransferFallbackProofSessionId = null;
-            fileTransferFallbackProofLanes = NknAccelerationLaneKind.None;
-            fileTransferFallbackProofGeneration++;
-            fileTransferFallbackProofProbeScheduled = false;
+            if (!authoritativeProof)
+            {
+                reason = fileTransferFallbackProofReason;
+                pendingSessionId = fileTransferFallbackProofSessionId ?? normalizedSessionId;
+                lanes = fileTransferFallbackProofLanes;
+                shouldLogUnconfirmed = !fileTransferFallbackBulkProofObserved;
+                fileTransferFallbackBulkProofObserved = true;
+                bulkProofObserved = fileTransferFallbackBulkProofObserved;
+                controlProofObserved = fileTransferFallbackControlProofObserved;
+            }
+            else
+            {
+                fileTransferFallbackControlProofObserved = true;
+                fileTransferFallbackProofPending = false;
+                reason = fileTransferFallbackProofReason;
+                pendingSessionId = fileTransferFallbackProofSessionId ?? normalizedSessionId;
+                lanes = fileTransferFallbackProofLanes;
+                bulkProofObserved = fileTransferFallbackBulkProofObserved;
+                controlProofObserved = fileTransferFallbackControlProofObserved;
+                fileTransferFallbackProofReason = "none";
+                fileTransferFallbackProofSessionId = null;
+                fileTransferFallbackProofLanes = NknAccelerationLaneKind.None;
+                fileTransferFallbackProofGeneration++;
+                fileTransferFallbackProofProbeScheduled = false;
+                fileTransferFallbackBulkProofObserved = false;
+                fileTransferFallbackControlProofObserved = false;
+                completed = true;
+            }
+        }
+
+        if (!completed)
+        {
+            if (shouldLogUnconfirmed)
+            {
+                LocalOperationalLog.Warn(
+                    "NKN.Tuna",
+                    $"event=filetransfer_fallback_nkn_proof_unconfirmed; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={normalizedProofKind}; lanes={FormatAccelerationLanesForLog(lanes)}; requires_control_proof=1; bulk_seen={(bulkProofObserved ? 1 : 0)}; control_seen={(controlProofObserved ? 1 : 0)}");
+            }
+
+            return false;
         }
 
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=filetransfer_fallback_nkn_proof_observed; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={SanitizeLogToken(proofKind)}; lanes={FormatAccelerationLanesForLog(lanes)}");
+            $"event=filetransfer_fallback_nkn_proof_observed; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={normalizedProofKind}; lanes={FormatAccelerationLanesForLog(lanes)}; bulk_seen={(bulkProofObserved ? 1 : 0)}; control_seen={(controlProofObserved ? 1 : 0)}");
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=tuna_disable_handoff_nkn_ready; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={SanitizeLogToken(proofKind)}; lanes={FormatAccelerationLanesForLog(lanes)}");
+            $"event=tuna_disable_handoff_nkn_ready; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={normalizedProofKind}; lanes={FormatAccelerationLanesForLog(lanes)}");
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=tuna_disable_handoff_completed; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={SanitizeLogToken(proofKind)}; lanes={FormatAccelerationLanesForLog(lanes)}");
+            $"event=tuna_disable_handoff_completed; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; reason={reason}; proof={normalizedProofKind}; lanes={FormatAccelerationLanesForLog(lanes)}");
 
         if ((lanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File)
         {
@@ -573,6 +630,75 @@ public sealed partial class NknSignalingTransport
 
         return true;
     }
+
+    private bool TryGetFileTransferFallbackControlProofPendingSnapshot(out string? sessionId, out string reason, out NknAccelerationLaneKind lanes)
+    {
+        lock (fileTransferFallbackProofGate)
+        {
+            if (!fileTransferFallbackProofPending ||
+                (fileTransferFallbackProofLanes & NknAccelerationLaneKind.File) != NknAccelerationLaneKind.File ||
+                fileTransferFallbackControlProofObserved)
+            {
+                sessionId = null;
+                reason = "none";
+                lanes = NknAccelerationLaneKind.None;
+                return false;
+            }
+
+            sessionId = fileTransferFallbackProofSessionId;
+            reason = fileTransferFallbackProofReason;
+            lanes = fileTransferFallbackProofLanes;
+            return true;
+        }
+    }
+
+    private static bool TryMapFileTransferFallbackNknProofKind(FileTransferDataFrame frame, out string proofKind)
+    {
+        proofKind = frame switch
+        {
+            FileTransferStateFrameV5 => "file_transfer_v5_state_frame_received",
+            FileTransferHandoffFrameV5 => "file_transfer_v5_handoff_frame_received",
+            FileTransferRepairRequestFrameV5 => "file_transfer_v5_repair_request_frame_received",
+            FileTransferRepairProofFrameV5 => "file_transfer_v5_repair_proof_frame_received",
+            FileTransferPauseControlFrameV5 => "file_transfer_v5_pause_control_frame_received",
+            FileTransferCompleteFrameV5 => "file_transfer_v5_complete_frame_received",
+            FileTransferCancelFrameV5 => "file_transfer_v5_cancel_frame_received",
+            FileTransferErrorFrameV5 => "file_transfer_v5_error_frame_received",
+            FileTransferChunkBatchFrameV5 => "file_transfer_bulk_frame_received",
+            _ => string.Empty,
+        };
+
+        return proofKind.Length > 0;
+    }
+
+    private static bool IsAuthoritativeFileTransferFallbackNknProof(string proofKind)
+        => proofKind.StartsWith("nkn_control_", StringComparison.Ordinal) ||
+           proofKind is
+               "file_transfer_v5_state_frame_received" or
+               "file_transfer_v5_handoff_frame_received" or
+               "file_transfer_v5_repair_request_frame_received" or
+               "file_transfer_v5_repair_proof_frame_received" or
+               "file_transfer_v5_pause_control_frame_received" or
+               "file_transfer_v5_complete_frame_received" or
+               "file_transfer_v5_cancel_frame_received" or
+               "file_transfer_v5_error_frame_received";
+
+    private static string MapSecureMessageTypeForProof(MsgType messageType)
+        => messageType switch
+        {
+            MsgType.Chat => "chat",
+            MsgType.Ack => "ack",
+            MsgType.SessionEnd => "session_end",
+            MsgType.FileTransferCancel => "file_transfer_cancel",
+            MsgType.FileTransferError => "file_transfer_error",
+            MsgType.FileTransferComplete => "file_transfer_complete",
+            MsgType.FileTransferOffer => "file_transfer_offer",
+            MsgType.FileTransferAccept => "file_transfer_accept",
+            MsgType.FileTransferDecline => "file_transfer_decline",
+            MsgType.FileTransferStart => "file_transfer_start",
+            MsgType.FileTransferSessionOpen => "file_transfer_session_open",
+            _ => SanitizeLogToken(messageType.ToString()).ToLowerInvariant(),
+        };
 
     private void ScheduleFileTransferFallbackNknProbeIfPending(string trigger)
     {
@@ -1684,6 +1810,14 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
+        if (TryGetFileTransferFallbackControlProofPendingSnapshot(out var pendingSessionId, out var pendingReason, out var pendingLanes))
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_retry_blocked_fallback_control_unproven; reason={SanitizeLogToken(reason)}; fallback_reason={SanitizeLogToken(pendingReason)}; session_id={SanitizeLogToken(pendingSessionId ?? "none")}; lanes={FormatAccelerationLanesForLog(pendingLanes)}");
+            return;
+        }
+
         var attempt = Interlocked.Increment(ref accelerationNegotiationRetryAttempts);
         if (attempt > AccelerationNegotiationMaxRetryAttempts)
         {
@@ -1707,6 +1841,14 @@ public sealed partial class NknSignalingTransport
                 try
                 {
                     await Task.Delay(delay, CancellationToken.None).ConfigureAwait(false);
+                    if (TryGetFileTransferFallbackControlProofPendingSnapshot(out var delayedPendingSessionId, out var delayedPendingReason, out var delayedPendingLanes))
+                    {
+                        LocalOperationalLog.Warn(
+                            "NKN.Tuna",
+                            $"event=tuna_acceleration_retry_skipped_fallback_control_unproven; reason={SanitizeLogToken(reason)}; fallback_reason={SanitizeLogToken(delayedPendingReason)}; session_id={SanitizeLogToken(delayedPendingSessionId ?? "none")}; lanes={FormatAccelerationLanesForLog(delayedPendingLanes)}");
+                        return;
+                    }
+
                     ScheduleAccelerationNegotiationIfEligible(
                         string.Equals(SanitizeLogToken(reason), "peer_user_stopped_tuna", StringComparison.Ordinal)
                             ? "runtime_unlock"

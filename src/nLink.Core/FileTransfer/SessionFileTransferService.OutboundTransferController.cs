@@ -81,7 +81,7 @@ public sealed partial class SessionFileTransferService
             normalizedCancelReason = NormalizeReason(cancelReason) ?? CanceledReason;
             if (terminalState == FileTransferTransferState.Canceled && shouldNotifyPeer)
             {
-                dataSessionForCancel = context.DataSession;
+                dataSessionForCancel = context.DetachDataSession();
             }
         }
 
@@ -111,6 +111,17 @@ public sealed partial class SessionFileTransferService
                         "outbound_terminal",
                         CancellationToken.None)
                     .ConfigureAwait(false);
+                StartV4CancelDataFrameRetryLoop(
+                    dataSessionForCancel,
+                    sessionId,
+                    transferId,
+                    normalizedCancelReason,
+                    FileTransferDirection.Outbound,
+                    "outbound_terminal");
+            }
+            else
+            {
+                dataSessionForCancel?.Dispose();
             }
         }
         finally
@@ -176,7 +187,7 @@ public sealed partial class SessionFileTransferService
             normalizedCancelReason = NormalizeReason(cancelReason) ?? CanceledReason;
             if (terminalState == FileTransferTransferState.Canceled)
             {
-                dataSessionForCancel = context.DataSession;
+                dataSessionForCancel = context.DetachDataSession();
             }
         }
 
@@ -219,6 +230,13 @@ public sealed partial class SessionFileTransferService
                         "inbound_terminal",
                         CancellationToken.None)
                     .ConfigureAwait(false);
+                StartV4CancelDataFrameRetryLoop(
+                    dataSessionForCancel,
+                    sessionId,
+                    transferId,
+                    normalizedCancelReason,
+                    FileTransferDirection.Inbound,
+                    "inbound_terminal");
             }
         }
         finally
@@ -430,6 +448,55 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Warn(
                 "FileTransferService",
                 $"event=filetransfer_lifecycle_priority_send_failed; kind=cancel; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; source={source}; path=redundant_data_frame; error={ex.GetType().Name}");
+        }
+    }
+
+    private void StartV4CancelDataFrameRetryLoop(
+        IFileTransferDataSession dataSession,
+        string sessionId,
+        string transferId,
+        string? reason,
+        FileTransferDirection direction,
+        string source)
+    {
+        _ = Task.Run(
+            () => RunV4CancelDataFrameRetryLoopAsync(dataSession, sessionId, transferId, reason, direction, source),
+            CancellationToken.None);
+    }
+
+    private async Task RunV4CancelDataFrameRetryLoopAsync(
+        IFileTransferDataSession dataSession,
+        string sessionId,
+        string transferId,
+        string? reason,
+        FileTransferDirection direction,
+        string source)
+    {
+        try
+        {
+            for (var index = 0; index < CancelDataFrameRetryDelaysMs.Length; index++)
+            {
+                await Task.Delay(CancelDataFrameRetryDelaysMs[index]).ConfigureAwait(false);
+                await TrySendV4CancelFrameAsync(
+                        dataSession,
+                        sessionId,
+                        transferId,
+                        reason,
+                        direction,
+                        $"{source}_retry_{index + 2}",
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            try
+            {
+                dataSession.Dispose();
+            }
+            catch
+            {
+            }
         }
     }
 

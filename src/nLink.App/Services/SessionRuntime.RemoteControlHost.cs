@@ -1936,6 +1936,8 @@ public sealed partial class SessionRuntime
 
             if (notifyRemoteSessionEnd)
             {
+                await TrySendRemoteSessionEndAsync(oldTransport, oldRole, oldState).ConfigureAwait(false);
+
                 // Tell the peer the session is over before best-effort teardown work starts
                 // competing for transport state or outbound bandwidth.
                 using (var fileTransferCancelCts = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
@@ -1952,7 +1954,6 @@ public sealed partial class SessionRuntime
 
                 await TrySendPendingIncomingHelpRequestCancellationAsync(oldTransport, "helper_closed").ConfigureAwait(false);
                 await TrySendPendingOutboundHelpRequestCancellationAsync(oldTransport, "helpee_closed").ConfigureAwait(false);
-                await TrySendRemoteSessionEndAsync(oldTransport, oldRole, oldState).ConfigureAwait(false);
                 await TrySendRemoteControlStopAsync(oldTransport, oldControlState, oldControlRequestId, "session_end").ConfigureAwait(false);
                 await StopTransportScreenShareAsync(
                     notifyRemoteStop: oldRole == SessionRuntimeRole.Helpee &&
@@ -10488,10 +10489,15 @@ public sealed partial class SessionRuntime
             try
             {
                 await pendingJoinTransport.SendPendingJoinCancelAsync(pendingJoinCts.Token).ConfigureAwait(false);
+                LocalOperationalLog.Info(
+                    "Session",
+                    "event=remote_session_end_sent; mode=pending_join_cancel; result=success");
             }
-            catch
+            catch (Exception ex)
             {
-                // Best-effort only.
+                LocalOperationalLog.Warn(
+                    "Session",
+                    $"event=remote_session_end_sent; mode=pending_join_cancel; result=failed; error={ex.GetType().Name}");
             }
 
             return;
@@ -10499,6 +10505,9 @@ public sealed partial class SessionRuntime
 
         if (!ShouldNotifyRemoteSessionEnd(oldTransport, oldRole, oldState))
         {
+            LocalOperationalLog.Info(
+                "Session",
+                $"event=remote_session_end_skipped; role={oldRole}; state={oldState}; transport={(oldTransport is null ? "(none)" : oldTransport.GetType().Name)}");
             return;
         }
 
@@ -10507,10 +10516,15 @@ public sealed partial class SessionRuntime
         try
         {
             await nknTransport.SendSessionEndAsync(cts.Token).ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "Session",
+                "event=remote_session_end_sent; mode=session_end; result=success");
         }
-        catch
+        catch (Exception ex)
         {
-            // Best-effort only.
+            LocalOperationalLog.Warn(
+                "Session",
+                $"event=remote_session_end_sent; mode=session_end; result=failed; error={ex.GetType().Name}");
         }
     }
 
