@@ -236,10 +236,15 @@ Current payer rules:
 - If only helpee is unlocked, helpee pays and listens.
 - If only helper is unlocked, helper pays and listens after the helpee-priority delay.
 - If both sides are unlocked, helpee pays and listens.
+- If helper has already started a paid listener and helpee unlocks before Tuna becomes active, helper yields, stops its listener, and becomes the free dialer.
 - If the selected payer toggles off before Tuna becomes active, the other unlocked side may try to pay.
 - If active Tuna is stopped by user intent, Tuna falls back to current NKN for the rest of that session and does not auto-reselect a new payer.
 
 Local runtime off means "do not pay." The app may still act as the free dialer when the peer is paying.
+
+Payer arbitration is guarded by a per-session payer decision id. Offers, answers, payer-intent messages, and Tuna-down messages carry the current decision id so late messages from a previous attempt cannot flip the current state. A stale answer or stale down message is rejected, logged for diagnostics, and regular NKN remains in use. This is especially important when one side unlocks Tuna while the other side is already starting a listener.
+
+Helper-paid startup uses an adaptive helpee-priority wait. Helper first sends payer intent, then waits briefly for helpee intent. If helpee says it will listen, helper yields. If helpee says it will only dial, helper starts immediately. If no helpee intent arrives within the short grace window, helper proceeds instead of waiting the full priority window. This keeps helper-only Tuna startup shorter while preserving helpee priority when both sides are actually unlocked.
 
 ## Stop And Fallback Behavior
 
@@ -323,9 +328,11 @@ The former Diagnostics page is user-facing `Options` and has three tabs:
 The session header shows a small Tuna pictogram next to the role label:
 
 - gray means inactive or unavailable,
-- pulsing means negotiation/start is in progress,
+- pulsing means negotiation/start is in progress and the wallet is already unlocked,
 - light blue means Tuna is connecting or active on the non-paying dialing side,
-- yellow means this computer is the paid Tuna listener side. The tooltip also explains that this computer pays for Tuna traffic while active.
+- yellow means this computer is selected as the paid Tuna listener side. The tooltip also explains that this computer pays for Tuna traffic while active.
+
+The icon must stay gray and non-pulsing while the wallet is locked. When both sides are unlocked, helpee priority can briefly change the helper from yellow listener-starting state to blue dialer state as the helper yields to the helpee-paid listener.
 
 The session header switch is placed next to the pictogram because it controls the session-only wallet unlock for Tuna.
 
@@ -385,8 +392,10 @@ Useful environment overrides for developer tests:
 - `NLINK_NKN_TUNA_ENABLED=1`
 - `NLINK_NKN_TUNA_SIDECAR_EXE=<path-to-nlink-tuna-sidecar.exe>`
 - `NLINK_NKN_TUNA_LANES=file,screen`
+- `NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY=1`
+- `NLINK_NKN_TUNA_REQUIRE_STRICT_PROVIDER_READY=1`
 
-The advanced Options runtime pilot can also enable Tuna locally without changing default startup behavior.
+The advanced Options runtime pilot can also enable Tuna locally without changing default startup behavior. The paid listener now accepts 3 usable provider paths as degraded-but-usable for the experimental runtime pilot because repeated paid file/screen cells carried traffic without disconnecting. This shortens startup when the fourth Tuna path is slow to appear. `NLINK_NKN_TUNA_REQUIRE_STRICT_PROVIDER_READY=1` forces the older strict 4-path gate for A/B testing, and `NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY=1` remains accepted for older local preference files or explicit experiments.
 
 Run the opt-in Tuna soak matrix from a developer machine:
 
