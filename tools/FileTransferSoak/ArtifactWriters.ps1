@@ -680,8 +680,7 @@ function Get-FileTransferBulkFramesPerMiB {
         Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_binary_frame_sent') |
             Where-Object {
                 $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
-                $frameType -eq 'filetransfer.chunk_batch.v4' -or
-                    $frameType -eq 'filetransfer.chunk_batch.v4' -or
+                $frameType -eq 'filetransfer.chunk_batch.v5' -or
                     $frameType -eq 'filetransfer.chunk_batch.v4'
             }
     )
@@ -756,8 +755,7 @@ function New-FileTransferThroughputSummaryLines {
         Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_binary_frame_sent') |
             Where-Object {
                 $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
-                $frameType -eq 'filetransfer.chunk_batch.v4' -or
-                    $frameType -eq 'filetransfer.chunk_batch.v4' -or
+                $frameType -eq 'filetransfer.chunk_batch.v5' -or
                     $frameType -eq 'filetransfer.chunk_batch.v4'
             }
     )
@@ -796,13 +794,32 @@ function New-FileTransferThroughputSummaryLines {
         0.0
     }
     $grantDeliveryEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_data_frame_dispatched') |
-        Where-Object { (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.state.v4' })
+        Where-Object {
+            $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
+            $frameType -eq 'filetransfer.state.v5' -or $frameType -eq 'filetransfer.state.v4'
+        })
     $ackDeliveryEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_data_frame_dispatched') |
-        Where-Object { (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.state.v4' })
-    $v4BatchEvents = @($payloadBatchEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v4' -or (Get-FileTransferEventField -Event $_ -Name 'batch_profile' -Default '') -eq 'v4_default_21k' })
-    $v4BudgetEvents = @($payloadBudgetEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v4' -or (Get-FileTransferEventField -Event $_ -Name 'batch_profile' -Default '') -eq 'v4_default_21k' })
+        Where-Object {
+            $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
+            $frameType -eq 'filetransfer.state.v5' -or $frameType -eq 'filetransfer.state.v4'
+        })
+    $v4BatchEvents = @($payloadBatchEvents | Where-Object {
+            $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
+            $frameType -eq 'filetransfer.chunk_batch.v5' -or
+                $frameType -eq 'filetransfer.chunk_batch.v4' -or
+                (Get-FileTransferEventField -Event $_ -Name 'batch_profile' -Default '') -eq 'v4_default_21k'
+        })
+    $v4BudgetEvents = @($payloadBudgetEvents | Where-Object {
+            $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
+            $frameType -eq 'filetransfer.chunk_batch.v5' -or
+                $frameType -eq 'filetransfer.chunk_batch.v4' -or
+                (Get-FileTransferEventField -Event $_ -Name 'batch_profile' -Default '') -eq 'v4_default_21k'
+        })
     $v4SplitEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_chunk_batch_split_for_transport') |
-        Where-Object { (Get-FileTransferEventField -Event $_ -Name 'original_frame_type' -Default '') -eq 'filetransfer.chunk_batch.v4' })
+        Where-Object {
+            $frameType = Get-FileTransferEventField -Event $_ -Name 'original_frame_type' -Default ''
+            $frameType -eq 'filetransfer.chunk_batch.v5' -or $frameType -eq 'filetransfer.chunk_batch.v4'
+        })
     $v4RepairSentEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_repair_sent'))
     $v4RepairBatchEvents = @($payloadBatchEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'batch_profile' -Default '') -like 'v4_repair_*' })
     $v4BatchDenominator = $v4BatchEvents.Count + $v4SplitEvents.Count
@@ -811,6 +828,14 @@ function New-FileTransferThroughputSummaryLines {
         (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_mixed_enabled') +
         (Get-FileTransferEventFieldValueCount -Events $Summary.TransferEvents -FieldName 'mixed_screenshare' -Value '1')
     $dataProtocolVersion = if (
+        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_negotiated') -gt 0 -or
+        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_sender_started') -gt 0 -or
+        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_receiver_started') -gt 0 -or
+        $Summary.FrameTypeCounts.ContainsKey('filetransfer.chunk_batch.v5') -or
+        $Summary.FrameTypeCounts.ContainsKey('filetransfer.state.v5')) {
+        '5'
+    }
+    elseif (
         (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_negotiated') -gt 0 -or
         (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_sender_started') -gt 0 -or
         (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_receiver_started') -gt 0 -or
@@ -977,6 +1002,10 @@ function New-FileTransferProtocolShapeSummaryLines {
 
     $profiles = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_chunk_profile', 'filetransfer_profile_selected', 'filetransfer_profile_step_up', 'filetransfer_profile_step_down', 'filetransfer_v4_profile_changed'))
     $legacyNegotiationRejectedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_legacy_negotiation_rejected'))
+    $v5NegotiatedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v5_negotiated'))
+    $v5SessionOpenRejectedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v5_session_open_rejected'))
+    $v5ReceiverStartedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v5_receiver_started'))
+    $v5SenderStartedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v5_sender_started'))
     $v4NegotiatedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_negotiated'))
     $v4SessionOpenRejectedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_session_open_rejected'))
     $v4ReceiverStartedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_receiver_started'))
@@ -998,20 +1027,20 @@ function New-FileTransferProtocolShapeSummaryLines {
     $v4FeedbackFirstSuccessEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_feedback_first_success'))
     $v4FeedbackBothFailedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_feedback_both_failed'))
     $v4FeedbackSecondaryCompletedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_feedback_secondary_completed'))
-    $v4EvidencePresent = ($v4NegotiatedEvents.Count + $v4ReceiverStartedEvents.Count + $v4SenderStartedEvents.Count + $v4StateEvents.Count + $v4StateReceivedEvents.Count + $v4BatchEvents.Count + $v4ChunkBatchSentEvents.Count) -gt 0
+    $v4EvidencePresent = ($v5NegotiatedEvents.Count + $v5ReceiverStartedEvents.Count + $v5SenderStartedEvents.Count + $v4NegotiatedEvents.Count + $v4ReceiverStartedEvents.Count + $v4SenderStartedEvents.Count + $v4StateEvents.Count + $v4StateReceivedEvents.Count + $v4BatchEvents.Count + $v4ChunkBatchSentEvents.Count) -gt 0
     $unexpectedLegacyFrameEventsDuringV4 = @()
     if ($v4EvidencePresent) {
         $unexpectedLegacyFrameEventsDuringV4 = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_binary_frame_sent', 'filetransfer_binary_frame_received', 'filetransfer_data_frame_dispatched') |
             Where-Object {
                 $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
-                $frameType -like 'filetransfer.*' -and $frameType -notlike 'filetransfer.*.v4'
+                $frameType -like 'filetransfer.*' -and $frameType -notlike 'filetransfer.*.v5'
             })
     }
     $legacyDataProtocolStartedEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_session_opened') |
         Where-Object {
             $protocolVersion = Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default ''
             -not [string]::IsNullOrWhiteSpace($protocolVersion) -and
-                $protocolVersion -ne '4'
+                $protocolVersion -ne '5'
         })
     $frameTypeLines = New-Object System.Collections.Generic.List[string]
     foreach ($key in @($Summary.FrameTypeCounts.Keys | Sort-Object)) {
@@ -1029,6 +1058,10 @@ function New-FileTransferProtocolShapeSummaryLines {
         ("profile_step_down_count={0}" -f (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_profile_step_down')),
         ("v4_profile_changed_count={0}" -f (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_profile_changed')),
         ("legacy_negotiation_rejected_count={0}" -f $legacyNegotiationRejectedEvents.Count),
+        ("v5_negotiated_count={0}" -f $v5NegotiatedEvents.Count),
+        ("v5_session_open_rejected_count={0}" -f $v5SessionOpenRejectedEvents.Count),
+        ("v5_receiver_started_count={0}" -f $v5ReceiverStartedEvents.Count),
+        ("v5_sender_started_count={0}" -f $v5SenderStartedEvents.Count),
         ("v4_negotiated_count={0}" -f $v4NegotiatedEvents.Count),
         ("v4_session_open_rejected_count={0}" -f $v4SessionOpenRejectedEvents.Count),
         ("v4_receiver_started_count={0}" -f $v4ReceiverStartedEvents.Count),
@@ -1055,7 +1088,7 @@ function New-FileTransferProtocolShapeSummaryLines {
     ) + @($frameTypeLines) + @(
         '',
         'protocol_evidence:'
-    ) + (Get-FileTransferArtifactEvidenceLines -Events @($profiles + $legacyNegotiationRejectedEvents + $v4NegotiatedEvents + $v4SessionOpenRejectedEvents + $v4ReceiverStartedEvents + $v4ManifestEvents + $v4SparseModeEvents + $v4StateEvents + $v4BatchEvents + $v4CompleteEvents + $v4ReceiverFailedEvents + $v4SenderStartedEvents + $v4ManifestSentEvents + $v4StateReceivedEvents + $v4ChunkBatchSentEvents + $v4SenderPumpEvents + $v4RepairScheduledEvents + $v4RepairSentEvents + $v4CompleteReceivedEvents + $v4SenderFailedEvents + $v4FeedbackFirstSuccessEvents + $v4FeedbackBothFailedEvents + $v4FeedbackSecondaryCompletedEvents + $unexpectedLegacyFrameEventsDuringV4 + $legacyDataProtocolStartedEvents) -Limit 40)
+    ) + (Get-FileTransferArtifactEvidenceLines -Events @($profiles + $legacyNegotiationRejectedEvents + $v5NegotiatedEvents + $v5SessionOpenRejectedEvents + $v5ReceiverStartedEvents + $v5SenderStartedEvents + $v4NegotiatedEvents + $v4SessionOpenRejectedEvents + $v4ReceiverStartedEvents + $v4ManifestEvents + $v4SparseModeEvents + $v4StateEvents + $v4BatchEvents + $v4CompleteEvents + $v4ReceiverFailedEvents + $v4SenderStartedEvents + $v4ManifestSentEvents + $v4StateReceivedEvents + $v4ChunkBatchSentEvents + $v4SenderPumpEvents + $v4RepairScheduledEvents + $v4RepairSentEvents + $v4CompleteReceivedEvents + $v4SenderFailedEvents + $v4FeedbackFirstSuccessEvents + $v4FeedbackBothFailedEvents + $v4FeedbackSecondaryCompletedEvents + $unexpectedLegacyFrameEventsDuringV4 + $legacyDataProtocolStartedEvents) -Limit 40)
 }
 
 function Get-FileTransferReorderProfileLines {
@@ -1400,8 +1433,7 @@ function New-FileTransferPayloadEfficiencySummaryLines {
         Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_binary_frame_sent') |
             Where-Object {
                 $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
-                $frameType -eq 'filetransfer.chunk_batch.v4' -or
-                    $frameType -eq 'filetransfer.chunk_batch.v4' -or
+                $frameType -eq 'filetransfer.chunk_batch.v5' -or
                     $frameType -eq 'filetransfer.chunk_batch.v4'
             }
     )
@@ -1691,7 +1723,10 @@ function Resolve-FileTransferThroughputLimiter {
     $v4FrontierTailRepairFilledEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_frontier_stall_missing_range_filled'))
     $v4CompleteEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_complete_sent', 'filetransfer_v4_complete_received'))
     $v4FailureEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_v4_sender_failed', 'filetransfer_v4_receiver_failed', 'filetransfer_v4_feedback_both_failed'))
-    $v4EvidenceCount = (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_negotiated') +
+    $v4EvidenceCount = (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_negotiated') +
+        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_sender_started') +
+        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_receiver_started') +
+        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_negotiated') +
         (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_sender_started') +
         (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_receiver_started') +
         $v4SenderPumpEvents.Count +
@@ -1746,6 +1781,7 @@ function Resolve-FileTransferThroughputLimiter {
         $v4PumpCompletedFrames = Get-FileTransferSumField -Events $v4SenderPumpEvents -FieldName 'completed_frames'
         $v4PayloadShapeEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_chunk_batch_sent_as_batch', 'filetransfer_transport_payload_budget') |
             Where-Object {
+                (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v5' -or
                 (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.chunk_batch.v4' -or
                 (Get-FileTransferEventField -Event $_ -Name 'batch_profile' -Default '') -eq 'v4_default_21k'
             })
@@ -2415,9 +2451,15 @@ function New-FileTransferThroughputDecompositionSummaryLines {
         0.0
     }
     $grantDeliveryEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_data_frame_dispatched') |
-        Where-Object { (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.state.v4' })
+        Where-Object {
+            $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
+            $frameType -eq 'filetransfer.state.v5' -or $frameType -eq 'filetransfer.state.v4'
+        })
     $ackDeliveryEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_data_frame_dispatched') |
-        Where-Object { (Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default '') -eq 'filetransfer.state.v4' })
+        Where-Object {
+            $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
+            $frameType -eq 'filetransfer.state.v5' -or $frameType -eq 'filetransfer.state.v4'
+        })
     $progressTimeoutWithReceiverGapStall = if ($Summary.LiveProgressTimeoutCount -gt 0 -and $gapStallEvents.Count -gt 0) { 1 } else { 0 }
     $limiter = Resolve-FileTransferThroughputLimiter `
         -SenderEvents $senderEvents `
@@ -2431,7 +2473,7 @@ function New-FileTransferThroughputDecompositionSummaryLines {
     return @(
         ("transfer_id={0}" -f $Summary.TransferId),
         ("likely_limiter={0}" -f $limiter),
-        ("data_protocol_version={0}" -f ($(if ((Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_negotiated') -gt 0 -or $v4SenderPumpEvents.Count -gt 0 -or $v4StateSentEvents.Count -gt 0 -or $v4StateReceivedEvents.Count -gt 0) { '4' } elseif ($senderEvents.Count -gt 0 -or $receiverEvents.Count -gt 0) { '3' } else { '(unknown)' }))),
+        ("data_protocol_version={0}" -f ($(if ((Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_negotiated') -gt 0 -or (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_sender_started') -gt 0 -or (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_receiver_started') -gt 0 -or $Summary.FrameTypeCounts.ContainsKey('filetransfer.chunk_batch.v5') -or $Summary.FrameTypeCounts.ContainsKey('filetransfer.state.v5')) { '5' } elseif ((Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_negotiated') -gt 0 -or $v4SenderPumpEvents.Count -gt 0 -or $v4StateSentEvents.Count -gt 0 -or $v4StateReceivedEvents.Count -gt 0) { '4' } elseif ($senderEvents.Count -gt 0 -or $receiverEvents.Count -gt 0) { '3' } else { '(unknown)' }))),
         ("sender_sample_count={0}" -f $senderEvents.Count),
         ("sender_pipeline_sample_count={0}" -f $senderPipelineEvents.Count),
         ("sender_feed_sample_count={0}" -f $senderFeedEvents.Count),
@@ -2789,12 +2831,12 @@ function New-FileTransferV4PromotionDecisionLines {
     $baselineProtocolMismatch = if ($baseline.ContainsKey('baseline_protocol_mismatch')) { [string]$baseline['baseline_protocol_mismatch'] } else { '0' }
     $baselineRegressionFailed = if ($baseline.ContainsKey('regression_failed')) { [string]$baseline['regression_failed'] } else { '0' }
     $safeDataProtocolVersion = if ($baseline.ContainsKey('safe_data_protocol_version')) { [string]$baseline['safe_data_protocol_version'] } else { '(unknown)' }
-    $sameProtocolV4BaselinePass = if (
+    $sameProtocolV5BaselinePass = if (
         $safeBaselineAvailable -eq '1' -and
         $baselineProtocolMismatch -eq '0' -and
         $baselineRegressionFailed -eq '0' -and
-        $dataProtocolVersion -eq '4' -and
-        $safeDataProtocolVersion -eq '4') {
+        $dataProtocolVersion -eq '5' -and
+        $safeDataProtocolVersion -eq '5') {
         1
     }
     else {
@@ -2836,8 +2878,8 @@ function New-FileTransferV4PromotionDecisionLines {
         $reason = 'filetransfer_data_session_dispatch_missing'
         $nextFocus = 'transport_data_session_lifecycle_dispatch'
     }
-    elseif ($dataProtocolVersion -ne '4') {
-        $reason = 'non_v4_protocol'
+    elseif ($dataProtocolVersion -ne '5') {
+        $reason = 'non_v5_protocol'
     }
     elseif ($progressTimeoutCounter -gt 0 -or
         (Get-FileTransferPromotionValue -Sources @($liveSummary, $decomposition) -Name 'terminal_missing_after_progress_timeout' -Default '0') -ne '0') {
@@ -2975,7 +3017,7 @@ function New-FileTransferV4PromotionDecisionLines {
             }
         }
     }
-    elseif ($sameProtocolV4BaselinePass -ne 1) {
+    elseif ($sameProtocolV5BaselinePass -ne 1) {
         if ($safeBaselineAvailable -ne '1') {
             $reason = 'baseline_rerun_required'
         }
@@ -2986,14 +3028,14 @@ function New-FileTransferV4PromotionDecisionLines {
             $reason = 'safe_baseline_regression'
         }
         else {
-            $reason = 'same_protocol_v4_baseline_not_confirmed'
+            $reason = 'same_protocol_v5_baseline_not_confirmed'
         }
     }
     else {
-        $decision = 'promote_v4_file_only'
+        $decision = 'promote_v5_file_only'
         $status = 'promote'
         $reason = 'long_proof_and_baseline_clean'
-        $nextFocus = 'capture_safe_v4_file_only_baseline'
+        $nextFocus = 'capture_safe_v5_file_only_baseline'
     }
 
     return @(
@@ -3023,7 +3065,7 @@ function New-FileTransferV4PromotionDecisionLines {
         ("safe_long_proof_matrix_complete={0}" -f $safeMatrix.MatrixComplete),
         ("long_proof_matrix_complete={0}" -f $longProofMatrixComplete),
         ("safe_baseline_available={0}" -f $safeBaselineAvailable),
-        ("same_protocol_v4_baseline_pass={0}" -f $sameProtocolV4BaselinePass),
+        ("same_protocol_v5_baseline_pass={0}" -f $sameProtocolV5BaselinePass),
         ("baseline_protocol_mismatch={0}" -f $baselineProtocolMismatch),
         ("baseline_regression_failed={0}" -f $baselineRegressionFailed),
         ("safe_data_protocol_version={0}" -f $safeDataProtocolVersion),

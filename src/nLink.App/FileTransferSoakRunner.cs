@@ -654,7 +654,7 @@ internal static class FileTransferSoakRunner
 
         if (!options.KeepReceivedFiles && !string.IsNullOrWhiteSpace(savedPath))
         {
-            TryDeleteTransferDirectory(savedPath);
+            TryDeleteReceivedFile(savedPath);
         }
 
         if (completed && integrityOk)
@@ -908,7 +908,7 @@ internal static class FileTransferSoakRunner
         var screenShareMediaFramesDelayed = cycles.Sum(static c => c.ScreenShareMediaFramesDelayed);
         var screenShareMediaFramesDropped = cycles.Sum(static c => c.ScreenShareMediaFramesDropped);
         var dataProtocolVersion = logMetrics.V4NegotiatedCount > 0 || logMetrics.V4ChunkBatchFrameCount > 0
-            ? FileTransferProtocol.ProtocolVersionV4
+            ? FileTransferProtocol.ProtocolVersionV5
             : 0;
         var hardLogFailure = logMetrics.PayloadRejectedCount > 0 ||
                              logMetrics.DecodeFailureCount > 0 ||
@@ -1160,7 +1160,7 @@ internal static class FileTransferSoakRunner
         using var reader = new StringReader(logText);
         while (reader.ReadLine() is { } line)
         {
-            if (line.Contains("event=filetransfer_v4_negotiated", StringComparison.Ordinal))
+            if (line.Contains("event=filetransfer_v5_negotiated", StringComparison.Ordinal))
             {
                 metrics.V4NegotiatedCount++;
             }
@@ -1168,7 +1168,7 @@ internal static class FileTransferSoakRunner
             {
                 metrics.V4ChunkBatchFrameCount++;
             }
-            if (line.Contains("event=filetransfer_v4_mixed_enabled", StringComparison.Ordinal))
+            if (line.Contains("event=filetransfer_v5_mixed_enabled", StringComparison.Ordinal))
             {
                 metrics.V4MixedEnabledCount++;
             }
@@ -1235,19 +1235,37 @@ internal static class FileTransferSoakRunner
         return Convert.ToBase64String(await SHA256.HashDataAsync(stream, ct).ConfigureAwait(false));
     }
 
-    private static void TryDeleteTransferDirectory(string savedPath)
+    internal static void TryDeleteReceivedFileForTests(string savedPath)
+        => TryDeleteReceivedFile(savedPath);
+
+    private static void TryDeleteReceivedFile(string savedPath)
     {
         try
         {
-            var directory = Path.GetDirectoryName(savedPath);
-            if (!string.IsNullOrWhiteSpace(directory) && Directory.Exists(directory))
+            if (string.IsNullOrWhiteSpace(savedPath))
             {
-                Directory.Delete(directory, recursive: true);
+                return;
+            }
+
+            var fullPath = Path.GetFullPath(savedPath);
+            if (Directory.Exists(fullPath))
+            {
+                LocalOperationalLog.Warn(
+                    "FileTransferSoak",
+                    $"event=filetransfer_local_soak_cleanup_skipped; reason=path_is_directory; path={fullPath}");
+                return;
+            }
+
+            if (File.Exists(fullPath))
+            {
+                File.Delete(fullPath);
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Soak cleanup is best-effort; the artifact records the saved path.
+            LocalOperationalLog.Warn(
+                "FileTransferSoak",
+                $"event=filetransfer_local_soak_cleanup_failed; reason={ex.GetType().Name}");
         }
     }
 

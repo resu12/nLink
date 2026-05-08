@@ -139,6 +139,38 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
     }
 
     [Fact]
+    public void FileTransferSoakRunner_Cleanup_DeletesOnlyReceivedFile_NotParentDirectory()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-filetransfer-cleanup-safety", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        var receivedFile = Path.Combine(tempRoot, "received.bin");
+        var siblingFile = Path.Combine(tempRoot, "keep.bin");
+        File.WriteAllBytes(receivedFile, [1, 2, 3]);
+        File.WriteAllBytes(siblingFile, [4, 5, 6]);
+
+        try
+        {
+            FileTransferSoakRunner.TryDeleteReceivedFileForTests(receivedFile);
+
+            Assert.True(Directory.Exists(tempRoot));
+            Assert.False(File.Exists(receivedFile));
+            Assert.True(File.Exists(siblingFile));
+
+            FileTransferSoakRunner.TryDeleteReceivedFileForTests(tempRoot);
+
+            Assert.True(Directory.Exists(tempRoot));
+            Assert.True(File.Exists(siblingFile));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void DevLocalImpairmentPolicy_None_ProducesNoDelayOrDrop()
     {
         var policy = new DevLocalImpairmentPolicy(new DevLocalImpairmentOptions(DevLocalImpairmentProfile.None, 42));
@@ -184,7 +216,7 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
     public void DevLocalImpairmentPolicy_ScreenSharePressure_DoesNotAffectFileTransferControlFrames()
     {
         var policy = new DevLocalImpairmentPolicy(new DevLocalImpairmentOptions(DevLocalImpairmentProfile.ScreenSharePressure, 42));
-        var manifest = new FileTransferManifestFrameV4
+        var manifest = new FileTransferManifestFrameV5
         {
             SessionId = "sess",
             TransferId = "transfer_manifest",
@@ -430,18 +462,18 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
 
             await AssertLocalV4SoakSuccessAsync(artifactDir, exitCode, "local-mixed", "ScreenSharePressure");
             var summary = ReadArtifactReport(artifactDir, "filetransfer-local-soak-summary.txt");
-            Assert.Equal("4", summary["data_protocol_version"]);
+            Assert.Equal("5", summary["data_protocol_version"]);
             Assert.True(long.Parse(summary["v4_mixed_enabled_count"]) > 0);
             Assert.True(long.Parse(summary["v4_chunk_batch_frame_count"]) > 0);
 
             var mixed = ReadArtifactReport(artifactDir, "mixed-screenshare-summary.txt");
             Assert.Equal("1", mixed["mixed_screenshare_exercised"]);
-            Assert.Equal("4", mixed["data_protocol_version"]);
+            Assert.Equal("5", mixed["data_protocol_version"]);
             Assert.True(long.Parse(mixed["v4_mixed_enabled_count"]) > 0);
             Assert.True(long.Parse(mixed["screen_share_frames_emitted"]) > 0);
 
             var logSlice = await File.ReadAllTextAsync(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log"), Encoding.UTF8);
-            Assert.Contains("event=filetransfer_v4_mixed_enabled", logSlice, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v5_mixed_enabled", logSlice, StringComparison.Ordinal);
             Assert.Contains("mixed_screenshare=1", logSlice, StringComparison.Ordinal);
             Assert.DoesNotContain("v4_file_only_required", logSlice, StringComparison.Ordinal);
         }
@@ -593,7 +625,7 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
         Assert.Contains(verdict["verdict"], new[] { "PASS", "WARN_RECOVERED_PRESSURE" });
 
         var logSlice = await File.ReadAllTextAsync(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log"), Encoding.UTF8);
-        Assert.Contains("event=filetransfer_v4_sender_started", logSlice, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v5_sender_started", logSlice, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v4_complete_received", logSlice, StringComparison.Ordinal);
     }
 
@@ -628,7 +660,7 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
         var logSlice = await File.ReadAllTextAsync(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log"), Encoding.UTF8);
     }
 
-    private static FileTransferChunkBatchFrameV4 CreateChunkFrame(string transferId, int chunkIndex)
+    private static FileTransferChunkBatchFrameV5 CreateChunkFrame(string transferId, int chunkIndex)
         => new()
         {
             SessionId = "sess",
