@@ -10,6 +10,7 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using NLink.Core;
+using NLink.Core.Configuration;
 using NLink.Core.Logging;
 using NLink.Infra.Nkn;
 
@@ -94,6 +95,8 @@ internal sealed record TunaRuntimeUnlockResult(
 
 internal sealed class TunaRuntimePreferenceState
 {
+    public const string AllowDegradedProviderReadyEnvVar = "NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY";
+    public const string RequireStrictProviderReadyEnvVar = "NLINK_NKN_TUNA_REQUIRE_STRICT_PROVIDER_READY";
     public const string DefaultMaxPriceNknPerMb = "0.0002";
     public const int DefaultMaxTotalMiB = 2048;
     public const int DefaultMaxDurationSec = 1800;
@@ -109,6 +112,8 @@ internal sealed class TunaRuntimePreferenceState
     public int MaxTotalMiB { get; init; } = DefaultMaxTotalMiB;
 
     public int MaxDurationSec { get; init; } = DefaultMaxDurationSec;
+
+    public bool AllowDegradedProviderReady { get; init; } = true;
 
     public string LastRuntimeStatus { get; init; } = "off";
 
@@ -145,6 +150,7 @@ internal sealed class TunaRuntimePreferenceState
             MaxPriceNknPerMb = MaxPriceNknPerMb,
             MaxTotalMiB = MaxTotalMiB,
             MaxDurationSec = MaxDurationSec,
+            AllowDegradedProviderReady = AllowDegradedProviderReady,
             LastRuntimeStatus = string.IsNullOrWhiteSpace(status) ? "unknown" : status.Trim(),
         };
 
@@ -168,6 +174,7 @@ internal sealed class TunaRuntimePreferenceState
             MaxPriceNknPerMb = price,
             MaxTotalMiB = Math.Clamp(MaxTotalMiB, 1, 65_536),
             MaxDurationSec = Math.Clamp(MaxDurationSec, 1, 86_400),
+            AllowDegradedProviderReady = AllowDegradedProviderReady,
             LastRuntimeStatus = status,
         };
     }
@@ -716,6 +723,7 @@ internal sealed class JsonTunaUsageAccountingStore : ITunaUsageAccountingStore
 
 internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
 {
+    private static readonly TimeSpan ListenerRestartUnlockRetention = TimeSpan.FromSeconds(60);
     private readonly object gate = new();
     private readonly ITunaRuntimePreferenceStore preferenceStore;
     private readonly ITunaUsageAccountingStore usageStore;
@@ -723,6 +731,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
     private readonly ITunaWalletVerifier walletVerifier;
     private readonly Func<DateTimeOffset> nowProvider;
     private char[]? unlockedPassword;
+    private CancellationTokenSource? listenerRestartUnlockRetentionCts;
     private TunaRuntimePreferenceState preferences;
     private TunaUsageAccountingState usage;
     private string runtimeStatus;
@@ -1332,6 +1341,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             return null;
         }
 
+        var allowDegradedProviderReady = EffectiveAllowDegradedProviderReady(currentPreferences);
         return new NknTunaListenerSidecarOptions
         {
             SidecarExePath = availability.SidecarPath,
@@ -1342,17 +1352,50 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             MaxDurationSec = currentPreferences.MaxDurationSec,
             AcceptTimeoutSec = 120,
             ReadyTimeoutMs = 120_000,
-            RequireProviderReady = true,
+            ListenStartTimeoutSec = 45,
+            StartupAttemptCount = 2,
+            RequireProviderReady = !allowDegradedProviderReady,
             ProviderReadyAttempts = 2,
             UsageSink = usageSink,
             StatusChanged = SetRuntimeStatus,
+            CapHandoffRequested = RequestCapHandoff,
             CanTakeWalletPassword = () => HasSessionUnlock,
         };
+    }
+
+    private static bool EffectiveAllowDegradedProviderReady(TunaRuntimePreferenceState preferences)
+    {
+        if (IsEnabled(ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
+                TunaRuntimePreferenceState.RequireStrictProviderReadyEnvVar,
+                category: "nkn_tuna_provider_readiness")))
+        {
+            return false;
+        }
+
+        return preferences.AllowDegradedProviderReady ||
+               IsEnabled(ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
+                   TunaRuntimePreferenceState.AllowDegradedProviderReadyEnvVar,
+                   category: "nkn_tuna_provider_readiness"));
+    }
+
+    private static bool IsEnabled(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var normalized = value.Trim();
+        return normalized.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("yes", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("on", StringComparison.OrdinalIgnoreCase);
     }
 
     private char[]? TakeUnlockedPasswordForListenerStart(RuntimeUsageSink usageSink)
     {
         char[] password;
+        char[] passwordForSidecar;
         lock (gate)
         {
             password = unlockedPassword ?? [];
@@ -1366,7 +1409,9 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 return null;
             }
 
-            unlockedPassword = null;
+            passwordForSidecar = new char[password.Length];
+            Array.Copy(password, passwordForSidecar, password.Length);
+            ScheduleListenerRestartUnlockRetention_NoLock();
             var now = DateTimeOffset.UtcNow;
             currentSessionRunId = Guid.NewGuid().ToString("N");
             currentSessionPaymentEventCount = 0;
@@ -1381,7 +1426,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         }
 
         NotifyStateChanged();
-        return password;
+        return passwordForSidecar;
     }
 
     private void SetRuntimeStatusForTransportCreation(TunaWalletLinkState wallet)
@@ -1470,6 +1515,75 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         NotifyStateChanged();
     }
 
+    private void RequestCapHandoff(string reason)
+    {
+        var normalizedReason = string.IsNullOrWhiteSpace(reason)
+            ? "cap_reached"
+            : reason.Trim();
+        ITransportAccelerationControl? control;
+        var shouldQueueStop = false;
+        lock (gate)
+        {
+            runtimeStatus = "cap_handoff_pending";
+            preferences = preferences.WithStatus(runtimeStatus);
+            UpdateStartupTiming_NoLock(runtimeStatus, DateTimeOffset.UtcNow);
+            preferenceStore.Save(preferences);
+            control = currentTransportControl;
+            if (control is not null)
+            {
+                shouldQueueStop = Interlocked.CompareExchange(ref stopInProgress, 1, 0) == 0;
+            }
+        }
+
+        NotifyStateChanged();
+        LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            $"event=tuna_runtime_cap_handoff_requested; reason={SanitizeStatusToken(normalizedReason)}; stop_queued={(shouldQueueStop ? 1 : 0)}");
+
+        if (control is null)
+        {
+            SetRuntimeStatus("cap_reached");
+            return;
+        }
+
+        if (!shouldQueueStop)
+        {
+            return;
+        }
+
+        _ = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await control.StopAccelerationAsync(normalizedReason, CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_runtime_cap_handoff_stop_failed; reason={SanitizeStatusToken(normalizedReason)}; error={ex.GetType().Name}");
+                }
+                finally
+                {
+                    lock (gate)
+                    {
+                        Interlocked.Exchange(ref stopInProgress, 0);
+                        runtimeStatus = "cap_reached";
+                        preferences = preferences.WithStatus(runtimeStatus);
+                        UpdateStartupTiming_NoLock(runtimeStatus, DateTimeOffset.UtcNow);
+                        preferenceStore.Save(preferences);
+                    }
+
+                    NotifyStateChanged();
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_runtime_cap_handoff_completed; reason={SanitizeStatusToken(normalizedReason)}");
+                }
+            },
+            CancellationToken.None);
+    }
+
     private void RecordIncompleteSession(string reason)
     {
         TunaUsageSessionRecord? recordedSession = null;
@@ -1555,11 +1669,55 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
 
     private void ClearSessionUnlock_NoLock()
     {
+        listenerRestartUnlockRetentionCts?.Cancel();
+        listenerRestartUnlockRetentionCts?.Dispose();
+        listenerRestartUnlockRetentionCts = null;
         if (unlockedPassword is not null)
         {
             Array.Clear(unlockedPassword);
             unlockedPassword = null;
         }
+    }
+
+    private void ScheduleListenerRestartUnlockRetention_NoLock()
+    {
+        listenerRestartUnlockRetentionCts?.Cancel();
+        listenerRestartUnlockRetentionCts?.Dispose();
+        var cts = new CancellationTokenSource();
+        listenerRestartUnlockRetentionCts = cts;
+        _ = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await Task.Delay(ListenerRestartUnlockRetention, cts.Token).ConfigureAwait(false);
+                    lock (gate)
+                    {
+                        if (!ReferenceEquals(listenerRestartUnlockRetentionCts, cts))
+                        {
+                            return;
+                        }
+
+                        listenerRestartUnlockRetentionCts?.Dispose();
+                        listenerRestartUnlockRetentionCts = null;
+                        if (unlockedPassword is not null)
+                        {
+                            Array.Clear(unlockedPassword);
+                            unlockedPassword = null;
+                        }
+                    }
+
+                    NotifyStateChanged();
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        "event=tuna_runtime_listener_restart_unlock_expired; retention_sec=60");
+                }
+                catch (OperationCanceledException)
+                {
+                    // A lock, unlock, or newer listener start superseded this retention window.
+                }
+            },
+            CancellationToken.None);
     }
 
     private TimeSpan RegisterUnlockFailure(string? reason)
@@ -1660,6 +1818,9 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                normalized.StartsWith("negotiation_scheduled_", StringComparison.Ordinal) ||
                normalized.Equals("unlock_validating", StringComparison.Ordinal) ||
                normalized.Equals("listener_starting", StringComparison.Ordinal) ||
+               normalized.Equals("listener_paths_starting", StringComparison.Ordinal) ||
+               normalized.Equals("listener_retrying", StringComparison.Ordinal) ||
+               normalized.Equals("listener_start_timeout", StringComparison.Ordinal) ||
                normalized.Equals("provider_paths_retrying", StringComparison.Ordinal) ||
                normalized.Equals("provider_paths_ready", StringComparison.Ordinal) ||
                normalized.Equals("provider_paths_degraded", StringComparison.Ordinal) ||
@@ -1757,6 +1918,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 completedUtc = null;
                 break;
             case "listener_starting":
+            case "listener_paths_starting":
                 waitingForApprovedSessionStartedUtc ??= now;
                 listenerStartUtc = now;
                 providerReadyUtc = null;
@@ -1764,6 +1926,8 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 peerConnectedUtc = null;
                 completedUtc = null;
                 break;
+            case "listener_retrying":
+            case "listener_start_timeout":
             case "provider_paths_retrying":
                 waitingForApprovedSessionStartedUtc ??= now;
                 listenerStartUtc ??= now;
@@ -2039,6 +2203,11 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 options.MaxPriceNknPerMb,
                 options.MaxTotalMiB.ToString(CultureInfo.InvariantCulture),
                 options.MaxDurationSec.ToString(CultureInfo.InvariantCulture),
-                options.AcceptTimeoutSec.ToString(CultureInfo.InvariantCulture));
+                options.AcceptTimeoutSec.ToString(CultureInfo.InvariantCulture),
+                options.ReadyTimeoutMs.ToString(CultureInfo.InvariantCulture),
+                options.ListenStartTimeoutSec.ToString(CultureInfo.InvariantCulture),
+                options.StartupAttemptCount.ToString(CultureInfo.InvariantCulture),
+                options.RequireProviderReady ? "strict_provider_ready" : "degraded_provider_ready",
+                options.ProviderReadyAttempts.ToString(CultureInfo.InvariantCulture));
     }
 }

@@ -92,6 +92,8 @@ internal interface INknTunaAccelerationSession : INknAccelerationLane
 
     string? LocalTunaAddress { get; }
 
+    bool IsLocalPaidListenerActive { get; }
+
     Task<bool> EnsureListenerSidecarConnectedAsync(string expectedRemotePeer, CancellationToken ct);
 
     Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct);
@@ -165,6 +167,9 @@ internal sealed class TransportAccelerationOfferPayload
     [JsonPropertyName("trigger")]
     public string Trigger { get; set; } = string.Empty;
 
+    [JsonPropertyName("payerDecisionId")]
+    public long PayerDecisionId { get; set; }
+
     [JsonPropertyName("sentAtUnixMs")]
     public long SentAtUnixMs { get; set; }
 
@@ -200,6 +205,9 @@ internal sealed class TransportAccelerationAnswerPayload
 
     [JsonPropertyName("rejectReason")]
     public string? RejectReason { get; set; }
+
+    [JsonPropertyName("payerDecisionId")]
+    public long PayerDecisionId { get; set; }
 }
 
 internal sealed class TransportAccelerationDownPayload
@@ -221,6 +229,9 @@ internal sealed class TransportAccelerationDownPayload
 
     [JsonPropertyName("reason")]
     public string Reason { get; set; } = string.Empty;
+
+    [JsonPropertyName("payerDecisionId")]
+    public long PayerDecisionId { get; set; }
 }
 
 internal sealed class TransportAccelerationPayerIntentPayload
@@ -239,6 +250,9 @@ internal sealed class TransportAccelerationPayerIntentPayload
 
     [JsonPropertyName("trigger")]
     public string Trigger { get; set; } = string.Empty;
+
+    [JsonPropertyName("payerDecisionId")]
+    public long PayerDecisionId { get; set; }
 
     [JsonPropertyName("sentAtUnixMs")]
     public long SentAtUnixMs { get; set; }

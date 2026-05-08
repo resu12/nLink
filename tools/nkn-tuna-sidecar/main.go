@@ -69,6 +69,7 @@ const (
 	providerReadyMinPaths     = 4
 	providerDegradedMinPaths  = 3
 	providerReadyTimeout      = 45 * time.Second
+	defaultListenStartTimeout = 45 * time.Second
 )
 
 var sidecarVersion = "dev"
@@ -94,6 +95,7 @@ type config struct {
 	maxTotalMiB           int
 	maxDurationSec        int
 	acceptTimeoutSec      int
+	listenStartTimeoutSec int
 	requireProviderReady  bool
 	providerReadyAttempts int
 
@@ -369,6 +371,7 @@ func parseArgs(args []string) (*config, error) {
 		fs.IntVar(&cfg.maxTotalMiB, "max-total-mib", defaultMaxTotalMiB, "local byte cap in MiB")
 		fs.IntVar(&cfg.maxDurationSec, "max-duration-sec", defaultMaxDurationSec, "local duration cap in seconds")
 		fs.IntVar(&cfg.acceptTimeoutSec, "accept-timeout-sec", 0, "optional timeout while waiting for app/Tuna connections")
+		fs.IntVar(&cfg.listenStartTimeoutSec, "listen-start-timeout-sec", int(defaultListenStartTimeout.Seconds()), "timeout while starting Tuna listener paths before retry/fallback")
 		fs.BoolVar(&cfg.requireProviderReady, "require-provider-ready", false, "fail listener startup unless full Tuna provider path readiness is reached")
 		fs.IntVar(&cfg.providerReadyAttempts, "provider-ready-attempts", 1, "provider readiness wait attempts before failing listener startup")
 	case modeDial:
@@ -446,6 +449,9 @@ func validateConfig(cfg *config) error {
 		}
 		if cfg.providerReadyAttempts < 1 || cfg.providerReadyAttempts > 5 {
 			return usageError("--provider-ready-attempts must be between 1 and 5")
+		}
+		if cfg.listenStartTimeoutSec < 5 || cfg.listenStartTimeoutSec > 300 {
+			return usageError("--listen-start-timeout-sec must be between 5 and 300")
 		}
 		if err := validateAllowRemote(cfg); err != nil {
 			return err
@@ -548,9 +554,36 @@ func runListen(ctx context.Context, cfg *config, emit *emitter) error {
 		"maxTotalMiB":    cfg.maxTotalMiB,
 		"maxDurationSec": cfg.maxDurationSec,
 	})
-	if err := tunaClient.Listen(allow); err != nil {
-		return fmt.Errorf("Tuna listen failed: %w", err)
+
+	listenStartTimeout := time.Duration(cfg.listenStartTimeoutSec) * time.Second
+	listenDone := make(chan error, 1)
+	go func() {
+		listenDone <- tunaClient.Listen(allow)
+	}()
+
+	select {
+	case err := <-listenDone:
+		if err != nil {
+			return fmt.Errorf("Tuna listen failed: %w", err)
+		}
+		emit.emit(event{
+			"event":      "tuna_listen_call_completed",
+			"role":       "listener",
+			"durationMs": time.Since(listenStarted).Milliseconds(),
+		})
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(listenStartTimeout):
+		emit.emit(event{
+			"event":      "tuna_listen_start_timeout",
+			"role":       "listener",
+			"durationMs": time.Since(listenStarted).Milliseconds(),
+			"timeoutSec": cfg.listenStartTimeoutSec,
+			"paths":      tunaProviderPathDiagnostics(tunaClient.GetPubAddrs()),
+		})
+		return fmt.Errorf("Tuna listen start timeout after %s", listenStartTimeout)
 	}
+
 	providerReady, providerReadyErr := waitForProviderPathReadiness(
 		ctx,
 		tunaClient,
@@ -1015,6 +1048,8 @@ func compatibleSidecarVersion(peerVersion string) bool {
 func bridgeConns(ctx context.Context, cfg *config, appConn net.Conn, tunaConn net.Conn, emit *emitter, role string, providerInfo event) error {
 	limitBytes := int64(cfg.maxTotalMiB) * 1024 * 1024
 	duration := time.Duration(cfg.maxDurationSec) * time.Second
+	hasByteCap := limitBytes > 0
+	hasDurationCap := duration > 0
 	if limitBytes <= 0 {
 		limitBytes = 1 << 62
 	}
@@ -1024,6 +1059,7 @@ func bridgeConns(ctx context.Context, cfg *config, appConn net.Conn, tunaConn ne
 	ctx, cancel := context.WithTimeout(ctx, duration)
 	defer cancel()
 	var totalBytes atomic.Int64
+	var capHandoffRequested atomic.Bool
 	if activePaymentObserver != nil {
 		defer activePaymentObserver.observeBytes(&totalBytes)()
 	}
@@ -1040,8 +1076,23 @@ func bridgeConns(ctx context.Context, cfg *config, appConn net.Conn, tunaConn ne
 		"tunaLocal":  connAddrDiagnostics(tunaConn.LocalAddr()),
 		"tunaRemote": connAddrDiagnostics(tunaConn.RemoteAddr()),
 	})
-	go bridgeDirection(ctx, role, "app_to_tuna", appConn, tunaConn, &totalBytes, limitBytes, emit, errCh)
-	go bridgeDirection(ctx, role, "tuna_to_app", tunaConn, appConn, &totalBytes, limitBytes, emit, errCh)
+	softLimitBytes := capHandoffSoftLimitBytes(limitBytes, hasByteCap)
+	if softLimitBytes > 0 {
+		emit.emit(event{
+			"event":          "tuna_cap_handoff_configured",
+			"transport":      "tuna",
+			"role":           role,
+			"capReason":      "byte_cap_reached",
+			"limitBytes":     limitBytes,
+			"softLimitBytes": softLimitBytes,
+			"reserveBytes":   limitBytes - softLimitBytes,
+		})
+	}
+	if hasDurationCap {
+		scheduleDurationCapHandoff(ctx, emit, role, duration, &capHandoffRequested)
+	}
+	go bridgeDirection(ctx, role, "app_to_tuna", appConn, tunaConn, &totalBytes, limitBytes, softLimitBytes, &capHandoffRequested, emit, errCh)
+	go bridgeDirection(ctx, role, "tuna_to_app", tunaConn, appConn, &totalBytes, limitBytes, softLimitBytes, &capHandoffRequested, emit, errCh)
 
 	var err error
 	var result bridgeDirectionResult
@@ -1186,6 +1237,8 @@ func bridgeDirection(
 	dst net.Conn,
 	totalBytes *atomic.Int64,
 	limitBytes int64,
+	softLimitBytes int64,
+	capHandoffRequested *atomic.Bool,
 	emit *emitter,
 	errCh chan<- bridgeDirectionResult) {
 	startedAt := time.Now()
@@ -1326,15 +1379,34 @@ func bridgeDirection(
 			})
 		}
 		moved := int64(len(frame.payload))
-		if totalBytes.Add(moved) > limitBytes {
+		projectedBytesMoved := totalBytes.Load() + moved
+		if projectedBytesMoved > limitBytes {
 			finish("cap", fmt.Errorf("byte cap reached"), lastFrame)
 			return
+		}
+		if softLimitBytes > 0 && projectedBytesMoved >= softLimitBytes && capHandoffRequested.CompareAndSwap(false, true) {
+			emit.emit(event{
+				"event":          "tuna_cap_handoff_requested",
+				"transport":      "tuna",
+				"role":           role,
+				"direction":      direction,
+				"capReason":      "byte_cap_reached",
+				"bytesMoved":     totalBytes.Load(),
+				"projectedBytes": projectedBytesMoved,
+				"limitBytes":     limitBytes,
+				"softLimitBytes": softLimitBytes,
+				"remainingBytes": maxInt64(0, limitBytes-totalBytes.Load()),
+				"frameType":      frameTypeName(frame.typ),
+				"frameLane":      frameLaneName(frame.lane),
+				"frameSeq":       frame.seq,
+			})
 		}
 		writeStarted := time.Now()
 		if err := writeFrame(dst, frame.typ, frame.lane, frame.seq, frame.timestamp, frame.payload); err != nil {
 			finish("write", err, frame)
 			return
 		}
+		totalBytes.Add(moved)
 		writeMs := time.Since(writeStarted).Milliseconds()
 		if writeMs > maxWriteMs {
 			maxWriteMs = writeMs
@@ -1378,6 +1450,76 @@ func bridgeDirection(
 			})
 		}
 	}
+}
+
+func capHandoffSoftLimitBytes(limitBytes int64, hasByteCap bool) int64 {
+	if !hasByteCap || limitBytes <= 0 {
+		return 0
+	}
+	reserve := limitBytes / 20
+	const minReserve = int64(8 * 1024 * 1024)
+	const maxReserve = int64(64 * 1024 * 1024)
+	if reserve < minReserve {
+		reserve = minReserve
+	}
+	if reserve > maxReserve {
+		reserve = maxReserve
+	}
+	if reserve >= limitBytes/2 {
+		reserve = maxInt64(1, limitBytes/4)
+	}
+	softLimit := limitBytes - reserve
+	if softLimit <= 0 || softLimit >= limitBytes {
+		return 0
+	}
+	return softLimit
+}
+
+func scheduleDurationCapHandoff(ctx context.Context, emit *emitter, role string, duration time.Duration, capHandoffRequested *atomic.Bool) {
+	if duration <= 0 {
+		return
+	}
+	reserve := duration / 20
+	if reserve < 10*time.Second {
+		reserve = 10 * time.Second
+	}
+	if reserve > 60*time.Second {
+		reserve = 60 * time.Second
+	}
+	if reserve >= duration/2 {
+		reserve = duration / 4
+	}
+	delay := duration - reserve
+	if delay <= 0 {
+		return
+	}
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			if capHandoffRequested.CompareAndSwap(false, true) {
+				emit.emit(event{
+					"event":           "tuna_cap_handoff_requested",
+					"transport":       "tuna",
+					"role":            role,
+					"direction":       "timer",
+					"capReason":       "duration_cap_reached",
+					"durationMs":      duration.Milliseconds(),
+					"softDurationMs":  delay.Milliseconds(),
+					"remainingTimeMs": reserve.Milliseconds(),
+				})
+			}
+		case <-ctx.Done():
+		}
+	}()
+}
+
+func maxInt64(a, b int64) int64 {
+	if a >= b {
+		return a
+	}
+	return b
 }
 
 func bridgeDirectionEvent(result bridgeDirectionResult) event {

@@ -16,6 +16,9 @@ namespace NLink.SmokeTests;
 [Trait("Area", "BridgeManual")]
 public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
 {
+    private const string TunaTestRequireProviderReadyEnv = "NLINK_TUNA_TEST_REQUIRE_PROVIDER_READY";
+    private const string TunaTestProviderReadyAttemptsEnv = "NLINK_TUNA_TEST_PROVIDER_READY_ATTEMPTS";
+
     [Trait("Category", "Manual")]
     [ManualBridgeFact]
     public async Task TunaSidecar_TwoRealNknTransports_NegotiatesScreenAndFileThenFallsBack()
@@ -141,7 +144,7 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
                     TransferId = transferId,
                     FileName = "tuna-live-transfer.bin",
                     FileSizeBytes = 32 * 1024,
-                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                 },
                 cts.Token);
             await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(30), cts.Token);
@@ -150,7 +153,7 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
                 {
                     SessionId = sessionId,
                     TransferId = transferId,
-                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                 },
                 cts.Token);
             await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(30), cts.Token);
@@ -159,7 +162,7 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
                 {
                     SessionId = sessionId,
                     TransferId = transferId,
-                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                     SessionRole = FileTransferProtocol.SessionRoleSender,
                     ChunkSizeBytes = 16 * 1024,
                     InitialPipelineDepth = 8,
@@ -309,6 +312,18 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
         process.StartInfo.ArgumentList.Add(acceptTimeoutSec.ToString(CultureInfo.InvariantCulture));
         process.StartInfo.ArgumentList.Add("--local-ipc");
         process.StartInfo.ArgumentList.Add("127.0.0.1:0");
+        if (IsEnabled(TunaTestRequireProviderReadyEnv))
+        {
+            process.StartInfo.ArgumentList.Add("--require-provider-ready");
+        }
+
+        var providerReadyAttempts = ReadInt(TunaTestProviderReadyAttemptsEnv, fallback: 1, min: 1, max: 5);
+        if (providerReadyAttempts > 1)
+        {
+            process.StartInfo.ArgumentList.Add("--provider-ready-attempts");
+            process.StartInfo.ArgumentList.Add(providerReadyAttempts.ToString(CultureInfo.InvariantCulture));
+        }
+
         process.StartInfo.ArgumentList.Add("--jsonl");
 
         process.OutputDataReceived += (_, e) =>
@@ -471,7 +486,7 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
         return host.CurrentSessionSecurityState.SessionId!.Value.Value;
     }
 
-    private static FileTransferChunkBatchFrameV4 CreateChunkFrame(string sessionId, string transferId, int chunkIndex, byte fill)
+    private static FileTransferChunkBatchFrameV5 CreateChunkFrame(string sessionId, string transferId, int chunkIndex, byte fill)
         => new()
         {
             SessionId = sessionId,
@@ -577,6 +592,14 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
         var value = Environment.GetEnvironmentVariable(name);
         return string.Equals(value, "1", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int ReadInt(string name, int fallback, int min, int max)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+            ? Math.Clamp(parsed, min, max)
+            : fallback;
     }
 
     private static int CountOccurrences(string text, string needle)

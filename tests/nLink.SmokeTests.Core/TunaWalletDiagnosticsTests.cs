@@ -250,6 +250,7 @@ public sealed class TunaWalletDiagnosticsTests
                 MaxPriceNknPerMb = "0.0002000",
                 MaxTotalMiB = 2048,
                 MaxDurationSec = 1800,
+                AllowDegradedProviderReady = true,
                 LastRuntimeStatus = "locked",
             });
 
@@ -262,6 +263,7 @@ public sealed class TunaWalletDiagnosticsTests
             Assert.Equal("0.0002", loaded.MaxPriceNknPerMb);
             Assert.Equal(2048, loaded.MaxTotalMiB);
             Assert.Equal(1800, loaded.MaxDurationSec);
+            Assert.True(loaded.AllowDegradedProviderReady);
             Assert.DoesNotContain("password", content, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("seed", content, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("private", content, StringComparison.OrdinalIgnoreCase);
@@ -982,10 +984,16 @@ public sealed class TunaWalletDiagnosticsTests
                 CancellationToken.None);
 
             Assert.Null(unlockedResult);
-            Assert.False(runtimeService.HasSessionUnlock);
+            Assert.True(runtimeService.HasSessionUnlock);
             Assert.Equal("listener_failed", runtimeService.RuntimeStatus);
             var persisted = await File.ReadAllTextAsync(Path.Combine(root, "tuna-runtime-preferences.json"));
             Assert.DoesNotContain("runtime-pass", persisted, StringComparison.Ordinal);
+
+            await runtimeService.LockOrStopForSessionAsync(
+                "test_lock",
+                TunaRuntimeUnlockSource.Header);
+
+            Assert.False(runtimeService.HasSessionUnlock);
         }
         finally
         {
@@ -1130,6 +1138,32 @@ public sealed class TunaWalletDiagnosticsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void TunaListenerSidecarSupervisor_CapHandoffEventRequestsRuntimeStop()
+    {
+        var statuses = new List<string>();
+        var reasons = new List<string>();
+        using var supervisor = new NknTunaListenerSidecarSupervisor(new NknTunaListenerSidecarOptions
+        {
+            SidecarExePath = Path.Combine(Path.GetTempPath(), "nlink-tuna-sidecar.exe"),
+            WalletPath = Path.Combine(Path.GetTempPath(), "wallet-test-nkn.json"),
+            TakeWalletPassword = static () => "unused".ToCharArray(),
+            MaxPriceNknPerMb = TunaRuntimePreferenceState.DefaultMaxPriceNknPerMb,
+            MaxTotalMiB = TunaRuntimePreferenceState.DefaultMaxTotalMiB,
+            MaxDurationSec = TunaRuntimePreferenceState.DefaultMaxDurationSec,
+            StatusChanged = statuses.Add,
+            CapHandoffRequested = reasons.Add,
+        });
+
+        InvokeSupervisorStdout(
+            supervisor,
+            "{\"event\":\"tuna_cap_handoff_requested\",\"capReason\":\"byte_cap_reached\",\"bytesMoved\":10485760,\"projectedBytes\":11534336,\"limitBytes\":12582912,\"remainingBytes\":2097152}");
+
+        Assert.Contains("cap_handoff_pending", statuses);
+        Assert.Equal("byte_cap_reached", Assert.Single(reasons));
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void DiagnosticsTunaRuntimeCopy_IncludesSpendCostAndBenchmarkEstimate()
     {
         var root = CreateTempRoot();
@@ -1165,6 +1199,7 @@ public sealed class TunaWalletDiagnosticsTests
             Assert.Contains("tuna_runtime_flag: Advanced opt-in", copied, StringComparison.Ordinal);
             Assert.Contains("tuna_runtime_enabled: yes", copied, StringComparison.Ordinal);
             Assert.Contains("tuna_runtime_caps: max_price_nkn_per_mb=0.0002; max_total_mib=2048; max_duration_minutes=30", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_provider_readiness: degraded_allowed", copied, StringComparison.Ordinal);
             Assert.Contains("tuna_startup_timing:", copied, StringComparison.Ordinal);
             Assert.Contains("tuna_spend_by_nlink: 0.01 NKN", copied, StringComparison.Ordinal);
             Assert.Contains("tuna_average_cost: 0.0001 NKN/MB", copied, StringComparison.Ordinal);

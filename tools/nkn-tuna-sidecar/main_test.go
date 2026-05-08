@@ -99,6 +99,39 @@ func TestBridgeLaneSequenceSummaries(t *testing.T) {
 	}
 }
 
+func TestCapHandoffSoftLimitBytesKeepsReserveBeforeHardCap(t *testing.T) {
+	tests := []struct {
+		name     string
+		limit    int64
+		hasCap   bool
+		want     int64
+		wantZero bool
+	}{
+		{name: "disabled without explicit cap", limit: 1 << 62, hasCap: false, wantZero: true},
+		{name: "small cap keeps quarter reserve", limit: 16 * 1024 * 1024, hasCap: true, want: 12 * 1024 * 1024},
+		{name: "normal cap uses five percent reserve", limit: 256 * 1024 * 1024, hasCap: true, want: 256*1024*1024 - 12*1024*1024 - 838860}, // 5% integer floor
+		{name: "large cap clamps reserve", limit: 2048 * 1024 * 1024, hasCap: true, want: 2048*1024*1024 - 64*1024*1024},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := capHandoffSoftLimitBytes(tt.limit, tt.hasCap)
+			if tt.wantZero {
+				if got != 0 {
+					t.Fatalf("capHandoffSoftLimitBytes() = %d, want 0", got)
+				}
+				return
+			}
+			if got != tt.want {
+				t.Fatalf("capHandoffSoftLimitBytes() = %d, want %d", got, tt.want)
+			}
+			if got <= 0 || got >= tt.limit {
+				t.Fatalf("soft limit %d should be inside hard cap %d", got, tt.limit)
+			}
+		})
+	}
+}
+
 func TestBridgeSequenceTrackerTreatsInterleavedLanesAsContiguousGlobalSequence(t *testing.T) {
 	tracker := &bridgeSequenceTracker{}
 	frames := []sidecarFrame{
@@ -237,6 +270,9 @@ func TestPaidListenStillRequiresExplicitCaps(t *testing.T) {
 	if cfg.providerReadyAttempts != 1 {
 		t.Fatalf("listen providerReadyAttempts = %d, want 1", cfg.providerReadyAttempts)
 	}
+	if cfg.listenStartTimeoutSec != int(defaultListenStartTimeout.Seconds()) {
+		t.Fatalf("listen listenStartTimeoutSec = %d, want %d", cfg.listenStartTimeoutSec, int(defaultListenStartTimeout.Seconds()))
+	}
 }
 
 func TestPaidListenProviderReadyAttempts(t *testing.T) {
@@ -248,6 +284,7 @@ func TestPaidListenProviderReadyAttempts(t *testing.T) {
 		"--max-price-nkn-per-mb", "0.0002",
 		"--max-total-mib", "512",
 		"--max-duration-sec", "900",
+		"--listen-start-timeout-sec", "30",
 		"--require-provider-ready",
 		"--provider-ready-attempts", "2",
 	})
@@ -260,5 +297,8 @@ func TestPaidListenProviderReadyAttempts(t *testing.T) {
 	}
 	if cfg.providerReadyAttempts != 2 {
 		t.Fatalf("providerReadyAttempts = %d, want 2", cfg.providerReadyAttempts)
+	}
+	if cfg.listenStartTimeoutSec != 30 {
+		t.Fatalf("listenStartTimeoutSec = %d, want 30", cfg.listenStartTimeoutSec)
 	}
 }

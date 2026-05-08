@@ -3,6 +3,7 @@ using NLink.App.Services;
 using NLink.App.ViewModels;
 using NLink.Core;
 using NLink.Core.Diagnostics;
+using NLink.Core.Logging;
 using NLink.Infra.Nkn;
 
 namespace NLink.SmokeTests;
@@ -11,6 +12,18 @@ namespace NLink.SmokeTests;
 [Trait("Area", "Core")]
 public sealed class DiagnosticsRedactorTests
 {
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public void OperationalLogRedactor_Preserves_Long_Snake_Case_Diagnostic_Reasons()
+    {
+        var sample = "event=filetransfer_message_rejected; reason=post_terminal_late_sender_frame_canceled";
+
+        var redacted = SensitiveDataRedactor.Redact(sample);
+
+        Assert.Contains("event=filetransfer_message_rejected", redacted, StringComparison.Ordinal);
+        Assert.Contains("reason=post_terminal_late_sender_frame_canceled", redacted, StringComparison.Ordinal);
+    }
+
     [Fact]
     [Trait("Category", "Smoke")]
     public void DiagnosticsRedactor_Redacts_Seeds_PrivateKeys_AndWalletSecrets()

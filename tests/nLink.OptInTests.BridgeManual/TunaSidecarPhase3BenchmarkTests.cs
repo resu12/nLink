@@ -1733,7 +1733,7 @@ public sealed partial class TunaSidecarLiveManualTests
                     TransferId = transferId,
                     FileName = "phase3-benchmark.bin",
                     FileSizeBytes = fileSizeBytes,
-                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                 },
                 ct);
             await WaitPhase3StageAsync(offerReceived.Task, TimeSpan.FromSeconds(30), "file_transfer_offer", ct);
@@ -1742,7 +1742,7 @@ public sealed partial class TunaSidecarLiveManualTests
                 {
                     SessionId = context.SessionId,
                     TransferId = transferId,
-                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                 },
                 ct);
             await WaitPhase3StageAsync(acceptReceived.Task, TimeSpan.FromSeconds(30), "file_transfer_accept", ct);
@@ -1751,7 +1751,7 @@ public sealed partial class TunaSidecarLiveManualTests
                 {
                     SessionId = context.SessionId,
                     TransferId = transferId,
-                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                     SessionRole = FileTransferProtocol.SessionRoleSender,
                     ChunkSizeBytes = chunkSizeBytes,
                     InitialPipelineDepth = 8,
@@ -1789,7 +1789,7 @@ public sealed partial class TunaSidecarLiveManualTests
         }
     }
 
-    private static FileTransferChunkBatchFrameV4 CreatePhase3ChunkFrame(
+    private static FileTransferChunkBatchFrameV5 CreatePhase3ChunkFrame(
         string sessionId,
         string transferId,
         int chunkIndex,
@@ -1940,7 +1940,7 @@ public sealed partial class TunaSidecarLiveManualTests
     }
 
     private static long GetPhase3FrameBytes(FileTransferDataFrame frame)
-        => frame is FileTransferChunkBatchFrameV4 batch
+        => frame is FileTransferChunkBatchFrameV5 batch
             ? batch.DataSegments.Sum(static segment => segment?.Length ?? 0)
             : 0;
 

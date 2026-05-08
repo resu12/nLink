@@ -48,13 +48,18 @@ public sealed partial class TunaSidecarLiveManualTests
             Assert.Empty(options.CellFilters);
             Assert.Contains(TunaSoakTier.Core, options.Tiers);
             Assert.DoesNotContain(TunaSoakTier.Extended, options.Tiers);
-            Assert.Contains(cells, static cell => cell.Transport == Phase3TransportMode.Baseline && cell.Preset == TunaSoakPreset.HighQuality);
-            Assert.Contains(cells, static cell => cell.Transport == Phase3TransportMode.Tuna && cell.Payer == TunaSoakPayerMode.HelpeeOnly);
-            Assert.Contains(cells, static cell => cell.Transport == Phase3TransportMode.Tuna && cell.Payer == TunaSoakPayerMode.HelperOnly);
-            Assert.Contains(cells, static cell => cell.Transport == Phase3TransportMode.Tuna && cell.Payer == TunaSoakPayerMode.BothUnlocked);
+            Assert.Equal(27, cells.Count);
+            Assert.All(cells, static cell => Assert.Equal(Phase3TransportMode.Tuna, cell.Transport));
+            Assert.Contains(cells, static cell => cell.Payer == TunaSoakPayerMode.HelpeeOnly);
+            Assert.Contains(cells, static cell => cell.Payer == TunaSoakPayerMode.HelperOnly);
+            Assert.Contains(cells, static cell => cell.Payer == TunaSoakPayerMode.BothUnlocked);
+            Assert.Contains(cells, static cell => cell.TrafficProfile == TunaSoakTrafficProfile.ScreenOnly);
+            Assert.Contains(cells, static cell => cell.TrafficProfile == TunaSoakTrafficProfile.FileOnly);
+            Assert.Contains(cells, static cell => cell.TrafficProfile == TunaSoakTrafficProfile.MixedScreenFile);
             Assert.Contains(cells, static cell => cell.Preset == TunaSoakPreset.TunaQuality);
             Assert.Contains(cells, static cell => cell.Fault == TunaSoakFaultMode.SidecarCrash);
             Assert.Contains(cells, static cell => cell.Fault == TunaSoakFaultMode.SwitchOffFallback);
+            Assert.Contains(cells, static cell => cell.Fault == TunaSoakFaultMode.CapReached);
         }
         finally
         {
@@ -89,12 +94,12 @@ public sealed partial class TunaSidecarLiveManualTests
         {
             ClearSoakEnvironment();
             Environment.SetEnvironmentVariable(SoakTiersEnv, "core,extended");
-            Environment.SetEnvironmentVariable(SoakCellFilterEnv, "core-tuna-high-helpee-none,extended-tuna-high-helpee-provider-timeout");
+            Environment.SetEnvironmentVariable(SoakCellFilterEnv, "core-tuna-mixed-helpee-switch-off,extended-tuna-mixed-helpee-provider-timeout");
 
             var options = TunaSoakMatrixOptions.Load();
             var cells = TunaSoakMatrixCell.Build(options);
 
-            Assert.Equal(new[] { "core-tuna-high-helpee-none", "extended-tuna-high-helpee-provider-timeout" }, cells.Select(static cell => cell.CellId).ToArray());
+            Assert.Equal(new[] { "core-tuna-mixed-helpee-switch-off", "extended-tuna-mixed-helpee-provider-timeout" }, cells.Select(static cell => cell.CellId).ToArray());
         }
         finally
         {
@@ -125,6 +130,7 @@ public sealed partial class TunaSidecarLiveManualTests
             TunaSoakTier.Core,
             "core-tuna-high-helpee-crash",
             Phase3TransportMode.Tuna,
+            TunaSoakTrafficProfile.MixedScreenFile,
             TunaSoakPreset.HighQuality,
             TunaSoakPayerMode.HelpeeOnly,
             TunaSoakFaultMode.SidecarCrash);
@@ -133,6 +139,7 @@ public sealed partial class TunaSidecarLiveManualTests
             CellId = cell.CellId,
             Tier = cell.Tier,
             Transport = cell.Transport,
+            TrafficProfile = cell.TrafficProfile,
             Preset = cell.Preset,
             Payer = cell.Payer,
             Fault = cell.Fault,
@@ -162,6 +169,7 @@ public sealed partial class TunaSidecarLiveManualTests
             TunaSoakTier.Core,
             "core-tuna-high-helpee-none",
             Phase3TransportMode.Tuna,
+            TunaSoakTrafficProfile.MixedScreenFile,
             TunaSoakPreset.HighQuality,
             TunaSoakPayerMode.HelpeeOnly,
             TunaSoakFaultMode.None);
@@ -170,13 +178,14 @@ public sealed partial class TunaSidecarLiveManualTests
             CellId = cell.CellId,
             Tier = cell.Tier,
             Transport = cell.Transport,
+            TrafficProfile = cell.TrafficProfile,
             Preset = cell.Preset,
             Payer = cell.Payer,
             Fault = cell.Fault,
             Completed = true,
             SessionAlive = true,
             ChatControlAlive = true,
-            FileCompleted = false,
+            FileCompleted = true,
             ScreenCompleted = true,
             FileBytesSent = 1000,
             FileBytesReceived = 990,
@@ -200,12 +209,55 @@ public sealed partial class TunaSidecarLiveManualTests
     }
 
     [Fact]
+    public void TunaSoakMatrixSummary_FailsFileTrafficWhenFileDidNotComplete()
+    {
+        var cell = new TunaSoakMatrixCell(
+            TunaSoakTier.Core,
+            "core-tuna-file-helpee-switch-off",
+            Phase3TransportMode.Tuna,
+            TunaSoakTrafficProfile.FileOnly,
+            TunaSoakPreset.HighQuality,
+            TunaSoakPayerMode.HelpeeOnly,
+            TunaSoakFaultMode.SwitchOffFallback);
+        var result = new TunaSoakCellResult
+        {
+            CellId = cell.CellId,
+            Tier = cell.Tier,
+            Transport = cell.Transport,
+            TrafficProfile = cell.TrafficProfile,
+            Preset = cell.Preset,
+            Payer = cell.Payer,
+            Fault = cell.Fault,
+            Completed = true,
+            SessionAlive = true,
+            ChatControlAlive = true,
+            FileCompleted = false,
+            ScreenCompleted = true,
+            FileBytesSent = 128_827_392,
+            FileBytesReceived = 124_895_232,
+            FileReceiveRatio = 0.9695,
+            TunaFrameCount = 10,
+            FallbackExpected = true,
+            FallbackStarted = true,
+            FallbackFileSent = true,
+            FallbackFileReceived = true,
+            TerminalReason = "local_ipc_eof",
+        };
+
+        var summary = TunaSoakMatrixSummary.Build(new[] { result });
+
+        Assert.Equal("fail", summary.Verdict);
+        Assert.Contains("core-tuna-file-helpee-switch-off:file_incomplete", summary.Reasons);
+    }
+
+    [Fact]
     public void TunaSoakMatrixSummary_FailsUnexpectedFallbackWithoutProof()
     {
         var cell = new TunaSoakMatrixCell(
             TunaSoakTier.Core,
             "core-tuna-high-both-none",
             Phase3TransportMode.Tuna,
+            TunaSoakTrafficProfile.MixedScreenFile,
             TunaSoakPreset.HighQuality,
             TunaSoakPayerMode.BothUnlocked,
             TunaSoakFaultMode.None);
@@ -214,6 +266,7 @@ public sealed partial class TunaSidecarLiveManualTests
             CellId = cell.CellId,
             Tier = cell.Tier,
             Transport = cell.Transport,
+            TrafficProfile = cell.TrafficProfile,
             Preset = cell.Preset,
             Payer = cell.Payer,
             Fault = cell.Fault,
@@ -277,6 +330,7 @@ public sealed partial class TunaSidecarLiveManualTests
             TunaSoakTier.Core,
             "core-tuna-high-helpee-none",
             Phase3TransportMode.Tuna,
+            TunaSoakTrafficProfile.MixedScreenFile,
             TunaSoakPreset.HighQuality,
             TunaSoakPayerMode.HelpeeOnly,
             TunaSoakFaultMode.None);
@@ -471,6 +525,15 @@ public sealed partial class TunaSidecarLiveManualTests
             cell.Fault == TunaSoakFaultMode.ProviderTimeout
                 ? Math.Max(30, (int)Math.Min(options.CellDuration.TotalSeconds / 2, 120))
                 : null);
+        if (cell.Fault == TunaSoakFaultMode.CapReached)
+        {
+            phase3Options = phase3Options with
+            {
+                ListenerMaxTotalMiB = 64,
+                ListenerMaxDurationSec = Math.Max(90, Math.Min(phase3Options.ListenerMaxDurationSec, 180)),
+            };
+        }
+
         await AppendPhase3EventAsync(
             runsPath,
             new
@@ -479,6 +542,7 @@ public sealed partial class TunaSidecarLiveManualTests
                 cellId = cell.CellId,
                 tier = cell.Tier,
                 transport = cell.Transport,
+                trafficProfile = cell.TrafficProfile,
                 preset = cell.Preset,
                 payer = cell.Payer,
                 fault = cell.Fault,
@@ -546,6 +610,7 @@ public sealed partial class TunaSidecarLiveManualTests
                 CellId = cell.CellId,
                 Tier = cell.Tier,
                 Transport = cell.Transport,
+                TrafficProfile = cell.TrafficProfile,
                 Preset = cell.Preset,
                 Payer = cell.Payer,
                 Fault = cell.Fault,
@@ -730,8 +795,12 @@ public sealed partial class TunaSidecarLiveManualTests
         var fileRunId = "soak-file-" + cell.CellId + "-" + Guid.NewGuid().ToString("N")[..8];
         var screenRunId = "soak-screen-" + cell.CellId + "-" + Guid.NewGuid().ToString("N")[..8];
         var faultTask = ScheduleTunaSoakFaultAsync(context, cell, soakOptions, runsPath, ct);
-        var fileTask = RunPhase3FileProfileAsync(context, fileRunId, repeat: 1, phase3Options, logStart, ct);
-        var screenTask = RunPhase3ScreenProfileAsync(context, screenRunId, repeat: 1, phase3Options, logStart, runsPath, ct);
+        var fileTask = CellUsesFileTraffic(cell)
+            ? RunPhase3FileProfileAsync(context, fileRunId, repeat: 1, phase3Options, logStart, ct)
+            : Task.FromResult(SkippedSoakRun(fileRunId, Phase3Profile.File, context.Mode));
+        var screenTask = CellUsesScreenTraffic(cell)
+            ? RunPhase3ScreenProfileAsync(context, screenRunId, repeat: 1, phase3Options, logStart, runsPath, ct)
+            : Task.FromResult(SkippedSoakRun(screenRunId, Phase3Profile.Screen, context.Mode));
         await Task.WhenAll(fileTask, screenTask, faultTask);
 
         var file = await fileTask;
@@ -739,7 +808,7 @@ public sealed partial class TunaSidecarLiveManualTests
         var logTail = ReadTunaSoakOperationalLogSlice(logStart, startedAtUtc);
         var sidecarText = ReadListenerStdoutSlice(listenerStdout, listenerStdoutStart);
         var fallbackExpected = cell.Transport == Phase3TransportMode.Tuna &&
-                               cell.Fault is TunaSoakFaultMode.SidecarCrash or TunaSoakFaultMode.SwitchOffFallback or TunaSoakFaultMode.ProviderTimeout;
+                               cell.Fault is TunaSoakFaultMode.SidecarCrash or TunaSoakFaultMode.SwitchOffFallback or TunaSoakFaultMode.ProviderTimeout or TunaSoakFaultMode.CapReached;
         var fallbackFileSent = CountOccurrences(logTail, "event=tuna_fallback_nkn_frame_sent; message_type=file_transfer_data_frame") > 0;
         var fallbackFileReceived = CountOccurrences(logTail, "event=tuna_fallback_nkn_frame_received; message_type=file_transfer_data_frame") > 0;
         var fallbackScreenSent = CountOccurrences(logTail, "event=tuna_fallback_nkn_frame_sent; message_type=screenshare_frame") > 0;
@@ -769,10 +838,8 @@ public sealed partial class TunaSidecarLiveManualTests
             terminalReason = ExtractLastJsonString(sidecarText, "terminalReason");
         }
         var fallbackProofComplete = fallbackStarted &&
-                                    fallbackFileSent &&
-                                    fallbackFileReceived &&
-                                    fallbackScreenSent &&
-                                    fallbackScreenReceived;
+                                    (!CellUsesFileTraffic(cell) || fallbackFileSent && fallbackFileReceived) &&
+                                    (!CellUsesScreenTraffic(cell) || fallbackScreenSent && fallbackScreenReceived);
         var tunaDiagnosticFrames = file.TunaFrameCount + screen.TunaFrameCount;
         var tunaLogFrames = CountOccurrences(logTail, "sidecar_event=bridge_frame_forwarded");
         var tunaFrames = Math.Max(tunaDiagnosticFrames, tunaLogFrames);
@@ -812,15 +879,25 @@ public sealed partial class TunaSidecarLiveManualTests
 
         var warningReason = string.Join("; ", warnings);
         var failureReason = string.Empty;
-        if (file.BytesReceived <= 0)
+        if (CellUsesFileTraffic(cell) && file.BytesReceived <= 0)
         {
             failureReason = "file_no_progress:" + file.FailureReason;
+        }
+        else if (CellUsesFileTraffic(cell) && !file.Completed)
+        {
+            failureReason = string.Format(
+                CultureInfo.InvariantCulture,
+                "file_incomplete:receive_ratio={0:F4}; reason={1}",
+                fileReceiveRatio,
+                string.IsNullOrWhiteSpace(file.FailureReason) ? "not_completed" : file.FailureReason);
         }
         else if (unexpectedFallbackStarted && !fallbackProofComplete)
         {
             failureReason = "unexpected_fallback_proof_missing";
         }
-        else if (unexpectedFallbackStarted && fileReceiveRatio < SoakUnexpectedFallbackRecoveredMinFileRatio)
+        else if (CellUsesFileTraffic(cell) &&
+                 unexpectedFallbackStarted &&
+                 fileReceiveRatio < SoakUnexpectedFallbackRecoveredMinFileRatio)
         {
             failureReason = string.Format(CultureInfo.InvariantCulture, "unexpected_fallback_file_receive_ratio_low:{0:F4}", fileReceiveRatio);
         }
@@ -828,19 +905,25 @@ public sealed partial class TunaSidecarLiveManualTests
         {
             failureReason = "unexpected_fallback_terminal_reason_missing";
         }
-        else if (!fallbackExpected && !unexpectedFallbackRecovered && file.StallCount > 0)
+        else if (CellUsesFileTraffic(cell) &&
+                 !fallbackExpected &&
+                 !unexpectedFallbackRecovered &&
+                 file.StallCount > 0)
         {
             failureReason = "file_stalled:" + file.FailureReason;
         }
-        else if (!fallbackExpected && !unexpectedFallbackRecovered && !string.IsNullOrWhiteSpace(file.FailureReason))
+        else if (CellUsesFileTraffic(cell) &&
+                 !fallbackExpected &&
+                 !unexpectedFallbackRecovered &&
+                 !string.IsNullOrWhiteSpace(file.FailureReason))
         {
             failureReason = "file_transport_failure:" + file.FailureReason;
         }
-        else if (unexpectedFallbackRecovered && screen.ReceivedFrames <= 0)
+        else if (CellUsesScreenTraffic(cell) && unexpectedFallbackRecovered && screen.ReceivedFrames <= 0)
         {
             failureReason = "screen_no_frames_after_recovered_fallback";
         }
-        else if (!screen.Completed)
+        else if (CellUsesScreenTraffic(cell) && !screen.Completed)
         {
             failureReason = "screen_incomplete:" + screen.FailureReason;
         }
@@ -862,14 +945,15 @@ public sealed partial class TunaSidecarLiveManualTests
             CellId = cell.CellId,
             Tier = cell.Tier,
             Transport = cell.Transport,
+            TrafficProfile = cell.TrafficProfile,
             Preset = cell.Preset,
             Payer = cell.Payer,
             Fault = cell.Fault,
             Completed = string.IsNullOrWhiteSpace(failureReason),
             SessionAlive = sessionAlive,
             ChatControlAlive = sessionAlive,
-            FileCompleted = file.Completed,
-            ScreenCompleted = screen.Completed,
+            FileCompleted = !CellUsesFileTraffic(cell) || file.Completed,
+            ScreenCompleted = !CellUsesScreenTraffic(cell) || screen.Completed,
             FileBytesSent = file.BytesSent,
             FileBytesReceived = file.BytesReceived,
             FileReceiveRatio = fileReceiveRatio,
@@ -935,6 +1019,8 @@ public sealed partial class TunaSidecarLiveManualTests
             .Split(new[] { "\r\n", "\n" }, StringSplitOptions.None)
             .Where(static line =>
                 line.Contains("tuna_fallback_", StringComparison.Ordinal) ||
+                line.Contains("screenshare_tuna_handoff_", StringComparison.Ordinal) ||
+                line.Contains("tuna_mixed_handoff_", StringComparison.Ordinal) ||
                 line.Contains("tuna_acceleration_negotiated", StringComparison.Ordinal) ||
                 line.Contains("tuna_sidecar_", StringComparison.Ordinal) ||
                 line.Contains("tuna_usage_session_recorded", StringComparison.Ordinal))
@@ -1097,12 +1183,34 @@ public sealed partial class TunaSidecarLiveManualTests
            cell.Fault is TunaSoakFaultMode.None or TunaSoakFaultMode.AppRestartBeforeTraffic &&
            !fallbackExpected &&
            fallbackStarted &&
-           fallbackFileSent &&
-           fallbackFileReceived &&
-           fallbackScreenSent &&
-           fallbackScreenReceived &&
+           (!CellUsesFileTraffic(cell) || fallbackFileSent && fallbackFileReceived) &&
+           (!CellUsesScreenTraffic(cell) || fallbackScreenSent && fallbackScreenReceived) &&
            sessionAlive &&
-           ComputeSoakFileReceiveRatio(fileBytesSent, fileBytesReceived) >= SoakUnexpectedFallbackRecoveredMinFileRatio;
+           (!CellUsesFileTraffic(cell) ||
+            ComputeSoakFileReceiveRatio(fileBytesSent, fileBytesReceived) >= SoakUnexpectedFallbackRecoveredMinFileRatio);
+
+    private static bool CellUsesFileTraffic(TunaSoakMatrixCell cell)
+        => cell.TrafficProfile is TunaSoakTrafficProfile.FileOnly or TunaSoakTrafficProfile.MixedScreenFile;
+
+    private static bool CellUsesScreenTraffic(TunaSoakMatrixCell cell)
+        => cell.TrafficProfile is TunaSoakTrafficProfile.ScreenOnly or TunaSoakTrafficProfile.MixedScreenFile;
+
+    private static bool CellUsesFileTraffic(TunaSoakCellResult result)
+        => result.TrafficProfile is TunaSoakTrafficProfile.FileOnly or TunaSoakTrafficProfile.MixedScreenFile;
+
+    private static bool CellUsesScreenTraffic(TunaSoakCellResult result)
+        => result.TrafficProfile is TunaSoakTrafficProfile.ScreenOnly or TunaSoakTrafficProfile.MixedScreenFile;
+
+    private static Phase3RunResult SkippedSoakRun(string runId, Phase3Profile profile, Phase3TransportMode mode)
+        => new()
+        {
+            RunId = runId,
+            Profile = profile,
+            Mode = mode,
+            Repeat = 1,
+            Completed = true,
+            FailureReason = string.Empty,
+        };
 
     private static double ComputeSoakFileReceiveRatio(long fileBytesSent, long fileBytesReceived)
         => fileBytesSent <= 0
@@ -1300,31 +1408,55 @@ public sealed partial class TunaSidecarLiveManualTests
         TunaSoakTier Tier,
         string CellId,
         Phase3TransportMode Transport,
+        TunaSoakTrafficProfile TrafficProfile,
         TunaSoakPreset Preset,
         TunaSoakPayerMode Payer,
         TunaSoakFaultMode Fault)
     {
         public static IReadOnlyList<TunaSoakMatrixCell> Build(TunaSoakMatrixOptions options)
         {
-            var cells = new List<TunaSoakMatrixCell>
+            var cells = new List<TunaSoakMatrixCell>();
+            var payers = new[]
             {
-                new(TunaSoakTier.Core, "core-nkn-high-none", Phase3TransportMode.Baseline, TunaSoakPreset.HighQuality, TunaSoakPayerMode.None, TunaSoakFaultMode.None),
-                new(TunaSoakTier.Core, "core-tuna-high-helpee-none", Phase3TransportMode.Tuna, TunaSoakPreset.HighQuality, TunaSoakPayerMode.HelpeeOnly, TunaSoakFaultMode.None),
-                new(TunaSoakTier.Core, "core-tuna-high-helper-none", Phase3TransportMode.Tuna, TunaSoakPreset.HighQuality, TunaSoakPayerMode.HelperOnly, TunaSoakFaultMode.None),
-                new(TunaSoakTier.Core, "core-tuna-high-both-none", Phase3TransportMode.Tuna, TunaSoakPreset.HighQuality, TunaSoakPayerMode.BothUnlocked, TunaSoakFaultMode.None),
-                new(TunaSoakTier.Core, "core-nkn-tuna-quality-none", Phase3TransportMode.Baseline, TunaSoakPreset.TunaQuality, TunaSoakPayerMode.None, TunaSoakFaultMode.None),
-                new(TunaSoakTier.Core, "core-tuna-tuna-quality-helpee-none", Phase3TransportMode.Tuna, TunaSoakPreset.TunaQuality, TunaSoakPayerMode.HelpeeOnly, TunaSoakFaultMode.None),
-                new(TunaSoakTier.Core, "core-tuna-high-helpee-crash", Phase3TransportMode.Tuna, TunaSoakPreset.HighQuality, TunaSoakPayerMode.HelpeeOnly, TunaSoakFaultMode.SidecarCrash),
-                new(TunaSoakTier.Core, "core-tuna-high-helpee-switch-off", Phase3TransportMode.Tuna, TunaSoakPreset.HighQuality, TunaSoakPayerMode.HelpeeOnly, TunaSoakFaultMode.SwitchOffFallback),
-                new(TunaSoakTier.Core, "core-nkn-high-restart", Phase3TransportMode.Baseline, TunaSoakPreset.HighQuality, TunaSoakPayerMode.None, TunaSoakFaultMode.AppRestartBeforeTraffic),
-                new(TunaSoakTier.Core, "core-tuna-high-helpee-restart", Phase3TransportMode.Tuna, TunaSoakPreset.HighQuality, TunaSoakPayerMode.HelpeeOnly, TunaSoakFaultMode.AppRestartBeforeTraffic),
+                TunaSoakPayerMode.HelpeeOnly,
+                TunaSoakPayerMode.HelperOnly,
+                TunaSoakPayerMode.BothUnlocked,
             };
+            var profiles = new[]
+            {
+                TunaSoakTrafficProfile.ScreenOnly,
+                TunaSoakTrafficProfile.FileOnly,
+                TunaSoakTrafficProfile.MixedScreenFile,
+            };
+            var faults = new[]
+            {
+                TunaSoakFaultMode.SwitchOffFallback,
+                TunaSoakFaultMode.SidecarCrash,
+                TunaSoakFaultMode.CapReached,
+            };
+
+            foreach (var payer in payers)
+            {
+                foreach (var profile in profiles)
+                {
+                    foreach (var fault in faults)
+                    {
+                        cells.Add(new(
+                            TunaSoakTier.Core,
+                            $"core-tuna-{FormatSoakProfileId(profile)}-{FormatSoakPayerId(payer)}-{FormatSoakFaultId(fault)}",
+                            Phase3TransportMode.Tuna,
+                            profile,
+                            TunaSoakPreset.TunaQuality,
+                            payer,
+                            fault));
+                    }
+                }
+            }
 
             if (options.Tiers.Contains(TunaSoakTier.Extended))
             {
-                cells.Add(new(TunaSoakTier.Extended, "extended-tuna-high-helpee-provider-timeout", Phase3TransportMode.Tuna, TunaSoakPreset.HighQuality, TunaSoakPayerMode.HelpeeOnly, TunaSoakFaultMode.ProviderTimeout));
-                cells.Add(new(TunaSoakTier.Extended, "extended-tuna-tuna-quality-both-provider-timeout", Phase3TransportMode.Tuna, TunaSoakPreset.TunaQuality, TunaSoakPayerMode.BothUnlocked, TunaSoakFaultMode.ProviderTimeout));
-                cells.Add(new(TunaSoakTier.Extended, "extended-nkn-tuna-quality-restart", Phase3TransportMode.Baseline, TunaSoakPreset.TunaQuality, TunaSoakPayerMode.None, TunaSoakFaultMode.AppRestartBeforeTraffic));
+                cells.Add(new(TunaSoakTier.Extended, "extended-tuna-mixed-helpee-provider-timeout", Phase3TransportMode.Tuna, TunaSoakTrafficProfile.MixedScreenFile, TunaSoakPreset.TunaQuality, TunaSoakPayerMode.HelpeeOnly, TunaSoakFaultMode.ProviderTimeout));
+                cells.Add(new(TunaSoakTier.Extended, "extended-tuna-mixed-both-provider-timeout", Phase3TransportMode.Tuna, TunaSoakTrafficProfile.MixedScreenFile, TunaSoakPreset.TunaQuality, TunaSoakPayerMode.BothUnlocked, TunaSoakFaultMode.ProviderTimeout));
             }
 
             var filtered = cells.Where(cell => options.Tiers.Contains(cell.Tier));
@@ -1336,6 +1468,30 @@ public sealed partial class TunaSidecarLiveManualTests
 
             return filtered.ToArray();
         }
+
+        private static string FormatSoakProfileId(TunaSoakTrafficProfile profile)
+            => profile switch
+            {
+                TunaSoakTrafficProfile.ScreenOnly => "screen",
+                TunaSoakTrafficProfile.FileOnly => "file",
+                _ => "mixed",
+            };
+
+        private static string FormatSoakPayerId(TunaSoakPayerMode payer)
+            => payer switch
+            {
+                TunaSoakPayerMode.HelperOnly => "helper",
+                TunaSoakPayerMode.BothUnlocked => "both",
+                _ => "helpee",
+            };
+
+        private static string FormatSoakFaultId(TunaSoakFaultMode fault)
+            => fault switch
+            {
+                TunaSoakFaultMode.SidecarCrash => "sidecar-kill",
+                TunaSoakFaultMode.CapReached => "cap",
+                _ => "switch-off",
+            };
     }
 
     private sealed class TunaSoakCellResult
@@ -1344,6 +1500,7 @@ public sealed partial class TunaSidecarLiveManualTests
         public string CellId { get; init; } = string.Empty;
         public TunaSoakTier Tier { get; init; }
         public Phase3TransportMode Transport { get; init; }
+        public TunaSoakTrafficProfile TrafficProfile { get; init; }
         public TunaSoakPreset Preset { get; init; }
         public TunaSoakPayerMode Payer { get; init; }
         public TunaSoakFaultMode Fault { get; init; }
@@ -1412,6 +1569,16 @@ public sealed partial class TunaSidecarLiveManualTests
                     reasons.Add(result.CellId + ":session_or_control_not_alive");
                 }
 
+                if (CellUsesFileTraffic(result) && !result.FileCompleted)
+                {
+                    reasons.Add(result.CellId + ":file_incomplete");
+                }
+
+                if (CellUsesScreenTraffic(result) && !result.ScreenCompleted)
+                {
+                    reasons.Add(result.CellId + ":screen_incomplete");
+                }
+
                 if (result.Transport == Phase3TransportMode.Tuna &&
                     result.Fault == TunaSoakFaultMode.None &&
                     result.TunaFrameCount <= 0)
@@ -1426,26 +1593,29 @@ public sealed partial class TunaSidecarLiveManualTests
                         reasons.Add(result.CellId + ":fallback_started_missing");
                     }
 
-                    if (!result.FallbackFileSent || !result.FallbackFileReceived)
+                    if (CellUsesFileTraffic(result) &&
+                        (!result.FallbackFileSent || !result.FallbackFileReceived))
                     {
                         reasons.Add("fallback_file_proof_missing");
                     }
 
-                    if (!result.FallbackScreenSent || !result.FallbackScreenReceived)
+                    if (CellUsesScreenTraffic(result) &&
+                        (!result.FallbackScreenSent || !result.FallbackScreenReceived))
                     {
                         reasons.Add(result.CellId + ":fallback_screen_proof_missing");
                     }
                 }
                 else if (result.Transport == Phase3TransportMode.Tuna && result.FallbackStarted)
                 {
-                    if (!result.FallbackFileSent ||
-                        !result.FallbackFileReceived ||
-                        !result.FallbackScreenSent ||
-                        !result.FallbackScreenReceived)
+                    if ((CellUsesFileTraffic(result) &&
+                         (!result.FallbackFileSent || !result.FallbackFileReceived)) ||
+                        (CellUsesScreenTraffic(result) &&
+                         (!result.FallbackScreenSent || !result.FallbackScreenReceived)))
                     {
                         reasons.Add(result.CellId + ":unexpected_fallback_proof_missing");
                     }
-                    else if (result.FileReceiveRatio < SoakUnexpectedFallbackRecoveredMinFileRatio)
+                    else if (CellUsesFileTraffic(result) &&
+                             result.FileReceiveRatio < SoakUnexpectedFallbackRecoveredMinFileRatio)
                     {
                         reasons.Add(result.CellId + ":unexpected_fallback_file_receive_ratio_low");
                     }
@@ -1492,6 +1662,13 @@ public sealed partial class TunaSidecarLiveManualTests
         TunaQuality,
     }
 
+    private enum TunaSoakTrafficProfile
+    {
+        ScreenOnly,
+        FileOnly,
+        MixedScreenFile,
+    }
+
     private enum TunaSoakPayerMode
     {
         None,
@@ -1506,6 +1683,7 @@ public sealed partial class TunaSidecarLiveManualTests
         AppRestartBeforeTraffic,
         SidecarCrash,
         SwitchOffFallback,
+        CapReached,
         ProviderTimeout,
     }
 }

@@ -8,10 +8,18 @@ namespace NLink.Infra.Nkn;
 
 internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 {
+    private enum ClientRole
+    {
+        None = 0,
+        Listener,
+        Dialer,
+    }
+
     private readonly object gate = new();
     private readonly NknTunaAccelerationOptions options;
     private readonly INknTunaListenerSidecarSupervisor? listenerSupervisor;
     private NknTunaSidecarClient? client;
+    private ClientRole clientRole;
     private NknTunaSidecarProcessOwner? dialerProcessOwner;
     private Task<bool>? dialerStartTask;
     private NknAccelerationLaneDiagnostics lastDiagnostics = NknAccelerationLaneDiagnostics.Empty;
@@ -62,6 +70,17 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         }
     }
 
+    public bool IsLocalPaidListenerActive
+    {
+        get
+        {
+            lock (gate)
+            {
+                return clientRole == ClientRole.Listener && client?.IsAvailable == true;
+            }
+        }
+    }
+
     public event EventHandler<NknIncomingMessage>? MessageReceived;
 
     public event EventHandler<AccelerationStateChangedEventArgs>? StateChanged;
@@ -87,9 +106,12 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             return false;
         }
 
-        if (IsAvailable)
+        lock (gate)
         {
-            return true;
+            if (client?.IsAvailable == true && clientRole == ClientRole.Listener)
+            {
+                return true;
+            }
         }
 
         var endpoint = options.ListenerEndpoint;
@@ -128,15 +150,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             return false;
         }
 
-        lock (gate)
-        {
-            ThrowIfDisposed();
-            CaptureClientDiagnostics_NoLock(client);
-            client?.Dispose();
-            client = nextClient;
-        }
-
-        return true;
+        return ReplaceClient(nextClient, ClientRole.Listener, null);
     }
 
     public async Task<bool> StartDialerSidecarAsync(string tunaAddress, string expectedRemotePeer, CancellationToken ct)
@@ -144,7 +158,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         Task<bool> startTask;
         lock (gate)
         {
-            if (client?.IsAvailable == true)
+            if (client?.IsAvailable == true && clientRole == ClientRole.Dialer)
             {
                 return true;
             }
@@ -180,9 +194,12 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             return false;
         }
 
-        if (IsAvailable)
+        lock (gate)
         {
-            return true;
+            if (client?.IsAvailable == true && clientRole == ClientRole.Dialer)
+            {
+                return true;
+            }
         }
 
         if (!File.Exists(options.SidecarExePath))
@@ -190,6 +207,8 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             LocalOperationalLog.Warn("NKN.Tuna", "event=tuna_dialer_sidecar_missing");
             return false;
         }
+
+        StopCurrentListenerBeforeDialer();
 
         var ready = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         string? lastSidecarEvent = null;
@@ -330,12 +349,10 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
                     ct)
                 .ConfigureAwait(false);
 
-            lock (gate)
+            if (!ReplaceClient(nextClient, ClientRole.Dialer, owner))
             {
-                ThrowIfDisposed();
-                CaptureClientDiagnostics_NoLock(client);
-                client?.Dispose();
-                client = nextClient;
+                StopDialerOwnerIfCurrent(owner, "dialer_replaced_by_current_client");
+                return false;
             }
 
             LocalOperationalLog.Info(
@@ -387,7 +404,14 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             clientToDispose = client;
             processToStop = dialerProcessOwner;
             CaptureClientDiagnostics_NoLock(clientToDispose);
+            if (clientToDispose is not null)
+            {
+                clientToDispose.MessageReceived -= OnClientMessageReceived;
+                clientToDispose.StateChanged -= OnClientStateChanged;
+            }
+
             client = null;
+            clientRole = ClientRole.None;
             dialerProcessOwner = null;
             dialerStartTask = null;
         }
@@ -418,7 +442,14 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
             clientToDispose = client;
             processToStop = dialerProcessOwner;
             CaptureClientDiagnostics_NoLock(clientToDispose);
+            if (clientToDispose is not null)
+            {
+                clientToDispose.MessageReceived -= OnClientMessageReceived;
+                clientToDispose.StateChanged -= OnClientStateChanged;
+            }
+
             client = null;
+            clientRole = ClientRole.None;
             dialerProcessOwner = null;
             dialerStartTask = null;
         }
@@ -447,6 +478,7 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
                     if (!e.IsAvailable)
                     {
                         client = null;
+                        clientRole = ClientRole.None;
                         dialerStartTask = null;
                         processToStop = dialerProcessOwner;
                         dialerProcessOwner = null;
@@ -465,6 +497,97 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
         {
             lastDiagnostics = sidecarClient.GetDiagnosticsSnapshot();
         }
+    }
+
+    private void StopCurrentListenerBeforeDialer()
+    {
+        NknTunaSidecarClient? clientToDispose = null;
+        lock (gate)
+        {
+            if (clientRole != ClientRole.Listener)
+            {
+                return;
+            }
+
+            clientToDispose = client;
+            CaptureClientDiagnostics_NoLock(clientToDispose);
+            if (clientToDispose is not null)
+            {
+                clientToDispose.MessageReceived -= OnClientMessageReceived;
+                clientToDispose.StateChanged -= OnClientStateChanged;
+            }
+
+            client = null;
+            clientRole = ClientRole.None;
+        }
+
+        clientToDispose?.Dispose();
+        listenerSupervisor?.Stop("payer_switch_to_dialer");
+        LocalOperationalLog.Info("NKN.Tuna", "event=tuna_listener_suppressed_for_remote_payer");
+    }
+
+    private bool ReplaceClient(
+        NknTunaSidecarClient nextClient,
+        ClientRole nextRole,
+        NknTunaSidecarProcessOwner? nextDialerOwner)
+    {
+        NknTunaSidecarClient? previousClient = null;
+        NknTunaSidecarProcessOwner? previousDialerOwner = null;
+        var rejectNextClient = false;
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            if (nextRole == ClientRole.Listener &&
+                clientRole == ClientRole.Dialer &&
+                client?.IsAvailable == true)
+            {
+                rejectNextClient = true;
+            }
+
+            if (rejectNextClient)
+            {
+                nextClient.MessageReceived -= OnClientMessageReceived;
+                nextClient.StateChanged -= OnClientStateChanged;
+            }
+            else
+            {
+                previousClient = client;
+                CaptureClientDiagnostics_NoLock(previousClient);
+                if (previousClient is not null)
+                {
+                    previousClient.MessageReceived -= OnClientMessageReceived;
+                    previousClient.StateChanged -= OnClientStateChanged;
+                }
+
+                if (clientRole == ClientRole.Dialer && !ReferenceEquals(dialerProcessOwner, nextDialerOwner))
+                {
+                    previousDialerOwner = dialerProcessOwner;
+                }
+
+                client = nextClient;
+                clientRole = nextRole;
+                dialerProcessOwner = nextRole == ClientRole.Dialer ? nextDialerOwner : null;
+            }
+        }
+
+        if (rejectNextClient)
+        {
+            nextClient.Dispose();
+            listenerSupervisor?.Stop("listener_rejected_current_dialer");
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                "event=tuna_listener_client_rejected; reason=current_dialer_active");
+            return false;
+        }
+
+        previousClient?.Dispose();
+        previousDialerOwner?.Stop("client_replaced");
+        if (nextRole == ClientRole.Dialer)
+        {
+            listenerSupervisor?.Stop("payer_switch_to_dialer");
+        }
+
+        return true;
     }
 
     private void MarkCurrentClientUnavailable(string reason)

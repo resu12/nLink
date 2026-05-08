@@ -23,6 +23,10 @@ internal sealed class NknTunaListenerSidecarOptions
 
     public int ReadyTimeoutMs { get; init; } = 75_000;
 
+    public int ListenStartTimeoutSec { get; init; } = 45;
+
+    public int StartupAttemptCount { get; init; } = 2;
+
     public bool RequireProviderReady { get; init; }
 
     public int ProviderReadyAttempts { get; init; } = 1;
@@ -31,18 +35,22 @@ internal sealed class NknTunaListenerSidecarOptions
 
     public Action<string>? StatusChanged { get; init; }
 
+    public Action<string>? CapHandoffRequested { get; init; }
+
     public Func<bool>? CanTakeWalletPassword { get; init; }
 }
 
 internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecarSupervisor
 {
     private readonly object gate = new();
+    private readonly SemaphoreSlim startGate = new(1, 1);
     private readonly NknTunaListenerSidecarOptions options;
     private NknTunaSidecarProcessOwner? processOwner;
     private NknTunaListenerSidecarEndpoint? endpoint;
     private string? expectedRemotePeer;
     private bool summaryObserved;
     private bool disposed;
+    private string? lastStartFailureReason;
 
     public NknTunaListenerSidecarSupervisor(NknTunaListenerSidecarOptions options)
     {
@@ -91,38 +99,86 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             }
         }
 
-        if (!File.Exists(options.SidecarExePath))
-        {
-            SetStatus("sidecar_missing");
-            return null;
-        }
-
-        if (!File.Exists(options.WalletPath))
-        {
-            SetStatus("wallet_missing");
-            return null;
-        }
-
-        var password = options.TakeWalletPassword();
-        if (password is null || password.Length == 0)
-        {
-            SetStatus("wallet_not_unlocked");
-            return null;
-        }
-
+        await startGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            return await StartProcessAsync(request, password, ct).ConfigureAwait(false);
+            lock (gate)
+            {
+                ThrowIfDisposed();
+                if (endpoint is not null &&
+                    processOwner?.IsRunning == true &&
+                    string.Equals(expectedRemotePeer, request.ExpectedRemotePeer, StringComparison.Ordinal))
+                {
+                    return endpoint;
+                }
+            }
+
+            if (!File.Exists(options.SidecarExePath))
+            {
+                SetStatus("sidecar_missing");
+                return null;
+            }
+
+            if (!File.Exists(options.WalletPath))
+            {
+                SetStatus("wallet_missing");
+                return null;
+            }
+
+            char[]? password = null;
+            try
+            {
+                password = options.TakeWalletPassword();
+                if (password is null || password.Length == 0)
+                {
+                    SetStatus("wallet_not_unlocked");
+                    return null;
+                }
+
+                var attemptCount = Math.Clamp(options.StartupAttemptCount, 1, 5);
+                for (var attempt = 1; attempt <= attemptCount; attempt++)
+                {
+                    ClearLastStartFailureReason();
+                    var endpoint = await StartProcessAsync(request, password, attempt, attemptCount, ct).ConfigureAwait(false);
+                    if (endpoint is not null)
+                    {
+                        return endpoint;
+                    }
+
+                    var reason = GetLastStartFailureReason();
+                    if (attempt >= attemptCount || !IsRetryableStartFailure(reason))
+                    {
+                        return null;
+                    }
+
+                    SetStatus("listener_retrying");
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_listener_sidecar_start_retrying; attempt={attempt + 1}; max_attempts={attemptCount}; reason={SanitizeLogToken(reason ?? "unknown")}");
+                    await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(1000 * attempt, 2500)), ct).ConfigureAwait(false);
+                }
+
+                return null;
+            }
+            finally
+            {
+                if (password is not null)
+                {
+                    Array.Clear(password);
+                }
+            }
         }
         finally
         {
-            Array.Clear(password);
+            startGate.Release();
         }
     }
 
     private async Task<NknTunaListenerSidecarEndpoint?> StartProcessAsync(
         NknTunaListenerStartRequest request,
         char[] password,
+        int attempt,
+        int maxAttempts,
         CancellationToken ct)
     {
         SetStatus("listener_starting");
@@ -157,6 +213,8 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         nextProcess.StartInfo.ArgumentList.Add(options.MaxDurationSec.ToString(CultureInfo.InvariantCulture));
         nextProcess.StartInfo.ArgumentList.Add("--accept-timeout-sec");
         nextProcess.StartInfo.ArgumentList.Add(options.AcceptTimeoutSec.ToString(CultureInfo.InvariantCulture));
+        nextProcess.StartInfo.ArgumentList.Add("--listen-start-timeout-sec");
+        nextProcess.StartInfo.ArgumentList.Add(Math.Clamp(options.ListenStartTimeoutSec, 5, 300).ToString(CultureInfo.InvariantCulture));
         nextProcess.StartInfo.ArgumentList.Add("--local-ipc");
         nextProcess.StartInfo.ArgumentList.Add("127.0.0.1:0");
         if (options.RequireProviderReady)
@@ -196,6 +254,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                 CompleteIncompleteSession("sidecar_exited_before_summary");
                 if (!ready.Task.IsCompleted)
                 {
+                    SetLastStartFailureReason(GetLastStartFailureReason() ?? "listener_exited_before_ready");
                     ready.TrySetException(new InvalidOperationException("Tuna listener sidecar exited before ready."));
                 }
             }
@@ -215,12 +274,16 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             if (!nextProcess.Start())
             {
                 nextProcess.Dispose();
+                SetLastStartFailureReason("listener_start_failed");
                 SetStatus("listener_start_failed");
                 CompleteIncompleteSession("listener_start_failed");
                 return null;
             }
 
             owner = NknTunaSidecarProcessOwner.Attach("listener", nextProcess);
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_listener_sidecar_start_attempt; attempt={attempt}; max_attempts={maxAttempts}; listen_start_timeout_sec={Math.Clamp(options.ListenStartTimeoutSec, 5, 300)}; ready_timeout_ms={options.ReadyTimeoutMs}");
             lock (gate)
             {
                 ThrowIfDisposed();
@@ -248,6 +311,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             LocalOperationalLog.Warn("NKN.Tuna", $"event=tuna_listener_sidecar_start_failed; error={ex.GetType().Name}");
+            SetLastStartFailureReason(GetLastStartFailureReason() ?? "listener_failed");
             SetStatus("listener_failed");
             CompleteIncompleteSession("listener_failed");
             StopOwnerIfCurrent(owner, "listener_failed");
@@ -256,6 +320,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             LocalOperationalLog.Warn("NKN.Tuna", "event=tuna_listener_sidecar_start_failed; error=ready_timeout");
+            SetLastStartFailureReason("listener_ready_timeout");
             SetStatus("listener_ready_timeout");
             CompleteIncompleteSession("listener_ready_timeout");
             StopOwnerIfCurrent(owner, "listener_ready_timeout");
@@ -263,6 +328,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         }
         catch (OperationCanceledException)
         {
+            SetLastStartFailureReason("listener_canceled");
             SetStatus("listener_canceled");
             CompleteIncompleteSession("listener_canceled");
             StopOwnerIfCurrent(owner, "listener_canceled");
@@ -328,12 +394,21 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                         ? (TryGetString(root, "capReason") ?? "cap_reached")
                         : "session_summary");
                     break;
+                case "tuna_cap_handoff_requested":
+                    var capReason = TryGetString(root, "capReason") ?? "cap_reached";
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_listener_cap_handoff_requested; cap_reason={SanitizeLogToken(capReason)}; bytes_moved={TryGetInt64(root, "bytesMoved") ?? -1}; projected_bytes={TryGetInt64(root, "projectedBytes") ?? -1}; limit_bytes={TryGetInt64(root, "limitBytes") ?? -1}; remaining_bytes={TryGetInt64(root, "remainingBytes") ?? -1}");
+                    SetStatus("cap_handoff_pending");
+                    RequestCapHandoff(capReason);
+                    break;
                 case "tuna_bridge_terminal":
                     var terminalReason = TryGetString(root, "terminalReason") ?? TryGetString(root, "reason") ?? "unknown";
                     LogBridgeTerminal(root);
                     SetStatus("terminal_" + SanitizeLogToken(terminalReason));
                     break;
                 case "error":
+                    SetLastStartFailureReason(TryGetString(root, "reason") ?? "sidecar_error");
                     SetStatus("sidecar_error");
                     break;
             }
@@ -348,6 +423,8 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         => eventName switch
         {
             "tuna_listen_start" => "listener_starting",
+            "tuna_listen_call_completed" => "listener_paths_starting",
+            "tuna_listen_start_timeout" => "listener_start_timeout",
             "tuna_provider_paths_ready" => "provider_paths_ready",
             "provider_paths_degraded" => (TryGetBool(root, "willRetry") ?? false)
                 ? "provider_paths_retrying"
@@ -355,6 +432,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             "tuna_provider_paths_ready_timeout" => (TryGetBool(root, "willRetry") ?? false)
                 ? "provider_paths_retrying"
                 : "provider_paths_wait_timeout",
+            "tuna_cap_handoff_requested" => "cap_handoff_pending",
             "tuna_listen_started" => (TryGetBool(root, "providerReady") ?? false)
                 ? "provider_paths_ready"
                 : "provider_paths_degraded",
@@ -500,6 +578,54 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
         {
             // Diagnostics-only status updates must never affect transport flow.
         }
+    }
+
+    private void RequestCapHandoff(string reason)
+    {
+        try
+        {
+            options.CapHandoffRequested?.Invoke(SanitizeLogToken(reason));
+        }
+        catch
+        {
+            // Cap handoff is best-effort; hard caps remain enforced by the sidecar.
+        }
+    }
+
+    private void SetLastStartFailureReason(string reason)
+    {
+        lock (gate)
+        {
+            lastStartFailureReason = SanitizeLogToken(reason);
+        }
+    }
+
+    private void ClearLastStartFailureReason()
+    {
+        lock (gate)
+        {
+            lastStartFailureReason = null;
+        }
+    }
+
+    private string? GetLastStartFailureReason()
+    {
+        lock (gate)
+        {
+            return lastStartFailureReason;
+        }
+    }
+
+    private static bool IsRetryableStartFailure(string? reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            return false;
+        }
+
+        return reason.Contains("timeout", StringComparison.OrdinalIgnoreCase) ||
+               reason.Contains("provider", StringComparison.OrdinalIgnoreCase) ||
+               reason.Contains("exited_before_ready", StringComparison.OrdinalIgnoreCase);
     }
 
     private bool IsCurrentProcessOwner(NknTunaSidecarProcessOwner? owner, Process process)

@@ -485,8 +485,8 @@ public partial class SessionHeaderView : UserControl
         var nextGlowOpacity = active ? 0.38d : pulsing ? 0.55d : 0d;
         var nextInnerGlowOpacity = active ? 0.2d : pulsing ? 0.28d : 0d;
         var nextGillOpacity = highlighted ? 0.92d : 0.55d;
-        var nextTip = paying
-            ? $"{presentation.Text} This computer is the Tuna listener and pays for Tuna traffic while active."
+        var nextTip = paying && !presentation.Text.Contains("paying", StringComparison.OrdinalIgnoreCase)
+            ? $"{presentation.Text} This computer is paying as the Tuna listener."
             : presentation.Text;
 
         SetAndRaise(TunaPictogramBrushProperty, ref tunaPictogramBrush, nextPictogramBrush);

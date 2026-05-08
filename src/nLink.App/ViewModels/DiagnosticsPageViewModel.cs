@@ -340,6 +340,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
                 MaxPriceNknPerMb = current.MaxPriceNknPerMb,
                 MaxTotalMiB = current.MaxTotalMiB,
                 MaxDurationSec = current.MaxDurationSec,
+                AllowDegradedProviderReady = current.AllowDegradedProviderReady,
                 LastRuntimeStatus = value ? "locked" : "off",
             });
         }
@@ -371,6 +372,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
                 MaxPriceNknPerMb = current.MaxPriceNknPerMb,
                 MaxTotalMiB = current.MaxTotalMiB,
                 MaxDurationSec = current.MaxDurationSec,
+                AllowDegradedProviderReady = current.AllowDegradedProviderReady,
                 LastRuntimeStatus = current.LastRuntimeStatus,
             });
         }
@@ -402,6 +404,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
                 MaxPriceNknPerMb = current.MaxPriceNknPerMb,
                 MaxTotalMiB = current.MaxTotalMiB,
                 MaxDurationSec = current.MaxDurationSec,
+                AllowDegradedProviderReady = current.AllowDegradedProviderReady,
                 LastRuntimeStatus = current.LastRuntimeStatus,
             });
         }
@@ -421,6 +424,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
                 MaxPriceNknPerMb = value,
                 MaxTotalMiB = current.MaxTotalMiB,
                 MaxDurationSec = current.MaxDurationSec,
+                AllowDegradedProviderReady = current.AllowDegradedProviderReady,
                 LastRuntimeStatus = current.LastRuntimeStatus,
             });
         }
@@ -440,6 +444,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
                 MaxPriceNknPerMb = current.MaxPriceNknPerMb,
                 MaxTotalMiB = int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : current.MaxTotalMiB,
                 MaxDurationSec = current.MaxDurationSec,
+                AllowDegradedProviderReady = current.AllowDegradedProviderReady,
                 LastRuntimeStatus = current.LastRuntimeStatus,
             });
         }
@@ -459,6 +464,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
                 MaxPriceNknPerMb = current.MaxPriceNknPerMb,
                 MaxTotalMiB = current.MaxTotalMiB,
                 MaxDurationSec = int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed * 60 : current.MaxDurationSec,
+                AllowDegradedProviderReady = current.AllowDegradedProviderReady,
                 LastRuntimeStatus = current.LastRuntimeStatus,
             });
         }
@@ -931,6 +937,35 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
     private TunaRuntimePreferenceState CurrentTunaRuntimePreferences()
         => tunaRuntimePilotService?.Preferences ?? TunaRuntimePreferenceState.Default;
 
+    private bool EffectiveTunaDegradedProviderReadyEnabled()
+    {
+        if (IsEnabled(ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
+                TunaRuntimePreferenceState.RequireStrictProviderReadyEnvVar,
+                category: "nkn_tuna_provider_readiness")))
+        {
+            return false;
+        }
+
+        return CurrentTunaRuntimePreferences().AllowDegradedProviderReady ||
+               IsEnabled(ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
+                   TunaRuntimePreferenceState.AllowDegradedProviderReadyEnvVar,
+                   category: "nkn_tuna_provider_readiness"));
+    }
+
+    private static bool IsEnabled(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var normalized = value.Trim();
+        return normalized.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("yes", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Equals("on", StringComparison.OrdinalIgnoreCase);
+    }
+
     private TunaUsageAccountingState CurrentTunaUsage()
         => tunaRuntimePilotService?.Usage ?? TunaUsageAccountingState.Empty;
 
@@ -1250,6 +1285,9 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
         var metricsSnapshot = metricsRegistry?.Snapshot();
         var timelineText = BuildSessionTimelineText(SessionTimeline.SnapshotRecent(30));
         var tunaAvailability = tunaWalletVerifier?.GetAvailability();
+        var tunaProviderReadinessMode = EffectiveTunaDegradedProviderReadyEnabled()
+            ? "degraded_allowed"
+            : "strict_4_paths";
         var lines = new List<string>
         {
             "Privacy notice",
@@ -1309,6 +1347,8 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"tuna_runtime_enabled: {(IsTunaRuntimeEnabled ? "yes" : "no")}",
             $"tuna_runtime_lanes: file={(IsTunaFileLaneEnabled ? "on" : "off")}, screen={(IsTunaScreenLaneEnabled ? "on" : "off")}",
             $"tuna_runtime_caps: max_price_nkn_per_mb={TunaMaxPriceNknPerMb}; max_total_mib={TunaMaxTotalMiB}; max_duration_minutes={TunaMaxDurationMinutes}",
+            $"tuna_provider_readiness: {tunaProviderReadinessMode}",
+            $"tuna_provider_readiness_env: {DiagnosticsExportBuilder.RedactStructuredValue(TunaRuntimePreferenceState.AllowDegradedProviderReadyEnvVar, Environment.GetEnvironmentVariable(TunaRuntimePreferenceState.AllowDegradedProviderReadyEnvVar))}",
             $"tuna_fallback_state: {TunaFallbackState}",
             $"tuna_sidecar_verifier: {TunaSidecarVerifierStatus}",
             $"tuna_sidecar_verifier_detail: {TunaSidecarVerifierDetail}",

@@ -441,7 +441,11 @@ public void DiagnosticsPageViewModel_UsesOptionsLabels_AndHidesEmptyBugReport()
 [InlineData("locked", "Tuna wallet is locked. Regular NKN is being used.", false)]
 [InlineData("waiting_for_approved_session", "Tuna is unlocked and waiting for an approved session.", false)]
 [InlineData("checking_payer_priority", "Choosing which side will pay for Tuna.", true)]
+[InlineData("selected_payer_starting_listener", "This computer was selected to pay for Tuna. Starting listener.", true)]
 [InlineData("listener_starting", "Starting Tuna listener. Regular NKN stays connected until ready.", true)]
+[InlineData("listener_paths_starting", "Starting Tuna relay paths. Regular NKN stays connected until ready.", true)]
+[InlineData("listener_retrying", "Retrying Tuna listener startup. Regular NKN stays connected.", true)]
+[InlineData("listener_start_timeout", "Tuna listener startup timed out. Retrying if possible; regular NKN stays connected.", true)]
 [InlineData("provider_paths_retrying", "Looking for enough Tuna relay paths. Regular NKN stays connected while Tuna retries.", true)]
 [InlineData("provider_paths_ready", "Tuna relay paths are ready. Waiting for peer connection.", true)]
 [InlineData("provider_paths_degraded", "Tuna relay paths are limited but usable. Waiting for peer connection.", true)]
@@ -450,9 +454,15 @@ public void DiagnosticsPageViewModel_UsesOptionsLabels_AndHidesEmptyBugReport()
 [InlineData("renegotiating_after_user_unlock", "Trying Tuna again for this session.", true)]
 [InlineData("dialer_starting", "Negotiating Tuna acceleration.", true)]
 [InlineData("dialer_ready", "Negotiating Tuna acceleration.", true)]
+[InlineData("suppressed_by_peer_payer", "The other computer was selected to pay for Tuna. This computer will dial for free.", true)]
+[InlineData("listener_stopped_payer_switch_to_dialer", "The other computer was selected to pay for Tuna. This computer will dial for free.", true)]
 [InlineData("negotiation_scheduled_runtime_unlock", "Negotiating Tuna acceleration.", true)]
 [InlineData("listener_sidecar_unavailable", "Tuna sidecar is unavailable. Regular NKN is being used.", false)]
 [InlineData("fallback_current_nkn", "Tuna is unavailable. Regular NKN is being used.", false)]
+[InlineData("cap_handoff_pending", "Tuna cap reached. Continuing on regular NKN.", false)]
+[InlineData("cap_reached", "Tuna cap reached. Continuing on regular NKN.", false)]
+[InlineData("byte_cap_reached", "Tuna cap reached. Continuing on regular NKN.", false)]
+[InlineData("duration_cap_reached", "Tuna cap reached. Continuing on regular NKN.", false)]
 public void TunaStatusPresentationMapper_FormatsFriendlyStatus(string runtimeStatus, string expectedText, bool expectedConnecting)
 {
     var presentation = TunaStatusPresentationMapper.FromRuntimeStatus(runtimeStatus);
@@ -463,6 +473,10 @@ public void TunaStatusPresentationMapper_FormatsFriendlyStatus(string runtimeSta
 
 [Theory]
 [InlineData("listener_starting", true)]
+[InlineData("listener_paths_starting", true)]
+[InlineData("listener_retrying", true)]
+[InlineData("listener_start_timeout", true)]
+[InlineData("selected_payer_starting_listener", true)]
 [InlineData("provider_paths_retrying", true)]
 [InlineData("provider_paths_ready", true)]
 [InlineData("provider_paths_degraded", true)]
@@ -499,16 +513,18 @@ public void TunaStatusPresentationMapper_ActiveTransportPreservesLocalPayerSigna
 {
     var payer = TunaStatusPresentationMapper.FromState(
         transportActive: true,
-        transportReason: "negotiated",
-        runtimeStatus: "peer_connected",
+        transportReason: "paid_listener_active",
+        runtimeStatus: "listener_ready_timeout",
         sessionUnlockOn: true);
     var dialer = TunaStatusPresentationMapper.FromState(
         transportActive: true,
-        transportReason: "negotiated",
-        runtimeStatus: "dialer_ready",
+        transportReason: "free_dialer_active",
+        runtimeStatus: "peer_connected",
         sessionUnlockOn: true);
 
+    Assert.Equal("Tuna is active. This computer is paying as the Tuna listener.", payer.Text);
     Assert.True(payer.IsLocalPayer);
+    Assert.Equal("Tuna is active and the other computer is paying.", dialer.Text);
     Assert.False(dialer.IsLocalPayer);
 }
 
@@ -698,6 +714,60 @@ public void SessionHeaderTunaSwitch_OverridesCompactButtonMinimumWidth()
     var toggleMarkup = xaml[start..Math.Min(xaml.Length, start + 500)];
     Assert.Contains("MinWidth=\"0\"", toggleMarkup, StringComparison.Ordinal);
     Assert.Contains("HorizontalContentAlignment=\"Left\"", toggleMarkup, StringComparison.Ordinal);
+}
+
+[Fact]
+public void TunaRuntimeProviderReadiness_DefaultsDegradedWithStrictOverride()
+{
+    var servicePath = FindFileUpwards(Path.Combine("src", "nLink.App", "Services", "TunaRuntimePilotService.cs"));
+    var source = File.ReadAllText(servicePath);
+
+    Assert.Contains("NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY", source, StringComparison.Ordinal);
+    Assert.Contains("NLINK_NKN_TUNA_REQUIRE_STRICT_PROVIDER_READY", source, StringComparison.Ordinal);
+    Assert.Contains("RequireProviderReady = !allowDegradedProviderReady", source, StringComparison.Ordinal);
+    Assert.Contains("strict_provider_ready", source, StringComparison.Ordinal);
+    Assert.Contains("degraded_provider_ready", source, StringComparison.Ordinal);
+    Assert.Contains("AllowDegradedProviderReady { get; init; } = true", source, StringComparison.Ordinal);
+}
+
+[Fact]
+public void TunaFallback_FileTransferWaitsForReceiveProofBeforeResume()
+{
+    var accelerationPath = FindFileUpwards(Path.Combine("src", "nLink.Infra.Nkn", "NknSignalingTransport.Acceleration.cs"));
+    var transportPath = FindFileUpwards(Path.Combine("src", "nLink.Infra.Nkn", "NknSignalingTransport.cs"));
+    var accelerationSource = File.ReadAllText(accelerationPath);
+    var transportSource = File.ReadAllText(transportPath);
+
+    Assert.Contains("event=tuna_disable_handoff_nkn_pending", accelerationSource, StringComparison.Ordinal);
+    Assert.DoesNotContain("reason: \"tuna_fallback_to_nkn\"", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("CompleteFileTransferFallbackNknProofIfPending", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("reason: \"transport_recovered\"", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("event=filetransfer_fallback_nkn_ready_unproven", transportSource, StringComparison.Ordinal);
+    Assert.Contains("isAvailable: false", transportSource, StringComparison.Ordinal);
+    Assert.Contains("reason: \"transport_recovered_unproven\"", transportSource, StringComparison.Ordinal);
+    Assert.Contains("ScheduleFileTransferFallbackNknProbeIfPending(\"bridge_ready_unproven\")", transportSource, StringComparison.Ordinal);
+    Assert.Contains("event=filetransfer_fallback_nkn_probe_scheduled", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("event=filetransfer_fallback_nkn_probe_started", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("proofKind: \"file_transfer_bulk_frame_received\"", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("event=filetransfer_fallback_nkn_receive_resumed_unproven", transportSource, StringComparison.Ordinal);
+    Assert.DoesNotContain("reason: \"transport_probe_unproven\"", accelerationSource, StringComparison.Ordinal);
+}
+
+[Fact]
+public void FileTransferRebind_DoesNotSendRepairWhileTransportProofPending()
+{
+    var rebindPath = FindFileUpwards(Path.Combine("src", "nLink.Core", "FileTransfer", "SessionFileTransferService.PullTransferSession.cs"));
+    var v4Path = FindFileUpwards(Path.Combine("src", "nLink.Core", "FileTransfer", "SessionFileTransferService.PullTransferSessionV4.cs"));
+    var rebindSource = File.ReadAllText(rebindPath);
+    var v4Source = File.ReadAllText(v4Path);
+
+    Assert.Contains("!context.PullTransportPaused &&", rebindSource, StringComparison.Ordinal);
+    Assert.Contains("\"transport_recovered_unproven\" or", rebindSource, StringComparison.Ordinal);
+    Assert.Contains("\"transport_probe_unproven\" or", rebindSource, StringComparison.Ordinal);
+    Assert.Contains("\"receive_stall_recovery\" ||", rebindSource, StringComparison.Ordinal);
+    Assert.Contains("context.PullTransportPaused ||", v4Source, StringComparison.Ordinal);
+    Assert.Contains("filetransfer_v4_peer_feedback_timeout", v4Source, StringComparison.Ordinal);
+    Assert.Contains("post_tuna_fallback_peer_silence", v4Source, StringComparison.Ordinal);
 }
 
 [Fact]

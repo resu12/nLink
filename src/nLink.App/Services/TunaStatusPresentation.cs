@@ -17,6 +17,22 @@ internal static class TunaStatusPresentationMapper
     {
         if (transportActive)
         {
+            var activeToken = Normalize(transportReason);
+            if (activeToken == "paid_listener_active")
+            {
+                return new TunaStatusPresentation(
+                    "Tuna is active. This computer is paying as the Tuna listener.",
+                    IsConnecting: false,
+                    IsLocalPayer: true);
+            }
+
+            if (activeToken == "free_dialer_active")
+            {
+                return new TunaStatusPresentation(
+                    "Tuna is active and the other computer is paying.",
+                    IsConnecting: false);
+            }
+
             return new TunaStatusPresentation(
                 "Tuna acceleration is active.",
                 IsConnecting: false,
@@ -30,7 +46,11 @@ internal static class TunaStatusPresentationMapper
             "locked" => new TunaStatusPresentation("Tuna wallet is locked. Regular NKN is being used.", false),
             "waiting_for_approved_session" => new TunaStatusPresentation("Tuna is unlocked and waiting for an approved session.", false),
             "checking_payer_priority" => new TunaStatusPresentation("Choosing which side will pay for Tuna.", true),
+            "selected_payer_starting_listener" => new TunaStatusPresentation("This computer was selected to pay for Tuna. Starting listener.", true, true),
             "listener_starting" => new TunaStatusPresentation("Starting Tuna listener. Regular NKN stays connected until ready.", true, true),
+            "listener_paths_starting" => new TunaStatusPresentation("Starting Tuna relay paths. Regular NKN stays connected until ready.", true, true),
+            "listener_retrying" => new TunaStatusPresentation("Retrying Tuna listener startup. Regular NKN stays connected.", true, true),
+            "listener_start_timeout" => new TunaStatusPresentation("Tuna listener startup timed out. Retrying if possible; regular NKN stays connected.", true, true),
             "provider_paths_retrying" => new TunaStatusPresentation("Looking for enough Tuna relay paths. Regular NKN stays connected while Tuna retries.", true, true),
             "provider_paths_ready" => new TunaStatusPresentation("Tuna relay paths are ready. Waiting for peer connection.", true, true),
             "provider_paths_degraded" => new TunaStatusPresentation("Tuna relay paths are limited but usable. Waiting for peer connection.", true, true),
@@ -38,6 +58,12 @@ internal static class TunaStatusPresentationMapper
                 => new TunaStatusPresentation("Waiting for the other side to connect to Tuna.", true, true),
             "waiting_for_answer" or "dialer_starting" or "dialer_ready" or "negotiated"
                 => new TunaStatusPresentation("Negotiating Tuna acceleration.", true, localPayer),
+            "free_dialer_active"
+                => new TunaStatusPresentation("Tuna is active and the other computer is paying.", false),
+            "paid_listener_active"
+                => new TunaStatusPresentation("Tuna is active. This computer is paying as the Tuna listener.", false, true),
+            "suppressed_by_peer_payer" or "payer_yield_to_helpee" or "listener_stopped_payer_switch_to_dialer" or "listener_stopped_payer_yield_to_helpee"
+                => new TunaStatusPresentation("The other computer was selected to pay for Tuna. This computer will dial for free.", true),
             "renegotiating_after_user_unlock"
                 => new TunaStatusPresentation("Trying Tuna again for this session.", true, localPayer),
             _ when token.StartsWith("negotiation_scheduled_", StringComparison.Ordinal)
@@ -56,8 +82,10 @@ internal static class TunaStatusPresentationMapper
                 => new TunaStatusPresentation("Tuna sidecar is unavailable. Regular NKN is being used.", false),
             "provider_paths_wait_timeout"
                 => new TunaStatusPresentation("Tuna relay path discovery timed out. Regular NKN is being used.", false),
-            "cap_reached"
-                => new TunaStatusPresentation("Tuna cap was reached. Regular NKN is being used.", false),
+            "cap_handoff_pending"
+                => new TunaStatusPresentation("Tuna cap reached. Continuing on regular NKN.", false),
+            "cap_reached" or "byte_cap_reached" or "duration_cap_reached"
+                => new TunaStatusPresentation("Tuna cap reached. Continuing on regular NKN.", false),
             "switching_to_regular_nkn"
                 => new TunaStatusPresentation("Switching Tuna off. Regular NKN will continue the session.", false),
             "user_stopped_tuna" or "header_switch_off" or "remote_header_switch_off"
@@ -104,12 +132,16 @@ internal static class TunaStatusPresentationMapper
         return normalized is "waiting_for_approved_session" or
             "checking_payer_priority" or
             "listener_starting" or
+            "listener_paths_starting" or
+            "listener_retrying" or
+            "listener_start_timeout" or
             "provider_paths_retrying" or
             "provider_paths_ready" or
             "provider_paths_degraded" or
             "listener_ready" or
             "waiting_for_peer_dial" or
             "peer_connected" or
+            "selected_payer_starting_listener" or
             "waiting_for_answer" or
             "renegotiating_after_user_unlock" or
             "dialer_starting" or
@@ -122,6 +154,10 @@ internal static class TunaStatusPresentationMapper
     {
         var normalized = Normalize(runtimeStatus);
         return normalized is "listener_starting" or
+            "listener_paths_starting" or
+            "listener_retrying" or
+            "listener_start_timeout" or
+            "selected_payer_starting_listener" or
             "provider_paths_retrying" or
             "provider_paths_ready" or
             "provider_paths_degraded" or
