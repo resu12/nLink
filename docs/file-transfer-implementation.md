@@ -4,7 +4,7 @@ This document describes the current nLink file-transfer implementation. It is an
 
 ## Current Status
 
-- Protocol: V4-only in the current release.
+- Protocol: V5-only in the current release. V4, null, or unsupported peers are rejected cleanly as transport-incompatible.
 - Scope: single-file transfer only.
 - Not supported yet: folders, drag-and-drop, and resume after app restart.
 - Consent boundary: receiving a file requires explicit accept or decline.
@@ -23,9 +23,9 @@ File-transfer control stays on current NKN. Offer, accept, decline, session-open
 5. The receiver accepts or declines.
 6. On acceptance, both sides exchange `FileTransferSessionOpenV2`.
 7. The transport opens an `IFileTransferDataSession` for the session and transfer id.
-8. The sender sends a V4 manifest containing file name, size, chunk size, chunk count, and SHA-256.
-9. The receiver sends V4 state frames with credit, committed progress, missing ranges, and pressure.
-10. The sender pumps V4 chunk batches while respecting receiver credit and pressure.
+8. The sender sends a V5 manifest containing file name, size, chunk size, chunk count, and SHA-256.
+9. The receiver sends V5 state frames with credit, committed progress, missing ranges, and pressure.
+10. The sender pumps V5 chunk batches while respecting receiver credit and pressure.
 11. The receiver writes chunks, commits progress, repairs missing ranges, and verifies the final SHA-256.
 12. The transfer ends with complete, cancel, or error state on both sides.
 
@@ -36,17 +36,17 @@ File-transfer control stays on current NKN. Offer, accept, decline, session-open
 - `src/nLink.Core/FileTransfer/IFileTransferSignalingTransport.cs`
   Defines file-transfer control sends, data-session opening, and data-session receive/send.
 - `src/nLink.Core/FileTransfer/SessionFileTransferService.cs`
-  Owns transfer state, offer/accept flow, V4 sender and receiver behavior, progress, pause/resume, cancel, and completion.
+  Owns transfer state, offer/accept flow, V5 sender and receiver behavior, progress, hard-priority pause/resume/cancel, and completion.
 - `src/nLink.Core/FileTransfer/SessionFileTransferService.PullTransferSessionV4.cs`
-  Implements most V4 pull-session behavior: manifest, state, credit, chunk batching, receiver commits, repair, and completion.
+  Implements most pull-session behavior: manifest, state, credit, chunk batching, receiver commits, repair, V5 handoff recovery, and completion. The filename is still V4-named because the V5 shell reused the previous implementation internals.
 - `src/nLink.Core/FileTransfer/SessionFileTransferModels.cs`
   Defines descriptors, snapshots, flow policies, terminal states, and progress models.
 - `src/nLink.Core/FileTransfer/FileTransferProtocol.cs`
   Defines protocol constants and message type names.
 - `src/nLink.Core/FileTransfer/FileTransferDataFrameV4.cs`
-  Defines V4 manifest, state, chunk batch, complete, cancel, error, and pause-control frames.
+  Defines the legacy V4 records plus current V5 manifest, state, chunk batch, complete, cancel, error, pause-control, handoff, repair-request, and repair-proof frames.
 - `src/nLink.Core/FileTransfer/FileTransferDataFrameCodec.cs`
-  Encodes and decodes the compact binary V4 data-frame format.
+  Encodes and decodes the compact binary V5 data-frame format.
 - `src/nLink.Core/FileTransfer/FileTransferPayloadCodec.cs`
   Encodes and decodes file-transfer control payloads.
 - `src/nLink.Core/FileTransfer/FileTransferChunkBudget.cs`
@@ -68,7 +68,7 @@ File-transfer control stays on current NKN. Offer, accept, decline, session-open
 ### NKN Transport Path
 
 - `src/nLink.Infra.Nkn/NknSignalingTransport.FileTransferTransportChannel.cs`
-  Implements control payload routing, data-session behavior, secure envelope validation, V4 data-frame dispatch, queues, and file-transfer diagnostics.
+  Implements control payload routing, data-session behavior, secure envelope validation, V5 data-frame dispatch, queues, handoff availability events, and file-transfer diagnostics.
 - `src/nLink.Infra.Nkn/NknEnvelopeRouter.cs`
   Routes `MsgType.FileTransferDataFrame` to file-transfer handling.
 
@@ -90,15 +90,18 @@ These messages stay on current NKN even when Tuna is active.
 
 ### Data Frames
 
-V4 data frames use `IFileTransferDataSession`:
+V5 data frames use `IFileTransferDataSession`:
 
-- `manifest.v4`
-- `state.v4`
-- `chunk_batch.v4`
-- `complete.v4`
-- `cancel.v4`
-- `error.v4`
-- `pause_control.v4`
+- `manifest.v5`
+- `state.v5`
+- `chunk_batch.v5`
+- `complete.v5`
+- `cancel.v5`
+- `error.v5`
+- `pause_control.v5`
+- `handoff.v5`
+- `repair_request.v5`
+- `repair_proof.v5`
 
 Only the serialized data frame envelope is eligible for Tuna, and only when it is sent as `MsgType.FileTransferDataFrame` on `NknBridgeChannel.Bulk`.
 
@@ -110,8 +113,8 @@ The current implementation keeps payloads bounded before they reach the bridge:
 - Maximum raw batch: `64 KiB`.
 - Maximum serialized chunk payload: `50 KiB`.
 - Maximum serialized batch payload: `64 KiB`.
-- Default V4 chunk size: `21 KiB`.
-- Default maximum V4 batch segments: `3`.
+- Default V5 chunk size: `21 KiB`.
+- Default maximum V5 batch segments: `3`.
 
 Payload efficiency profiles are available for focused tuning:
 
@@ -126,7 +129,7 @@ The environment variable is `NLINK_FILETRANSFER_PAYLOAD_EFFICIENCY_PROFILE`. Mix
 
 File transfer is receiver-driven. The receiver reports what it has durably accepted and how much more it can take. The sender pumps only within the advertised budget.
 
-Important V4 state fields include:
+Important V5 state fields include:
 
 - contiguous committed chunk index,
 - durable highest received chunk index,
@@ -149,6 +152,31 @@ Recovery behaviors include:
 - pause/resume control from either side.
 
 The transfer treats integrity and terminal correctness as more important than raw throughput.
+
+## V5 Transport Handoff
+
+V5 adds an explicit transport handoff state machine for file-data movement. It is used for both directions:
+
+- normal NKN to Tuna activation,
+- Tuna to normal NKN fallback,
+- Tuna restart,
+- regular NKN receive recovery.
+
+Every handoff creates a `TransportHandoffEpoch` with source transport, target transport, reason, starting committed frontier, and proof timestamps. Generic bridge readiness is not enough to declare recovery.
+
+The handoff states are:
+
+- `TransportProofPending`
+- `FrontierRepairOnly`
+- `BackfillRepair`
+- `Recovered`
+- `WaitingForTargetTransport`
+
+During `TransportProofPending` and `FrontierRepairOnly`, the sender blocks new/tail chunk traffic on the target transport and sends only exact frontier repair/probe chunks. Transport send success is logged as sent, not recovered. Recovery requires receiver proof, durable frontier progress, or transfer completion.
+
+The receiver is authoritative for recovery. On handoff it sends `handoff.v5`, `state.v5`, and `repair_request.v5` for the current frontier. It requests the exact missing frontier first, then narrow retries. Far-ahead chunks may be stored or deduped, but they do not prove recovery until the committed frontier advances.
+
+If proof does not arrive within the recovery window, the transfer remains alive and enters `WaitingForTargetTransport` / user-facing waiting state instead of falsely reporting recovered.
 
 ## Security And Consent
 
@@ -176,6 +204,19 @@ Both sides can pause, resume, or cancel active transfers. A transfer can end as:
 
 Restarting either app does not resume a partial transfer. Partial files must not be presented as resumable release artifacts.
 
+Lifecycle actions are hard-priority and local-first. Cancel, pause, resume, session end, peer down, window close, app exit, and transport detach bypass data credit, repair queues, Tuna, bulk backlog, and the V5 handoff state machine.
+
+When a lifecycle action is requested:
+
+- the local transfer card updates immediately,
+- transfer lifetime work is stopped or paused locally,
+- a best-effort lifecycle notice is sent over regular NKN control,
+- redundant V5 lifecycle frames may be sent where useful,
+- duplicate lifecycle notices are idempotent,
+- late data frames after terminalization are dropped with rate-limited diagnostics.
+
+Complete wins only when checksum/final terminal state was committed first. Otherwise hard lifecycle terminal state wins.
+
 ## Diagnostics
 
 The main support surfaces are:
@@ -185,7 +226,7 @@ The main support surfaces are:
 - Retained logs under `%LOCALAPPDATA%\nLink\logs`.
 - File-transfer analyzer artifacts.
 
-Useful diagnostics include transfer ids, terminal state, bridge bulk health, file-transfer message rejections, V4 manifest/state/chunk events, receiver buffer pressure, repair/reorder summaries, coexistence summaries, and external transport health summaries.
+Useful diagnostics include transfer ids, terminal state, bridge bulk health, file-transfer message rejections, V5 manifest/state/chunk events, handoff epochs, frontier repair proof, receiver buffer pressure, repair/reorder summaries, coexistence summaries, lifecycle-priority markers, and external transport health summaries.
 
 The first retained-analysis file to read is `filetransfer-operator-verdict.txt`.
 

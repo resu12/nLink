@@ -7,7 +7,7 @@ Tuna remains experimental and default-off. The normal NKN bridge is still the ca
 Related app-payload references:
 
 - [`docs/screenshare-implementation.md`](screenshare-implementation.md) describes the current H.264 screen-share media pipeline.
-- [`docs/file-transfer-implementation.md`](file-transfer-implementation.md) describes the current V4 file-transfer data-session pipeline.
+- [`docs/file-transfer-implementation.md`](file-transfer-implementation.md) describes the current V5 file-transfer data-session and handoff recovery pipeline.
 
 ## Goals
 
@@ -276,6 +276,18 @@ These situations must not crash the app or end the normal NKN session:
 - user switch-off while waiting,
 - user switch-off while starting,
 - user switch-off while active.
+
+File-transfer fallback is V5 handoff based. When Tuna becomes active during a transfer, drops, caps out, is switched off, or restarts, file data enters a `TransportHandoffEpoch`. New tail traffic on the target transport is blocked until the receiver proves the exact committed frontier can advance there. Generic bridge `Ready` or Tuna `Ready` is not enough to mark the transfer recovered.
+
+The V5 handoff states are:
+
+- `TransportProofPending`
+- `FrontierRepairOnly`
+- `BackfillRepair`
+- `Recovered`
+- `WaitingForTargetTransport`
+
+Cancel, pause, resume, session end, peer down, window close, and app exit stay outside this recovery machine. They are hard-priority lifecycle actions over regular NKN control and must terminalize or pause locally without waiting for Tuna, file-data credit, repair queues, or bulk backlog.
 
 ## Spending Caps And Accounting
 

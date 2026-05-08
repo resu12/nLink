@@ -1,6 +1,6 @@
 # File-Transfer Operability
 
-For the runtime architecture and current V4 data-session pipeline, see `docs/file-transfer-implementation.md`.
+For the runtime architecture and current V5 data-session and transport-handoff pipeline, see `docs/file-transfer-implementation.md`.
 
 Start every retained file-transfer investigation with:
 

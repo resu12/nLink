@@ -10,7 +10,7 @@ Minimal `.NET 8` / Avalonia desktop app for Windows with deterministic smoke tes
 
 ## Current Release (0.7.0)
 
-`0.7.0` is the current release. It keeps the H.264 screen-sharing and V4 file-transfer defaults, and adds the experimental Options Tuna wallet-linking UX while keeping Tuna runtime acceleration disabled unless explicitly enabled through the advanced opt-in path.
+`0.7.0` is the current release. It keeps the H.264 screen-sharing and normal NKN transport defaults, moves file transfer to the V5 data protocol, and adds the experimental Options Tuna wallet-linking UX while keeping Tuna runtime acceleration disabled unless explicitly enabled through the advanced opt-in path.
 
 ## Quick Start (Windows)
 
@@ -60,9 +60,10 @@ Notes:
 - Options -> Settings includes Balanced, High quality, Tuna quality, and High performance screen-share presets. High quality now opts into 24 capture FPS / 15 transport FPS over normal NKN, while Tuna quality remains the higher-bandwidth preset recommended for Tuna-enabled screen sharing.
 - The helper-side cursor overlay, H.264 motion/keyframe safeguards, WGC GPU scaling, and same-apartment Win10 WGC teardown remain enabled.
 - Chat UX keeps `Enter` to send, `Shift+Enter` for a new line, stable pane sizing in chat-only and screen-sharing layouts, and message entry remains available during screen sharing.
-- File transfer in `0.7.0` is V4-only and single-file only. No folders, drag-and-drop, or resume after restart yet.
+- File transfer in `0.7.0` is V5-only and single-file only. No folders, drag-and-drop, or resume after restart yet.
 - Receiving a file requires explicit accept/decline, and file-transfer data is protected by nLink's session envelope plus source/session validation rather than by assuming NKN transport alone is sufficient.
 - Active file transfers can be paused, resumed, or canceled from either side when file transfer is allowed.
+- File-transfer lifecycle actions are hard-priority: cancel, pause, session end, peer down, window close, and app exit do not wait for file-data credit, repair queues, Tuna, or bulk backlog.
 - Received files are saved into the Windows Downloads folder by default, with a numbered suffix added automatically when the target name already exists.
 - Safe-by-default file size cap for `0.7.0`: `25 GiB`
 - Options -> Wallet exposes an experimental Tuna wallet-linking and runtime opt-in section; linking a wallet does not start Tuna, spend NKN, or change the default transport.

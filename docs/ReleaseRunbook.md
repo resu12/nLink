@@ -84,14 +84,14 @@ Transport/app-layer security contract:
 - release notes and README must distinguish transport security from nLink application-layer security
 - current code may claim nLink application-layer protection for chat, remote control, screen share, file transfer, and session lifecycle traffic after approval
 - current code must still distinguish those nLink guarantees from the remaining trust placed in the bundled NKN bridge/runtime
-- current code must describe file transfer as V4-only, single-file, explicit accept/decline, and protected by nLink session envelope/source validation rather than by assuming NKN alone is sufficient
+- current code must describe file transfer as V5-only, single-file, explicit accept/decline, and protected by nLink session envelope/source validation rather than by assuming NKN alone is sufficient
 
 Transport abuse-resistance limit matrix:
 - `NknSignalingTransport` high-priority control queue: `256` items max
 - `NknSignalingTransport` low-priority control queue: `256` items max, stale mouse-move entries coalesce to latest
 - `NknSignalingTransport` file-transfer data-session queue: `512` frames and `32 MiB` estimated queued bytes per active data session
 - file-transfer overflow policy: log `filetransfer_data_session_overflow`, fail closed with `ReceiverBufferExhausted`, remove the active data-session registration, and require resume/reopen
-- file-transfer V4 bulk path: sender/source validation is bound to the negotiated remote bulk endpoint
+- file-transfer V5 bulk path: sender/source validation is bound to the negotiated remote bulk endpoint
 - `NknSignalingTransport` screen-share outbound gate wait budget: `25 ms`
 - `NknSignalingTransport` replay windows: bounded per control, lifecycle, and screen-share family
 - `NknSignalingTransport` high-lane overflow policy:
@@ -106,7 +106,7 @@ Transport abuse-resistance limit matrix:
 
 File-transfer release gate:
 - run at least one live NKN file-transfer soak on the packaged app after building the bridge/runtime bundle
-- verify completion/integrity, no `filetransfer_data_session_overflow`, no `filetransfer_message_rejected`, no bridge stdout protocol violations, and no unexpected downgrade from the V4 data path
+- verify completion/integrity, no `filetransfer_data_session_overflow`, no `filetransfer_message_rejected`, no bridge stdout protocol violations, and no unexpected downgrade from the V5 data path
 - `post_completion_late_sender_frame` ignored frames are allowed only when they occur after terminal completion for a recently completed transfer; retain the count from the soak summary with the release evidence
 - retain `filetransfer-live-nkn-summary.txt`, `filetransfer-live-nkn-cycles.jsonl`, and the retained log slice with the release evidence
 

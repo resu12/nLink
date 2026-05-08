@@ -1,13 +1,13 @@
 # File Transfer Soak Workflow
 
-This workflow is V4-only. The current stable build remains the rollback point; do not re-enable removed legacy data-protocol paths during soak triage.
+This workflow targets the current V5-only file-transfer protocol. The current stable build remains the rollback point; do not re-enable removed legacy data-protocol paths during soak triage.
 
 ## Guardrails
 
 - Production bridge default remains fanout.
-- V4 mixed screen-share transfer is still controlled by `NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE=1`.
-- With the mixed flag off, mixed V4 must fail cleanly with `v4_file_only_required`.
-- Do not add new file-transfer wire frames as part of soak tuning.
+- Mixed screen-share transfer is still controlled by the legacy-named `NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE=1` flag while the V5 runtime cleanup is in progress.
+- With the mixed flag off, mixed file transfer must fail cleanly with `v4_file_only_required` until the result code is renamed.
+- Do not add new file-transfer wire frames as part of soak tuning unless they are part of the V5 handoff/recovery protocol.
 - Optimize mixed transfer for screen-share safety and completion before speed.
 - Run .NET tests serially on Windows to avoid DLL file locks.
 
@@ -29,13 +29,13 @@ Supported operator modes:
 - `AnalyzeRetained`
 - `SupportCapture`
 
-Local V4 file-only proof:
+Local V5 file-only proof:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\FileTransfer-Ops.ps1 -Mode LocalFast -PayloadSizes 16MiB -Cycles 1 -Build -FailOnGate
 ```
 
-Guarded V4 mixed proof:
+Guarded V5 mixed proof:
 
 ```powershell
 $env:NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE='1'
@@ -64,11 +64,13 @@ Acceptance for guarded experimental mixed:
 
 - Completed cycles with SHA match.
 - `error_code=(none)`.
-- `data_protocol_version=4`.
+- `data_protocol_version=5`.
 - `payload_efficiency_profile=v4_default_21k`.
 - No payload rejects, decode failures, message rejects, bridge bulk failures, media queue severe events, or progress timeout.
 - Screen-share frames continue during transfer.
 
 ## Promotion Checks
 
-Do not promote from a one-cycle smoke, an inconclusive run, a progress timeout, a cross-protocol baseline, or any run with hard failure counters. Baseline comparison gates only when current and baseline artifacts both report `data_protocol_version=4`; protocol mismatches are report-only.
+Do not promote from a one-cycle smoke, an inconclusive run, a progress timeout, a cross-protocol baseline, or any run with hard failure counters. Baseline comparison gates only when current and baseline artifacts both report `data_protocol_version=5`; protocol mismatches are report-only.
+
+Note: `v4_default_21k`, `NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE`, and `v4_file_only_required` are legacy names that still appear in logs and scripts. They do not mean the negotiated data protocol is V4.
