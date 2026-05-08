@@ -534,6 +534,30 @@ public sealed class FileTransferPanelItemViewModelTests
     }
 
     [Fact]
+    public void LargeTransfer_ShowsGbProgressWithTensOfMbPrecision()
+    {
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-large",
+                Direction: FileTransferDirection.Inbound,
+                State: FileTransferTransferState.Receiving,
+                FileName: "disk-image.bin",
+                FileSizeBytes: 5_583_457_484,
+                Sha256Base64: null,
+                BytesTransferred: 2_842_594_713,
+                ChunksTransferred: 43_741,
+                ChunkCount: 85_800,
+                ChunkSizeBytes: 65_536,
+                ErrorCode: null,
+                StatusMessage: null));
+
+        Assert.NotNull(item);
+        Assert.Equal("2.65 GB / 5.20 GB", item!.ProgressText);
+        Assert.Equal("5.20 GB", item.FileSizeText);
+    }
+
+    [Fact]
     public void ActiveTransfer_PrefersConciseStateText_OverVerboseRuntimeStatus()
     {
         var item = FileTransferPanelItemViewModel.FromSnapshot(

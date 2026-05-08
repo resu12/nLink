@@ -284,8 +284,9 @@ public sealed record FileTransferPanelItemViewModel(
             unitIndex++;
         }
 
+        var format = unitIndex >= 2 ? "0.00" : "0.#";
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"{value:0.#} {units[Math.Max(unitIndex, 0)]}");
+            $"{value.ToString(format, CultureInfo.InvariantCulture)} {units[Math.Max(unitIndex, 0)]}");
     }
 }
