@@ -128,6 +128,72 @@ public sealed class SessionRuntimeFlowSnapshotTests
     }
 
     [Fact]
+    public async Task ActiveConnectedSession_ExtendsExpiredGrantAndKeepsChatControls()
+    {
+        var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_780_000_000_000);
+        using var transport = new TestSessionSecurityTransport("helpee.active.grant.extend");
+        using var runtime = new SessionRuntime(
+            () => transport,
+            SessionRuntimeWatchdogOptions.Default,
+            nowProvider: () => nowUtc);
+        await runtime.StartHelpeeAsync(CancellationToken.None);
+
+        var approvedSessionId = new SessionId("session-active-long-transfer");
+        var approvedHelper = new PeerAddress("helper.identity.long.transfer");
+        var expiresAtUtc = nowUtc.AddMinutes(1);
+        var approvedState = CreateApprovedSecurityState(
+            new PeerAddress(transport.LocalPeerAddress),
+            approvedHelper,
+            approvedSessionId,
+            CapabilityGrant.Chat | CapabilityGrant.ScreenShare | CapabilityGrant.FileTransfer,
+            expiresAtUtc);
+
+        transport.SetSessionSecurityStateForTests(approvedState);
+        MarkTransportApproved(runtime);
+        await WaitUntilAsync(() => runtime.CurrentSessionGrant?.SessionId == approvedSessionId, TimeSpan.FromSeconds(2));
+
+        nowUtc = expiresAtUtc.AddSeconds(1);
+
+        Assert.True(runtime.CanPerform(SessionCapability.Chat));
+        Assert.True(runtime.CanPerform(SessionCapability.ScreenShare));
+        Assert.True(runtime.CanPerform(SessionCapability.FileTransfer));
+        Assert.NotNull(runtime.CurrentSessionGrant);
+        Assert.True(runtime.CurrentSessionGrant!.ExpiresAtUtc > nowUtc);
+        Assert.True(runtime.FlowSnapshot.ApprovalActive);
+        Assert.True(runtime.FlowSnapshot.CanUseChatControls);
+    }
+
+    [Fact]
+    public async Task ExpiredGrantBeforeConnected_InvalidatesApproval()
+    {
+        var nowUtc = DateTimeOffset.FromUnixTimeMilliseconds(1_780_000_100_000);
+        using var transport = new TestSessionSecurityTransport("helpee.pending.grant.expiry");
+        using var runtime = new SessionRuntime(
+            () => transport,
+            SessionRuntimeWatchdogOptions.Default,
+            nowProvider: () => nowUtc);
+        await runtime.StartHelpeeAsync(CancellationToken.None);
+
+        var expiresAtUtc = nowUtc.AddMinutes(1);
+        var approvedState = CreateApprovedSecurityState(
+            new PeerAddress(transport.LocalPeerAddress),
+            new PeerAddress("helper.identity.pending.expiry"),
+            new SessionId("session-pending-expiry"),
+            CapabilityGrant.Chat | CapabilityGrant.ScreenShare,
+            expiresAtUtc);
+
+        transport.SetSessionSecurityStateForTests(approvedState);
+        await WaitUntilAsync(() => runtime.CurrentSessionGrant is not null, TimeSpan.FromSeconds(2));
+
+        nowUtc = expiresAtUtc.AddSeconds(1);
+
+        Assert.False(runtime.CanPerform(SessionCapability.Chat));
+        Assert.Null(runtime.CurrentSessionGrant);
+        Assert.False(runtime.FlowSnapshot.ApprovalActive);
+        Assert.False(runtime.FlowSnapshot.CanUseChatControls);
+    }
+
+    [Fact]
     public async Task RepeatedApprovedSessions_StalePriorSessionFailure_DoesNotInvalidateCurrentGrant()
     {
         using var transport = new TestSessionSecurityTransport("helpee.multi.session.guard");
@@ -574,7 +640,8 @@ public sealed class SessionRuntimeFlowSnapshotTests
         PeerAddress helpeeIdentity,
         PeerAddress helperIdentity,
         SessionId sessionId,
-        CapabilityGrant capabilities)
+        CapabilityGrant capabilities,
+        DateTimeOffset? expiresAtUtc = null)
     {
         var nowUtc = DateTimeOffset.UtcNow;
         return (SessionSecurityState.Empty with
@@ -589,7 +656,7 @@ public sealed class SessionRuntimeFlowSnapshotTests
             helperIdentity,
             capabilities,
             sessionId,
-            nowUtc.AddMinutes(5)));
+            expiresAtUtc ?? nowUtc.AddMinutes(5)));
     }
 
     private static async Task WaitUntilAsync(Func<bool> predicate, TimeSpan timeout)

@@ -142,6 +142,9 @@ internal sealed partial class TransportScreenShareCoordinator
                     LocalOperationalLog.Info(
                         "ScreenShareTransport",
                         $"event=screenshare_transport_rebind_keyframe_sent; direction=outbound; session_id={currentSessionId}; stream_epoch={e.StreamEpoch}; reason={(string.IsNullOrWhiteSpace(rebindReasonToLog) ? "transport_rebind" : rebindReasonToLog)}; rebind_generation={rebindGenerationToLog}");
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_tuna_handoff_keyframe_forced; direction=outbound; session_id={currentSessionId}; stream_epoch={e.StreamEpoch}; reason={(string.IsNullOrWhiteSpace(rebindReasonToLog) ? "transport_rebind" : rebindReasonToLog)}; rebind_generation={rebindGenerationToLog}");
                 }
             }
 

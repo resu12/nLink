@@ -158,8 +158,13 @@ public sealed class NknScreenShareAccelerationTransportTests : ScreenCaptureAbst
             Assert.Equal(NknBridgeChannel.Media, rawNknFrames.Single().Channel);
             var logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStart);
             Assert.Contains("event=tuna_fallback_started;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=screenshare_tuna_handoff_started;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_disable_handoff_screen_started;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_disable_handoff_media_ready;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=screenshare_tuna_handoff_nkn_frame_sent;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=screenshare_tuna_handoff_nkn_frame_received;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=screenshare_tuna_handoff_nkn_frame_applied;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=screenshare_tuna_handoff_recovered;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_nkn_frame_sent; message_type=screenshare_frame; channel=media", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_nkn_frame_received; message_type=screenshare_frame; channel=media", logTail, StringComparison.Ordinal);
         }
@@ -234,7 +239,7 @@ public sealed class NknScreenShareAccelerationTransportTests : ScreenCaptureAbst
                 TimeSpan.FromSeconds(3));
 
             await dataSession.SendAsync(
-                new FileTransferChunkBatchFrameV4
+                new FileTransferChunkBatchFrameV5
                 {
                     SessionId = sessionId,
                     TransferId = "transfer_tuna_mixed_fallback",
@@ -265,11 +270,15 @@ public sealed class NknScreenShareAccelerationTransportTests : ScreenCaptureAbst
             Assert.Empty(hostLane.Sent);
             Assert.Empty(helperLane.Sent);
             var logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStart);
+            Assert.Contains("event=tuna_mixed_handoff_started;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_mixed_handoff_lane_state_changed;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_filetransfer_rebind_requested;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=screenshare_tuna_handoff_started;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_disable_handoff_screen_started;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_nkn_frame_sent; message_type=file_transfer_data_frame; channel=bulk", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_nkn_frame_sent; message_type=screenshare_frame; channel=media", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_nkn_frame_received; message_type=screenshare_frame; channel=media", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=screenshare_tuna_handoff_nkn_frame_applied;", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -346,7 +355,7 @@ public sealed class NknScreenShareAccelerationTransportTests : ScreenCaptureAbst
                     TransferId = transferId,
                     FileName = "mixed-local-switch-off.bin",
                     FileSizeBytes = 1024,
-                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                 },
                 cts.Token);
             await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
@@ -355,7 +364,7 @@ public sealed class NknScreenShareAccelerationTransportTests : ScreenCaptureAbst
                 {
                     SessionId = sessionId,
                     TransferId = transferId,
-                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                 },
                 cts.Token);
             await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
@@ -364,7 +373,7 @@ public sealed class NknScreenShareAccelerationTransportTests : ScreenCaptureAbst
                 {
                     SessionId = sessionId,
                     TransferId = transferId,
-                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV4,
+                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
                     SessionRole = FileTransferProtocol.SessionRoleSender,
                     ChunkSizeBytes = 1024,
                     InitialPipelineDepth = 8,
@@ -383,7 +392,7 @@ public sealed class NknScreenShareAccelerationTransportTests : ScreenCaptureAbst
                 TimeSpan.FromSeconds(3));
 
             await dataSession.SendAsync(
-                new FileTransferChunkBatchFrameV4
+                new FileTransferChunkBatchFrameV5
                 {
                     SessionId = sessionId,
                     TransferId = transferId,
@@ -409,7 +418,7 @@ public sealed class NknScreenShareAccelerationTransportTests : ScreenCaptureAbst
             await CoreSmokeTestsBase.WaitUntilAsync(() => rawNknScreenFrames.Count == 1, TimeSpan.FromSeconds(2));
             var receivedFileFrame = await inboundDataSession.ReceiveAsync(cts.Token);
             var screen = await screenReceived.Task.WaitAsync(TimeSpan.FromSeconds(2), cts.Token);
-            Assert.IsType<FileTransferChunkBatchFrameV4>(receivedFileFrame);
+            Assert.IsType<FileTransferChunkBatchFrameV5>(receivedFileFrame);
             Assert.Equal(43, screen.FrameId);
             Assert.Equal(NknBridgeChannel.Bulk, rawNknFileFrames.Single().Channel);
             Assert.Equal(NknBridgeChannel.Media, rawNknScreenFrames.Single().Channel);
@@ -426,12 +435,16 @@ public sealed class NknScreenShareAccelerationTransportTests : ScreenCaptureAbst
             var logTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStart);
             Assert.Contains("event=tuna_fallback_started;", logTail, StringComparison.Ordinal);
             Assert.Contains("reason=soak_switch_off", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_mixed_handoff_started;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=tuna_mixed_handoff_lane_state_changed;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_filetransfer_rebind_requested;", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=screenshare_tuna_handoff_started;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_disable_handoff_screen_started;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_nkn_frame_sent; message_type=file_transfer_data_frame; channel=bulk", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_nkn_frame_sent; message_type=screenshare_frame; channel=media", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_nkn_frame_received; message_type=file_transfer_data_frame; channel=bulk", logTail, StringComparison.Ordinal);
             Assert.Contains("event=tuna_fallback_nkn_frame_received; message_type=screenshare_frame; channel=media", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=screenshare_tuna_handoff_nkn_frame_applied;", logTail, StringComparison.Ordinal);
         }
         finally
         {

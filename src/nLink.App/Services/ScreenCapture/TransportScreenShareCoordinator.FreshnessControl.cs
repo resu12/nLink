@@ -62,6 +62,9 @@ internal sealed partial class TransportScreenShareCoordinator
         LocalOperationalLog.Info(
             "ScreenShareTransport",
             $"event=screenshare_transport_rebind_keyframe_requested; direction=outbound; session_id={currentSessionId}; reason={normalizedReason}; rebind_generation={generation}");
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_tuna_handoff_keyframe_requested; direction=outbound; session_id={currentSessionId}; reason={normalizedReason}; rebind_generation={generation}");
         RequestKeyFrame("transport_rebind_recovery_" + normalizedReason);
         return true;
     }

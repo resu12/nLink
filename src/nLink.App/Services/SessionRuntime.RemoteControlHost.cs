@@ -1938,6 +1938,18 @@ public sealed partial class SessionRuntime
             {
                 // Tell the peer the session is over before best-effort teardown work starts
                 // competing for transport state or outbound bandwidth.
+                using (var fileTransferCancelCts = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
+                {
+                    try
+                    {
+                        await fileTransferService.CancelActiveTransfersForSessionEndAsync("session_end", fileTransferCancelCts.Token).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // Best-effort only. Session teardown must continue even if per-transfer cancel cannot be sent.
+                    }
+                }
+
                 await TrySendPendingIncomingHelpRequestCancellationAsync(oldTransport, "helper_closed").ConfigureAwait(false);
                 await TrySendPendingOutboundHelpRequestCancellationAsync(oldTransport, "helpee_closed").ConfigureAwait(false);
                 await TrySendRemoteSessionEndAsync(oldTransport, oldRole, oldState).ConfigureAwait(false);
@@ -2323,10 +2335,42 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        if (ShouldExtendExpiredGrantForActiveSession(grant))
+        {
+            var extendedGrant = grant with
+            {
+                ExpiresAtUtc = nowProvider().Add(SessionSecurityDefaults.GrantLifetime),
+            };
+            currentSessionGrant = extendedGrant;
+            SetSessionSecurityState(sessionSecurityState.WithApproval(extendedGrant));
+            LocalOperationalLog.Info(
+                "SessionSecurity",
+                $"event=approval_grant_extended_for_active_session; session_id={extendedGrant.SessionId.Value}; helper_identity={extendedGrant.HelperIdentity.Value}; capabilities={extendedGrant.Capabilities}; expires_at_utc={extendedGrant.ExpiresAtUtc:O}");
+            return;
+        }
+
         currentSessionGrant = null;
         pendingApprovalRequest = null;
         SetSessionSecurityState(sessionSecurityState.WithApprovalExpired());
         HandleGrantInvalidated("approval_expired");
+    }
+
+    private bool ShouldExtendExpiredGrantForActiveSession(SessionGrant grant)
+    {
+        if (disposed ||
+            resetInProgress ||
+            state != SessionRuntimeState.Connected)
+        {
+            return false;
+        }
+
+        return sessionSecurityState.SessionId == grant.SessionId &&
+               sessionSecurityState.HelperAddress == grant.HelperIdentity &&
+               sessionSecurityState.InviteValidated &&
+               sessionSecurityState.HandshakeCompleted &&
+               sessionSecurityState.HandshakeState == SessionHandshakeState.Verified &&
+               sessionSecurityState.ApprovalGranted &&
+               (sessionSecurityState.ApprovedCapabilities & grant.Capabilities) == grant.Capabilities;
     }
 
     private bool TryCreateGrantFromTransportState(SessionSecurityState transportState, out SessionGrant grant)
@@ -5438,6 +5482,9 @@ public sealed partial class SessionRuntime
                     LocalOperationalLog.Info(
                         "ScreenShareTransport",
                         $"event=screenshare_transport_rebind_keyframe_requested; direction=inbound; session_id={(string.IsNullOrWhiteSpace(activeSessionId) ? "(none)" : activeSessionId)}; stream_epoch={streamEpoch}; reason={normalizedReason}; rebind_generation={generation}; retry_delay_ms={(long)delay.TotalMilliseconds}");
+                    LocalOperationalLog.Info(
+                        "ScreenShareTransport",
+                        $"event=screenshare_tuna_handoff_keyframe_requested; direction=inbound; session_id={(string.IsNullOrWhiteSpace(activeSessionId) ? "(none)" : activeSessionId)}; stream_epoch={streamEpoch}; reason={normalizedReason}; rebind_generation={generation}; retry_delay_ms={(long)delay.TotalMilliseconds}");
                     RequestHelperRemoteRecoveryKeyframe(
                         streamEpoch,
                         "transport_rebind_recovery_" + normalizedReason,
@@ -5465,7 +5512,13 @@ public sealed partial class SessionRuntime
             $"event=screenshare_transport_rebind_frame_applied; direction=inbound; session_id={e.SessionId ?? GetSessionIdForLog()}; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; is_keyframe={(e.IsKeyFrame ? 1 : 0)}; rebind_generation={generation}");
         LocalOperationalLog.Info(
             "ScreenShareTransport",
+            $"event=screenshare_tuna_handoff_nkn_frame_applied; direction=inbound; session_id={e.SessionId ?? GetSessionIdForLog()}; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; is_keyframe={(e.IsKeyFrame ? 1 : 0)}; rebind_generation={generation}");
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
             $"event=screenshare_transport_rebind_recovered; direction=inbound; session_id={e.SessionId ?? GetSessionIdForLog()}; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; rebind_generation={generation}");
+        LocalOperationalLog.Info(
+            "ScreenShareTransport",
+            $"event=screenshare_tuna_handoff_recovered; direction=inbound; session_id={e.SessionId ?? GetSessionIdForLog()}; stream_epoch={e.StreamEpoch}; frame_id={e.FrameId}; rebind_generation={generation}");
     }
 
     private void RequestHelperRemoteRecoveryKeyframe(

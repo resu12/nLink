@@ -1596,6 +1596,12 @@ public sealed partial class NknSignalingTransport
             inboundContext.Envelope.Payload.Length,
             chunk.SessionId);
 
+        if (ShouldIgnoreAcceleratedScreenShareFrameDuringFallback(chunk.SessionId))
+        {
+            LogAcceleratedScreenShareFrameIgnoredDuringFallback(chunk.SessionId, chunk.StreamEpoch, chunk.FrameId);
+            return;
+        }
+
         foreach (var fragment in fragments)
         {
             ScreenShareFrameLossAttributionRegistry.ObserveInboundReceivePath(

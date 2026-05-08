@@ -925,8 +925,8 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
             SessionPrivilegedActionKind.ApprovalGrant or SessionPrivilegedActionKind.ApprovalDeny => true,
             SessionPrivilegedActionKind.FileTransferStartSend or
             SessionPrivilegedActionKind.FileTransferAcceptIncoming or
-            SessionPrivilegedActionKind.FileTransferDeclineIncoming or
-            SessionPrivilegedActionKind.FileTransferCancel => TryAuthorizeFileTransferSend(),
+            SessionPrivilegedActionKind.FileTransferDeclineIncoming => TryAuthorizeFileTransferSend(),
+            SessionPrivilegedActionKind.FileTransferCancel => TryAuthorizeFileTransferAction(action.Operation),
             SessionPrivilegedActionKind.FileTransferPause or
             SessionPrivilegedActionKind.FileTransferResume => TryAuthorizeFileTransferAction(action.Operation),
             SessionPrivilegedActionKind.ClipboardSync or SessionPrivilegedActionKind.ClipboardApply => TryAuthorizeClipboardSync(),
@@ -1153,6 +1153,59 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
 
         LogFileTransferRejected(operation, result);
         return false;
+    }
+
+    private bool TryAuthorizeExistingFileTransferControl(string transferId, string operation)
+    {
+        EnsureApprovalGrantActive();
+
+        var snapshot = fileTransferService.Snapshot;
+        var activeTransfer =
+            IsActiveFileTransferSnapshot(snapshot.Outbound, transferId) ? snapshot.Outbound :
+            IsActiveFileTransferSnapshot(snapshot.Inbound, transferId) ? snapshot.Inbound :
+            null;
+        if (activeTransfer is null)
+        {
+            return false;
+        }
+
+        if (currentSessionGrant is SessionGrant grant)
+        {
+            if ((grant.Capabilities & CapabilityGrant.FileTransfer) != CapabilityGrant.FileTransfer ||
+                !string.Equals(activeTransfer.SessionId, grant.SessionId.Value, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            LogExistingFileTransferControlAuthorized(operation, activeTransfer, "active_grant");
+            return true;
+        }
+
+        if (state != SessionRuntimeState.Connected ||
+            sessionSecurityState.SessionId is not SessionId sessionId ||
+            sessionSecurityState.HelperAddress is null ||
+            !string.Equals(activeTransfer.SessionId, sessionId.Value, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        LogExistingFileTransferControlAuthorized(operation, activeTransfer, "active_transfer_session_binding");
+        return true;
+    }
+
+    private static bool IsActiveFileTransferSnapshot(FileTransferTransferSnapshot? snapshot, string transferId)
+        => snapshot is not null &&
+           !snapshot.IsTerminal &&
+           string.Equals(snapshot.TransferId, transferId, StringComparison.Ordinal);
+
+    private static void LogExistingFileTransferControlAuthorized(
+        string operation,
+        FileTransferTransferSnapshot snapshot,
+        string reason)
+    {
+        LocalOperationalLog.Info(
+            "SessionSecurity",
+            $"event=file_transfer_existing_control_authorized; operation={operation}; reason={reason}; session_id={snapshot.SessionId}; transfer_id={snapshot.TransferId}; direction={snapshot.Direction}; state={snapshot.State}");
     }
 
     internal FileTransferAccessResult ValidateInboundFileTransferMetadata(
@@ -2299,6 +2352,11 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         string? reason = null,
         CancellationToken uiCt = default)
     {
+        if (TryAuthorizeExistingFileTransferControl(transferId, "file_transfer_cancel"))
+        {
+            return fileTransferHost.CancelTransferAsync(transferId, reason, uiCt);
+        }
+
         return privilegedCommandExecutor.ExecuteAsync(
             new SessionPrivilegedAction(SessionPrivilegedActionKind.FileTransferCancel, "file_transfer_cancel"),
             ct => fileTransferHost.CancelTransferAsync(transferId, reason, ct),
@@ -2323,6 +2381,11 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         string? reason = null,
         CancellationToken uiCt = default)
     {
+        if (TryAuthorizeExistingFileTransferControl(transferId, "file_transfer_pause"))
+        {
+            return fileTransferHost.PauseTransferAsync(transferId, reason, uiCt);
+        }
+
         return privilegedCommandExecutor.ExecuteAsync(
             new SessionPrivilegedAction(SessionPrivilegedActionKind.FileTransferPause, "file_transfer_pause"),
             ct => fileTransferHost.PauseTransferAsync(transferId, reason, ct),
@@ -2351,6 +2414,11 @@ public sealed partial class SessionRuntime : IDisposable, ISessionRuntimeScreenS
         string? reason = null,
         CancellationToken uiCt = default)
     {
+        if (TryAuthorizeExistingFileTransferControl(transferId, "file_transfer_resume"))
+        {
+            return fileTransferHost.ResumeTransferAsync(transferId, reason, uiCt);
+        }
+
         return privilegedCommandExecutor.ExecuteAsync(
             new SessionPrivilegedAction(SessionPrivilegedActionKind.FileTransferResume, "file_transfer_resume"),
             ct => fileTransferHost.ResumeTransferAsync(transferId, reason, ct),
