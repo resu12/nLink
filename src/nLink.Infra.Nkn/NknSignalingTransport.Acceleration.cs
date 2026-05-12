@@ -2846,6 +2846,11 @@ public sealed partial class NknSignalingTransport
             return false;
         }
 
+        if (ShouldSuppressAcceleratedFileTransferBulkDuringRegularNknFallback(lane))
+        {
+            return false;
+        }
+
         if (!IsAccelerationNegotiatedAndHealthy())
         {
             if (TryCaptureAccelerationNegotiation(out var unavailableSessionId, out var unavailableLanes))
@@ -2906,6 +2911,41 @@ public sealed partial class NknSignalingTransport
         }
 
         return false;
+    }
+
+    private bool ShouldSuppressAcceleratedFileTransferBulkDuringRegularNknFallback(NknAccelerationLaneKind lane)
+    {
+        if (lane != NknAccelerationLaneKind.File)
+        {
+            return false;
+        }
+
+        TunaFallbackProofState? snapshot = null;
+        var shouldLog = false;
+        lock (accelerationGate)
+        {
+            if (!TryGetCurrentTunaFallbackProofStateUnsafe(currentSessionSecurityState.SessionId?.Value, out var state) ||
+                (state.Lanes & NknAccelerationLaneKind.File) != NknAccelerationLaneKind.File ||
+                state.FileState == TunaFallbackLaneState.None)
+            {
+                return false;
+            }
+
+            shouldLog = ShouldLogTunaFallbackProofMarkerUnsafe(
+                state,
+                "file_acceleration_suppressed_regular_nkn_fallback",
+                DateTimeOffset.UtcNow);
+            snapshot = state;
+        }
+
+        if (shouldLog && snapshot is not null)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_file_acceleration_suppressed_regular_nkn_fallback; session_id={SanitizeLogToken(snapshot.SessionId)}; fallback_epoch={snapshot.Epoch}; reason={snapshot.Reason}; file_state={FormatTunaFallbackLaneState(snapshot.FileState)}; file_v6_epoch_state={FormatTunaFallbackFileV6EpochState(snapshot)}");
+        }
+
+        return true;
     }
 
     public Task RequestAccelerationNegotiationAsync(string reason, CancellationToken ct)

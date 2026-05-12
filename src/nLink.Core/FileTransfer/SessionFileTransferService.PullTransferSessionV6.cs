@@ -485,8 +485,7 @@ public sealed partial class SessionFileTransferService
         string? recoveryMode,
         FileTransferTransportKind receivedTransportKind)
     {
-        if (transportEpoch <= 0 ||
-            receivedTransportKind != FileTransferTransportKind.RegularNkn)
+        if (transportEpoch <= 0)
         {
             return false;
         }
@@ -498,6 +497,11 @@ public sealed partial class SessionFileTransferService
         }
 
         var recoveredTunaEpochId = ResolveRecoveredOutboundV6TunaActivationEpochId(context);
+        if (receivedTransportKind == FileTransferTransportKind.Tuna)
+        {
+            return false;
+        }
+
         return recoveredTunaEpochId > 0 &&
                transportEpoch > recoveredTunaEpochId &&
                IsV6RegularNknRecoveryMode(recoveryMode);
