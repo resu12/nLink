@@ -584,6 +584,7 @@ func runListen(ctx context.Context, cfg *config, emit *emitter) error {
 		return fmt.Errorf("Tuna listen start timeout after %s", listenStartTimeout)
 	}
 
+	providerPathState := newProviderPathReadinessState()
 	providerReady, providerReadyErr := waitForProviderPathReadiness(
 		ctx,
 		tunaClient,
@@ -592,7 +593,8 @@ func runListen(ctx context.Context, cfg *config, emit *emitter) error {
 		emit,
 		"listener",
 		!cfg.requireProviderReady,
-		cfg.providerReadyAttempts)
+		cfg.providerReadyAttempts,
+		providerPathState)
 	if providerReadyErr != nil && (ctx.Err() != nil || cfg.requireProviderReady) {
 		return providerReadyErr
 	}
@@ -606,7 +608,7 @@ func runListen(ctx context.Context, cfg *config, emit *emitter) error {
 		"paths":          tunaProviderPathDiagnostics(tunaClient.GetPubAddrs()),
 	})
 	cleanupBeforeListen = false
-	go watchProviderPaths(ctx, tunaClient, emit, "listener")
+	go watchProviderPaths(ctx, tunaClient, emit, "listener", providerPathState)
 
 	localListener, err := net.Listen("tcp", cfg.localIPC)
 	if err != nil {
@@ -666,7 +668,7 @@ func runListen(ctx context.Context, cfg *config, emit *emitter) error {
 		"paths":      tunaProviderPathDiagnostics(tunaClient.GetPubAddrs()),
 	})
 
-	return bridgeConns(ctx, cfg, appConn, tunaConn, emit, "listener", tunaProviderPathDiagnostics(tunaClient.GetPubAddrs()))
+	return bridgeConns(ctx, cfg, appConn, tunaConn, emit, "listener", tunaProviderPathDiagnostics(tunaClient.GetPubAddrs()), providerPathState)
 }
 
 func runDial(ctx context.Context, cfg *config, emit *emitter) error {
@@ -781,7 +783,7 @@ func runDial(ctx context.Context, cfg *config, emit *emitter) error {
 	if err := writeStatus(appConn, tunaClient.Address()); err != nil {
 		return err
 	}
-	return bridgeConns(ctx, cfg, appConn, conn, emit, "dialer", nil)
+	return bridgeConns(ctx, cfg, appConn, conn, emit, "dialer", nil, nil)
 }
 
 func dialTuna(ctx context.Context, tunaClient *ts.TunaSessionClient, cfg *config) (net.Conn, error) {
@@ -1045,7 +1047,7 @@ func compatibleSidecarVersion(peerVersion string) bool {
 	return peerVersion == sidecarVersion || peerVersion == "dev" || sidecarVersion == "dev"
 }
 
-func bridgeConns(ctx context.Context, cfg *config, appConn net.Conn, tunaConn net.Conn, emit *emitter, role string, providerInfo event) error {
+func bridgeConns(ctx context.Context, cfg *config, appConn net.Conn, tunaConn net.Conn, emit *emitter, role string, providerInfo event, providerPathState *providerPathReadinessState) error {
 	limitBytes := int64(cfg.maxTotalMiB) * 1024 * 1024
 	duration := time.Duration(cfg.maxDurationSec) * time.Second
 	hasByteCap := limitBytes > 0
@@ -1155,6 +1157,16 @@ doneCollectingBridgeResults:
 	if !capReached && err != nil {
 		fallbackReason = safeReason(err)
 	}
+	if providerPathState != nil {
+		if providerInfo != nil {
+			providerPathState.observePaths(emit, role, providerInfo, "bridge_summary")
+		}
+		if latest := providerPathState.latestPaths(); latest != nil {
+			providerInfo = latest
+		}
+		providerPathState.emitStillDegradedIfNeeded(emit, role, "bridge_summary")
+	}
+	providerReadiness := providerPathReadinessSummary(providerPathState)
 	providerUsableCount := -1
 	if providerInfo != nil {
 		providerUsableCount = eventInt(providerInfo, "usableCount")
@@ -1189,6 +1201,7 @@ doneCollectingBridgeResults:
 		"seqReorderCount":     result.seqReorderCount,
 		"providerUsableCount": providerUsableCount,
 		"minProviderCnt":      providerReadyMinPaths,
+		"providerReadiness":   providerReadiness,
 		"paymentStatus":       paymentStatus,
 		"paymentEventCount":   paymentEventCount,
 	}
@@ -1215,6 +1228,7 @@ doneCollectingBridgeResults:
 		"fallbackReason":      fallbackReason,
 		"providerUsableCount": providerUsableCount,
 		"minProviderCnt":      providerReadyMinPaths,
+		"providerReadiness":   providerReadiness,
 		"directions":          directionSummaries,
 	}
 	if bytesMoved > 0 && cumulativeSpend.Sign() > 0 {
@@ -1698,7 +1712,150 @@ func frameLaneName(lane byte) string {
 	}
 }
 
-func watchProviderPaths(ctx context.Context, tunaClient *ts.TunaSessionClient, emit *emitter, role string) {
+type providerPathReadinessState struct {
+	mu                   sync.Mutex
+	degradedAccepted     bool
+	recovered            bool
+	stillDegradedEmitted bool
+	firstDegradedAt      time.Time
+	recoveredAt          time.Time
+	startedAt            time.Time
+	attempt              int
+	maxAttempts          int
+	lastPaths            event
+}
+
+func newProviderPathReadinessState() *providerPathReadinessState {
+	return &providerPathReadinessState{}
+}
+
+func (s *providerPathReadinessState) markDegradedAccepted(
+	emit *emitter,
+	role string,
+	paths event,
+	attempt int,
+	maxAttempts int,
+	startedAt time.Time) {
+	if s == nil {
+		return
+	}
+	elapsedMs := time.Since(startedAt).Milliseconds()
+	accepted := false
+	s.mu.Lock()
+	if !s.degradedAccepted {
+		s.degradedAccepted = true
+		s.firstDegradedAt = time.Now()
+		s.startedAt = startedAt
+		s.attempt = attempt
+		s.maxAttempts = maxAttempts
+		accepted = true
+	}
+	s.lastPaths = paths
+	s.mu.Unlock()
+	if accepted {
+		emit.emit(providerPathEvent("provider_paths_degraded_accepted", role, paths, attempt, maxAttempts, elapsedMs, "startup"))
+	}
+}
+
+func (s *providerPathReadinessState) observePaths(emit *emitter, role string, paths event, stage string) {
+	if s == nil || paths == nil {
+		return
+	}
+	usableCount := eventInt(paths, "usableCount")
+	var shouldEmitRecovered bool
+	var attempt int
+	var maxAttempts int
+	var elapsedMs int64
+	s.mu.Lock()
+	s.lastPaths = paths
+	if s.degradedAccepted && !s.recovered && usableCount >= providerReadyMinPaths {
+		s.recovered = true
+		s.recoveredAt = time.Now()
+		shouldEmitRecovered = true
+		attempt = s.attempt
+		maxAttempts = s.maxAttempts
+		if !s.startedAt.IsZero() {
+			elapsedMs = time.Since(s.startedAt).Milliseconds()
+		}
+	}
+	s.mu.Unlock()
+	if shouldEmitRecovered {
+		emit.emit(providerPathEvent("provider_paths_recovered", role, paths, attempt, maxAttempts, elapsedMs, stage))
+	}
+}
+
+func (s *providerPathReadinessState) emitStillDegradedIfNeeded(emit *emitter, role string, stage string) {
+	if s == nil {
+		return
+	}
+	var shouldEmit bool
+	var paths event
+	var attempt int
+	var maxAttempts int
+	var elapsedMs int64
+	s.mu.Lock()
+	if s.degradedAccepted && !s.recovered && !s.stillDegradedEmitted {
+		s.stillDegradedEmitted = true
+		shouldEmit = true
+		paths = s.lastPaths
+		attempt = s.attempt
+		maxAttempts = s.maxAttempts
+		if !s.startedAt.IsZero() {
+			elapsedMs = time.Since(s.startedAt).Milliseconds()
+		}
+	}
+	s.mu.Unlock()
+	if shouldEmit {
+		emit.emit(providerPathEvent("provider_paths_still_degraded", role, paths, attempt, maxAttempts, elapsedMs, stage))
+	}
+}
+
+func (s *providerPathReadinessState) latestPaths() event {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastPaths
+}
+
+func providerPathReadinessSummary(s *providerPathReadinessState) event {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return event{
+		"degradedAccepted": s.degradedAccepted,
+		"recovered":        s.recovered,
+		"stillDegraded":    s.degradedAccepted && !s.recovered,
+		"attempt":          s.attempt,
+		"maxAttempts":      s.maxAttempts,
+	}
+}
+
+func providerPathEvent(name string, role string, paths event, attempt int, maxAttempts int, elapsedMs int64, stage string) event {
+	usableCount := eventInt(paths, "usableCount")
+	pathsHash := ""
+	if paths != nil {
+		pathsHash, _ = paths["pathsHash"].(string)
+	}
+	return event{
+		"event":               name,
+		"role":                role,
+		"stage":               stage,
+		"usableCount":         usableCount,
+		"minProviderCnt":      providerReadyMinPaths,
+		"degradedProviderCnt": providerDegradedMinPaths,
+		"pathsHash":           pathsHash,
+		"elapsedMs":           elapsedMs,
+		"attempt":             attempt,
+		"maxAttempts":         maxAttempts,
+		"paths":               paths,
+	}
+}
+
+func watchProviderPaths(ctx context.Context, tunaClient *ts.TunaSessionClient, emit *emitter, role string, state *providerPathReadinessState) {
 	ticker := time.NewTicker(providerWatchInterval)
 	defer ticker.Stop()
 	lastSignature := ""
@@ -1711,6 +1868,7 @@ func watchProviderPaths(ctx context.Context, tunaClient *ts.TunaSessionClient, e
 			connectedCh = nil
 			paths := tunaProviderPathDiagnostics(tunaClient.GetPubAddrs())
 			lastSignature, _ = paths["pathsHash"].(string)
+			state.observePaths(emit, role, paths, "connected")
 			emit.emit(event{
 				"event":        "tuna_provider_paths",
 				"role":         role,
@@ -1724,6 +1882,7 @@ func watchProviderPaths(ctx context.Context, tunaClient *ts.TunaSessionClient, e
 				continue
 			}
 			lastSignature = signature
+			state.observePaths(emit, role, paths, "changed")
 			emit.emit(event{
 				"event":        "tuna_provider_paths",
 				"role":         role,
@@ -1742,7 +1901,8 @@ func waitForProviderPathReadiness(
 	emit *emitter,
 	role string,
 	allowDegradedReady bool,
-	attempts int) (bool, error) {
+	attempts int,
+	state *providerPathReadinessState) (bool, error) {
 	if minUsablePaths <= 0 {
 		return true, nil
 	}
@@ -1782,6 +1942,7 @@ func waitForProviderPathReadiness(
 					"maxAttempts":         attempts,
 					"paths":               paths,
 				})
+				state.markDegradedAccepted(emit, role, paths, attempt, attempts, started)
 				return false, fmt.Errorf("Tuna provider path readiness degraded: usable=%d min=%d", usableCount, minUsablePaths)
 			}
 			if time.Now().After(deadline) {

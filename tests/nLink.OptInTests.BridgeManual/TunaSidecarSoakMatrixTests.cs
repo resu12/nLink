@@ -370,26 +370,42 @@ public sealed partial class TunaSidecarLiveManualTests
     }
 
     [Fact]
-    public void TunaPhase6RetryUsesProviderWarningForCleanActivationOnly()
+    public void TunaPhase6RetryAllowsProviderDegradedIncompleteCleanActivation()
     {
         var cleanActivation = new TunaSoakCellResult
         {
+            IsPhase6Gate = true,
+            Transport = Phase3TransportMode.Tuna,
+            Fault = TunaSoakFaultMode.None,
             Completed = false,
             FallbackExpected = false,
+            ProviderDegradedAccepted = true,
+            ProviderDegradationOverlappedFileTransfer = true,
             FailureReason = "file_incomplete:receive_ratio=0.9222; reason=soak_timeout_incomplete",
             WarningReason = "provider_paths_degraded",
         };
         var expectedFault = new TunaSoakCellResult
         {
+            IsPhase6Gate = true,
+            Transport = Phase3TransportMode.Tuna,
+            Fault = TunaSoakFaultMode.CapReached,
             Completed = false,
             FallbackExpected = true,
+            ProviderDegradedAccepted = true,
+            ProviderDegradationOverlappedFileTransfer = true,
             FailureReason = "file_incomplete:receive_ratio=0.4662; reason=soak_timeout_incomplete",
             WarningReason = "provider_paths_degraded",
+        };
+        var providerTimeout = new TunaSoakCellResult
+        {
+            Completed = false,
+            FallbackExpected = false,
+            FailureReason = "tuna_readiness_missing:provider_paths_wait_timeout",
         };
 
         Assert.True(ShouldRetryPhase6SoakCell(cleanActivation, attempt: 1, maxRetries: 1));
         Assert.False(ShouldRetryPhase6SoakCell(expectedFault, attempt: 1, maxRetries: 1));
-        Assert.False(ShouldRetryPhase6SoakCell(cleanActivation, attempt: 2, maxRetries: 1));
+        Assert.True(ShouldRetryPhase6SoakCell(providerTimeout, attempt: 1, maxRetries: 1));
     }
 
     [Fact]
@@ -398,13 +414,56 @@ public sealed partial class TunaSidecarLiveManualTests
         var stdout = new ConcurrentQueue<string>();
         stdout.Enqueue("{\"event\":\"ready\"}");
         var start = stdout.Count;
-        stdout.Enqueue("{\"event\":\"provider_paths_degraded\",\"usableCount\":3}");
+        stdout.Enqueue("{\"event\":\"provider_paths_degraded_accepted\",\"usableCount\":3}");
+        stdout.Enqueue("{\"event\":\"provider_paths_recovered\",\"usableCount\":4}");
         stdout.Enqueue("{\"event\":\"tuna_bridge_terminal\",\"terminalReason\":\"tuna_stream_eof\"}");
 
         var slice = ReadListenerStdoutSlice(stdout, start);
 
-        Assert.Contains("\"event\":\"provider_paths_degraded\"", slice, StringComparison.Ordinal);
+        Assert.Contains("\"event\":\"provider_paths_degraded_accepted\"", slice, StringComparison.Ordinal);
+        Assert.Contains("\"event\":\"provider_paths_recovered\"", slice, StringComparison.Ordinal);
         Assert.Equal("tuna_stream_eof", ExtractLastJsonString(slice, "terminalReason"));
+    }
+
+    [Fact]
+    public void TunaSoakProviderPathDiagnosticsDistinguishRecoveredAndPersistentDegradation()
+    {
+        var started = new DateTimeOffset(2026, 5, 12, 12, 0, 0, TimeSpan.Zero);
+        var recoveredLog = """
+            [2026-05-12 12:00:01Z] event=tuna_listener_sidecar_event; sidecar_event=provider_paths_degraded_accepted
+            [2026-05-12 12:00:03Z] event=tuna_listener_sidecar_event; sidecar_event=provider_paths_recovered
+            """;
+        var recoveredStdout = """
+            {"event":"provider_paths_degraded_accepted","usableCount":3}
+            {"event":"provider_paths_recovered","usableCount":4}
+            """;
+        var persistentStdout = """
+            {"event":"provider_paths_degraded_accepted","usableCount":3}
+            {"event":"provider_paths_still_degraded","usableCount":3}
+            """;
+        var lateRecoveredStdout = """
+            {"event":"provider_paths_degraded_accepted","usableCount":3}
+            {"event":"provider_paths_recovered","usableCount":4}
+            """;
+
+        var recovered = AnalyzeProviderPathDiagnostics(recoveredLog, recoveredStdout, started, started.AddMinutes(1));
+        var persistent = AnalyzeProviderPathDiagnostics(string.Empty, persistentStdout, started, started.AddMinutes(1));
+        var lateRecovered = AnalyzeProviderPathDiagnostics(string.Empty, lateRecoveredStdout, started, started.AddMinutes(1));
+
+        Assert.True(recovered.DegradedAccepted);
+        Assert.True(recovered.RecoveredAfterDegraded);
+        Assert.False(recovered.StillDegradedAtEnd);
+        Assert.Equal(4, recovered.FinalUsableCount);
+        Assert.Equal(started.AddSeconds(1), recovered.FirstDegradedUtc);
+        Assert.Equal(started.AddSeconds(3), recovered.RecoveredUtc);
+        Assert.True(persistent.DegradedAccepted);
+        Assert.False(persistent.RecoveredAfterDegraded);
+        Assert.True(persistent.StillDegradedAtEnd);
+        Assert.Equal(3, persistent.FinalUsableCount);
+        Assert.True(lateRecovered.DegradedAccepted);
+        Assert.False(lateRecovered.RecoveredAfterDegraded);
+        Assert.True(lateRecovered.StillDegradedAtEnd);
+        Assert.Equal(4, lateRecovered.FinalUsableCount);
     }
 
     [Fact]
@@ -987,10 +1046,7 @@ public sealed partial class TunaSidecarLiveManualTests
             terminalReason = ExtractLastLogToken(logTail, "sidecar_reason=");
         }
 
-        var providerDegraded = CountOccurrences(logTail, "sidecar_event=provider_paths_degraded") > 0 ||
-                               CountOccurrences(logTail, "\"event\":\"provider_paths_degraded\"") > 0 ||
-                               CountOccurrences(logTail, "event=provider_paths_degraded") > 0 ||
-                               CountOccurrences(sidecarText, "\"event\":\"provider_paths_degraded\"") > 0;
+        var providerPaths = AnalyzeProviderPathDiagnostics(logTail, sidecarText, startedAtUtc, DateTimeOffset.UtcNow);
         var v6FileEpochPending = CountOccurrences(logTail, "file_v6_epoch_state=pending") > 0;
         var v6EpochStarted = CountOccurrences(logTail, "event=filetransfer_v6_epoch_started") > 0 ||
                              v6FileEpochPending ||
@@ -1072,9 +1128,33 @@ public sealed partial class TunaSidecarLiveManualTests
             warnings.Add(string.Format(CultureInfo.InvariantCulture, "tuna_diagnostic_counter_lost_after_reset:sidecar_forwarded_frames={0}", tunaLogFrames));
         }
 
-        if (cell.Transport == Phase3TransportMode.Tuna && providerDegraded)
+        if (cell.Transport == Phase3TransportMode.Tuna && providerPaths.StillDegradedAtEnd)
         {
             warnings.Add("provider_paths_degraded");
+        }
+        else if (cell.Transport == Phase3TransportMode.Tuna && providerPaths.RecoveredAfterDegraded)
+        {
+            warnings.Add("provider_paths_degraded_recovered");
+        }
+
+        if (IsPhase6CleanActivationCell(cell) && file.Completed && !peerCloseObserved)
+        {
+            warnings.Add("activation_cleanup_late_peer_close");
+            await AppendPhase3EventAsync(
+                    runsPath,
+                    new
+                    {
+                        @event = "phase6_activation_cleanup_late_peer_close",
+                        cellId = cell.CellId,
+                        fileRunId = file.RunId,
+                        fileBytesSent = file.BytesSent,
+                        fileBytesReceived = file.BytesReceived,
+                        senderTerminalObserved = file.SenderTerminalObserved || outboundTerminalObserved,
+                        receiverTerminalObserved = file.ReceiverTerminalObserved || inboundTerminalObserved,
+                        observedAtUtc = DateTimeOffset.UtcNow,
+                    },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
         }
 
         var warningReason = string.Join("; ", warnings);
@@ -1174,7 +1254,13 @@ public sealed partial class TunaSidecarLiveManualTests
             FallbackScreenSent = fallbackScreenSent,
             FallbackScreenReceived = fallbackScreenReceived,
             TerminalReason = terminalReason,
-            ProviderDegraded = providerDegraded,
+            ProviderDegradedAccepted = providerPaths.DegradedAccepted,
+            ProviderRecoveredAfterDegraded = providerPaths.RecoveredAfterDegraded,
+            ProviderStillDegradedAtEnd = providerPaths.StillDegradedAtEnd,
+            ProviderFirstDegradedUtc = providerPaths.FirstDegradedUtc,
+            ProviderRecoveredUtc = providerPaths.RecoveredUtc,
+            ProviderFinalUsableCount = providerPaths.FinalUsableCount,
+            ProviderDegradationOverlappedFileTransfer = providerPaths.OverlappedFileTransfer,
             FailureReason = failureReason,
             WarningReason = warningReason,
             DataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
@@ -1301,8 +1387,35 @@ public sealed partial class TunaSidecarLiveManualTests
                     .ConfigureAwait(false);
                 if (!waitCompletedOrWaiting)
                 {
-                    failureReason = "soak_timeout_incomplete";
-                    await ForcePhase6ServiceSoakTimeoutTerminalizationAsync(sender, receiver, transferId).ConfigureAwait(false);
+                    waitCompletedOrWaiting = await TryConfirmPhase6CleanActivationCompletionAfterDrainAsync(
+                            cell,
+                            sender,
+                            receiver,
+                            transferId,
+                            receivedPath,
+                            payloadBytes,
+                            expectedHash,
+                            runsPath,
+                            runId,
+                            ct)
+                        .ConfigureAwait(false);
+                    if (!waitCompletedOrWaiting)
+                    {
+                        failureReason = "soak_timeout_incomplete";
+                        await ForcePhase6ServiceSoakTimeoutTerminalizationAsync(sender, receiver, transferId).ConfigureAwait(false);
+                        await AppendPhase3EventAsync(
+                                runsPath,
+                                new
+                                {
+                                    @event = "phase6_activation_cleanup_forced_terminalization",
+                                    runId,
+                                    transferId,
+                                    reason = "soak_timeout_incomplete",
+                                    forcedAtUtc = DateTimeOffset.UtcNow,
+                                },
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
                 }
             }
         }
@@ -1473,6 +1586,20 @@ public sealed partial class TunaSidecarLiveManualTests
                     runsPath,
                     new
                     {
+                        @event = "phase6_activation_cleanup_forced_terminalization",
+                        runId,
+                        transferId,
+                        reason = "terminal_evidence_missing_after_summary",
+                        senderTerminalBeforeCleanup = senderTerminal,
+                        receiverTerminalBeforeCleanup = receiverTerminal,
+                        forcedAtUtc = DateTimeOffset.UtcNow,
+                    },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            await AppendPhase3EventAsync(
+                    runsPath,
+                    new
+                    {
                         @event = "phase6_service_file_cleanup_terminalized",
                         runId,
                         transferId,
@@ -1494,6 +1621,84 @@ public sealed partial class TunaSidecarLiveManualTests
 
     private static bool IsPhase6ServiceWaitingForRegularNkn(FileTransferTransferSnapshot? snapshot)
         => string.Equals(snapshot?.StatusMessage, "Waiting for regular NKN", StringComparison.Ordinal);
+
+    private static async Task<bool> TryConfirmPhase6CleanActivationCompletionAfterDrainAsync(
+        TunaSoakMatrixCell cell,
+        SessionFileTransferService sender,
+        SessionFileTransferService receiver,
+        string transferId,
+        string receivedPath,
+        long payloadBytes,
+        string expectedHash,
+        string runsPath,
+        string runId,
+        CancellationToken ct)
+    {
+        if (!IsPhase6CleanActivationCell(cell) || !File.Exists(receivedPath))
+        {
+            return false;
+        }
+
+        var receivedBytes = new FileInfo(receivedPath).Length;
+        if (receivedBytes != payloadBytes)
+        {
+            return false;
+        }
+
+        string actualHash;
+        await using (var receivedStream = new FileStream(
+            receivedPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            bufferSize: 64 * 1024,
+            FileOptions.SequentialScan))
+        {
+            actualHash = Convert.ToBase64String(await SHA256.HashDataAsync(receivedStream, ct).ConfigureAwait(false));
+        }
+
+        if (!string.Equals(actualHash, expectedHash, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var terminalConfirmed = await WaitForPhase6ServiceConditionAsync(
+                () =>
+                {
+                    var outbound = sender.Snapshot.Outbound;
+                    var inbound = receiver.Snapshot.Inbound;
+                    return string.Equals(outbound?.TransferId, transferId, StringComparison.Ordinal) &&
+                           string.Equals(inbound?.TransferId, transferId, StringComparison.Ordinal) &&
+                           outbound?.State == FileTransferTransferState.Completed &&
+                           inbound?.State == FileTransferTransferState.Completed &&
+                           outbound?.IsTerminal == true &&
+                           inbound?.IsTerminal == true;
+                },
+                TimeSpan.FromSeconds(10),
+                ct)
+            .ConfigureAwait(false);
+        if (!terminalConfirmed)
+        {
+            return false;
+        }
+
+        await AppendPhase3EventAsync(
+                runsPath,
+                new
+                {
+                    @event = "phase6_activation_cleanup_terminal_confirmed",
+                    runId,
+                    transferId,
+                    payloadBytes,
+                    receivedBytes,
+                    finalShaMatched = true,
+                    drainMs = 10_000,
+                    confirmedAtUtc = DateTimeOffset.UtcNow,
+                },
+                CancellationToken.None)
+            .ConfigureAwait(false);
+        return true;
+    }
 
     private static async Task<bool> WaitForPhase6ServiceTransferCompletionOrWaitingAsync(
         SessionFileTransferService sender,
@@ -1955,6 +2160,112 @@ public sealed partial class TunaSidecarLiveManualTests
         return false;
     }
 
+    private static ProviderPathSoakDiagnostics AnalyzeProviderPathDiagnostics(
+        string logText,
+        string sidecarText,
+        DateTimeOffset cellStartedUtc,
+        DateTimeOffset observedAtUtc)
+    {
+        var combined = string.Concat(logText, Environment.NewLine, sidecarText);
+        var degradedAccepted =
+            ContainsProviderEvent(combined, "provider_paths_degraded_accepted") ||
+            ContainsProviderEvent(combined, "provider_paths_degraded");
+        var recoveredEventObserved = ContainsProviderEvent(combined, "provider_paths_recovered");
+        var firstDegradedUtc = FindFirstLogTimestamp(
+            logText,
+            "provider_paths_degraded_accepted",
+            "provider_paths_degraded") ?? (degradedAccepted ? cellStartedUtc : null);
+        var recoveredUtc = FindFirstLogTimestamp(logText, "provider_paths_recovered") ??
+                           (recoveredEventObserved ? observedAtUtc : null);
+        var recoveredWithRunway = recoveredUtc.HasValue &&
+                                  recoveredUtc.Value <= observedAtUtc - TimeSpan.FromSeconds(10);
+        var recovered = recoveredEventObserved && recoveredWithRunway;
+        var stillDegraded = ContainsProviderEvent(combined, "provider_paths_still_degraded") ||
+                            degradedAccepted && (!recoveredEventObserved || !recoveredWithRunway);
+        var finalUsableCount =
+            ExtractLastJsonInt(sidecarText, "usableCount") ??
+            ExtractLastLogInt(logText, "usable_provider_count=") ??
+            -1;
+        var overlapped = degradedAccepted &&
+                         firstDegradedUtc <= observedAtUtc &&
+                         (!recoveredUtc.HasValue || recoveredUtc.Value >= cellStartedUtc);
+        return new ProviderPathSoakDiagnostics(
+            degradedAccepted,
+            recovered,
+            stillDegraded,
+            firstDegradedUtc,
+            recoveredUtc,
+            finalUsableCount,
+            overlapped);
+    }
+
+    private static bool ContainsProviderEvent(string text, string eventName)
+        => CountOccurrences(text, "sidecar_event=" + eventName) > 0 ||
+           CountOccurrences(text, "\"event\":\"" + eventName + "\"") > 0 ||
+           CountOccurrences(text, "event=" + eventName) > 0;
+
+    private static DateTimeOffset? FindFirstLogTimestamp(string logText, params string[] tokens)
+    {
+        if (string.IsNullOrWhiteSpace(logText))
+        {
+            return null;
+        }
+
+        foreach (var line in logText.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!tokens.Any(token => line.Contains(token, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            if (TryReadOperationalLogTimestamp(line, out var timestamp))
+            {
+                return timestamp;
+            }
+        }
+
+        return null;
+    }
+
+    private static int? ExtractLastJsonInt(string text, string propertyName)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(propertyName))
+        {
+            return null;
+        }
+
+        var prefix = "\"" + propertyName + "\":";
+        var index = text.LastIndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+        if (index < 0)
+        {
+            return null;
+        }
+
+        var start = index + prefix.Length;
+        while (start < text.Length && char.IsWhiteSpace(text[start]))
+        {
+            start++;
+        }
+
+        var end = start;
+        while (end < text.Length && (char.IsDigit(text[end]) || text[end] == '-'))
+        {
+            end++;
+        }
+
+        return int.TryParse(text[start..end], NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
+            ? value
+            : null;
+    }
+
+    private static int? ExtractLastLogInt(string text, string prefix)
+    {
+        var token = ExtractLastLogToken(text, prefix);
+        return int.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
+            ? value
+            : null;
+    }
+
     private static string ReadListenerStdoutSlice(ConcurrentQueue<string> listenerStdout, int startIndex)
     {
         var lines = listenerStdout.ToArray();
@@ -2026,12 +2337,23 @@ public sealed partial class TunaSidecarLiveManualTests
         }
 
         var retryEvidence = string.Concat(result.FailureReason, ";", result.WarningReason);
+        if (result.IsPhase6Gate &&
+            result.Transport == Phase3TransportMode.Tuna &&
+            result.Fault == TunaSoakFaultMode.None &&
+            result.ProviderDegradedAccepted &&
+            result.ProviderDegradationOverlappedFileTransfer &&
+            result.FailureReason.Contains("soak_timeout_incomplete", StringComparison.OrdinalIgnoreCase) &&
+            result.FailureReason.Contains("file_incomplete", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
         return retryEvidence.Contains("file_tuna_lane_unavailable", StringComparison.OrdinalIgnoreCase) ||
                retryEvidence.Contains("tuna_readiness_missing", StringComparison.OrdinalIgnoreCase) ||
-               retryEvidence.Contains("provider_paths_degraded", StringComparison.OrdinalIgnoreCase) ||
+               retryEvidence.Contains("provider_paths_wait_timeout", StringComparison.OrdinalIgnoreCase) ||
+               retryEvidence.Contains("tuna_provider_paths_ready_timeout", StringComparison.OrdinalIgnoreCase) ||
                retryEvidence.Contains("dialer_exited", StringComparison.OrdinalIgnoreCase) ||
-               retryEvidence.Contains("listener_ready", StringComparison.OrdinalIgnoreCase) ||
-               retryEvidence.Contains("provider", StringComparison.OrdinalIgnoreCase);
+               retryEvidence.Contains("listener_ready", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string BuildRetryWarning(int attempt, TunaSoakCellResult result)
@@ -2097,6 +2419,12 @@ public sealed partial class TunaSidecarLiveManualTests
 
     private static bool IsPhase6GateCell(TunaSoakMatrixCell cell)
         => cell.CellId.StartsWith("phase6-tuna-file-", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsPhase6CleanActivationCell(TunaSoakMatrixCell cell)
+        => IsPhase6GateCell(cell) &&
+           cell.Transport == Phase3TransportMode.Tuna &&
+           cell.Fault == TunaSoakFaultMode.None &&
+           CellUsesFileTraffic(cell);
 
     private static TimeSpan ResolveTunaSoakFaultDelay(TunaSoakMatrixCell cell, TunaSoakMatrixOptions options)
     {
@@ -2458,7 +2786,13 @@ public sealed partial class TunaSidecarLiveManualTests
         public bool FallbackScreenSent { get; init; }
         public bool FallbackScreenReceived { get; init; }
         public string TerminalReason { get; init; } = string.Empty;
-        public bool ProviderDegraded { get; init; }
+        public bool ProviderDegradedAccepted { get; set; }
+        public bool ProviderRecoveredAfterDegraded { get; set; }
+        public bool ProviderStillDegradedAtEnd { get; set; }
+        public DateTimeOffset? ProviderFirstDegradedUtc { get; set; }
+        public DateTimeOffset? ProviderRecoveredUtc { get; set; }
+        public int ProviderFinalUsableCount { get; set; }
+        public bool ProviderDegradationOverlappedFileTransfer { get; set; }
         public string FailureReason { get; init; } = string.Empty;
         public string WarningReason { get; set; } = string.Empty;
         public string LogExcerpt { get; set; } = string.Empty;
@@ -2482,6 +2816,15 @@ public sealed partial class TunaSidecarLiveManualTests
         public string FinalStatus { get; set; } = string.Empty;
     }
 
+    private sealed record ProviderPathSoakDiagnostics(
+        bool DegradedAccepted,
+        bool RecoveredAfterDegraded,
+        bool StillDegradedAtEnd,
+        DateTimeOffset? FirstDegradedUtc,
+        DateTimeOffset? RecoveredUtc,
+        int FinalUsableCount,
+        bool OverlappedFileTransfer);
+
     private sealed record TunaSoakMatrixSummary(
         string Event,
         string Verdict,
@@ -2489,6 +2832,9 @@ public sealed partial class TunaSidecarLiveManualTests
         int PassedCells,
         string[] Reasons,
         string[] Warnings,
+        int ProviderDegradedAcceptedCells,
+        int ProviderRecoveredAfterDegradedCells,
+        int ProviderStillDegradedAtEndCells,
         TunaSoakCellResult[] Results)
     {
         public static TunaSoakMatrixSummary Build(IEnumerable<TunaSoakCellResult> source)
@@ -2605,6 +2951,9 @@ public sealed partial class TunaSidecarLiveManualTests
                     (result.Completed && string.IsNullOrWhiteSpace(result.FailureReason))),
                 reasons.Distinct(StringComparer.Ordinal).ToArray(),
                 warnings.Distinct(StringComparer.Ordinal).ToArray(),
+                results.Count(static result => result.ProviderDegradedAccepted),
+                results.Count(static result => result.ProviderRecoveredAfterDegraded),
+                results.Count(static result => result.ProviderStillDegradedAtEnd),
                 results);
         }
 

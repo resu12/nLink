@@ -7,7 +7,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestBridgeTerminalReasonMapsCloseClasses(t *testing.T) {
@@ -96,6 +98,67 @@ func TestBridgeLaneSequenceSummaries(t *testing.T) {
 	}
 	if seen["bulk"]["seqReorderCount"] != int64(1) {
 		t.Fatalf("bulk summary = %#v", seen["bulk"])
+	}
+}
+
+func TestProviderPathReadinessStateEmitsAcceptedRecoveredAndStillDegraded(t *testing.T) {
+	degradedPaths := event{
+		"usableCount": int64(3),
+		"pathsHash":   "degraded-hash",
+		"paths": []event{
+			{"index": 0, "usable": true, "ipHash": "a"},
+			{"index": 1, "usable": true, "ipHash": "b"},
+			{"index": 2, "usable": true, "ipHash": "c"},
+		},
+	}
+	recoveredPaths := event{
+		"usableCount": int64(4),
+		"pathsHash":   "recovered-hash",
+	}
+	var output bytes.Buffer
+	emit := &emitter{jsonl: true, out: &output}
+	state := newProviderPathReadinessState()
+
+	state.markDegradedAccepted(emit, "listener", degradedPaths, 1, 1, time.Now().Add(-time.Second))
+	state.observePaths(emit, "listener", recoveredPaths, "changed")
+
+	text := output.String()
+	if !strings.Contains(text, `"event":"provider_paths_degraded_accepted"`) {
+		t.Fatalf("missing degraded accepted event: %s", text)
+	}
+	if !strings.Contains(text, `"event":"provider_paths_recovered"`) {
+		t.Fatalf("missing recovered event: %s", text)
+	}
+	if !strings.Contains(text, `"pathsHash":"degraded-hash"`) || !strings.Contains(text, `"pathsHash":"recovered-hash"`) {
+		t.Fatalf("missing path hashes: %s", text)
+	}
+
+	summary := providerPathReadinessSummary(state)
+	if summary["degradedAccepted"] != true || summary["recovered"] != true || summary["stillDegraded"] != false {
+		t.Fatalf("summary = %#v", summary)
+	}
+}
+
+func TestProviderPathReadinessStateEmitsStillDegradedOnce(t *testing.T) {
+	paths := event{
+		"usableCount": int64(3),
+		"pathsHash":   "degraded-hash",
+	}
+	var output bytes.Buffer
+	emit := &emitter{jsonl: true, out: &output}
+	state := newProviderPathReadinessState()
+
+	state.markDegradedAccepted(emit, "listener", paths, 1, 1, time.Now().Add(-time.Second))
+	state.emitStillDegradedIfNeeded(emit, "listener", "bridge_summary")
+	state.emitStillDegradedIfNeeded(emit, "listener", "bridge_summary")
+
+	text := output.String()
+	if count := strings.Count(text, `"event":"provider_paths_still_degraded"`); count != 1 {
+		t.Fatalf("still degraded event count = %d; output=%s", count, text)
+	}
+	summary := providerPathReadinessSummary(state)
+	if summary["degradedAccepted"] != true || summary["recovered"] != false || summary["stillDegraded"] != true {
+		t.Fatalf("summary = %#v", summary)
 	}
 }
 

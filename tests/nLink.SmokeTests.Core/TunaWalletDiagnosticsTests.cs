@@ -1138,6 +1138,40 @@ public sealed class TunaWalletDiagnosticsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public void TunaListenerSidecarSupervisor_TracksProviderPathDiagnosticsCounters()
+    {
+        var statuses = new List<string>();
+        using var supervisor = new NknTunaListenerSidecarSupervisor(new NknTunaListenerSidecarOptions
+        {
+            SidecarExePath = Path.Combine(Path.GetTempPath(), "nlink-tuna-sidecar.exe"),
+            WalletPath = Path.Combine(Path.GetTempPath(), "wallet-test-nkn.json"),
+            TakeWalletPassword = static () => "unused".ToCharArray(),
+            MaxPriceNknPerMb = TunaRuntimePreferenceState.DefaultMaxPriceNknPerMb,
+            MaxTotalMiB = TunaRuntimePreferenceState.DefaultMaxTotalMiB,
+            MaxDurationSec = TunaRuntimePreferenceState.DefaultMaxDurationSec,
+            StatusChanged = statuses.Add,
+        });
+
+        InvokeSupervisorStdout(
+            supervisor,
+            "{\"event\":\"provider_paths_degraded_accepted\",\"usableCount\":3,\"minProviderCnt\":4,\"degradedProviderCnt\":3}");
+        InvokeSupervisorStdout(
+            supervisor,
+            "{\"event\":\"provider_paths_recovered\",\"usableCount\":4,\"minProviderCnt\":4,\"degradedProviderCnt\":3}");
+        InvokeSupervisorStdout(
+            supervisor,
+            "{\"event\":\"provider_paths_still_degraded\",\"usableCount\":3,\"minProviderCnt\":4,\"degradedProviderCnt\":3}");
+
+        Assert.Contains("provider_paths_degraded", statuses);
+        Assert.Contains("provider_paths_ready", statuses);
+        var diagnostics = supervisor.ProviderPathDiagnostics;
+        Assert.Equal(1, diagnostics.DegradedAcceptedCount);
+        Assert.Equal(1, diagnostics.RecoveredCount);
+        Assert.Equal(1, diagnostics.StillDegradedCount);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public void TunaListenerSidecarSupervisor_CapHandoffEventRequestsRuntimeStop()
     {
         var statuses = new List<string>();

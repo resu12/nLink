@@ -40,6 +40,11 @@ internal sealed class NknTunaListenerSidecarOptions
     public Func<bool>? CanTakeWalletPassword { get; init; }
 }
 
+internal sealed record NknTunaProviderPathDiagnostics(
+    int DegradedAcceptedCount,
+    int RecoveredCount,
+    int StillDegradedCount);
+
 internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecarSupervisor
 {
     private readonly object gate = new();
@@ -51,6 +56,9 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
     private bool summaryObserved;
     private bool disposed;
     private string? lastStartFailureReason;
+    private int providerPathsDegradedAcceptedCount;
+    private int providerPathsRecoveredCount;
+    private int providerPathsStillDegradedCount;
 
     public NknTunaListenerSidecarSupervisor(NknTunaListenerSidecarOptions options)
     {
@@ -76,6 +84,20 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             catch
             {
                 return false;
+            }
+        }
+    }
+
+    public NknTunaProviderPathDiagnostics ProviderPathDiagnostics
+    {
+        get
+        {
+            lock (gate)
+            {
+                return new NknTunaProviderPathDiagnostics(
+                    providerPathsDegradedAcceptedCount,
+                    providerPathsRecoveredCount,
+                    providerPathsStillDegradedCount);
             }
         }
     }
@@ -269,6 +291,9 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                 endpoint = null;
                 expectedRemotePeer = request.ExpectedRemotePeer.Trim();
                 summaryObserved = false;
+                providerPathsDegradedAcceptedCount = 0;
+                providerPathsRecoveredCount = 0;
+                providerPathsStillDegradedCount = 0;
             }
 
             if (!nextProcess.Start())
@@ -353,6 +378,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
 
             var safeEvent = SanitizeLogToken(eventName);
             LocalOperationalLog.Info("NKN.Tuna", $"event=tuna_listener_sidecar_event; sidecar_event={safeEvent}; line_len={line.Length}");
+            RecordProviderPathDiagnosticEvent(eventName);
             var stageStatus = RuntimeStatusForSidecarEvent(eventName, root);
             if (!string.IsNullOrWhiteSpace(stageStatus))
             {
@@ -426,6 +452,9 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             "tuna_listen_call_completed" => "listener_paths_starting",
             "tuna_listen_start_timeout" => "listener_start_timeout",
             "tuna_provider_paths_ready" => "provider_paths_ready",
+            "provider_paths_degraded_accepted" => "provider_paths_degraded",
+            "provider_paths_recovered" => "provider_paths_ready",
+            "provider_paths_still_degraded" => "provider_paths_degraded",
             "provider_paths_degraded" => (TryGetBool(root, "willRetry") ?? false)
                 ? "provider_paths_retrying"
                 : "provider_paths_degraded",
@@ -443,6 +472,25 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             "error" => "sidecar_error",
             _ => null,
         };
+
+    private void RecordProviderPathDiagnosticEvent(string eventName)
+    {
+        lock (gate)
+        {
+            switch (eventName)
+            {
+                case "provider_paths_degraded_accepted":
+                    providerPathsDegradedAcceptedCount++;
+                    break;
+                case "provider_paths_recovered":
+                    providerPathsRecoveredCount++;
+                    break;
+                case "provider_paths_still_degraded":
+                    providerPathsStillDegradedCount++;
+                    break;
+            }
+        }
+    }
 
     private void HandlePayment(JsonElement root)
     {

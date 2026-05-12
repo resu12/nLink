@@ -231,6 +231,46 @@ public sealed partial class TunaSidecarLiveManualTests
     }
 
     [Fact]
+    public void TunaSidecarPhase6Summary_DistinguishesProviderPathRecoveryWarnings()
+    {
+        var recovered = CreatePassingPhase6Result("phase6-provider-recovered");
+        recovered.WarningReason = "provider_paths_degraded_recovered";
+        recovered.ProviderDegradedAccepted = true;
+        recovered.ProviderRecoveredAfterDegraded = true;
+        recovered.ProviderStillDegradedAtEnd = false;
+        recovered.ProviderFinalUsableCount = 4;
+        var persistent = CreatePassingPhase6Result("phase6-provider-persistent");
+        persistent.WarningReason = "provider_paths_degraded";
+        persistent.ProviderDegradedAccepted = true;
+        persistent.ProviderRecoveredAfterDegraded = false;
+        persistent.ProviderStillDegradedAtEnd = true;
+        persistent.ProviderFinalUsableCount = 3;
+
+        var summary = TunaSoakMatrixSummary.Build(new[] { recovered, persistent });
+
+        Assert.Equal("pass", summary.Verdict);
+        Assert.Equal(2, summary.ProviderDegradedAcceptedCells);
+        Assert.Equal(1, summary.ProviderRecoveredAfterDegradedCells);
+        Assert.Equal(1, summary.ProviderStillDegradedAtEndCells);
+        Assert.Contains("phase6-provider-recovered:warning:provider_paths_degraded_recovered", summary.Warnings);
+        Assert.Contains("phase6-provider-persistent:warning:provider_paths_degraded", summary.Warnings);
+    }
+
+    [Fact]
+    public void TunaSidecarPhase6Summary_AcceptsCleanActivationWithoutPeerCloseEvidence()
+    {
+        var result = CreatePassingPhase6Result("phase6-clean-activation-no-peer-close");
+        result.PeerCloseObserved = false;
+        result.WarningReason = "activation_cleanup_late_peer_close";
+
+        var summary = TunaSoakMatrixSummary.Build(new[] { result });
+
+        Assert.Equal("pass", summary.Verdict);
+        Assert.Empty(summary.Reasons);
+        Assert.Contains("phase6-clean-activation-no-peer-close:warning:activation_cleanup_late_peer_close", summary.Warnings);
+    }
+
+    [Fact]
     public void TunaSidecarPhase6FaultDelay_FiresWhileFastFileTransferIsActive()
     {
         var snapshot = CaptureSoakEnvironment();
@@ -570,6 +610,9 @@ public sealed partial class TunaSidecarLiveManualTests
             "passed_cells=" + summary.PassedCells.ToString(CultureInfo.InvariantCulture),
             "reason_count=" + summary.Reasons.Length.ToString(CultureInfo.InvariantCulture),
             "warning_count=" + summary.Warnings.Length.ToString(CultureInfo.InvariantCulture),
+            "provider_degraded_accepted_cells=" + summary.ProviderDegradedAcceptedCells.ToString(CultureInfo.InvariantCulture),
+            "provider_recovered_after_degraded_cells=" + summary.ProviderRecoveredAfterDegradedCells.ToString(CultureInfo.InvariantCulture),
+            "provider_still_degraded_at_end_cells=" + summary.ProviderStillDegradedAtEndCells.ToString(CultureInfo.InvariantCulture),
             "first_read=phase6-operator-verdict.txt",
         };
         if (terminalException is not null)

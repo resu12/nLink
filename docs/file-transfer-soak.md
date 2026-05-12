@@ -49,7 +49,8 @@ Before paid Tuna time:
 
 ```powershell
 dotnet build src\nLink.App\nLink.App.csproj -c Release
-go -C tools\nkn-tuna-sidecar build -o ..\..\artifacts\tuna-sidecar\nlink-tuna-sidecar.exe .
+$version = (Get-Content VERSION -Raw).Trim()
+go -C tools\nkn-tuna-sidecar build -ldflags "-X main.sidecarVersion=$version" -o ..\..\artifacts\tuna-sidecar\nlink-tuna-sidecar.exe .
 dotnet test tests\nLink.SmokeTests.Core\nLink.SmokeTests.Core.csproj --filter "FullyQualifiedName~SessionFileTransferV6TunaIntegrationTests|FullyQualifiedName~SessionFileTransferV6TransportEpochTests|FullyQualifiedName~SessionFileTransferV6RuntimeTests|FullyQualifiedName~SessionFileTransferPauseTests|FullyQualifiedName~NknAccelerationTransportTests|FullyQualifiedName~NknFileTransferTransportTests|FullyQualifiedName~DiagnosticsAndLoggingTests|FullyQualifiedName~FileTransferOpsScriptsTests" -c Release
 ```
 
@@ -63,6 +64,13 @@ dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.cs
 ```
 
 The Phase 6 short matrix writes artifacts under `artifacts/tuna-sidecar/phase6-short-<timestamp>/`. Read `phase6-operator-verdict.txt` first, then keep `summary.json`, `runs.jsonl`, redacted app log tail, listener stdout/stderr, and sidecar cleanup evidence.
+
+Provider readiness warnings are now split so a degraded startup can be distinguished from a persistent provider-path problem:
+
+- `providerDegradedAccepted` means the listener started with the allowed 3 usable Tuna paths.
+- `providerRecoveredAfterDegraded` means usable paths later reached the full 4-path target.
+- `providerStillDegradedAtEnd` means the cell ended before full 4-path readiness was observed, and the verdict reports `provider_paths_degraded`.
+- `activation_cleanup_late_peer_close` is a clean-activation warning only: full bytes, SHA match, and terminal sender/receiver snapshots are accepted even if peer-close evidence arrives late or is absent.
 
 Latest local Phase 6 reference run:
 
