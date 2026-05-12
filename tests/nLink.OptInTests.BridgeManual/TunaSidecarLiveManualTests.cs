@@ -144,7 +144,7 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
                     TransferId = transferId,
                     FileName = "tuna-live-transfer.bin",
                     FileSizeBytes = 32 * 1024,
-                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
                 },
                 cts.Token);
             await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(30), cts.Token);
@@ -153,7 +153,7 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
                 {
                     SessionId = sessionId,
                     TransferId = transferId,
-                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
                 },
                 cts.Token);
             await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(30), cts.Token);
@@ -162,7 +162,7 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
                 {
                     SessionId = sessionId,
                     TransferId = transferId,
-                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
                     SessionRole = FileTransferProtocol.SessionRoleSender,
                     ChunkSizeBytes = 16 * 1024,
                     InitialPipelineDepth = 8,
@@ -486,7 +486,7 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
         return host.CurrentSessionSecurityState.SessionId!.Value.Value;
     }
 
-    private static FileTransferChunkBatchFrameV5 CreateChunkFrame(string sessionId, string transferId, int chunkIndex, byte fill)
+    private static FileTransferChunkBatchFrameV6 CreateChunkFrame(string sessionId, string transferId, int chunkIndex, byte fill)
         => new()
         {
             SessionId = sessionId,

@@ -260,8 +260,8 @@ public sealed partial class TunaSidecarLiveManualTests
             this.dropPolicy = dropPolicy;
         }
 
-        public bool SupportsFileTransferV5Streaming
-            => inner is IFileTransferProtocolCapabilities { SupportsFileTransferV5Streaming: true };
+        public bool SupportsFileTransferV6Streaming
+            => inner is IFileTransferProtocolCapabilities { SupportsFileTransferV6Streaming: true };
 
         public FileTransferTransportProfileKind FileTransferTransportProfileKind
             => inner is IFileTransferTransportProfileProvider provider
@@ -310,6 +310,36 @@ public sealed partial class TunaSidecarLiveManualTests
             remove => inner.FileTransferCompleteReceived -= value;
         }
 
+        public event EventHandler<FileTransferPauseControlReceivedEventArgs>? FileTransferPauseControlReceived
+        {
+            add => inner.FileTransferPauseControlReceived += value;
+            remove => inner.FileTransferPauseControlReceived -= value;
+        }
+
+        public event EventHandler<FileTransferHeartbeatReceivedEventArgs>? FileTransferHeartbeatReceived
+        {
+            add => inner.FileTransferHeartbeatReceived += value;
+            remove => inner.FileTransferHeartbeatReceived -= value;
+        }
+
+        public event EventHandler<FileTransferTransportEpochReceivedEventArgs>? FileTransferTransportEpochReceived
+        {
+            add => inner.FileTransferTransportEpochReceived += value;
+            remove => inner.FileTransferTransportEpochReceived -= value;
+        }
+
+        public event EventHandler<FileTransferTransportProbeReceivedEventArgs>? FileTransferTransportProbeReceived
+        {
+            add => inner.FileTransferTransportProbeReceived += value;
+            remove => inner.FileTransferTransportProbeReceived -= value;
+        }
+
+        public event EventHandler<FileTransferRepairProofReceivedEventArgs>? FileTransferRepairProofReceived
+        {
+            add => inner.FileTransferRepairProofReceived += value;
+            remove => inner.FileTransferRepairProofReceived -= value;
+        }
+
         public int ResolveSafeOutboundChunkSize(FileTransferChunkBudgetRequest request)
             => inner is IFileTransferChunkBudgetProvider provider
                 ? provider.ResolveSafeOutboundChunkSize(request)
@@ -338,6 +368,21 @@ public sealed partial class TunaSidecarLiveManualTests
 
         public Task SendFileTransferCompleteAsync(FileTransferCompleteV1 message, CancellationToken ct)
             => inner.SendFileTransferCompleteAsync(message, ct);
+
+        public Task SendFileTransferPauseControlAsync(FileTransferPauseControlV6 message, CancellationToken ct)
+            => inner.SendFileTransferPauseControlAsync(message, ct);
+
+        public Task SendFileTransferHeartbeatAsync(FileTransferHeartbeatV6 message, CancellationToken ct)
+            => inner.SendFileTransferHeartbeatAsync(message, ct);
+
+        public Task SendFileTransferTransportEpochAsync(FileTransferTransportEpochV6 message, CancellationToken ct)
+            => inner.SendFileTransferTransportEpochAsync(message, ct);
+
+        public Task SendFileTransferTransportProbeAsync(FileTransferTransportProbeV6 message, CancellationToken ct)
+            => inner.SendFileTransferTransportProbeAsync(message, ct);
+
+        public Task SendFileTransferRepairProofAsync(FileTransferRepairProofV6 message, CancellationToken ct)
+            => inner.SendFileTransferRepairProofAsync(message, ct);
 
         public async Task<IFileTransferDataSession> OpenFileTransferDataSessionAsync(string sessionId, string transferId, CancellationToken ct)
             => new FaultInjectingFileTransferDataSession(
@@ -374,6 +419,9 @@ public sealed partial class TunaSidecarLiveManualTests
 
         public ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct)
             => inner.ReceiveAsync(ct);
+
+        public ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(CancellationToken ct)
+            => inner.ReceiveWithMetadataAsync(ct);
 
         public Task SendAsync(FileTransferDataFrame frame, CancellationToken ct)
             => dropPolicy.TryDrop(frame)

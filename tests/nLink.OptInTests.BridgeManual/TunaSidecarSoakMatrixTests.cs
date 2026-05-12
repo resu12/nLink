@@ -1,10 +1,12 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using NLink.Core;
+using NLink.Core.Configuration;
 using NLink.Core.FileTransfer;
 using NLink.Core.Logging;
 using NLink.Core.ScreenShare;
@@ -24,7 +26,10 @@ public sealed partial class TunaSidecarLiveManualTests
     private const string SoakCellFilterEnv = "NLINK_TUNA_SOAK_CELL_FILTER";
     private const string SoakFilePacingMbpsEnv = "NLINK_TUNA_SOAK_FILE_PACING_MBPS";
     private const string SoakCellRetriesEnv = "NLINK_TUNA_SOAK_CELL_RETRIES";
+    private const string Phase6ShortMatrixOptInEnv = "NLINK_RUN_TUNA_PHASE6_SHORT_MATRIX";
+    private const string Phase6TargetedOptInEnv = "NLINK_RUN_TUNA_PHASE6_TARGETED";
     private const int SoakDefaultDurationMinutes = 15;
+    private const int Phase6DefaultDurationMinutes = 5;
     private const double SoakDefaultFilePacingMbps = 8;
     private const int SoakDefaultCellRetries = 1;
     private const double SoakUnexpectedFallbackRecoveredMinFileRatio = 0.98;
@@ -251,6 +256,62 @@ public sealed partial class TunaSidecarLiveManualTests
     }
 
     [Fact]
+    public void TunaSoakMatrixSummary_AllowsPhase6ExpectedWaitingWithControlDown()
+    {
+        var cell = new TunaSoakMatrixCell(
+            TunaSoakTier.Core,
+            "phase6-tuna-file-helper-receiving-helpee-switch-off",
+            Phase3TransportMode.Tuna,
+            TunaSoakTrafficProfile.FileOnly,
+            TunaSoakPreset.TunaQuality,
+            TunaSoakPayerMode.HelpeeOnly,
+            TunaSoakFaultMode.SwitchOffFallback)
+        {
+            ReceiverRole = TunaSoakReceiverRole.HelperReceiving,
+        };
+        var result = new TunaSoakCellResult
+        {
+            CellId = cell.CellId,
+            Tier = cell.Tier,
+            Transport = cell.Transport,
+            TrafficProfile = cell.TrafficProfile,
+            Preset = cell.Preset,
+            Payer = cell.Payer,
+            Fault = cell.Fault,
+            Completed = false,
+            SessionAlive = false,
+            ChatControlAlive = false,
+            FileCompleted = false,
+            ScreenCompleted = true,
+            FileBytesSent = 300_000_000,
+            FileBytesReceived = 180_000_000,
+            FileReceiveRatio = 0.6,
+            TunaFrameCount = 10,
+            FallbackExpected = true,
+            FallbackStarted = true,
+            FallbackFileSent = true,
+            FallbackFileReceived = true,
+            FailureReason = "file_incomplete:receive_ratio=0.6000; reason=waiting_for_regular_nkn",
+            IsPhase6Gate = true,
+            DataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+            V6EpochStarted = true,
+            V6TargetProofObserved = true,
+            V6EpochWaiting = true,
+            V6EpochTerminal = true,
+            SenderTerminalObserved = true,
+            ReceiverTerminalObserved = true,
+            UnresolvedEpochCount = 1,
+            ExpectedWaiting = true,
+            FinalStatus = "Waiting for regular NKN",
+        };
+
+        var summary = TunaSoakMatrixSummary.Build(new[] { result });
+
+        Assert.Equal("pass", summary.Verdict);
+        Assert.Empty(summary.Reasons);
+    }
+
+    [Fact]
     public void TunaSoakMatrixSummary_FailsUnexpectedFallbackWithoutProof()
     {
         var cell = new TunaSoakMatrixCell(
@@ -306,6 +367,29 @@ public sealed partial class TunaSidecarLiveManualTests
         Assert.Contains("retry_after_failed_attempt:1", finalWarning);
         Assert.Contains("previous_failure=file_no_progress:file_tuna_lane_unavailable", finalWarning);
         Assert.Contains("previous_warning=tuna_diagnostic_counter_lost_after_reset", finalWarning);
+    }
+
+    [Fact]
+    public void TunaPhase6RetryUsesProviderWarningForCleanActivationOnly()
+    {
+        var cleanActivation = new TunaSoakCellResult
+        {
+            Completed = false,
+            FallbackExpected = false,
+            FailureReason = "file_incomplete:receive_ratio=0.9222; reason=soak_timeout_incomplete",
+            WarningReason = "provider_paths_degraded",
+        };
+        var expectedFault = new TunaSoakCellResult
+        {
+            Completed = false,
+            FallbackExpected = true,
+            FailureReason = "file_incomplete:receive_ratio=0.4662; reason=soak_timeout_incomplete",
+            WarningReason = "provider_paths_degraded",
+        };
+
+        Assert.True(ShouldRetryPhase6SoakCell(cleanActivation, attempt: 1, maxRetries: 1));
+        Assert.False(ShouldRetryPhase6SoakCell(expectedFault, attempt: 1, maxRetries: 1));
+        Assert.False(ShouldRetryPhase6SoakCell(cleanActivation, attempt: 2, maxRetries: 1));
     }
 
     [Fact]
@@ -382,6 +466,7 @@ public sealed partial class TunaSidecarLiveManualTests
         var appLogStart = GetOperationalLogLength();
         var listenerStdout = new ConcurrentQueue<string>();
         var listenerStderr = new ConcurrentQueue<string>();
+        var previousDeveloperMode = Environment.GetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar);
         var previousNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var previousBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         var previousManualBridge = Environment.GetEnvironmentVariable("NLINK_RUN_MANUAL_BRIDGE");
@@ -392,6 +477,7 @@ public sealed partial class TunaSidecarLiveManualTests
 
         try
         {
+            Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, "1");
             Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", Path.Combine(bridgeDir!, "node.exe"));
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", Path.Combine(bridgeDir!, "index.js"));
             Environment.SetEnvironmentVariable("NLINK_RUN_MANUAL_BRIDGE", "1");
@@ -501,6 +587,7 @@ public sealed partial class TunaSidecarLiveManualTests
         }
         finally
         {
+            Environment.SetEnvironmentVariable(ReleaseOverridePolicy.UnsafeDeveloperModeEnvVar, previousDeveloperMode);
             Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", previousNodePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", previousBridgePath);
             Environment.SetEnvironmentVariable("NLINK_RUN_MANUAL_BRIDGE", previousManualBridge);
@@ -516,15 +603,18 @@ public sealed partial class TunaSidecarLiveManualTests
         string runsPath,
         ConcurrentQueue<string> listenerStdout,
         ConcurrentQueue<string> listenerStderr,
-        CancellationToken ct)
+        CancellationToken ct,
+        Phase3BenchmarkOptions? phase3OptionsOverride = null,
+        bool useV6ServiceFileProfile = false)
     {
         var startedAtUtc = DateTimeOffset.UtcNow;
         var logStart = GetOperationalLogLength();
         var listenerStdoutStart = listenerStdout.Count;
-        var phase3Options = options.ToPhase3BenchmarkOptions(
-            cell.Fault == TunaSoakFaultMode.ProviderTimeout
-                ? Math.Max(30, (int)Math.Min(options.CellDuration.TotalSeconds / 2, 120))
-                : null);
+        var phase3Options = phase3OptionsOverride ??
+                            options.ToPhase3BenchmarkOptions(
+                                cell.Fault == TunaSoakFaultMode.ProviderTimeout
+                                    ? Math.Max(30, (int)Math.Min(options.CellDuration.TotalSeconds / 2, 120))
+                                    : null);
         if (cell.Fault == TunaSoakFaultMode.CapReached)
         {
             phase3Options = phase3Options with
@@ -574,34 +664,52 @@ public sealed partial class TunaSidecarLiveManualTests
                     ct);
             }
 
-            using var context = await CreateTunaSoakLiveRunContextAsync(
-                cell,
-                phase3Options,
-                sidecarExe,
-                walletPath,
-                walletPassword,
-                runsPath,
-                listenerStdout,
-                listenerStderr,
-                setupRepeat: Math.Abs(cell.CellId.GetHashCode(StringComparison.Ordinal)),
-                ct);
+            Phase3LiveRunContext? context = null;
+            try
+            {
+                context = await CreateTunaSoakLiveRunContextAsync(
+                    cell,
+                    phase3Options,
+                    sidecarExe,
+                    walletPath,
+                    walletPassword,
+                    runsPath,
+                    listenerStdout,
+                    listenerStderr,
+                    setupRepeat: Math.Abs(cell.CellId.GetHashCode(StringComparison.Ordinal)),
+                    ct);
 
-            var result = await RunTunaSoakConcurrentTrafficAsync(
-                context,
-                cell,
-                options,
-                phase3Options,
-                runsPath,
-                startedAtUtc,
-                logStart,
-                listenerStdout,
-                listenerStdoutStart,
-                ct);
-            result.StartedUtc = startedAtUtc;
-            result.EndedUtc = DateTimeOffset.UtcNow;
-            result.DurationMs = Math.Max(1, (long)(result.EndedUtc - result.StartedUtc).TotalMilliseconds);
-            result.LogExcerpt = ExtractTunaSoakProofExcerpt(logStart, startedAtUtc);
-            return result;
+                var result = await RunTunaSoakConcurrentTrafficAsync(
+                    context,
+                    cell,
+                    options,
+                    phase3Options,
+                    runsPath,
+                    startedAtUtc,
+                    logStart,
+                    listenerStdout,
+                    listenerStdoutStart,
+                    ct,
+                    useV6ServiceFileProfile);
+                result.StartedUtc = startedAtUtc;
+                result.EndedUtc = DateTimeOffset.UtcNow;
+                result.DurationMs = Math.Max(1, (long)(result.EndedUtc - result.StartedUtc).TotalMilliseconds);
+                result.LogExcerpt = ExtractTunaSoakProofExcerpt(logStart, startedAtUtc);
+                return result;
+            }
+            finally
+            {
+                if (context is not null)
+                {
+                    await DisposeTunaSoakLiveRunContextAsync(
+                            context,
+                            runsPath,
+                            cell.CellId,
+                            bounded: useV6ServiceFileProfile,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                }
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -621,6 +729,53 @@ public sealed partial class TunaSidecarLiveManualTests
                 LogExcerpt = ExtractTunaSoakProofExcerpt(logStart, startedAtUtc),
             };
         }
+    }
+
+    private static async Task DisposeTunaSoakLiveRunContextAsync(
+        Phase3LiveRunContext context,
+        string runsPath,
+        string cellId,
+        bool bounded,
+        CancellationToken ct)
+    {
+        if (!bounded)
+        {
+            context.Dispose();
+            return;
+        }
+
+        context.KillListener();
+        var disposeTask = Task.Run(context.Dispose, CancellationToken.None);
+        var timeoutTask = Task.Delay(TimeSpan.FromSeconds(15), CancellationToken.None);
+        var completed = await Task.WhenAny(disposeTask, timeoutTask).ConfigureAwait(false);
+        if (completed == disposeTask)
+        {
+            try
+            {
+                await disposeTask.ConfigureAwait(false);
+                await AppendPhase3EventAsync(
+                        runsPath,
+                        new { @event = "phase6_context_disposed", cellId, bounded = true, disposedAtUtc = DateTimeOffset.UtcNow },
+                        ct)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                await AppendPhase3EventAsync(
+                        runsPath,
+                        new { @event = "phase6_context_dispose_failed", cellId, error = ex.GetType().Name, disposedAtUtc = DateTimeOffset.UtcNow },
+                        ct)
+                    .ConfigureAwait(false);
+            }
+
+            return;
+        }
+
+        await AppendPhase3EventAsync(
+                runsPath,
+                new { @event = "phase6_context_dispose_timeout", cellId, timeoutMs = 15000, disposedAtUtc = DateTimeOffset.UtcNow },
+                ct)
+            .ConfigureAwait(false);
     }
 
     private async Task<Phase3LiveRunContext> CreateTunaSoakLiveRunContextAsync(
@@ -790,13 +945,16 @@ public sealed partial class TunaSidecarLiveManualTests
         int logStart,
         ConcurrentQueue<string> listenerStdout,
         int listenerStdoutStart,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool useV6ServiceFileProfile)
     {
         var fileRunId = "soak-file-" + cell.CellId + "-" + Guid.NewGuid().ToString("N")[..8];
         var screenRunId = "soak-screen-" + cell.CellId + "-" + Guid.NewGuid().ToString("N")[..8];
         var faultTask = ScheduleTunaSoakFaultAsync(context, cell, soakOptions, runsPath, ct);
         var fileTask = CellUsesFileTraffic(cell)
-            ? RunPhase3FileProfileAsync(context, fileRunId, repeat: 1, phase3Options, logStart, ct)
+            ? useV6ServiceFileProfile
+                ? RunPhase6ServiceFileProfileAsync(context, cell, fileRunId, phase3Options, runsPath, logStart, startedAtUtc, ct)
+                : RunPhase3FileProfileAsync(context, fileRunId, repeat: 1, phase3Options, logStart, ct, cell.ReceiverRole)
             : Task.FromResult(SkippedSoakRun(fileRunId, Phase3Profile.File, context.Mode));
         var screenTask = CellUsesScreenTraffic(cell)
             ? RunPhase3ScreenProfileAsync(context, screenRunId, repeat: 1, phase3Options, logStart, runsPath, ct)
@@ -833,12 +991,48 @@ public sealed partial class TunaSidecarLiveManualTests
                                CountOccurrences(logTail, "\"event\":\"provider_paths_degraded\"") > 0 ||
                                CountOccurrences(logTail, "event=provider_paths_degraded") > 0 ||
                                CountOccurrences(sidecarText, "\"event\":\"provider_paths_degraded\"") > 0;
+        var v6FileEpochPending = CountOccurrences(logTail, "file_v6_epoch_state=pending") > 0;
+        var v6EpochStarted = CountOccurrences(logTail, "event=filetransfer_v6_epoch_started") > 0 ||
+                             v6FileEpochPending ||
+                             CountOccurrences(logTail, "event=tuna_fallback_filetransfer_rebind_requested") > 0;
+        var v6TargetProofObserved = CountOccurrences(logTail, "event=filetransfer_v6_transport_probe_ack_sent") > 0 ||
+                                    CountOccurrences(logTail, "event=filetransfer_v6_transport_probe_ack_received") > 0 ||
+                                    CountOccurrences(logTail, "reason=transport_probe_ack") > 0;
+        var v6RepairProofObserved = CountOccurrences(logTail, "event=filetransfer_v6_repair_proof_sent") > 0 ||
+                                    CountOccurrences(logTail, "event=filetransfer_v6_repair_proof_received") > 0 ||
+                                    CountOccurrences(logTail, "event=filetransfer_v6_frontier_repair_applied") > 0 ||
+                                    CountOccurrences(logTail, "reason=frontier_chunk_proof") > 0 ||
+                                    CountOccurrences(logTail, "reason=frontier_repair_proof") > 0;
+        var v6EpochRecoveredEvent = CountOccurrences(logTail, "event=filetransfer_v6_epoch_recovered") > 0;
+        var v6FallbackProofRecovered = CountOccurrences(logTail, "proof=filetransfer_v6_epoch_recovered") > 0;
+        var v6LaneRecovered = CountOccurrences(logTail, "file_v6_epoch_state=recovered") > 0;
+        var v6EpochRecovered = v6EpochRecoveredEvent || v6FallbackProofRecovered || v6LaneRecovered;
+        var v6EpochWaiting = CountOccurrences(logTail, "event=filetransfer_v6_epoch_waiting") > 0 ||
+                             CountOccurrences(logTail, "event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch") > 0 ||
+                             CountOccurrences(logTail, "Waiting for regular NKN") > 0 ||
+                             (fallbackExpected && v6FileEpochPending && !v6EpochRecovered);
+        var v6EpochTerminal = CountOccurrences(logTail, "event=filetransfer_v6_epoch_terminal") > 0;
+        var falseRecoveryObserved = HasExplicitV6FalseRecoveryEvidence(logTail);
+        var outboundTerminalObserved = CountOccurrences(logTail, "event=file_transfer_outbound_terminal") > 0;
+        var inboundTerminalObserved = CountOccurrences(logTail, "event=file_transfer_inbound_terminal") > 0;
+        var cancelObserved = CountOccurrences(logTail, "event=filetransfer_v6_cancel_received") > 0 ||
+                             CountOccurrences(logTail, "event=filetransfer_v6_cancel_sent") > 0 ||
+                             CountOccurrences(logTail, "file_transfer_cancel") > 0;
+        var peerCloseObserved = CountOccurrences(logTail, "peer_disconnected") > 0 ||
+                                CountOccurrences(logTail, "window_close") > 0 ||
+                                CountOccurrences(logTail, "session_end") > 0 ||
+                                CountOccurrences(logTail, "app_exit") > 0;
         if (string.IsNullOrWhiteSpace(terminalReason))
         {
             terminalReason = ExtractLastJsonString(sidecarText, "terminalReason");
         }
+        var phase6V6FallbackProofComplete =
+            IsPhase6GateCell(cell) &&
+            v6EpochStarted &&
+            (v6EpochRecovered || v6EpochWaiting || v6EpochTerminal) &&
+            !falseRecoveryObserved;
         var fallbackProofComplete = fallbackStarted &&
-                                    (!CellUsesFileTraffic(cell) || fallbackFileSent && fallbackFileReceived) &&
+                                    (!CellUsesFileTraffic(cell) || fallbackFileSent && fallbackFileReceived || phase6V6FallbackProofComplete) &&
                                     (!CellUsesScreenTraffic(cell) || fallbackScreenSent && fallbackScreenReceived);
         var tunaDiagnosticFrames = file.TunaFrameCount + screen.TunaFrameCount;
         var tunaLogFrames = CountOccurrences(logTail, "sidecar_event=bridge_frame_forwarded");
@@ -861,6 +1055,12 @@ public sealed partial class TunaSidecarLiveManualTests
             file.BytesSent,
             file.BytesReceived,
             sessionAlive);
+        var expectedWaiting = fallbackExpected &&
+                              CellUsesFileTraffic(cell) &&
+                              !file.Completed &&
+                              file.BytesReceived > 0 &&
+                              v6EpochWaiting &&
+                              !falseRecoveryObserved;
         var warnings = new List<string>();
         if (unexpectedFallbackRecovered)
         {
@@ -977,7 +1177,653 @@ public sealed partial class TunaSidecarLiveManualTests
             ProviderDegraded = providerDegraded,
             FailureReason = failureReason,
             WarningReason = warningReason,
+            DataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+            V6EpochStarted = v6EpochStarted || v6EpochRecovered || v6EpochWaiting || v6EpochTerminal || file.V6EpochStarted,
+            V6TargetProofObserved = v6TargetProofObserved || file.V6TargetProofObserved,
+            V6RepairProofObserved = v6RepairProofObserved || file.V6RepairProofObserved,
+            V6EpochRecovered = v6EpochRecovered || file.V6EpochRecovered,
+            V6EpochWaiting = v6EpochWaiting || file.V6EpochWaiting,
+            V6EpochTerminal = v6EpochTerminal || file.V6EpochTerminal,
+            FalseRecoveryObserved = falseRecoveryObserved || file.FalseRecoveryObserved,
+            SenderTerminalObserved = outboundTerminalObserved || file.SenderTerminalObserved || file.Completed || expectedWaiting,
+            ReceiverTerminalObserved = inboundTerminalObserved || file.ReceiverTerminalObserved || file.Completed || expectedWaiting,
+            CancelObserved = cancelObserved,
+            PeerCloseObserved = peerCloseObserved,
+            FinalShaMatched = file.Completed,
+            SidecarOrphanCount = 0,
+            UnresolvedEpochCount = expectedWaiting ? 1 : 0,
+            ExpectedWaiting = expectedWaiting,
+            FinalStatus = expectedWaiting ? "Waiting for regular NKN" : string.Empty,
         };
+    }
+
+    private async Task<Phase3RunResult> RunPhase6ServiceFileProfileAsync(
+        Phase3LiveRunContext context,
+        TunaSoakMatrixCell cell,
+        string runId,
+        Phase3BenchmarkOptions options,
+        string runsPath,
+        int logStart,
+        DateTimeOffset startedAtUtc,
+        CancellationToken ct)
+    {
+        var transferId = "phase6-file-" + Guid.NewGuid().ToString("N");
+        var payloadBytes = options.FileTargetBytes;
+        var seed = unchecked((int)0x6f12d0ab ^ runId.GetHashCode(StringComparison.Ordinal));
+        var artifactDir = Path.GetDirectoryName(runsPath) ?? Path.Combine(FindRepoRoot(), "artifacts", "tuna-sidecar");
+        var runDir = Path.Combine(artifactDir, "file-runs", SanitizePhase6ArtifactSegment(runId));
+        Directory.CreateDirectory(runDir);
+        var receivedPath = Path.Combine(runDir, "received.bin");
+        var expectedHash = await ComputePhase6DeterministicSha256Base64Async(payloadBytes, seed, ct).ConfigureAwait(false);
+        var senderTransport = GetPhase3FileSender(context, cell.ReceiverRole);
+        var receiverTransport = GetPhase3FileReceiver(context, cell.ReceiverRole);
+        var accelerationAvailableAtStart = IsPhase3TunaLaneReady(context, NknAccelerationLaneKind.File);
+        if (context.Mode == Phase3TransportMode.Tuna && !accelerationAvailableAtStart)
+        {
+            return new Phase3RunResult
+            {
+                RunId = runId,
+                Profile = Phase3Profile.File,
+                Mode = context.Mode,
+                Repeat = 1,
+                FailureReason = "file_tuna_lane_unavailable",
+                AccelerationAvailableAtStart = false,
+            };
+        }
+
+        var senderAccelerationStart = senderTransport.AccelerationDiagnosticsForTests;
+        var receiverAccelerationStart = receiverTransport.AccelerationDiagnosticsForTests;
+        var senderEpochDiagnosticsStart = senderTransport.FileTransferV6TransportEpochDiagnosticsForTests;
+        var receiverEpochDiagnosticsStart = receiverTransport.FileTransferV6TransportEpochDiagnosticsForTests;
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+
+        await AppendPhase3EventAsync(
+            runsPath,
+            new
+            {
+                @event = "phase6_service_file_start",
+                runId,
+                transferId,
+                receiverRole = cell.ReceiverRole,
+                payloadBytes,
+                artifact = Path.GetFileName(runDir),
+                startedAtUtc = DateTimeOffset.UtcNow,
+            },
+            ct).ConfigureAwait(false);
+
+        var started = Stopwatch.StartNew();
+        var completed = false;
+        var finalShaMatched = false;
+        var actualHash = string.Empty;
+        var failureReason = string.Empty;
+        try
+        {
+            await sender.TryStartSendAsync(
+                    new FileTransferSendDescriptor("phase6-service-file.bin", payloadBytes, transferId),
+                    _ => Task.FromResult<Stream>(new Phase6DeterministicPayloadStream(payloadBytes, seed, options.FileSendPacingMbps)),
+                    ct)
+                .ConfigureAwait(false);
+
+            var offerAccepted = await WaitForPhase6ServiceConditionAsync(
+                    () => receiver.Snapshot.Inbound?.TransferId == transferId &&
+                          receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision,
+                    TimeSpan.FromSeconds(45),
+                    ct)
+                .ConfigureAwait(false);
+            if (!offerAccepted)
+            {
+                failureReason = "receiver_offer_timeout";
+            }
+            else
+            {
+                await receiver.AcceptIncomingTransferAsync(
+                        transferId,
+                        (_, _) => Task.FromResult<Stream>(new FileStream(
+                            receivedPath,
+                            FileMode.Create,
+                            FileAccess.ReadWrite,
+                            FileShare.Read,
+                            bufferSize: Math.Clamp(FileTransferChunkBudget.MaxRawChunkBytes, 4096, 64 * 1024),
+                            FileOptions.Asynchronous | FileOptions.RandomAccess)),
+                        ct)
+                    .ConfigureAwait(false);
+
+                var waitCompletedOrWaiting = await WaitForPhase6ServiceTransferCompletionOrWaitingAsync(
+                        sender,
+                        receiver,
+                        transferId,
+                        options.ProfileDuration + Phase3FallbackDrainTimeout,
+                        IsPhase6FallbackExpected(cell),
+                        ct)
+                    .ConfigureAwait(false);
+                if (!waitCompletedOrWaiting)
+                {
+                    failureReason = "soak_timeout_incomplete";
+                    await ForcePhase6ServiceSoakTimeoutTerminalizationAsync(sender, receiver, transferId).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            failureReason = ex.GetType().Name + ":" + ex.Message;
+        }
+
+        started.Stop();
+        var outbound = sender.Snapshot.Outbound;
+        var inbound = receiver.Snapshot.Inbound;
+        var senderTerminal = outbound?.IsTerminal == true;
+        var receiverTerminal = inbound?.IsTerminal == true;
+        var waitingForRegularNkn = IsPhase6ServiceWaitingForRegularNkn(outbound) ||
+                                   IsPhase6ServiceWaitingForRegularNkn(inbound);
+        var receivedBytes = File.Exists(receivedPath) ? new FileInfo(receivedPath).Length : 0L;
+        if (File.Exists(receivedPath) && receivedBytes > 0)
+        {
+            await using var receivedStream = new FileStream(
+                receivedPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete,
+                bufferSize: 64 * 1024,
+                FileOptions.SequentialScan);
+            actualHash = Convert.ToBase64String(await SHA256.HashDataAsync(receivedStream, ct).ConfigureAwait(false));
+        }
+
+        completed = outbound?.State == FileTransferTransferState.Completed &&
+                    inbound?.State == FileTransferTransferState.Completed &&
+                    receivedBytes == payloadBytes;
+        finalShaMatched = completed &&
+                          string.Equals(actualHash, expectedHash, StringComparison.Ordinal);
+        if (string.IsNullOrWhiteSpace(failureReason) && !completed)
+        {
+            failureReason = waitingForRegularNkn
+                ? "waiting_for_regular_nkn"
+                : BuildPhase6ServiceFileFailureReason(outbound, inbound, payloadBytes, receivedBytes);
+        }
+        else if (completed && !finalShaMatched)
+        {
+            failureReason = "sha_mismatch";
+        }
+
+        var accelerationDelta = CreatePhase3AccelerationLaneDelta(
+            senderAccelerationStart,
+            senderTransport.AccelerationDiagnosticsForTests,
+            receiverAccelerationStart,
+            receiverTransport.AccelerationDiagnosticsForTests,
+            NknBridgeChannel.Bulk);
+        var durationMs = Math.Max(1, (long)started.Elapsed.TotalMilliseconds);
+        var logTail = ReadTunaSoakOperationalLogSlice(logStart, startedAtUtc);
+        var senderEpochDiagnosticsEnd = senderTransport.FileTransferV6TransportEpochDiagnosticsForTests;
+        var receiverEpochDiagnosticsEnd = receiverTransport.FileTransferV6TransportEpochDiagnosticsForTests;
+        var v6EpochStartedFromDiagnostics =
+            senderEpochDiagnosticsEnd.StartedCount > senderEpochDiagnosticsStart.StartedCount ||
+            receiverEpochDiagnosticsEnd.StartedCount > receiverEpochDiagnosticsStart.StartedCount;
+        var v6TargetProofFromDiagnostics =
+            senderEpochDiagnosticsEnd.NormalToTunaActivationRecoveredCount > senderEpochDiagnosticsStart.NormalToTunaActivationRecoveredCount ||
+            receiverEpochDiagnosticsEnd.NormalToTunaActivationRecoveredCount > receiverEpochDiagnosticsStart.NormalToTunaActivationRecoveredCount ||
+            senderEpochDiagnosticsEnd.RecoveredCount > senderEpochDiagnosticsStart.RecoveredCount ||
+            receiverEpochDiagnosticsEnd.RecoveredCount > receiverEpochDiagnosticsStart.RecoveredCount;
+        var v6EpochRecoveredFromDiagnostics =
+            senderEpochDiagnosticsEnd.RecoveredCount > senderEpochDiagnosticsStart.RecoveredCount ||
+            receiverEpochDiagnosticsEnd.RecoveredCount > receiverEpochDiagnosticsStart.RecoveredCount;
+        var v6EpochWaitingFromDiagnostics =
+            senderEpochDiagnosticsEnd.WaitingCount > senderEpochDiagnosticsStart.WaitingCount ||
+            receiverEpochDiagnosticsEnd.WaitingCount > receiverEpochDiagnosticsStart.WaitingCount;
+        var v6EpochTerminalFromDiagnostics =
+            senderEpochDiagnosticsEnd.TerminalCount > senderEpochDiagnosticsStart.TerminalCount ||
+            receiverEpochDiagnosticsEnd.TerminalCount > receiverEpochDiagnosticsStart.TerminalCount;
+        var serviceChunkSize = outbound?.ChunkSizeBytes ?? FileTransferChunkBudget.MaxRawChunkBytes;
+        var sentFrames = outbound?.ChunksTransferred ??
+                         (int)Math.Ceiling(Math.Max(0L, outbound?.BytesAcceptedForTransport ?? 0L) / (double)Math.Max(1, serviceChunkSize));
+        var receivedFrames = inbound?.ChunksTransferred ??
+                             (int)Math.Ceiling(receivedBytes / (double)Math.Max(1, serviceChunkSize));
+        var result = new Phase3RunResult
+        {
+            RunId = runId,
+            Profile = Phase3Profile.File,
+            Mode = context.Mode,
+            Repeat = 1,
+            DurationMs = durationMs,
+            BytesSent = payloadBytes,
+            BytesReceived = receivedBytes,
+            SentFrames = sentFrames,
+            ReceivedFrames = receivedFrames,
+            SenderThroughputMbps = ToMbps(Math.Max(0L, outbound?.BytesAcceptedForTransport ?? payloadBytes), durationMs),
+            ReceiverThroughputMbps = ToMbps(receivedBytes, durationMs),
+            Completed = completed && finalShaMatched,
+            CapReached = receivedBytes >= payloadBytes,
+            StallCount = completed || waitingForRegularNkn ? 0 : 1,
+            TunaFrameCount = (int)Math.Min(accelerationDelta.FramesWritten, accelerationDelta.FramesReceived),
+            NknFrameCount = Math.Max(0, sentFrames - (int)accelerationDelta.FramesAccepted),
+            AccelerationAvailableAtStart = accelerationAvailableAtStart,
+            AccelerationFramesAccepted = accelerationDelta.FramesAccepted,
+            AccelerationFramesWritten = accelerationDelta.FramesWritten,
+            AccelerationFramesReceived = accelerationDelta.FramesReceived,
+            AccelerationSendRejected = accelerationDelta.SendRejected,
+            AccelerationQueueOverflow = accelerationDelta.QueueOverflow,
+            AccelerationLastUnavailableReason = accelerationDelta.LastUnavailableReason,
+            FailureReason = (completed && finalShaMatched) ? string.Empty : failureReason,
+            SenderTerminalObserved = senderTerminal,
+            ReceiverTerminalObserved = receiverTerminal,
+            SenderFinalStatus = outbound?.StatusMessage ?? string.Empty,
+            ReceiverFinalStatus = inbound?.StatusMessage ?? string.Empty,
+            V6EpochStarted = v6EpochStartedFromDiagnostics ||
+                             CountOccurrences(logTail, "event=filetransfer_v6_epoch_started") > 0,
+            V6TargetProofObserved = CountOccurrences(logTail, "event=filetransfer_v6_transport_probe_ack_sent") > 0 ||
+                                    CountOccurrences(logTail, "event=filetransfer_v6_transport_probe_ack_received") > 0 ||
+                                    CountOccurrences(logTail, "reason=transport_probe_ack") > 0 ||
+                                    v6TargetProofFromDiagnostics,
+            V6RepairProofObserved = CountOccurrences(logTail, "event=filetransfer_v6_repair_proof_sent") > 0 ||
+                                    CountOccurrences(logTail, "event=filetransfer_v6_repair_proof_received") > 0 ||
+                                    CountOccurrences(logTail, "event=filetransfer_v6_frontier_repair_applied") > 0 ||
+                                    CountOccurrences(logTail, "reason=frontier_chunk_proof") > 0 ||
+                                    CountOccurrences(logTail, "reason=frontier_repair_proof") > 0,
+            V6EpochRecovered = CountOccurrences(logTail, "event=filetransfer_v6_epoch_recovered") > 0 ||
+                               CountOccurrences(logTail, "proof=filetransfer_v6_epoch_recovered") > 0 ||
+                               CountOccurrences(logTail, "file_v6_epoch_state=recovered") > 0 ||
+                               v6EpochRecoveredFromDiagnostics,
+            V6EpochWaiting = CountOccurrences(logTail, "event=filetransfer_v6_epoch_waiting") > 0 ||
+                             CountOccurrences(logTail, "event=filetransfer_fallback_nkn_proof_waiting_for_v6_epoch") > 0 ||
+                             CountOccurrences(logTail, "Waiting for regular NKN") > 0 ||
+                             v6EpochWaitingFromDiagnostics,
+            V6EpochTerminal = CountOccurrences(logTail, "event=filetransfer_v6_epoch_terminal") > 0 ||
+                              v6EpochTerminalFromDiagnostics,
+            FalseRecoveryObserved = HasExplicitV6FalseRecoveryEvidence(logTail),
+        };
+
+        await AppendPhase3EventAsync(
+            runsPath,
+            new
+            {
+                @event = "phase6_service_file_summary",
+                runId,
+                transferId,
+                receiverRole = cell.ReceiverRole,
+                completed = result.Completed,
+                payloadBytes,
+                receivedBytes,
+                expectedSha256Base64 = expectedHash,
+                actualSha256Base64 = actualHash,
+                finalShaMatched,
+                senderState = outbound?.State.ToString() ?? "(none)",
+                receiverState = inbound?.State.ToString() ?? "(none)",
+                senderTerminal,
+                receiverTerminal,
+                waitingForRegularNkn,
+                senderStatus = outbound?.StatusMessage ?? string.Empty,
+                receiverStatus = inbound?.StatusMessage ?? string.Empty,
+                failureReason = result.FailureReason,
+                v6SenderStarted = CountOccurrences(logTail, "event=filetransfer_v6_sender_started") > 0,
+                v6ReceiverStarted = CountOccurrences(logTail, "event=filetransfer_v6_receiver_started") > 0,
+                v6EpochStartedFromDiagnostics,
+                v6TargetProofFromDiagnostics,
+                v6EpochRecoveredFromDiagnostics,
+                v6EpochWaitingFromDiagnostics,
+                v6EpochTerminalFromDiagnostics,
+                endedAtUtc = DateTimeOffset.UtcNow,
+            },
+            CancellationToken.None).ConfigureAwait(false);
+
+        if (!senderTerminal || !receiverTerminal)
+        {
+            await ForcePhase6ServiceSoakTimeoutTerminalizationAsync(sender, receiver, transferId).ConfigureAwait(false);
+            await AppendPhase3EventAsync(
+                    runsPath,
+                    new
+                    {
+                        @event = "phase6_service_file_cleanup_terminalized",
+                        runId,
+                        transferId,
+                        reason = "soak_timeout_incomplete",
+                        senderTerminalBeforeCleanup = senderTerminal,
+                        receiverTerminalBeforeCleanup = receiverTerminal,
+                        cleanupAtUtc = DateTimeOffset.UtcNow,
+                    },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+
+        return result;
+    }
+
+    private static bool IsPhase6FallbackExpected(TunaSoakMatrixCell cell)
+        => cell.Transport == Phase3TransportMode.Tuna &&
+           cell.Fault is TunaSoakFaultMode.SidecarCrash or TunaSoakFaultMode.SwitchOffFallback or TunaSoakFaultMode.ProviderTimeout or TunaSoakFaultMode.CapReached;
+
+    private static bool IsPhase6ServiceWaitingForRegularNkn(FileTransferTransferSnapshot? snapshot)
+        => string.Equals(snapshot?.StatusMessage, "Waiting for regular NKN", StringComparison.Ordinal);
+
+    private static async Task<bool> WaitForPhase6ServiceTransferCompletionOrWaitingAsync(
+        SessionFileTransferService sender,
+        SessionFileTransferService receiver,
+        string transferId,
+        TimeSpan timeout,
+        bool expectedFallback,
+        CancellationToken ct)
+    {
+        var stableWaitingSince = (DateTimeOffset?)null;
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            ct.ThrowIfCancellationRequested();
+            var outbound = sender.Snapshot.Outbound;
+            var inbound = receiver.Snapshot.Inbound;
+            var terminal = string.Equals(outbound?.TransferId, transferId, StringComparison.Ordinal) &&
+                           string.Equals(inbound?.TransferId, transferId, StringComparison.Ordinal) &&
+                           outbound?.IsTerminal == true &&
+                           inbound?.IsTerminal == true;
+            if (terminal)
+            {
+                return true;
+            }
+
+            if (expectedFallback &&
+                (IsPhase6ServiceWaitingForRegularNkn(outbound) || IsPhase6ServiceWaitingForRegularNkn(inbound)))
+            {
+                stableWaitingSince ??= DateTimeOffset.UtcNow;
+                if (DateTimeOffset.UtcNow - stableWaitingSince.Value >= TimeSpan.FromSeconds(10))
+                {
+                    return true;
+                }
+            }
+            else
+            {
+                stableWaitingSince = null;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(250), ct).ConfigureAwait(false);
+        }
+
+        return false;
+    }
+
+    private static async Task ForcePhase6ServiceSoakTimeoutTerminalizationAsync(
+        SessionFileTransferService sender,
+        SessionFileTransferService receiver,
+        string transferId)
+    {
+        try
+        {
+            await sender.CancelTransferAsync(transferId, "soak_timeout_incomplete", CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best-effort cleanup for opt-in paid soak evidence; preserve the timeout result.
+        }
+
+        try
+        {
+            await receiver.CancelTransferAsync(transferId, "soak_timeout_incomplete", CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best-effort cleanup for opt-in paid soak evidence; preserve the timeout result.
+        }
+
+        await WaitForPhase6ServiceConditionAsync(
+                () => sender.Snapshot.Outbound?.IsTerminal == true &&
+                      receiver.Snapshot.Inbound?.IsTerminal == true,
+                TimeSpan.FromSeconds(5),
+                CancellationToken.None)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task<bool> WaitForPhase6ServiceConditionAsync(Func<bool> condition, TimeSpan timeout, CancellationToken ct)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (condition())
+            {
+                return true;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(100), ct).ConfigureAwait(false);
+        }
+
+        return condition();
+    }
+
+    private static string BuildPhase6ServiceFileFailureReason(
+        FileTransferTransferSnapshot? outbound,
+        FileTransferTransferSnapshot? inbound,
+        long payloadBytes,
+        long receivedBytes)
+    {
+        var senderState = outbound?.State.ToString() ?? "(none)";
+        var receiverState = inbound?.State.ToString() ?? "(none)";
+        var senderError = string.IsNullOrWhiteSpace(outbound?.ErrorCode) ? "none" : outbound!.ErrorCode;
+        var receiverError = string.IsNullOrWhiteSpace(inbound?.ErrorCode) ? "none" : inbound!.ErrorCode;
+        var senderStatus = string.IsNullOrWhiteSpace(outbound?.StatusMessage) ? "none" : outbound!.StatusMessage;
+        var receiverStatus = string.IsNullOrWhiteSpace(inbound?.StatusMessage) ? "none" : inbound!.StatusMessage;
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            "service_file_incomplete:sender={0}/{1}/{2}; receiver={3}/{4}/{5}; received={6}/{7}",
+            senderState,
+            senderError,
+            SanitizePhase6FailureToken(senderStatus),
+            receiverState,
+            receiverError,
+            SanitizePhase6FailureToken(receiverStatus),
+            receivedBytes,
+            payloadBytes);
+    }
+
+    private static string SanitizePhase6FailureToken(string value)
+        => value.Replace(';', ',').Replace('\r', ' ').Replace('\n', ' ');
+
+    private static string SanitizePhase6ArtifactSegment(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var builder = new StringBuilder(value.Length);
+        foreach (var ch in value)
+        {
+            builder.Append(invalid.Contains(ch) ? '_' : ch);
+        }
+
+        return builder.Length == 0 ? "run" : builder.ToString();
+    }
+
+    private static async Task<string> ComputePhase6DeterministicSha256Base64Async(long length, int seed, CancellationToken ct)
+    {
+        using var stream = new Phase6DeterministicPayloadStream(length, seed);
+        return Convert.ToBase64String(await SHA256.HashDataAsync(stream, ct).ConfigureAwait(false));
+    }
+
+    private sealed class Phase6DeterministicPayloadStream : Stream
+    {
+        private readonly long length;
+        private readonly int seed;
+        private readonly double pacingMbps;
+        private readonly Stopwatch pacingStarted = Stopwatch.StartNew();
+        private bool pacingEnabled;
+        private long position;
+
+        public Phase6DeterministicPayloadStream(long length, int seed, double pacingMbps = 0)
+        {
+            this.length = Math.Max(0, length);
+            this.seed = seed;
+            this.pacingMbps = Math.Max(0, pacingMbps);
+        }
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => true;
+
+        public override bool CanWrite => false;
+
+        public override long Length => length;
+
+        public override long Position
+        {
+            get => position;
+            set
+            {
+                if (value < 0 || value > length)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(value));
+                }
+
+                if (value == 0 && position > 0)
+                {
+                    EnablePacing();
+                }
+
+                position = value;
+            }
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+            => Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            if (position >= length || buffer.Length == 0)
+            {
+                return 0;
+            }
+
+            var bytesToRead = (int)Math.Min(buffer.Length, length - position);
+            for (var index = 0; index < bytesToRead; index++)
+            {
+                buffer[index] = ComputeByte(position + index, seed);
+            }
+
+            position += bytesToRead;
+            PaceSynchronously(position);
+            return bytesToRead;
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            var bytesRead = ReadWithoutPacing(buffer.Span);
+            if (bytesRead > 0)
+            {
+                await PaceAsync(position, cancellationToken).ConfigureAwait(false);
+            }
+
+            return bytesRead;
+        }
+
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            var bytesRead = ReadWithoutPacing(buffer.AsSpan(offset, count));
+            if (bytesRead > 0)
+            {
+                await PaceAsync(position, cancellationToken).ConfigureAwait(false);
+            }
+
+            return bytesRead;
+        }
+
+        private int ReadWithoutPacing(Span<byte> buffer)
+        {
+            if (position >= length || buffer.Length == 0)
+            {
+                return 0;
+            }
+
+            var bytesToRead = (int)Math.Min(buffer.Length, length - position);
+            for (var index = 0; index < bytesToRead; index++)
+            {
+                buffer[index] = ComputeByte(position + index, seed);
+            }
+
+            position += bytesToRead;
+            return bytesToRead;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            var next = origin switch
+            {
+                SeekOrigin.Begin => offset,
+                SeekOrigin.Current => position + offset,
+                SeekOrigin.End => length + offset,
+                _ => throw new ArgumentOutOfRangeException(nameof(origin)),
+            };
+            if (next < 0 || next > length)
+            {
+                throw new IOException("Seek position is outside the deterministic payload stream.");
+            }
+
+            if (next == 0 && position > 0)
+            {
+                EnablePacing();
+            }
+
+            position = next;
+            return position;
+        }
+
+        public override void SetLength(long value)
+            => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count)
+            => throw new NotSupportedException();
+
+        private void PaceSynchronously(long bytesRead)
+        {
+            if (!pacingEnabled || pacingMbps <= 0)
+            {
+                return;
+            }
+
+            var targetElapsedMs = bytesRead * 8d / (Math.Max(1, pacingMbps) * 1000d);
+            var delayMs = targetElapsedMs - pacingStarted.Elapsed.TotalMilliseconds;
+            if (delayMs > 1)
+            {
+                Task.Delay(TimeSpan.FromMilliseconds(Math.Min(delayMs, 250))).GetAwaiter().GetResult();
+            }
+        }
+
+        private async Task PaceAsync(long bytesRead, CancellationToken ct)
+        {
+            if (!pacingEnabled || pacingMbps <= 0)
+            {
+                return;
+            }
+
+            var targetElapsedMs = bytesRead * 8d / (Math.Max(1, pacingMbps) * 1000d);
+            var delayMs = targetElapsedMs - pacingStarted.Elapsed.TotalMilliseconds;
+            if (delayMs > 1)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(delayMs, 250)), ct).ConfigureAwait(false);
+            }
+        }
+
+        private void EnablePacing()
+        {
+            if (pacingMbps <= 0)
+            {
+                return;
+            }
+
+            pacingEnabled = true;
+            pacingStarted.Restart();
+        }
+
+        private static byte ComputeByte(long index, int seed)
+        {
+            unchecked
+            {
+                var value = (index * 31L) + (seed * 17L) + 113L;
+                value %= 251L;
+                if (value < 0)
+                {
+                    value += 251L;
+                }
+
+                return (byte)value;
+            }
+        }
     }
 
     private static async Task ScheduleTunaSoakFaultAsync(
@@ -993,9 +1839,7 @@ public sealed partial class TunaSidecarLiveManualTests
             return;
         }
 
-        var delay = cell.Fault == TunaSoakFaultMode.ProviderTimeout
-            ? TimeSpan.FromSeconds(Math.Max(45, Math.Min(options.CellDuration.TotalSeconds / 2, 150)))
-            : TimeSpan.FromSeconds(Math.Max(20, Math.Min(options.CellDuration.TotalSeconds / 3, 90)));
+        var delay = ResolveTunaSoakFaultDelay(cell, options);
         await Task.Delay(delay, ct);
         await AppendPhase3EventAsync(
             runsPath,
@@ -1079,6 +1923,38 @@ public sealed partial class TunaSidecarLiveManualTests
         return builder.ToString();
     }
 
+    private static bool HasExplicitV6FalseRecoveryEvidence(string logText)
+    {
+        if (string.IsNullOrWhiteSpace(logText))
+        {
+            return false;
+        }
+
+        var lines = logText.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var line in lines)
+        {
+            if (!line.Contains("filetransfer_v6_epoch_recovered", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (line.Contains("bridge_ready", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("sidecar_ready", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("send_success", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("send_succeeded", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("bulk_bytes", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("bulk-bytes", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("bridge_frame_forwarded", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("ready_unproven", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("generic", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static string ReadListenerStdoutSlice(ConcurrentQueue<string> listenerStdout, int startIndex)
     {
         var lines = listenerStdout.ToArray();
@@ -1139,6 +2015,24 @@ public sealed partial class TunaSidecarLiveManualTests
             result.FailureReason.Contains("tuna_readiness_missing", StringComparison.OrdinalIgnoreCase) ||
             result.FailureReason.Contains("sidecar_remote_closed", StringComparison.OrdinalIgnoreCase) ||
             result.FailureReason.Contains("dialer_exited", StringComparison.OrdinalIgnoreCase));
+
+    private static bool ShouldRetryPhase6SoakCell(TunaSoakCellResult result, int attempt, int maxRetries)
+    {
+        if (attempt > maxRetries ||
+            result.Completed ||
+            result.FallbackExpected)
+        {
+            return false;
+        }
+
+        var retryEvidence = string.Concat(result.FailureReason, ";", result.WarningReason);
+        return retryEvidence.Contains("file_tuna_lane_unavailable", StringComparison.OrdinalIgnoreCase) ||
+               retryEvidence.Contains("tuna_readiness_missing", StringComparison.OrdinalIgnoreCase) ||
+               retryEvidence.Contains("provider_paths_degraded", StringComparison.OrdinalIgnoreCase) ||
+               retryEvidence.Contains("dialer_exited", StringComparison.OrdinalIgnoreCase) ||
+               retryEvidence.Contains("listener_ready", StringComparison.OrdinalIgnoreCase) ||
+               retryEvidence.Contains("provider", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static string BuildRetryWarning(int attempt, TunaSoakCellResult result)
     {
@@ -1201,6 +2095,34 @@ public sealed partial class TunaSidecarLiveManualTests
     private static bool CellUsesScreenTraffic(TunaSoakCellResult result)
         => result.TrafficProfile is TunaSoakTrafficProfile.ScreenOnly or TunaSoakTrafficProfile.MixedScreenFile;
 
+    private static bool IsPhase6GateCell(TunaSoakMatrixCell cell)
+        => cell.CellId.StartsWith("phase6-tuna-file-", StringComparison.OrdinalIgnoreCase);
+
+    private static TimeSpan ResolveTunaSoakFaultDelay(TunaSoakMatrixCell cell, TunaSoakMatrixOptions options)
+    {
+        if (IsPhase6GateCell(cell) &&
+            cell.Fault is TunaSoakFaultMode.SwitchOffFallback or TunaSoakFaultMode.SidecarCrash)
+        {
+            return TimeSpan.FromSeconds(30);
+        }
+
+        return cell.Fault == TunaSoakFaultMode.ProviderTimeout
+            ? TimeSpan.FromSeconds(Math.Max(45, Math.Min(options.CellDuration.TotalSeconds / 2, 150)))
+            : TimeSpan.FromSeconds(Math.Max(20, Math.Min(options.CellDuration.TotalSeconds / 3, 90)));
+    }
+
+    private static bool HasFileFallbackProof(TunaSoakCellResult result)
+        => result.FallbackFileSent &&
+           result.FallbackFileReceived ||
+           HasPhase6V6FallbackProof(result);
+
+    private static bool HasPhase6V6FallbackProof(TunaSoakCellResult result)
+        => result.IsPhase6Gate &&
+           result.DataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+           result.V6EpochStarted &&
+           (result.V6EpochRecovered || result.V6EpochWaiting || result.V6EpochTerminal) &&
+           !result.FalseRecoveryObserved;
+
     private static Phase3RunResult SkippedSoakRun(string runId, Phase3Profile profile, Phase3TransportMode mode)
         => new()
         {
@@ -1247,6 +2169,8 @@ public sealed partial class TunaSidecarLiveManualTests
     private static readonly string[] SoakEnvironmentNames =
     [
         SoakOptInEnv,
+        Phase6ShortMatrixOptInEnv,
+        Phase6TargetedOptInEnv,
         SoakDurationMinutesEnv,
         SoakNetworkLabelEnv,
         SoakNetworkPairIdEnv,
@@ -1413,6 +2337,8 @@ public sealed partial class TunaSidecarLiveManualTests
         TunaSoakPayerMode Payer,
         TunaSoakFaultMode Fault)
     {
+        public TunaSoakReceiverRole ReceiverRole { get; init; } = TunaSoakReceiverRole.HelpeeReceiving;
+
         public static IReadOnlyList<TunaSoakMatrixCell> Build(TunaSoakMatrixOptions options)
         {
             var cells = new List<TunaSoakMatrixCell>();
@@ -1536,6 +2462,24 @@ public sealed partial class TunaSidecarLiveManualTests
         public string FailureReason { get; init; } = string.Empty;
         public string WarningReason { get; set; } = string.Empty;
         public string LogExcerpt { get; set; } = string.Empty;
+        public bool IsPhase6Gate { get; set; }
+        public int DataProtocolVersion { get; set; }
+        public bool V6EpochStarted { get; set; }
+        public bool V6TargetProofObserved { get; set; }
+        public bool V6RepairProofObserved { get; set; }
+        public bool V6EpochRecovered { get; set; }
+        public bool V6EpochWaiting { get; set; }
+        public bool V6EpochTerminal { get; set; }
+        public bool FalseRecoveryObserved { get; set; }
+        public bool SenderTerminalObserved { get; set; }
+        public bool ReceiverTerminalObserved { get; set; }
+        public bool CancelObserved { get; set; }
+        public bool PeerCloseObserved { get; set; }
+        public bool FinalShaMatched { get; set; }
+        public int SidecarOrphanCount { get; set; }
+        public int UnresolvedEpochCount { get; set; }
+        public bool ExpectedWaiting { get; set; }
+        public string FinalStatus { get; set; } = string.Empty;
     }
 
     private sealed record TunaSoakMatrixSummary(
@@ -1554,9 +2498,15 @@ public sealed partial class TunaSidecarLiveManualTests
             var warnings = new List<string>();
             foreach (var result in results)
             {
+                var phase6ExpectedWaiting = IsPhase6ExpectedWaiting(result);
+                var phase6ExpectedTerminal = IsPhase6ExpectedTerminal(result);
+                var phase6ExpectedNonCompletedOutcome = phase6ExpectedWaiting || phase6ExpectedTerminal;
                 if (!result.Completed || !string.IsNullOrWhiteSpace(result.FailureReason))
                 {
-                    reasons.Add(result.CellId + ":cell_failed:" + result.FailureReason);
+                    if (!phase6ExpectedNonCompletedOutcome)
+                    {
+                        reasons.Add(result.CellId + ":cell_failed:" + result.FailureReason);
+                    }
                 }
 
                 if (!string.IsNullOrWhiteSpace(result.WarningReason))
@@ -1564,12 +2514,12 @@ public sealed partial class TunaSidecarLiveManualTests
                     warnings.Add(result.CellId + ":warning:" + result.WarningReason);
                 }
 
-                if (!result.SessionAlive || !result.ChatControlAlive)
+                if ((!result.SessionAlive || !result.ChatControlAlive) && !phase6ExpectedNonCompletedOutcome)
                 {
                     reasons.Add(result.CellId + ":session_or_control_not_alive");
                 }
 
-                if (CellUsesFileTraffic(result) && !result.FileCompleted)
+                if (CellUsesFileTraffic(result) && !result.FileCompleted && !phase6ExpectedNonCompletedOutcome)
                 {
                     reasons.Add(result.CellId + ":file_incomplete");
                 }
@@ -1588,15 +2538,16 @@ public sealed partial class TunaSidecarLiveManualTests
 
                 if (result.FallbackExpected)
                 {
-                    if (!result.FallbackStarted)
+                    if (!result.FallbackStarted && !phase6ExpectedNonCompletedOutcome)
                     {
                         reasons.Add(result.CellId + ":fallback_started_missing");
                     }
 
                     if (CellUsesFileTraffic(result) &&
-                        (!result.FallbackFileSent || !result.FallbackFileReceived))
+                        !HasFileFallbackProof(result) &&
+                        !phase6ExpectedNonCompletedOutcome)
                     {
-                        reasons.Add("fallback_file_proof_missing");
+                        reasons.Add(result.CellId + ":fallback_file_proof_missing");
                     }
 
                     if (CellUsesScreenTraffic(result) &&
@@ -1632,6 +2583,11 @@ public sealed partial class TunaSidecarLiveManualTests
                         }
                     }
                 }
+
+                if (result.IsPhase6Gate)
+                {
+                    AddPhase6GateReasons(result, phase6ExpectedWaiting, phase6ExpectedTerminal, reasons);
+                }
             }
 
             var verdict = results.Length == 0
@@ -1643,10 +2599,104 @@ public sealed partial class TunaSidecarLiveManualTests
                 "soak_matrix_summary",
                 verdict,
                 results.Length,
-                results.Count(static result => result.Completed && string.IsNullOrWhiteSpace(result.FailureReason)),
+                results.Count(static result =>
+                    IsPhase6ExpectedWaiting(result) ||
+                    IsPhase6ExpectedTerminal(result) ||
+                    (result.Completed && string.IsNullOrWhiteSpace(result.FailureReason))),
                 reasons.Distinct(StringComparer.Ordinal).ToArray(),
                 warnings.Distinct(StringComparer.Ordinal).ToArray(),
                 results);
+        }
+
+        private static bool IsPhase6ExpectedWaiting(TunaSoakCellResult result)
+            => result.IsPhase6Gate &&
+               result.ExpectedWaiting &&
+               result.V6EpochWaiting &&
+               !result.FalseRecoveryObserved &&
+               string.Equals(result.FinalStatus, "Waiting for regular NKN", StringComparison.Ordinal);
+
+        private static bool IsPhase6ExpectedTerminal(TunaSoakCellResult result)
+            => result.IsPhase6Gate &&
+               result.FallbackExpected &&
+               CellUsesFileTraffic(result) &&
+               !result.FileCompleted &&
+               result.DataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
+               result.FallbackStarted &&
+               HasFileFallbackProof(result) &&
+               result.V6EpochStarted &&
+               (result.V6EpochRecovered || result.V6EpochTerminal) &&
+               !result.FalseRecoveryObserved &&
+               result.SidecarOrphanCount == 0 &&
+               result.UnresolvedEpochCount == 0 &&
+               result.SenderTerminalObserved &&
+               result.ReceiverTerminalObserved &&
+               result.FinalStatus is not ("Sending..." or "Receiving...") &&
+               IsPhase6ExpectedTerminalFailureReason(result.FailureReason);
+
+        private static bool IsPhase6ExpectedTerminalFailureReason(string failureReason)
+            => failureReason.Contains("soak_timeout_incomplete", StringComparison.OrdinalIgnoreCase) ||
+               failureReason.Contains(FileTransferResultCodes.PeerDisconnected, StringComparison.OrdinalIgnoreCase) ||
+               failureReason.Contains(FileTransferResultCodes.TransportDisconnected, StringComparison.OrdinalIgnoreCase);
+
+        private static void AddPhase6GateReasons(
+            TunaSoakCellResult result,
+            bool expectedWaiting,
+            bool expectedTerminal,
+            List<string> reasons)
+        {
+            var expectedNonCompletedOutcome = expectedWaiting || expectedTerminal;
+            if (result.DataProtocolVersion != FileTransferProtocol.ProtocolVersionV6)
+            {
+                reasons.Add(result.CellId + ":data_protocol_not_v6");
+            }
+
+            if (CellUsesFileTraffic(result) && !expectedNonCompletedOutcome && !result.FinalShaMatched)
+            {
+                reasons.Add(result.CellId + ":final_sha_missing_or_mismatch");
+            }
+
+            if (result.FalseRecoveryObserved)
+            {
+                reasons.Add(result.CellId + ":false_recovery");
+            }
+
+            if (result.SidecarOrphanCount > 0)
+            {
+                reasons.Add(result.CellId + ":sidecar_orphaned");
+            }
+
+            if (result.UnresolvedEpochCount > 0 && !expectedNonCompletedOutcome)
+            {
+                reasons.Add(result.CellId + ":unresolved_v6_epoch");
+            }
+
+            if (!result.SenderTerminalObserved && !expectedNonCompletedOutcome)
+            {
+                reasons.Add(result.CellId + ":sender_terminal_missing");
+            }
+
+            if (!result.ReceiverTerminalObserved && !expectedNonCompletedOutcome)
+            {
+                reasons.Add(result.CellId + ":receiver_terminal_missing");
+            }
+
+            if (result.FinalStatus is "Sending..." or "Receiving...")
+            {
+                reasons.Add(result.CellId + ":zombie_transfer_status");
+            }
+
+            if (result.FallbackExpected &&
+                !expectedNonCompletedOutcome &&
+                !result.V6EpochRecovered &&
+                !result.V6EpochTerminal)
+            {
+                reasons.Add(result.CellId + ":v6_epoch_recovery_or_terminal_missing");
+            }
+
+            if (result.FallbackExpected && !result.V6EpochStarted)
+            {
+                reasons.Add(result.CellId + ":v6_epoch_start_missing");
+            }
         }
     }
 
@@ -1675,6 +2725,12 @@ public sealed partial class TunaSidecarLiveManualTests
         HelpeeOnly,
         HelperOnly,
         BothUnlocked,
+    }
+
+    private enum TunaSoakReceiverRole
+    {
+        HelpeeReceiving,
+        HelperReceiving,
     }
 
     private enum TunaSoakFaultMode

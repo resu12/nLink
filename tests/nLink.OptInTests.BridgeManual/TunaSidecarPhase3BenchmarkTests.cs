@@ -785,12 +785,15 @@ public sealed partial class TunaSidecarLiveManualTests
         int repeat,
         Phase3BenchmarkOptions options,
         int logStart,
-        CancellationToken ct)
+        CancellationToken ct,
+        TunaSoakReceiverRole receiverRole = TunaSoakReceiverRole.HelpeeReceiving)
     {
         var transferId = "phase3-file-" + Guid.NewGuid().ToString("N");
-        await OpenPhase3FileTransferAsync(context, transferId, options.FileTargetBytes, options.FileWriteBytes, ct);
-        using var receiverSession = await context.Host.OpenFileTransferDataSessionAsync(context.SessionId, transferId, ct);
-        using var senderSession = await context.Helper.OpenFileTransferDataSessionAsync(context.SessionId, transferId, ct);
+        var senderTransport = GetPhase3FileSender(context, receiverRole);
+        var receiverTransport = GetPhase3FileReceiver(context, receiverRole);
+        await OpenPhase3FileTransferAsync(context, transferId, options.FileTargetBytes, options.FileWriteBytes, ct, receiverRole);
+        using var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(context.SessionId, transferId, ct);
+        using var senderSession = await senderTransport.OpenFileTransferDataSessionAsync(context.SessionId, transferId, ct);
         var accelerationAvailableAtStart = IsPhase3TunaLaneReady(context, NknAccelerationLaneKind.File);
         if (context.Mode == Phase3TransportMode.Tuna && !accelerationAvailableAtStart)
         {
@@ -805,8 +808,8 @@ public sealed partial class TunaSidecarLiveManualTests
             };
         }
 
-        var senderAccelerationStart = context.Helper.AccelerationDiagnosticsForTests;
-        var receiverAccelerationStart = context.Host.AccelerationDiagnosticsForTests;
+        var senderAccelerationStart = senderTransport.AccelerationDiagnosticsForTests;
+        var receiverAccelerationStart = receiverTransport.AccelerationDiagnosticsForTests;
         using var receiveCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var progress = new Phase3FileProgress(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         var receiveTask = Task.Run(() => ReceivePhase3FileFramesAsync(receiverSession, progress, receiveCts.Token), CancellationToken.None);
@@ -828,16 +831,16 @@ public sealed partial class TunaSidecarLiveManualTests
                 chunkIndex++;
                 await PacePhase3FileSendAsync(started, sentBytes, GetPhase3FilePacingMbps(context, options), ct);
                 if (context.Mode == Phase3TransportMode.Tuna &&
-                    !context.Host.IsAccelerationAvailableForTests &&
-                    context.Helper.IsAccelerationAvailableForTests)
+                    !receiverTransport.IsAccelerationAvailableForTests &&
+                    senderTransport.IsAccelerationAvailableForTests)
                 {
                     await WaitUntilOrFalseAsync(
-                        () => !context.Helper.IsAccelerationAvailableForTests,
+                        () => !senderTransport.IsAccelerationAvailableForTests,
                         TimeSpan.FromSeconds(2));
                 }
             }
 
-            var drainDeadline = DateTimeOffset.UtcNow + GetPhase3FileDrainTimeout(context);
+            var drainDeadline = DateTimeOffset.UtcNow + GetPhase3FileDrainTimeout(context, options);
             while (DateTimeOffset.UtcNow < drainDeadline && Volatile.Read(ref progress.BytesReceived) < sentBytes)
             {
                 await Task.Delay(100, ct);
@@ -853,12 +856,12 @@ public sealed partial class TunaSidecarLiveManualTests
         var receivedBytes = Volatile.Read(ref progress.BytesReceived);
         var receivedFrames = Volatile.Read(ref progress.FramesReceived);
         var completed = receivedBytes >= sentBytes && sentBytes > 0;
-        await ClosePhase3FileTransferControlAsync(context, transferId, sentBytes, completed, ct);
+        await ClosePhase3FileTransferControlAsync(context, transferId, sentBytes, completed, ct, receiverRole);
         var accelerationDelta = CreatePhase3AccelerationLaneDelta(
             senderAccelerationStart,
-            context.Helper.AccelerationDiagnosticsForTests,
+            senderTransport.AccelerationDiagnosticsForTests,
             receiverAccelerationStart,
-            context.Host.AccelerationDiagnosticsForTests,
+            receiverTransport.AccelerationDiagnosticsForTests,
             NknBridgeChannel.Bulk);
         var tunaBulkEvents = (int)Math.Min(accelerationDelta.FramesWritten, accelerationDelta.FramesReceived);
         var stalled = IsPhase3FileStalled(progress, sentBytes);
@@ -916,11 +919,27 @@ public sealed partial class TunaSidecarLiveManualTests
             ? Math.Min(options.FileSendPacingMbps, options.FileFallbackPacingMbps)
             : options.FileSendPacingMbps;
 
-    private static TimeSpan GetPhase3FileDrainTimeout(Phase3LiveRunContext context)
-        => context.Mode == Phase3TransportMode.Tuna &&
-           (!context.Host.IsAccelerationAvailableForTests || !context.Helper.IsAccelerationAvailableForTests)
-            ? Phase3FallbackDrainTimeout
-            : Phase3DrainTimeout;
+    private static TimeSpan GetPhase3FileDrainTimeout(Phase3LiveRunContext context, Phase3BenchmarkOptions options)
+    {
+        if (context.Mode != Phase3TransportMode.Tuna)
+        {
+            return Phase3DrainTimeout;
+        }
+
+        if (!context.Host.IsAccelerationAvailableForTests || !context.Helper.IsAccelerationAvailableForTests)
+        {
+            return Phase3FallbackDrainTimeout;
+        }
+
+        var tunaDrainSeconds = Math.Clamp((int)Math.Ceiling(options.ProfileDuration.TotalSeconds / 10d), 15, 45);
+        return TimeSpan.FromSeconds(tunaDrainSeconds);
+    }
+
+    private static NknSignalingTransport GetPhase3FileSender(Phase3LiveRunContext context, TunaSoakReceiverRole receiverRole)
+        => receiverRole == TunaSoakReceiverRole.HelperReceiving ? context.Host : context.Helper;
+
+    private static NknSignalingTransport GetPhase3FileReceiver(Phase3LiveRunContext context, TunaSoakReceiverRole receiverRole)
+        => receiverRole == TunaSoakReceiverRole.HelperReceiving ? context.Helper : context.Host;
 
     private static async Task PacePhase3FileSendAsync(Stopwatch started, long sentBytes, double fileSendPacingMbps, CancellationToken ct)
     {
@@ -937,8 +956,11 @@ public sealed partial class TunaSidecarLiveManualTests
         string transferId,
         long fileSizeBytes,
         bool completed,
-        CancellationToken ct)
+        CancellationToken ct,
+        TunaSoakReceiverRole receiverRole = TunaSoakReceiverRole.HelpeeReceiving)
     {
+        var senderTransport = GetPhase3FileSender(context, receiverRole);
+        var receiverTransport = GetPhase3FileReceiver(context, receiverRole);
         var terminalReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnComplete(object? _, FileTransferCompleteReceivedEventArgs e)
         {
@@ -956,13 +978,13 @@ public sealed partial class TunaSidecarLiveManualTests
             }
         }
 
-        context.Helper.FileTransferCompleteReceived += OnComplete;
-        context.Helper.FileTransferCancelReceived += OnCancel;
+        senderTransport.FileTransferCompleteReceived += OnComplete;
+        senderTransport.FileTransferCancelReceived += OnCancel;
         try
         {
             if (completed)
             {
-                await context.Host.SendFileTransferCompleteAsync(
+                await receiverTransport.SendFileTransferCompleteAsync(
                     new FileTransferCompleteV1
                     {
                         SessionId = context.SessionId,
@@ -974,7 +996,7 @@ public sealed partial class TunaSidecarLiveManualTests
             }
             else
             {
-                await context.Host.SendFileTransferCancelAsync(
+                await receiverTransport.SendFileTransferCancelAsync(
                     new FileTransferCancelV1
                     {
                         SessionId = context.SessionId,
@@ -988,8 +1010,8 @@ public sealed partial class TunaSidecarLiveManualTests
         }
         finally
         {
-            context.Helper.FileTransferCompleteReceived -= OnComplete;
-            context.Helper.FileTransferCancelReceived -= OnCancel;
+            senderTransport.FileTransferCompleteReceived -= OnComplete;
+            senderTransport.FileTransferCancelReceived -= OnCancel;
         }
     }
 
@@ -1692,8 +1714,11 @@ public sealed partial class TunaSidecarLiveManualTests
         string transferId,
         long fileSizeBytes,
         int chunkSizeBytes,
-        CancellationToken ct)
+        CancellationToken ct,
+        TunaSoakReceiverRole receiverRole = TunaSoakReceiverRole.HelpeeReceiving)
     {
+        var senderTransport = GetPhase3FileSender(context, receiverRole);
+        var receiverTransport = GetPhase3FileReceiver(context, receiverRole);
         var offerReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
         var acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
         var sessionOpenReceived = new TaskCompletionSource<FileTransferSessionOpenV2>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1721,37 +1746,37 @@ public sealed partial class TunaSidecarLiveManualTests
             }
         }
 
-        context.Host.FileTransferOfferReceived += OnOffer;
-        context.Helper.FileTransferAcceptReceived += OnAccept;
-        context.Host.FileTransferSessionOpenReceived += OnOpen;
+        receiverTransport.FileTransferOfferReceived += OnOffer;
+        senderTransport.FileTransferAcceptReceived += OnAccept;
+        receiverTransport.FileTransferSessionOpenReceived += OnOpen;
         try
         {
-            await context.Helper.SendFileTransferOfferAsync(
+            await senderTransport.SendFileTransferOfferAsync(
                 new FileTransferOfferV2
                 {
                     SessionId = context.SessionId,
                     TransferId = transferId,
                     FileName = "phase3-benchmark.bin",
                     FileSizeBytes = fileSizeBytes,
-                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
                 },
                 ct);
             await WaitPhase3StageAsync(offerReceived.Task, TimeSpan.FromSeconds(30), "file_transfer_offer", ct);
-            await context.Host.SendFileTransferAcceptAsync(
+            await receiverTransport.SendFileTransferAcceptAsync(
                 new FileTransferAcceptV1
                 {
                     SessionId = context.SessionId,
                     TransferId = transferId,
-                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
                 },
                 ct);
             await WaitPhase3StageAsync(acceptReceived.Task, TimeSpan.FromSeconds(30), "file_transfer_accept", ct);
-            await context.Helper.SendFileTransferSessionOpenAsync(
+            await senderTransport.SendFileTransferSessionOpenAsync(
                 new FileTransferSessionOpenV2
                 {
                     SessionId = context.SessionId,
                     TransferId = transferId,
-                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                    ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
                     SessionRole = FileTransferProtocol.SessionRoleSender,
                     ChunkSizeBytes = chunkSizeBytes,
                     InitialPipelineDepth = 8,
@@ -1761,9 +1786,9 @@ public sealed partial class TunaSidecarLiveManualTests
         }
         finally
         {
-            context.Host.FileTransferOfferReceived -= OnOffer;
-            context.Helper.FileTransferAcceptReceived -= OnAccept;
-            context.Host.FileTransferSessionOpenReceived -= OnOpen;
+            receiverTransport.FileTransferOfferReceived -= OnOffer;
+            senderTransport.FileTransferAcceptReceived -= OnAccept;
+            receiverTransport.FileTransferSessionOpenReceived -= OnOpen;
         }
     }
 
@@ -1789,7 +1814,7 @@ public sealed partial class TunaSidecarLiveManualTests
         }
     }
 
-    private static FileTransferChunkBatchFrameV5 CreatePhase3ChunkFrame(
+    private static FileTransferChunkBatchFrameV6 CreatePhase3ChunkFrame(
         string sessionId,
         string transferId,
         int chunkIndex,
@@ -1801,7 +1826,7 @@ public sealed partial class TunaSidecarLiveManualTests
             StartChunkIndex = chunkIndex,
             ChunkCount = 1,
             DataSegments = new[] { CreatePhase3Payload(payloadBytes, chunkIndex) },
-            BatchProfile = "phase3_benchmark_64k",
+            BatchProfile = $"phase3_benchmark_{Math.Max(1, payloadBytes / 1024)}k",
         };
 
     private static async Task<int> SendPhase3ScreenFrameAsync(
@@ -1940,7 +1965,7 @@ public sealed partial class TunaSidecarLiveManualTests
     }
 
     private static long GetPhase3FrameBytes(FileTransferDataFrame frame)
-        => frame is FileTransferChunkBatchFrameV5 batch
+        => frame is FileTransferChunkBatchFrame batch
             ? batch.DataSegments.Sum(static segment => segment?.Length ?? 0)
             : 0;
 
@@ -2602,6 +2627,28 @@ public sealed partial class TunaSidecarLiveManualTests
         public bool SessionAliveAfterFallback { get; init; }
 
         public string FailureReason { get; init; } = string.Empty;
+
+        public bool SenderTerminalObserved { get; init; }
+
+        public bool ReceiverTerminalObserved { get; init; }
+
+        public string SenderFinalStatus { get; init; } = string.Empty;
+
+        public string ReceiverFinalStatus { get; init; } = string.Empty;
+
+        public bool V6EpochStarted { get; init; }
+
+        public bool V6TargetProofObserved { get; init; }
+
+        public bool V6RepairProofObserved { get; init; }
+
+        public bool V6EpochRecovered { get; init; }
+
+        public bool V6EpochWaiting { get; init; }
+
+        public bool V6EpochTerminal { get; init; }
+
+        public bool FalseRecoveryObserved { get; init; }
 
         public static Phase3RunResult Failed(
             string runId,

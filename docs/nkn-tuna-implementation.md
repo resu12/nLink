@@ -7,7 +7,7 @@ Tuna remains experimental and default-off. The normal NKN bridge is still the ca
 Related app-payload references:
 
 - [`docs/screenshare-implementation.md`](screenshare-implementation.md) describes the current H.264 screen-share media pipeline.
-- [`docs/file-transfer-implementation.md`](file-transfer-implementation.md) describes the current V5 file-transfer data-session and handoff recovery pipeline.
+- [`docs/file-transfer-implementation.md`](file-transfer-implementation.md) describes the current V6 file-transfer data-session and transport-epoch recovery pipeline.
 
 ## Goals
 
@@ -277,15 +277,17 @@ These situations must not crash the app or end the normal NKN session:
 - user switch-off while starting,
 - user switch-off while active.
 
-File-transfer fallback is V5 handoff based. When Tuna becomes active during a transfer, drops, caps out, is switched off, or restarts, file data enters a `TransportHandoffEpoch`. New tail traffic on the target transport is blocked until the receiver proves the exact committed frontier can advance there. Generic bridge `Ready` or Tuna `Ready` is not enough to mark the transfer recovered.
+File-transfer fallback is V6 transport-epoch based. When Tuna becomes active during a transfer, drops, caps out, is switched off, or restarts, file data enters a `FileTransferV6TransportEpoch`. New tail traffic on the target transport is blocked until the receiver proves the exact committed frontier can advance there. Generic bridge `Ready` or Tuna `Ready` is not enough to mark the transfer recovered.
 
-The V5 handoff states are:
+The V6 epoch states are:
 
-- `TransportProofPending`
+- `EpochStarting`
+- `TargetProofPending`
 - `FrontierRepairOnly`
 - `BackfillRepair`
 - `Recovered`
 - `WaitingForTargetTransport`
+- `Terminal`
 
 Cancel, pause, resume, session end, peer down, window close, and app exit stay outside this recovery machine. They are hard-priority lifecycle actions over regular NKN control and must terminalize or pause locally without waiting for Tuna, file-data credit, repair queues, or bulk backlog.
 
@@ -409,7 +411,18 @@ Useful environment overrides for developer tests:
 
 The advanced Options runtime pilot can also enable Tuna locally without changing default startup behavior. The paid listener now accepts 3 usable provider paths as degraded-but-usable for the experimental runtime pilot because repeated paid file/screen cells carried traffic without disconnecting. This shortens startup when the fourth Tuna path is slow to appear. `NLINK_NKN_TUNA_REQUIRE_STRICT_PROVIDER_READY=1` forces the older strict 4-path gate for A/B testing, and `NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY=1` remains accepted for older local preference files or explicit experiments.
 
-Run the opt-in Tuna soak matrix from a developer machine:
+Run the Phase 6 short paid Tuna file-transfer gate from a developer machine:
+
+```powershell
+$env:NLINK_RUN_MANUAL_BRIDGE = "1"
+$env:NLINK_RUN_TUNA_PHASE6_SHORT_MATRIX = "1"
+$env:NLINK_TUNA_TEST_WALLET_PASSWORD = "<session-only test wallet password>"
+dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release --filter "FullyQualifiedName~TunaSidecarPhase6_ShortPaidMatrix"
+```
+
+The Phase 6 short matrix writes artifacts under `artifacts/tuna-sidecar/phase6-short-<timestamp>/`. Read `phase6-operator-verdict.txt` first. The short gate covers helper-receiving and helpee-receiving file transfers across helpee-only unlocked, helper-only unlocked, and both-unlocked payer modes. Each payer/receiver pair runs one clean activation and one payer-specific fallback fault: helpee-only switch-off, helper-only cap reached, and both-unlocked sidecar drop. It requires V6 protocol evidence, SHA success for completed files, V6 epoch proof or explicit waiting, no false recovery from generic readiness, and no orphan sidecar.
+
+The wider opt-in Tuna soak matrix remains available when a longer paid pass is warranted:
 
 ```powershell
 $env:NLINK_RUN_MANUAL_BRIDGE = "1"
@@ -420,7 +433,7 @@ $env:NLINK_TUNA_SOAK_DURATION_MIN = "15"
 dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj --filter "FullyQualifiedName~TunaSidecar_SoakMatrix_FileScreenAcrossPayersPresetsFaults"
 ```
 
-The soak matrix writes artifacts under `artifacts/tuna-sidecar/soak-matrix-<timestamp>/`. It covers baseline NKN, Tuna helpee-paid, Tuna helper-paid, both-unlocked payer selection, app-restart setup, sidecar crash, switch-off fallback, provider-timeout cells, and both High quality and Tuna quality screen presets. `NLINK_TUNA_SOAK_FILE_PACING_MBPS` defaults to `8` so mixed file-plus-screen soak traffic is sustained without intentionally saturating the Tuna sidecar queues; Phase 3 file-only benchmark traffic still uses its separate 45 Mbps pacing. During a Tuna-down fallback, the soak file stream slows to an NKN-safe fallback pace and gets a longer drain window so the test proves fallback progress instead of flooding the fallback path. If Tuna drops unexpectedly near the tail of a long no-fault or restart-before-traffic cell, the cell may pass with an `unexpected_tuna_drop_recovered` warning only when NKN fallback proof is complete for file and screen and at least 98% of the file stream was received. Soak readiness uses live app-side Tuna counters first, then sidecar `bridge_frame_forwarded` log evidence as a fallback when the lane has already reset and live counters are unavailable. Use `NLINK_TUNA_SOAK_CELL_FILTER=core-tuna-high-helpee-none` or a comma-separated list of cell ids to rerun one failing cell before spending on the full matrix.
+The wider soak matrix writes artifacts under `artifacts/tuna-sidecar/soak-matrix-<timestamp>/`. It covers Tuna helpee-paid, Tuna helper-paid, both-unlocked payer selection, app-restart setup, sidecar crash, switch-off fallback, provider-timeout cells, and both High quality and Tuna quality screen presets. `NLINK_TUNA_SOAK_FILE_PACING_MBPS` defaults to `8` so mixed file-plus-screen soak traffic is sustained without intentionally saturating the Tuna sidecar queues. During a Tuna-down fallback, the soak file stream slows to an NKN-safe fallback pace and gets a longer drain window so the test proves fallback progress instead of flooding the fallback path. If Tuna drops unexpectedly near the tail of a long no-fault or restart-before-traffic cell, the cell may pass with an `unexpected_tuna_drop_recovered` warning only when NKN fallback proof is complete for file and screen and at least 98% of the file stream was received. Soak readiness uses live app-side Tuna counters first, then sidecar `bridge_frame_forwarded` log evidence as a fallback when the lane has already reset and live counters are unavailable. Use `NLINK_TUNA_SOAK_CELL_FILTER=core-tuna-file-helpee-switch-off` or a comma-separated list of cell ids to rerun one failing cell before spending on the full matrix.
 
 The app-side Tuna IPC queue defaults to 1024 frames. Bulk/file queue timeout is still treated as a hard acceleration failure because mixing file chunk order across Tuna and NKN is risky. Media/screen queue timeout is treated as per-frame backpressure: that frame falls back to NKN, Tuna remains available, and logs record `tuna_sidecar_queue_backpressure`.
 

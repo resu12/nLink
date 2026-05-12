@@ -30,7 +30,10 @@ function Test-FileTransferTerminalCompleted {
 function Test-FileTransferSummaryHasV4Evidence {
     param([Parameter(Mandatory = $true)]$Summary)
 
-    if ((Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_negotiated') -gt 0 -or
+    if ((Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v6_negotiated') -gt 0 -or
+        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v6_sender_started') -gt 0 -or
+        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v6_receiver_started') -gt 0 -or
+        (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_negotiated') -gt 0 -or
         (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_sender_started') -gt 0 -or
         (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v5_receiver_started') -gt 0 -or
         (Get-FileTransferEventCount -Events $Summary.TransferEvents -Name 'filetransfer_v4_negotiated') -gt 0 -or
@@ -43,7 +46,7 @@ function Test-FileTransferSummaryHasV4Evidence {
 
     foreach ($event in @($Summary.TransferEvents)) {
         $frameType = Get-FileTransferEventField -Event $event -Name 'frame_type' -Default ''
-        if ($frameType -like 'filetransfer.*.v5' -or $frameType -like 'filetransfer.*.v4') {
+        if ($frameType -like 'filetransfer.*.v6' -or $frameType -like 'filetransfer.*.v5' -or $frameType -like 'filetransfer.*.v4') {
             return $true
         }
     }
@@ -67,7 +70,7 @@ function Get-FileTransferUnexpectedLegacyFrameEventsDuringV4 {
             } |
             Where-Object {
                 $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
-                $frameType -like 'filetransfer.*' -and $frameType -notlike 'filetransfer.*.v5'
+                $frameType -like 'filetransfer.*' -and $frameType -notlike 'filetransfer.*.v6'
             }
     )
 }
@@ -120,7 +123,9 @@ function Test-FileTransferBenignPostCompletionLateSenderFrame {
     }
 
     $frameType = Get-FileTransferEventField -Event $Event -Name 'frame_type' -Default ''
-    if ($frameType -ne 'filetransfer.manifest.v5' -and
+    if ($frameType -ne 'filetransfer.manifest.v6' -and
+        $frameType -ne 'filetransfer.chunk_batch.v6' -and
+        $frameType -ne 'filetransfer.manifest.v5' -and
         $frameType -ne 'filetransfer.chunk_batch.v5' -and
         $frameType -ne 'filetransfer.manifest.v4' -and
         $frameType -ne 'filetransfer.chunk_batch.v4') {
@@ -150,6 +155,7 @@ function Get-FileTransferHardFailureEvents {
                 $_.EventName -eq 'filetransfer_chunk_rejected' -or
                 $_.EventName -eq 'filetransfer_message_rejected' -or
                 $_.EventName -eq 'filetransfer_local_soak_cycle_failed' -or
+                $_.EventName -eq 'filetransfer_v6_required_transport_incompatible' -or
                 $_.EventName -eq 'filetransfer_v5_required_transport_incompatible' -or
                 $_.EventName -eq 'filetransfer_v4_required_transport_incompatible' -or
                 $_.EventName -eq 'filetransfer_v4_receiver_failed' -or
@@ -176,7 +182,7 @@ function Get-FileTransferLegacyProtocolStartedEvents {
 
                 $protocolVersion = Get-FileTransferEventField -Event $_ -Name 'protocol_version' -Default ''
                 return -not [string]::IsNullOrWhiteSpace($protocolVersion) -and
-                    $protocolVersion -ne '5'
+                    $protocolVersion -ne '6'
             }
     )
 }
@@ -355,7 +361,7 @@ function Get-FileTransferStabilizationGateResult {
 
     $unexpectedLegacyFramesDuringV4 = @(Get-FileTransferUnexpectedLegacyFrameEventsDuringV4 -Summary $Summary)
     foreach ($event in @($unexpectedLegacyFramesDuringV4)) {
-        Add-FileTransferGateFinding -List $hardFailures -Finding ("legacy data frame observed during V5 transfer: {0}" -f (Format-FileTransferEvidenceLine -Event $event))
+        Add-FileTransferGateFinding -List $hardFailures -Finding ("legacy data frame observed during V6 transfer: {0}" -f (Format-FileTransferEvidenceLine -Event $event))
     }
 
     $bridgeBulkFailures = @(Get-FileTransferBridgeBulkFailureEvents -Summary $Summary)
