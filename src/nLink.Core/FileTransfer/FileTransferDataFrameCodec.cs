@@ -15,10 +15,10 @@ public static class FileTransferDataFrameCodec
         ArgumentNullException.ThrowIfNull(frame);
 
         var payload = SerializeBinary(frame);
-        var maxSerializedPayloadBytes = frame is FileTransferChunkBatchFrameV5
-            ? FileTransferProtocol.MaxSerializedChunkBatchPayloadBytesV5
+        var maxSerializedPayloadBytes = frame is FileTransferChunkBatchFrameV5 or FileTransferChunkBatchFrameV6
+            ? FileTransferProtocol.MaxSerializedChunkBatchPayloadBytesV6
             : FileTransferProtocol.MaxSerializedChunkPayloadBytes;
-        if (frame is FileTransferChunkBatchFrameV5 && payload.Length > maxSerializedPayloadBytes)
+        if ((frame is FileTransferChunkBatchFrameV5 or FileTransferChunkBatchFrameV6) && payload.Length > maxSerializedPayloadBytes)
         {
             LocalOperationalLog.Warn(
                 "FileTransferPayload",
@@ -53,10 +53,10 @@ public static class FileTransferDataFrameCodec
 
         switch (frame)
         {
-            case FileTransferManifestFrameV5 manifest:
+            case FileTransferManifestFrameV4 manifest when frame is FileTransferManifestFrameV5 or FileTransferManifestFrameV6:
                 if (!IsValidV4ManifestTuple(manifest.FileSizeBytes, manifest.ChunkSizeBytes, manifest.ChunkCount))
                 {
-                    throw new InvalidOperationException("V5 manifest chunk tuple was invalid.");
+                    throw new InvalidOperationException("Manifest chunk tuple was invalid.");
                 }
 
                 WriteString(buffer, manifest.FileName);
@@ -65,10 +65,16 @@ public static class FileTransferDataFrameCodec
                 WriteInt32(buffer, manifest.ChunkCount);
                 WriteHash(buffer, manifest.Sha256Base64);
                 break;
-            case FileTransferStateFrameV5 state:
-                if (!TryNormalizeV4MissingRanges(state.MissingRanges, allowEmpty: true, out var normalizedMissingRanges))
+            case FileTransferStateFrameV4 state when frame is FileTransferStateFrameV5 or FileTransferReceiverStateFrameV6:
+                if (!TryNormalizeV4MissingRanges(
+                        state.MissingRanges,
+                        allowEmpty: true,
+                        out var normalizedMissingRanges,
+                        maxRangeCount: frame is FileTransferReceiverStateFrameV6 ? FileTransferProtocol.MaxStateMissingRangesV6 : FileTransferProtocol.MaxStateMissingRangesV4,
+                        maxChunkCount: frame is FileTransferReceiverStateFrameV6 ? FileTransferProtocol.MaxChunkCountV6 : FileTransferProtocol.MaxChunkCountV4,
+                        maxTotalChunks: frame is FileTransferReceiverStateFrameV6 ? FileTransferProtocol.MaxStateMissingChunksV6 : FileTransferProtocol.MaxStateMissingChunksV4))
                 {
-                    throw new InvalidOperationException("V5 state missing ranges payload was invalid.");
+                    throw new InvalidOperationException("Receiver state missing ranges payload was invalid.");
                 }
 
                 WriteInt32(buffer, state.Epoch);
@@ -89,15 +95,18 @@ public static class FileTransferDataFrameCodec
                 WriteBool(buffer, state.TransferPaused);
                 WriteOptionalString(buffer, state.TransferPauseReason);
                 break;
-            case FileTransferChunkBatchFrameV5 batch:
+            case FileTransferChunkBatchFrameV4 batch when frame is FileTransferChunkBatchFrameV5 or FileTransferChunkBatchFrameV6:
                 if (batch.DataSegments.Count == 0)
                 {
                     throw new InvalidOperationException("Chunk batch payload may not be empty.");
                 }
 
-                if (batch.DataSegments.Count > FileTransferProtocol.MaxChunkBatchSegmentsV5)
+                var maxChunkBatchSegments = frame is FileTransferChunkBatchFrameV6
+                    ? FileTransferProtocol.MaxChunkBatchSegmentsV6
+                    : FileTransferProtocol.MaxChunkBatchSegmentsV5;
+                if (batch.DataSegments.Count > maxChunkBatchSegments)
                 {
-                    throw new InvalidOperationException($"V5 chunk batch segment count exceeded {FileTransferProtocol.MaxChunkBatchSegmentsV5}.");
+                    throw new InvalidOperationException($"Chunk batch segment count exceeded {maxChunkBatchSegments}.");
                 }
 
                 if (batch.ChunkCount != batch.DataSegments.Count)
@@ -107,7 +116,7 @@ public static class FileTransferDataFrameCodec
 
                 if (!IsValidV4ChunkRange(batch.StartChunkIndex, batch.ChunkCount))
                 {
-                    throw new InvalidOperationException("V5 chunk batch range was outside protocol bounds.");
+                    throw new InvalidOperationException("Chunk batch range was outside protocol bounds.");
                 }
 
                 var totalChunkBytes = 0L;
@@ -127,31 +136,37 @@ public static class FileTransferDataFrameCodec
                         throw new InvalidOperationException($"Chunk batch segment payload exceeded {FileTransferProtocol.MaxChunkRawBytes} bytes.");
                     }
 
-                    if (totalChunkBytes > FileTransferProtocol.MaxChunkBatchRawBytesV5)
+                    if (totalChunkBytes > FileTransferProtocol.MaxChunkBatchRawBytesV6)
                     {
-                        throw new InvalidOperationException($"V5 chunk batch payload exceeded {FileTransferProtocol.MaxChunkBatchRawBytesV5} bytes.");
+                        throw new InvalidOperationException($"Chunk batch payload exceeded {FileTransferProtocol.MaxChunkBatchRawBytesV6} bytes.");
                     }
 
                     WriteBytes(buffer, segmentBytes);
                 }
                 break;
-            case FileTransferCompleteFrameV5 complete:
+            case FileTransferCompleteFrameV4 complete when frame is FileTransferCompleteFrameV5 or FileTransferCompleteFrameV6:
                 WriteInt64(buffer, complete.FileSizeBytes);
                 WriteHash(buffer, complete.Sha256Base64);
                 break;
-            case FileTransferCancelFrameV5 cancel:
+            case FileTransferCancelFrameV4 cancel when frame is FileTransferCancelFrameV5 or FileTransferCancelFrameV6:
                 WriteOptionalString(buffer, cancel.Reason);
                 break;
-            case FileTransferErrorFrameV5 error:
+            case FileTransferErrorFrameV4 error when frame is FileTransferErrorFrameV5 or FileTransferErrorFrameV6:
                 WriteString(buffer, error.ErrorCode);
                 WriteOptionalString(buffer, error.Message);
                 break;
-            case FileTransferPauseControlFrameV5 pauseControl:
+            case FileTransferPauseControlFrameV4 pauseControl when frame is FileTransferPauseControlFrameV5 or FileTransferPauseControlFrameV6:
                 WriteInt32(buffer, pauseControl.Epoch);
                 WriteBool(buffer, pauseControl.Paused);
                 WriteOptionalString(buffer, pauseControl.Reason);
                 break;
             case FileTransferHandoffFrameV5 handoff:
+                break;
+            case FileTransferTransportEpochFrameV6:
+                break;
+            case FileTransferTransportProbeFrameV6 probe:
+                WriteOptionalString(buffer, probe.ProbeId);
+                WriteOptionalString(buffer, probe.TargetTransport);
                 break;
             case FileTransferRepairRequestFrameV5 repairRequest:
                 if (!TryNormalizeV4MissingRanges(repairRequest.MissingRanges, allowEmpty: false, out var normalizedRepairRanges))
@@ -166,9 +181,36 @@ public static class FileTransferDataFrameCodec
                     WriteInt32(buffer, range.ChunkCount);
                 }
                 break;
+            case FileTransferFrontierRequestFrameV6 frontierRequest:
+                if (!TryNormalizeV4MissingRanges(
+                        frontierRequest.MissingRanges,
+                        allowEmpty: false,
+                        out var normalizedFrontierRanges,
+                        maxRangeCount: FileTransferProtocol.MaxStateMissingRangesV6,
+                        maxChunkCount: FileTransferProtocol.MaxChunkCountV6,
+                        maxTotalChunks: FileTransferProtocol.MaxStateMissingChunksV6))
+                {
+                    throw new InvalidOperationException("V6 frontier request missing ranges payload was invalid.");
+                }
+
+                WriteInt32(buffer, normalizedFrontierRanges.Count);
+                foreach (var range in normalizedFrontierRanges)
+                {
+                    WriteInt32(buffer, range.StartChunkIndex);
+                    WriteInt32(buffer, range.ChunkCount);
+                }
+                break;
             case FileTransferRepairProofFrameV5 repairProof:
                 WriteInt32(buffer, repairProof.AppliedChunkCount);
                 WriteInt32(buffer, repairProof.CommittedChunkIndex);
+                break;
+            case FileTransferRepairProofFrameV6 repairProof:
+                WriteInt32(buffer, repairProof.AppliedChunkCount);
+                WriteInt32(buffer, repairProof.CommittedChunkIndex);
+                break;
+            case FileTransferHeartbeatFrameV6 heartbeat:
+                WriteInt64(buffer, heartbeat.Sequence);
+                WriteInt64(buffer, heartbeat.SentUnixTimeMilliseconds);
                 break;
             default:
                 throw new InvalidOperationException($"Unsupported file-transfer data frame type '{frame.GetType().Name}'.");
@@ -492,6 +534,326 @@ public static class FileTransferDataFrameCodec
                     RecoveryMode = metadata.RecoveryMode,
                 };
                 break;
+            case 40:
+                if (!reader.TryReadString(out var v6FileName) ||
+                    !reader.TryReadInt64(out var v6FileSizeBytes) ||
+                    !reader.TryReadInt32(out var v6ChunkSizeBytes) ||
+                    !reader.TryReadInt32(out var v6ChunkCount) ||
+                    !reader.TryReadHash(out var v6Sha256Base64) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferManifestFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = v6FileName,
+                    FileSizeBytes = v6FileSizeBytes,
+                    ChunkSizeBytes = v6ChunkSizeBytes,
+                    ChunkCount = v6ChunkCount,
+                    Sha256Base64 = v6Sha256Base64,
+                    TransportEpoch = metadata.TransportEpoch,
+                    BatchId = metadata.BatchId,
+                    RepairRequestId = metadata.RepairRequestId,
+                    Priority = metadata.Priority,
+                    RecoveryMode = metadata.RecoveryMode,
+                };
+                break;
+            case 41:
+                if (!reader.TryReadInt32(out var v6StateEpoch) ||
+                    !reader.TryReadInt32(out var v6ContiguousCommitted) ||
+                    !reader.TryReadInt32(out var v6DurableHighest) ||
+                    !reader.TryReadInt32(out var v6CreditUntil) ||
+                    !reader.TryReadInt32(out var v6MissingRangeCount) ||
+                    v6MissingRangeCount < 0 ||
+                    v6MissingRangeCount > FileTransferProtocol.MaxStateMissingRangesV6)
+                {
+                    return false;
+                }
+
+                var v6MissingRanges = new FileTransferRangeV4[v6MissingRangeCount];
+                for (var rangeIndex = 0; rangeIndex < v6MissingRangeCount; rangeIndex++)
+                {
+                    if (!reader.TryReadInt32(out var rangeStartChunkIndex) ||
+                        !reader.TryReadInt32(out var rangeChunkCount))
+                    {
+                        return false;
+                    }
+
+                    v6MissingRanges[rangeIndex] = new FileTransferRangeV4
+                    {
+                        StartChunkIndex = rangeStartChunkIndex,
+                        ChunkCount = rangeChunkCount,
+                    };
+                }
+
+                if (!reader.TryReadInt64(out var v6BytesCommitted) ||
+                    !reader.TryReadBool(out var v6ReceiverMemoryPressure) ||
+                    !reader.TryReadBool(out var v6ReceiverDiskPressure) ||
+                    !reader.TryReadBool(out var v6TerminalReady) ||
+                    !reader.TryReadBool(out var v6TransferPaused) ||
+                    !reader.TryReadOptionalString(out var v6TransferPauseReason) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferReceiverStateFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Epoch = v6StateEpoch,
+                    ContiguousCommittedChunkIndex = v6ContiguousCommitted,
+                    DurableReceivedHighestChunkIndex = v6DurableHighest,
+                    CreditUntilChunkIndexExclusive = v6CreditUntil,
+                    MissingRanges = v6MissingRanges,
+                    BytesCommitted = v6BytesCommitted,
+                    ReceiverMemoryPressure = v6ReceiverMemoryPressure,
+                    ReceiverDiskPressure = v6ReceiverDiskPressure,
+                    TerminalReady = v6TerminalReady,
+                    TransferPaused = v6TransferPaused,
+                    TransferPauseReason = v6TransferPauseReason,
+                    TransportEpoch = metadata.TransportEpoch,
+                    BatchId = metadata.BatchId,
+                    RepairRequestId = metadata.RepairRequestId,
+                    Priority = metadata.Priority,
+                    RecoveryMode = metadata.RecoveryMode,
+                };
+                break;
+            case 42:
+                if (!reader.TryReadInt32(out var v6StartChunkIndex) ||
+                    !reader.TryReadInt32(out var v6BatchChunkCount) ||
+                    !reader.TryReadInt32(out var v6BatchSegmentCount) ||
+                    v6BatchSegmentCount <= 0 ||
+                    v6BatchSegmentCount > FileTransferProtocol.MaxChunkBatchSegmentsV6 ||
+                    v6BatchChunkCount != v6BatchSegmentCount)
+                {
+                    return false;
+                }
+
+                var v6Segments = new byte[v6BatchSegmentCount][];
+                for (var segmentIndex = 0; segmentIndex < v6BatchSegmentCount; segmentIndex++)
+                {
+                    if (!reader.TryReadBytes(out var segmentBytes))
+                    {
+                        return false;
+                    }
+
+                    v6Segments[segmentIndex] = segmentBytes;
+                }
+
+                if (!reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferChunkBatchFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    StartChunkIndex = v6StartChunkIndex,
+                    ChunkCount = v6BatchChunkCount,
+                    DataSegments = v6Segments,
+                    TransportEpoch = metadata.TransportEpoch,
+                    BatchId = metadata.BatchId,
+                    RepairRequestId = metadata.RepairRequestId,
+                    Priority = metadata.Priority,
+                    RecoveryMode = metadata.RecoveryMode,
+                };
+                break;
+            case 43:
+                if (!reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferTransportEpochFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = metadata.TransportEpoch,
+                    RecoveryMode = metadata.RecoveryMode,
+                };
+                break;
+            case 44:
+                if (!reader.TryReadOptionalString(out var probeId) ||
+                    !reader.TryReadOptionalString(out var targetTransport) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferTransportProbeFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = metadata.TransportEpoch,
+                    ProbeId = probeId,
+                    TargetTransport = targetTransport,
+                };
+                break;
+            case 45:
+                if (!reader.TryReadInt32(out var frontierRangeCount) ||
+                    frontierRangeCount <= 0 ||
+                    frontierRangeCount > FileTransferProtocol.MaxStateMissingRangesV6)
+                {
+                    return false;
+                }
+
+                var frontierRanges = new FileTransferRangeV4[frontierRangeCount];
+                for (var rangeIndex = 0; rangeIndex < frontierRangeCount; rangeIndex++)
+                {
+                    if (!reader.TryReadInt32(out var rangeStartChunkIndex) ||
+                        !reader.TryReadInt32(out var rangeChunkCount))
+                    {
+                        return false;
+                    }
+
+                    frontierRanges[rangeIndex] = new FileTransferRangeV4
+                    {
+                        StartChunkIndex = rangeStartChunkIndex,
+                        ChunkCount = rangeChunkCount,
+                    };
+                }
+
+                if (!reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferFrontierRequestFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = metadata.TransportEpoch,
+                    RepairRequestId = metadata.RepairRequestId,
+                    MissingRanges = frontierRanges,
+                    Priority = metadata.Priority,
+                    RecoveryMode = metadata.RecoveryMode,
+                };
+                break;
+            case 46:
+                if (!reader.TryReadInt32(out var v6AppliedChunkCount) ||
+                    !reader.TryReadInt32(out var v6CommittedChunkIndex) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferRepairProofFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = metadata.TransportEpoch,
+                    RepairRequestId = metadata.RepairRequestId,
+                    AppliedChunkCount = v6AppliedChunkCount,
+                    CommittedChunkIndex = v6CommittedChunkIndex,
+                    RecoveryMode = metadata.RecoveryMode,
+                };
+                break;
+            case 47:
+                if (!reader.TryReadInt64(out var v6CompleteFileSizeBytes) ||
+                    !reader.TryReadHash(out var v6CompleteSha256Base64) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferCompleteFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileSizeBytes = v6CompleteFileSizeBytes,
+                    Sha256Base64 = v6CompleteSha256Base64,
+                    TransportEpoch = metadata.TransportEpoch,
+                    BatchId = metadata.BatchId,
+                    RepairRequestId = metadata.RepairRequestId,
+                    Priority = metadata.Priority,
+                    RecoveryMode = metadata.RecoveryMode,
+                };
+                break;
+            case 48:
+                if (!reader.TryReadOptionalString(out var v6CancelReason) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferCancelFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Reason = v6CancelReason,
+                    TransportEpoch = metadata.TransportEpoch,
+                    BatchId = metadata.BatchId,
+                    RepairRequestId = metadata.RepairRequestId,
+                    Priority = metadata.Priority,
+                    RecoveryMode = metadata.RecoveryMode,
+                };
+                break;
+            case 49:
+                if (!reader.TryReadString(out var v6ErrorCode) ||
+                    !reader.TryReadOptionalString(out var v6ErrorMessage) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferErrorFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ErrorCode = v6ErrorCode,
+                    Message = v6ErrorMessage,
+                    TransportEpoch = metadata.TransportEpoch,
+                    BatchId = metadata.BatchId,
+                    RepairRequestId = metadata.RepairRequestId,
+                    Priority = metadata.Priority,
+                    RecoveryMode = metadata.RecoveryMode,
+                };
+                break;
+            case 50:
+                if (!reader.TryReadInt32(out var v6PauseControlEpoch) ||
+                    !reader.TryReadBool(out var v6Paused) ||
+                    !reader.TryReadOptionalString(out var v6PauseControlReason) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferPauseControlFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Epoch = v6PauseControlEpoch,
+                    Paused = v6Paused,
+                    Reason = v6PauseControlReason,
+                    TransportEpoch = metadata.TransportEpoch,
+                    BatchId = metadata.BatchId,
+                    RepairRequestId = metadata.RepairRequestId,
+                    Priority = metadata.Priority,
+                    RecoveryMode = metadata.RecoveryMode,
+                };
+                break;
+            case 51:
+                if (!reader.TryReadInt64(out var sequence) ||
+                    !reader.TryReadInt64(out var sentUnixTimeMilliseconds) ||
+                    !reader.IsFullyConsumed)
+                {
+                    return false;
+                }
+
+                frame = new FileTransferHeartbeatFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = metadata.TransportEpoch,
+                    Sequence = sequence,
+                    SentUnixTimeMilliseconds = sentUnixTimeMilliseconds,
+                };
+                break;
             default:
                 return false;
         }
@@ -544,7 +906,13 @@ public static class FileTransferDataFrameCodec
                 state.CreditUntilChunkIndexExclusive >= state.ContiguousCommittedChunkIndex &&
                 state.CreditUntilChunkIndexExclusive <= FileTransferProtocol.MaxChunkCountV5 &&
                 state.BytesCommitted >= 0 &&
-                TryNormalizeV4MissingRanges(state.MissingRanges, allowEmpty: true, out var missingRanges) &&
+                TryNormalizeV4MissingRanges(
+                    state.MissingRanges,
+                    allowEmpty: true,
+                    out var missingRanges,
+                    maxRangeCount: FileTransferProtocol.MaxStateMissingRangesV5,
+                    maxChunkCount: FileTransferProtocol.MaxChunkCountV5,
+                    maxTotalChunks: FileTransferProtocol.MaxStateMissingChunksV5) &&
                 FileTransferPayloadCodec.TryNormalizeOptional(state.TransferPauseReason, FileTransferProtocol.MaxReasonLength, out var transferPauseReason):
                 normalized = state with
                 {
@@ -711,6 +1079,239 @@ public static class FileTransferDataFrameCodec
                     RecoveryMode = NormalizeV5MetadataToken(repairProof.RecoveryMode),
                 };
                 return true;
+            case FileTransferManifestFrameV6 manifest when
+                FileTransferPayloadCodec.TryNormalizeFileName(manifest.FileName, out var fileName) &&
+                IsValidV4ManifestTuple(manifest.FileSizeBytes, manifest.ChunkSizeBytes, manifest.ChunkCount) &&
+                FileTransferPayloadCodec.TryNormalizeSha256(manifest.Sha256Base64, out var hash):
+                normalized = manifest with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.ManifestFrameTypeV6,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = fileName,
+                    Sha256Base64 = hash,
+                    TransportEpoch = manifest.TransportEpoch,
+                    BatchId = NormalizeV5MetadataToken(manifest.BatchId),
+                    RepairRequestId = NormalizeV5MetadataToken(manifest.RepairRequestId),
+                    Priority = NormalizeV5MetadataToken(manifest.Priority),
+                    RecoveryMode = NormalizeV5MetadataToken(manifest.RecoveryMode),
+                };
+                return true;
+            case FileTransferReceiverStateFrameV6 state when
+                state.Epoch >= 0 &&
+                state.ContiguousCommittedChunkIndex >= 0 &&
+                state.ContiguousCommittedChunkIndex <= FileTransferProtocol.MaxChunkCountV6 &&
+                state.DurableReceivedHighestChunkIndex >= -1 &&
+                state.DurableReceivedHighestChunkIndex <= FileTransferProtocol.MaxChunkCountV6 &&
+                state.CreditUntilChunkIndexExclusive >= state.ContiguousCommittedChunkIndex &&
+                state.CreditUntilChunkIndexExclusive <= FileTransferProtocol.MaxChunkCountV6 &&
+                state.BytesCommitted >= 0 &&
+                TryNormalizeV4MissingRanges(
+                    state.MissingRanges,
+                    allowEmpty: true,
+                    out var missingRanges,
+                    maxRangeCount: FileTransferProtocol.MaxStateMissingRangesV6,
+                    maxChunkCount: FileTransferProtocol.MaxChunkCountV6,
+                    maxTotalChunks: FileTransferProtocol.MaxStateMissingChunksV6) &&
+                FileTransferPayloadCodec.TryNormalizeOptional(state.TransferPauseReason, FileTransferProtocol.MaxReasonLength, out var transferPauseReason):
+                normalized = state with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.ReceiverStateFrameTypeV6,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    MissingRanges = missingRanges,
+                    TransferPauseReason = transferPauseReason,
+                    TransportEpoch = state.TransportEpoch,
+                    BatchId = NormalizeV5MetadataToken(state.BatchId),
+                    RepairRequestId = NormalizeV5MetadataToken(state.RepairRequestId),
+                    Priority = NormalizeV5MetadataToken(state.Priority),
+                    RecoveryMode = NormalizeV5MetadataToken(state.RecoveryMode),
+                };
+                return true;
+            case FileTransferChunkBatchFrameV6 batch when
+                batch.StartChunkIndex >= 0 &&
+                batch.ChunkCount > 0 &&
+                IsValidV4ChunkRange(batch.StartChunkIndex, batch.ChunkCount) &&
+                batch.DataSegments.Count > 0 &&
+                batch.DataSegments.Count <= FileTransferProtocol.MaxChunkBatchSegmentsV6 &&
+                batch.ChunkCount == batch.DataSegments.Count:
+                var normalizedV6Segments = new byte[batch.DataSegments.Count][];
+                var totalV6ChunkBytes = 0L;
+                for (var segmentIndex = 0; segmentIndex < batch.DataSegments.Count; segmentIndex++)
+                {
+                    var segment = batch.DataSegments[segmentIndex];
+                    if (segment.Length == 0)
+                    {
+                        return false;
+                    }
+
+                    normalizedV6Segments[segmentIndex] = segment.ToArray();
+                    totalV6ChunkBytes += segment.Length;
+                    if (segment.Length > FileTransferProtocol.MaxChunkRawBytes ||
+                        totalV6ChunkBytes > FileTransferProtocol.MaxChunkBatchRawBytesV6)
+                    {
+                        return false;
+                    }
+                }
+
+                normalized = batch with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.ChunkBatchFrameTypeV6,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    DataSegments = normalizedV6Segments,
+                    TransportEpoch = batch.TransportEpoch,
+                    BatchId = NormalizeV5MetadataToken(batch.BatchId),
+                    RepairRequestId = NormalizeV5MetadataToken(batch.RepairRequestId),
+                    Priority = NormalizeV5MetadataToken(batch.Priority),
+                    RecoveryMode = NormalizeV5MetadataToken(batch.RecoveryMode),
+                };
+                return true;
+            case FileTransferTransportEpochFrameV6 epoch when epoch.TransportEpoch > 0:
+                normalized = epoch with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.TransportEpochFrameTypeV6,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    RecoveryMode = NormalizeV5MetadataToken(epoch.RecoveryMode),
+                };
+                return true;
+            case FileTransferTransportProbeFrameV6 probe when
+                probe.TransportEpoch > 0 &&
+                FileTransferPayloadCodec.TryNormalizeOptional(probe.ProbeId, FileTransferProtocol.MaxReasonLength, out var probeId) &&
+                FileTransferPayloadCodec.TryNormalizeOptional(probe.TargetTransport, FileTransferProtocol.MaxReasonLength, out var targetTransport):
+                normalized = probe with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.TransportProbeFrameTypeV6,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ProbeId = probeId,
+                    TargetTransport = targetTransport,
+                };
+                return true;
+            case FileTransferFrontierRequestFrameV6 frontierRequest when
+                frontierRequest.TransportEpoch >= 0 &&
+                !string.IsNullOrWhiteSpace(frontierRequest.RepairRequestId) &&
+                TryNormalizeV4MissingRanges(
+                    frontierRequest.MissingRanges,
+                    allowEmpty: false,
+                    out var frontierRanges,
+                    maxRangeCount: FileTransferProtocol.MaxStateMissingRangesV6,
+                    maxChunkCount: FileTransferProtocol.MaxChunkCountV6,
+                    maxTotalChunks: FileTransferProtocol.MaxStateMissingChunksV6):
+                normalized = frontierRequest with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.FrontierRequestFrameTypeV6,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    RepairRequestId = NormalizeV5MetadataToken(frontierRequest.RepairRequestId),
+                    MissingRanges = frontierRanges,
+                    Priority = NormalizeV5MetadataToken(frontierRequest.Priority),
+                    RecoveryMode = NormalizeV5MetadataToken(frontierRequest.RecoveryMode),
+                };
+                return true;
+            case FileTransferRepairProofFrameV6 repairProof when
+                repairProof.TransportEpoch > 0 &&
+                repairProof.AppliedChunkCount >= 0 &&
+                repairProof.CommittedChunkIndex >= 0 &&
+                repairProof.CommittedChunkIndex <= FileTransferProtocol.MaxChunkCountV6:
+                normalized = repairProof with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.RepairProofFrameTypeV6,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    RepairRequestId = NormalizeV5MetadataToken(repairProof.RepairRequestId),
+                    RecoveryMode = NormalizeV5MetadataToken(repairProof.RecoveryMode),
+                };
+                return true;
+            case FileTransferCompleteFrameV6 complete when
+                complete.FileSizeBytes >= 0 &&
+                FileTransferPayloadCodec.TryNormalizeSha256(complete.Sha256Base64, out var completeHash):
+                normalized = complete with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.SessionCompleteFrameTypeV6,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Sha256Base64 = completeHash,
+                    TransportEpoch = complete.TransportEpoch,
+                    BatchId = NormalizeV5MetadataToken(complete.BatchId),
+                    RepairRequestId = NormalizeV5MetadataToken(complete.RepairRequestId),
+                    Priority = NormalizeV5MetadataToken(complete.Priority),
+                    RecoveryMode = NormalizeV5MetadataToken(complete.RecoveryMode),
+                };
+                return true;
+            case FileTransferCancelFrameV6 cancel when
+                FileTransferPayloadCodec.TryNormalizeOptional(cancel.Reason, FileTransferProtocol.MaxReasonLength, out var cancelReason):
+                normalized = cancel with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.SessionCancelFrameTypeV6,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Reason = cancelReason,
+                    TransportEpoch = cancel.TransportEpoch,
+                    BatchId = NormalizeV5MetadataToken(cancel.BatchId),
+                    RepairRequestId = NormalizeV5MetadataToken(cancel.RepairRequestId),
+                    Priority = NormalizeV5MetadataToken(cancel.Priority),
+                    RecoveryMode = NormalizeV5MetadataToken(cancel.RecoveryMode),
+                };
+                return true;
+            case FileTransferErrorFrameV6 error when
+                FileTransferPayloadCodec.TryNormalizeOptional(error.ErrorCode, FileTransferProtocol.MaxErrorCodeLength, out var errorCode) &&
+                errorCode is not null &&
+                FileTransferPayloadCodec.TryNormalizeOptional(error.Message, FileTransferProtocol.MaxErrorMessageLength, out var errorMessage):
+                normalized = error with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.ErrorFrameTypeV6,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    ErrorCode = errorCode,
+                    Message = errorMessage,
+                    TransportEpoch = error.TransportEpoch,
+                    BatchId = NormalizeV5MetadataToken(error.BatchId),
+                    RepairRequestId = NormalizeV5MetadataToken(error.RepairRequestId),
+                    Priority = NormalizeV5MetadataToken(error.Priority),
+                    RecoveryMode = NormalizeV5MetadataToken(error.RecoveryMode),
+                };
+                return true;
+            case FileTransferPauseControlFrameV6 pauseControl when
+                pauseControl.Epoch >= 0 &&
+                FileTransferPayloadCodec.TryNormalizeOptional(pauseControl.Reason, FileTransferProtocol.MaxReasonLength, out var pauseControlReason):
+                normalized = pauseControl with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.PauseControlFrameTypeV6,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Reason = pauseControlReason,
+                    TransportEpoch = pauseControl.TransportEpoch,
+                    BatchId = NormalizeV5MetadataToken(pauseControl.BatchId),
+                    RepairRequestId = NormalizeV5MetadataToken(pauseControl.RepairRequestId),
+                    Priority = NormalizeV5MetadataToken(pauseControl.Priority),
+                    RecoveryMode = NormalizeV5MetadataToken(pauseControl.RecoveryMode),
+                };
+                return true;
+            case FileTransferHeartbeatFrameV6 heartbeat when
+                heartbeat.TransportEpoch >= 0 &&
+                heartbeat.Sequence >= 0 &&
+                heartbeat.SentUnixTimeMilliseconds >= 0:
+                normalized = heartbeat with
+                {
+                    Kind = FileTransferProtocol.Kind,
+                    Type = FileTransferProtocol.HeartbeatFrameTypeV6,
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                };
+                return true;
             default:
                 return false;
         }
@@ -730,7 +1331,13 @@ public static class FileTransferDataFrameCodec
             FileTransferHandoffFrameV5 metadata => (metadata.TransportEpoch, null, null, null, metadata.RecoveryMode),
             FileTransferRepairRequestFrameV5 metadata => (metadata.TransportEpoch, null, metadata.RepairRequestId, metadata.Priority, metadata.RecoveryMode),
             FileTransferRepairProofFrameV5 metadata => (metadata.TransportEpoch, null, metadata.RepairRequestId, null, metadata.RecoveryMode),
-            _ => throw new InvalidOperationException($"Unsupported V5 metadata frame type '{frame.GetType().Name}'."),
+            IFileTransferTransportMetadataFrame metadata => (metadata.TransportEpoch, metadata.BatchId, metadata.RepairRequestId, metadata.Priority, metadata.RecoveryMode),
+            FileTransferTransportEpochFrameV6 metadata => (metadata.TransportEpoch, null, null, null, metadata.RecoveryMode),
+            FileTransferTransportProbeFrameV6 metadata => (metadata.TransportEpoch, null, null, null, null),
+            FileTransferFrontierRequestFrameV6 metadata => (metadata.TransportEpoch, null, metadata.RepairRequestId, metadata.Priority, metadata.RecoveryMode),
+            FileTransferRepairProofFrameV6 metadata => (metadata.TransportEpoch, null, metadata.RepairRequestId, null, metadata.RecoveryMode),
+            FileTransferHeartbeatFrameV6 metadata => (metadata.TransportEpoch, null, null, null, null),
+            _ => throw new InvalidOperationException($"Unsupported metadata frame type '{frame.GetType().Name}'."),
         };
 
         WriteInt64(stream, transportEpoch);
@@ -811,15 +1418,21 @@ public static class FileTransferDataFrameCodec
     private static bool TryNormalizeV4MissingRanges(
         IReadOnlyList<FileTransferRangeV4>? ranges,
         bool allowEmpty,
-        out IReadOnlyList<FileTransferRangeV4> normalized)
+        out IReadOnlyList<FileTransferRangeV4> normalized,
+        int? maxRangeCount = null,
+        int? maxChunkCount = null,
+        int? maxTotalChunks = null)
     {
         normalized = [];
+        var effectiveMaxRangeCount = maxRangeCount ?? FileTransferProtocol.MaxStateMissingRangesV4;
+        var effectiveMaxChunkCount = maxChunkCount ?? FileTransferProtocol.MaxChunkCountV4;
+        var effectiveMaxTotalChunks = maxTotalChunks ?? FileTransferProtocol.MaxStateMissingChunksV4;
         if (ranges is null || ranges.Count == 0)
         {
             return allowEmpty;
         }
 
-        if (ranges.Count > FileTransferProtocol.MaxStateMissingRangesV4)
+        if (ranges.Count > effectiveMaxRangeCount)
         {
             return false;
         }
@@ -833,7 +1446,7 @@ public static class FileTransferDataFrameCodec
             }
 
             var endExclusive = (long)range.StartChunkIndex + range.ChunkCount;
-            if (endExclusive > FileTransferProtocol.MaxChunkCountV4)
+            if (endExclusive > effectiveMaxChunkCount)
             {
                 return false;
             }
@@ -872,7 +1485,7 @@ public static class FileTransferDataFrameCodec
             ChunkCount = currentEnd - currentStart,
         });
 
-        if (merged.Count > FileTransferProtocol.MaxStateMissingRangesV4)
+        if (merged.Count > effectiveMaxRangeCount)
         {
             return false;
         }
@@ -881,7 +1494,7 @@ public static class FileTransferDataFrameCodec
         foreach (var range in merged)
         {
             totalChunks += range.ChunkCount;
-            if (totalChunks > FileTransferProtocol.MaxStateMissingChunksV4)
+            if (totalChunks > effectiveMaxTotalChunks)
             {
                 return false;
             }
@@ -904,6 +1517,18 @@ public static class FileTransferDataFrameCodec
             FileTransferHandoffFrameV5 => 32,
             FileTransferRepairRequestFrameV5 => 33,
             FileTransferRepairProofFrameV5 => 34,
+            FileTransferManifestFrameV6 => 40,
+            FileTransferReceiverStateFrameV6 => 41,
+            FileTransferChunkBatchFrameV6 => 42,
+            FileTransferTransportEpochFrameV6 => 43,
+            FileTransferTransportProbeFrameV6 => 44,
+            FileTransferFrontierRequestFrameV6 => 45,
+            FileTransferRepairProofFrameV6 => 46,
+            FileTransferCompleteFrameV6 => 47,
+            FileTransferCancelFrameV6 => 48,
+            FileTransferErrorFrameV6 => 49,
+            FileTransferPauseControlFrameV6 => 50,
+            FileTransferHeartbeatFrameV6 => 51,
             _ => throw new InvalidOperationException($"Unsupported file-transfer data frame type '{frame.GetType().Name}'."),
         };
 

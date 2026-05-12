@@ -14,7 +14,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const string BusyReason = FileTransferResultCodes.Busy;
     private const string DeclinedReason = FileTransferResultCodes.Declined;
     private const string CanceledReason = FileTransferResultCodes.CanceledLocal;
-    private const string DisconnectedErrorCode = FileTransferResultCodes.TransportDisconnected;
+    private const string DisconnectedErrorCode = FileTransferResultCodes.PeerDisconnected;
     private const string DetachedErrorCode = FileTransferResultCodes.TransportDetached;
     private const string InvalidStateErrorCode = FileTransferResultCodes.InvalidState;
     private const string SessionMismatchErrorCode = FileTransferResultCodes.SessionMismatch;
@@ -43,6 +43,8 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int RepairResendIntervalMs = 150;
     private const int RepairAckTimeoutMs = 750;
     private const int LifecyclePrioritySendTimeoutMs = 2000;
+    private const int V6HeartbeatIntervalMs = 5000;
+    private const int V6PeerLivenessTimeoutMs = 20000;
     private const int RepairBatchSize = 2;
     private const int DegradedRepairGrantChunks = 32;
     private const int DegradedRepairLowWatermarkChunks = 8;
@@ -154,6 +156,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static readonly TimeSpan PullTransportRebindSafetyReplayRearmCooldown = TimeSpan.FromSeconds(5);
     private const int PullTransportRebindFrontierOnlyStableAdvanceChunks = 64;
     private static readonly TimeSpan V5TransportHandoffWaitingTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan V6TransportEpochProofTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan PullV4PostFallbackPeerSilenceTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan PullV4PeerSilenceTimeout = TimeSpan.FromSeconds(90);
     private static readonly int[] CancelRetryDelaysMs = [250, 750, 1500, 3000, 7000, 12000, 20000, 30000];
@@ -245,6 +248,22 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V4PostFallbackFrontierBackfillStep3AfterCommittedChunks = 8;
     private const int V4FrontierTailRetryChunks = V4MaxBatchSegmentsDefault;
     private const int V4FileOnlyFrontierTailRetryChunks = 12;
+    private const int V6ReceiverRequestWindowChunks = 4096;
+    private const int V6FrontierRequestChunks = 1;
+    private const int V6NormalReceiverStateResendGateMs = 30000;
+    private const int V6RecoveredFrontierResendGateMs = 2000;
+    private const int V6TunaRedundantDataProbeDelayMs = 10000;
+    private const long V6TunaRedundantDataMinimumBytesAfterProof = 10L * 1024L * 1024L;
+    private const int V6FileOnlySenderPipelineDepth = 64;
+    private const int V6RegularNknRedundantSenderPipelineDepth = 2;
+    private const int V6RegularNknRedundantNormalBatchLimit = 4;
+    private const int V6EpochPriorityPipelineBypassDepth = 2;
+    private const int V6SenderTransportSendTimeoutMs = 5000;
+    private const int V6RegularNknRedundantTransportSendTimeoutMs = 15000;
+    private const int V6ReceiverStateRetryIntervalMs = 1500;
+    private const int V6FrontierRequestRetryIntervalMs = 2000;
+    private const int V6ReceiverStateProgressMinCommittedChunks = 32;
+    private const int V6ReceiverStateProgressMaxIntervalMs = 1000;
     private const string V4MaxBatchSegmentsEnvironmentVariableName = "NLINK_FILETRANSFER_V4_MAX_BATCH_SEGMENTS";
     private const string V4MixedScreenShareEnvironmentVariableName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
     private const string V4FileOnlyFastRepairEnvironmentVariableName = "NLINK_FILETRANSFER_V4_FILE_ONLY_FAST_REPAIR";
@@ -284,6 +303,12 @@ public sealed partial class SessionFileTransferService : IDisposable
     internal Func<string, string, Task>? InboundDispatchBeforeWorkAsyncForTests { get; set; }
 
     internal static TimeSpan? V4PeerSilenceTimeoutOverrideForTests { get; set; }
+    internal static TimeSpan? V6HeartbeatIntervalOverrideForTests { get; set; }
+    internal static TimeSpan? V6PeerLivenessTimeoutOverrideForTests { get; set; }
+    internal static TimeSpan? V6TransportEpochProofTimeoutOverrideForTests { get; set; }
+    internal static TimeSpan? V6TunaRedundantDataProbeDelayOverrideForTests { get; set; }
+    internal static long? V6TunaRedundantDataMinimumBytesAfterProofOverrideForTests { get; set; }
+    internal static TimeSpan? V6SenderTransportSendTimeoutOverrideForTests { get; set; }
 
     public SessionFileTransferService(Func<string>? transferIdFactory = null)
     {
@@ -530,12 +555,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         transport.FileTransferCancelReceived += OnFileTransferCancelReceived;
         transport.FileTransferErrorReceived += OnFileTransferErrorReceived;
         transport.FileTransferCompleteReceived += OnFileTransferCompleteReceived;
+        transport.FileTransferPauseControlReceived += OnFileTransferPauseControlReceived;
+        transport.FileTransferHeartbeatReceived += OnFileTransferHeartbeatReceived;
+        transport.FileTransferTransportEpochReceived += OnFileTransferTransportEpochReceived;
+        transport.FileTransferTransportProbeReceived += OnFileTransferTransportProbeReceived;
+        transport.FileTransferRepairProofReceived += OnFileTransferRepairProofReceived;
 
         if (transport is ISignalingTransport lifecycleTransport)
         {
             transportLifecycle = lifecycleTransport;
-            lifecycleTransport.Rejected += OnTransportRejectedOrDisconnected;
-            lifecycleTransport.Disconnected += OnTransportRejectedOrDisconnected;
+            lifecycleTransport.Rejected += OnTransportRejected;
+            lifecycleTransport.Disconnected += OnTransportDisconnected;
         }
 
         RaiseTransferChanged(CreateSnapshot());
@@ -557,6 +587,19 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             inbound = inboundTransfer;
             outbound = outboundTransfer;
+            if (outbound?.V6TransportEpoch is { } outboundEpoch)
+            {
+                TerminalizeV6TransportEpochLocked(FileTransferDirection.Outbound, outbound.TransferId, outbound.SessionId, outboundEpoch, "reset_session_state");
+                outbound.V6TransportEpoch = null;
+            }
+
+            if (inbound?.V6TransportEpoch is { } inboundEpoch)
+            {
+                TerminalizeV6TransportEpochLocked(FileTransferDirection.Inbound, inbound.TransferId, inbound.SessionId, inboundEpoch, "reset_session_state");
+                inbound.V6TransportEpoch = null;
+                inbound.V6ReceiverTransportEpoch = 0;
+            }
+
             inboundTransfer = null;
             outboundTransfer = null;
             sessionScreenShareObserved = sessionScreenShareActive || sessionScreenShareDegraded;
@@ -686,14 +729,14 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         RaiseTransferChanged(CreateSnapshot());
 
-        if (!IsV5StreamingTransport(currentTransport))
+        if (!IsV6StreamingTransport(currentTransport))
         {
-            LogV5RequiredTransportIncompatible(context.TransferId, context.SessionId);
+            LogV6RequiredTransportIncompatible(context.TransferId, context.SessionId);
             await TransitionOutboundToTerminalAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: TransportIncompatibleErrorCode,
-                statusMessage: "File transfer requires V5 streaming support from the attached transport.",
+                statusMessage: "File transfer requires V6 streaming support from the attached transport.",
                 notifyPeer: false,
                 cancelReason: null,
                 ct: CancellationToken.None).ConfigureAwait(false);
@@ -721,7 +764,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             TransferId = context.TransferId,
             FileName = context.FileName,
             FileSizeBytes = context.FileSizeBytes,
-            PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+            PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
         };
 
         try
@@ -751,11 +794,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
         catch (Exception ex)
         {
+            var errorCode = ClassifyOutboundFailureErrorCode(ex, InvalidStateErrorCode);
             await TransitionOutboundToTerminalAsync(
                 context,
                 FileTransferTransferState.Failed,
-                errorCode: ClassifyOutboundFailureErrorCode(ex, InvalidStateErrorCode),
-                statusMessage: ex.Message,
+                errorCode: errorCode,
+                statusMessage: ClassifyOutboundFailureStatusMessage(ex, errorCode),
                 notifyPeer: false,
                 cancelReason: null,
                 ct: CancellationToken.None).ConfigureAwait(false);
@@ -819,7 +863,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
             context.OpenWriteDestinationAsync = openWriteDestinationAsync;
             context.AcceptInProgress = false;
-            context.NegotiatedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5;
+            context.NegotiatedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6;
             context.MetadataAwaitingSinceUtc = DateTimeOffset.UtcNow;
             context.State = FileTransferTransferState.AwaitingMetadata;
             context.StatusMessage = "Waiting for sender to prepare the file.";
@@ -837,9 +881,10 @@ public sealed partial class SessionFileTransferService : IDisposable
                 {
                     SessionId = context.SessionId,
                     TransferId = context.TransferId,
-                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
                 },
                 ct).ConfigureAwait(false);
+            StartInboundV6HeartbeatLoop(context, "accept_sent");
             return CaptureCurrentInboundSnapshot();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -984,7 +1029,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 transportPaused = outboundTransfer.PullTransportPaused;
                 outboundTransfer.V4SenderPumpLastWakeReason = "user_paused";
                 outboundTransfer.SignalV4SenderPump();
-                pausedOutboundContext = outboundTransfer.DataSession is not null
+                pausedOutboundContext = !string.IsNullOrWhiteSpace(outboundTransfer.SessionId)
                     ? outboundTransfer
                     : null;
             }
@@ -1007,7 +1052,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 direction = FileTransferDirection.Inbound;
                 state = inboundTransfer.State;
                 transportPaused = inboundTransfer.PullTransportPaused;
-                pausedInboundContext = inboundTransfer.PullManifestReceived && inboundTransfer.DataSession is not null
+                pausedInboundContext = !string.IsNullOrWhiteSpace(inboundTransfer.SessionId)
                     ? inboundTransfer
                     : null;
             }
@@ -1032,7 +1077,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             await SendInboundV4PauseControlAsync(pausedInboundContext, "user_paused").ConfigureAwait(false);
             _ = Task.Run(
-                () => SendInboundV4StateAsync(pausedInboundContext, "user_paused", terminalReady: false),
+                () => SendInboundV6ReceiverStateAsync(pausedInboundContext, "user_paused", forceSend: true),
                 CancellationToken.None);
         }
 
@@ -1084,7 +1129,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 ResetOutboundV4AcceptedForUserResumeLocked(outboundTransfer);
                 outboundTransfer.V4SenderPumpLastWakeReason = "user_resumed";
                 resumedOutboundPumpContext = outboundTransfer;
-                resumedOutboundContext = outboundTransfer.DataSession is not null
+                resumedOutboundContext = !string.IsNullOrWhiteSpace(outboundTransfer.SessionId)
                     ? outboundTransfer
                     : null;
             }
@@ -1109,7 +1154,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 direction = FileTransferDirection.Inbound;
                 state = inboundTransfer.State;
                 transportPaused = inboundTransfer.PullTransportPaused;
-                resumedInboundContext = inboundTransfer.PullManifestReceived && inboundTransfer.DataSession is not null
+                resumedInboundContext = !string.IsNullOrWhiteSpace(inboundTransfer.SessionId)
                     ? inboundTransfer
                     : null;
             }
@@ -1136,7 +1181,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             await SendInboundV4PauseControlAsync(resumedInboundContext, "user_resumed").ConfigureAwait(false);
             _ = Task.Run(
-                () => FlushInboundV4PausedProgressAsync(resumedInboundContext, "user_resumed"),
+                () => FlushInboundV6PausedProgressAsync(resumedInboundContext, "user_resumed"),
                 CancellationToken.None);
         }
 
@@ -1159,7 +1204,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             FileTransferTransferState.AwaitingAcceptance => "Waiting for receiver response.",
             FileTransferTransferState.PreparingMetadata => "Preparing file metadata.",
-            FileTransferTransferState.AwaitingStart => "Starting V4 file transfer.",
+            FileTransferTransferState.AwaitingStart => "Starting V6 file transfer.",
             FileTransferTransferState.Sending => "Sending file data.",
             _ => "Transfer resumed.",
         };
@@ -1169,7 +1214,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             FileTransferTransferState.AwaitingMetadata => "Waiting for sender to prepare the file.",
             FileTransferTransferState.AwaitingStart => "Preparing to receive.",
-            FileTransferTransferState.Receiving => "Receiving V4 file data.",
+            FileTransferTransferState.Receiving => "Receiving V6 file data.",
             _ => "Transfer resumed.",
         };
 
@@ -1298,14 +1343,14 @@ public sealed partial class SessionFileTransferService : IDisposable
                     context.TransferId,
                     context.SessionId,
                     FileTransferDirection.Outbound,
-                    offeredVersion: FileTransferProtocol.ProtocolVersionV5,
+                    offeredVersion: FileTransferProtocol.ProtocolVersionV6,
                     acceptedVersion: context.NegotiatedDataProtocolVersion,
-                    reason: "prepared_protocol_not_v5");
+                    reason: "prepared_protocol_not_v6");
                 await TransitionOutboundToTerminalAsync(
                     context,
                     FileTransferTransferState.Failed,
                     errorCode: TransportIncompatibleErrorCode,
-                    statusMessage: "File transfer requires V5 data protocol.",
+                    statusMessage: "File transfer requires V6 data protocol.",
                     notifyPeer: false,
                     cancelReason: null,
                     ct: CancellationToken.None).ConfigureAwait(false);
@@ -1317,31 +1362,32 @@ public sealed partial class SessionFileTransferService : IDisposable
                 return;
             }
 
-            LogV5Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
+            LogV6Negotiated(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
             if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
             {
                 await FailOutboundV4Async(
                     context,
                     dataSession: null,
                     V4FileOnlyRequiredErrorCode,
-                    "V5 file-transfer send is currently file-only.",
+                    "V6 file-transfer send is currently file-only.",
                     notifyPeer: false).ConfigureAwait(false);
                 return;
             }
 
             LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
-            await RunOutboundV4SenderAsync(context).ConfigureAwait(false);
+            await RunOutboundV6SenderAsync(context).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
         {
         }
         catch (Exception ex)
         {
+            var errorCode = ClassifyOutboundFailureErrorCode(ex, StreamReadFailedErrorCode);
             await TransitionOutboundToTerminalAsync(
                 context,
                 FileTransferTransferState.Failed,
-                errorCode: ClassifyOutboundFailureErrorCode(ex, StreamReadFailedErrorCode),
-                statusMessage: ex.Message,
+                errorCode: errorCode,
+                statusMessage: ClassifyOutboundFailureStatusMessage(ex, errorCode),
                 notifyPeer: true,
                 cancelReason: null,
                 ct: CancellationToken.None).ConfigureAwait(false);
@@ -1402,10 +1448,28 @@ public sealed partial class SessionFileTransferService : IDisposable
         => RunHardPriorityInboundLifecycle("error", () => HandleIncomingErrorAsync(e.Message));
 
     private void OnFileTransferCompleteReceived(object? sender, FileTransferCompleteReceivedEventArgs e)
-        => EnqueueInboundLifecycle("complete", () => HandleIncomingCompleteAsync(e.Message));
+        => RunHardPriorityInboundLifecycle("complete", () => HandleIncomingCompleteAsync(e.Message));
 
-    private void OnTransportRejectedOrDisconnected(object? sender, EventArgs e)
-        => RunHardPriorityInboundLifecycle("transport_disconnect", HandleTransportRejectedOrDisconnectedAsync);
+    private void OnFileTransferPauseControlReceived(object? sender, FileTransferPauseControlReceivedEventArgs e)
+        => RunHardPriorityInboundLifecycle("pause_control", () => HandleIncomingPauseControlAsync(e.Message));
+
+    private void OnFileTransferHeartbeatReceived(object? sender, FileTransferHeartbeatReceivedEventArgs e)
+        => RunHardPriorityInboundLifecycle("heartbeat", () => HandleIncomingHeartbeatAsync(e.Message));
+
+    private void OnFileTransferTransportEpochReceived(object? sender, FileTransferTransportEpochReceivedEventArgs e)
+        => RunHardPriorityInboundLifecycle("transport_epoch", () => HandleIncomingTransportEpochAsync(e.Message));
+
+    private void OnFileTransferTransportProbeReceived(object? sender, FileTransferTransportProbeReceivedEventArgs e)
+        => RunHardPriorityInboundLifecycle("transport_probe", () => HandleIncomingTransportProbeAckAsync(e.Message));
+
+    private void OnFileTransferRepairProofReceived(object? sender, FileTransferRepairProofReceivedEventArgs e)
+        => RunHardPriorityInboundLifecycle("repair_proof", () => HandleIncomingRepairProofAsync(e.Message));
+
+    private void OnTransportRejected(object? sender, EventArgs e)
+        => RunHardPriorityInboundLifecycle("transport_rejected", HandleTransportRejectedAsync);
+
+    private void OnTransportDisconnected(object? sender, EventArgs e)
+        => RunHardPriorityInboundLifecycle("transport_disconnect", HandleTransportDisconnectedAsync);
 
     private void RunHardPriorityInboundLifecycle(string operation, Func<Task> work)
     {
@@ -1499,84 +1563,117 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
     }
 
-    private async Task HandleTransportRejectedOrDisconnectedAsync()
+    private Task HandleTransportRejectedAsync()
+        => HandleTransportPeerDownAsync("transport_rejected", deferActiveV6Session: false);
+
+    private Task HandleTransportDisconnectedAsync()
+        => HandleTransportPeerDownAsync("transport_disconnected", deferActiveV6Session: true);
+
+    private async Task HandleTransportPeerDownAsync(string reason, bool deferActiveV6Session)
     {
-        OutboundTransferContext? outbound;
-        InboundTransferContext? inbound;
-        string? outboundPausedTransferId = null;
-        string? outboundPausedSessionId = null;
-        string? inboundPausedTransferId = null;
-        string? inboundPausedSessionId = null;
+        OutboundTransferContext? outboundToFail;
+        InboundTransferContext? inboundToFail;
+        OutboundTransferContext? outboundDeferred;
+        InboundTransferContext? inboundDeferred;
         lock (gate)
         {
-            outbound = outboundTransfer is { IsTerminal: false } ? outboundTransfer : null;
-            inbound = inboundTransfer is { IsTerminal: false } ? inboundTransfer : null;
+            outboundToFail = null;
+            inboundToFail = null;
+            outboundDeferred = null;
+            inboundDeferred = null;
 
-            if (outbound is not null &&
-                (TryPauseOutboundTransportLocked(outbound, "transport_disconnected", true) || outbound.PullTransportPaused))
+            if (outboundTransfer is { IsTerminal: false } outbound)
             {
-                if (outboundPausedTransferId is null)
+                if (deferActiveV6Session && ShouldDeferV6TransportDisconnectedTerminalizationLocked(outbound))
                 {
-                    outboundPausedTransferId = outbound.TransferId;
-                    outboundPausedSessionId = outbound.SessionId;
+                    outboundDeferred = outbound;
                 }
-
-                outbound = null;
+                else
+                {
+                    outboundToFail = outbound;
+                }
             }
 
-            if (inbound is not null &&
-                (TryPauseInboundTransportLocked(inbound, "transport_disconnected", true) || inbound.PullTransportPaused))
+            if (inboundTransfer is { IsTerminal: false } inbound)
             {
-                if (inboundPausedTransferId is null)
+                if (deferActiveV6Session && ShouldDeferV6TransportDisconnectedTerminalizationLocked(inbound))
                 {
-                    inboundPausedTransferId = inbound.TransferId;
-                    inboundPausedSessionId = inbound.SessionId;
+                    inboundDeferred = inbound;
                 }
-
-                inbound = null;
+                else
+                {
+                    inboundToFail = inbound;
+                }
             }
         }
 
-        if (outboundPausedTransferId is not null && outboundPausedSessionId is not null)
+        if (outboundDeferred is not null)
         {
-            LogTransportPaused(FileTransferDirection.Outbound, outboundPausedTransferId, outboundPausedSessionId, "transport_disconnected");
+            LogV6PeerDisconnectDeferred(FileTransferDirection.Outbound, outboundDeferred, reason);
         }
 
-        if (inboundPausedTransferId is not null && inboundPausedSessionId is not null)
+        if (inboundDeferred is not null)
         {
-            LogTransportPaused(FileTransferDirection.Inbound, inboundPausedTransferId, inboundPausedSessionId, "transport_disconnected");
+            LogV6PeerDisconnectDeferred(FileTransferDirection.Inbound, inboundDeferred, reason);
         }
 
-        if (outbound is not null)
+        if (outboundToFail is not null)
         {
             await TransitionOutboundToTerminalAsync(
-                outbound,
+                outboundToFail,
                 FileTransferTransferState.Failed,
                 errorCode: DisconnectedErrorCode,
-                statusMessage: "Transport disconnected.",
+                statusMessage: "Peer disconnected.",
                 notifyPeer: false,
                 cancelReason: null,
                 ct: CancellationToken.None).ConfigureAwait(false);
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_terminalized_by_peer_down; direction=outbound; transfer_id={outbound.TransferId}; session_id={outbound.SessionId}; reason=transport_disconnected; terminal_state=failed");
+                $"event=filetransfer_terminalized_by_peer_down; direction=outbound; transfer_id={outboundToFail.TransferId}; session_id={outboundToFail.SessionId}; reason={FormatProtocolLogValue(reason)}; terminal_state=failed");
         }
 
-        if (inbound is not null)
+        if (inboundToFail is not null)
         {
             await TransitionInboundToTerminalAsync(
-                inbound,
+                inboundToFail,
                 FileTransferTransferState.Failed,
                 errorCode: DisconnectedErrorCode,
-                statusMessage: "Transport disconnected.",
+                statusMessage: "Peer disconnected.",
                 sendError: false,
                 errorMessage: null,
                 cancelReason: null,
                 ct: CancellationToken.None).ConfigureAwait(false);
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_terminalized_by_peer_down; direction=inbound; transfer_id={inbound.TransferId}; session_id={inbound.SessionId}; reason=transport_disconnected; terminal_state=failed");
+                $"event=filetransfer_terminalized_by_peer_down; direction=inbound; transfer_id={inboundToFail.TransferId}; session_id={inboundToFail.SessionId}; reason={FormatProtocolLogValue(reason)}; terminal_state=failed");
         }
+    }
+
+    private static bool ShouldDeferV6TransportDisconnectedTerminalizationLocked(OutboundTransferContext context)
+        => context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
+           context.PullSessionActive;
+
+    private static bool ShouldDeferV6TransportDisconnectedTerminalizationLocked(InboundTransferContext context)
+        => context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6 &&
+           context.PullSessionActive;
+
+    private static void LogV6PeerDisconnectDeferred(FileTransferDirection direction, OutboundTransferContext context, string reason)
+        => LogV6PeerDisconnectDeferred(direction, context.TransferId, context.SessionId, context.V6TransportEpoch, context.PullTransportPauseReason, reason);
+
+    private static void LogV6PeerDisconnectDeferred(FileTransferDirection direction, InboundTransferContext context, string reason)
+        => LogV6PeerDisconnectDeferred(direction, context.TransferId, context.SessionId, context.V6TransportEpoch, context.PullTransportPauseReason, reason);
+
+    private static void LogV6PeerDisconnectDeferred(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        V6TransportEpoch? epoch,
+        string? pauseReason,
+        string reason)
+    {
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_v6_peer_disconnect_deferred_for_epoch; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; reason={FormatProtocolLogValue(reason)}; transport_epoch={epoch?.EpochId ?? 0}; epoch_state={FormatProtocolLogValue(epoch is null ? null : FormatV6TransportEpochState(epoch.State))}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch?.Kind ?? FileTransferTransportHandoffKind.None)}; target_transport={FormatFileTransferTransportKind(epoch?.TargetTransport ?? FileTransferTransportKind.Unknown)}; pause_reason={FormatProtocolLogValue(pauseReason)}");
     }
 
     private async Task HandleIncomingOfferAsync(FileTransferOfferV2 message)
@@ -1591,7 +1688,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 FileTransferDirection.Inbound,
                 offeredVersion: message.PreferredDataProtocolVersion,
                 acceptedVersion: null,
-                reason: "offer_protocol_not_v5");
+                reason: "offer_protocol_not_v6");
             await SendDeclineAsync(message.SessionId, message.TransferId, TransportIncompatibleErrorCode, CancellationToken.None).ConfigureAwait(false);
             return;
         }
@@ -1642,7 +1739,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         ArgumentNullException.ThrowIfNull(message);
 
         OutboundTransferContext? context;
-        var acceptedVersionIsV4 = IsNegotiableDataProtocolVersion(message.AcceptedDataProtocolVersion);
+        var acceptedVersionIsV6 = IsNegotiableDataProtocolVersion(message.AcceptedDataProtocolVersion);
         lock (gate)
         {
             context = outboundTransfer;
@@ -1655,7 +1752,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 return;
             }
 
-            if (!acceptedVersionIsV4)
+            if (!acceptedVersionIsV6)
             {
                 // Leave SendStarted false so the transfer remains visibly rejected by negotiation,
                 // not partially started.
@@ -1664,26 +1761,26 @@ public sealed partial class SessionFileTransferService : IDisposable
             {
                 context.SendStarted = true;
                 context.SessionId = message.SessionId;
-                context.NegotiatedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5;
+                context.NegotiatedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6;
                 context.State = FileTransferTransferState.PreparingMetadata;
                 context.StatusMessage = "Preparing file metadata.";
             }
         }
 
-        if (!acceptedVersionIsV4)
+        if (!acceptedVersionIsV6)
         {
             LogLegacyNegotiationRejected(
                 message.TransferId,
                 message.SessionId,
                 FileTransferDirection.Outbound,
-                offeredVersion: FileTransferProtocol.ProtocolVersionV5,
+                offeredVersion: FileTransferProtocol.ProtocolVersionV6,
                 acceptedVersion: message.AcceptedDataProtocolVersion,
-                reason: "accept_protocol_not_v5");
+                reason: "accept_protocol_not_v6");
             await TransitionOutboundToTerminalAsync(
                 context,
                 FileTransferTransferState.Failed,
                 errorCode: TransportIncompatibleErrorCode,
-                statusMessage: "Receiver did not accept the required V5 file-transfer protocol.",
+                statusMessage: "Receiver did not accept the required V6 file-transfer protocol.",
                 notifyPeer: false,
                 cancelReason: null,
                 ct: CancellationToken.None).ConfigureAwait(false);
@@ -1695,6 +1792,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             FileTransferDirection.Outbound,
             message.TransferId,
             sessionId: message.SessionId);
+        StartOutboundV6HeartbeatLoop(context, "accept_received");
         RaiseTransferChanged(CreateSnapshot());
         _ = PrepareAndStartAcceptedOutboundTransferAsync(context);
     }
@@ -1759,13 +1857,13 @@ public sealed partial class SessionFileTransferService : IDisposable
                         FileTransferDirection.Inbound,
                         offeredVersion: message.ProtocolVersion,
                         acceptedVersion: context.NegotiatedDataProtocolVersion,
-                        reason: "session_open_protocol_not_v5");
-                    LogV5SessionOpenRejected(
+                        reason: "session_open_protocol_not_v6");
+                    LogV6SessionOpenRejected(
                         message.TransferId,
                         message.SessionId,
                         FileTransferDirection.Inbound,
                         message.ProtocolVersion,
-                        "session_open_protocol_not_v5");
+                        "session_open_protocol_not_v6");
                 }
                 context = null;
             }
@@ -1780,12 +1878,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             return;
         }
 
-        if (message.ProtocolVersion == FileTransferProtocol.ProtocolVersionV5)
+        if (message.ProtocolVersion == FileTransferProtocol.ProtocolVersionV6)
         {
-            LogV5Negotiated(message.TransferId, message.SessionId, FileTransferDirection.Inbound);
+            LogV6Negotiated(message.TransferId, message.SessionId, FileTransferDirection.Inbound);
             if ((sessionScreenShareActive || sessionScreenShareDegraded) && !ShouldAllowV4DuringScreenShare())
             {
-                LogV5SessionOpenRejected(
+                LogV6SessionOpenRejected(
                     message.TransferId,
                     message.SessionId,
                     FileTransferDirection.Inbound,
@@ -1795,9 +1893,9 @@ public sealed partial class SessionFileTransferService : IDisposable
                     context,
                     FileTransferTransferState.Failed,
                     errorCode: V4FileOnlyRequiredErrorCode,
-                    statusMessage: "V5 file-transfer receive is currently file-only.",
+                    statusMessage: "V6 file-transfer receive is currently file-only.",
                     sendError: true,
-                    errorMessage: "V5 file-transfer receive is currently file-only.",
+                    errorMessage: "V6 file-transfer receive is currently file-only.",
                     cancelReason: null,
                     ct: CancellationToken.None).ConfigureAwait(false);
                 return;
@@ -1820,8 +1918,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
                     ReplaceInboundDataSessionLocked(context, session);
                     context.PullSessionActive = true;
-                    context.NegotiatedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5;
-                    context.StatusMessage = "Waiting for V5 file-transfer manifest.";
+                    context.NegotiatedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6;
+                    context.StatusMessage = "Waiting for V6 file-transfer manifest.";
                 }
 
                 LogTransferInfo(
@@ -1830,7 +1928,8 @@ public sealed partial class SessionFileTransferService : IDisposable
                     message.TransferId,
                     sessionId: message.SessionId,
                     reason: $"role={message.SessionRole}; protocol_version={message.ProtocolVersion}; chunk_size_bytes={message.ChunkSizeBytes}; pipeline_depth={message.InitialPipelineDepth}");
-                _ = RunInboundV4SparseReceiveLoopAsync(context, message);
+                StartInboundV6HeartbeatLoop(context, "session_open_received");
+                _ = RunInboundV6ReceiverAsync(context, message);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1840,7 +1939,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                     errorCode: InvalidStateErrorCode,
                     statusMessage: ex.Message,
                     sendError: true,
-                    errorMessage: "Could not open the dedicated V5 file-transfer session.",
+                    errorMessage: "Could not open the dedicated V6 file-transfer session.",
                     cancelReason: null,
                     ct: CancellationToken.None).ConfigureAwait(false);
             }
@@ -1856,8 +1955,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             return;
         }
 
-        EnqueueInboundLifecycle(
-            "filetransfer data session availability changed",
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_data_session_availability_observed; session_id={dataSession.SessionId}; transfer_id={dataSession.TransferId}; is_available={(e.IsAvailable ? 1 : 0)}; reason={FormatProtocolLogValue(e.Reason)}; requires_resume_request={(e.RequiresResumeRequest ? 1 : 0)}; handoff_kind={FormatFileTransferTransportHandoffKind(e.HandoffKind)}; target_transport={FormatFileTransferTransportKind(e.TargetTransport)}");
+
+        RunHardPriorityInboundLifecycle(
+            "data_session_availability",
             () => HandleDataSessionAvailabilityChangedAsync(dataSession, e));
     }
 
@@ -1873,6 +1976,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         string? inboundPausedSessionId = null;
         bool outboundResumed = false;
         bool inboundResumed = false;
+        bool outboundEpochStartedWhileUnavailable = false;
+        bool inboundEpochStartedWhileUnavailable = false;
 
         lock (gate)
         {
@@ -1892,10 +1997,24 @@ public sealed partial class SessionFileTransferService : IDisposable
                         outboundToResume = outbound;
                     }
                 }
-                else if (TryPauseOutboundTransportLocked(outbound, availability.Reason, availability.RequiresResumeRequest))
+                else
                 {
-                    outboundPausedTransferId = outbound.TransferId;
-                    outboundPausedSessionId = outbound.SessionId;
+                    if (TryPauseOutboundTransportLocked(outbound, availability.Reason, availability.RequiresResumeRequest))
+                    {
+                        outboundPausedTransferId = outbound.TransferId;
+                        outboundPausedSessionId = outbound.SessionId;
+                    }
+
+                    if (TryStartOutboundV6TransportEpochWhileUnavailableLocked(
+                            outbound,
+                            availability.Reason,
+                            availability.RequiresResumeRequest,
+                            availability.HandoffKind,
+                            availability.TargetTransport))
+                    {
+                        outboundEpochStartedWhileUnavailable = true;
+                        outboundToResume = outbound;
+                    }
                 }
             }
 
@@ -1915,10 +2034,24 @@ public sealed partial class SessionFileTransferService : IDisposable
                         inboundToResume = inbound;
                     }
                 }
-                else if (TryPauseInboundTransportLocked(inbound, availability.Reason, availability.RequiresResumeRequest))
+                else
                 {
-                    inboundPausedTransferId = inbound.TransferId;
-                    inboundPausedSessionId = inbound.SessionId;
+                    if (TryPauseInboundTransportLocked(inbound, availability.Reason, availability.RequiresResumeRequest))
+                    {
+                        inboundPausedTransferId = inbound.TransferId;
+                        inboundPausedSessionId = inbound.SessionId;
+                    }
+
+                    if (TryStartInboundV6TransportEpochWhileUnavailableLocked(
+                            inbound,
+                            availability.Reason,
+                            availability.RequiresResumeRequest,
+                            availability.HandoffKind,
+                            availability.TargetTransport))
+                    {
+                        inboundEpochStartedWhileUnavailable = true;
+                        inboundToResume = inbound;
+                    }
                 }
             }
         }
@@ -1938,11 +2071,20 @@ public sealed partial class SessionFileTransferService : IDisposable
             LogTransportResumed(FileTransferDirection.Outbound, outboundToResume.TransferId, outboundToResume.SessionId, availability.Reason, availability.RequiresResumeRequest);
             if (availability.RequiresResumeRequest)
             {
+                await AnnounceAndProbeOutboundV6TransportEpochAsync(outboundToResume).ConfigureAwait(false);
                 LocalOperationalLog.Info(
                     "FileTransferService",
                     $"event=filetransfer_transport_rebind_generation_started; direction=outbound; transfer_id={outboundToResume.TransferId}; session_id={outboundToResume.SessionId}; reason={FormatProtocolLogValue(availability.Reason)}; rebind_generation={outboundToResume.PullTransportRebindGeneration}; remote_committed_chunk={outboundToResume.RemoteNextExpectedChunkIndex}; highest_sent_chunk={Math.Max(-1, outboundToResume.ChunksAcceptedForTransport - 1)}");
                 SignalOutboundV4SenderPump(outboundToResume);
             }
+        }
+        else if (outboundEpochStartedWhileUnavailable && outboundToResume is not null)
+        {
+            await AnnounceAndProbeOutboundV6TransportEpochAsync(outboundToResume).ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_transport_epoch_started_while_unavailable; direction=outbound; transfer_id={outboundToResume.TransferId}; session_id={outboundToResume.SessionId}; reason={FormatProtocolLogValue(availability.Reason)}; rebind_generation={outboundToResume.PullTransportRebindGeneration}; target_transport={FormatFileTransferTransportKind(availability.TargetTransport)}");
+            SignalOutboundV4SenderPump(outboundToResume);
         }
 
         if (inboundResumed && inboundToResume is not null)
@@ -1950,6 +2092,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             LogTransportResumed(FileTransferDirection.Inbound, inboundToResume.TransferId, inboundToResume.SessionId, availability.Reason, availability.RequiresResumeRequest);
             if (availability.RequiresResumeRequest)
             {
+                await AnnounceAndProbeInboundV6TransportEpochAsync(inboundToResume).ConfigureAwait(false);
                 LocalOperationalLog.Info(
                     "FileTransferService",
                     $"event=filetransfer_transport_rebind_generation_started; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(availability.Reason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; committed_chunk={inboundToResume.NextChunkIndex}; highest_received_chunk={inboundToResume.PullHighestReceivedChunkIndex}; missing_range_count={(inboundToResume.NextChunkIndex <= inboundToResume.PullHighestReceivedChunkIndex ? 1 : 0)}");
@@ -1970,6 +2113,13 @@ public sealed partial class SessionFileTransferService : IDisposable
                 }
             }
         }
+        else if (inboundEpochStartedWhileUnavailable && inboundToResume is not null)
+        {
+            await AnnounceAndProbeInboundV6TransportEpochAsync(inboundToResume).ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_transport_epoch_started_while_unavailable; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(availability.Reason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; target_transport={FormatFileTransferTransportKind(availability.TargetTransport)}");
+        }
     }
 
     private Task HandleIncomingCancelAsync(FileTransferCancelV1 message)
@@ -1980,20 +2130,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         InboundTransferContext? inbound;
         lock (gate)
         {
-            outbound = outboundTransfer is not null &&
-                       !outboundTransfer.IsTerminal &&
-                       string.Equals(outboundTransfer.TransferId, message.TransferId, StringComparison.Ordinal)
+            outbound = IsOutboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId)
                 ? outboundTransfer
                 : null;
-            inbound = inboundTransfer is not null &&
-                      !inboundTransfer.IsTerminal &&
-                      string.Equals(inboundTransfer.TransferId, message.TransferId, StringComparison.Ordinal)
+            inbound = IsInboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId)
                 ? inboundTransfer
                 : null;
         }
 
         if (outbound is not null)
         {
+            TouchOutboundV6PeerLiveness(outbound, "cancel");
             LogTransferInfo(
                 "cancel_received",
                 FileTransferDirection.Outbound,
@@ -2015,6 +2162,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         if (inbound is not null)
         {
+            TouchInboundV6PeerLiveness(inbound, "cancel");
             LogTransferInfo(
                 "cancel_received",
                 FileTransferDirection.Inbound,
@@ -2046,20 +2194,17 @@ public sealed partial class SessionFileTransferService : IDisposable
         InboundTransferContext? inbound;
         lock (gate)
         {
-            outbound = outboundTransfer is not null &&
-                       !outboundTransfer.IsTerminal &&
-                       string.Equals(outboundTransfer.TransferId, message.TransferId, StringComparison.Ordinal)
+            outbound = IsOutboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId)
                 ? outboundTransfer
                 : null;
-            inbound = inboundTransfer is not null &&
-                      !inboundTransfer.IsTerminal &&
-                      string.Equals(inboundTransfer.TransferId, message.TransferId, StringComparison.Ordinal)
+            inbound = IsInboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId)
                 ? inboundTransfer
                 : null;
         }
 
         if (outbound is not null)
         {
+            TouchOutboundV6PeerLiveness(outbound, "error");
             LogTransferInfo(
                 "error_received",
                 FileTransferDirection.Outbound,
@@ -2082,6 +2227,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         if (inbound is not null)
         {
+            TouchInboundV6PeerLiveness(inbound, "error");
             LogTransferInfo(
                 "error_received",
                 FileTransferDirection.Inbound,
@@ -2118,9 +2264,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             completionEligible = context is not null &&
                 !context.IsTerminal &&
                 string.Equals(context.TransferId, message.TransferId, StringComparison.Ordinal) &&
+                string.Equals(context.SessionId, message.SessionId, StringComparison.Ordinal) &&
                 (
                     context.State == FileTransferTransferState.AwaitingCompletion ||
-                    (context.PullSessionActive && context.ChunksTransferred >= context.ChunkCount && context.ChunkCount > 0)
+                    context.PullSessionActive
                 ) &&
                 context.FileSizeBytes == message.FileSizeBytes &&
                 string.Equals(context.Sha256Base64, message.Sha256Base64, StringComparison.Ordinal);
@@ -2145,6 +2292,10 @@ public sealed partial class SessionFileTransferService : IDisposable
             message.TransferId,
             sessionId: message.SessionId,
             fileSizeBytes: message.FileSizeBytes);
+        TouchOutboundV6PeerLiveness(context, "complete");
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_lifecycle_priority_received; kind=complete; transfer_id={message.TransferId}; session_id={message.SessionId}; direction=outbound; file_size_bytes={message.FileSizeBytes}");
         return TransitionOutboundToTerminalAsync(
             context,
             FileTransferTransferState.Completed,
@@ -2154,6 +2305,105 @@ public sealed partial class SessionFileTransferService : IDisposable
             cancelReason: null,
             ct: CancellationToken.None);
     }
+
+    private Task HandleIncomingPauseControlAsync(FileTransferPauseControlV6 message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+
+        OutboundTransferContext? outbound;
+        InboundTransferContext? inbound;
+        lock (gate)
+        {
+            outbound = IsOutboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId)
+                ? outboundTransfer
+                : null;
+            inbound = IsInboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId)
+                ? inboundTransfer
+                : null;
+        }
+
+        var frame = new FileTransferPauseControlFrameV6
+        {
+            SessionId = message.SessionId,
+            TransferId = message.TransferId,
+            Epoch = message.Epoch,
+            Paused = message.Paused,
+            Reason = message.Reason,
+            TransportEpoch = message.TransportEpoch,
+            BatchId = message.BatchId,
+            RepairRequestId = message.RepairRequestId,
+            Priority = message.Priority,
+            RecoveryMode = message.RecoveryMode,
+        };
+
+        if (outbound is not null)
+        {
+            TouchOutboundV6PeerLiveness(outbound, "pause_control");
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_lifecycle_priority_received; kind=pause_control; transfer_id={message.TransferId}; session_id={message.SessionId}; direction=outbound; paused={(message.Paused ? 1 : 0)}; reason={FormatProtocolLogValue(NormalizeReason(message.Reason) ?? "(none)")}");
+            ApplyOutboundV4PauseControl(outbound, frame);
+            SignalOutboundV4SenderPump(outbound);
+            return Task.CompletedTask;
+        }
+
+        if (inbound is not null)
+        {
+            TouchInboundV6PeerLiveness(inbound, "pause_control");
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_lifecycle_priority_received; kind=pause_control; transfer_id={message.TransferId}; session_id={message.SessionId}; direction=inbound; paused={(message.Paused ? 1 : 0)}; reason={FormatProtocolLogValue(NormalizeReason(message.Reason) ?? "(none)")}");
+            if (ApplyInboundV4PauseControl(inbound, frame))
+            {
+                _ = Task.Run(
+                    () => FlushInboundV6PausedProgressAsync(inbound, "peer_resumed"),
+                    CancellationToken.None);
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private Task HandleIncomingHeartbeatAsync(FileTransferHeartbeatV6 message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+
+        OutboundTransferContext? outbound;
+        InboundTransferContext? inbound;
+        lock (gate)
+        {
+            outbound = IsOutboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId)
+                ? outboundTransfer
+                : null;
+            inbound = IsInboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId)
+                ? inboundTransfer
+                : null;
+        }
+
+        if (outbound is not null)
+        {
+            TouchOutboundV6PeerLiveness(outbound, "heartbeat");
+        }
+
+        if (inbound is not null)
+        {
+            TouchInboundV6PeerLiveness(inbound, "heartbeat");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private bool IsOutboundLifecycleMessageMatchLocked(string sessionId, string transferId)
+        => outboundTransfer is not null &&
+           !outboundTransfer.IsTerminal &&
+           string.Equals(outboundTransfer.TransferId, transferId, StringComparison.Ordinal) &&
+           string.Equals(outboundTransfer.SessionId, sessionId, StringComparison.Ordinal);
+
+    private bool IsInboundLifecycleMessageMatchLocked(string sessionId, string transferId)
+        => inboundTransfer is not null &&
+           !inboundTransfer.IsTerminal &&
+           string.Equals(inboundTransfer.TransferId, transferId, StringComparison.Ordinal) &&
+           string.Equals(inboundTransfer.SessionId, sessionId, StringComparison.Ordinal);
 
 
     private async Task FinalizeInboundTransferAsync(InboundTransferContext context, CancellationToken ct)
@@ -2188,7 +2438,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             destination = context.WriteDestination;
         }
 
-        var isV4 = negotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV5;
+        var isV4 = negotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6;
         if (isV4)
         {
             LocalOperationalLog.Info(
@@ -2334,32 +2584,21 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         try
         {
-            if (context.PullSessionActive && context.DataSession is not null)
-            {
-                if (!await SendInboundV4CompleteAsync(
-                        context,
-                        sessionId,
-                        transferId,
-                        context.FileSizeBytes,
-                        computedHash,
-                        ct).ConfigureAwait(false))
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(LifecyclePrioritySendTimeoutMs));
+            using var linkedCompletionCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+            var currentTransport = GetTransportOrThrow();
+            await currentTransport.SendFileTransferCompleteAsync(
+                new FileTransferCompleteV1
                 {
-                    return;
-                }
-            }
-            else
-            {
-                var currentTransport = GetTransportOrThrow();
-                await currentTransport.SendFileTransferCompleteAsync(
-                    new FileTransferCompleteV1
-                    {
-                        SessionId = sessionId,
-                        TransferId = transferId,
-                        FileSizeBytes = context.FileSizeBytes,
-                        Sha256Base64 = computedHash,
-                    },
-                    ct).ConfigureAwait(false);
-            }
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileSizeBytes = context.FileSizeBytes,
+                    Sha256Base64 = computedHash,
+                },
+                linkedCompletionCts.Token).ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_lifecycle_priority_sent; kind=complete; transfer_id={transferId}; session_id={sessionId}; path=control; file_size_bytes={context.FileSizeBytes}");
 
             await TransitionInboundToTerminalAsync(
                 context,
@@ -2397,7 +2636,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         var buffer = ArrayPool<byte>.Shared.Rent(ReceiverWriteBatchMaxBytes);
         long remaining = context.FileSizeBytes;
         long readBytes = 0;
-        var isV4 = context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV5;
+        var isV4 = context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6;
         var completed = false;
         if (isV4)
         {
@@ -2498,10 +2737,17 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         return IsTransportIncompatible(ex)
             ? TransportIncompatibleErrorCode
+            : IsTransportDisconnected(ex)
+                ? DisconnectedErrorCode
             : IsPayloadBudgetExceeded(ex)
                 ? PayloadBudgetExceededErrorCode
-            : fallbackErrorCode;
+                : fallbackErrorCode;
     }
+
+    private static string ClassifyOutboundFailureStatusMessage(Exception ex, string errorCode)
+        => string.Equals(errorCode, DisconnectedErrorCode, StringComparison.Ordinal)
+            ? "Peer disconnected."
+            : ex.Message;
 
     private static bool TryGetSenderCacheErrorCode(Exception ex, out string errorCode)
     {
@@ -2533,6 +2779,25 @@ public sealed partial class SessionFileTransferService : IDisposable
                 invalidOperationException.Message.Contains(
                     "Installed bridge does not support",
                     StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsTransportDisconnected(Exception ex)
+    {
+        for (Exception? current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is ObjectDisposedException)
+            {
+                return true;
+            }
+
+            if (current is InvalidOperationException invalidOperationException &&
+                invalidOperationException.Message.Contains("Bridge disconnected", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }
@@ -2676,7 +2941,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 try
                 {
                     var payload = FileTransferDataFrameCodec.Serialize(
-                        new FileTransferChunkBatchFrameV5
+                        new FileTransferChunkBatchFrameV6
                         {
                             SessionId = string.IsNullOrWhiteSpace(context.SessionId) ? new string('s', 32) : context.SessionId,
                             TransferId = context.TransferId,
@@ -2691,14 +2956,14 @@ public sealed partial class SessionFileTransferService : IDisposable
                     return false;
                 }
             },
-            "No valid V5 file-transfer chunk size fits within the payload budget.");
+            "No valid V6 file-transfer chunk size fits within the payload budget.");
     }
 
     private static bool IsNegotiableDataProtocolVersion(int? protocolVersion)
-        => protocolVersion == FileTransferProtocol.ProtocolVersionV5;
+        => protocolVersion == FileTransferProtocol.ProtocolVersionV6;
 
-    private static bool IsV5StreamingTransport(IFileTransferSignalingTransport? currentTransport)
-        => currentTransport is IFileTransferProtocolCapabilities { SupportsFileTransferV5Streaming: true };
+    private static bool IsV6StreamingTransport(IFileTransferSignalingTransport? currentTransport)
+        => currentTransport is IFileTransferProtocolCapabilities { SupportsFileTransferV6Streaming: true };
 
     private static bool IsV4MixedScreenShareEnabled()
     {
@@ -2737,7 +3002,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static bool IsActiveV4MixedOutboundTransferLocked(OutboundTransferContext? context)
         => context is not null &&
            !context.IsTerminal &&
-           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV5 &&
+           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
            (context.V4MixedScreenShareTransfer ||
             context.State is FileTransferTransferState.PreparingMetadata
                 or FileTransferTransferState.AwaitingStart
@@ -2747,7 +3012,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static bool IsActiveV4MixedInboundTransferLocked(InboundTransferContext? context)
         => context is not null &&
            !context.IsTerminal &&
-           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV5 &&
+           context.NegotiatedDataProtocolVersion == FileTransferProtocol.ProtocolVersionV6 &&
            (context.V4MixedScreenShareTransfer ||
             context.State is FileTransferTransferState.AwaitingMetadata
                 or FileTransferTransferState.Receiving
@@ -2762,7 +3027,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v5_mixed_enabled; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; direction={direction}; screen_share_active={(sessionScreenShareActive ? 1 : 0)}; screen_share_degraded={(sessionScreenShareDegraded ? 1 : 0)}; screen_share_observed={(sessionScreenShareObserved ? 1 : 0)}; screen_share_policy_hint=catch_up_only; credit_window_chunks={ResolveV4StateCreditWindowChunksForCurrentMode()}; normal_batch_segments={ResolveV4MaxBatchSegments(repairSend: false)}");
+            $"event=filetransfer_v6_mixed_enabled; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; direction={direction}; screen_share_active={(sessionScreenShareActive ? 1 : 0)}; screen_share_degraded={(sessionScreenShareDegraded ? 1 : 0)}; screen_share_observed={(sessionScreenShareObserved ? 1 : 0)}; screen_share_policy_hint=catch_up_only; credit_window_chunks={ResolveV4StateCreditWindowChunksForCurrentMode()}; normal_batch_segments={ResolveV4MaxBatchSegments(repairSend: false)}");
     }
 
     private static FileTransferTransportProfileKind ResolveTransportProfileKind(IFileTransferSignalingTransport? currentTransport)
@@ -2815,23 +3080,26 @@ public sealed partial class SessionFileTransferService : IDisposable
         LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_legacy_negotiation_rejected; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; direction={direction}; offered_version={FormatProtocolLogValue(offeredVersion)}; accepted_version={FormatProtocolLogValue(acceptedVersion)}; reason={reason}");
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_v6_required_transport_incompatible; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; direction={direction}; required_protocol_version={FileTransferProtocol.ProtocolVersionV6}; offered_version={FormatProtocolLogValue(offeredVersion)}; accepted_version={FormatProtocolLogValue(acceptedVersion)}; reason={reason}");
     }
 
-    private static void LogV5RequiredTransportIncompatible(string transferId, string sessionId)
+    private static void LogV6RequiredTransportIncompatible(string transferId, string sessionId)
     {
         LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_v5_required_transport_incompatible; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; required_protocol_version={FileTransferProtocol.ProtocolVersionV5}");
+            $"event=filetransfer_v6_required_transport_incompatible; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; required_protocol_version={FileTransferProtocol.ProtocolVersionV6}");
     }
 
-    private static void LogV5Negotiated(string transferId, string sessionId, FileTransferDirection direction)
+    private static void LogV6Negotiated(string transferId, string sessionId, FileTransferDirection direction)
     {
         LocalOperationalLog.Info(
             "FileTransferService",
-            $"event=filetransfer_v5_negotiated; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; direction={direction}; protocol_version={FileTransferProtocol.ProtocolVersionV5}");
+            $"event=filetransfer_v6_negotiated; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; direction={direction}; protocol_version={FileTransferProtocol.ProtocolVersionV6}");
     }
 
-    private static void LogV5SessionOpenRejected(
+    private static void LogV6SessionOpenRejected(
         string transferId,
         string sessionId,
         FileTransferDirection direction,
@@ -2840,7 +3108,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     {
         LocalOperationalLog.Warn(
             "FileTransferService",
-            $"event=filetransfer_v5_session_open_rejected; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; direction={direction}; protocol_version={protocolVersion}; reason={reason}");
+            $"event=filetransfer_v6_session_open_rejected; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; direction={direction}; protocol_version={protocolVersion}; reason={reason}");
     }
 
     private static string FormatProtocolLogValue(string? value)
@@ -3099,7 +3367,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public string? Sha256Base64 { get; set; }
 
-        public int NegotiatedDataProtocolVersion { get; set; } = FileTransferProtocol.ProtocolVersionV5;
+        public int NegotiatedDataProtocolVersion { get; set; } = FileTransferProtocol.ProtocolVersionV6;
 
         public long BytesTransferred { get; set; }
 
@@ -3169,6 +3437,12 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public DateTimeOffset? PullV4LastPeerFrameReceivedUtc { get; set; }
 
+        public bool V6HeartbeatLoopStarted { get; set; }
+
+        public long V6HeartbeatSequence { get; set; }
+
+        public DateTimeOffset? V6LastPeerLivenessUtc { get; set; }
+
         public bool PullV4ExpandedWindowActive { get; set; }
 
         public bool PullV4LimitedWindowActive { get; set; }
@@ -3190,6 +3464,48 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int PullTransportRebindGeneration { get; set; }
 
         public long LastRecoveredV5TransportHandoffEpoch { get; set; }
+
+        public long LastRecoveredV6TransportEpoch { get; set; }
+
+        public FileTransferTransportHandoffKind LastRecoveredV6TransportEpochKind { get; set; }
+
+        public FileTransferTransportKind LastRecoveredV6TransportTargetTransport { get; set; }
+
+        public V6TransportEpoch? V6TransportEpoch { get; set; }
+
+        public int V6LastReceiverStateEpoch { get; set; } = -1;
+
+        public int V6NextSequentialSourceChunkIndex { get; set; }
+
+        public SortedSet<int> V6PriorityRequestedChunks { get; } = [];
+
+        public SortedSet<int> V6NormalRequestedChunks { get; } = [];
+
+        public Dictionary<int, V6OutboundChunkRequestMetadata> V6RequestedChunkMetadataByChunkIndex { get; } = new();
+
+        public HashSet<string> V6AppliedFrontierRequestIds { get; } = new(StringComparer.Ordinal);
+
+        public HashSet<string> V6PendingEpochRepairRequestIds { get; } = new(StringComparer.Ordinal);
+
+        public string? V6CurrentNormalRequestKey { get; set; }
+
+        public string V6SenderPumpLastWakeReason { get; set; } = "startup";
+
+        public bool V6UseRegularNknRedundantData { get; set; }
+
+        public long V6TunaRedundantDataEpochId { get; set; }
+
+        public long V6TunaRedundantDataSatisfiedEpochId { get; set; }
+
+        public DateTimeOffset? V6TunaRedundantDataProbeStartedUtc { get; set; }
+
+        public long V6TunaRedundantDataProbeStartedBytes { get; set; }
+
+        public long V6RegularNknRedundantDataEpochId { get; set; }
+
+        public long V6RegularNknRedundantDataDisabledEpochId { get; set; }
+
+        public int V6RegularNknRedundantDataBatchCount { get; set; }
 
         public bool PullPostTunaRecoveryActive { get; set; }
 
@@ -3506,6 +3822,22 @@ public sealed partial class SessionFileTransferService : IDisposable
         public bool FrontierTailRepair { get; init; }
     }
 
+    private enum V6ReceiveDestinationMode
+    {
+        Unknown = 0,
+        SparseSeekable = 1,
+        ContiguousOnly = 2,
+    }
+
+    private readonly record struct V6OutboundChunkRequestMetadata(
+        string RequestKey,
+        bool Priority,
+        long TransportEpoch,
+        string? RepairRequestId,
+        string? PriorityName,
+        string? RecoveryMode,
+        bool ForceRegularNknBulk = false);
+
     private sealed class InboundTransferContext
     {
         public InboundTransferContext(FileTransferOfferV2 offer)
@@ -3532,7 +3864,7 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int OfferedDataProtocolVersion { get; }
 
-        public int NegotiatedDataProtocolVersion { get; set; } = FileTransferProtocol.ProtocolVersionV5;
+        public int NegotiatedDataProtocolVersion { get; set; } = FileTransferProtocol.ProtocolVersionV6;
 
         public FileTransferTransferState State { get; set; } = FileTransferTransferState.PendingDecision;
 
@@ -3752,6 +4084,30 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public long LastRecoveredV5TransportHandoffEpoch { get; set; }
 
+        public long LastRecoveredV6TransportEpoch { get; set; }
+
+        public FileTransferTransportHandoffKind LastRecoveredV6TransportEpochKind { get; set; }
+
+        public FileTransferTransportKind LastRecoveredV6TransportTargetTransport { get; set; }
+
+        public V6ReceiveDestinationMode V6DestinationMode { get; set; } = V6ReceiveDestinationMode.Unknown;
+
+        public int V6ReceiverStateEpoch { get; set; }
+
+        public long V6ReceiverTransportEpoch { get; set; }
+
+        public V6TransportEpoch? V6TransportEpoch { get; set; }
+
+        public long V6FrontierRequestSequence { get; set; }
+
+        public DateTimeOffset? V6LastReceiverStateSentUtc { get; set; }
+
+        public DateTimeOffset? V6LastFrontierRequestSentUtc { get; set; }
+
+        public int V6LastFrontierRequestChunkIndex { get; set; } = -1;
+
+        public string? V6LastFrontierRequestId { get; set; }
+
         public bool PullPostTunaRecoveryActive { get; set; }
 
         public int PullPostTunaRecoveryGeneration { get; set; }
@@ -3883,6 +4239,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int PullV4LastRepairRequestHighestReceivedChunkIndex { get; set; } = -1;
 
         public DateTimeOffset? PullV4LastPeerFrameReceivedUtc { get; set; }
+
+        public bool V6HeartbeatLoopStarted { get; set; }
+
+        public long V6HeartbeatSequence { get; set; }
+
+        public DateTimeOffset? V6LastPeerLivenessUtc { get; set; }
+
+        public int V6LastReceiverStateCommittedChunkIndex { get; set; } = -1;
 
         public FileTransferTransportProfileKind TransportProfileKind { get; set; } = FileTransferTransportProfileKind.Default;
 

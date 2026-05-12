@@ -54,6 +54,36 @@ public static class FileTransferPayloadCodec
         return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
     }
 
+    public static byte[] Serialize(FileTransferPauseControlV6 msg)
+    {
+        ArgumentNullException.ThrowIfNull(msg);
+        return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
+    }
+
+    public static byte[] Serialize(FileTransferHeartbeatV6 msg)
+    {
+        ArgumentNullException.ThrowIfNull(msg);
+        return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
+    }
+
+    public static byte[] Serialize(FileTransferTransportEpochV6 msg)
+    {
+        ArgumentNullException.ThrowIfNull(msg);
+        return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
+    }
+
+    public static byte[] Serialize(FileTransferTransportProbeV6 msg)
+    {
+        ArgumentNullException.ThrowIfNull(msg);
+        return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
+    }
+
+    public static byte[] Serialize(FileTransferRepairProofV6 msg)
+    {
+        ArgumentNullException.ThrowIfNull(msg);
+        return JsonSerializer.SerializeToUtf8Bytes(msg, JsonOptions);
+    }
+
     public static bool TryDeserializeOffer(ReadOnlySpan<byte> utf8Json, out FileTransferOfferV2 msg)
     {
         msg = default!;
@@ -172,7 +202,7 @@ public static class FileTransferPayloadCodec
     }
 
     internal static bool IsSupportedDataProtocolVersion(int protocolVersion)
-        => protocolVersion == FileTransferProtocol.ProtocolVersionV5;
+        => protocolVersion == FileTransferProtocol.ProtocolVersionV6;
 
     internal static bool TryNormalizeRequiredProtocolVersion(int? protocolVersion, out int normalizedProtocolVersion)
     {
@@ -246,6 +276,146 @@ public static class FileTransferPayloadCodec
             SessionId = sessionId,
             TransferId = transferId,
             Sha256Base64 = sha256Base64,
+        };
+        return true;
+    }
+
+    public static bool TryDeserializePauseControl(ReadOnlySpan<byte> utf8Json, out FileTransferPauseControlV6 msg)
+    {
+        msg = default!;
+        if (!TryDeserialize(utf8Json, out FileTransferPauseControlV6? parsed) ||
+            parsed is null ||
+            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.PauseControlFrameTypeV6, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
+            parsed.Epoch < 0 ||
+            parsed.TransportEpoch < 0 ||
+            !TryNormalizeOptional(parsed.Reason, FileTransferProtocol.MaxReasonLength, out var reason) ||
+            !TryNormalizeOptional(parsed.BatchId, FileTransferProtocol.MaxReasonLength, out var batchId) ||
+            !TryNormalizeOptional(parsed.RepairRequestId, FileTransferProtocol.MaxReasonLength, out var repairRequestId) ||
+            !TryNormalizeOptional(parsed.Priority, FileTransferProtocol.MaxReasonLength, out var priority) ||
+            !TryNormalizeOptional(parsed.RecoveryMode, FileTransferProtocol.MaxReasonLength, out var recoveryMode))
+        {
+            return false;
+        }
+
+        msg = parsed with
+        {
+            Kind = FileTransferProtocol.Kind,
+            Type = FileTransferProtocol.PauseControlFrameTypeV6,
+            SessionId = sessionId,
+            TransferId = transferId,
+            Reason = reason,
+            BatchId = batchId,
+            RepairRequestId = repairRequestId,
+            Priority = priority,
+            RecoveryMode = recoveryMode,
+        };
+        return true;
+    }
+
+    public static bool TryDeserializeHeartbeat(ReadOnlySpan<byte> utf8Json, out FileTransferHeartbeatV6 msg)
+    {
+        msg = default!;
+        if (!TryDeserialize(utf8Json, out FileTransferHeartbeatV6? parsed) ||
+            parsed is null ||
+            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.HeartbeatFrameTypeV6, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
+            parsed.TransportEpoch < 0 ||
+            parsed.Sequence <= 0 ||
+            parsed.SentUnixTimeMilliseconds <= 0)
+        {
+            return false;
+        }
+
+        msg = parsed with
+        {
+            Kind = FileTransferProtocol.Kind,
+            Type = FileTransferProtocol.HeartbeatFrameTypeV6,
+            SessionId = sessionId,
+            TransferId = transferId,
+        };
+        return true;
+    }
+
+    public static bool TryDeserializeTransportEpoch(ReadOnlySpan<byte> utf8Json, out FileTransferTransportEpochV6 msg)
+    {
+        msg = default!;
+        if (!TryDeserialize(utf8Json, out FileTransferTransportEpochV6? parsed) ||
+            parsed is null ||
+            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.TransportEpochFrameTypeV6, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
+            parsed.TransportEpoch <= 0 ||
+            !TryNormalizeRequiredBounded(parsed.State, FileTransferProtocol.MaxReasonLength, out var state) ||
+            !TryNormalizeOptional(parsed.HandoffKind, FileTransferProtocol.MaxReasonLength, out var handoffKind) ||
+            !TryNormalizeOptional(parsed.SourceTransport, FileTransferProtocol.MaxReasonLength, out var sourceTransport) ||
+            !TryNormalizeOptional(parsed.TargetTransport, FileTransferProtocol.MaxReasonLength, out var targetTransport) ||
+            !TryNormalizeOptional(parsed.Reason, FileTransferProtocol.MaxReasonLength, out var reason) ||
+            !TryNormalizeOptional(parsed.RecoveryMode, FileTransferProtocol.MaxReasonLength, out var recoveryMode))
+        {
+            return false;
+        }
+
+        msg = parsed with
+        {
+            Kind = FileTransferProtocol.Kind,
+            Type = FileTransferProtocol.TransportEpochFrameTypeV6,
+            SessionId = sessionId,
+            TransferId = transferId,
+            State = state,
+            HandoffKind = handoffKind,
+            SourceTransport = sourceTransport,
+            TargetTransport = targetTransport,
+            Reason = reason,
+            RecoveryMode = recoveryMode,
+        };
+        return true;
+    }
+
+    public static bool TryDeserializeTransportProbe(ReadOnlySpan<byte> utf8Json, out FileTransferTransportProbeV6 msg)
+    {
+        msg = default!;
+        if (!TryDeserialize(utf8Json, out FileTransferTransportProbeV6? parsed) ||
+            parsed is null ||
+            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.TransportProbeFrameTypeV6, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
+            parsed.TransportEpoch <= 0 ||
+            !TryNormalizeOptional(parsed.ProbeId, FileTransferProtocol.MaxReasonLength, out var probeId) ||
+            !TryNormalizeOptional(parsed.TargetTransport, FileTransferProtocol.MaxReasonLength, out var targetTransport))
+        {
+            return false;
+        }
+
+        msg = parsed with
+        {
+            Kind = FileTransferProtocol.Kind,
+            Type = FileTransferProtocol.TransportProbeFrameTypeV6,
+            SessionId = sessionId,
+            TransferId = transferId,
+            ProbeId = probeId,
+            TargetTransport = targetTransport,
+        };
+        return true;
+    }
+
+    public static bool TryDeserializeRepairProof(ReadOnlySpan<byte> utf8Json, out FileTransferRepairProofV6 msg)
+    {
+        msg = default!;
+        if (!TryDeserialize(utf8Json, out FileTransferRepairProofV6? parsed) ||
+            parsed is null ||
+            !TryNormalizeRequiredEnvelope(parsed.Kind, parsed.Type, FileTransferProtocol.RepairProofFrameTypeV6, parsed.SessionId, parsed.TransferId, out var sessionId, out var transferId) ||
+            parsed.TransportEpoch <= 0 ||
+            parsed.AppliedChunkCount < 0 ||
+            parsed.CommittedChunkIndex < 0 ||
+            !TryNormalizeRequiredBounded(parsed.RepairRequestId, FileTransferProtocol.MaxReasonLength, out var repairRequestId) ||
+            !TryNormalizeOptional(parsed.RecoveryMode, FileTransferProtocol.MaxReasonLength, out var recoveryMode))
+        {
+            return false;
+        }
+
+        msg = parsed with
+        {
+            Kind = FileTransferProtocol.Kind,
+            Type = FileTransferProtocol.RepairProofFrameTypeV6,
+            SessionId = sessionId,
+            TransferId = transferId,
+            RepairRequestId = repairRequestId,
+            RecoveryMode = recoveryMode,
         };
         return true;
     }

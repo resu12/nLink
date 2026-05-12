@@ -75,6 +75,9 @@ public record FileTransferChunkBatchFrameV4 : FileTransferChunkBatchFrame
 
     [JsonIgnore]
     public FileTransferV4RepairDeliveryMode RepairDeliveryMode { get; init; } = FileTransferV4RepairDeliveryMode.BulkOnly;
+
+    [JsonIgnore]
+    public bool ForceRegularNknBulk { get; init; }
 }
 
 public record FileTransferCompleteFrameV4 : FileTransferDataFrame
@@ -310,4 +313,219 @@ public record FileTransferRepairProofFrameV5 : FileTransferDataFrame
     public int CommittedChunkIndex { get; init; }
 
     public string? RecoveryMode { get; init; }
+}
+
+public interface IFileTransferTransportMetadataFrame
+{
+    long TransportEpoch { get; }
+
+    string? BatchId { get; }
+
+    string? RepairRequestId { get; }
+
+    string? Priority { get; }
+
+    string? RecoveryMode { get; }
+}
+
+public record FileTransferManifestFrameV6 : FileTransferManifestFrameV4, IFileTransferTransportMetadataFrame
+{
+    public FileTransferManifestFrameV6()
+    {
+        Type = FileTransferProtocol.ManifestFrameTypeV6;
+    }
+
+    public long TransportEpoch { get; init; }
+
+    public string? BatchId { get; init; }
+
+    public string? RepairRequestId { get; init; }
+
+    public string? Priority { get; init; }
+
+    public string? RecoveryMode { get; init; }
+}
+
+public record FileTransferReceiverStateFrameV6 : FileTransferStateFrameV4, IFileTransferTransportMetadataFrame
+{
+    public FileTransferReceiverStateFrameV6()
+    {
+        Type = FileTransferProtocol.ReceiverStateFrameTypeV6;
+    }
+
+    public long TransportEpoch { get; init; }
+
+    public string? BatchId { get; init; }
+
+    public string? RepairRequestId { get; init; }
+
+    public string? Priority { get; init; }
+
+    public string? RecoveryMode { get; init; }
+}
+
+public record FileTransferChunkBatchFrameV6 : FileTransferChunkBatchFrameV4, IFileTransferTransportMetadataFrame
+{
+    public FileTransferChunkBatchFrameV6()
+    {
+        Type = FileTransferProtocol.ChunkBatchFrameTypeV6;
+    }
+
+    public long TransportEpoch { get; init; }
+
+    public string? BatchId { get; init; }
+
+    public string? RepairRequestId { get; init; }
+
+    public string? Priority { get; init; }
+
+    public string? RecoveryMode { get; init; }
+}
+
+public record FileTransferTransportEpochFrameV6 : FileTransferDataFrame
+{
+    public FileTransferTransportEpochFrameV6()
+    {
+        Type = FileTransferProtocol.TransportEpochFrameTypeV6;
+    }
+
+    public long TransportEpoch { get; init; }
+
+    public string? RecoveryMode { get; init; }
+}
+
+public record FileTransferTransportProbeFrameV6 : FileTransferDataFrame
+{
+    public FileTransferTransportProbeFrameV6()
+    {
+        Type = FileTransferProtocol.TransportProbeFrameTypeV6;
+    }
+
+    public long TransportEpoch { get; init; }
+
+    public string? ProbeId { get; init; }
+
+    public string? TargetTransport { get; init; }
+}
+
+public record FileTransferFrontierRequestFrameV6 : FileTransferDataFrame
+{
+    public FileTransferFrontierRequestFrameV6()
+    {
+        Type = FileTransferProtocol.FrontierRequestFrameTypeV6;
+    }
+
+    public long TransportEpoch { get; init; }
+
+    public string? RepairRequestId { get; init; }
+
+    public IReadOnlyList<FileTransferRangeV4> MissingRanges { get; init; } = [];
+
+    public string? Priority { get; init; }
+
+    public string? RecoveryMode { get; init; }
+}
+
+public record FileTransferRepairProofFrameV6 : FileTransferDataFrame
+{
+    public FileTransferRepairProofFrameV6()
+    {
+        Type = FileTransferProtocol.RepairProofFrameTypeV6;
+    }
+
+    public long TransportEpoch { get; init; }
+
+    public string? RepairRequestId { get; init; }
+
+    public int AppliedChunkCount { get; init; }
+
+    public int CommittedChunkIndex { get; init; }
+
+    public string? RecoveryMode { get; init; }
+}
+
+public record FileTransferCompleteFrameV6 : FileTransferCompleteFrameV4, IFileTransferTransportMetadataFrame
+{
+    public FileTransferCompleteFrameV6()
+    {
+        Type = FileTransferProtocol.SessionCompleteFrameTypeV6;
+    }
+
+    public long TransportEpoch { get; init; }
+
+    public string? BatchId { get; init; }
+
+    public string? RepairRequestId { get; init; }
+
+    public string? Priority { get; init; }
+
+    public string? RecoveryMode { get; init; }
+}
+
+public record FileTransferCancelFrameV6 : FileTransferCancelFrameV4, IFileTransferTransportMetadataFrame
+{
+    public FileTransferCancelFrameV6()
+    {
+        Type = FileTransferProtocol.SessionCancelFrameTypeV6;
+    }
+
+    public long TransportEpoch { get; init; }
+
+    public string? BatchId { get; init; }
+
+    public string? RepairRequestId { get; init; }
+
+    public string? Priority { get; init; }
+
+    public string? RecoveryMode { get; init; }
+}
+
+public record FileTransferErrorFrameV6 : FileTransferErrorFrameV4, IFileTransferTransportMetadataFrame
+{
+    public FileTransferErrorFrameV6()
+    {
+        Type = FileTransferProtocol.ErrorFrameTypeV6;
+    }
+
+    public long TransportEpoch { get; init; }
+
+    public string? BatchId { get; init; }
+
+    public string? RepairRequestId { get; init; }
+
+    public string? Priority { get; init; }
+
+    public string? RecoveryMode { get; init; }
+}
+
+public record FileTransferPauseControlFrameV6 : FileTransferPauseControlFrameV4, IFileTransferTransportMetadataFrame
+{
+    public FileTransferPauseControlFrameV6()
+    {
+        Type = FileTransferProtocol.PauseControlFrameTypeV6;
+    }
+
+    public long TransportEpoch { get; init; }
+
+    public string? BatchId { get; init; }
+
+    public string? RepairRequestId { get; init; }
+
+    public string? Priority { get; init; }
+
+    public string? RecoveryMode { get; init; }
+}
+
+public record FileTransferHeartbeatFrameV6 : FileTransferDataFrame
+{
+    public FileTransferHeartbeatFrameV6()
+    {
+        Type = FileTransferProtocol.HeartbeatFrameTypeV6;
+    }
+
+    public long TransportEpoch { get; init; }
+
+    public long Sequence { get; init; }
+
+    public long SentUnixTimeMilliseconds { get; init; }
 }

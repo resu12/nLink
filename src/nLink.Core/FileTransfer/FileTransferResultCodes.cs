@@ -25,6 +25,7 @@ public static class FileTransferResultCodes
     public const string MetadataNotProvided = "metadata_not_provided";
     public const string CanceledLocal = "canceled_local";
     public const string CanceledRemote = "canceled_remote";
+    public const string PeerDisconnected = "peer_disconnected";
     public const string TransportDisconnected = "transport_disconnected";
     public const string TransportDetached = "transport_detached";
 }

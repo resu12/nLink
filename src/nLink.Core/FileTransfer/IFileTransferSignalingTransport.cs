@@ -24,7 +24,7 @@ public interface IFileTransferTransportProfileProvider
 
 public interface IFileTransferProtocolCapabilities
 {
-    bool SupportsFileTransferV5Streaming { get; }
+    bool SupportsFileTransferV6Streaming { get; }
 }
 
 public interface IFileTransferSignalingTransport
@@ -36,6 +36,11 @@ public interface IFileTransferSignalingTransport
     event EventHandler<FileTransferCancelReceivedEventArgs>? FileTransferCancelReceived;
     event EventHandler<FileTransferErrorReceivedEventArgs>? FileTransferErrorReceived;
     event EventHandler<FileTransferCompleteReceivedEventArgs>? FileTransferCompleteReceived;
+    event EventHandler<FileTransferPauseControlReceivedEventArgs>? FileTransferPauseControlReceived;
+    event EventHandler<FileTransferHeartbeatReceivedEventArgs>? FileTransferHeartbeatReceived;
+    event EventHandler<FileTransferTransportEpochReceivedEventArgs>? FileTransferTransportEpochReceived;
+    event EventHandler<FileTransferTransportProbeReceivedEventArgs>? FileTransferTransportProbeReceived;
+    event EventHandler<FileTransferRepairProofReceivedEventArgs>? FileTransferRepairProofReceived;
 
     Task SendFileTransferOfferAsync(FileTransferOfferV2 message, CancellationToken ct);
     Task SendFileTransferAcceptAsync(FileTransferAcceptV1 message, CancellationToken ct);
@@ -44,8 +49,19 @@ public interface IFileTransferSignalingTransport
     Task SendFileTransferCancelAsync(FileTransferCancelV1 message, CancellationToken ct);
     Task SendFileTransferErrorAsync(FileTransferErrorV1 message, CancellationToken ct);
     Task SendFileTransferCompleteAsync(FileTransferCompleteV1 message, CancellationToken ct);
+    Task SendFileTransferPauseControlAsync(FileTransferPauseControlV6 message, CancellationToken ct);
+    Task SendFileTransferHeartbeatAsync(FileTransferHeartbeatV6 message, CancellationToken ct);
+    Task SendFileTransferTransportEpochAsync(FileTransferTransportEpochV6 message, CancellationToken ct);
+    Task SendFileTransferTransportProbeAsync(FileTransferTransportProbeV6 message, CancellationToken ct);
+    Task SendFileTransferRepairProofAsync(FileTransferRepairProofV6 message, CancellationToken ct);
     Task<IFileTransferDataSession> OpenFileTransferDataSessionAsync(string sessionId, string transferId, CancellationToken ct);
 }
+
+public sealed record FileTransferReceivedDataFrame(
+    FileTransferDataFrame Frame,
+    FileTransferTransportKind TransportKind,
+    string Lane,
+    DateTimeOffset ReceivedUtc);
 
 public interface IFileTransferDataSession : IDisposable
 {
@@ -58,6 +74,8 @@ public interface IFileTransferDataSession : IDisposable
     event EventHandler<FileTransferDataSessionAvailabilityChangedEventArgs>? AvailabilityChanged;
 
     ValueTask<FileTransferDataFrame> ReceiveAsync(CancellationToken ct);
+
+    ValueTask<FileTransferReceivedDataFrame> ReceiveWithMetadataAsync(CancellationToken ct);
 
     Task SendAsync(FileTransferDataFrame frame, CancellationToken ct);
 }
@@ -176,6 +194,71 @@ public sealed class FileTransferCompleteReceivedEventArgs : EventArgs
     }
 
     public FileTransferCompleteV1 Message { get; }
+
+    public string? PeerId { get; }
+}
+
+public sealed class FileTransferPauseControlReceivedEventArgs : EventArgs
+{
+    public FileTransferPauseControlReceivedEventArgs(FileTransferPauseControlV6 message, string? peerId)
+    {
+        Message = message ?? throw new ArgumentNullException(nameof(message));
+        PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
+    }
+
+    public FileTransferPauseControlV6 Message { get; }
+
+    public string? PeerId { get; }
+}
+
+public sealed class FileTransferHeartbeatReceivedEventArgs : EventArgs
+{
+    public FileTransferHeartbeatReceivedEventArgs(FileTransferHeartbeatV6 message, string? peerId)
+    {
+        Message = message ?? throw new ArgumentNullException(nameof(message));
+        PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
+    }
+
+    public FileTransferHeartbeatV6 Message { get; }
+
+    public string? PeerId { get; }
+}
+
+public sealed class FileTransferTransportEpochReceivedEventArgs : EventArgs
+{
+    public FileTransferTransportEpochReceivedEventArgs(FileTransferTransportEpochV6 message, string? peerId)
+    {
+        Message = message ?? throw new ArgumentNullException(nameof(message));
+        PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
+    }
+
+    public FileTransferTransportEpochV6 Message { get; }
+
+    public string? PeerId { get; }
+}
+
+public sealed class FileTransferTransportProbeReceivedEventArgs : EventArgs
+{
+    public FileTransferTransportProbeReceivedEventArgs(FileTransferTransportProbeV6 message, string? peerId)
+    {
+        Message = message ?? throw new ArgumentNullException(nameof(message));
+        PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
+    }
+
+    public FileTransferTransportProbeV6 Message { get; }
+
+    public string? PeerId { get; }
+}
+
+public sealed class FileTransferRepairProofReceivedEventArgs : EventArgs
+{
+    public FileTransferRepairProofReceivedEventArgs(FileTransferRepairProofV6 message, string? peerId)
+    {
+        Message = message ?? throw new ArgumentNullException(nameof(message));
+        PeerId = string.IsNullOrWhiteSpace(peerId) ? null : peerId.Trim();
+    }
+
+    public FileTransferRepairProofV6 Message { get; }
 
     public string? PeerId { get; }
 }
