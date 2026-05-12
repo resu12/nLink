@@ -385,7 +385,7 @@ This is an estimate, not a guarantee. Tuna remains experimental until installed-
 Build the app:
 
 ```powershell
-dotnet build src\nLink.App\nLink.App.csproj -c Release
+dotnet build src\nLink.App\nLink.App.csproj -c Release -m:1 -nr:false -p:UseSharedCompilation=false
 ```
 
 Build the Tuna sidecar:
@@ -414,13 +414,15 @@ The advanced Options runtime pilot can also enable Tuna locally without changing
 Run the Phase 6 short paid Tuna file-transfer gate from a developer machine:
 
 ```powershell
+dotnet build tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release -m:1 -nr:false -p:UseSharedCompilation=false
 $env:NLINK_RUN_MANUAL_BRIDGE = "1"
 $env:NLINK_RUN_TUNA_PHASE6_SHORT_MATRIX = "1"
 $env:NLINK_TUNA_TEST_WALLET_PASSWORD = "<session-only test wallet password>"
-dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release --filter "FullyQualifiedName~TunaSidecarPhase6_ShortPaidMatrix"
+dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release --no-build --no-restore --filter "FullyQualifiedName~TunaSidecarPhase6_ShortPaidMatrix"
+dotnet build-server shutdown
 ```
 
-The Phase 6 short matrix writes artifacts under `artifacts/tuna-sidecar/phase6-short-<timestamp>/`. Read `phase6-operator-verdict.txt` first. The short gate covers helper-receiving and helpee-receiving file transfers across helpee-only unlocked, helper-only unlocked, and both-unlocked payer modes. Each payer/receiver pair runs one clean activation and one payer-specific fallback fault: helpee-only switch-off, helper-only cap reached, and both-unlocked sidecar drop. It requires V6 protocol evidence, SHA success for completed files, V6 epoch proof or explicit waiting, no false recovery from generic readiness, and no orphan sidecar. Provider readiness diagnostics distinguish degraded startup accepted at 3 paths, later recovery to 4 paths, and persistent degraded-at-end warnings. Clean activation cells may warn `activation_cleanup_late_peer_close` when file bytes, SHA, and terminal sender/receiver snapshots are already clean but peer-close evidence is late.
+The Phase 6 short matrix writes artifacts under `artifacts/tuna-sidecar/phase6-short-<timestamp>/`. Read `phase6-operator-verdict.txt` first. The short gate covers helper-receiving and helpee-receiving file transfers across helpee-only unlocked, helper-only unlocked, and both-unlocked payer modes. Each payer/receiver pair runs one clean activation and one payer-specific fallback fault: helpee-only switch-off, helper-only cap reached, and both-unlocked sidecar drop. It requires V6 protocol evidence, SHA success for completed files, V6 epoch proof or explicit waiting, no false recovery from generic readiness, and no orphan sidecar. Provider readiness diagnostics distinguish degraded startup accepted at 3 paths, later recovery to 4 paths, and persistent degraded-at-end warnings. Clean activation cells may warn `activation_cleanup_late_peer_close` when file bytes, SHA, and terminal sender/receiver snapshots are already clean but peer-close evidence is late. Repeated paid cells should use the build-once plus `--no-build --no-restore` pattern from `docs/build-test-lock-avoidance.md` to avoid Windows generated-output locks.
 
 Latest local Phase 6 file-transfer reference run:
 

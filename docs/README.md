@@ -18,6 +18,7 @@ Start here when you need current repo guidance. Historical release notes live un
 
 - [`docs/RELEASING.md`](RELEASING.md): short release checklist.
 - [`docs/ReleaseRunbook.md`](ReleaseRunbook.md): detailed version-neutral release runbook.
+- [`docs/build-test-lock-avoidance.md`](build-test-lock-avoidance.md): Windows-safe build/test command shapes for avoiding generated-output locks during repeated manual runs.
 - [`docs/release/rc-validation-checklist.md`](release/rc-validation-checklist.md): active RC validation checklist.
 - [`docs/release/rc-guardrails.md`](release/rc-guardrails.md): RC guardrail workflow rules.
 - [`docs/BETA_HARDENING_EXTRAS.md`](BETA_HARDENING_EXTRAS.md): optional Windows hardening extras.

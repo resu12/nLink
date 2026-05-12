@@ -324,7 +324,7 @@ public sealed class TestArchitectureContractTests
         Assert.True(File.Exists(readmePath), $"Expected tests README: {readmePath}");
 
         var text = File.ReadAllText(readmePath);
-        Assert.Contains("dotnet test -c Release --no-restore -m:1 -p:UseSharedCompilation=false --verbosity minimal", text, StringComparison.Ordinal);
+        Assert.Contains("dotnet test -c Release --no-restore -m:1 -nr:false -p:UseSharedCompilation=false --verbosity minimal", text, StringComparison.Ordinal);
         foreach (var (_, projectName) in DomainProjects)
         {
             Assert.Contains(projectName, text, StringComparison.Ordinal);

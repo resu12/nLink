@@ -7,9 +7,10 @@ This runbook describes the version-neutral steps to ship `v<version>` from a cle
 Run from the repo root:
 
 ```powershell
-dotnet build .\nLink.sln -c Release
+dotnet build .\nLink.sln -c Release -m:1 -nr:false -p:UseSharedCompilation=false
 powershell -ExecutionPolicy Bypass -File .\tools\Test-Lanes.ps1 -Lane Smoke -Configuration Release
 powershell -ExecutionPolicy Bypass -File .\tools\BetaReadiness-Check.ps1
+dotnet build-server shutdown
 ```
 
 Optional GUI smoke requires an interactive Windows desktop:
@@ -26,6 +27,7 @@ Expected outcome:
 - reliability and packaging gates pass
 
 Test ownership lanes are documented in `docs\test-lanes.md`. Prefer named lanes for local validation instead of invoking retired project paths.
+Windows generated-output lock avoidance is documented in `docs\build-test-lock-avoidance.md`; use that pattern for repeated manual or paid opt-in cells.
 
 Support evidence and bug-report expectations are documented in `docs\supportability.md`.
 

@@ -9,7 +9,7 @@ This workflow targets the current V6-only file-transfer protocol. V5, V4, null, 
 - Tuna remains experimental and default-off unless the Phase 6 paid gate passes.
 - Do not redesign screen sharing, wallet UX, payer policy, caps, sidecar startup, installer behavior, or Diagnostics/Options UI while tuning file-transfer soak.
 - All generated artifacts must stay under repo `artifacts/`. Manual scripts and runbooks must never delete or clean Downloads or other user data folders.
-- Run .NET tests serially on Windows to avoid DLL file locks.
+- Run .NET tests serially on Windows to avoid DLL file locks; see `docs/build-test-lock-avoidance.md`.
 
 ## Common Runs
 
@@ -48,10 +48,12 @@ Run the three-cycle public NKN proof only after a shorter mixed proof is clean.
 Before paid Tuna time:
 
 ```powershell
-dotnet build src\nLink.App\nLink.App.csproj -c Release
+dotnet build src\nLink.App\nLink.App.csproj -c Release -m:1 -nr:false -p:UseSharedCompilation=false
 $version = (Get-Content VERSION -Raw).Trim()
 go -C tools\nkn-tuna-sidecar build -ldflags "-X main.sidecarVersion=$version" -o ..\..\artifacts\tuna-sidecar\nlink-tuna-sidecar.exe .
-dotnet test tests\nLink.SmokeTests.Core\nLink.SmokeTests.Core.csproj --filter "FullyQualifiedName~SessionFileTransferV6TunaIntegrationTests|FullyQualifiedName~SessionFileTransferV6TransportEpochTests|FullyQualifiedName~SessionFileTransferV6RuntimeTests|FullyQualifiedName~SessionFileTransferPauseTests|FullyQualifiedName~NknAccelerationTransportTests|FullyQualifiedName~NknFileTransferTransportTests|FullyQualifiedName~DiagnosticsAndLoggingTests|FullyQualifiedName~FileTransferOpsScriptsTests" -c Release
+dotnet test tests\nLink.SmokeTests.Core\nLink.SmokeTests.Core.csproj --filter "FullyQualifiedName~SessionFileTransferV6TunaIntegrationTests|FullyQualifiedName~SessionFileTransferV6TransportEpochTests|FullyQualifiedName~SessionFileTransferV6RuntimeTests|FullyQualifiedName~SessionFileTransferPauseTests|FullyQualifiedName~NknAccelerationTransportTests|FullyQualifiedName~NknFileTransferTransportTests|FullyQualifiedName~DiagnosticsAndLoggingTests|FullyQualifiedName~FileTransferOpsScriptsTests" -c Release -m:1 -nr:false -p:UseSharedCompilation=false
+dotnet build tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release -m:1 -nr:false -p:UseSharedCompilation=false
+dotnet build-server shutdown
 ```
 
 Run the short paid matrix only from an explicit opt-in shell:
@@ -60,7 +62,8 @@ Run the short paid matrix only from an explicit opt-in shell:
 $env:NLINK_RUN_MANUAL_BRIDGE = "1"
 $env:NLINK_RUN_TUNA_PHASE6_SHORT_MATRIX = "1"
 $env:NLINK_TUNA_TEST_WALLET_PASSWORD = "<session-only test wallet password>"
-dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release --filter "FullyQualifiedName~TunaSidecarPhase6_ShortPaidMatrix"
+dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release --no-build --no-restore --filter "FullyQualifiedName~TunaSidecarPhase6_ShortPaidMatrix"
+dotnet build-server shutdown
 ```
 
 The Phase 6 short matrix writes artifacts under `artifacts/tuna-sidecar/phase6-short-<timestamp>/`. Read `phase6-operator-verdict.txt` first, then keep `summary.json`, `runs.jsonl`, redacted app log tail, listener stdout/stderr, and sidecar cleanup evidence.
