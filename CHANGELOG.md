@@ -8,6 +8,7 @@
 - Diagnostics now includes a visible `Tuna (experimental)` wallet-linking section for local wallet status, balance validation, address copy, and unlinking.
 - Safe `wallet-status` validation mode in the Tuna sidecar unlocks a linked wallet for one balance check and exits without starting a paid listener or spending NKN.
 - Phase 3 benchmark artifacts and acceptance gates compare current NKN and Tuna for file, screen, and reconnect behavior.
+- V6-only file-transfer protocol, receiver-driven runtime, hard-priority lifecycle/liveness path, transport epochs, and Phase 6 paid Tuna gate tooling.
 
 ### Changed
 
@@ -16,11 +17,13 @@
 - Packaging now rejects stale bridge manifests whose `appVersion` does not match `VERSION`, so bridge bundles must be regenerated after version bumps.
 - Tuna remains default-off and developer-gated; a linked or funded wallet does not change runtime transport behavior by itself.
 - Diagnostics copy/export redaction now covers Tuna wallet paths, wallet addresses, password-like fields, seeds, and private-key material.
+- File transfer now requires V6 negotiation; V5, V4, null, and mismatched data protocols fail as transport-incompatible.
 
 ### Fixed
 
 - Tuna negotiation is bound to the approved, verified nLink session and silently falls back to the current NKN transport on address, session, nonce, version, expiry, lane, or sidecar mismatches.
 - Sidecar and benchmark failure handling was tightened so disconnects and listener shutdowns mark acceleration unavailable without ending the approved nLink session.
+- Tuna file-transfer activation and fallback are governed by V6 transport proof instead of generic bridge/sidecar readiness.
 
 ### Packaging
 

@@ -422,6 +422,13 @@ dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.cs
 
 The Phase 6 short matrix writes artifacts under `artifacts/tuna-sidecar/phase6-short-<timestamp>/`. Read `phase6-operator-verdict.txt` first. The short gate covers helper-receiving and helpee-receiving file transfers across helpee-only unlocked, helper-only unlocked, and both-unlocked payer modes. Each payer/receiver pair runs one clean activation and one payer-specific fallback fault: helpee-only switch-off, helper-only cap reached, and both-unlocked sidecar drop. It requires V6 protocol evidence, SHA success for completed files, V6 epoch proof or explicit waiting, no false recovery from generic readiness, and no orphan sidecar.
 
+Latest local Phase 6 file-transfer reference run:
+
+- Artifact root: `artifacts/tuna-sidecar/phase6-short-20260512T151146Z/`
+- Verdict: `PASS`
+- Cells: `12/12`
+- Caveats: all cells reported `provider_paths_degraded`; two clean activation cells used the allowed single retry. Keep Tuna experimental/default-off while provider path degradation and retry cleanup are investigated.
+
 The wider opt-in Tuna soak matrix remains available when a longer paid pass is warranted:
 
 ```powershell

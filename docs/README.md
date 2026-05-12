@@ -8,7 +8,7 @@ Start here when you need current repo guidance. Historical release notes live un
 - [`docs/supportability.md`](supportability.md): support evidence checklist for bug reports, diagnostics, hang reports, logs, and screenshare evidence.
 - [`docs/screenshare-implementation.md`](screenshare-implementation.md): current H.264 screen-share capture, transport, decode, recovery, and diagnostics design.
 - [`docs/screenshare-operability.md`](screenshare-operability.md): screenshare-specific operator model and `ScreenShare-Ops.ps1` entry point.
-- [`docs/file-transfer-implementation.md`](file-transfer-implementation.md): current V5 single-file transfer protocol, data session, handoff recovery, lifecycle safety, and diagnostics design.
+- [`docs/file-transfer-implementation.md`](file-transfer-implementation.md): current V6 single-file transfer protocol, receiver-driven data session, transport-epoch recovery, lifecycle safety, and diagnostics design.
 - [`docs/file-transfer-operability.md`](file-transfer-operability.md): file-transfer-specific operator model and `FileTransfer-Ops.ps1` entry point.
 - [`docs/nkn-tuna-implementation.md`](nkn-tuna-implementation.md): experimental NKN Tuna wallet, sidecar, session binding, runtime unlock, caps, and fallback design.
 - [`docs/screenshare-soak.md`](screenshare-soak.md): technical reference for local screenshare soak output and retained Track B evidence.

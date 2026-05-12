@@ -64,6 +64,13 @@ dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.cs
 
 The Phase 6 short matrix writes artifacts under `artifacts/tuna-sidecar/phase6-short-<timestamp>/`. Read `phase6-operator-verdict.txt` first, then keep `summary.json`, `runs.jsonl`, redacted app log tail, listener stdout/stderr, and sidecar cleanup evidence.
 
+Latest local Phase 6 reference run:
+
+- Artifact root: `artifacts/tuna-sidecar/phase6-short-20260512T151146Z/`
+- Verdict: `PASS`
+- Cells: `12/12`
+- Notes: all cells reported `provider_paths_degraded`; two activation cells used the allowed single retry. Treat this as a passed V6/Tuna gate with follow-up diagnostics, not as promotion evidence for enabling Tuna by default.
+
 The short matrix covers exactly 12 file-transfer cells: helper-receiving and helpee-receiving, each across helpee-only unlocked, helper-only unlocked, and both-unlocked payer modes, with one clean activation and one payer-specific fallback fault per payer. Helpee-only uses switch-off fallback, helper-only uses cap reached, and both-unlocked uses sidecar drop.
 
 ## Evidence
