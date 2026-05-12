@@ -73,6 +73,11 @@ internal sealed class NknEnvelopeRouter
             case MsgType.FileTransferComplete:
             case MsgType.FileTransferSessionOpen:
             case MsgType.FileTransferDataFrame:
+            case MsgType.FileTransferPauseControl:
+            case MsgType.FileTransferHeartbeat:
+            case MsgType.FileTransferTransportEpoch:
+            case MsgType.FileTransferTransportProbe:
+            case MsgType.FileTransferRepairProof:
                 fileTransferChannel.Handle(inboundContext);
                 break;
             default:

@@ -15,8 +15,30 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IAuthoritativeConnectedAddressSource
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IAuthoritativeConnectedAddressSource
 {
+    private readonly record struct FileTransferV6TransportEpochKey(
+        string SessionId,
+        string TransferId,
+        FileTransferDirection Direction,
+        long TransportEpoch);
+
+    internal readonly record struct FileTransferV6TransportEpochDiagnostics(
+        long StartedCount,
+        long NormalToTunaActivationStartedCount,
+        long RecoveredCount,
+        long NormalToTunaActivationRecoveredCount,
+        long WaitingCount,
+        long TerminalCount,
+        long UnresolvedCount);
+
+    private sealed record FileTransferV6PendingHandoffIntent(
+        string SessionId,
+        string Reason,
+        FileTransferTransportHandoffKind HandoffKind,
+        FileTransferTransportKind TargetTransport,
+        DateTimeOffset RecordedUtc);
+
     private sealed class RecoveryBurstLease
     {
         public string SessionId { get; init; } = string.Empty;
@@ -107,7 +129,16 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private readonly Dictionary<string, DateTimeOffset> fileTransferCancelEchoLastSent = new(StringComparer.Ordinal);
     private readonly Dictionary<string, TransportFileTransferDataSession> fileTransferDataSessions = new(StringComparer.Ordinal);
     private readonly HashSet<string> fileTransferDataSessionRemoteOpenSuppressed = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, FileTransferV6PendingHandoffIntent> pendingFileTransferV6HandoffsBySession = new(StringComparer.Ordinal);
     private readonly object fileTransferFallbackProofGate = new();
+    private readonly object fileTransferV6TransportEpochGate = new();
+    private readonly Dictionary<FileTransferV6TransportEpochKey, FileTransferV6TransportEpochSnapshot> unresolvedFileTransferV6TransportEpochs = new();
+    private long observedFileTransferV6TransportEpochStartedCount;
+    private long observedFileTransferV6NormalToTunaActivationStartedCount;
+    private long observedFileTransferV6TransportEpochRecoveredCount;
+    private long observedFileTransferV6NormalToTunaActivationRecoveredCount;
+    private long observedFileTransferV6TransportEpochWaitingCount;
+    private long observedFileTransferV6TransportEpochTerminalCount;
     private readonly SortedDictionary<long, InboundFileTransferDispatchWork> pendingInboundFileTransferControlDispatch = new();
     private readonly NknLifecycleChannel lifecycleChannel;
     private readonly NknSecureControlChannel controlChannel;
@@ -124,7 +155,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private const int FileTransferInboundReplayWindowSize = 32768;
     private const long FileTransferInboundReplayMaxForwardAdvance = 131072;
 
-    public bool SupportsFileTransferV5Streaming => true;
+    public bool SupportsFileTransferV6Streaming => true;
 
     public FileTransferTransportProfileKind FileTransferTransportProfileKind => FileTransferTransportProfileKind.ConservativeNknStartup;
 
@@ -350,6 +381,11 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     public event EventHandler<FileTransferCancelReceivedEventArgs>? FileTransferCancelReceived;
     public event EventHandler<FileTransferErrorReceivedEventArgs>? FileTransferErrorReceived;
     public event EventHandler<FileTransferCompleteReceivedEventArgs>? FileTransferCompleteReceived;
+    public event EventHandler<FileTransferPauseControlReceivedEventArgs>? FileTransferPauseControlReceived;
+    public event EventHandler<FileTransferHeartbeatReceivedEventArgs>? FileTransferHeartbeatReceived;
+    public event EventHandler<FileTransferTransportEpochReceivedEventArgs>? FileTransferTransportEpochReceived;
+    public event EventHandler<FileTransferTransportProbeReceivedEventArgs>? FileTransferTransportProbeReceived;
+    public event EventHandler<FileTransferRepairProofReceivedEventArgs>? FileTransferRepairProofReceived;
 
     internal event EventHandler<BridgeLifecycleEvent>? BridgeLifecycle;
     public event EventHandler<ScreenShareFrameCompletedEventArgs>? ScreenShareFrameCompleted;

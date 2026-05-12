@@ -47,4 +47,9 @@ internal enum MsgType
     TransportAccelerationAnswer = 42,
     TransportAccelerationDown = 43,
     TransportAccelerationPayerIntent = 44,
+    FileTransferPauseControl = 45,
+    FileTransferHeartbeat = 46,
+    FileTransferTransportEpoch = 47,
+    FileTransferTransportProbe = 48,
+    FileTransferRepairProof = 49,
 }

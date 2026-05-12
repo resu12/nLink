@@ -2099,12 +2099,18 @@ public sealed partial class NknSignalingTransport
         await SendBulkEnvelopeAsync(destination, envelope, bytes, ct).ConfigureAwait(false);
     }
 
-    private async Task<bool> SendBulkEnvelopeAsync(string destination, Envelope envelope, byte[] bytes, CancellationToken ct)
+    private async Task<bool> SendBulkEnvelopeAsync(
+        string destination,
+        Envelope envelope,
+        byte[] bytes,
+        CancellationToken ct,
+        bool allowAcceleration = true)
     {
 
         try
         {
-            if (envelope.Type == MsgType.FileTransferDataFrame &&
+            if (allowAcceleration &&
+                envelope.Type == MsgType.FileTransferDataFrame &&
                 await TrySendAcceleratedEnvelopeAsync(envelope.Type, NknBridgeChannel.Bulk, bytes, ct).ConfigureAwait(false))
             {
                 LocalOperationalLog.Info(
@@ -2233,6 +2239,8 @@ public sealed partial class NknSignalingTransport
     private void ResetSessionTracking()
     {
         CompleteTunaFallbackProof("reset_session_tracking");
+        ClearUnresolvedFileTransferV6TransportEpochs("reset_session_tracking");
+        ClearPendingFileTransferV6Handoffs("reset_session_tracking");
         FlushAllControlOutboundQueues("reset_session_tracking");
         ClearScreenShareOutboundQueue("reset_session_tracking");
         ResetControlSecureState();
