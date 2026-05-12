@@ -216,7 +216,7 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
     public void DevLocalImpairmentPolicy_ScreenSharePressure_DoesNotAffectFileTransferControlFrames()
     {
         var policy = new DevLocalImpairmentPolicy(new DevLocalImpairmentOptions(DevLocalImpairmentProfile.ScreenSharePressure, 42));
-        var manifest = new FileTransferManifestFrameV5
+        var manifest = new FileTransferManifestFrameV6
         {
             SessionId = "sess",
             TransferId = "transfer_manifest",
@@ -473,7 +473,7 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
             Assert.True(long.Parse(mixed["screen_share_frames_emitted"]) > 0);
 
             var logSlice = await File.ReadAllTextAsync(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log"), Encoding.UTF8);
-            Assert.Contains("event=filetransfer_v5_mixed_enabled", logSlice, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v6_mixed_enabled", logSlice, StringComparison.Ordinal);
             Assert.Contains("mixed_screenshare=1", logSlice, StringComparison.Ordinal);
             Assert.DoesNotContain("v4_file_only_required", logSlice, StringComparison.Ordinal);
         }
@@ -625,7 +625,7 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
         Assert.Contains(verdict["verdict"], new[] { "PASS", "WARN_RECOVERED_PRESSURE" });
 
         var logSlice = await File.ReadAllTextAsync(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log"), Encoding.UTF8);
-        Assert.Contains("event=filetransfer_v5_sender_started", logSlice, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_sender_started", logSlice, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_v4_complete_received", logSlice, StringComparison.Ordinal);
     }
 
@@ -660,7 +660,7 @@ public sealed class FileTransferSoakRunnerTests : CoreSmokeTestsBase
         var logSlice = await File.ReadAllTextAsync(Path.Combine(artifactDir, "filetransfer-retained-log-slice.log"), Encoding.UTF8);
     }
 
-    private static FileTransferChunkBatchFrameV5 CreateChunkFrame(string transferId, int chunkIndex)
+    private static FileTransferChunkBatchFrameV6 CreateChunkFrame(string transferId, int chunkIndex)
         => new()
         {
             SessionId = "sess",

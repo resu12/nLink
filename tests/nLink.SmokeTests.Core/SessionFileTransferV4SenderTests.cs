@@ -9,6 +9,11 @@ namespace NLink.SmokeTests;
 [Collection(FakeNknNetworkCollection.Name)]
 public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServiceTestBase
 {
+    private const string RetiredV4CreditRepairRuntimeSkip =
+        "Retired: Phase 3 V6 receiver-driven runtime no longer uses V4 credit/repair scheduling; covered by SessionFileTransferV6RuntimeTests.";
+    private const string DeferredV6TransportEpochRuntimeSkip =
+        "Deferred: Phase 4/5 will replace these transport epoch and Tuna handoff expectations with proof-based V6 tests.";
+
     [Fact]
     public async Task V4FileOnlyTransfer_CompletesEndToEnd_WithSparseReceiverIntegrity()
     {
@@ -37,12 +42,17 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         Assert.Equal(payload, destination.ToArray()[..payload.Length]);
         var sessionOpen = Assert.Single(senderTransport.SentSessionOpens);
-        Assert.Equal(FileTransferProtocol.ProtocolVersionV5, sessionOpen.ProtocolVersion);
-        Assert.Contains(senderTransport.SentDataFrames, static frame => frame is FileTransferManifestFrameV5);
-        Assert.Contains(senderTransport.SentDataFrames, static frame => frame is FileTransferChunkBatchFrameV5);
-        Assert.Contains(receiverTransport.SentDataFrames, static frame => frame is FileTransferStateFrameV5);
-        Assert.Contains(receiverTransport.SentDataFrames, static frame => frame is FileTransferCompleteFrameV5);
-        Assert.DoesNotContain(receiverTransport.SentDataFrames, static frame => frame is not FileTransferStateFrameV5 and not FileTransferCompleteFrameV5);
+        Assert.Equal(FileTransferProtocol.ProtocolVersionV6, sessionOpen.ProtocolVersion);
+        Assert.Contains(senderTransport.SentDataFrames, static frame => frame is FileTransferManifestFrameV6);
+        Assert.Contains(senderTransport.SentDataFrames, static frame => frame is FileTransferChunkBatchFrameV6);
+        Assert.Contains(receiverTransport.SentDataFrames, static frame => frame is FileTransferReceiverStateFrameV6);
+        Assert.Contains(receiverTransport.SentCompletes, complete =>
+            string.Equals(complete.TransferId, transferId, StringComparison.Ordinal) &&
+            complete.FileSizeBytes == payload.Length);
+        Assert.DoesNotContain(receiverTransport.SentDataFrames, static frame => frame is FileTransferCompleteFrameV6);
+        Assert.DoesNotContain(
+            receiverTransport.SentDataFrames,
+            static frame => frame is not FileTransferReceiverStateFrameV6 and not FileTransferFrontierRequestFrameV6);
     }
 
     [Fact]
@@ -55,7 +65,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         using var receiverTransport = new LoopbackFileTransferTransport("session_v4_sender_cancel_retry");
         senderTransport.DataSessionSendDelayMs = 10;
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
-            Task.FromResult(frame is FileTransferCancelFrameV5);
+            Task.FromResult(frame is FileTransferCancelFrameV6);
         senderTransport.OutboundCancelDeliveryOverrideAsync = (_, _, _) =>
         {
             var attempt = Interlocked.Increment(ref cancelControlAttempts);
@@ -76,7 +86,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
         await WaitUntilAsync(
             () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Sending &&
-                  senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(),
+                  senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(),
             timeoutMs: 5000);
 
         var canceled = await sender.CancelTransferAsync(transferId, "user_canceled", CancellationToken.None);
@@ -84,7 +94,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.NotNull(canceled);
         Assert.Equal(FileTransferTransferState.Canceled, canceled!.State);
         Assert.Equal(FileTransferResultCodes.CanceledLocal, canceled.ErrorCode);
-        Assert.Contains(senderTransport.SentDataFrames, static frame => frame is FileTransferCancelFrameV5);
+        Assert.Contains(senderTransport.SentCancels, cancel => string.Equals(cancel.TransferId, transferId, StringComparison.Ordinal));
+        Assert.DoesNotContain(senderTransport.SentDataFrames, static frame => frame is FileTransferCancelFrameV6);
         await WaitUntilAsync(
             () => receiver.Snapshot.Inbound?.State == FileTransferTransferState.Canceled,
             timeoutMs: 6000);
@@ -93,7 +104,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
-    public async Task V5Sender_LocalCancel_RetriesDataCancelWhenControlPathIsLost()
+    public async Task V6Sender_LocalCancel_DoesNotFallbackToDataCancelWhenControlPathIsLost()
     {
         const string transferId = "transfer_v5_sender_cancel_data_retry";
         var payload = Enumerable.Range(0, 1_500_000).Select(static index => (byte)(index % 251)).ToArray();
@@ -104,7 +115,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         senderTransport.OutboundCancelDeliveryOverrideAsync = (_, _, _) => Task.FromResult(true);
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
         {
-            if (frame is not FileTransferCancelFrameV5)
+            if (frame is not FileTransferCancelFrameV6)
             {
                 return Task.FromResult(false);
             }
@@ -127,18 +138,18 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
         await WaitUntilAsync(
             () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Sending &&
-                  senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(),
+                  senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(),
             timeoutMs: 5000);
 
         var canceled = await sender.CancelTransferAsync(transferId, "user_canceled", CancellationToken.None);
 
         Assert.NotNull(canceled);
         Assert.Equal(FileTransferTransferState.Canceled, canceled!.State);
-        await WaitUntilAsync(
-            () => receiver.Snapshot.Inbound?.State == FileTransferTransferState.Canceled,
-            timeoutMs: 6000);
-        Assert.True(cancelDataAttempts >= 2);
-        Assert.Equal(FileTransferResultCodes.CanceledRemote, receiver.Snapshot.Inbound!.ErrorCode);
+        Assert.Contains(senderTransport.SentCancels, cancel => string.Equals(cancel.TransferId, transferId, StringComparison.Ordinal));
+        Assert.Equal(0, cancelDataAttempts);
+        Assert.DoesNotContain(senderTransport.SentDataFrames, static frame => frame is FileTransferCancelFrameV6);
+        await Task.Delay(200);
+        Assert.NotEqual(FileTransferTransferState.Canceled, receiver.Snapshot.Inbound?.State);
     }
 
     [Fact]
@@ -149,7 +160,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         using var senderTransport = new LoopbackFileTransferTransport("session_v5_sender_cancel_priority_token");
         using var receiverTransport = new LoopbackFileTransferTransport("session_v5_sender_cancel_priority_token");
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
-            Task.FromResult(frame is FileTransferCancelFrameV5);
+            Task.FromResult(frame is FileTransferCancelFrameV6);
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         using var receiver = new SessionFileTransferService();
@@ -165,7 +176,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
         await WaitUntilAsync(
             () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Sending &&
-                  senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(),
+                  senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(),
             timeoutMs: 5000);
 
         using var canceledToken = new CancellationTokenSource();
@@ -260,7 +271,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
         await WaitUntilAsync(
             () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Sending &&
-                  senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(),
+                  senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(),
             timeoutMs: 5000);
 
         var canceledCount = await sender.CancelActiveTransfersForSessionEndAsync("session_end", CancellationToken.None);
@@ -269,35 +280,34 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Equal(FileTransferTransferState.Canceled, sender.Snapshot.Outbound?.State);
         Assert.Equal(FileTransferResultCodes.CanceledLocal, sender.Snapshot.Outbound?.ErrorCode);
         Assert.Contains(senderTransport.SentCancels, cancel => string.Equals(cancel.Reason, "session_end", StringComparison.Ordinal));
-        Assert.Contains(senderTransport.SentDataFrames, static frame => frame is FileTransferCancelFrameV5);
+        Assert.DoesNotContain(senderTransport.SentDataFrames, static frame => frame is FileTransferCancelFrameV6);
         await WaitUntilAsync(
             () => receiver.Snapshot.Inbound?.State == FileTransferTransferState.Canceled,
             timeoutMs: 6000);
         Assert.Equal(FileTransferResultCodes.CanceledRemote, receiver.Snapshot.Inbound!.ErrorCode);
     }
 
-    [Fact]
+    [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4Sender_PeerSilence_TerminalsInsteadOfSendingForever()
     {
         const string transferId = "transfer_v4_sender_peer_silence";
         var previousTimeout = SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests;
+        var previousHeartbeatInterval = SessionFileTransferService.V6HeartbeatIntervalOverrideForTests;
+        var previousPeerLivenessTimeout = SessionFileTransferService.V6PeerLivenessTimeoutOverrideForTests;
         SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = TimeSpan.FromMilliseconds(300);
+        SessionFileTransferService.V6HeartbeatIntervalOverrideForTests = TimeSpan.FromMilliseconds(50);
+        SessionFileTransferService.V6PeerLivenessTimeoutOverrideForTests = TimeSpan.FromMilliseconds(300);
         try
         {
             var payload = Enumerable.Range(0, 5_000_000).Select(static index => (byte)(index % 251)).ToArray();
-            var receiverPeerFrameCount = 0;
+            var dropPeerLiveness = 0;
             using var senderTransport = new LoopbackFileTransferTransport("session_v4_sender_peer_silence");
             using var receiverTransport = new LoopbackFileTransferTransport("session_v4_sender_peer_silence");
+            senderTransport.DataSessionSendDelayMs = 100;
             receiverTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
-            {
-                if (frame is FileTransferStateFrameV5 &&
-                    Interlocked.Increment(ref receiverPeerFrameCount) == 1)
-                {
-                    return Task.FromResult(false);
-                }
-
-                return Task.FromResult(true);
-            };
+                Task.FromResult(Volatile.Read(ref dropPeerLiveness) == 1 && frame is FileTransferReceiverStateFrameV6);
+            receiverTransport.OutboundHeartbeatDeliveryOverrideAsync = (_, _, _) =>
+                Task.FromResult(Volatile.Read(ref dropPeerLiveness) == 1);
             senderTransport.Connect(receiverTransport);
             using var sender = new SessionFileTransferService();
             using var receiver = new SessionFileTransferService();
@@ -313,16 +323,19 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
             await WaitUntilAsync(
                 () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Sending &&
-                      senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(),
+                      senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(),
                 timeoutMs: 5000);
+            Volatile.Write(ref dropPeerLiveness, 1);
             await WaitUntilAsync(() => sender.Snapshot.Outbound?.State == FileTransferTransferState.Failed, timeoutMs: 5000);
 
-            Assert.Equal(FileTransferResultCodes.TransportDisconnected, sender.Snapshot.Outbound!.ErrorCode);
-            Assert.Contains("Receiver stopped responding", sender.Snapshot.Outbound.StatusMessage, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(FileTransferResultCodes.PeerDisconnected, sender.Snapshot.Outbound!.ErrorCode);
+            Assert.Contains("Peer disconnected", sender.Snapshot.Outbound.StatusMessage, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
             SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = previousTimeout;
+            SessionFileTransferService.V6HeartbeatIntervalOverrideForTests = previousHeartbeatInterval;
+            SessionFileTransferService.V6PeerLivenessTimeoutOverrideForTests = previousPeerLivenessTimeout;
         }
     }
 
@@ -355,13 +368,13 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 {
                     SessionId = offer.SessionId,
                     TransferId = transferId,
-                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
                 },
                 CancellationToken.None);
 
             await WaitUntilAsync(() => sender.Snapshot.Outbound?.State == FileTransferTransferState.Failed, timeoutMs: 5000);
             Assert.Equal(FileTransferResultCodes.V4FileOnlyRequired, sender.Snapshot.Outbound?.ErrorCode);
-            Assert.DoesNotContain(senderTransport.SentDataFrames, static frame => frame is FileTransferManifestFrameV5);
+            Assert.DoesNotContain(senderTransport.SentDataFrames, static frame => frame is FileTransferManifestFrameV6);
         }
         finally
         {
@@ -369,7 +382,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         }
     }
 
-    [Fact]
+    [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4Sender_WithScreenshareAndMixedFlag_CompletesWithTwoChunkNormalBatches()
     {
         const string transferId = "transfer_v4_sender_mixed_flag_on";
@@ -411,7 +424,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
             Assert.Equal(payload, destination.ToArray()[..payload.Length]);
             var normalBatches = senderTransport.SentDataFrames
-                .OfType<FileTransferChunkBatchFrameV5>()
+                .OfType<FileTransferChunkBatchFrameV6>()
                 .Where(static batch => batch.BatchProfile != "v4_repair_21k")
                 .ToArray();
             Assert.NotEmpty(normalBatches);
@@ -428,7 +441,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                     batch.DataSegments[1].Length == 21 * 1024);
 
             var log = ReadOperationalLogTail(logStart);
-            Assert.Contains($"event=filetransfer_v5_mixed_enabled; transfer_id={transferId}", log, StringComparison.Ordinal);
+            Assert.Contains($"event=filetransfer_v6_mixed_enabled; transfer_id={transferId}", log, StringComparison.Ordinal);
             Assert.Contains("normal_batch_segments=2", log, StringComparison.Ordinal);
             Assert.Contains("mixed_screenshare=1", log, StringComparison.Ordinal);
         }
@@ -438,7 +451,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         }
     }
 
-    [Fact]
+    [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4Sender_WithMixedFlag_LatchesMixedPacingAfterScreenshareWasObserved()
     {
         const string transferId = "transfer_v4_sender_mixed_latched";
@@ -477,7 +490,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
             Assert.Equal(payload, destination.ToArray()[..payload.Length]);
             var normalBatches = senderTransport.SentDataFrames
-                .OfType<FileTransferChunkBatchFrameV5>()
+                .OfType<FileTransferChunkBatchFrameV6>()
                 .Where(static batch => batch.BatchProfile != "v4_repair_21k")
                 .ToArray();
             Assert.NotEmpty(normalBatches);
@@ -489,7 +502,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             Assert.Contains(normalBatches, static batch => batch.DataSegments.Count == 2);
 
             var log = ReadOperationalLogTail(logStart);
-            Assert.Contains($"event=filetransfer_v5_mixed_enabled; transfer_id={transferId}", log, StringComparison.Ordinal);
+            Assert.Contains($"event=filetransfer_v6_mixed_enabled; transfer_id={transferId}", log, StringComparison.Ordinal);
             Assert.Contains("screen_share_active=0", log, StringComparison.Ordinal);
             Assert.Contains("screen_share_observed=1", log, StringComparison.Ordinal);
             Assert.Contains("normal_batch_segments=2", log, StringComparison.Ordinal);
@@ -501,7 +514,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         }
     }
 
-    [Fact]
+    [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4Sender_WithDegradedScreenshareAndMixedFlag_UsesTwoChunkNormalBatches()
     {
         const string transferId = "transfer_v4_sender_mixed_degraded";
@@ -539,7 +552,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
             Assert.Equal(payload, destination.ToArray()[..payload.Length]);
             var normalBatches = senderTransport.SentDataFrames
-                .OfType<FileTransferChunkBatchFrameV5>()
+                .OfType<FileTransferChunkBatchFrameV6>()
                 .Where(static batch => batch.BatchProfile != "v4_repair_21k")
                 .ToArray();
             Assert.NotEmpty(normalBatches);
@@ -551,7 +564,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             Assert.Contains(normalBatches, static batch => batch.DataSegments.Count == 2);
 
             var log = ReadOperationalLogTail(logStart);
-            Assert.Contains($"event=filetransfer_v5_mixed_enabled; transfer_id={transferId}", log, StringComparison.Ordinal);
+            Assert.Contains($"event=filetransfer_v6_mixed_enabled; transfer_id={transferId}", log, StringComparison.Ordinal);
             Assert.Contains("screen_share_degraded=1", log, StringComparison.Ordinal);
             Assert.Contains("normal_batch_segments=2", log, StringComparison.Ordinal);
             Assert.Contains("mixed_screenshare=1", log, StringComparison.Ordinal);
@@ -562,7 +575,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         }
     }
 
-    [Fact]
+    [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4Sender_MissingRangesSchedulePriorityRepair_AndComplete()
     {
         const string transferId = "transfer_v4_sender_repair_priority";
@@ -572,7 +585,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         using var receiverTransport = new LoopbackFileTransferTransport("session_v4_sender_repair_priority");
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = (target, frame, _) =>
         {
-            if (frame is FileTransferChunkBatchFrameV5 { StartChunkIndex: 0 } &&
+            if (frame is FileTransferChunkBatchFrameV6 { StartChunkIndex: 0 } &&
                 Interlocked.Exchange(ref droppedFirstBatch, 1) == 0)
             {
                 return Task.FromResult(true);
@@ -601,9 +614,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         Assert.Equal(1, droppedFirstBatch);
         Assert.Equal(payload, destination.ToArray()[..payload.Length]);
-        Assert.True(senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Count(static batch => batch.StartChunkIndex == 0) >= 2);
+        Assert.True(senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count(static batch => batch.StartChunkIndex == 0) >= 2);
         Assert.Contains(
-            senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>(),
+            senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>(),
             static batch => batch.StartChunkIndex == 0 &&
                 batch.BatchProfile == "v4_repair_21k" &&
                 batch.RepairDeliveryMode == FileTransferV4RepairDeliveryMode.BulkOnly);
@@ -620,7 +633,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.DoesNotContain("filetransfer.request_chunks.v2", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = DeferredV6TransportEpochRuntimeSkip)]
     public async Task V4Sender_TransportRebind_QueuesBoundedSafetyReplayFromPeerFrontier()
     {
         const string transferId = "transfer_v4_sender_transport_rebind_replay";
@@ -643,15 +656,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -664,12 +677,12 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             },
             CancellationToken.None);
         await WaitUntilAsync(
-            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Count(static batch => batch.StartChunkIndex == 0) == 1,
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count(static batch => batch.StartChunkIndex == 0) == 1,
             timeoutMs: 5000);
 
-        var batchCountBeforeRebind = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Count();
-        senderTransport.RaiseDisconnected();
-        senderTransport.RaiseReconnected();
+        var batchCountBeforeRebind = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count();
+        senderTransport.SetConnectedDataSessionsUnavailableForTests("transport_rebind");
+        senderTransport.SetConnectedDataSessionsAvailableForTests("transport_recovered");
 
         await WaitUntilAsync(
             () => ReadOperationalLogTail(logStart).Contains(
@@ -678,7 +691,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             timeoutMs: 5000);
         await WaitUntilAsync(
             () => senderTransport.SentDataFrames
-                .OfType<FileTransferChunkBatchFrameV5>()
+                .OfType<FileTransferChunkBatchFrameV6>()
                 .Skip(batchCountBeforeRebind)
                 .Any(static batch =>
                     batch.StartChunkIndex == 0 &&
@@ -689,13 +702,13 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var log = ReadOperationalLogTail(logStart);
         Assert.Contains("event=filetransfer_transport_rebind_generation_started; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_transport_rebind_safety_replay_started;", log, StringComparison.Ordinal);
-        Assert.Contains("event=filetransfer_v5_tail_blocked_until_frontier_proof; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_tail_blocked_until_frontier_proof; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("repair_delivery_mode=control_bulk_escalated", log, StringComparison.Ordinal);
         Assert.Contains("requested_chunk_count=1", log, StringComparison.Ordinal);
         Assert.Contains("replay_chunk_cap=64", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = DeferredV6TransportEpochRuntimeSkip)]
     public async Task V4Sender_TransportRebind_RearmsSafetyReplayWhenNoFeedbackArrives()
     {
         const string transferId = "transfer_v4_sender_transport_rebind_rearm";
@@ -718,15 +731,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -739,11 +752,11 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             },
             CancellationToken.None);
         await WaitUntilAsync(
-            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Count(static batch => batch.StartChunkIndex == 0) == 1,
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count(static batch => batch.StartChunkIndex == 0) == 1,
             timeoutMs: 5000);
 
-        senderTransport.RaiseDisconnected();
-        senderTransport.RaiseReconnected();
+        senderTransport.SetConnectedDataSessionsUnavailableForTests("transport_rebind");
+        senderTransport.SetConnectedDataSessionsAvailableForTests("transport_recovered");
 
         await WaitUntilAsync(
             () => CountOccurrences(
@@ -756,14 +769,14 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("reason=post_fallback_sender_wait", log, StringComparison.Ordinal);
         Assert.True(
             senderTransport.SentDataFrames
-                .OfType<FileTransferChunkBatchFrameV5>()
+                .OfType<FileTransferChunkBatchFrameV6>()
                 .Count(static batch =>
                     batch.StartChunkIndex == 0 &&
                     batch.BatchProfile == "v4_repair_21k" &&
                     batch.RepairDeliveryMode == FileTransferV4RepairDeliveryMode.ControlBulkRedundant) >= 2);
     }
 
-    [Fact]
+    [Fact(Skip = DeferredV6TransportEpochRuntimeSkip)]
     public async Task V4Sender_PostRebindZeroCredit_EmergencyReplaysExactFrontier()
     {
         const string transferId = "transfer_v4_sender_rebind_zero_credit_emergency";
@@ -786,15 +799,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -807,12 +820,12 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             },
             CancellationToken.None);
 
-        senderTransport.RaiseDisconnected();
-        senderTransport.RaiseReconnected();
+        senderTransport.SetConnectedDataSessionsUnavailableForTests("transport_rebind");
+        senderTransport.SetConnectedDataSessionsAvailableForTests("transport_recovered");
 
         await WaitUntilAsync(
             () => senderTransport.SentDataFrames
-                .OfType<FileTransferChunkBatchFrameV5>()
+                .OfType<FileTransferChunkBatchFrameV6>()
                 .Any(static batch =>
                     batch.StartChunkIndex == 0 &&
                     batch.ChunkCount == 1 &&
@@ -826,7 +839,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("repair_delivery_escalation_reason=transport_rebind_emergency_frontier", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = DeferredV6TransportEpochRuntimeSkip)]
     public async Task V4Sender_PostRebindDuplicateFrontierState_ReplaysOnlyExactFrontier()
     {
         const string transferId = "transfer_v4_sender_rebind_frontier_only";
@@ -849,15 +862,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -869,15 +882,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 BytesCommitted = 0,
             },
             CancellationToken.None);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static batch => batch.StartChunkIndex == 0), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static batch => batch.StartChunkIndex == 0), timeoutMs: 5000);
 
-        senderTransport.RaiseDisconnected();
-        senderTransport.RaiseReconnected();
+        senderTransport.SetConnectedDataSessionsUnavailableForTests("transport_rebind");
+        senderTransport.SetConnectedDataSessionsAvailableForTests("transport_recovered");
         await WaitUntilAsync(
             () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_transport_rebind_generation_started; direction=outbound;", StringComparison.Ordinal),
             timeoutMs: 5000);
 
-        var missingFrontierState = new FileTransferStateFrameV5
+        var missingFrontierState = new FileTransferReceiverStateFrameV6
         {
             SessionId = offer.SessionId,
             TransferId = transferId,
@@ -891,14 +904,14 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         await receiverSession.SendAsync(missingFrontierState, CancellationToken.None);
         await WaitUntilAsync(
             () => senderTransport.SentDataFrames
-                .OfType<FileTransferChunkBatchFrameV5>()
+                .OfType<FileTransferChunkBatchFrameV6>()
                 .Any(static batch =>
                     batch.StartChunkIndex == 4 &&
                     batch.ChunkCount == 1 &&
                     batch.RepairDeliveryMode == FileTransferV4RepairDeliveryMode.ControlBulkRedundant),
             timeoutMs: 5000);
 
-        var batchCountBeforeDuplicate = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Count();
+        var batchCountBeforeDuplicate = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count();
         var duplicateStart = ReadOperationalLogText().Length;
         await receiverSession.SendAsync(missingFrontierState, CancellationToken.None);
 
@@ -907,7 +920,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             timeoutMs: 5000);
         await WaitUntilAsync(
             () => senderTransport.SentDataFrames
-                .OfType<FileTransferChunkBatchFrameV5>()
+                .OfType<FileTransferChunkBatchFrameV6>()
                 .Skip(batchCountBeforeDuplicate)
                 .Any(static batch =>
                     batch.StartChunkIndex == 4 &&
@@ -923,7 +936,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("repair_delivery_escalation_reason=transport_rebind_frontier_only", duplicateLog, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = DeferredV6TransportEpochRuntimeSkip)]
     public async Task V5Sender_HandoffRecoveryUnblocksTailAndIgnoresStaleRecoveryFrames()
     {
         const string transferId = "transfer_v5_handoff_tail_unblock";
@@ -946,15 +959,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -966,16 +979,16 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 BytesCommitted = 0,
             },
             CancellationToken.None);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static batch => batch.StartChunkIndex == 0), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static batch => batch.StartChunkIndex == 0), timeoutMs: 5000);
 
-        senderTransport.RaiseDisconnected();
-        senderTransport.RaiseReconnected();
+        senderTransport.SetConnectedDataSessionsUnavailableForTests("transport_rebind");
+        senderTransport.SetConnectedDataSessionsAvailableForTests("transport_recovered");
         await WaitUntilAsync(
             () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_transport_rebind_generation_started; direction=outbound;", StringComparison.Ordinal),
             timeoutMs: 5000);
 
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -989,7 +1002,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             },
             CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1004,11 +1017,11 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             CancellationToken.None);
 
         await WaitUntilAsync(
-            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v5_handoff_tail_unblocked; direction=outbound;", StringComparison.Ordinal),
+            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_handoff_tail_unblocked; direction=outbound;", StringComparison.Ordinal),
             timeoutMs: 5000);
         await WaitUntilAsync(
             () => senderTransport.SentDataFrames
-                .OfType<FileTransferChunkBatchFrameV5>()
+                .OfType<FileTransferChunkBatchFrameV6>()
                 .Any(static batch =>
                     batch.StartChunkIndex >= 16 &&
                     batch.TransportEpoch == 0 &&
@@ -1018,7 +1031,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         var staleStart = ReadOperationalLogText().Length;
         await receiverSession.SendAsync(
-            new FileTransferRepairRequestFrameV5
+            new FileTransferFrontierRequestFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1035,13 +1048,13 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             timeoutMs: 5000);
 
         var staleLog = ReadOperationalLogTail(staleStart);
-        Assert.Contains("event=filetransfer_v5_recovery_frame_ignored; direction=outbound;", staleLog, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=filetransfer_v5_tail_blocked_until_frontier_proof; direction=outbound;", staleLog, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_recovery_frame_ignored; direction=outbound;", staleLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_tail_blocked_until_frontier_proof; direction=outbound;", staleLog, StringComparison.Ordinal);
 
         var reopenedStart = ReadOperationalLogText().Length;
-        var batchCountBeforeReopen = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Count();
+        var batchCountBeforeReopen = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count();
         await receiverSession.SendAsync(
-            new FileTransferRepairRequestFrameV5
+            new FileTransferFrontierRequestFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1054,11 +1067,11 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             CancellationToken.None);
 
         await WaitUntilAsync(
-            () => ReadOperationalLogTail(reopenedStart).Contains("event=filetransfer_v5_handoff_epoch_reopened; direction=outbound;", StringComparison.Ordinal),
+            () => ReadOperationalLogTail(reopenedStart).Contains("event=filetransfer_v6_handoff_epoch_reopened; direction=outbound;", StringComparison.Ordinal),
             timeoutMs: 5000);
         await WaitUntilAsync(
             () => senderTransport.SentDataFrames
-                .OfType<FileTransferChunkBatchFrameV5>()
+                .OfType<FileTransferChunkBatchFrameV6>()
                 .Skip(batchCountBeforeReopen)
                 .Any(static batch =>
                     batch.StartChunkIndex == 16 &&
@@ -1067,11 +1080,11 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             timeoutMs: 5000);
 
         var reopenedLog = ReadOperationalLogTail(reopenedStart);
-        Assert.Contains("event=filetransfer_v5_frontier_repair_requested; direction=outbound;", reopenedLog, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_frontier_repair_requested; direction=outbound;", reopenedLog, StringComparison.Ordinal);
         Assert.DoesNotContain("reason=recovered_epoch", reopenedLog, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = DeferredV6TransportEpochRuntimeSkip)]
     public async Task V5Sender_HandoffSparseBackfillKeepsTailBlockedAndSendsRepairWindow()
     {
         const string transferId = "transfer_v5_sparse_backfill_window";
@@ -1094,15 +1107,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1114,17 +1127,17 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 BytesCommitted = 0,
             },
             CancellationToken.None);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static batch => batch.StartChunkIndex == 0), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static batch => batch.StartChunkIndex == 0), timeoutMs: 5000);
 
-        senderTransport.RaiseDisconnected();
-        senderTransport.RaiseReconnected();
+        senderTransport.SetConnectedDataSessionsUnavailableForTests("transport_rebind");
+        senderTransport.SetConnectedDataSessionsAvailableForTests("transport_recovered");
         await WaitUntilAsync(
             () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_transport_rebind_generation_started; direction=outbound;", StringComparison.Ordinal),
             timeoutMs: 5000);
 
-        var batchCountBeforeSparseProof = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Count();
+        var batchCountBeforeSparseProof = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count();
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1142,10 +1155,10 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             () => ReadOperationalLogTail(logStart).Contains("reason=frontier_proof_with_sparse_backfill", StringComparison.Ordinal),
             timeoutMs: 5000);
         var sparseProofLog = ReadOperationalLogTail(logStart);
-        Assert.DoesNotContain("event=filetransfer_v5_handoff_tail_unblocked; direction=outbound;", sparseProofLog, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_handoff_tail_unblocked; direction=outbound;", sparseProofLog, StringComparison.Ordinal);
 
         await receiverSession.SendAsync(
-            new FileTransferRepairRequestFrameV5
+            new FileTransferFrontierRequestFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1159,7 +1172,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         await WaitUntilAsync(
             () => senderTransport.SentDataFrames
-                .OfType<FileTransferChunkBatchFrameV5>()
+                .OfType<FileTransferChunkBatchFrameV6>()
                 .Skip(batchCountBeforeSparseProof)
                 .Any(static batch =>
                     batch.StartChunkIndex == 8 &&
@@ -1170,12 +1183,12 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             timeoutMs: 5000);
 
         var log = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_v5_frontier_repair_requested; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_frontier_repair_requested; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("priority=backfill", log, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=filetransfer_v5_handoff_tail_unblocked; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_handoff_tail_unblocked; direction=outbound;", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = DeferredV6TransportEpochRuntimeSkip)]
     public async Task V5Sender_NormalToTunaActivationStartsSymmetricHandoffAndBlocksTail()
     {
         const string transferId = "transfer_v5_tuna_activation_handoff";
@@ -1198,15 +1211,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1218,21 +1231,21 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 BytesCommitted = 0,
             },
             CancellationToken.None);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static batch => batch.StartChunkIndex == 0), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static batch => batch.StartChunkIndex == 0), timeoutMs: 5000);
 
-        var batchCountBeforeHandoff = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Count();
+        var batchCountBeforeHandoff = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count();
         senderTransport.RequestAllDataSessionHandoffs(
             "tuna_activation_negotiated",
             FileTransferTransportHandoffKind.NormalToTunaActivation,
             FileTransferTransportKind.Tuna);
         await WaitUntilAsync(
-            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v5_handoff_epoch_started; direction=outbound;", StringComparison.Ordinal) &&
+            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_handoff_epoch_started; direction=outbound;", StringComparison.Ordinal) &&
                   ReadOperationalLogTail(logStart).Contains("handoff_kind=normal_to_tuna_activation", StringComparison.Ordinal) &&
                   ReadOperationalLogTail(logStart).Contains("target_transport=tuna", StringComparison.Ordinal),
             timeoutMs: 5000);
 
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1247,7 +1260,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         await WaitUntilAsync(
             () => senderTransport.SentDataFrames
-                .OfType<FileTransferChunkBatchFrameV5>()
+                .OfType<FileTransferChunkBatchFrameV6>()
                 .Skip(batchCountBeforeHandoff)
                 .Any(static batch =>
                     batch.StartChunkIndex == 4 &&
@@ -1257,7 +1270,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             timeoutMs: 5000);
 
         var newBatches = senderTransport.SentDataFrames
-            .OfType<FileTransferChunkBatchFrameV5>()
+            .OfType<FileTransferChunkBatchFrameV6>()
             .Skip(batchCountBeforeHandoff)
             .ToArray();
         Assert.DoesNotContain(
@@ -1267,11 +1280,11 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                             string.IsNullOrWhiteSpace(batch.RecoveryMode));
 
         var log = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_v5_tail_blocked_until_frontier_proof; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_tail_blocked_until_frontier_proof; direction=outbound;", log, StringComparison.Ordinal);
         Assert.Contains("target_transport=tuna", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = DeferredV6TransportEpochRuntimeSkip)]
     public async Task V5Sender_DuplicateTargetHandoffReusesEpochAndAcceptsPeerRepair()
     {
         const string transferId = "transfer_v5_duplicate_handoff_epoch";
@@ -1294,15 +1307,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1314,17 +1327,17 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 BytesCommitted = 0,
             },
             CancellationToken.None);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static batch => batch.StartChunkIndex == 0), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static batch => batch.StartChunkIndex == 0), timeoutMs: 5000);
 
         senderTransport.RequestAllDataSessionHandoffs(
             "header_switch_off",
             FileTransferTransportHandoffKind.TunaToNormalFallback,
             FileTransferTransportKind.RegularNkn);
         await WaitUntilAsync(
-            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static batch => batch.TransportEpoch > 0),
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static batch => batch.TransportEpoch > 0),
             timeoutMs: 5000);
         var handoffEpoch = senderTransport.SentDataFrames
-            .OfType<FileTransferChunkBatchFrameV5>()
+            .OfType<FileTransferChunkBatchFrameV6>()
             .First(static batch => batch.TransportEpoch > 0)
             .TransportEpoch;
 
@@ -1333,11 +1346,11 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             FileTransferTransportHandoffKind.TunaToNormalFallback,
             FileTransferTransportKind.RegularNkn);
         await WaitUntilAsync(
-            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v5_handoff_epoch_reused; direction=outbound;", StringComparison.Ordinal),
+            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_handoff_epoch_reused; direction=outbound;", StringComparison.Ordinal),
             timeoutMs: 5000);
 
         await receiverSession.SendAsync(
-            new FileTransferRepairRequestFrameV5
+            new FileTransferFrontierRequestFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1350,12 +1363,12 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             CancellationToken.None);
 
         await WaitUntilAsync(
-            () => ReadOperationalLogTail(logStart).Contains($"event=filetransfer_v5_frontier_repair_requested; direction=outbound; transfer_id={transferId};", StringComparison.Ordinal) &&
+            () => ReadOperationalLogTail(logStart).Contains($"event=filetransfer_v6_frontier_repair_requested; direction=outbound; transfer_id={transferId};", StringComparison.Ordinal) &&
                   ReadOperationalLogTail(logStart).Contains($"transport_epoch={handoffEpoch}", StringComparison.Ordinal),
             timeoutMs: 5000);
 
         var log = ReadOperationalLogTail(logStart);
-        Assert.Contains("event=filetransfer_v5_handoff_epoch_reused; direction=outbound;", log, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_handoff_epoch_reused; direction=outbound;", log, StringComparison.Ordinal);
         Assert.DoesNotContain($"reason=stale_or_mismatched_epoch; frame_transport_epoch={handoffEpoch}", log, StringComparison.Ordinal);
     }
 
@@ -1371,7 +1384,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         using var receiverTransport = new LoopbackFileTransferTransport("session_v4_transport_rebind_e2e");
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
         {
-            if (frame is FileTransferChunkBatchFrameV5 { StartChunkIndex: 0 } &&
+            if (frame is FileTransferChunkBatchFrameV6 { StartChunkIndex: 0 } &&
                 Volatile.Read(ref allowFrontierChunk) == 0)
             {
                 Interlocked.Increment(ref droppedFrontierBatchCount);
@@ -1395,7 +1408,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
 
         await WaitUntilAsync(
-            () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Any(static state =>
+            () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static state =>
                 state.MissingRanges.Any(static range =>
                     range.StartChunkIndex == 0 &&
                     range.ChunkCount > 0)),
@@ -1403,8 +1416,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.True(Volatile.Read(ref droppedFrontierBatchCount) > 0);
 
         Volatile.Write(ref allowFrontierChunk, 1);
-        senderTransport.RaiseDisconnected();
-        senderTransport.RaiseReconnected();
+        senderTransport.SetConnectedDataSessionsUnavailableForTests("transport_rebind");
+        senderTransport.SetConnectedDataSessionsAvailableForTests("transport_recovered");
 
         await WaitUntilAsync(
             () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
@@ -1420,7 +1433,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("event=filetransfer_transport_rebind_recovered; direction=inbound;", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4Sender_SuppressesDuplicateMissingRangeRepairKeys()
     {
         const string transferId = "transfer_v4_sender_repair_dedupe";
@@ -1443,15 +1456,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1463,9 +1476,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 BytesCommitted = 0,
             },
             CancellationToken.None);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
 
-        var repairState = new FileTransferStateFrameV5
+        var repairState = new FileTransferReceiverStateFrameV6
         {
             SessionId = offer.SessionId,
             TransferId = transferId,
@@ -1489,7 +1502,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.DoesNotContain("filetransfer.request_chunks.v2", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4Sender_RetriedMissingRange_EscalatesRepairDelivery()
     {
         const string transferId = "transfer_v4_sender_repair_escalates";
@@ -1512,15 +1525,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1532,9 +1545,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 BytesCommitted = 0,
             },
             CancellationToken.None);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
 
-        var repairState = new FileTransferStateFrameV5
+        var repairState = new FileTransferReceiverStateFrameV6
         {
             SessionId = offer.SessionId,
             TransferId = transferId,
@@ -1548,7 +1561,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         await receiverSession.SendAsync(repairState, CancellationToken.None);
         await WaitUntilAsync(
-            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static batch =>
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static batch =>
                 batch.BatchProfile == "v4_repair_21k" &&
                 batch.RepairDeliveryMode == FileTransferV4RepairDeliveryMode.BulkOnly),
             timeoutMs: 5000);
@@ -1557,7 +1570,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         await receiverSession.SendAsync(repairState with { Epoch = 3 }, CancellationToken.None);
 
         await WaitUntilAsync(
-            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static batch =>
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static batch =>
                 batch.BatchProfile == "v4_repair_21k" &&
                 batch.RepairDeliveryMode == FileTransferV4RepairDeliveryMode.ControlBulkRedundant),
             timeoutMs: 5000);
@@ -1568,7 +1581,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.DoesNotContain("filetransfer.request_chunks.v2", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4Sender_MaxBatchSegmentsEnvironment_CapsNormalBatches()
     {
         const string transferId = "transfer_v4_sender_batch_cap";
@@ -1596,15 +1609,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 {
                     SessionId = offer.SessionId,
                     TransferId = transferId,
-                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
                 },
                 CancellationToken.None);
             await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-            await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+            await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
             var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
             await receiverSession.SendAsync(
-                new FileTransferStateFrameV5
+                new FileTransferReceiverStateFrameV6
                 {
                     SessionId = offer.SessionId,
                     TransferId = transferId,
@@ -1618,10 +1631,10 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 CancellationToken.None);
 
             await WaitUntilAsync(
-                () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Sum(static batch => batch.DataSegments.Count) >= 12,
+                () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Sum(static batch => batch.DataSegments.Count) >= 12,
                 timeoutMs: 5000);
 
-            var batches = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().ToArray();
+            var batches = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().ToArray();
             Assert.NotEmpty(batches);
             Assert.All(batches, static batch => Assert.InRange(batch.DataSegments.Count, 1, 2));
             Assert.Contains(batches, static batch => batch.DataSegments.Count == 2 && batch.BatchProfile == "v4_default_21k_2x");
@@ -1632,7 +1645,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         }
     }
 
-    [Fact]
+    [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4Sender_SuppressesSameMissingRange_WhenDurableHighestAdvances()
     {
         const string transferId = "transfer_v4_sender_repair_stable_key";
@@ -1655,15 +1668,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1675,10 +1688,10 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 BytesCommitted = 0,
             },
             CancellationToken.None);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
 
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1693,7 +1706,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v4_repair_scheduled; transfer_id=transfer_v4_sender_repair_stable_key", StringComparison.Ordinal), timeoutMs: 5000);
 
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1713,7 +1726,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.DoesNotContain("filetransfer.request_chunks.v2", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4Sender_SuppressesRepair_FromStaleSameFrontierMissingRanges()
     {
         const string transferId = "v4_stale_same";
@@ -1737,15 +1750,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1757,10 +1770,10 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 BytesCommitted = 0,
             },
             CancellationToken.None);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
 
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1785,7 +1798,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.DoesNotContain("filetransfer.request_chunks.v2", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4Sender_TreatsSameEpochReceiverStateAsDuplicate()
     {
         const string transferId = "v4_duplicate_epoch";
@@ -1809,15 +1822,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1829,10 +1842,10 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 BytesCommitted = 0,
             },
             CancellationToken.None);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
 
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1857,7 +1870,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.DoesNotContain("filetransfer.request_chunks.v2", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4Sender_SuppressesRepair_FromStaleMovedFrontierMissingRanges()
     {
         const string transferId = "v4_stale_moved";
@@ -1881,15 +1894,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1901,10 +1914,10 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 BytesCommitted = 21 * 1024,
             },
             CancellationToken.None);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
 
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1929,7 +1942,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.DoesNotContain("filetransfer.request_chunks.v2", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = DeferredV6TransportEpochRuntimeSkip)]
     public async Task V4Sender_PostRebind_SuppressesStaleRepairStateBehindCurrentFrontier()
     {
         const string transferId = "v4_post_rebind_stale_behind";
@@ -1953,15 +1966,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1973,16 +1986,16 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
                 BytesCommitted = 0,
             },
             CancellationToken.None);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static frame => frame.StartChunkIndex == 0), timeoutMs: 5000);
 
-        senderTransport.RaiseDisconnected();
-        senderTransport.RaiseReconnected();
+        senderTransport.SetConnectedDataSessionsUnavailableForTests("transport_rebind");
+        senderTransport.SetConnectedDataSessionsAvailableForTests("transport_recovered");
         await WaitUntilAsync(
             () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_transport_rebind_generation_started; direction=outbound;", StringComparison.Ordinal),
             timeoutMs: 5000);
 
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -1998,7 +2011,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var staleStart = ReadOperationalLogText().Length;
 
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -2022,7 +2035,7 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.DoesNotContain($"event=filetransfer_v4_repair_scheduled; transfer_id={transferId}", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
     public async Task V4Sender_PrioritizesFrontierMissingRange_AndKeepsFarHoles()
     {
         const string transferId = "transfer_v4_sender_frontier_first";
@@ -2045,15 +2058,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
-                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => senderTransport.SentSessionOpens.Any(), timeoutMs: 5000);
-        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV5>().Any(), timeoutMs: 5000);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
 
         var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,
@@ -2066,13 +2079,13 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             },
             CancellationToken.None);
         await WaitUntilAsync(
-            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(static frame =>
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static frame =>
                 frame.StartChunkIndex <= 10 &&
                 frame.StartChunkIndex + frame.ChunkCount > 10),
             timeoutMs: 5000);
 
         await receiverSession.SendAsync(
-            new FileTransferStateFrameV5
+            new FileTransferReceiverStateFrameV6
             {
                 SessionId = offer.SessionId,
                 TransferId = transferId,

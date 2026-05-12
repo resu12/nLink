@@ -88,7 +88,8 @@ internal static async Task VerifyHandshakeAsync(bool approve)
         var invite = CreateValidatedInviteForTarget(
             new PeerAddress(hostAddress),
             out var rawToken,
-            InviteCapabilities.Chat);
+            InviteCapabilities.Chat,
+            boundHelperAddress: new PeerAddress(joiner.LocalPeerAddress));
         await WaitStepAsync("joiner join", joiner.JoinByInviteAsync(rawToken, invite, cts.Token), TimeSpan.FromSeconds(3));
         await WaitStepAsync("join request raised", joinRequestRaised.Task, TimeSpan.FromSeconds(3));
         Assert.NotNull(pendingJoinRequest);
@@ -734,6 +735,11 @@ internal static Envelope BuildSecureFileTransferEnvelope<TMessage>(
             FileTransferCancelV1 cancel => FileTransferPayloadCodec.Serialize(cancel),
             FileTransferErrorV1 error => FileTransferPayloadCodec.Serialize(error),
             FileTransferCompleteV1 complete => FileTransferPayloadCodec.Serialize(complete),
+            FileTransferPauseControlV6 pauseControl => FileTransferPayloadCodec.Serialize(pauseControl),
+            FileTransferHeartbeatV6 heartbeat => FileTransferPayloadCodec.Serialize(heartbeat),
+            FileTransferTransportEpochV6 transportEpoch => FileTransferPayloadCodec.Serialize(transportEpoch),
+            FileTransferTransportProbeV6 transportProbe => FileTransferPayloadCodec.Serialize(transportProbe),
+            FileTransferRepairProofV6 repairProof => FileTransferPayloadCodec.Serialize(repairProof),
             _ => throw new ArgumentOutOfRangeException(nameof(message), "Unsupported file-transfer message."),
         };
 
@@ -756,6 +762,11 @@ internal static Envelope BuildSecureFileTransferEnvelope<TMessage>(
                         MsgType.FileTransferCancel => "file_transfer_cancel",
                         MsgType.FileTransferError => "file_transfer_error",
                         MsgType.FileTransferComplete => "file_transfer_complete",
+                        MsgType.FileTransferPauseControl => "file_transfer_pause_control",
+                        MsgType.FileTransferHeartbeat => "file_transfer_heartbeat",
+                        MsgType.FileTransferTransportEpoch => "file_transfer_transport_epoch",
+                        MsgType.FileTransferTransportProbe => "file_transfer_transport_probe",
+                        MsgType.FileTransferRepairProof => "file_transfer_repair_proof",
                         _ => throw new ArgumentOutOfRangeException(nameof(msgType), msgType, "Unsupported file-transfer message."),
                     },
                     SessionId: sessionId,

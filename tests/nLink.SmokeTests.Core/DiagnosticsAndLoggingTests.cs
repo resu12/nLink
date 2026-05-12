@@ -749,8 +749,9 @@ public void TunaFallback_FileTransferWaitsForReceiveProofBeforeResume()
     Assert.Contains("event=filetransfer_fallback_nkn_probe_scheduled", accelerationSource, StringComparison.Ordinal);
     Assert.Contains("event=filetransfer_fallback_nkn_probe_started", accelerationSource, StringComparison.Ordinal);
     Assert.Contains("filetransfer_fallback_nkn_proof_unconfirmed", accelerationSource, StringComparison.Ordinal);
-    Assert.Contains("requires_control_proof=1", accelerationSource, StringComparison.Ordinal);
-    Assert.Contains("file_transfer_v5_state_frame_received", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("requires_control_proof={(controlProofObserved ? 0 : 1)}", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("requires_v6_epoch_recovery={(requiresV6EpochRecovery ? 1 : 0)}", accelerationSource, StringComparison.Ordinal);
+    Assert.Contains("file_transfer_v6_state_frame_received", accelerationSource, StringComparison.Ordinal);
     Assert.Contains("tuna_acceleration_retry_blocked_fallback_control_unproven", accelerationSource, StringComparison.Ordinal);
     Assert.Contains("event=filetransfer_fallback_nkn_receive_resumed_unproven", transportSource, StringComparison.Ordinal);
     Assert.DoesNotContain("reason: \"transport_probe_unproven\"", accelerationSource, StringComparison.Ordinal);

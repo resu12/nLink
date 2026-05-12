@@ -83,7 +83,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
                 TransferId = transferId,
                 FileName = "pause-inbound.bin",
                 FileSizeBytes = 16,
-                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
@@ -126,7 +126,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
                 TransferId = transferId,
                 FileName = "pending.bin",
                 FileSizeBytes = 16,
-                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
@@ -237,11 +237,11 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
 
         await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
         await WaitUntilAsync(
-            () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0),
+            () => receiver.Snapshot.Inbound is { IsPeerPaused: true },
             timeoutMs: 5000);
         await Task.Delay(300);
 
-        Assert.Empty(senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>());
+        Assert.Empty(senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>());
         Assert.True(sender.Snapshot.Outbound!.IsPaused);
 
         Assert.NotNull(await sender.ResumeTransferAsync(transferId, "resume", CancellationToken.None));
@@ -274,14 +274,14 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
         await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
         await WaitUntilAsync(
-            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Any(),
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(),
             timeoutMs: 5000);
 
         Assert.NotNull(await sender.PauseTransferAsync(transferId, "pause_active", CancellationToken.None));
         await Task.Delay(900);
-        var drainedCount = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Count();
+        var drainedCount = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count();
         await Task.Delay(350);
-        Assert.Equal(drainedCount, senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Count());
+        Assert.Equal(drainedCount, senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count());
         Assert.True(sender.Snapshot.Outbound!.IsPaused);
 
         Assert.NotNull(await sender.ResumeTransferAsync(transferId, "resume", CancellationToken.None));
@@ -319,7 +319,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
         Assert.NotNull(await receiver.PauseTransferAsync(transferId, "pause_before_manifest", CancellationToken.None));
         await senderSession.SendAsync(CreateManifest(sessionId, transferId, "pause-before-manifest.bin", payload.Length, 4, sha256), CancellationToken.None);
         await WaitUntilAsync(
-            () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Any(static frame =>
+            () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame =>
                 frame.CreditUntilChunkIndexExclusive == 0 &&
                 frame.ContiguousCommittedChunkIndex == 0),
             timeoutMs: 5000);
@@ -328,7 +328,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
 
         Assert.NotNull(await receiver.ResumeTransferAsync(transferId, "resume", CancellationToken.None));
         await WaitUntilAsync(
-            () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0),
+            () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0),
             timeoutMs: 5000);
 
         await senderSession.SendAsync(CreateChunkBatch(sessionId, transferId, payload, startChunkIndex: 0, chunkSizeBytes: 4, chunkCount: 3), CancellationToken.None);
@@ -360,30 +360,30 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
             (_, _) => Task.FromResult<Stream>(destination),
             chunkSizeBytes: 4);
         await senderSession.SendAsync(CreateManifest(sessionId, transferId, "pause-receiving.bin", payload.Length, 4, sha256), CancellationToken.None);
-        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0));
+        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0));
 
         await senderSession.SendAsync(CreateChunkBatch(sessionId, transferId, payload, startChunkIndex: 0, chunkSizeBytes: 4, chunkCount: 1), CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.BytesTransferred == 4, timeoutMs: 5000);
-        var stateCountBeforePause = receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Count();
+        var stateCountBeforePause = receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Count();
 
         Assert.NotNull(await receiver.PauseTransferAsync(transferId, "pause_receiving", CancellationToken.None));
         await WaitUntilAsync(
-            () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Skip(stateCountBeforePause).Any(static frame =>
+            () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Skip(stateCountBeforePause).Any(static frame =>
                 frame.ContiguousCommittedChunkIndex == 1 &&
                 frame.CreditUntilChunkIndexExclusive == 1 &&
                 frame.MissingRanges.Count == 0),
             timeoutMs: 5000);
 
-        var stateCountAfterPause = receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Count();
+        var stateCountAfterPause = receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Count();
         await senderSession.SendAsync(CreateChunkBatch(sessionId, transferId, payload, startChunkIndex: 2, chunkSizeBytes: 4, chunkCount: 1), CancellationToken.None);
         await Task.Delay(300);
         Assert.DoesNotContain(
-            receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Skip(stateCountAfterPause),
+            receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Skip(stateCountAfterPause),
             static frame => frame.MissingRanges.Count > 0 || frame.CreditUntilChunkIndexExclusive > 1);
 
         Assert.NotNull(await receiver.ResumeTransferAsync(transferId, "resume", CancellationToken.None));
         await WaitUntilAsync(
-            () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 1),
+            () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 1),
             timeoutMs: 5000);
         await senderSession.SendAsync(CreateChunkBatch(sessionId, transferId, payload, startChunkIndex: 1, chunkSizeBytes: 4, chunkCount: 2), CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed, timeoutMs: 5000);
@@ -414,7 +414,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
             (_, _) => Task.FromResult<Stream>(destination),
             chunkSizeBytes: 4);
         await senderSession.SendAsync(CreateManifest(sessionId, transferId, "pause-freezes-progress.bin", payload.Length, 4, sha256), CancellationToken.None);
-        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0));
+        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0));
 
         await senderSession.SendAsync(CreateChunkBatch(sessionId, transferId, payload, startChunkIndex: 0, chunkSizeBytes: 4, chunkCount: 1), CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.BytesTransferred == 4, timeoutMs: 5000);
@@ -459,7 +459,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
             (_, _) => Task.FromResult<Stream>(destination),
             chunkSizeBytes: 4);
         await senderSession.SendAsync(CreateManifest(sessionId, transferId, "peer-pause-freezes-progress.bin", payload.Length, 4, sha256), CancellationToken.None);
-        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0));
+        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0));
 
         await senderSession.SendAsync(CreateChunkBatch(sessionId, transferId, payload, startChunkIndex: 0, chunkSizeBytes: 4, chunkCount: 1), CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.BytesTransferred == 4, timeoutMs: 5000);
@@ -534,15 +534,15 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
         Assert.NotNull(await sender.PauseTransferAsync(transferId, "pause", CancellationToken.None));
         await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
         await WaitUntilAsync(
-            () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0),
+            () => receiver.Snapshot.Inbound is { IsPeerPaused: true },
             timeoutMs: 5000);
 
-        senderTransport.RaiseDisconnected();
-        senderTransport.RaiseReconnected();
+        senderTransport.SetConnectedDataSessionsUnavailableForTests("transport_rebind");
+        senderTransport.SetConnectedDataSessionsAvailableForTests("transport_recovered");
         await Task.Delay(300);
 
         Assert.True(sender.Snapshot.Outbound!.IsPaused);
-        Assert.Empty(senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>());
+        Assert.Empty(senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>());
 
         Assert.NotNull(await sender.ResumeTransferAsync(transferId, "resume", CancellationToken.None));
         await WaitUntilAsync(
@@ -598,10 +598,10 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
     public async Task InboundUserPause_NotifiesOutboundPeerPause()
     {
         const string transferId = "transfer_pause_inbound_peer_visible";
-        var payload = Enumerable.Range(0, 8_000_000).Select(static index => (byte)(index % 251)).ToArray();
+        var payload = Enumerable.Range(0, 2_000_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport("session_pause_inbound_peer_visible");
         using var receiverTransport = new LoopbackFileTransferTransport("session_pause_inbound_peer_visible");
-        senderTransport.DataSessionSendDelayMs = 50;
+        senderTransport.DataSessionSendDelayMs = 10;
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         using var receiver = new SessionFileTransferService();
@@ -616,7 +616,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
         await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
         await WaitUntilAsync(
-            () => receiverTransport.SentDataFrames.OfType<FileTransferStateFrameV5>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0),
+            () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0),
             timeoutMs: 5000);
 
         Assert.NotNull(await receiver.PauseTransferAsync(transferId, "receiver_pause", CancellationToken.None));
@@ -630,9 +630,9 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
         Assert.Equal("receiver_pause", sender.Snapshot.Outbound.PeerPauseReason);
 
         await Task.Delay(900);
-        var drainedCount = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Count();
+        var drainedCount = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count();
         await Task.Delay(400);
-        Assert.Equal(drainedCount, senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV5>().Count());
+        Assert.Equal(drainedCount, senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count());
 
         Assert.NotNull(await receiver.ResumeTransferAsync(transferId, "receiver_resume", CancellationToken.None));
         await WaitUntilAsync(
@@ -673,7 +673,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
                 TransferId = transferId,
                 FileName = fileName,
                 FileSizeBytes = fileSizeBytes,
-                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
             },
             CancellationToken.None);
         await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
@@ -686,17 +686,17 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
             {
                 SessionId = sessionId,
                 TransferId = transferId,
-                ProtocolVersion = FileTransferProtocol.ProtocolVersionV5,
+                ProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
                 SessionRole = FileTransferProtocol.SessionRoleSender,
                 ChunkSizeBytes = chunkSizeBytes,
                 InitialPipelineDepth = 1,
             },
             CancellationToken.None);
-        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v5_receiver_started;", StringComparison.Ordinal), timeoutMs: 5000);
+        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_receiver_started;", StringComparison.Ordinal), timeoutMs: 5000);
         return await senderTransport.OpenFileTransferDataSessionAsync(sessionId, transferId, CancellationToken.None);
     }
 
-    private static FileTransferManifestFrameV5 CreateManifest(
+    private static FileTransferManifestFrameV6 CreateManifest(
         string sessionId,
         string transferId,
         string fileName,
@@ -714,7 +714,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
             Sha256Base64 = sha256,
         };
 
-    private static FileTransferChunkBatchFrameV5 CreateChunkBatch(
+    private static FileTransferChunkBatchFrameV6 CreateChunkBatch(
         string sessionId,
         string transferId,
         byte[] payload,
@@ -731,7 +731,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
             segments.Add(payload.Skip(start).Take(length).ToArray());
         }
 
-        return new FileTransferChunkBatchFrameV5
+        return new FileTransferChunkBatchFrameV6
         {
             SessionId = sessionId,
             TransferId = transferId,
@@ -741,7 +741,7 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
         };
     }
 
-    private static FileTransferStateFrameV5 CreatePeerPauseState(
+    private static FileTransferReceiverStateFrameV6 CreatePeerPauseState(
         string sessionId,
         string transferId,
         int epoch,

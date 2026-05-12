@@ -220,7 +220,14 @@ public sealed class SessionChatRuntimeTests : CoreSmokeTestsBase
                 };
                 hostTransport.HostByAddressAsync(cts.Token);
                 await Task.Delay(75, cts.Token);
-                await helperTransport.JoinByInviteAsync(invite: CoreSmokeTestsBase.CreateValidatedInviteForTarget(new PeerAddress(hostAddress), out string rawToken, InviteCapabilities.Chat), inviteToken: rawToken, ct: cts.Token).WaitAsync(TimeSpan.FromSeconds(3.0));
+                await helperTransport.JoinByInviteAsync(
+                    invite: CoreSmokeTestsBase.CreateValidatedInviteForTarget(
+                        new PeerAddress(hostAddress),
+                        out string rawToken,
+                        InviteCapabilities.Chat,
+                        boundHelperAddress: new PeerAddress(helperTransport.LocalPeerAddress)),
+                    inviteToken: rawToken,
+                    ct: cts.Token).WaitAsync(TimeSpan.FromSeconds(3.0));
                 Assert.Null(await helperChat.TrySendTextAsync("Hi, it's me", cts.Token));
                 Assert.False(preApprovalNoticeRaised.Task.IsCompleted);
                 await joinRaised.Task.WaitAsync(cts.Token);

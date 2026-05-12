@@ -461,7 +461,11 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
             hostReceived.TrySetResult(Encoding.UTF8.GetString(e.Payload));
         };
         _ = hostTransport.HostByAddressAsync(cts.Token);
-        var invite = CreateValidatedInviteForTarget(new PeerAddress(hostAddress), out var rawToken, InviteCapabilities.Chat);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat,
+            boundHelperAddress: new PeerAddress(helperTransport.LocalPeerAddress));
         await helperTransport.JoinByInviteAsync(rawToken, invite, cts.Token).WaitAsync(TimeSpan.FromSeconds(3));
         await joinRaised.Task.WaitAsync(cts.Token);
         await pendingJoin!.ApproveAsync(pendingJoin.CreateApprovalDecision(), cts.Token);
@@ -485,6 +489,8 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
             return;
         }
 
+        using var unsafeDeveloperMode = EnableUnsafeDeveloperModeForTests();
+        using var unboundInviteOptIn = new EnvironmentOverride(AppFeatureFlags.AllowInsecureUnboundPublicInvitesEnvVar, "1");
         var transportConfig = CreateDevLocalTestConfig();
         var network = new FakeSessionTransportNetwork();
         using var helpeeRuntime = new SessionRuntime(() => network.CreateTransport("helpee-chat-hardening-" + Guid.NewGuid().ToString("N")));
@@ -583,12 +589,18 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
     public async Task SessionRuntime_HelperReconnect_DoesNotReuseOldApproval()
     {
         var hostAddress = CreateTestPeerAddress();
+        var helperAddress = CreateTestPeerAddress();
+        var reconnectAddress = CreateTestPeerAddress();
         using var helpeeRuntime = new SessionRuntime(() => new DevLocalTransport(hostAddress));
-        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport());
-        using var reconnectRuntime = new SessionRuntime(() => new DevLocalTransport());
+        using var helperRuntime = new SessionRuntime(() => new DevLocalTransport(helperAddress));
+        using var reconnectRuntime = new SessionRuntime(() => new DevLocalTransport(reconnectAddress));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
         await helpeeRuntime.StartHelpeeAsync(cts.Token);
-        var invite = CreateValidatedInviteForTarget(new PeerAddress(hostAddress), out var rawToken, InviteCapabilities.Chat | InviteCapabilities.RemoteControl);
+        var invite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var rawToken,
+            InviteCapabilities.Chat | InviteCapabilities.RemoteControl,
+            boundHelperAddress: new PeerAddress(helperAddress));
         await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
         await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
         await helpeeRuntime.ApproveAsync(cts.Token);
@@ -597,7 +609,11 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
         await helperRuntime.DisconnectAsync();
         await WaitUntilAsync(() => helpeeRuntime.CurrentSessionGrant is null && !helpeeRuntime.SecurityState.ApprovalGranted, TimeSpan.FromSeconds(3));
         await helpeeRuntime.StartHelpeeAsync(cts.Token);
-        var reconnectInvite = CreateValidatedInviteForTarget(new PeerAddress(hostAddress), out var reconnectToken, InviteCapabilities.Chat | InviteCapabilities.RemoteControl);
+        var reconnectInvite = CreateValidatedInviteForTarget(
+            new PeerAddress(hostAddress),
+            out var reconnectToken,
+            InviteCapabilities.Chat | InviteCapabilities.RemoteControl,
+            boundHelperAddress: new PeerAddress(reconnectAddress));
         var reconnectTask = reconnectRuntime.StartHelperAsync(reconnectToken, reconnectInvite, cts.Token);
         await WaitUntilAsync(() => helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
         Assert.Null(reconnectRuntime.CurrentSessionGrant);
@@ -668,7 +684,10 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
             using var helperRuntime = new SessionRuntime(() => helperTransport);
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             await helpeeRuntime.StartHelpeeAsync(cts.Token);
-            var invite = CreateValidatedInviteForTarget(GetHostedAddressOrThrow(helpeeRuntime), out var rawToken);
+            var invite = CreateValidatedInviteForTarget(
+                GetHostedAddressOrThrow(helpeeRuntime),
+                out var rawToken,
+                boundHelperAddress: new PeerAddress(helperTransport.LocalPeerAddress));
             await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
             await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest, TimeSpan.FromSeconds(2));
             await helpeeRuntime.ApproveAsync(cts.Token);
@@ -700,7 +719,10 @@ public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConne
             using var helperRuntime = new SessionRuntime(() => helperTransport);
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             await helpeeRuntime.StartHelpeeAsync(cts.Token);
-            var invite = CreateValidatedInviteForTarget(GetHostedAddressOrThrow(helpeeRuntime), out var rawToken);
+            var invite = CreateValidatedInviteForTarget(
+                GetHostedAddressOrThrow(helpeeRuntime),
+                out var rawToken,
+                boundHelperAddress: new PeerAddress(helperTransport.LocalPeerAddress));
             await helperRuntime.StartHelperAsync(rawToken, invite, cts.Token);
             await WaitUntilAsync(() => helpeeRuntime.State == SessionRuntimeState.IncomingJoinRequest && helpeeRuntime.PendingApprovalRequest is not null, TimeSpan.FromSeconds(2));
             await helperRuntime.DisconnectAsync();
