@@ -212,6 +212,7 @@ public sealed record FileTransferPanelItemViewModel(
             FileTransferResultCodes.PayloadBudgetExceeded => "Transfer payload too large",
             FileTransferResultCodes.ReadFailed => "Couldn't read file",
             FileTransferResultCodes.TransportIncompatible => "Update nLink and retry",
+            FileTransferResultCodes.PeerDisconnected => "Peer disconnected",
             FileTransferResultCodes.TransportDisconnected => "Connection lost",
             FileTransferResultCodes.TransportDetached => "Transfer stopped",
             _ => snapshot.StatusMessage,

@@ -908,7 +908,7 @@ internal static class FileTransferSoakRunner
         var screenShareMediaFramesDelayed = cycles.Sum(static c => c.ScreenShareMediaFramesDelayed);
         var screenShareMediaFramesDropped = cycles.Sum(static c => c.ScreenShareMediaFramesDropped);
         var dataProtocolVersion = logMetrics.V4NegotiatedCount > 0 || logMetrics.V4ChunkBatchFrameCount > 0
-            ? FileTransferProtocol.ProtocolVersionV5
+            ? FileTransferProtocol.ProtocolVersionV6
             : 0;
         var hardLogFailure = logMetrics.PayloadRejectedCount > 0 ||
                              logMetrics.DecodeFailureCount > 0 ||
@@ -1160,7 +1160,7 @@ internal static class FileTransferSoakRunner
         using var reader = new StringReader(logText);
         while (reader.ReadLine() is { } line)
         {
-            if (line.Contains("event=filetransfer_v5_negotiated", StringComparison.Ordinal))
+            if (line.Contains("event=filetransfer_v6_negotiated", StringComparison.Ordinal))
             {
                 metrics.V4NegotiatedCount++;
             }
@@ -1168,7 +1168,7 @@ internal static class FileTransferSoakRunner
             {
                 metrics.V4ChunkBatchFrameCount++;
             }
-            if (line.Contains("event=filetransfer_v5_mixed_enabled", StringComparison.Ordinal))
+            if (line.Contains("event=filetransfer_v6_mixed_enabled", StringComparison.Ordinal))
             {
                 metrics.V4MixedEnabledCount++;
             }
