@@ -271,6 +271,70 @@ public sealed partial class TunaSidecarLiveManualTests
     }
 
     [Fact]
+    public void TunaSidecarPhase6Summary_DoesNotReportShaMismatchWhenHashMatchedButCompletionTimedOut()
+    {
+        var result = new TunaSoakCellResult
+        {
+            CellId = "phase6-clean-activation-sender-timeout",
+            Tier = TunaSoakTier.Core,
+            Transport = Phase3TransportMode.Tuna,
+            TrafficProfile = TunaSoakTrafficProfile.FileOnly,
+            Preset = TunaSoakPreset.TunaQuality,
+            Payer = TunaSoakPayerMode.BothUnlocked,
+            Fault = TunaSoakFaultMode.None,
+            Completed = false,
+            SessionAlive = true,
+            ChatControlAlive = true,
+            FileCompleted = false,
+            ScreenCompleted = true,
+            FileBytesSent = 1024,
+            FileBytesReceived = 1024,
+            FileReceiveRatio = 1,
+            FailureReason = "file_incomplete:receive_ratio=1.0000; reason=soak_timeout_incomplete",
+            DataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+            V6EpochStarted = true,
+            V6TargetProofObserved = true,
+            V6EpochRecovered = true,
+            SenderTerminalObserved = true,
+            ReceiverTerminalObserved = true,
+            FinalShaMatched = true,
+            IsPhase6Gate = true,
+        };
+
+        var summary = TunaSoakMatrixSummary.Build(new[] { result });
+
+        Assert.Equal("fail", summary.Verdict);
+        Assert.Contains("phase6-clean-activation-sender-timeout:file_incomplete", summary.Reasons);
+        Assert.DoesNotContain("phase6-clean-activation-sender-timeout:final_sha_missing_or_mismatch", summary.Reasons);
+    }
+
+    [Fact]
+    public async Task TunaSidecarPhase6ProviderQualityReport_WritesComparableRows()
+    {
+        var result = CreatePassingPhase6Result("phase6-provider-quality");
+        result.ProviderDegradedAccepted = true;
+        result.ProviderStillDegradedAtEnd = true;
+        result.ProviderQualityClass = "persistent_missing_path";
+        result.ProviderMissingIndices = [0];
+        result.ProviderStable3OnlyMs = 12000;
+        result.ProviderFinalUsableCount = 3;
+        result.ProviderFinalPathReasons = ["0:empty_endpoint", "1:usable"];
+        var summary = TunaSoakMatrixSummary.Build([result]);
+        var artifactDir = Path.Combine(Path.GetTempPath(), "nlink-provider-quality-report-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(artifactDir);
+
+        await WriteProviderQualityReportAsync(artifactDir, summary, CancellationToken.None);
+
+        var reportPath = Path.Combine(artifactDir, "provider-quality-report.json");
+        Assert.True(File.Exists(reportPath));
+        var text = await File.ReadAllTextAsync(reportPath);
+        Assert.Contains("\"artifactKind\": \"tuna_provider_quality_report\"", text, StringComparison.Ordinal);
+        Assert.Contains("\"providerQualityClass\": \"persistent_missing_path\"", text, StringComparison.Ordinal);
+        Assert.Contains("\"providerMissingIndices\": [", text, StringComparison.Ordinal);
+        Assert.Contains("\"providerStable3OnlyMs\": 12000", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TunaSidecarPhase6FaultDelay_FiresWhileFastFileTransferIsActive()
     {
         var snapshot = CaptureSoakEnvironment();
@@ -450,6 +514,7 @@ public sealed partial class TunaSidecarLiveManualTests
                     Path.Combine(artifactDir, "summary.json"),
                     JsonSerializer.Serialize(summary, SoakJsonOptions),
                     CancellationToken.None);
+                await WriteProviderQualityReportAsync(artifactDir, summary, CancellationToken.None);
                 await File.WriteAllTextAsync(
                     Path.Combine(artifactDir, "app-log-tail.redacted.log"),
                     RedactPhase3ArtifactText(ReadTunaSoakOperationalLogSlice(appLogStart, matrixStartedAtUtc), walletPath, walletPassword),
@@ -623,6 +688,53 @@ public sealed partial class TunaSidecarLiveManualTests
         lines.Add("reasons=" + (summary.Reasons.Length == 0 ? "(none)" : string.Join(",", summary.Reasons)));
         lines.Add("warnings=" + (summary.Warnings.Length == 0 ? "(none)" : string.Join(",", summary.Warnings)));
         await File.WriteAllLinesAsync(Path.Combine(artifactDir, "phase6-operator-verdict.txt"), lines, new UTF8Encoding(false), ct);
+    }
+
+    private static Task WriteProviderQualityReportAsync(
+        string artifactDir,
+        TunaSoakMatrixSummary summary,
+        CancellationToken ct)
+    {
+        var report = new
+        {
+            artifactKind = "tuna_provider_quality_report",
+            generatedAtUtc = DateTimeOffset.UtcNow,
+            cellCount = summary.CellCount,
+            rows = summary.Results.Select(static result => new
+            {
+                result.CellId,
+                result.StartedUtc,
+                result.EndedUtc,
+                result.DurationMs,
+                result.ProviderQualityClass,
+                result.ProviderDegradedAccepted,
+                result.ProviderRecoveredAfterDegraded,
+                result.ProviderStillDegradedAtEnd,
+                result.ProviderFirstDegradedUtc,
+                result.ProviderRecoveredUtc,
+                result.ProviderFinalUsableCount,
+                result.ProviderMissingIndices,
+                result.ProviderRecoveryLatencyMs,
+                result.ProviderStable3OnlyMs,
+                result.ProviderFinalPathReasons,
+                fileStartedUtc = result.StartedUtc,
+                fileEndedUtc = result.EndedUtc,
+                fileThroughputMbps = result.FileThroughputMbps,
+                fileReceiveRatio = result.FileReceiveRatio,
+                fallbackStarted = result.FallbackStarted,
+                fallbackExpected = result.FallbackExpected,
+                v6EpochRecovered = result.V6EpochRecovered,
+                v6EpochWaiting = result.V6EpochWaiting,
+                sidecarOrphanCount = result.SidecarOrphanCount,
+                warning = result.WarningReason,
+                failure = result.FailureReason,
+            }).ToArray(),
+        };
+
+        return File.WriteAllTextAsync(
+            Path.Combine(artifactDir, "provider-quality-report.json"),
+            JsonSerializer.Serialize(report, SoakJsonOptions),
+            ct);
     }
 
     private static TunaSoakCellResult CreatePassingPhase6Result(string cellId)

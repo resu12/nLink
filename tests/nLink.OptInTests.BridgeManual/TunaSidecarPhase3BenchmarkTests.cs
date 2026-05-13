@@ -2628,6 +2628,8 @@ public sealed partial class TunaSidecarLiveManualTests
 
         public string FailureReason { get; init; } = string.Empty;
 
+        public bool FinalShaMatched { get; init; }
+
         public bool SenderTerminalObserved { get; init; }
 
         public bool ReceiverTerminalObserved { get; init; }

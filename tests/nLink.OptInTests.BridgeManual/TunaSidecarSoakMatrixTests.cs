@@ -440,6 +440,7 @@ public sealed partial class TunaSidecarLiveManualTests
         var persistentStdout = """
             {"event":"provider_paths_degraded_accepted","usableCount":3}
             {"event":"provider_paths_still_degraded","usableCount":3}
+            {"event":"provider_path_quality_summary","qualityClass":"persistent_missing_path","usableCount":3,"missingIndices":[0],"recoveryLatencyMs":-1,"stable3OnlyMs":59000,"finalPathReasons":[{"index":0,"stateReason":"empty_endpoint"},{"index":1,"stateReason":"usable"}]}
             """;
         var lateRecoveredStdout = """
             {"event":"provider_paths_degraded_accepted","usableCount":3}
@@ -460,6 +461,10 @@ public sealed partial class TunaSidecarLiveManualTests
         Assert.False(persistent.RecoveredAfterDegraded);
         Assert.True(persistent.StillDegradedAtEnd);
         Assert.Equal(3, persistent.FinalUsableCount);
+        Assert.Equal("persistent_missing_path", persistent.QualityClass);
+        Assert.Equal([0], persistent.MissingIndices);
+        Assert.Equal(59000, persistent.Stable3OnlyMs);
+        Assert.Contains("0:empty_endpoint", persistent.FinalPathReasons);
         Assert.True(lateRecovered.DegradedAccepted);
         Assert.False(lateRecovered.RecoveredAfterDegraded);
         Assert.True(lateRecovered.StillDegradedAtEnd);
@@ -627,6 +632,7 @@ public sealed partial class TunaSidecarLiveManualTests
                     Path.Combine(artifactDir, "summary.json"),
                     JsonSerializer.Serialize(summary, SoakJsonOptions),
                     CancellationToken.None);
+                await WriteProviderQualityReportAsync(artifactDir, summary, CancellationToken.None);
                 await File.WriteAllTextAsync(
                     Path.Combine(artifactDir, "app-log-tail.redacted.log"),
                     RedactPhase3ArtifactText(ReadTunaSoakOperationalLogSlice(appLogStart, matrixStartedAtUtc), walletPath, walletPassword),
@@ -1261,6 +1267,11 @@ public sealed partial class TunaSidecarLiveManualTests
             ProviderRecoveredUtc = providerPaths.RecoveredUtc,
             ProviderFinalUsableCount = providerPaths.FinalUsableCount,
             ProviderDegradationOverlappedFileTransfer = providerPaths.OverlappedFileTransfer,
+            ProviderMissingIndices = providerPaths.MissingIndices,
+            ProviderQualityClass = providerPaths.QualityClass,
+            ProviderRecoveryLatencyMs = providerPaths.RecoveryLatencyMs,
+            ProviderStable3OnlyMs = providerPaths.Stable3OnlyMs,
+            ProviderFinalPathReasons = providerPaths.FinalPathReasons,
             FailureReason = failureReason,
             WarningReason = warningReason,
             DataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
@@ -1275,7 +1286,7 @@ public sealed partial class TunaSidecarLiveManualTests
             ReceiverTerminalObserved = inboundTerminalObserved || file.ReceiverTerminalObserved || file.Completed || expectedWaiting,
             CancelObserved = cancelObserved,
             PeerCloseObserved = peerCloseObserved,
-            FinalShaMatched = file.Completed,
+            FinalShaMatched = file.FinalShaMatched || file.Completed,
             SidecarOrphanCount = 0,
             UnresolvedEpochCount = expectedWaiting ? 1 : 0,
             ExpectedWaiting = expectedWaiting,
@@ -1447,7 +1458,7 @@ public sealed partial class TunaSidecarLiveManualTests
         completed = outbound?.State == FileTransferTransferState.Completed &&
                     inbound?.State == FileTransferTransferState.Completed &&
                     receivedBytes == payloadBytes;
-        finalShaMatched = completed &&
+        finalShaMatched = receivedBytes == payloadBytes &&
                           string.Equals(actualHash, expectedHash, StringComparison.Ordinal);
         if (string.IsNullOrWhiteSpace(failureReason) && !completed)
         {
@@ -1518,6 +1529,7 @@ public sealed partial class TunaSidecarLiveManualTests
             AccelerationQueueOverflow = accelerationDelta.QueueOverflow,
             AccelerationLastUnavailableReason = accelerationDelta.LastUnavailableReason,
             FailureReason = (completed && finalShaMatched) ? string.Empty : failureReason,
+            FinalShaMatched = finalShaMatched,
             SenderTerminalObserved = senderTerminal,
             ReceiverTerminalObserved = receiverTerminal,
             SenderFinalStatus = outbound?.StatusMessage ?? string.Empty,
@@ -2167,6 +2179,7 @@ public sealed partial class TunaSidecarLiveManualTests
         DateTimeOffset observedAtUtc)
     {
         var combined = string.Concat(logText, Environment.NewLine, sidecarText);
+        var qualitySummary = ReadLastProviderQualitySummary(sidecarText);
         var degradedAccepted =
             ContainsProviderEvent(combined, "provider_paths_degraded_accepted") ||
             ContainsProviderEvent(combined, "provider_paths_degraded");
@@ -2183,12 +2196,15 @@ public sealed partial class TunaSidecarLiveManualTests
         var stillDegraded = ContainsProviderEvent(combined, "provider_paths_still_degraded") ||
                             degradedAccepted && (!recoveredEventObserved || !recoveredWithRunway);
         var finalUsableCount =
+            qualitySummary?.UsableCount ??
             ExtractLastJsonInt(sidecarText, "usableCount") ??
             ExtractLastLogInt(logText, "usable_provider_count=") ??
             -1;
         var overlapped = degradedAccepted &&
                          firstDegradedUtc <= observedAtUtc &&
                          (!recoveredUtc.HasValue || recoveredUtc.Value >= cellStartedUtc);
+        var qualityClass = qualitySummary?.QualityClass ??
+                           ClassifyProviderQuality(degradedAccepted, recovered, stillDegraded, finalUsableCount);
         return new ProviderPathSoakDiagnostics(
             degradedAccepted,
             recovered,
@@ -2196,7 +2212,37 @@ public sealed partial class TunaSidecarLiveManualTests
             firstDegradedUtc,
             recoveredUtc,
             finalUsableCount,
-            overlapped);
+            overlapped,
+            qualityClass,
+            qualitySummary?.MissingIndices ?? [],
+            qualitySummary?.RecoveryLatencyMs ?? -1,
+            qualitySummary?.Stable3OnlyMs ?? -1,
+            qualitySummary?.FinalPathReasons ?? []);
+    }
+
+    private static string ClassifyProviderQuality(bool degradedAccepted, bool recovered, bool stillDegraded, int finalUsableCount)
+    {
+        if (!degradedAccepted && finalUsableCount >= 4)
+        {
+            return "full_ready";
+        }
+
+        if (recovered)
+        {
+            return "degraded_recovered";
+        }
+
+        if (stillDegraded)
+        {
+            return "persistent_missing_path";
+        }
+
+        if (!degradedAccepted && finalUsableCount >= 0 && finalUsableCount < 3)
+        {
+            return "timeout_before_degraded";
+        }
+
+        return "unknown";
     }
 
     private static bool ContainsProviderEvent(string text, string eventName)
@@ -2256,6 +2302,103 @@ public sealed partial class TunaSidecarLiveManualTests
         return int.TryParse(text[start..end], NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
             ? value
             : null;
+    }
+
+    private static ProviderPathQualitySummary? ReadLastProviderQualitySummary(string sidecarText)
+    {
+        if (string.IsNullOrWhiteSpace(sidecarText))
+        {
+            return null;
+        }
+
+        ProviderPathQualitySummary? summary = null;
+        foreach (var line in sidecarText.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(line);
+                var root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object ||
+                    !root.TryGetProperty("event", out var eventName) ||
+                    eventName.ValueKind != JsonValueKind.String ||
+                    !string.Equals(eventName.GetString(), "provider_path_quality_summary", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                summary = new ProviderPathQualitySummary(
+                    root.TryGetProperty("qualityClass", out var qualityClass) && qualityClass.ValueKind == JsonValueKind.String
+                        ? qualityClass.GetString() ?? "unknown"
+                        : "unknown",
+                    root.TryGetProperty("usableCount", out var usableCount) && usableCount.TryGetInt32(out var parsedUsable)
+                        ? parsedUsable
+                        : -1,
+                    ReadJsonIntArray(root, "missingIndices"),
+                    root.TryGetProperty("recoveryLatencyMs", out var recoveryLatency) && recoveryLatency.TryGetInt64(out var parsedRecovery)
+                        ? parsedRecovery
+                        : -1,
+                    root.TryGetProperty("stable3OnlyMs", out var stable3Only) && stable3Only.TryGetInt64(out var parsedStable3Only)
+                        ? parsedStable3Only
+                        : -1,
+                    ReadJsonFinalPathReasons(root));
+            }
+            catch (JsonException)
+            {
+                // Ignore unrelated sidecar lines.
+            }
+        }
+
+        return summary;
+    }
+
+    private static int[] ReadJsonIntArray(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var array) ||
+            array.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var values = new List<int>();
+        foreach (var item in array.EnumerateArray())
+        {
+            if (item.TryGetInt32(out var value))
+            {
+                values.Add(value);
+            }
+        }
+
+        return values.ToArray();
+    }
+
+    private static string[] ReadJsonFinalPathReasons(JsonElement root)
+    {
+        if (!root.TryGetProperty("finalPathReasons", out var array) ||
+            array.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var values = new List<string>();
+        foreach (var item in array.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var index = item.TryGetProperty("index", out var indexElement) &&
+                        indexElement.TryGetInt32(out var parsedIndex)
+                ? parsedIndex
+                : -1;
+            var reason = item.TryGetProperty("stateReason", out var reasonElement) &&
+                         reasonElement.ValueKind == JsonValueKind.String
+                ? reasonElement.GetString()
+                : "unknown";
+            values.Add(index.ToString(CultureInfo.InvariantCulture) + ":" + (reason ?? "unknown"));
+        }
+
+        return values.ToArray();
     }
 
     private static int? ExtractLastLogInt(string text, string prefix)
@@ -2506,6 +2649,7 @@ public sealed partial class TunaSidecarLiveManualTests
         SoakCellFilterEnv,
         SoakFilePacingMbpsEnv,
         SoakCellRetriesEnv,
+        TunaTestDegradedProviderGraceSecondsEnv,
     ];
 
     private static object GetTunaSoakPresetMetadata(TunaSoakPreset preset)
@@ -2793,6 +2937,11 @@ public sealed partial class TunaSidecarLiveManualTests
         public DateTimeOffset? ProviderRecoveredUtc { get; set; }
         public int ProviderFinalUsableCount { get; set; }
         public bool ProviderDegradationOverlappedFileTransfer { get; set; }
+        public int[] ProviderMissingIndices { get; set; } = [];
+        public string ProviderQualityClass { get; set; } = "unknown";
+        public long ProviderRecoveryLatencyMs { get; set; } = -1;
+        public long ProviderStable3OnlyMs { get; set; } = -1;
+        public string[] ProviderFinalPathReasons { get; set; } = [];
         public string FailureReason { get; init; } = string.Empty;
         public string WarningReason { get; set; } = string.Empty;
         public string LogExcerpt { get; set; } = string.Empty;
@@ -2823,7 +2972,20 @@ public sealed partial class TunaSidecarLiveManualTests
         DateTimeOffset? FirstDegradedUtc,
         DateTimeOffset? RecoveredUtc,
         int FinalUsableCount,
-        bool OverlappedFileTransfer);
+        bool OverlappedFileTransfer,
+        string QualityClass,
+        int[] MissingIndices,
+        long RecoveryLatencyMs,
+        long Stable3OnlyMs,
+        string[] FinalPathReasons);
+
+    private sealed record ProviderPathQualitySummary(
+        string QualityClass,
+        int UsableCount,
+        int[] MissingIndices,
+        long RecoveryLatencyMs,
+        long Stable3OnlyMs,
+        string[] FinalPathReasons);
 
     private sealed record TunaSoakMatrixSummary(
         string Event,

@@ -97,6 +97,7 @@ internal sealed class TunaRuntimePreferenceState
 {
     public const string AllowDegradedProviderReadyEnvVar = "NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY";
     public const string RequireStrictProviderReadyEnvVar = "NLINK_NKN_TUNA_REQUIRE_STRICT_PROVIDER_READY";
+    public const string DegradedProviderGraceSecondsEnvVar = "NLINK_NKN_TUNA_DEGRADED_PROVIDER_GRACE_SECONDS";
     public const string DefaultMaxPriceNknPerMb = "0.0002";
     public const int DefaultMaxTotalMiB = 2048;
     public const int DefaultMaxDurationSec = 1800;
@@ -1356,6 +1357,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             StartupAttemptCount = 2,
             RequireProviderReady = !allowDegradedProviderReady,
             ProviderReadyAttempts = 2,
+            DegradedProviderGraceSeconds = EffectiveDegradedProviderGraceSeconds(),
             UsageSink = usageSink,
             StatusChanged = SetRuntimeStatus,
             CapHandoffRequested = RequestCapHandoff,
@@ -1376,6 +1378,16 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                IsEnabled(ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
                    TunaRuntimePreferenceState.AllowDegradedProviderReadyEnvVar,
                    category: "nkn_tuna_provider_readiness"));
+    }
+
+    private static int EffectiveDegradedProviderGraceSeconds()
+    {
+        var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
+            TunaRuntimePreferenceState.DegradedProviderGraceSecondsEnvVar,
+            category: "nkn_tuna_provider_readiness");
+        return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
+            ? Math.Clamp(parsed, 0, 300)
+            : 0;
     }
 
     private static bool IsEnabled(string? value)
@@ -2208,6 +2220,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
                 options.ListenStartTimeoutSec.ToString(CultureInfo.InvariantCulture),
                 options.StartupAttemptCount.ToString(CultureInfo.InvariantCulture),
                 options.RequireProviderReady ? "strict_provider_ready" : "degraded_provider_ready",
-                options.ProviderReadyAttempts.ToString(CultureInfo.InvariantCulture));
+                options.ProviderReadyAttempts.ToString(CultureInfo.InvariantCulture),
+                options.DegradedProviderGraceSeconds.ToString(CultureInfo.InvariantCulture));
     }
 }

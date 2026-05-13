@@ -1161,6 +1161,9 @@ public sealed class TunaWalletDiagnosticsTests
         InvokeSupervisorStdout(
             supervisor,
             "{\"event\":\"provider_paths_still_degraded\",\"usableCount\":3,\"minProviderCnt\":4,\"degradedProviderCnt\":3}");
+        InvokeSupervisorStdout(
+            supervisor,
+            "{\"event\":\"provider_path_quality_summary\",\"qualityClass\":\"persistent_missing_path\",\"usableCount\":3,\"missingIndices\":[0],\"recoveryLatencyMs\":-1,\"stable3OnlyMs\":12000,\"finalPathReasons\":[{\"index\":0,\"stateReason\":\"empty_endpoint\"},{\"index\":1,\"stateReason\":\"usable\"}]}");
 
         Assert.Contains("provider_paths_degraded", statuses);
         Assert.Contains("provider_paths_ready", statuses);
@@ -1168,6 +1171,12 @@ public sealed class TunaWalletDiagnosticsTests
         Assert.Equal(1, diagnostics.DegradedAcceptedCount);
         Assert.Equal(1, diagnostics.RecoveredCount);
         Assert.Equal(1, diagnostics.StillDegradedCount);
+        Assert.NotNull(diagnostics.LatestQualitySummary);
+        Assert.Equal("persistent_missing_path", diagnostics.LatestQualitySummary.QualityClass);
+        Assert.Equal(3, diagnostics.LatestQualitySummary.UsableCount);
+        Assert.Equal([0], diagnostics.LatestQualitySummary.MissingIndices);
+        Assert.Equal(12000, diagnostics.LatestQualitySummary.Stable3OnlyMs);
+        Assert.Contains("0:empty_endpoint", diagnostics.LatestQualitySummary.FinalPathReasons);
     }
 
     [Fact]

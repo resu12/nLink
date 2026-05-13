@@ -73,7 +73,27 @@ Provider readiness warnings are now split so a degraded startup can be distingui
 - `providerDegradedAccepted` means the listener started with the allowed 3 usable Tuna paths.
 - `providerRecoveredAfterDegraded` means usable paths later reached the full 4-path target.
 - `providerStillDegradedAtEnd` means the cell ended before full 4-path readiness was observed, and the verdict reports `provider_paths_degraded`.
+- `providerQualityClass` is one of `full_ready`, `degraded_recovered`, `persistent_missing_path`, `timeout_before_degraded`, or `unknown`.
+- `provider-quality-report.json` is written beside `summary.json` and should be used to compare default, warmup, and strict provider-readiness runs.
 - `activation_cleanup_late_peer_close` is a clean-activation warning only: full bytes, SHA match, and terminal sender/receiver snapshots are accepted even if peer-close evidence arrives late or is absent.
+
+Provider-path A/B troubleshooting sequence:
+
+```powershell
+# Default degraded behavior.
+$env:NLINK_TUNA_SOAK_CELL_FILTER = "phase6-tuna-file-helper-receiving-both-activation,phase6-tuna-file-helpee-receiving-both-activation,phase6-tuna-file-helpee-receiving-helper-cap"
+dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release --no-build --no-restore --filter "FullyQualifiedName~TunaSidecarPhase6_ShortPaidMatrix"
+
+# Warmup: wait up to 20 seconds for the fourth provider path before accepting degraded readiness.
+$env:NLINK_TUNA_TEST_DEGRADED_PROVIDER_GRACE_SECONDS = "20"
+dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release --no-build --no-restore --filter "FullyQualifiedName~TunaSidecarPhase6_ShortPaidMatrix"
+
+# Strict: require full 4-path readiness, with up to three attempts.
+$env:NLINK_TUNA_TEST_DEGRADED_PROVIDER_GRACE_SECONDS = $null
+$env:NLINK_TUNA_TEST_REQUIRE_PROVIDER_READY = "1"
+$env:NLINK_TUNA_TEST_PROVIDER_READY_ATTEMPTS = "3"
+dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release --no-build --no-restore --filter "FullyQualifiedName~TunaSidecarPhase6_ShortPaidMatrix"
+```
 
 Latest local Phase 6 reference run:
 

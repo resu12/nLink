@@ -143,6 +143,12 @@ func TestProviderPathReadinessStateEmitsStillDegradedOnce(t *testing.T) {
 	paths := event{
 		"usableCount": int64(3),
 		"pathsHash":   "degraded-hash",
+		"paths": []event{
+			{"index": 0, "usable": false, "stateReason": "empty_endpoint", "endpointHash": "missing"},
+			{"index": 1, "usable": true, "stateReason": "usable", "endpointHash": "a"},
+			{"index": 2, "usable": true, "stateReason": "usable", "endpointHash": "b"},
+			{"index": 3, "usable": true, "stateReason": "usable", "endpointHash": "c"},
+		},
 	}
 	var output bytes.Buffer
 	emit := &emitter{jsonl: true, out: &output}
@@ -151,14 +157,44 @@ func TestProviderPathReadinessStateEmitsStillDegradedOnce(t *testing.T) {
 	state.markDegradedAccepted(emit, "listener", paths, 1, 1, time.Now().Add(-time.Second))
 	state.emitStillDegradedIfNeeded(emit, "listener", "bridge_summary")
 	state.emitStillDegradedIfNeeded(emit, "listener", "bridge_summary")
+	state.emitQualitySummary(emit, "listener", "bridge_summary")
 
 	text := output.String()
 	if count := strings.Count(text, `"event":"provider_paths_still_degraded"`); count != 1 {
 		t.Fatalf("still degraded event count = %d; output=%s", count, text)
 	}
+	if !strings.Contains(text, `"event":"provider_path_state_changed"`) ||
+		!strings.Contains(text, `"event":"provider_path_quality_summary"`) ||
+		!strings.Contains(text, `"qualityClass":"persistent_missing_path"`) ||
+		!strings.Contains(text, `"missingIndices":[0]`) {
+		t.Fatalf("missing provider quality diagnostics: %s", text)
+	}
 	summary := providerPathReadinessSummary(state)
 	if summary["degradedAccepted"] != true || summary["recovered"] != false || summary["stillDegraded"] != true {
 		t.Fatalf("summary = %#v", summary)
+	}
+}
+
+func TestProviderPathStateReasonClassifiesEndpointQuality(t *testing.T) {
+	tests := []struct {
+		name string
+		ip   string
+		port uint32
+		want string
+	}{
+		{name: "empty", want: "empty_endpoint"},
+		{name: "missing ip", port: 42, want: "missing_ip"},
+		{name: "missing port", ip: "159.65.92.44", want: "missing_port"},
+		{name: "non public", ip: "127.0.0.1", port: 42, want: "non_public_ip"},
+		{name: "usable", ip: "159.65.92.44", port: 42, want: "usable"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := providerPathStateReason(tt.ip, tt.port); got != tt.want {
+				t.Fatalf("providerPathStateReason() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -350,6 +386,7 @@ func TestPaidListenProviderReadyAttempts(t *testing.T) {
 		"--listen-start-timeout-sec", "30",
 		"--require-provider-ready",
 		"--provider-ready-attempts", "2",
+		"--degraded-provider-grace-sec", "20",
 	})
 	if err != nil {
 		t.Fatalf("parseArgs(listen with provider attempts) error = %v", err)
@@ -360,6 +397,9 @@ func TestPaidListenProviderReadyAttempts(t *testing.T) {
 	}
 	if cfg.providerReadyAttempts != 2 {
 		t.Fatalf("providerReadyAttempts = %d, want 2", cfg.providerReadyAttempts)
+	}
+	if cfg.degradedProviderGraceSec != 20 {
+		t.Fatalf("degradedProviderGraceSec = %d, want 20", cfg.degradedProviderGraceSec)
 	}
 	if cfg.listenStartTimeoutSec != 30 {
 		t.Fatalf("listenStartTimeoutSec = %d, want 30", cfg.listenStartTimeoutSec)

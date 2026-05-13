@@ -18,6 +18,7 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
 {
     private const string TunaTestRequireProviderReadyEnv = "NLINK_TUNA_TEST_REQUIRE_PROVIDER_READY";
     private const string TunaTestProviderReadyAttemptsEnv = "NLINK_TUNA_TEST_PROVIDER_READY_ATTEMPTS";
+    private const string TunaTestDegradedProviderGraceSecondsEnv = "NLINK_TUNA_TEST_DEGRADED_PROVIDER_GRACE_SECONDS";
 
     [Trait("Category", "Manual")]
     [ManualBridgeFact]
@@ -322,6 +323,13 @@ public sealed partial class TunaSidecarLiveManualTests : CoreSmokeTestsBase
         {
             process.StartInfo.ArgumentList.Add("--provider-ready-attempts");
             process.StartInfo.ArgumentList.Add(providerReadyAttempts.ToString(CultureInfo.InvariantCulture));
+        }
+
+        var degradedProviderGraceSeconds = ReadInt(TunaTestDegradedProviderGraceSecondsEnv, fallback: 0, min: 0, max: 300);
+        if (degradedProviderGraceSeconds > 0)
+        {
+            process.StartInfo.ArgumentList.Add("--degraded-provider-grace-sec");
+            process.StartInfo.ArgumentList.Add(degradedProviderGraceSeconds.ToString(CultureInfo.InvariantCulture));
         }
 
         process.StartInfo.ArgumentList.Add("--jsonl");

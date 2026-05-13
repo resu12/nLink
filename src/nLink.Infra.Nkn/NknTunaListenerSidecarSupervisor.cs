@@ -31,6 +31,8 @@ internal sealed class NknTunaListenerSidecarOptions
 
     public int ProviderReadyAttempts { get; init; } = 1;
 
+    public int DegradedProviderGraceSeconds { get; init; }
+
     public INknTunaUsageTelemetrySink? UsageSink { get; init; }
 
     public Action<string>? StatusChanged { get; init; }
@@ -43,7 +45,16 @@ internal sealed class NknTunaListenerSidecarOptions
 internal sealed record NknTunaProviderPathDiagnostics(
     int DegradedAcceptedCount,
     int RecoveredCount,
-    int StillDegradedCount);
+    int StillDegradedCount,
+    NknTunaProviderPathQualitySummary? LatestQualitySummary = null);
+
+internal sealed record NknTunaProviderPathQualitySummary(
+    string QualityClass,
+    int UsableCount,
+    int[] MissingIndices,
+    long RecoveryLatencyMs,
+    long Stable3OnlyMs,
+    string[] FinalPathReasons);
 
 internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecarSupervisor
 {
@@ -59,6 +70,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
     private int providerPathsDegradedAcceptedCount;
     private int providerPathsRecoveredCount;
     private int providerPathsStillDegradedCount;
+    private NknTunaProviderPathQualitySummary? latestProviderPathQualitySummary;
 
     public NknTunaListenerSidecarSupervisor(NknTunaListenerSidecarOptions options)
     {
@@ -97,7 +109,8 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                 return new NknTunaProviderPathDiagnostics(
                     providerPathsDegradedAcceptedCount,
                     providerPathsRecoveredCount,
-                    providerPathsStillDegradedCount);
+                    providerPathsStillDegradedCount,
+                    latestProviderPathQualitySummary);
             }
         }
     }
@@ -250,6 +263,12 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             nextProcess.StartInfo.ArgumentList.Add(options.ProviderReadyAttempts.ToString(CultureInfo.InvariantCulture));
         }
 
+        if (options.DegradedProviderGraceSeconds > 0)
+        {
+            nextProcess.StartInfo.ArgumentList.Add("--degraded-provider-grace-sec");
+            nextProcess.StartInfo.ArgumentList.Add(Math.Clamp(options.DegradedProviderGraceSeconds, 0, 300).ToString(CultureInfo.InvariantCulture));
+        }
+
         nextProcess.StartInfo.ArgumentList.Add("--jsonl");
 
         nextProcess.OutputDataReceived += (_, e) =>
@@ -294,6 +313,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                 providerPathsDegradedAcceptedCount = 0;
                 providerPathsRecoveredCount = 0;
                 providerPathsStillDegradedCount = 0;
+                latestProviderPathQualitySummary = null;
             }
 
             if (!nextProcess.Start())
@@ -378,7 +398,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
 
             var safeEvent = SanitizeLogToken(eventName);
             LocalOperationalLog.Info("NKN.Tuna", $"event=tuna_listener_sidecar_event; sidecar_event={safeEvent}; line_len={line.Length}");
-            RecordProviderPathDiagnosticEvent(eventName);
+            RecordProviderPathDiagnosticEvent(eventName, root);
             var stageStatus = RuntimeStatusForSidecarEvent(eventName, root);
             if (!string.IsNullOrWhiteSpace(stageStatus))
             {
@@ -473,7 +493,7 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
             _ => null,
         };
 
-    private void RecordProviderPathDiagnosticEvent(string eventName)
+    private void RecordProviderPathDiagnosticEvent(string eventName, JsonElement root)
     {
         lock (gate)
         {
@@ -488,8 +508,72 @@ internal sealed class NknTunaListenerSidecarSupervisor : INknTunaListenerSidecar
                 case "provider_paths_still_degraded":
                     providerPathsStillDegradedCount++;
                     break;
+                case "provider_path_quality_summary":
+                    latestProviderPathQualitySummary = ReadProviderPathQualitySummary(root);
+                    break;
             }
         }
+    }
+
+    private static NknTunaProviderPathQualitySummary ReadProviderPathQualitySummary(JsonElement root)
+        => new(
+            TryGetString(root, "qualityClass") ?? "unknown",
+            TryGetInt32(root, "usableCount") ?? -1,
+            ReadIntArray(root, "missingIndices"),
+            TryGetInt64(root, "recoveryLatencyMs") ?? -1,
+            TryGetInt64(root, "stable3OnlyMs") ?? -1,
+            ReadFinalPathReasons(root));
+
+    private static int[] ReadIntArray(JsonElement root, string propertyName)
+    {
+        if (!root.TryGetProperty(propertyName, out var array) ||
+            array.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var values = new List<int>();
+        foreach (var item in array.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.Number &&
+                item.TryGetInt32(out var value))
+            {
+                values.Add(value);
+            }
+        }
+
+        return values.ToArray();
+    }
+
+    private static string[] ReadFinalPathReasons(JsonElement root)
+    {
+        if (!root.TryGetProperty("finalPathReasons", out var array) ||
+            array.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var values = new List<string>();
+        foreach (var item in array.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var index = item.TryGetProperty("index", out var indexElement) &&
+                        indexElement.ValueKind == JsonValueKind.Number &&
+                        indexElement.TryGetInt32(out var parsedIndex)
+                ? parsedIndex
+                : -1;
+            var reason = item.TryGetProperty("stateReason", out var reasonElement) &&
+                         reasonElement.ValueKind == JsonValueKind.String
+                ? reasonElement.GetString()
+                : "unknown";
+            values.Add(index.ToString(CultureInfo.InvariantCulture) + ":" + SanitizeLogToken(reason));
+        }
+
+        return values.ToArray();
     }
 
     private void HandlePayment(JsonElement root)

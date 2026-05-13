@@ -1349,6 +1349,7 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             $"tuna_runtime_caps: max_price_nkn_per_mb={TunaMaxPriceNknPerMb}; max_total_mib={TunaMaxTotalMiB}; max_duration_minutes={TunaMaxDurationMinutes}",
             $"tuna_provider_readiness: {tunaProviderReadinessMode}",
             $"tuna_provider_readiness_env: {DiagnosticsExportBuilder.RedactStructuredValue(TunaRuntimePreferenceState.AllowDegradedProviderReadyEnvVar, Environment.GetEnvironmentVariable(TunaRuntimePreferenceState.AllowDegradedProviderReadyEnvVar))}",
+            $"tuna_provider_grace_env: {DiagnosticsExportBuilder.RedactStructuredValue(TunaRuntimePreferenceState.DegradedProviderGraceSecondsEnvVar, Environment.GetEnvironmentVariable(TunaRuntimePreferenceState.DegradedProviderGraceSecondsEnvVar))}",
             $"tuna_fallback_state: {TunaFallbackState}",
             $"tuna_sidecar_verifier: {TunaSidecarVerifierStatus}",
             $"tuna_sidecar_verifier_detail: {TunaSidecarVerifierDetail}",

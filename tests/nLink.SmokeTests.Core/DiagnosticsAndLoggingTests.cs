@@ -724,6 +724,7 @@ public void TunaRuntimeProviderReadiness_DefaultsDegradedWithStrictOverride()
 
     Assert.Contains("NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY", source, StringComparison.Ordinal);
     Assert.Contains("NLINK_NKN_TUNA_REQUIRE_STRICT_PROVIDER_READY", source, StringComparison.Ordinal);
+    Assert.Contains("NLINK_NKN_TUNA_DEGRADED_PROVIDER_GRACE_SECONDS", source, StringComparison.Ordinal);
     Assert.Contains("RequireProviderReady = !allowDegradedProviderReady", source, StringComparison.Ordinal);
     Assert.Contains("strict_provider_ready", source, StringComparison.Ordinal);
     Assert.Contains("degraded_provider_ready", source, StringComparison.Ordinal);

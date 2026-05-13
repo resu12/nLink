@@ -84,20 +84,21 @@ type config struct {
 	connectTimeoutSec int
 	localIPC          string
 
-	walletPath            string
-	passwordPrompt        bool
-	passwordStdin         bool
-	allowRemote           string
-	allowRemoteRegex      bool
-	unsafeAllowAny        bool
-	maxPriceNKNPerMB      string
-	minBalanceNKN         string
-	maxTotalMiB           int
-	maxDurationSec        int
-	acceptTimeoutSec      int
-	listenStartTimeoutSec int
-	requireProviderReady  bool
-	providerReadyAttempts int
+	walletPath               string
+	passwordPrompt           bool
+	passwordStdin            bool
+	allowRemote              string
+	allowRemoteRegex         bool
+	unsafeAllowAny           bool
+	maxPriceNKNPerMB         string
+	minBalanceNKN            string
+	maxTotalMiB              int
+	maxDurationSec           int
+	acceptTimeoutSec         int
+	listenStartTimeoutSec    int
+	requireProviderReady     bool
+	providerReadyAttempts    int
+	degradedProviderGraceSec int
 
 	to                string
 	tunaDialTimeoutMs int
@@ -374,6 +375,7 @@ func parseArgs(args []string) (*config, error) {
 		fs.IntVar(&cfg.listenStartTimeoutSec, "listen-start-timeout-sec", int(defaultListenStartTimeout.Seconds()), "timeout while starting Tuna listener paths before retry/fallback")
 		fs.BoolVar(&cfg.requireProviderReady, "require-provider-ready", false, "fail listener startup unless full Tuna provider path readiness is reached")
 		fs.IntVar(&cfg.providerReadyAttempts, "provider-ready-attempts", 1, "provider readiness wait attempts before failing listener startup")
+		fs.IntVar(&cfg.degradedProviderGraceSec, "degraded-provider-grace-sec", 0, "optional diagnostic grace seconds to wait for full provider readiness after degraded readiness is observed")
 	case modeDial:
 		fs.StringVar(&cfg.to, "to", "", "remote Tuna/NKN listener address")
 		fs.IntVar(&cfg.maxTotalMiB, "max-total-mib", defaultMaxTotalMiB, "optional local byte cap in MiB; 0 disables")
@@ -449,6 +451,9 @@ func validateConfig(cfg *config) error {
 		}
 		if cfg.providerReadyAttempts < 1 || cfg.providerReadyAttempts > 5 {
 			return usageError("--provider-ready-attempts must be between 1 and 5")
+		}
+		if cfg.degradedProviderGraceSec < 0 || cfg.degradedProviderGraceSec > 300 {
+			return usageError("--degraded-provider-grace-sec must be between 0 and 300")
 		}
 		if cfg.listenStartTimeoutSec < 5 || cfg.listenStartTimeoutSec > 300 {
 			return usageError("--listen-start-timeout-sec must be between 5 and 300")
@@ -594,6 +599,7 @@ func runListen(ctx context.Context, cfg *config, emit *emitter) error {
 		"listener",
 		!cfg.requireProviderReady,
 		cfg.providerReadyAttempts,
+		time.Duration(cfg.degradedProviderGraceSec)*time.Second,
 		providerPathState)
 	if providerReadyErr != nil && (ctx.Err() != nil || cfg.requireProviderReady) {
 		return providerReadyErr
@@ -1165,6 +1171,7 @@ doneCollectingBridgeResults:
 			providerInfo = latest
 		}
 		providerPathState.emitStillDegradedIfNeeded(emit, role, "bridge_summary")
+		providerPathState.emitQualitySummary(emit, role, "bridge_summary")
 	}
 	providerReadiness := providerPathReadinessSummary(providerPathState)
 	providerUsableCount := -1
@@ -1713,20 +1720,32 @@ func frameLaneName(lane byte) string {
 }
 
 type providerPathReadinessState struct {
-	mu                   sync.Mutex
-	degradedAccepted     bool
-	recovered            bool
-	stillDegradedEmitted bool
-	firstDegradedAt      time.Time
-	recoveredAt          time.Time
-	startedAt            time.Time
-	attempt              int
-	maxAttempts          int
-	lastPaths            event
+	mu                    sync.Mutex
+	degradedAccepted      bool
+	recovered             bool
+	stillDegradedEmitted  bool
+	qualitySummaryEmitted bool
+	firstDegradedAt       time.Time
+	recoveredAt           time.Time
+	startedAt             time.Time
+	attempt               int
+	maxAttempts           int
+	lastPaths             event
+	lastPathStates        map[int]providerPathObservedState
+	pathTimeline          []event
 }
 
 func newProviderPathReadinessState() *providerPathReadinessState {
-	return &providerPathReadinessState{}
+	return &providerPathReadinessState{
+		lastPathStates: map[int]providerPathObservedState{},
+	}
+}
+
+type providerPathObservedState struct {
+	signature    string
+	endpointHash string
+	reason       string
+	usable       bool
 }
 
 func (s *providerPathReadinessState) markDegradedAccepted(
@@ -1741,6 +1760,7 @@ func (s *providerPathReadinessState) markDegradedAccepted(
 	}
 	elapsedMs := time.Since(startedAt).Milliseconds()
 	accepted := false
+	var changes []event
 	s.mu.Lock()
 	if !s.degradedAccepted {
 		s.degradedAccepted = true
@@ -1751,10 +1771,12 @@ func (s *providerPathReadinessState) markDegradedAccepted(
 		accepted = true
 	}
 	s.lastPaths = paths
+	changes = s.recordPathStatesLocked(role, paths, "startup")
 	s.mu.Unlock()
 	if accepted {
 		emit.emit(providerPathEvent("provider_paths_degraded_accepted", role, paths, attempt, maxAttempts, elapsedMs, "startup"))
 	}
+	emitProviderPathStateChanges(emit, changes)
 }
 
 func (s *providerPathReadinessState) observePaths(emit *emitter, role string, paths event, stage string) {
@@ -1766,8 +1788,10 @@ func (s *providerPathReadinessState) observePaths(emit *emitter, role string, pa
 	var attempt int
 	var maxAttempts int
 	var elapsedMs int64
+	var changes []event
 	s.mu.Lock()
 	s.lastPaths = paths
+	changes = s.recordPathStatesLocked(role, paths, stage)
 	if s.degradedAccepted && !s.recovered && usableCount >= providerReadyMinPaths {
 		s.recovered = true
 		s.recoveredAt = time.Now()
@@ -1782,6 +1806,7 @@ func (s *providerPathReadinessState) observePaths(emit *emitter, role string, pa
 	if shouldEmitRecovered {
 		emit.emit(providerPathEvent("provider_paths_recovered", role, paths, attempt, maxAttempts, elapsedMs, stage))
 	}
+	emitProviderPathStateChanges(emit, changes)
 }
 
 func (s *providerPathReadinessState) emitStillDegradedIfNeeded(emit *emitter, role string, stage string) {
@@ -1810,6 +1835,22 @@ func (s *providerPathReadinessState) emitStillDegradedIfNeeded(emit *emitter, ro
 	}
 }
 
+func (s *providerPathReadinessState) emitQualitySummary(emit *emitter, role string, stage string) {
+	if s == nil {
+		return
+	}
+	var summary event
+	s.mu.Lock()
+	if !s.qualitySummaryEmitted {
+		s.qualitySummaryEmitted = true
+		summary = s.qualitySummaryLocked(role, stage, time.Now())
+	}
+	s.mu.Unlock()
+	if summary != nil {
+		emit.emit(summary)
+	}
+}
+
 func (s *providerPathReadinessState) latestPaths() event {
 	if s == nil {
 		return nil
@@ -1825,13 +1866,166 @@ func providerPathReadinessSummary(s *providerPathReadinessState) event {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	summary := s.qualitySummaryLocked("", "status", time.Now())
 	return event{
 		"degradedAccepted": s.degradedAccepted,
 		"recovered":        s.recovered,
 		"stillDegraded":    s.degradedAccepted && !s.recovered,
 		"attempt":          s.attempt,
 		"maxAttempts":      s.maxAttempts,
+		"quality":          summary,
 	}
+}
+
+func (s *providerPathReadinessState) recordPathStatesLocked(role string, paths event, stage string) []event {
+	if paths == nil {
+		return nil
+	}
+	rawPaths, ok := paths["paths"].([]event)
+	if !ok {
+		return nil
+	}
+	changes := make([]event, 0)
+	nowMs := time.Now().UnixMilli()
+	for _, path := range rawPaths {
+		index := eventInt(path, "index")
+		reason, _ := path["stateReason"].(string)
+		endpointHash, _ := path["endpointHash"].(string)
+		usable, _ := path["usable"].(bool)
+		signature := fmt.Sprintf("%d|%t|%s|%s", index, usable, reason, endpointHash)
+		previous, existed := s.lastPathStates[index]
+		if existed && previous.signature == signature {
+			continue
+		}
+		change := event{
+			"event":                "provider_path_state_changed",
+			"role":                 role,
+			"stage":                stage,
+			"index":                index,
+			"usable":               usable,
+			"stateReason":          reason,
+			"endpointHash":         endpointHash,
+			"previousStateReason":  previous.reason,
+			"previousEndpointHash": previous.endpointHash,
+			"observedUnixMs":       nowMs,
+		}
+		if !existed {
+			change["previousStateReason"] = "unknown"
+			change["previousEndpointHash"] = ""
+		}
+		changes = append(changes, change)
+		s.pathTimeline = append(s.pathTimeline, change)
+		s.lastPathStates[index] = providerPathObservedState{
+			signature:    signature,
+			endpointHash: endpointHash,
+			reason:       reason,
+			usable:       usable,
+		}
+	}
+	if len(s.pathTimeline) > 64 {
+		s.pathTimeline = append([]event(nil), s.pathTimeline[len(s.pathTimeline)-64:]...)
+	}
+	return changes
+}
+
+func emitProviderPathStateChanges(emit *emitter, changes []event) {
+	for _, change := range changes {
+		emit.emit(change)
+	}
+}
+
+func (s *providerPathReadinessState) qualitySummaryLocked(role string, stage string, observedAt time.Time) event {
+	paths := s.lastPaths
+	usableCount := eventInt(paths, "usableCount")
+	pathsHash := ""
+	if paths != nil {
+		pathsHash, _ = paths["pathsHash"].(string)
+	}
+	missingIndices := providerMissingIndices(paths)
+	finalReasons := providerFinalPathReasons(paths)
+	recoveryLatencyMs := int64(-1)
+	if !s.firstDegradedAt.IsZero() && !s.recoveredAt.IsZero() {
+		recoveryLatencyMs = s.recoveredAt.Sub(s.firstDegradedAt).Milliseconds()
+	}
+	stable3OnlyMs := int64(-1)
+	if s.degradedAccepted && !s.firstDegradedAt.IsZero() {
+		end := observedAt
+		if !s.recoveredAt.IsZero() {
+			end = s.recoveredAt
+		}
+		stable3OnlyMs = end.Sub(s.firstDegradedAt).Milliseconds()
+	}
+	return event{
+		"event":             "provider_path_quality_summary",
+		"role":              role,
+		"stage":             stage,
+		"qualityClass":      providerQualityClass(s.degradedAccepted, s.recovered, usableCount),
+		"usableCount":       usableCount,
+		"minProviderCnt":    providerReadyMinPaths,
+		"missingIndices":    missingIndices,
+		"stable3OnlyMs":     stable3OnlyMs,
+		"recoveryLatencyMs": recoveryLatencyMs,
+		"pathsHash":         pathsHash,
+		"finalPathReasons":  finalReasons,
+		"pathTimeline":      append([]event(nil), s.pathTimeline...),
+	}
+}
+
+func providerQualityClass(degradedAccepted bool, recovered bool, usableCount int) string {
+	if !degradedAccepted && usableCount >= providerReadyMinPaths {
+		return "full_ready"
+	}
+	if degradedAccepted && recovered {
+		return "degraded_recovered"
+	}
+	if degradedAccepted {
+		return "persistent_missing_path"
+	}
+	if usableCount < providerDegradedMinPaths {
+		return "timeout_before_degraded"
+	}
+	return "unknown"
+}
+
+func providerMissingIndices(paths event) []int {
+	if paths == nil {
+		return []int{}
+	}
+	rawPaths, ok := paths["paths"].([]event)
+	if !ok {
+		return []int{}
+	}
+	missing := make([]int, 0)
+	for _, path := range rawPaths {
+		usable, _ := path["usable"].(bool)
+		if !usable {
+			missing = append(missing, eventInt(path, "index"))
+		}
+	}
+	return missing
+}
+
+func providerFinalPathReasons(paths event) []event {
+	if paths == nil {
+		return []event{}
+	}
+	rawPaths, ok := paths["paths"].([]event)
+	if !ok {
+		return []event{}
+	}
+	reasons := make([]event, 0, len(rawPaths))
+	for _, path := range rawPaths {
+		reason, _ := path["stateReason"].(string)
+		endpointHash, _ := path["endpointHash"].(string)
+		usable, _ := path["usable"].(bool)
+		reasons = append(reasons, event{
+			"index":        eventInt(path, "index"),
+			"usable":       usable,
+			"stateReason":  reason,
+			"endpointHash": endpointHash,
+		})
+	}
+	return reasons
 }
 
 func providerPathEvent(name string, role string, paths event, attempt int, maxAttempts int, elapsedMs int64, stage string) event {
@@ -1902,6 +2096,7 @@ func waitForProviderPathReadiness(
 	role string,
 	allowDegradedReady bool,
 	attempts int,
+	degradedGrace time.Duration,
 	state *providerPathReadinessState) (bool, error) {
 	if minUsablePaths <= 0 {
 		return true, nil
@@ -1912,6 +2107,7 @@ func waitForProviderPathReadiness(
 	for attempt := 1; attempt <= attempts; attempt++ {
 		started := time.Now()
 		deadline := started.Add(timeout)
+		var degradedObservedAt time.Time
 		ticker := time.NewTicker(providerReadyPollInterval)
 		for {
 			paths := tunaProviderPathDiagnostics(tunaClient.GetPubAddrs())
@@ -1930,6 +2126,32 @@ func waitForProviderPathReadiness(
 				return true, nil
 			}
 			if allowDegradedReady && usableCount >= providerDegradedMinPaths {
+				if degradedGrace > 0 {
+					if degradedObservedAt.IsZero() {
+						degradedObservedAt = time.Now()
+						emit.emit(event{
+							"event":               "provider_paths_degraded_warmup",
+							"role":                role,
+							"usableCount":         usableCount,
+							"minProviderCnt":      minUsablePaths,
+							"degradedProviderCnt": providerDegradedMinPaths,
+							"elapsedMs":           time.Since(started).Milliseconds(),
+							"graceMs":             degradedGrace.Milliseconds(),
+							"attempt":             attempt,
+							"maxAttempts":         attempts,
+							"paths":               paths,
+						})
+					}
+					if time.Since(degradedObservedAt) < degradedGrace && time.Now().Before(deadline) {
+						select {
+						case <-ctx.Done():
+							ticker.Stop()
+							return false, ctx.Err()
+						case <-ticker.C:
+						}
+						continue
+					}
+				}
 				ticker.Stop()
 				emit.emit(event{
 					"event":               "provider_paths_degraded",
@@ -1995,8 +2217,9 @@ func tunaProviderPathDiagnostics(pubAddrs *ts.PubAddrs) event {
 	usableCount := 0
 	for i, addr := range pubAddrs.Addrs {
 		path := event{
-			"index":  i,
-			"usable": false,
+			"index":       i,
+			"usable":      false,
+			"stateReason": "nil_addr",
 		}
 		if addr != nil {
 			endpoint := fmt.Sprintf("%s:%d", addr.IP, addr.Port)
@@ -2005,6 +2228,7 @@ func tunaProviderPathDiagnostics(pubAddrs *ts.PubAddrs) event {
 			path["ipHash"] = shortHash(addr.IP)
 			path["port"] = addr.Port
 			path["endpointHash"] = shortHash(endpoint)
+			path["stateReason"] = providerPathStateReason(addr.IP, addr.Port)
 			if addr.IP != "" && addr.Port != 0 {
 				usableCount++
 				signatureParts = append(signatureParts, endpoint)
@@ -2027,6 +2251,22 @@ func tunaProviderPathDiagnostics(pubAddrs *ts.PubAddrs) event {
 	info["pathsHash"] = shortHash(strings.Join(signatureParts, "|"))
 	info["paths"] = paths
 	return info
+}
+
+func providerPathStateReason(ip string, port uint32) string {
+	if ip == "" && port == 0 {
+		return "empty_endpoint"
+	}
+	if ip == "" {
+		return "missing_ip"
+	}
+	if port == 0 {
+		return "missing_port"
+	}
+	if classifyHost(ip) != "public" {
+		return "non_public_ip"
+	}
+	return "usable"
 }
 
 func eventInt(values event, key string) int {
