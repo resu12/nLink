@@ -115,7 +115,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
-    public async Task V6Epoch_RecoveredRegularNknFrontierPriorityPreemptsNormalRequestWindow()
+    public async Task V6Epoch_RecoveredRegularNknRecoveryFrontierPriorityPreemptsNormalRequestWindowWithoutRedundantBulk()
     {
         const string transferId = "transfer_v6_epoch_recovered_frontier_keeps_normal";
         var logStart = GetOperationalLogLength();
@@ -187,12 +187,14 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         Assert.Equal(0, firstBatch.StartChunkIndex);
         Assert.True(firstBatch.ChunkCount > 1);
         Assert.Equal("frontier", firstBatch.Priority);
-        Assert.Equal(FileTransferV4RepairDeliveryMode.ControlBulkRedundant, firstBatch.RepairDeliveryMode);
+        Assert.Equal(FileTransferV4RepairDeliveryMode.BulkOnly, firstBatch.RepairDeliveryMode);
+        Assert.False(firstBatch.ForceRegularNknBulk);
+        var firstNormalChunkIndex = firstBatch.StartChunkIndex + firstBatch.ChunkCount;
         var normalBatches = batches
             .Where(batch => batch.Priority is null &&
                             batch.TransportEpoch == probeFrame.TransportEpoch)
             .ToList();
-        Assert.All(normalBatches, batch => Assert.True(batch.StartChunkIndex >= 12));
+        Assert.All(normalBatches, batch => Assert.True(batch.StartChunkIndex >= firstNormalChunkIndex));
     }
 
     [Fact]
@@ -591,6 +593,73 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             ReadOperationalLogTail(logStart),
             StringComparison.Ordinal);
         Assert.DoesNotContain("reason=normal_batch_limit", ReadOperationalLogTail(logStart), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task V6Epoch_RecoveredRegularNknRecoveryDoesNotEnableRedundantRegularNknStreaming()
+    {
+        const string transferId = "transfer_v6_epoch_regular_nkn_recovery_no_redundant";
+        var logStart = GetOperationalLogLength();
+        using var senderTransport = new LoopbackFileTransferTransport("session_v6_epoch_regular_nkn_recovery_no_redundant");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_v6_epoch_regular_nkn_recovery_no_redundant");
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+
+        var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId, payloadSize: 1_000_000);
+        receiverTransport.NextDataFrameTransportKind = FileTransferTransportKind.RegularNkn;
+        senderTransport.RequestAllDataSessionHandoffs(
+            "receive_stall_recovery",
+            FileTransferTransportHandoffKind.RegularNknRecovery,
+            FileTransferTransportKind.RegularNkn);
+        await WaitUntilAsync(() => senderTransport.SentTransportEpochs.Any(), timeoutMs: 5000);
+
+        var probe = await ReceiveProbeAsync(receiverSession);
+        var probeFrame = Assert.IsType<FileTransferTransportProbeFrameV6>(probe.Frame);
+        await receiverTransport.SendFileTransferTransportProbeAsync(
+            new FileTransferTransportProbeV6
+            {
+                SessionId = probeFrame.SessionId,
+                TransferId = probeFrame.TransferId,
+                TransportEpoch = probeFrame.TransportEpoch,
+                ProbeId = probeFrame.ProbeId,
+                TargetTransport = probeFrame.TargetTransport,
+            },
+            CancellationToken.None);
+        await WaitUntilAsync(() => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_epoch_recovered", StringComparison.Ordinal), timeoutMs: 5000);
+
+        await receiverSession.SendAsync(
+            new FileTransferReceiverStateFrameV6
+            {
+                SessionId = probeFrame.SessionId,
+                TransferId = transferId,
+                Epoch = 1,
+                ContiguousCommittedChunkIndex = 0,
+                DurableReceivedHighestChunkIndex = -1,
+                CreditUntilChunkIndexExclusive = 12,
+                MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 0, ChunkCount = 8 }],
+                BytesCommitted = 0,
+                TransportEpoch = probeFrame.TransportEpoch,
+            },
+            CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static batch => batch.StartChunkIndex == 0),
+            timeoutMs: 5000);
+
+        var normalBatches = senderTransport.SentDataFrames
+            .OfType<FileTransferChunkBatchFrameV6>()
+            .Where(static batch => batch.StartChunkIndex == 0)
+            .ToArray();
+        Assert.NotEmpty(normalBatches);
+        Assert.All(normalBatches, static batch =>
+        {
+            Assert.Equal("v6_request_window", batch.BatchProfile);
+            Assert.False(batch.ForceRegularNknBulk);
+        });
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.DoesNotContain("event=filetransfer_v6_regular_nkn_redundant_data_enabled", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("reason=regular_nkn_recovered_after_tuna_fallback", logTail, StringComparison.Ordinal);
     }
 
     [Fact]

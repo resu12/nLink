@@ -554,7 +554,7 @@ public sealed partial class SessionFileTransferService
             {
                 TargetTransport: FileTransferTransportKind.RegularNkn,
                 State: V6TransportEpochState.Recovered,
-                Kind: FileTransferTransportHandoffKind.TunaToNormalFallback or FileTransferTransportHandoffKind.RegularNknRecovery,
+                Kind: FileTransferTransportHandoffKind.TunaToNormalFallback,
             }
                 ? current.EpochId
                 : 0;
@@ -562,8 +562,7 @@ public sealed partial class SessionFileTransferService
 
         return context.LastRecoveredV6TransportEpoch > 0 &&
                context.LastRecoveredV6TransportTargetTransport == FileTransferTransportKind.RegularNkn &&
-               context.LastRecoveredV6TransportEpochKind is FileTransferTransportHandoffKind.TunaToNormalFallback or
-                   FileTransferTransportHandoffKind.RegularNknRecovery
+               context.LastRecoveredV6TransportEpochKind == FileTransferTransportHandoffKind.TunaToNormalFallback
             ? context.LastRecoveredV6TransportEpoch
             : 0;
     }
@@ -574,8 +573,7 @@ public sealed partial class SessionFileTransferService
         => transportEpoch > 0 &&
            context.LastRecoveredV6TransportEpoch == transportEpoch &&
            context.LastRecoveredV6TransportTargetTransport == FileTransferTransportKind.RegularNkn &&
-           context.LastRecoveredV6TransportEpochKind is FileTransferTransportHandoffKind.TunaToNormalFallback or
-               FileTransferTransportHandoffKind.RegularNknRecovery;
+           context.LastRecoveredV6TransportEpochKind == FileTransferTransportHandoffKind.TunaToNormalFallback;
 
     private static bool IsOutboundV6RegularNknFallbackPrimaryDelivery(OutboundTransferContext context)
     {

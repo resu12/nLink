@@ -258,7 +258,7 @@ public sealed record FileTransferPanelItemViewModel(
             return Math.Max(0L, snapshot.BytesAcknowledgedByReceiver ?? snapshot.BytesTransferred);
         }
 
-        return Math.Max(0L, snapshot.BytesTransferred);
+        return Math.Max(0L, snapshot.BytesAcceptedForTransport ?? snapshot.BytesTransferred);
     }
 
     private static string? BuildSavedLocationText(FileTransferTransferSnapshot snapshot)
