@@ -252,14 +252,14 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V4FileOnlyFrontierTailRetryChunks = 12;
     private const int V6ReceiverRequestWindowChunks = 2048;
     private const int V6RecoveredRegularNknReceiverRequestWindowChunks = 1024;
-    private const int V6RecoveredRegularNknFrontierStalledReceiverRequestWindowChunks = 64;
+    private const int V6RecoveredRegularNknFrontierStalledReceiverRequestWindowChunks = 8;
     private const int V6FrontierStalledReceiverRequestWindowChunks = 8;
     private const int V6FrontierRequestChunks = 1;
     private const int V6FrontierStalledPriorityBurstChunks = 8;
     private const int V6RecoveredRegularNknFrontierPriorityBurstChunks = 12;
     private const int V6NormalReceiverStateResendGateMs = 3500;
-    private const int V6RecoveredFrontierResendGateMs = 5000;
-    private const int V6EpochFrontierResendGateMs = 4000;
+    private const int V6RecoveredFrontierResendGateMs = 1500;
+    private const int V6EpochFrontierResendGateMs = 1500;
     private const int V6TunaRedundantDataProbeDelayMs = 10000;
     private const int V6SenderRequestFeedbackStallRecoveryMs = 12000;
     private const int V6SenderRequestFeedbackStallRecoveryCooldownMs = 15000;
