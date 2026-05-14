@@ -1463,7 +1463,11 @@ public sealed partial class SessionFileTransferService
             context.PeerPaused = pauseControl.Paused;
             context.PeerPauseReason = normalizedReason;
             context.PeerPausedSinceUtc = pauseControl.Paused ? DateTimeOffset.UtcNow : null;
-            if (!pauseControl.Paused)
+            if (pauseControl.Paused)
+            {
+                context.ResetV6SenderPipelineCancellation();
+            }
+            else
             {
                 ResetOutboundV4AcceptedForPeerResumeLocked(context);
             }
@@ -2677,6 +2681,154 @@ public sealed partial class SessionFileTransferService
         }
 
         return await SendV4PauseControlAsync(frame, reason, FileTransferDirection.Inbound, CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private void ScheduleOutboundV4PauseControlRetry(OutboundTransferContext context, bool paused, string reason)
+    {
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_pause_control_retry_scheduled; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; paused={(paused ? 1 : 0)}; reason={FormatProtocolLogValue(reason)}; attempt_count={PauseControlRetryDelaysMs.Length}");
+        _ = Task.Run(
+            () => RunOutboundV4PauseControlRetryLoopAsync(context, paused, reason),
+            CancellationToken.None);
+    }
+
+    private void ScheduleInboundV4PauseControlRetry(InboundTransferContext context, bool paused, string reason)
+    {
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_pause_control_retry_scheduled; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; paused={(paused ? 1 : 0)}; reason={FormatProtocolLogValue(reason)}; attempt_count={PauseControlRetryDelaysMs.Length}");
+        _ = Task.Run(
+            () => RunInboundV4PauseControlRetryLoopAsync(context, paused, reason),
+            CancellationToken.None);
+    }
+
+    private async Task RunOutboundV4PauseControlRetryLoopAsync(OutboundTransferContext context, bool paused, string reason)
+    {
+        for (var index = 0; index < PauseControlRetryDelaysMs.Length; index++)
+        {
+            try
+            {
+                var delayMs = PauseControlRetryDelaysMs[index];
+                if (delayMs > 0)
+                {
+                    await Task.Delay(delayMs).ConfigureAwait(false);
+                }
+
+                if (!ShouldContinueOutboundV4PauseControlRetry(context, paused))
+                {
+                    LogPauseControlRetryStopped(FileTransferDirection.Outbound, context.TransferId, context.SessionId, paused, reason, index + 1, "state_changed_or_terminal");
+                    return;
+                }
+
+                if (await SendOutboundV4PauseControlAsync(context, reason).ConfigureAwait(false))
+                {
+                    LogPauseControlRetrySent(FileTransferDirection.Outbound, context.TransferId, context.SessionId, paused, reason, index + 1);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                LogPauseControlRetryStopped(FileTransferDirection.Outbound, context.TransferId, context.SessionId, paused, reason, index + 1, ex.GetType().Name);
+                return;
+            }
+        }
+
+        LogPauseControlRetryCompleted(FileTransferDirection.Outbound, context.TransferId, context.SessionId, paused, reason, PauseControlRetryDelaysMs.Length);
+    }
+
+    private async Task RunInboundV4PauseControlRetryLoopAsync(InboundTransferContext context, bool paused, string reason)
+    {
+        for (var index = 0; index < PauseControlRetryDelaysMs.Length; index++)
+        {
+            try
+            {
+                var delayMs = PauseControlRetryDelaysMs[index];
+                if (delayMs > 0)
+                {
+                    await Task.Delay(delayMs).ConfigureAwait(false);
+                }
+
+                if (!ShouldContinueInboundV4PauseControlRetry(context, paused))
+                {
+                    LogPauseControlRetryStopped(FileTransferDirection.Inbound, context.TransferId, context.SessionId, paused, reason, index + 1, "state_changed_or_terminal");
+                    return;
+                }
+
+                if (await SendInboundV4PauseControlAsync(context, reason).ConfigureAwait(false))
+                {
+                    LogPauseControlRetrySent(FileTransferDirection.Inbound, context.TransferId, context.SessionId, paused, reason, index + 1);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                LogPauseControlRetryStopped(FileTransferDirection.Inbound, context.TransferId, context.SessionId, paused, reason, index + 1, ex.GetType().Name);
+                return;
+            }
+        }
+
+        LogPauseControlRetryCompleted(FileTransferDirection.Inbound, context.TransferId, context.SessionId, paused, reason, PauseControlRetryDelaysMs.Length);
+    }
+
+    private bool ShouldContinueOutboundV4PauseControlRetry(OutboundTransferContext context, bool paused)
+    {
+        lock (gate)
+        {
+            return ReferenceEquals(outboundTransfer, context) &&
+                   !context.IsTerminal &&
+                   context.UserPaused == paused &&
+                   !string.IsNullOrWhiteSpace(context.SessionId);
+        }
+    }
+
+    private bool ShouldContinueInboundV4PauseControlRetry(InboundTransferContext context, bool paused)
+    {
+        lock (gate)
+        {
+            return ReferenceEquals(inboundTransfer, context) &&
+                   !context.IsTerminal &&
+                   context.UserPaused == paused &&
+                   !string.IsNullOrWhiteSpace(context.SessionId);
+        }
+    }
+
+    private static void LogPauseControlRetrySent(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        bool paused,
+        string reason,
+        int attempt)
+    {
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_pause_control_retry_sent; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; paused={(paused ? 1 : 0)}; reason={FormatProtocolLogValue(reason)}; attempt={attempt}");
+    }
+
+    private static void LogPauseControlRetryStopped(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        bool paused,
+        string reason,
+        int attempt,
+        string stopReason)
+    {
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_pause_control_retry_stopped; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; paused={(paused ? 1 : 0)}; reason={FormatProtocolLogValue(reason)}; attempt={attempt}; stop_reason={FormatProtocolLogValue(stopReason)}");
+    }
+
+    private static void LogPauseControlRetryCompleted(
+        FileTransferDirection direction,
+        string transferId,
+        string sessionId,
+        bool paused,
+        string reason,
+        int attemptCount)
+    {
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_pause_control_retry_completed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; paused={(paused ? 1 : 0)}; reason={FormatProtocolLogValue(reason)}; attempt_count={attemptCount}");
     }
 
     private async Task<bool> SendV4PauseControlAsync(

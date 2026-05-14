@@ -508,7 +508,7 @@ public sealed class FileTransferPanelItemViewModelTests
     }
 
     [Fact]
-    public void OutboundTransfer_ShowsReceiverAcknowledgedProgress()
+    public void OutboundTransfer_ShowsReceiverAcknowledgedProgressWhenTransportRunsAhead()
     {
         var item = FileTransferPanelItemViewModel.FromSnapshot(
             new FileTransferTransferSnapshot(
@@ -555,6 +555,31 @@ public sealed class FileTransferPanelItemViewModelTests
         Assert.NotNull(item);
         Assert.Equal("2.65 GB / 5.20 GB", item!.ProgressText);
         Assert.Equal("5.20 GB", item.FileSizeText);
+    }
+
+    [Fact]
+    public void InboundSparseTransfer_ShowsCommittedProgressWhenSparseWritesRunAhead()
+    {
+        var item = FileTransferPanelItemViewModel.FromSnapshot(
+            new FileTransferTransferSnapshot(
+                SessionId: "session-a",
+                TransferId: "transfer-sparse",
+                Direction: FileTransferDirection.Inbound,
+                State: FileTransferTransferState.Receiving,
+                FileName: "movie.mkv",
+                FileSizeBytes: 134_217_728,
+                Sha256Base64: null,
+                BytesTransferred: 10_485_760,
+                ChunksTransferred: 160,
+                ChunkCount: 2048,
+                ChunkSizeBytes: 65_536,
+                ErrorCode: null,
+                StatusMessage: "Receiving V6 file data.",
+                BytesAcceptedForTransport: 74_448_896));
+
+        Assert.NotNull(item);
+        Assert.Equal("10 MB / 128 MB", item!.ProgressText);
+        Assert.Equal(10_485_760d / 134_217_728d, item.ProgressFraction, 6);
     }
 
     [Fact]

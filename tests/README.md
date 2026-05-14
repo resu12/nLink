@@ -44,6 +44,8 @@ Run an opt-in project explicitly, for example:
 dotnet test tests\nLink.OptInTests.GuiSmoke\nLink.OptInTests.GuiSmoke.csproj -c Release
 ```
 
+Paid Tuna GUI file-transfer automation is additionally gated by `NLINK_RUN_TUNA_GUI_FILETRANSFER=1` and wallet credentials. Prefer the wrapper in `docs\file-transfer-soak.md` / `tools\Run-FileTransferTunaGuiSmoke.ps1` so artifacts stay under `artifacts\gui-smoke\`.
+
 Do not move opt-in projects back into the default solution baseline unless they are deterministic, non-interactive, and environment-independent.
 
 ## Diagnostic expectations

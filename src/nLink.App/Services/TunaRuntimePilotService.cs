@@ -663,10 +663,7 @@ internal sealed class JsonTunaRuntimePreferenceStore : ITunaRuntimePreferenceSto
 
     internal static string DefaultPathProvider()
     {
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var root = string.IsNullOrWhiteSpace(localAppData)
-            ? AppContext.BaseDirectory
-            : Path.Combine(localAppData, "nLink");
+        var root = TunaRuntimeStateRoot.Resolve();
         return Path.Combine(root, "tuna-runtime-preferences.json");
     }
 }
@@ -714,10 +711,7 @@ internal sealed class JsonTunaUsageAccountingStore : ITunaUsageAccountingStore
 
     internal static string DefaultPathProvider()
     {
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var root = string.IsNullOrWhiteSpace(localAppData)
-            ? AppContext.BaseDirectory
-            : Path.Combine(localAppData, "nLink");
+        var root = TunaRuntimeStateRoot.Resolve();
         return Path.Combine(root, "tuna-usage-accounting.json");
     }
 }

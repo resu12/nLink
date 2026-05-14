@@ -38,6 +38,67 @@ namespace NLink.SmokeTests;
 public sealed class SessionRuntimeConnectionLifecycleTests : SessionRuntimeConnectionTestBase
 {
     [Fact]
+    public void SessionRuntime_FileTransferPeerDisconnected_DoesNotEndConnectedSession()
+    {
+        var helperAddress = new PeerAddress("helper.file.peer.disconnect");
+        var helpeeAddress = new PeerAddress("helpee.file.peer.disconnect");
+        var sessionId = new SessionId("sess_file_peer_disconnect");
+        var grant = new SessionGrant(
+            helperAddress,
+            CapabilityGrant.Chat | CapabilityGrant.FileTransfer,
+            sessionId,
+            DateTimeOffset.UtcNow.AddMinutes(5));
+        var securityState = CreateVerifiedSecurityState(helpeeAddress, helperAddress, sessionId)
+            .WithApproval(grant);
+        using var runtime = new SessionRuntime(
+            () => new ScriptedSignalingTransport(localPeerAddress: helperAddress.Value),
+            SessionRuntimeWatchdogOptions.Default with { Enabled = false });
+        runtime.SetRoleForTests(SessionRuntimeRole.Helper);
+        SetPrivateField(runtime, "state", SessionRuntimeState.Connected);
+        SetPrivateField(runtime, "statusText", "Connected");
+        SetPrivateField(runtime, "transportState", TransportState.Connected);
+        SetPrivateField(runtime, "sessionSecurityState", securityState);
+        SetPrivateField(runtime, "currentSessionGrant", grant);
+        SetPrivateField(
+            runtime,
+            "sessionFlowState",
+            new SessionFlowState(
+                Phase: SessionFlowPhase.ActiveSession,
+                LastEndOrigin: SessionFlowEndOrigin.None,
+                LocalEndInProgress: false,
+                HadActiveSession: true,
+                FailureReason: string.Empty));
+        var remoteEnded = 0;
+        var fileTransferChanged = 0;
+        runtime.RemoteSessionEnded += (_, _) => remoteEnded++;
+        runtime.FileTransferChanged += (_, _) => fileTransferChanged++;
+
+        var transfer = new FileTransferTransferSnapshot(
+            sessionId.Value,
+            "ft_peer_disconnect",
+            FileTransferDirection.Inbound,
+            FileTransferTransferState.Failed,
+            "peer-left.bin",
+            1024,
+            Sha256Base64: null,
+            BytesTransferred: 128,
+            ChunksTransferred: 1,
+            ChunkCount: 8,
+            ChunkSizeBytes: 128,
+            ErrorCode: FileTransferResultCodes.PeerDisconnected,
+            StatusMessage: "Peer disconnected.");
+        var snapshot = new SessionFileTransferSnapshot(Outbound: null, Inbound: transfer);
+
+        InvokePrivateMethod(runtime, "OnFileTransferChanged", runtime, new SessionFileTransferSnapshotChangedEventArgs(snapshot));
+
+        Assert.Equal(0, remoteEnded);
+        Assert.Equal(1, fileTransferChanged);
+        Assert.False(runtime.LastDisconnectWasRemoteEnd);
+        Assert.Equal(SessionRuntimeState.Connected, runtime.State);
+        Assert.Equal(SessionFlowEndOrigin.None, runtime.FlowSnapshot.LastEndOrigin);
+    }
+
+    [Fact]
     public void SessionRuntime_DefaultHumanApprovalTimers_AreAligned()
     {
         using var runtime = new SessionRuntime(() => new ScriptedSignalingTransport());

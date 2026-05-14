@@ -293,6 +293,92 @@ public sealed class SessionFileTransferPauseTests : SessionFileTransferServiceTe
     }
 
     [Fact]
+    public async Task OutboundPause_RetriesControlAfterTransientTimeout()
+    {
+        const string transferId = "transfer_pause_retry_control";
+        var payload = Enumerable.Range(0, 4_000_000).Select(static index => (byte)(index % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_pause_retry_control");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_pause_retry_control");
+        senderTransport.DataSessionSendDelayMs = 50;
+        var pauseAttempts = 0;
+        senderTransport.OutboundPauseControlDeliveryOverrideAsync = (_, _, token) =>
+        {
+            if (Interlocked.Increment(ref pauseAttempts) == 1)
+            {
+                throw new OperationCanceledException(token);
+            }
+
+            return Task.FromResult(false);
+        };
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+        using var destination = new NonDisposingMemoryStream();
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pause-retry-control.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
+        await WaitUntilAsync(
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(),
+            timeoutMs: 5000);
+
+        Assert.NotNull(await sender.PauseTransferAsync(transferId, "pause_retry", CancellationToken.None));
+
+        await WaitUntilAsync(
+            () => receiver.Snapshot.Inbound is { IsPeerPaused: true },
+            timeoutMs: 7000);
+        await WaitUntilAsync(() => Volatile.Read(ref pauseAttempts) >= 2, timeoutMs: 5000);
+        Assert.True(pauseAttempts >= 2);
+        Assert.True(senderTransport.SentPauseControls.Count >= 2);
+    }
+
+    [Fact]
+    public async Task OutboundPause_RetriesAfterSuccessfulButUndeliveredControlSend()
+    {
+        const string transferId = "transfer_pause_retry_lost_control";
+        var payload = Enumerable.Range(0, 4_000_000).Select(static index => (byte)(index % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_pause_retry_lost_control");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_pause_retry_lost_control");
+        senderTransport.DataSessionSendDelayMs = 50;
+        var pauseAttempts = 0;
+        senderTransport.OutboundPauseControlDeliveryOverrideAsync = (_, _, _) =>
+        {
+            var attempt = Interlocked.Increment(ref pauseAttempts);
+            return Task.FromResult(attempt == 1);
+        };
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+        using var destination = new NonDisposingMemoryStream();
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("pause-retry-lost-control.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
+        await WaitUntilAsync(
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(),
+            timeoutMs: 5000);
+
+        Assert.NotNull(await sender.PauseTransferAsync(transferId, "pause_retry_lost", CancellationToken.None));
+
+        await WaitUntilAsync(
+            () => receiver.Snapshot.Inbound is { IsPeerPaused: true },
+            timeoutMs: 7000);
+        await WaitUntilAsync(() => Volatile.Read(ref pauseAttempts) >= 2, timeoutMs: 5000);
+        Assert.True(pauseAttempts >= 2);
+        Assert.True(senderTransport.SentPauseControls.Count >= 2);
+    }
+
+    [Fact]
     public async Task InboundPausedBeforeManifest_ClampsCreditUntilResumeAndCompletes()
     {
         const string transferId = "transfer_pause_inbound_before_manifest";

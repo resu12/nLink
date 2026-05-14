@@ -271,6 +271,51 @@ public sealed partial class TunaSidecarLiveManualTests
     }
 
     [Fact]
+    public void TunaSidecarPhase6Summary_AcceptsCleanActivationWithV6UnexpectedFallbackProofOnly()
+    {
+        var result = new TunaSoakCellResult
+        {
+            CellId = "phase6-clean-activation-unexpected-fallback",
+            Tier = TunaSoakTier.Core,
+            Transport = Phase3TransportMode.Tuna,
+            TrafficProfile = TunaSoakTrafficProfile.FileOnly,
+            Preset = TunaSoakPreset.TunaQuality,
+            Payer = TunaSoakPayerMode.HelpeeOnly,
+            Fault = TunaSoakFaultMode.None,
+            Completed = true,
+            SessionAlive = true,
+            ChatControlAlive = true,
+            FileCompleted = true,
+            ScreenCompleted = true,
+            FileBytesSent = 1024,
+            FileBytesReceived = 1024,
+            FileReceiveRatio = 1,
+            TunaFrameCount = 1,
+            DataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+            FallbackStarted = true,
+            FallbackFileSent = false,
+            FallbackFileReceived = false,
+            TerminalReason = string.Empty,
+            SenderTerminalObserved = true,
+            ReceiverTerminalObserved = true,
+            FinalShaMatched = true,
+            IsPhase6Gate = true,
+        };
+        result.V6EpochStarted = true;
+        result.V6TargetProofObserved = true;
+        result.V6RepairProofObserved = true;
+        result.V6EpochRecovered = true;
+
+        var summary = TunaSoakMatrixSummary.Build(new[] { result });
+
+        Assert.Equal("pass", summary.Verdict);
+        Assert.Empty(summary.Reasons);
+        Assert.Contains(
+            "phase6-clean-activation-unexpected-fallback:warning:unexpected_tuna_drop_recovered:file_receive_ratio=1.0000",
+            summary.Warnings);
+    }
+
+    [Fact]
     public void TunaSidecarPhase6Summary_DoesNotReportShaMismatchWhenHashMatchedButCompletionTimedOut()
     {
         var result = new TunaSoakCellResult

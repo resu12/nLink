@@ -68,6 +68,43 @@ dotnet build-server shutdown
 
 The Phase 6 short matrix writes artifacts under `artifacts/tuna-sidecar/phase6-short-<timestamp>/`. Read `phase6-operator-verdict.txt` first, then keep `summary.json`, `runs.jsonl`, redacted app log tail, listener stdout/stderr, and sidecar cleanup evidence.
 
+## Paid Tuna GUI Handoff/Fallback Smoke
+
+Use the GUI smoke when the visual file-transfer card, pause/resume buttons, or session shell behavior needs to be exercised with real windows. This is an opt-in paid test and writes artifacts under `artifacts/gui-smoke/`.
+
+```powershell
+$env:NLINK_TUNA_TEST_WALLET_PASSWORD = "<session-only test wallet password>"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-FileTransferTunaGuiSmoke.ps1 `
+  -WalletPath ".\artifacts\tuna-poc\wallet-test-nkn.json" `
+  -PayerMode helpee `
+  -Fault switch-off `
+  -Direction helpee-to-helper `
+  -PayloadSize 128MiB
+```
+
+The runner launches two GUI app instances, connects them over NKN, starts a regular-NKN V6 file transfer, unlocks Tuna during the active transfer to prove `NormalToTunaActivation`, then triggers fallback and waits for completion. It also clicks Pause/Resume by default and verifies `pause_control.v6` lifecycle evidence.
+
+Useful variants:
+
+```powershell
+# Kill the payer-side Tuna sidecar instead of switching Tuna off.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-FileTransferTunaGuiSmoke.ps1 -Fault sidecar-kill
+
+# Exercise helper-paid Tuna.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\Run-FileTransferTunaGuiSmoke.ps1 -PayerMode helper -Direction helper-to-helpee
+```
+
+The GUI summary is written to `filetransfer-tuna-gui-summary.json`. Required evidence includes V6 sender/receiver start, `tuna_acceleration_negotiated`, terminal sender/receiver completion, SHA match, and no peer-disconnect or heartbeat-timeout evidence. Clean activation runs require a recovered `NormalToTunaActivation` epoch unless Tuna drops before proof and a fallback epoch starts; fallback runs require a recovered or explicitly waiting `TunaToNormalFallback` or `RegularNknRecovery` epoch.
+
+File-transfer progress is committed-frontier based. On sparse destinations the receiver may accept far-ahead chunks, but the UI should report only contiguous committed bytes. During Tuna fallback or NKN receive-stall recovery it is normal for visible progress to pause, then jump when the missing frontier chunk arrives. Treat this as a bug only if the sender keeps sending unrequested chunks, committed progress stops until timeout, SHA validation fails, or sender/receiver terminal states diverge.
+
+Recent local GUI reference cells:
+
+- `artifacts/gui-smoke/tuna-filetransfer-20260513T200617Z/`: 128 MiB clean activation, completed, SHA match, no fallback.
+- `artifacts/gui-smoke/tuna-filetransfer-20260513T201011Z/`: 128 MiB switch-off fallback, completed, SHA match.
+- `artifacts/gui-smoke/tuna-filetransfer-20260513T201750Z/`: 128 MiB sidecar-kill fallback, completed, SHA match.
+- `artifacts/gui-smoke/tuna-filetransfer-20260513T202236Z/`: 512 MiB sidecar-kill fallback, completed, SHA match after regular-NKN receive-stall recovery.
+
 Provider readiness warnings are now split so a degraded startup can be distinguished from a persistent provider-path problem:
 
 - `providerDegradedAccepted` means the listener started with the allowed 3 usable Tuna paths.

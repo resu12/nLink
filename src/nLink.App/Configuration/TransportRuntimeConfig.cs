@@ -262,6 +262,28 @@ public sealed class TransportRuntimeConfig
             var bridgeDir = Path.Combine(baseDir, "bridge", rid);
             var indexJs = Path.Combine(bridgeDir, "index.js");
             var nodeExe = Path.Combine(bridgeDir, RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "node.exe" : "node");
+            var overrideBridge = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", category: "bridge_runtime_path");
+            var overrideNode = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_NODE_PATH", category: "bridge_runtime_path");
+
+            if (!string.IsNullOrWhiteSpace(overrideBridge) ||
+                !string.IsNullOrWhiteSpace(overrideNode))
+            {
+                var resolvedBridge = string.IsNullOrWhiteSpace(overrideBridge)
+                    ? string.Empty
+                    : Path.GetFullPath(overrideBridge);
+                var resolvedNode = string.IsNullOrWhiteSpace(overrideNode)
+                    ? string.Empty
+                    : Path.GetFullPath(overrideNode);
+
+                if (File.Exists(resolvedBridge) && File.Exists(resolvedNode))
+                {
+                    reason = "unsafe_override_bridge_runtime";
+                    return true;
+                }
+
+                reason = MissingBridgeReason(resolvedBridge, resolvedNode);
+                return false;
+            }
 
             if (File.Exists(indexJs) && File.Exists(nodeExe))
             {

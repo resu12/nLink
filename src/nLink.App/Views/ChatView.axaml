@@ -90,16 +90,19 @@
                           ColumnSpacing="12">
                         <StackPanel Grid.Column="0"
                                     Spacing="2">
-                            <TextBlock Text="{Binding FileName}"
+                            <TextBlock AutomationProperties.AutomationId="Chat.FileTransfer.FileName"
+                                       Text="{Binding FileName}"
                                        Foreground="{StaticResource AppTextBrush}"
                                        FontSize="15"
                                        FontWeight="SemiBold"
                                        TextTrimming="CharacterEllipsis"/>
-                            <TextBlock Text="{Binding FileSizeText}"
+                            <TextBlock AutomationProperties.AutomationId="Chat.FileTransfer.FileSize"
+                                       Text="{Binding FileSizeText}"
                                        Classes="appMuted"/>
                         </StackPanel>
 
                         <TextBlock Grid.Column="1"
+                                   AutomationProperties.AutomationId="Chat.FileTransfer.StatusText"
                                    Text="{Binding StatusText}"
                                    Foreground="{StaticResource AppMutedTextBrush}"
                                    FontSize="13"
@@ -109,10 +112,12 @@
 
                     <StackPanel IsVisible="{Binding ShowProgress}"
                                 Spacing="6">
-                        <ProgressBar Classes="transferProgress"
+                        <ProgressBar AutomationProperties.AutomationId="Chat.FileTransfer.ProgressBar"
+                                     Classes="transferProgress"
                                      Value="{Binding ProgressFraction}"/>
 
-                        <TextBlock Text="{Binding ProgressText}"
+                        <TextBlock AutomationProperties.AutomationId="Chat.FileTransfer.ProgressText"
+                                   Text="{Binding ProgressText}"
                                    Classes="appMuted"/>
                     </StackPanel>
 

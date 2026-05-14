@@ -16,17 +16,20 @@ internal static class WalletPasswordDialog
         var result = new TaskCompletionSource<char[]?>();
         var passwordBox = new TextBox
         {
+            [Avalonia.Automation.AutomationProperties.AutomationIdProperty] = "WalletPassword.Password",
             Width = 320,
             PasswordChar = '*',
         };
         var okButton = new Button
         {
+            [Avalonia.Automation.AutomationProperties.AutomationIdProperty] = "WalletPassword.Accept",
             Classes = { "appButton", "primaryButton", "compactButton" },
             Content = acceptText,
             HorizontalAlignment = HorizontalAlignment.Right,
         };
         var cancelButton = new Button
         {
+            [Avalonia.Automation.AutomationProperties.AutomationIdProperty] = "WalletPassword.Cancel",
             Classes = { "appButton", "secondaryButton", "compactButton" },
             Content = "Cancel",
             HorizontalAlignment = HorizontalAlignment.Right,

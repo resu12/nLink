@@ -842,8 +842,7 @@ public sealed partial class SessionFileTransferService
             StartOutboundPostTunaRecoveryLocked(context, reason);
         }
 
-        ResetOutboundV4AcceptedAfterPauseLocked(context, reason);
-        QueueOutboundV4TransportRebindSafetyReplayLocked(context, reason);
+        LogOutboundV6TransportEpochWaitingForRequests(context, reason);
         return IsV6TransportEpochUnresolved(context.V6TransportEpoch);
     }
 
@@ -899,6 +898,13 @@ public sealed partial class SessionFileTransferService
         return IsV6TransportEpochUnresolved(context.V6TransportEpoch);
     }
 
+    private static void LogOutboundV6TransportEpochWaitingForRequests(
+        OutboundTransferContext context,
+        string reason)
+        => LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_recovery_waiting_for_receiver_requests; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={context.V6TransportEpoch?.EpochId ?? 0}; reason={FormatProtocolLogValue(reason)}");
+
     private bool TryResumeOutboundTransportLocked(
         OutboundTransferContext context,
         string reason,
@@ -941,8 +947,7 @@ public sealed partial class SessionFileTransferService
             context.PullTransportFrontierOnlyRepairStartChunkIndex = -1;
             context.V4SenderPumpLastWakeReason = "transport_handoff";
             StartOutboundV6TransportEpochLocked(context, reason, handoffKind, targetTransport);
-            ResetOutboundV4AcceptedAfterPauseLocked(context, reason);
-            QueueOutboundV4TransportRebindSafetyReplayLocked(context, reason);
+            LogOutboundV6TransportEpochWaitingForRequests(context, reason);
             return true;
         }
 
@@ -980,8 +985,7 @@ public sealed partial class SessionFileTransferService
                 StartOutboundPostTunaRecoveryLocked(context, reason);
             }
 
-            ResetOutboundV4AcceptedAfterPauseLocked(context, reason);
-            QueueOutboundV4TransportRebindSafetyReplayLocked(context, reason);
+            LogOutboundV6TransportEpochWaitingForRequests(context, reason);
         }
         else
         {

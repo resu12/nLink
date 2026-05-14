@@ -64,7 +64,7 @@ public sealed partial class SessionFileTransferService
             FileTransferTransportHandoffKind.TunaToNormalFallback => FileTransferTransportKind.Tuna,
             FileTransferTransportHandoffKind.TunaRestart => FileTransferTransportKind.Tuna,
             FileTransferTransportHandoffKind.RegularNknRecovery when targetTransport == FileTransferTransportKind.Tuna => FileTransferTransportKind.RegularNkn,
-            FileTransferTransportHandoffKind.RegularNknRecovery => FileTransferTransportKind.Tuna,
+            FileTransferTransportHandoffKind.RegularNknRecovery => FileTransferTransportKind.RegularNkn,
             _ => targetTransport == FileTransferTransportKind.Tuna
                 ? FileTransferTransportKind.RegularNkn
                 : FileTransferTransportKind.Tuna,
@@ -188,6 +188,10 @@ public sealed partial class SessionFileTransferService
         context.V6RegularNknRedundantDataEpochId = 0;
         context.V6RegularNknRedundantDataDisabledEpochId = 0;
         context.V6RegularNknRedundantDataBatchCount = 0;
+        ClearOutboundV6RequestQueuesForTransportEpochLocked(
+            context,
+            epoch.EpochId,
+            "transport_epoch_started");
         context.StatusMessage = GetV6TransportEpochStatus(epoch);
         LogV6TransportEpochStarted(context.TransferId, context.SessionId, epoch);
         PublishV6TransportEpochSnapshot(context.SessionId, context.TransferId, epoch);
@@ -293,7 +297,7 @@ public sealed partial class SessionFileTransferService
             var elapsedMs = Math.Max(0, (long)(DateTimeOffset.UtcNow - epoch.StartedUtc).TotalMilliseconds);
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v6_epoch_recovered; direction={epoch.Direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; transport_epoch={epoch.EpochId}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; reason={FormatProtocolLogValue(reason)}; elapsed_ms={elapsedMs}; committed_chunk={committedChunkIndex}; highest_observed_chunk={highestObservedChunkIndex}");
+                $"event=filetransfer_v6_epoch_recovered; direction={epoch.Direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; transport_epoch={epoch.EpochId}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.Kind)}; source_transport={FormatFileTransferTransportKind(epoch.SourceTransport)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; reason={FormatProtocolLogValue(reason)}; elapsed_ms={elapsedMs}; committed_chunk={committedChunkIndex}; highest_observed_chunk={highestObservedChunkIndex}");
         }
 
         PublishV6TransportEpochSnapshot(sessionId, transferId, epoch);
@@ -613,6 +617,20 @@ public sealed partial class SessionFileTransferService
             ProbeId = $"v6-probe:{message.TransportEpoch}:{Guid.NewGuid():N}",
         };
         context.V6TransportEpoch = epoch;
+        context.V6PendingEpochRepairRequestIds.Clear();
+        context.V6SenderPumpLastWakeReason = "peer_transport_epoch";
+        context.V6UseRegularNknRedundantData = false;
+        context.V6TunaRedundantDataEpochId = 0;
+        context.V6TunaRedundantDataSatisfiedEpochId = 0;
+        context.V6TunaRedundantDataProbeStartedUtc = null;
+        context.V6TunaRedundantDataProbeStartedBytes = 0;
+        context.V6RegularNknRedundantDataEpochId = 0;
+        context.V6RegularNknRedundantDataDisabledEpochId = 0;
+        context.V6RegularNknRedundantDataBatchCount = 0;
+        ClearOutboundV6RequestQueuesForTransportEpochLocked(
+            context,
+            epoch.EpochId,
+            "peer_transport_epoch_adopted");
         context.StatusMessage = GetV6TransportEpochStatus(epoch);
         LogV6TransportEpochStarted(context.TransferId, context.SessionId, epoch);
         PublishV6TransportEpochSnapshot(context.SessionId, context.TransferId, epoch);
@@ -951,9 +969,18 @@ public sealed partial class SessionFileTransferService
 
         if (epoch.State is V6TransportEpochState.FrontierRepairOnly or V6TransportEpochState.WaitingForTargetTransport)
         {
-            return !metadata.Priority ||
-                   chunkIndex != context.RemoteNextExpectedChunkIndex ||
-                   !string.Equals(metadata.PriorityName, "frontier", StringComparison.OrdinalIgnoreCase);
+            if (!metadata.Priority ||
+                !string.Equals(metadata.PriorityName, "frontier", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (chunkIndex == context.RemoteNextExpectedChunkIndex)
+            {
+                return false;
+            }
+
+            return string.IsNullOrWhiteSpace(metadata.RepairRequestId);
         }
 
         if (epoch.State == V6TransportEpochState.BackfillRepair)

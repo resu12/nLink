@@ -1123,8 +1123,17 @@ public sealed partial class TunaSidecarLiveManualTests
                               file.BytesReceived > 0 &&
                               v6EpochWaiting &&
                               !falseRecoveryObserved;
+        var phase6UnexpectedFallbackSafelyRecovered =
+            IsPhase6CleanActivationCell(cell) &&
+            unexpectedFallbackStarted &&
+            file.Completed &&
+            file.FinalShaMatched &&
+            sessionAlive &&
+            phase6V6FallbackProofComplete &&
+            (file.SenderTerminalObserved || outboundTerminalObserved) &&
+            (file.ReceiverTerminalObserved || inboundTerminalObserved);
         var warnings = new List<string>();
-        if (unexpectedFallbackRecovered)
+        if (unexpectedFallbackRecovered || phase6UnexpectedFallbackSafelyRecovered)
         {
             warnings.Add(string.Format(CultureInfo.InvariantCulture, "unexpected_tuna_drop_recovered:file_receive_ratio={0:F4}; terminal_reason={1}; file_failure={2}", fileReceiveRatio, string.IsNullOrWhiteSpace(terminalReason) ? "unknown" : terminalReason, file.FailureReason));
         }
@@ -1177,7 +1186,7 @@ public sealed partial class TunaSidecarLiveManualTests
                 fileReceiveRatio,
                 string.IsNullOrWhiteSpace(file.FailureReason) ? "not_completed" : file.FailureReason);
         }
-        else if (unexpectedFallbackStarted && !fallbackProofComplete)
+        else if (unexpectedFallbackStarted && !fallbackProofComplete && !phase6UnexpectedFallbackSafelyRecovered)
         {
             failureReason = "unexpected_fallback_proof_missing";
         }
@@ -1187,7 +1196,7 @@ public sealed partial class TunaSidecarLiveManualTests
         {
             failureReason = string.Format(CultureInfo.InvariantCulture, "unexpected_fallback_file_receive_ratio_low:{0:F4}", fileReceiveRatio);
         }
-        else if (unexpectedFallbackStarted && string.IsNullOrWhiteSpace(terminalReason))
+        else if (unexpectedFallbackStarted && string.IsNullOrWhiteSpace(terminalReason) && !phase6UnexpectedFallbackSafelyRecovered)
         {
             failureReason = "unexpected_fallback_terminal_reason_missing";
         }
@@ -3066,8 +3075,9 @@ public sealed partial class TunaSidecarLiveManualTests
                 }
                 else if (result.Transport == Phase3TransportMode.Tuna && result.FallbackStarted)
                 {
+                    var phase6UnexpectedFallbackSafelyRecovered = IsPhase6UnexpectedFallbackSafelyRecovered(result);
                     if ((CellUsesFileTraffic(result) &&
-                         (!result.FallbackFileSent || !result.FallbackFileReceived)) ||
+                         !HasFileFallbackProof(result)) ||
                         (CellUsesScreenTraffic(result) &&
                          (!result.FallbackScreenSent || !result.FallbackScreenReceived)))
                     {
@@ -3080,7 +3090,8 @@ public sealed partial class TunaSidecarLiveManualTests
                     }
                     else
                     {
-                        if (string.IsNullOrWhiteSpace(result.TerminalReason))
+                        if (string.IsNullOrWhiteSpace(result.TerminalReason) &&
+                            !phase6UnexpectedFallbackSafelyRecovered)
                         {
                             reasons.Add(result.CellId + ":unexpected_fallback_terminal_reason_missing");
                         }
@@ -3148,6 +3159,23 @@ public sealed partial class TunaSidecarLiveManualTests
             => failureReason.Contains("soak_timeout_incomplete", StringComparison.OrdinalIgnoreCase) ||
                failureReason.Contains(FileTransferResultCodes.PeerDisconnected, StringComparison.OrdinalIgnoreCase) ||
                failureReason.Contains(FileTransferResultCodes.TransportDisconnected, StringComparison.OrdinalIgnoreCase);
+
+        private static bool IsPhase6UnexpectedFallbackSafelyRecovered(TunaSoakCellResult result)
+            => result.IsPhase6Gate &&
+               result.Transport == Phase3TransportMode.Tuna &&
+               result.Fault == TunaSoakFaultMode.None &&
+               result.FallbackStarted &&
+               result.Completed &&
+               result.FileCompleted &&
+               result.FinalShaMatched &&
+               result.SessionAlive &&
+               result.ChatControlAlive &&
+               HasPhase6V6FallbackProof(result) &&
+               result.SidecarOrphanCount == 0 &&
+               result.UnresolvedEpochCount == 0 &&
+               result.SenderTerminalObserved &&
+               result.ReceiverTerminalObserved &&
+               result.FinalStatus is not ("Sending..." or "Receiving...");
 
         private static void AddPhase6GateReasons(
             TunaSoakCellResult result,

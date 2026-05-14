@@ -15,6 +15,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const string DeclinedReason = FileTransferResultCodes.Declined;
     private const string CanceledReason = FileTransferResultCodes.CanceledLocal;
     private const string DisconnectedErrorCode = FileTransferResultCodes.PeerDisconnected;
+    private const string ControlChannelStalledErrorCode = FileTransferResultCodes.ControlChannelStalled;
     private const string DetachedErrorCode = FileTransferResultCodes.TransportDetached;
     private const string InvalidStateErrorCode = FileTransferResultCodes.InvalidState;
     private const string SessionMismatchErrorCode = FileTransferResultCodes.SessionMismatch;
@@ -161,6 +162,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static readonly TimeSpan PullV4PeerSilenceTimeout = TimeSpan.FromSeconds(90);
     private static readonly int[] CancelRetryDelaysMs = [250, 750, 1500, 3000, 7000, 12000, 20000, 30000];
     private static readonly int[] CancelDataFrameRetryDelaysMs = [250, 750, 1500, 3000, 7000, 12000];
+    private static readonly int[] PauseControlRetryDelaysMs = [0, 250, 750, 1500, 3000, 7000, 12000];
     private const int CancelDataFrameBestEffortTimeoutMs = 750;
     private const int PullV4GrantLowWatermarkDivisor = 2;
     private const int PullV4HealthyDefaultChunkSizeBytes = 40 * 1024;
@@ -248,15 +250,19 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V4PostFallbackFrontierBackfillStep3AfterCommittedChunks = 8;
     private const int V4FrontierTailRetryChunks = V4MaxBatchSegmentsDefault;
     private const int V4FileOnlyFrontierTailRetryChunks = 12;
-    private const int V6ReceiverRequestWindowChunks = 4096;
+    private const int V6ReceiverRequestWindowChunks = 128;
+    private const int V6RecoveredRegularNknReceiverRequestWindowChunks = 64;
+    private const int V6FrontierStalledReceiverRequestWindowChunks = 32;
     private const int V6FrontierRequestChunks = 1;
-    private const int V6NormalReceiverStateResendGateMs = 30000;
+    private const int V6NormalReceiverStateResendGateMs = 10000;
     private const int V6RecoveredFrontierResendGateMs = 2000;
+    private const int V6EpochFrontierResendGateMs = 4000;
     private const int V6TunaRedundantDataProbeDelayMs = 10000;
     private const long V6TunaRedundantDataMinimumBytesAfterProof = 10L * 1024L * 1024L;
-    private const int V6FileOnlySenderPipelineDepth = 64;
+    private const int V6FileOnlySenderPipelineDepth = 8;
     private const int V6RegularNknRedundantSenderPipelineDepth = 2;
-    private const int V6RegularNknRedundantNormalBatchLimit = 4;
+    private const int V6RegularNknRedundantNormalBatchLimit = 2;
+    private const int V6RegularNknFallbackSenderPipelineDepth = 4;
     private const int V6EpochPriorityPipelineBypassDepth = 2;
     private const int V6SenderTransportSendTimeoutMs = 5000;
     private const int V6RegularNknRedundantTransportSendTimeoutMs = 15000;
@@ -1028,6 +1034,7 @@ public sealed partial class SessionFileTransferService : IDisposable
                 state = outboundTransfer.State;
                 transportPaused = outboundTransfer.PullTransportPaused;
                 outboundTransfer.V4SenderPumpLastWakeReason = "user_paused";
+                outboundTransfer.ResetV6SenderPipelineCancellation();
                 outboundTransfer.SignalV4SenderPump();
                 pausedOutboundContext = !string.IsNullOrWhiteSpace(outboundTransfer.SessionId)
                     ? outboundTransfer
@@ -1067,7 +1074,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         LogUserPauseResume("filetransfer_user_paused", normalizedTransferId, sessionId, direction, state, paused: true, normalizedReason, transportPaused);
         if (pausedOutboundContext is not null)
         {
-            await SendOutboundV4PauseControlAsync(pausedOutboundContext, "user_paused").ConfigureAwait(false);
+            ScheduleOutboundV4PauseControlRetry(pausedOutboundContext, paused: true, "user_paused");
             _ = Task.Run(
                 () => SendOutboundV4PauseStateAsync(pausedOutboundContext, "user_paused"),
                 CancellationToken.None);
@@ -1075,12 +1082,13 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         if (pausedInboundContext is not null)
         {
-            await SendInboundV4PauseControlAsync(pausedInboundContext, "user_paused").ConfigureAwait(false);
+            ScheduleInboundV4PauseControlRetry(pausedInboundContext, paused: true, "user_paused");
             _ = Task.Run(
                 () => SendInboundV6ReceiverStateAsync(pausedInboundContext, "user_paused", forceSend: true),
                 CancellationToken.None);
         }
 
+        await Task.CompletedTask.ConfigureAwait(false);
         return result;
     }
 
@@ -1169,7 +1177,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         LogUserPauseResume("filetransfer_user_resumed", normalizedTransferId, sessionId, direction, state, paused: false, normalizedReason, transportPaused);
         if (resumedOutboundContext is not null)
         {
-            await SendOutboundV4PauseControlAsync(resumedOutboundContext, "user_resumed").ConfigureAwait(false);
+            ScheduleOutboundV4PauseControlRetry(resumedOutboundContext, paused: false, "user_resumed");
             _ = Task.Run(
                 () => SendOutboundV4PauseStateAsync(resumedOutboundContext, "user_resumed"),
                 CancellationToken.None);
@@ -1179,12 +1187,13 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         if (resumedInboundContext is not null)
         {
-            await SendInboundV4PauseControlAsync(resumedInboundContext, "user_resumed").ConfigureAwait(false);
+            ScheduleInboundV4PauseControlRetry(resumedInboundContext, paused: false, "user_resumed");
             _ = Task.Run(
                 () => FlushInboundV6PausedProgressAsync(resumedInboundContext, "user_resumed"),
                 CancellationToken.None);
         }
 
+        await Task.CompletedTask.ConfigureAwait(false);
         return result;
     }
 
@@ -1959,7 +1968,7 @@ public sealed partial class SessionFileTransferService : IDisposable
             "FileTransferService",
             $"event=filetransfer_data_session_availability_observed; session_id={dataSession.SessionId}; transfer_id={dataSession.TransferId}; is_available={(e.IsAvailable ? 1 : 0)}; reason={FormatProtocolLogValue(e.Reason)}; requires_resume_request={(e.RequiresResumeRequest ? 1 : 0)}; handoff_kind={FormatFileTransferTransportHandoffKind(e.HandoffKind)}; target_transport={FormatFileTransferTransportKind(e.TargetTransport)}");
 
-        RunHardPriorityInboundLifecycle(
+        EnqueueInboundLifecycle(
             "data_session_availability",
             () => HandleDataSessionAvailabilityChangedAsync(dataSession, e));
     }
@@ -1968,6 +1977,13 @@ public sealed partial class SessionFileTransferService : IDisposable
         IFileTransferDataSession dataSession,
         FileTransferDataSessionAvailabilityChangedEventArgs availability)
     {
+        if (!availability.IsAvailable &&
+            IsTerminalControlChannelStallReason(availability.Reason))
+        {
+            await TerminalizeTransfersForControlChannelStallAsync(dataSession, availability.Reason).ConfigureAwait(false);
+            return;
+        }
+
         OutboundTransferContext? outboundToResume = null;
         InboundTransferContext? inboundToResume = null;
         string? outboundPausedTransferId = null;
@@ -2121,6 +2137,64 @@ public sealed partial class SessionFileTransferService : IDisposable
                 $"event=filetransfer_transport_epoch_started_while_unavailable; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(availability.Reason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; target_transport={FormatFileTransferTransportKind(availability.TargetTransport)}");
         }
     }
+
+    private async Task TerminalizeTransfersForControlChannelStallAsync(
+        IFileTransferDataSession dataSession,
+        string reason)
+    {
+        OutboundTransferContext? outbound = null;
+        InboundTransferContext? inbound = null;
+        lock (gate)
+        {
+            if (ReferenceEquals(outboundTransfer?.DataSession, dataSession) &&
+                outboundTransfer is { IsTerminal: false } outboundCandidate)
+            {
+                outbound = outboundCandidate;
+            }
+
+            if (ReferenceEquals(inboundTransfer?.DataSession, dataSession) &&
+                inboundTransfer is { IsTerminal: false } inboundCandidate)
+            {
+                inbound = inboundCandidate;
+            }
+        }
+
+        if (outbound is not null)
+        {
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_control_channel_stalled_terminalized; direction=outbound; transfer_id={outbound.TransferId}; session_id={outbound.SessionId}; reason={FormatProtocolLogValue(reason)}");
+            await TransitionOutboundToTerminalAsync(
+                outbound,
+                FileTransferTransferState.Failed,
+                errorCode: ControlChannelStalledErrorCode,
+                statusMessage: "Connection control channel stalled.",
+                notifyPeer: true,
+                cancelReason: null,
+                ct: CancellationToken.None).ConfigureAwait(false);
+        }
+
+        if (inbound is not null)
+        {
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_control_channel_stalled_terminalized; direction=inbound; transfer_id={inbound.TransferId}; session_id={inbound.SessionId}; reason={FormatProtocolLogValue(reason)}");
+            await TransitionInboundToTerminalAsync(
+                inbound,
+                FileTransferTransferState.Failed,
+                errorCode: ControlChannelStalledErrorCode,
+                statusMessage: "Connection control channel stalled.",
+                sendError: true,
+                errorMessage: "Connection control channel stalled.",
+                cancelReason: null,
+                ct: CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    private static bool IsTerminalControlChannelStallReason(string? reason)
+        => !string.IsNullOrWhiteSpace(reason) &&
+           reason.Contains("control_receive_stalled", StringComparison.OrdinalIgnoreCase) &&
+           reason.Contains("max_restarts", StringComparison.OrdinalIgnoreCase);
 
     private Task HandleIncomingCancelAsync(FileTransferCancelV1 message)
     {
@@ -3347,11 +3421,17 @@ public sealed partial class SessionFileTransferService : IDisposable
     {
         private TaskCompletionSource<bool> controlSignal = CreateSignal();
 
+        private readonly List<CancellationTokenSource> retiredV6SenderPipelineCts = [];
+
         public FileTransferSendDescriptor Descriptor { get; }
 
         public FileTransferReadStreamFactory OpenReadStreamAsync { get; }
 
         public CancellationTokenSource LifetimeCts { get; } = new();
+
+        public CancellationTokenSource V6SenderPipelineCts { get; private set; } = new();
+
+        public long V6SenderPipelineGeneration { get; private set; }
 
         public string SessionId { get; set; } = string.Empty;
 
@@ -3409,6 +3489,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public Dictionary<int, DateTimeOffset> SentAwaitingAck { get; } = new();
 
+        public Dictionary<int, DateTimeOffset> V6ChunkSendsInFlight { get; } = new();
+
         public Dictionary<int, DateTimeOffset> LastChunkSentUtc { get; } = new();
 
         public Dictionary<int, DateTimeOffset> LastChunkResentUtc { get; } = new();
@@ -3442,6 +3524,10 @@ public sealed partial class SessionFileTransferService : IDisposable
         public long V6HeartbeatSequence { get; set; }
 
         public DateTimeOffset? V6LastPeerLivenessUtc { get; set; }
+
+        public int V6PeerLivenessRecoveryDeferralCount { get; set; }
+
+        public DateTimeOffset? V6PeerLivenessRecoveryDeferredUtc { get; set; }
 
         public bool PullV4ExpandedWindowActive { get; set; }
 
@@ -3705,6 +3791,7 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             try
             {
+                V6SenderPipelineCts.Cancel();
                 LifetimeCts.Cancel();
             }
             catch
@@ -3712,11 +3799,43 @@ public sealed partial class SessionFileTransferService : IDisposable
             }
         }
 
+        public long ResetV6SenderPipelineCancellation()
+        {
+            var previous = V6SenderPipelineCts;
+            V6SenderPipelineCts = new CancellationTokenSource();
+            V6SenderPipelineGeneration++;
+            try
+            {
+                previous.Cancel();
+            }
+            catch
+            {
+            }
+
+            retiredV6SenderPipelineCts.Add(previous);
+            return V6SenderPipelineGeneration;
+        }
+
         public void DisposeResources()
         {
             try
             {
                 DataSession?.Dispose();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                V6SenderPipelineCts.Cancel();
+                V6SenderPipelineCts.Dispose();
+                foreach (var retired in retiredV6SenderPipelineCts)
+                {
+                    retired.Dispose();
+                }
+
+                retiredV6SenderPipelineCts.Clear();
             }
             catch
             {
@@ -4052,6 +4171,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int PullHighestReceivedChunkIndex { get; set; } = -1;
 
+        public int V6SparseAcceptWindowEndExclusive { get; set; }
+
         public int PullLateArrivalDistance { get; set; }
 
         public bool PullGapFocusActive { get; set; }
@@ -4310,7 +4431,12 @@ public sealed partial class SessionFileTransferService : IDisposable
             => new(SessionId, TransferId, FileName, FileSizeBytes, Sha256Base64);
 
         public FileTransferTransferSnapshot ToSnapshot()
-            => new(
+        {
+            var bytesAcceptedForTransport = ReceiverSparseWriteActive
+                ? Math.Max(BytesTransferred, ReceiverSparseBytesWritten)
+                : BytesTransferred;
+
+            return new(
                 SessionId,
                 TransferId,
                 FileTransferDirection.Inbound,
@@ -4327,10 +4453,12 @@ public sealed partial class SessionFileTransferService : IDisposable
                 SavedFilePath,
                 SavedDirectoryPath,
                 SavedFileName,
+                BytesAcceptedForTransport: bytesAcceptedForTransport,
                 IsPaused: UserPaused,
                 PauseReason: UserPauseReason,
                 IsPeerPaused: PeerPaused,
                 PeerPauseReason: PeerPauseReason);
+        }
 
         public void CancelLifetime()
         {

@@ -185,7 +185,7 @@ public sealed record FileTransferTransferSnapshot(
 
     public long ProgressBytes
         => Direction == FileTransferDirection.Outbound
-            ? Math.Max(0L, BytesAcceptedForTransport ?? BytesTransferred)
+            ? Math.Max(0L, BytesAcknowledgedByReceiver ?? BytesTransferred)
             : Math.Max(0L, BytesTransferred);
 
     public double ProgressFraction

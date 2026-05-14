@@ -111,6 +111,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
     private bool canSendFiles;
     private FileTransferPanelItemViewModel? inboundFileTransfer;
     private FileTransferPanelItemViewModel? outboundFileTransfer;
+    private SessionFileTransferSnapshot? pendingFileTransferUiSnapshot;
     private bool isChatInputEnabled;
     private bool controlModeEnabled;
     private SessionUiPhase effectivePhase;
@@ -2949,6 +2950,11 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
         }
 
         Interlocked.Increment(ref fileTransferUiRefreshPendingCount);
+        if (e?.Snapshot is { } snapshot)
+        {
+            Interlocked.Exchange(ref pendingFileTransferUiSnapshot, snapshot);
+        }
+
         if (IsUrgentFileTransferSnapshot(e?.Snapshot))
         {
             Volatile.Write(ref fileTransferUiRefreshUrgent, 1);
@@ -2982,6 +2988,7 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                 var coalescedCount = Interlocked.Exchange(ref fileTransferUiRefreshPendingCount, 0);
                 if (coalescedCount > 0)
                 {
+                    var snapshotOverride = Interlocked.Exchange(ref pendingFileTransferUiSnapshot, null);
                     await UiThreadDispatch.RunAsync(() =>
                     {
                         if (disposed)
@@ -2989,7 +2996,9 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
                             return;
                         }
 
-                        UpdateUiFromSnapshot(coalescedCount > 1 ? "file_transfer_changed_coalesced" : "file_transfer_changed");
+                        UpdateUiFromSnapshot(
+                            coalescedCount > 1 ? "file_transfer_changed_coalesced" : "file_transfer_changed",
+                            snapshotOverride);
                     }).ConfigureAwait(false);
                     Volatile.Write(ref lastFileTransferUiRefreshUtcMs, Environment.TickCount64);
                     if (coalescedCount >= FileTransferUiRefreshCoalescedLogThreshold)
@@ -3984,14 +3993,14 @@ public sealed class HelperPageViewModel : ViewModelBase, IDisposable, IChatPanel
             snapshot.IsPaused ||
             snapshot.IsPeerPaused);
 
-    private void UpdateUiFromSnapshot(string source)
+    private void UpdateUiFromSnapshot(string source, SessionFileTransferSnapshot? fileTransferSnapshotOverride = null)
     {
         bool nextChatEnabled;
         bool nextCanSendFiles;
         bool nextCanEndSession;
         bool nextCanOpenDiagnostics;
         var flow = sessionRuntime.FlowSnapshot;
-        var fileTransferSnapshot = sessionRuntime.FileTransferSnapshot;
+        var fileTransferSnapshot = fileTransferSnapshotOverride ?? sessionRuntime.FileTransferSnapshot;
         InboundFileTransfer = FileTransferPanelItemViewModel.FromSnapshot(
             fileTransferSnapshot.Inbound,
             AcceptIncomingFileCommand,

@@ -90,6 +90,8 @@ public sealed partial class NknSignalingTransport
 
         public V6TransportEpochState? FileV6EpochState { get; set; }
 
+        public long FileV6TransportEpoch { get; set; }
+
         public long ScreenFramesApplied { get; set; }
 
         public bool AccelerationUsedAfterFallback { get; set; }
@@ -341,7 +343,7 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        MarkTunaFallbackFileV6EpochState(snapshot.SessionId, snapshot.State, SanitizeLogToken(snapshot.Reason));
+        MarkTunaFallbackFileV6EpochState(snapshot.SessionId, snapshot.TransportEpoch, snapshot.State, SanitizeLogToken(snapshot.Reason));
 
         if (snapshot.State == V6TransportEpochState.WaitingForTargetTransport)
         {
@@ -371,14 +373,14 @@ public sealed partial class NknSignalingTransport
         lock (accelerationGate)
         {
             if (!TryGetCurrentTunaFallbackProofStateUnsafe(snapshot.SessionId, out var current) ||
-                !IsFileTransferFallbackFinalForLanes(current, NknAccelerationLaneKind.File))
+                !ShouldIgnoreFinalFileTransferFallbackEpochSnapshotUnsafe(snapshot, current))
             {
                 return false;
             }
 
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=filetransfer_v6_epoch_observation_ignored_final_fallback; session_id={SanitizeLogToken(snapshot.SessionId)}; transfer_id={SanitizeLogToken(snapshot.TransferId)}; direction={snapshot.Direction.ToString().ToLowerInvariant()}; transport_epoch={snapshot.TransportEpoch}; state={FormatFileTransferV6TransportEpochStateForLog(snapshot.State)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(snapshot.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(snapshot.TargetTransport)}; reason={SanitizeLogToken(snapshot.Reason)}; file_state={FormatTunaFallbackLaneState(current.FileState)}; file_v6_epoch_state={FormatTunaFallbackFileV6EpochState(current)}");
+                $"event=filetransfer_v6_epoch_observation_ignored_final_fallback; session_id={SanitizeLogToken(snapshot.SessionId)}; transfer_id={SanitizeLogToken(snapshot.TransferId)}; direction={snapshot.Direction.ToString().ToLowerInvariant()}; transport_epoch={snapshot.TransportEpoch}; state={FormatFileTransferV6TransportEpochStateForLog(snapshot.State)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(snapshot.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(snapshot.TargetTransport)}; reason={SanitizeLogToken(snapshot.Reason)}; file_state={FormatTunaFallbackLaneState(current.FileState)}; file_v6_epoch_state={FormatTunaFallbackFileV6EpochState(current)}; file_v6_transport_epoch={current.FileV6TransportEpoch}");
             return true;
         }
     }
@@ -394,16 +396,38 @@ public sealed partial class NknSignalingTransport
         lock (accelerationGate)
         {
             if (!TryGetCurrentTunaFallbackProofStateUnsafe(snapshot.SessionId, out var current) ||
-                !IsFileTransferFallbackFinalForLanes(current, NknAccelerationLaneKind.File))
+                !ShouldIgnoreFinalFileTransferFallbackEpochSnapshotUnsafe(snapshot, current))
             {
                 return false;
             }
 
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=filetransfer_v6_epoch_observation_ignored_final_fallback; session_id={SanitizeLogToken(snapshot.SessionId)}; transfer_id={SanitizeLogToken(snapshot.TransferId)}; direction={snapshot.Direction.ToString().ToLowerInvariant()}; transport_epoch={snapshot.TransportEpoch}; state={FormatFileTransferV6TransportEpochStateForLog(snapshot.State)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(snapshot.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(snapshot.TargetTransport)}; reason={SanitizeLogToken(snapshot.Reason)}; file_state={FormatTunaFallbackLaneState(current.FileState)}; file_v6_epoch_state={FormatTunaFallbackFileV6EpochState(current)}");
+                $"event=filetransfer_v6_epoch_observation_ignored_final_fallback; session_id={SanitizeLogToken(snapshot.SessionId)}; transfer_id={SanitizeLogToken(snapshot.TransferId)}; direction={snapshot.Direction.ToString().ToLowerInvariant()}; transport_epoch={snapshot.TransportEpoch}; state={FormatFileTransferV6TransportEpochStateForLog(snapshot.State)}; handoff_kind={FormatFileTransferTransportHandoffKindForLog(snapshot.HandoffKind)}; target_transport={FormatFileTransferTransportKindForLog(snapshot.TargetTransport)}; reason={SanitizeLogToken(snapshot.Reason)}; file_state={FormatTunaFallbackLaneState(current.FileState)}; file_v6_epoch_state={FormatTunaFallbackFileV6EpochState(current)}; file_v6_transport_epoch={current.FileV6TransportEpoch}");
             return true;
         }
+    }
+
+    private static bool ShouldIgnoreFinalFileTransferFallbackEpochSnapshotUnsafe(
+        FileTransferV6TransportEpochSnapshot snapshot,
+        TunaFallbackProofState current)
+    {
+        if (!IsFileTransferFallbackFinalForLanes(current, NknAccelerationLaneKind.File))
+        {
+            return false;
+        }
+
+        if (current.FileV6TransportEpoch > 0 &&
+            snapshot.TransportEpoch > 0 &&
+            snapshot.TransportEpoch < current.FileV6TransportEpoch)
+        {
+            return true;
+        }
+
+        // Once Core has entered an unresolved proof/waiting state for the same epoch,
+        // it is still the recovery authority. Only suppress new proof-pending noise
+        // caused by secondary sidecar errors after a completed fallback.
+        return snapshot.State == V6TransportEpochState.TargetProofPending;
     }
 
     private bool TryGetUnresolvedFileTransferV6TransportEpochForCurrentSession(out FileTransferV6TransportEpochSnapshot snapshot)
@@ -1197,6 +1221,7 @@ public sealed partial class NknSignalingTransport
 
     private void MarkTunaFallbackFileV6EpochState(
         string? sessionId,
+        long transportEpoch,
         V6TransportEpochState state,
         string reason)
     {
@@ -1210,17 +1235,31 @@ public sealed partial class NknSignalingTransport
             }
 
             if (IsFileTransferFallbackFinalForLanes(current, NknAccelerationLaneKind.File) &&
+                current.FileV6TransportEpoch > 0 &&
+                transportEpoch > 0 &&
+                transportEpoch < current.FileV6TransportEpoch)
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_v6_epoch_state_ignored_final_fallback; session_id={SanitizeLogToken(sessionId ?? "none")}; transport_epoch={transportEpoch}; state={FormatFileTransferV6TransportEpochStateForLog(state)}; reason={SanitizeLogToken(reason)}; file_state={FormatTunaFallbackLaneState(current.FileState)}; file_v6_epoch_state={FormatTunaFallbackFileV6EpochState(current)}; file_v6_transport_epoch={current.FileV6TransportEpoch}");
+                return;
+            }
+
+            if (IsFileTransferFallbackFinalForLanes(current, NknAccelerationLaneKind.File) &&
+                state == V6TransportEpochState.TargetProofPending &&
                 current.FileV6EpochState != state)
             {
                 LocalOperationalLog.Info(
                     "NKN.Tuna",
-                    $"event=filetransfer_v6_epoch_state_ignored_final_fallback; session_id={SanitizeLogToken(sessionId ?? "none")}; state={FormatFileTransferV6TransportEpochStateForLog(state)}; reason={SanitizeLogToken(reason)}; file_state={FormatTunaFallbackLaneState(current.FileState)}; file_v6_epoch_state={FormatTunaFallbackFileV6EpochState(current)}");
+                    $"event=filetransfer_v6_epoch_state_ignored_final_fallback; session_id={SanitizeLogToken(sessionId ?? "none")}; transport_epoch={transportEpoch}; state={FormatFileTransferV6TransportEpochStateForLog(state)}; reason={SanitizeLogToken(reason)}; file_state={FormatTunaFallbackLaneState(current.FileState)}; file_v6_epoch_state={FormatTunaFallbackFileV6EpochState(current)}; file_v6_transport_epoch={current.FileV6TransportEpoch}");
                 return;
             }
 
-            if (current.FileV6EpochState != state)
+            if (current.FileV6EpochState != state ||
+                current.FileV6TransportEpoch != transportEpoch)
             {
                 current.FileV6EpochState = state;
+                current.FileV6TransportEpoch = transportEpoch;
                 changed = true;
             }
 
@@ -1387,7 +1426,7 @@ public sealed partial class NknSignalingTransport
 
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=tuna_mixed_handoff_lane_state_changed; session_id={state.SessionId}; fallback_epoch={state.Epoch}; reason={state.Reason}; lane_state={SanitizeLogToken(laneState)}; screen_state={FormatTunaFallbackLaneState(state.ScreenState)}; file_state={FormatTunaFallbackLaneState(state.FileState)}; file_v6_epoch_state={FormatTunaFallbackFileV6EpochState(state)}");
+            $"event=tuna_mixed_handoff_lane_state_changed; session_id={state.SessionId}; fallback_epoch={state.Epoch}; reason={state.Reason}; lane_state={SanitizeLogToken(laneState)}; screen_state={FormatTunaFallbackLaneState(state.ScreenState)}; file_state={FormatTunaFallbackLaneState(state.FileState)}; file_v6_epoch_state={FormatTunaFallbackFileV6EpochState(state)}; file_v6_transport_epoch={state.FileV6TransportEpoch}");
     }
 
     private static string FormatTunaFallbackFileV6EpochState(TunaFallbackProofState state)
@@ -1480,6 +1519,14 @@ public sealed partial class NknSignalingTransport
             "sidecar_unexpected_exit";
     }
 
+    internal static string NormalizeAccelerationSidecarResetReason(string? reason)
+    {
+        var normalized = SanitizeLogToken(reason);
+        return normalized.StartsWith("sidecar_", StringComparison.Ordinal)
+            ? normalized
+            : $"sidecar_{normalized}";
+    }
+
     internal static bool ShouldStartImmediateFileTransferFallbackProbe(string? reason)
     {
         var normalized = SanitizeLogToken(reason);
@@ -1537,7 +1584,7 @@ public sealed partial class NknSignalingTransport
             $"event=tuna_acceleration_state_changed; available={(e.IsAvailable ? 1 : 0)}; reason={reason}");
         if (!e.IsAvailable)
         {
-            ResetAccelerationNegotiation($"sidecar_{e.Reason}");
+            ResetAccelerationNegotiation(NormalizeAccelerationSidecarResetReason(e.Reason));
             if (shouldNotifyRemoteDown)
             {
                 ScheduleAccelerationDownNotification(downSessionId, downLanes, reason);

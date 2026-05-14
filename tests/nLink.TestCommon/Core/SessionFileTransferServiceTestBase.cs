@@ -183,10 +183,12 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public FileTransferTransportProfileKind FileTransferTransportProfileKind { get; set; } = FileTransferTransportProfileKind.Default;
         public int DataSessionSendDelayMs { get; set; }
         public int DataSessionSendFailureAfterCount { get; set; }
+        public int ActiveDataSessionSends => Volatile.Read(ref activeDataSessionSends);
         public int MaxConcurrentDataSessionSends => Volatile.Read(ref maxConcurrentDataSessionSends);
         public Func<LoopbackFileTransferTransport, FileTransferDataFrame, CancellationToken, Task<bool>>? OutboundDataFrameDeliveryOverrideAsync { get; set; }
         public Func<LoopbackFileTransferTransport, FileTransferDataFrame, bool, CancellationToken, Task<bool>>? OutboundDataFrameDeliveryOverrideWithLaneAsync { get; set; }
         public Func<LoopbackFileTransferTransport, FileTransferCancelV1, CancellationToken, Task<bool>>? OutboundCancelDeliveryOverrideAsync { get; set; }
+        public Func<LoopbackFileTransferTransport, FileTransferPauseControlV6, CancellationToken, Task<bool>>? OutboundPauseControlDeliveryOverrideAsync { get; set; }
         public Func<LoopbackFileTransferTransport, FileTransferHeartbeatV6, CancellationToken, Task<bool>>? OutboundHeartbeatDeliveryOverrideAsync { get; set; }
         public Func<LoopbackFileTransferTransport, FileTransferTransportProbeV6, CancellationToken, Task<bool>>? OutboundTransportProbeDeliveryOverrideAsync { get; set; }
         public FileTransferTransportKind NextDataFrameTransportKind { get; set; } = FileTransferTransportKind.RegularNkn;
@@ -297,7 +299,11 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         {
             var payload = message with { SessionId = NormalizeSessionId(message.SessionId) };
             SentPauseControls.Enqueue(payload);
-            return DeliverAsync(payload, (target, deliveredPayload) => target.FileTransferPauseControlReceived?.Invoke(target, new FileTransferPauseControlReceivedEventArgs(deliveredPayload, "loopback-peer")), ct);
+            return DeliverMaybeAsync(
+                payload,
+                static (transport, delivered, token) => transport.OutboundPauseControlDeliveryOverrideAsync?.Invoke(transport.peer!, delivered, token) ?? Task.FromResult(false),
+                (target, deliveredPayload) => target.FileTransferPauseControlReceived?.Invoke(target, new FileTransferPauseControlReceivedEventArgs(deliveredPayload, "loopback-peer")),
+                ct);
         }
 
         public Task SendFileTransferHeartbeatAsync(FileTransferHeartbeatV6 message, CancellationToken ct)

@@ -26,6 +26,7 @@ public static class FileTransferResultCodes
     public const string CanceledLocal = "canceled_local";
     public const string CanceledRemote = "canceled_remote";
     public const string PeerDisconnected = "peer_disconnected";
+    public const string ControlChannelStalled = "control_channel_stalled";
     public const string TransportDisconnected = "transport_disconnected";
     public const string TransportDetached = "transport_detached";
 }

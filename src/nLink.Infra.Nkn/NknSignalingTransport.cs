@@ -2403,6 +2403,23 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             }
         }
 
+        if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted)
+        {
+            var sessionId = SanitizeLogToken(currentSessionSecurityState.SessionId?.Value ?? "none");
+            var reason = string.IsNullOrWhiteSpace(e.ExitReasonText)
+                ? "control_receive_stalled_max_restarts"
+                : SanitizeLogToken(e.ExitReasonText);
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=filetransfer_control_receive_stall_terminal_broadcast; session_id={sessionId}; reason={reason}");
+            SetFileTransferDataSessionsAvailability(
+                isAvailable: false,
+                reason: reason,
+                requiresResumeRequest: false,
+                handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+                targetTransport: FileTransferTransportKind.RegularNkn);
+        }
+
         BridgeLifecycle?.Invoke(this, e);
     }
 

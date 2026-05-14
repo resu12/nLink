@@ -2899,17 +2899,27 @@ public sealed partial class SessionRuntime
             return;
         }
 
+        HandlePeerEndedSession("remote_session_end", sender);
+    }
+
+    private void HandlePeerEndedSession(string reason, object? teardownSender = null)
+    {
+        if (disposed || resetInProgress || remoteSessionEndHandling)
+        {
+            return;
+        }
+
         if (remoteControlSessionState.ControlState != ControlState.Off)
         {
             MarkRemoteControlStopPriority(
-                "remote_session_ended",
+                reason,
                 remoteControlSessionState.CurrentControlRequestId,
                 remoteControlSessionState.ControllerPeerId);
         }
         ApplyRemoteControlReducerTransition(
             new RemoteControlReducerEvent(
                 RemoteControlReducerEventKind.SystemDisconnect,
-                "remote_session_ended",
+                reason,
                 RequestId: remoteControlSessionState.CurrentControlRequestId,
                 PeerId: remoteControlSessionState.ControllerPeerId));
         allowTransportScreenShareAutoStart = false;
@@ -2920,13 +2930,16 @@ public sealed partial class SessionRuntime
             role,
             state,
             transportState,
-            "remote_session_end"));
+            reason));
         QueueDetachFileTransferTransport();
         RemoteSessionEnded?.Invoke(this, EventArgs.Empty);
         RunCountedBackgroundTask(
             () => transportScreenShareCoordinator.HandleDisconnectedAsync(),
             countAsTransportTask: false);
-        NotifyLocalScreenShareStoppedForTeardown("remote_session_ended", sender);
+        if (teardownSender is not null)
+        {
+            NotifyLocalScreenShareStoppedForTeardown(reason, teardownSender);
+        }
 
         var message = role switch
         {
@@ -2941,8 +2954,11 @@ public sealed partial class SessionRuntime
             {
                 try
                 {
-                    SessionTimeline.Record("SessionEndReceived", "remote_end");
-                    SessionTimeline.Record("Disconnected", "remote_end");
+                    var timelineReason = string.Equals(reason, "remote_session_end", StringComparison.Ordinal)
+                        ? "remote_end"
+                        : reason;
+                    SessionTimeline.Record("SessionEndReceived", timelineReason);
+                    SessionTimeline.Record("Disconnected", timelineReason);
                     await ResetAsync(notifyRemoteSessionEnd: false).ConfigureAwait(false);
                     // A just-closed helper session can leave the old NKN bridge in a stale state
                     // for passive hosting. Force a fresh listener transport before relistening.
@@ -2965,8 +2981,11 @@ public sealed partial class SessionRuntime
         {
             try
             {
-                SessionTimeline.Record("SessionEndReceived", "remote_end");
-                SessionTimeline.Record("Disconnected", "remote_end");
+                var timelineReason = string.Equals(reason, "remote_session_end", StringComparison.Ordinal)
+                    ? "remote_end"
+                    : reason;
+                SessionTimeline.Record("SessionEndReceived", timelineReason);
+                SessionTimeline.Record("Disconnected", timelineReason);
                 await FailAsync(message).ConfigureAwait(false);
                 Disconnected?.Invoke(this, EventArgs.Empty);
             }
@@ -8091,6 +8110,12 @@ public sealed partial class SessionRuntime
 
     internal static string GetDefaultInboundFileTransferRootDirectory()
     {
+        var testOverrideRoot = Environment.GetEnvironmentVariable("NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT");
+        if (!string.IsNullOrWhiteSpace(testOverrideRoot))
+        {
+            return Path.GetFullPath(testOverrideRoot.Trim());
+        }
+
         if (OperatingSystem.IsWindows() &&
             TryGetWindowsKnownFolderPath(WindowsDownloadsKnownFolderId, out var downloadsPath))
         {

@@ -3,6 +3,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using NLink.Core.Configuration;
 
 namespace NLink.App.Services;
 
@@ -84,10 +85,35 @@ internal sealed class JsonTunaWalletLinkStore : ITunaWalletLinkStore
 
     internal static string DefaultPathProvider()
     {
+        var root = TunaRuntimeStateRoot.Resolve();
+        return Path.Combine(root, "tuna-wallet-link.json");
+    }
+}
+
+internal static class TunaRuntimeStateRoot
+{
+    private const string StateRootEnvVar = "NLINK_TUNA_STATE_ROOT";
+
+    public static string Resolve()
+    {
+        var overrideRoot = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
+            StateRootEnvVar,
+            category: "nkn_tuna_test_state");
+        if (!string.IsNullOrWhiteSpace(overrideRoot))
+        {
+            try
+            {
+                return Path.GetFullPath(overrideRoot.Trim());
+            }
+            catch
+            {
+                // Fall through to the normal user-local state path.
+            }
+        }
+
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        var root = string.IsNullOrWhiteSpace(localAppData)
+        return string.IsNullOrWhiteSpace(localAppData)
             ? AppContext.BaseDirectory
             : Path.Combine(localAppData, "nLink");
-        return Path.Combine(root, "tuna-wallet-link.json");
     }
 }

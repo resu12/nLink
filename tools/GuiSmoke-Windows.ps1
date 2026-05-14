@@ -2347,6 +2347,771 @@ function Run-ScenarioFileTransferNknMixedSoak {
     Run-FileTransferNknSoakCore -Context $Context -Mixed:$true
 }
 
+function Test-GuiSmokeEnvEnabled {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $value = [string][Environment]::GetEnvironmentVariable($Name)
+    if ([string]::IsNullOrWhiteSpace($value)) { return $false }
+    return $value -match '^(1|true|yes|on)$'
+}
+
+function Resolve-RepoPathForGuiSmoke {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+
+    return [System.IO.Path]::GetFullPath((Join-Path (Resolve-Path '.').Path $Path))
+}
+
+function Resolve-TunaGuiWalletPath {
+    $value = [string]$env:NLINK_TUNA_GUI_WALLET_PATH
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        $value = 'artifacts\tuna-poc\wallet-test-nkn.json'
+    }
+
+    return Resolve-RepoPathForGuiSmoke -Path $value
+}
+
+function Resolve-TunaGuiSidecarPath {
+    $value = [string]$env:NLINK_TUNA_GUI_SIDECAR_EXE
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        $value = [string]$env:NLINK_NKN_TUNA_SIDECAR_EXE
+    }
+
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        $value = 'artifacts\portable\nLink\win-x64\tuna\win-x64\nlink-tuna-sidecar.exe'
+    }
+
+    return Resolve-RepoPathForGuiSmoke -Path $value
+}
+
+function Initialize-TunaGuiRuntimeState {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$WalletPath,
+        [Parameter(Mandatory = $true)][string]$SidecarPath
+    )
+
+    if (-not (Test-Path -LiteralPath $WalletPath -PathType Leaf)) {
+        throw "Tuna GUI wallet not found: $WalletPath"
+    }
+
+    if (-not (Test-Path -LiteralPath $SidecarPath -PathType Leaf)) {
+        throw "Tuna GUI sidecar not found: $SidecarPath"
+    }
+
+    $stateRoot = Join-Path $ArtifactDir 'tuna-runtime-state'
+    New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
+    $now = [DateTimeOffset]::UtcNow.ToString('o')
+
+    $walletState = [ordered]@{
+        walletPath = $WalletPath
+        linkedUtc = $now
+        lastVerifiedUtc = $now
+        walletAddress = 'gui-smoke-redacted'
+        balanceNkn = '1'
+        status = 2
+    }
+    $walletState | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stateRoot 'tuna-wallet-link.json') -Encoding UTF8
+
+    $preferences = [ordered]@{
+        enabled = $true
+        fileLaneEnabled = $true
+        screenLaneEnabled = $false
+        maxPriceNknPerMb = '0.0002'
+        maxTotalMiB = 2048
+        maxDurationSec = 1800
+        allowDegradedProviderReady = $true
+        lastRuntimeStatus = 'locked'
+    }
+    $preferences | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stateRoot 'tuna-runtime-preferences.json') -Encoding UTF8
+
+    $usage = [ordered]@{
+        sessions = @()
+    }
+    $usage | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stateRoot 'tuna-usage-accounting.json') -Encoding UTF8
+
+    $env:NLINK_TUNA_STATE_ROOT = $stateRoot
+    $env:NLINK_NKN_TUNA_SIDECAR_EXE = $SidecarPath
+    $env:NLINK_NKN_TUNA_LANES = 'file'
+    $env:NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY = '1'
+
+    if ([string]::IsNullOrWhiteSpace($env:NLINK_NKN_TUNA_DEGRADED_PROVIDER_GRACE_SECONDS) -and
+        -not [string]::IsNullOrWhiteSpace($env:NLINK_TUNA_TEST_DEGRADED_PROVIDER_GRACE_SECONDS)) {
+        $env:NLINK_NKN_TUNA_DEGRADED_PROVIDER_GRACE_SECONDS = $env:NLINK_TUNA_TEST_DEGRADED_PROVIDER_GRACE_SECONDS
+    }
+
+    return $stateRoot
+}
+
+function Get-WalletPasswordDialogForProcess {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    foreach ($window in @(Get-TopLevelWindowElementsByProcessId -ProcessId $ProcessId)) {
+        if ([string]::Equals($window.Current.Name, 'Wallet password', [System.StringComparison]::Ordinal)) {
+            return $window
+        }
+
+        $dialog = Find-ByNameAndType -Root $window -Name 'Wallet password' -ControlType ([System.Windows.Automation.ControlType]::Window)
+        if ($dialog) {
+            return $dialog
+        }
+    }
+
+    return $null
+}
+
+function Wait-AppLogContainsAfterBookmark {
+    param(
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [Parameter(Mandatory = $true)][string]$Needle,
+        [int]$TimeoutMs = 30000,
+        [string]$Description = ''
+    )
+
+    $label = if ([string]::IsNullOrWhiteSpace($Description)) { $Needle } else { $Description }
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 500 -OnTimeoutMessage "Timed out waiting for app log evidence: $label" -Condition {
+        foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
+            if ($line.IndexOf($Needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                return $line
+            }
+        }
+
+        return $null
+    }
+}
+
+function Wait-AppLogContainsAllAfterBookmark {
+    param(
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [Parameter(Mandatory = $true)][string[]]$Needles,
+        [int]$TimeoutMs = 30000,
+        [string]$Description = ''
+    )
+
+    $label = if ([string]::IsNullOrWhiteSpace($Description)) { ($Needles -join ' + ') } else { $Description }
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 500 -OnTimeoutMessage "Timed out waiting for app log evidence: $label" -Condition {
+        foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
+            $matched = $true
+            foreach ($needle in $Needles) {
+                if ($line.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                    $matched = $false
+                    break
+                }
+            }
+
+            if ($matched) { return $line }
+        }
+
+        return $null
+    }
+}
+
+function Wait-AppLogContainsAnyAllAfterBookmark {
+    param(
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [Parameter(Mandatory = $true)][object[]]$NeedleSets,
+        [int]$TimeoutMs = 30000,
+        [string]$Description = ''
+    )
+
+    $label = if ([string]::IsNullOrWhiteSpace($Description)) { 'any matching app log evidence' } else { $Description }
+    return Wait-Until -TimeoutMs $TimeoutMs -PollMs 500 -OnTimeoutMessage "Timed out waiting for app log evidence: $label" -Condition {
+        foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
+            foreach ($needleSet in $NeedleSets) {
+                $needles = @($needleSet)
+                $matched = $true
+                foreach ($needle in $needles) {
+                    if ($line.IndexOf([string]$needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                        $matched = $false
+                        break
+                    }
+                }
+
+                if ($matched) { return $line }
+            }
+        }
+
+        return $null
+    }
+}
+
+function Unlock-TunaFromSessionHeader {
+    param(
+        [Parameter(Mandatory = $true)]$Process,
+        [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
+        [Parameter(Mandatory = $true)][string]$Password,
+        [Parameter(Mandatory = $true)][string]$RoleLabel
+    )
+
+    $bookmark = Get-AppLogBookmark
+    $toggle = Wait-ControlEnabledStateByAutomationId -Window $Window -AutomationId 'SessionHeader.TunaUnlockToggle' -IsEnabled $true -TimeoutMs 45000
+    Click-Element $toggle
+
+    $dialog = Wait-Until -TimeoutMs 20000 -PollMs 200 -OnTimeoutMessage "Timed out waiting for $RoleLabel Tuna wallet password dialog." -Condition {
+        Get-WalletPasswordDialogForProcess -ProcessId $Process.Id
+    }
+    $passwordBox = Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage "Timed out waiting for $RoleLabel Tuna wallet password box." -Condition {
+        Find-VisibleByAutomationId -Root $dialog -AutomationId 'WalletPassword.Password'
+    }
+    Set-Text -Element $passwordBox -Text $Password
+    $accept = Wait-Until -TimeoutMs 10000 -PollMs 200 -OnTimeoutMessage "Timed out waiting for $RoleLabel Tuna wallet Unlock button." -Condition {
+        $button = Find-VisibleByAutomationId -Root $dialog -AutomationId 'WalletPassword.Accept'
+        if ($button -and $button.Current.IsEnabled) { return $button }
+        return $null
+    }
+    Click-Element $accept
+
+    [void](Wait-AppLogContainsAfterBookmark -Bookmark $bookmark -Needle 'event=tuna_runtime_unlocked' -TimeoutMs 90000 -Description "$RoleLabel Tuna runtime unlocked")
+    Write-Host "[GUI Smoke][filetransfer_tuna] $RoleLabel Tuna unlock completed." -ForegroundColor Green
+}
+
+function Get-TunaGuiPayerRole {
+    $mode = [string]$env:NLINK_TUNA_GUI_PAYER_MODE
+    if ([string]::IsNullOrWhiteSpace($mode)) { return 'helpee' }
+
+    $normalized = $mode.Trim().ToLowerInvariant()
+    if ($normalized -in @('helpee', 'helper', 'both')) { return $normalized }
+    throw "Invalid NLINK_TUNA_GUI_PAYER_MODE '$mode'. Use helpee, helper, or both."
+}
+
+function Unlock-TunaPayers {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$PayerMode,
+        [Parameter(Mandatory = $true)][string]$Password
+    )
+
+    if ($PayerMode -eq 'helpee' -or $PayerMode -eq 'both') {
+        Unlock-TunaFromSessionHeader -Process $Context.HelpeeProc -Window $Context.HelpeeWindow -Password $Password -RoleLabel 'helpee'
+    }
+
+    if ($PayerMode -eq 'helper' -or $PayerMode -eq 'both') {
+        Unlock-TunaFromSessionHeader -Process $Context.HelperProc -Window $Context.HelperWindow -Password $Password -RoleLabel 'helper'
+    }
+}
+
+function Get-TunaGuiFaultMode {
+    $value = [string]$env:NLINK_TUNA_GUI_FAULT
+    if ([string]::IsNullOrWhiteSpace($value)) { return 'switch-off' }
+
+    $normalized = $value.Trim().ToLowerInvariant()
+    if ($normalized -in @('none', 'switch-off', 'sidecar-kill')) { return $normalized }
+    throw "Invalid NLINK_TUNA_GUI_FAULT '$value'. Use none, switch-off, or sidecar-kill."
+}
+
+function Get-TunaGuiFaultTarget {
+    param([Parameter(Mandatory = $true)][string]$PayerMode)
+
+    if ($PayerMode -eq 'helper') { return 'helper' }
+    return 'helpee'
+}
+
+function Invoke-TunaGuiFallbackFault {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$FaultMode,
+        [Parameter(Mandatory = $true)][string]$PayerMode
+    )
+
+    $target = Get-TunaGuiFaultTarget -PayerMode $PayerMode
+    $targetWindow = if ($target -eq 'helper') { $Context.HelperWindow } else { $Context.HelpeeWindow }
+    $targetProc = if ($target -eq 'helper') { $Context.HelperProc } else { $Context.HelpeeProc }
+
+    if ($FaultMode -eq 'switch-off') {
+        $toggle = Wait-ControlEnabledStateByAutomationId -Window $targetWindow -AutomationId 'SessionHeader.TunaUnlockToggle' -IsEnabled $true -TimeoutMs 30000
+        Click-Element $toggle
+        Write-Host "[GUI Smoke][filetransfer_tuna] Triggered Tuna fallback by switching off $target." -ForegroundColor Yellow
+        return
+    }
+
+    $children = @(
+        Get-CimInstance Win32_Process -Filter "ParentProcessId = $($targetProc.Id)" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ieq 'nlink-tuna-sidecar.exe' -or $_.Name -ieq 'nlink-tuna-sidecar' }
+    )
+    if ($children.Count -eq 0) {
+        throw "No Tuna sidecar child process found for $target."
+    }
+
+    foreach ($child in $children) {
+        Stop-Process -Id $child.ProcessId -Force -ErrorAction Stop
+    }
+    Write-Host "[GUI Smoke][filetransfer_tuna] Triggered Tuna fallback by killing $target sidecar child process(es)." -ForegroundColor Yellow
+}
+
+function Invoke-TunaGuiPauseResumeProbe {
+    param(
+        [Parameter(Mandatory = $true)]$SenderWindow,
+        [Parameter(Mandatory = $true)][int]$Bookmark
+    )
+
+    if (-not (Test-GuiSmokeEnvEnabled -Name 'NLINK_TUNA_GUI_EXERCISE_PAUSE')) {
+        return $false
+    }
+
+    $pause = Wait-ControlEnabledStateByAutomationId -Window $SenderWindow -AutomationId 'Chat.FileTransfer.Pause' -IsEnabled $true -TimeoutMs 30000
+    Click-Element $pause
+    [void](Wait-AppLogContainsAllAfterBookmark -Bookmark $Bookmark -Needles @('event=filetransfer_lifecycle_priority_sent', 'kind=pause_control', 'paused=1') -TimeoutMs 30000 -Description 'pause control sent')
+    [void](Wait-AppLogContainsAllAfterBookmark -Bookmark $Bookmark -Needles @('event=filetransfer_lifecycle_priority_received', 'kind=pause_control', 'paused=1') -TimeoutMs 30000 -Description 'pause control received')
+
+    $resume = Wait-ControlEnabledStateByAutomationId -Window $SenderWindow -AutomationId 'Chat.FileTransfer.Resume' -IsEnabled $true -TimeoutMs 30000
+    Start-Sleep -Milliseconds 1000
+    Click-Element $resume
+    [void](Wait-AppLogContainsAllAfterBookmark -Bookmark $Bookmark -Needles @('event=filetransfer_lifecycle_priority_sent', 'kind=pause_control', 'paused=0') -TimeoutMs 30000 -Description 'resume control sent')
+    [void](Wait-AppLogContainsAllAfterBookmark -Bookmark $Bookmark -Needles @('event=filetransfer_lifecycle_priority_received', 'kind=pause_control', 'paused=0') -TimeoutMs 30000 -Description 'resume control received')
+    Write-Host '[GUI Smoke][filetransfer_tuna] Pause/resume lifecycle probe completed.' -ForegroundColor Green
+    return $true
+}
+
+function Get-TunaGuiEvidenceSummary {
+    param([Parameter(Mandatory = $true)][int]$Bookmark)
+
+    $summary = [ordered]@{
+        tunaNegotiated = $false
+        activationEpochStarted = $false
+        activationEpochRecovered = $false
+        fallbackEpochStarted = $false
+        fallbackEpochRecovered = $false
+        fallbackEpochWaiting = $false
+        pauseSent = $false
+        pauseReceived = $false
+        resumeSent = $false
+        resumeReceived = $false
+        heartbeatTimeoutCount = 0
+        peerDisconnectedCount = 0
+        transportFailedCount = 0
+        senderChunkBytes = 0L
+        receiverChunkBytes = 0L
+    }
+
+    foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
+        if ($line.IndexOf('event=tuna_acceleration_negotiated', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $summary.tunaNegotiated = $true
+        }
+
+        if ($line.IndexOf('event=filetransfer_v6_epoch_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $line.IndexOf('handoff_kind=normal_to_tuna_activation', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $summary.activationEpochStarted = $true
+        }
+
+        if (($line.IndexOf('event=filetransfer_v6_epoch_recovered', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+             ($line.IndexOf('handoff_kind=normal_to_tuna_activation', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+              $line.IndexOf('target_transport=tuna', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) -or
+            ($line.IndexOf('event=filetransfer_v6_epoch_observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+             $line.IndexOf('handoff_kind=normal_to_tuna_activation', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+             $line.IndexOf('state=recovered', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
+            $summary.activationEpochRecovered = $true
+        }
+
+        if ($line.IndexOf('event=filetransfer_v6_epoch_started', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $line.IndexOf('handoff_kind=tuna_to_normal_fallback', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $summary.fallbackEpochStarted = $true
+        }
+
+        if (($line.IndexOf('event=filetransfer_v6_epoch_recovered', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+             $line.IndexOf('handoff_kind=tuna_to_normal_fallback', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
+            ($line.IndexOf('event=filetransfer_v6_epoch_observed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+             $line.IndexOf('handoff_kind=tuna_to_normal_fallback', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+             $line.IndexOf('state=recovered', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
+            $summary.fallbackEpochRecovered = $true
+        }
+
+        if ($line.IndexOf('event=filetransfer_v6_epoch_waiting', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $line.IndexOf('handoff_kind=tuna_to_normal_fallback', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $summary.fallbackEpochWaiting = $true
+        }
+
+        if ($line.IndexOf('event=filetransfer_lifecycle_priority_sent', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $line.IndexOf('kind=pause_control', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            if ($line.IndexOf('paused=1', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { $summary.pauseSent = $true }
+            if ($line.IndexOf('paused=0', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { $summary.resumeSent = $true }
+        }
+
+        if ($line.IndexOf('event=filetransfer_lifecycle_priority_received', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $line.IndexOf('kind=pause_control', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            if ($line.IndexOf('paused=1', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { $summary.pauseReceived = $true }
+            if ($line.IndexOf('paused=0', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { $summary.resumeReceived = $true }
+        }
+
+        if ($line.IndexOf('event=filetransfer_v6_heartbeat_timeout', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $summary.heartbeatTimeoutCount++
+        }
+
+        if ($line.IndexOf('peer_disconnected', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $summary.peerDisconnectedCount++
+        }
+
+        if ($line.IndexOf('transport_state_changed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+            $line.IndexOf('to=Failed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $summary.transportFailedCount++
+        }
+
+        $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
+        $eventName = Get-GuiSmokeFieldValue -Fields $fields -Name 'event'
+        if ($eventName -eq 'filetransfer_binary_frame_sent') {
+            $summary.senderChunkBytes += [Math]::Max(0L, (Get-GuiSmokeInt64FieldValue -Fields $fields -Name 'raw_chunk_bytes'))
+        }
+        elseif ($eventName -eq 'filetransfer_binary_frame_received') {
+            $summary.receiverChunkBytes += [Math]::Max(0L, (Get-GuiSmokeInt64FieldValue -Fields $fields -Name 'raw_chunk_bytes'))
+        }
+        elseif ($eventName -eq 'filetransfer_v6_sparse_write_committed' -or
+            $eventName -eq 'filetransfer_v6_contiguous_write_committed') {
+            $summary.receiverChunkBytes += [Math]::Max(0L, (Get-GuiSmokeInt64FieldValue -Fields $fields -Name 'written_bytes'))
+        }
+    }
+
+    return $summary
+}
+
+function Invoke-FileTransferTunaHandoffFallbackCycle {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)][string]$AutopickPath,
+        [Parameter(Mandatory = $true)][long]$PayloadSizeBytes,
+        [Parameter(Mandatory = $true)][string]$Direction,
+        [Parameter(Mandatory = $true)][int]$Seed,
+        [Parameter(Mandatory = $true)][int]$TimeoutMs,
+        [Parameter(Mandatory = $true)][int]$StartupTimeoutMs,
+        [Parameter(Mandatory = $true)][int]$ProgressTimeoutMs,
+        [Parameter(Mandatory = $true)][string]$PayerMode,
+        [Parameter(Mandatory = $true)][string]$FaultMode,
+        [Parameter(Mandatory = $true)][string]$WalletPassword
+    )
+
+    Write-DeterministicFileTransferPayload -Path $AutopickPath -SizeBytes $PayloadSizeBytes -Seed $Seed -CycleIndex 0
+    $expectedHash = Get-FileSha256Hex -Path $AutopickPath
+    $senderWindow = if ($Direction -eq 'helper-to-helpee') { $Context.HelperWindow } else { $Context.HelpeeWindow }
+    $receiverWindow = if ($Direction -eq 'helper-to-helpee') { $Context.HelpeeWindow } else { $Context.HelperWindow }
+    $cycleStartedUtc = [datetime]::UtcNow
+    $bookmark = Get-AppLogBookmark
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $observedEvidenceLines = New-Object System.Collections.Generic.List[string]
+    $tunaNegotiatedObserved = $false
+    $activationEpochStartedObserved = $false
+    $activationEpochRecoveredObserved = $false
+    $fallbackEpochStartedObserved = $false
+    $fallbackEpochRecoveredObserved = $false
+    $fallbackEpochWaitingObserved = $false
+
+    $sendButton = Wait-ControlEnabledStateByAutomationId -Window $senderWindow -AutomationId 'Chat.SendFile' -IsEnabled $true -TimeoutMs ([Math]::Min(15000, $StartupTimeoutMs))
+    Click-Element $sendButton
+
+    $acceptButton = Wait-ControlEnabledStateByAutomationId -Window $receiverWindow -AutomationId 'Chat.FileTransfer.Accept' -IsEnabled $true -TimeoutMs $StartupTimeoutMs
+    Click-Element $acceptButton
+
+    [void](Wait-AppLogContainsAfterBookmark -Bookmark $bookmark -Needle 'event=filetransfer_v6_sender_started' -TimeoutMs 45000 -Description 'V6 sender started')
+    [void](Wait-AppLogContainsAfterBookmark -Bookmark $bookmark -Needle 'event=filetransfer_v6_receiver_started' -TimeoutMs 45000 -Description 'V6 receiver started')
+
+    [void](Wait-FileTransferTerminalOrProgressBeforeAction -Bookmark $bookmark -ProgressTimeoutMs $ProgressTimeoutMs -MinProgressEvents 2 -TimeoutMs 60000)
+
+    Unlock-TunaPayers -Context $Context -PayerMode $PayerMode -Password $WalletPassword
+    $tunaNegotiatedLine = [string](Wait-AppLogContainsAfterBookmark -Bookmark $bookmark -Needle 'event=tuna_acceleration_negotiated' -TimeoutMs 150000 -Description 'Tuna negotiated during active GUI file transfer')
+    $observedEvidenceLines.Add($tunaNegotiatedLine) | Out-Null
+    $tunaNegotiatedObserved = $true
+    $activationStartedLine = [string](Wait-AppLogContainsAllAfterBookmark -Bookmark $bookmark -Needles @('event=filetransfer_v6_epoch_started', 'handoff_kind=normal_to_tuna_activation') -TimeoutMs 150000 -Description 'V6 NormalToTunaActivation epoch started')
+    $observedEvidenceLines.Add($activationStartedLine) | Out-Null
+    $activationEpochStartedObserved = $true
+    $activationResolutionLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
+        @('event=filetransfer_v6_epoch_recovered', 'handoff_kind=normal_to_tuna_activation'),
+        @('event=filetransfer_v6_epoch_recovered', 'target_transport=tuna'),
+        @('event=filetransfer_v6_epoch_observed', 'handoff_kind=normal_to_tuna_activation', 'state=recovered'),
+        @('event=filetransfer_v6_epoch_started', 'handoff_kind=tuna_to_normal_fallback'),
+        @('event=filetransfer_v6_epoch_started', 'handoff_kind=regular_nkn_recovery')
+    ) -TimeoutMs 150000 -Description 'V6 NormalToTunaActivation epoch recovered or early fallback started')
+    $observedEvidenceLines.Add($activationResolutionLine) | Out-Null
+    if (($activationResolutionLine.IndexOf('handoff_kind=tuna_to_normal_fallback', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
+        ($activationResolutionLine.IndexOf('handoff_kind=regular_nkn_recovery', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
+        Write-Host '[GUI Smoke][filetransfer_tuna] Tuna dropped before activation proof; continuing as early-fallback coverage.' -ForegroundColor Yellow
+        $fallbackEpochStartedObserved = $true
+    }
+    else {
+        $activationEpochRecoveredObserved = $true
+    }
+
+    if ($FaultMode -ne 'none' -and -not $fallbackEpochStartedObserved) {
+        Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
+        $fallbackStartedLine = [string](Wait-AppLogContainsAllAfterBookmark -Bookmark $bookmark -Needles @('event=filetransfer_v6_epoch_started', 'handoff_kind=tuna_to_normal_fallback') -TimeoutMs 90000 -Description 'V6 TunaToNormalFallback epoch started')
+        $observedEvidenceLines.Add($fallbackStartedLine) | Out-Null
+        $fallbackEpochStartedObserved = $true
+    }
+    if ($fallbackEpochStartedObserved) {
+        $fallbackResolutionLine = [string](Wait-AppLogContainsAnyAllAfterBookmark -Bookmark $bookmark -NeedleSets @(
+            @('event=filetransfer_v6_epoch_recovered', 'handoff_kind=tuna_to_normal_fallback'),
+            @('event=filetransfer_v6_epoch_recovered', 'target_transport=regular_nkn'),
+            @('event=filetransfer_v6_epoch_observed', 'handoff_kind=tuna_to_normal_fallback', 'state=recovered'),
+            @('event=filetransfer_v6_epoch_waiting', 'handoff_kind=tuna_to_normal_fallback'),
+            @('event=filetransfer_v6_epoch_observed', 'handoff_kind=tuna_to_normal_fallback', 'state=waiting_for_target_transport')
+        ) -TimeoutMs 150000 -Description 'V6 TunaToNormalFallback epoch recovered or waiting')
+        $observedEvidenceLines.Add($fallbackResolutionLine) | Out-Null
+        if (($fallbackResolutionLine.IndexOf('state=waiting_for_target_transport', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -or
+            ($fallbackResolutionLine.IndexOf('event=filetransfer_v6_epoch_waiting', [System.StringComparison]::OrdinalIgnoreCase) -ge 0)) {
+            $fallbackEpochWaitingObserved = $true
+        }
+        else {
+            $fallbackEpochRecoveredObserved = $true
+        }
+    }
+
+    $pauseProbe = Invoke-TunaGuiPauseResumeProbe -SenderWindow $senderWindow -Bookmark $bookmark
+
+    $expectedInboundRole = if ($Direction -eq 'helper-to-helpee') { 'helpee' } else { 'helper' }
+    $expectedOutboundRole = if ($Direction -eq 'helper-to-helpee') { 'helper' } else { 'helpee' }
+    $terminal = Wait-FileTransferTerminalPairAfterBookmark `
+        -Bookmark $bookmark `
+        -TimeoutMs $TimeoutMs `
+        -ProgressTimeoutMs $ProgressTimeoutMs `
+        -ExpectedFileName ([System.IO.Path]::GetFileName($AutopickPath)) `
+        -ExpectedSizeBytes $PayloadSizeBytes `
+        -ExpectedInboundRole $expectedInboundRole `
+        -ExpectedOutboundRole $expectedOutboundRole `
+        -NotBeforeUtc $cycleStartedUtc
+    $sw.Stop()
+
+    $inbound = $terminal.Inbound
+    $outbound = $terminal.Outbound
+    $savedPath = Get-GuiSmokeFieldValue -Fields $inbound -Name 'saved_path' -Default '(none)'
+    $resolvedSavedPath = [string]$terminal.ResolvedSavedPath
+    if ([string]::IsNullOrWhiteSpace($resolvedSavedPath)) {
+        $resolvedSavedPath = Resolve-FileTransferLiveReceivedFilePath `
+            -LoggedPath $savedPath `
+            -ExpectedFileName ([System.IO.Path]::GetFileName($AutopickPath)) `
+            -ExpectedSizeBytes $PayloadSizeBytes `
+            -NotBeforeUtc $cycleStartedUtc
+    }
+
+    $actualHash = '(none)'
+    $savedSize = -1L
+    if (-not [string]::IsNullOrWhiteSpace($resolvedSavedPath) -and (Test-Path -LiteralPath $resolvedSavedPath -PathType Leaf)) {
+        $actualHash = Get-FileSha256Hex -Path $resolvedSavedPath
+        $savedSize = (Get-Item -LiteralPath $resolvedSavedPath).Length
+    }
+
+    $inboundState = Get-GuiSmokeFieldValue -Fields $inbound -Name 'state' -Default '(unknown)'
+    $outboundState = Get-GuiSmokeFieldValue -Fields $outbound -Name 'state' -Default '(unknown)'
+    $inboundError = Get-GuiSmokeFieldValue -Fields $inbound -Name 'error_code' -Default '(none)'
+    $outboundError = Get-GuiSmokeFieldValue -Fields $outbound -Name 'error_code' -Default '(none)'
+    $completed = $inboundState -eq 'Completed' -and $outboundState -eq 'Completed' -and $inboundError -eq '(none)' -and $outboundError -eq '(none)'
+    $integrityOk = $completed -and $savedSize -eq $PayloadSizeBytes -and $actualHash -eq $expectedHash
+    $evidence = Get-TunaGuiEvidenceSummary -Bookmark $bookmark
+    if ($tunaNegotiatedObserved) { $evidence.tunaNegotiated = $true }
+    if ($activationEpochStartedObserved) { $evidence.activationEpochStarted = $true }
+    if ($activationEpochRecoveredObserved) { $evidence.activationEpochRecovered = $true }
+    if ($fallbackEpochStartedObserved) { $evidence.fallbackEpochStarted = $true }
+    if ($fallbackEpochRecoveredObserved) { $evidence.fallbackEpochRecovered = $true }
+    if ($fallbackEpochWaitingObserved) { $evidence.fallbackEpochWaiting = $true }
+    if ($pauseProbe) {
+        $evidence.pauseSent = $true
+        $evidence.pauseReceived = $true
+        $evidence.resumeSent = $true
+        $evidence.resumeReceived = $true
+    }
+
+    $summary = [ordered]@{
+        event = 'filetransfer_tuna_gui_handoff_fallback_summary'
+        direction = $Direction
+        payerMode = $PayerMode
+        faultMode = $FaultMode
+        transferId = $terminal.TransferId
+        payloadBytes = $PayloadSizeBytes
+        durationMs = [Math]::Round($sw.Elapsed.TotalMilliseconds, 3)
+        completed = $completed
+        integrityOk = $integrityOk
+        inboundState = $inboundState
+        outboundState = $outboundState
+        inboundErrorCode = $inboundError
+        outboundErrorCode = $outboundError
+        expectedSha256 = $expectedHash
+        receivedSha256 = $actualHash
+        savedFileSizeBytes = $savedSize
+        savedPath = $savedPath
+        resolvedSavedPath = $resolvedSavedPath
+        pauseProbe = [bool]$pauseProbe
+        evidence = $evidence
+    }
+    $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'filetransfer-tuna-gui-summary.json') -Encoding UTF8
+    if ($observedEvidenceLines.Count -gt 0) {
+        [System.IO.File]::WriteAllText(
+            (Join-Path $ArtifactDir 'filetransfer-tuna-gui-milestone-evidence.log'),
+            ($observedEvidenceLines.ToArray() -join [Environment]::NewLine),
+            [System.Text.Encoding]::UTF8)
+    }
+    Copy-FileTransferLiveLogSlice -ArtifactDir $ArtifactDir -Bookmark $bookmark
+
+    if (-not $integrityOk) {
+        throw ("Tuna GUI file-transfer cycle failed terminal/integrity check: transfer_id={0}; inbound_state={1}; outbound_state={2}; inbound_error={3}; outbound_error={4}; saved_size={5}; expected_size={6}" -f `
+            $terminal.TransferId,
+            $inboundState,
+            $outboundState,
+            $inboundError,
+            $outboundError,
+            $savedSize,
+            $PayloadSizeBytes)
+    }
+
+    $activationOrEarlyFallbackProved = $evidence.activationEpochRecovered -or $evidence.fallbackEpochRecovered -or $evidence.fallbackEpochWaiting
+    $fallbackRequirementSatisfied = $FaultMode -eq 'none' -or ($evidence.fallbackEpochStarted -and ($evidence.fallbackEpochRecovered -or $evidence.fallbackEpochWaiting))
+    if (-not $evidence.tunaNegotiated -or -not $evidence.activationEpochStarted -or -not $activationOrEarlyFallbackProved -or -not $fallbackRequirementSatisfied) {
+        throw "Tuna GUI file-transfer missing required V6 handoff/fallback evidence. Summary: $($evidence | ConvertTo-Json -Compress)"
+    }
+
+    if ($evidence.heartbeatTimeoutCount -gt 0 -or $evidence.peerDisconnectedCount -gt 0 -or $evidence.transportFailedCount -gt 0) {
+        throw "Tuna GUI file-transfer completed with disconnect/timeout evidence. Summary: $($evidence | ConvertTo-Json -Compress)"
+    }
+
+    if ($pauseProbe -and (-not $evidence.pauseSent -or -not $evidence.pauseReceived -or -not $evidence.resumeSent -or -not $evidence.resumeReceived)) {
+        throw "Tuna GUI pause/resume probe did not produce complete lifecycle evidence. Summary: $($evidence | ConvertTo-Json -Compress)"
+    }
+
+    [void](Wait-AutomationTextEquals -Window $Context.HelperWindow -AutomationId 'SessionHeader.StatusText' -ExpectedText 'Connected' -TimeoutMs 10000)
+    [void](Wait-AutomationTextEquals -Window $Context.HelpeeWindow -AutomationId 'SessionHeader.StatusText' -ExpectedText 'Connected' -TimeoutMs 10000)
+
+    Write-Host ("[GUI Smoke][filetransfer_tuna] PASS direction={0} bytes={1} transfer_id={2} sent_chunk_bytes={3} received_chunk_bytes={4}" -f `
+        $Direction,
+        $PayloadSizeBytes,
+        $terminal.TransferId,
+        $evidence.senderChunkBytes,
+        $evidence.receiverChunkBytes) -ForegroundColor Green
+}
+
+function Wait-FileTransferTerminalOrProgressBeforeAction {
+    param(
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [Parameter(Mandatory = $true)][int]$ProgressTimeoutMs,
+        [int]$MinProgressEvents = 1,
+        [int]$TimeoutMs = 60000
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $maxReceiverNextChunkIndex = [ref](-1L)
+    $maxReceiverHighestChunkIndex = [ref](-1L)
+    $progressEvents = 0
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
+            if ($line.IndexOf('event=', [System.StringComparison]::Ordinal) -lt 0) {
+                continue
+            }
+
+            $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
+            if ((Get-FileTransferLiveProgressScore -Fields $fields -MaxReceiverNextChunkIndex $maxReceiverNextChunkIndex -MaxReceiverHighestChunkIndex $maxReceiverHighestChunkIndex) -gt 0) {
+                $progressEvents++
+                if ($progressEvents -ge $MinProgressEvents) {
+                    return $true
+                }
+            }
+        }
+
+        Start-Sleep -Milliseconds 500
+    }
+
+    throw "Timed out waiting for initial GUI file-transfer progress before Tuna action; progress_events=$progressEvents; timeout_s=$($TimeoutMs / 1000); progress_timeout_s=$($ProgressTimeoutMs / 1000)."
+}
+
+function Run-ScenarioFileTransferTunaHandoffFallback {
+    param([Parameter(Mandatory = $true)]$Context)
+
+    if (-not (Test-GuiSmokeEnvEnabled -Name 'NLINK_RUN_TUNA_GUI_FILETRANSFER')) {
+        Write-Host '[GUI Smoke][filetransfer_tuna] SKIP: set NLINK_RUN_TUNA_GUI_FILETRANSFER=1 to run paid Tuna GUI file-transfer automation.' -ForegroundColor Yellow
+        return
+    }
+
+    Reset-ScenarioContext -Context $Context
+
+    if (-not (Get-IsNknTransport)) {
+        throw 'FILETRANSFER_TUNA_HANDOFF_FALLBACK requires NLINK_TRANSPORT=NKN.'
+    }
+
+    $walletPassword = [string]$env:NLINK_TUNA_TEST_WALLET_PASSWORD
+    if ([string]::IsNullOrWhiteSpace($walletPassword)) {
+        throw 'Set NLINK_TUNA_TEST_WALLET_PASSWORD for Tuna GUI file-transfer automation.'
+    }
+
+    $artifactDir = Get-FileTransferSoakArtifactDir
+    $walletPath = Resolve-TunaGuiWalletPath
+    $sidecarPath = Resolve-TunaGuiSidecarPath
+    $stateRoot = Initialize-TunaGuiRuntimeState -ArtifactDir $artifactDir -WalletPath $walletPath -SidecarPath $sidecarPath
+    $autopickPath = [string]$env:NLINK_FILETRANSFER_SOAK_AUTOPICK_FILE
+    if ([string]::IsNullOrWhiteSpace($autopickPath)) {
+        $autopickPath = Join-Path $artifactDir 'filetransfer-tuna-gui-payload.bin'
+        $env:NLINK_FILETRANSFER_SOAK_AUTOPICK_FILE = $autopickPath
+    }
+
+    $configuredPayloadSizes = [string]$env:NLINK_FILETRANSFER_SOAK_PAYLOAD_SIZES
+    if ([string]::IsNullOrWhiteSpace($configuredPayloadSizes)) {
+        $payloadSize = 128L * 1024L * 1024L
+    }
+    else {
+        $payloadSizes = @(Get-FileTransferSoakPayloadSizes)
+        $payloadSize = if ($payloadSizes.Count -gt 0) { [long]$payloadSizes[0] } else { 128L * 1024L * 1024L }
+    }
+    if ($payloadSize -lt (16L * 1024L * 1024L)) {
+        Write-Host '[GUI Smoke][filetransfer_tuna] Payload size below 16MiB; handoff/fallback may happen near the tail. Consider NLINK_FILETRANSFER_SOAK_PAYLOAD_SIZES=128MiB.' -ForegroundColor Yellow
+    }
+
+    $direction = Get-FileTransferSoakDirection
+    if ($direction -eq 'alternate') { $direction = 'helpee-to-helper' }
+    $seed = Get-FileTransferSoakSeed
+    $cycleTimeoutMs = Get-FileTransferSoakCycleTimeoutMs
+    $startupTimeoutMs = Get-FileTransferSoakStartupTimeoutMs
+    $progressTimeoutMs = Get-FileTransferSoakProgressTimeoutMs
+    $payerMode = Get-TunaGuiPayerRole
+    $faultMode = Get-TunaGuiFaultMode
+    $runBookmark = Get-AppLogBookmark
+
+    Write-Host ("[GUI Smoke][filetransfer_tuna] artifact_dir={0}; state_root={1}; direction={2}; payer={3}; fault={4}; payload_bytes={5}" -f `
+        $artifactDir,
+        $stateRoot,
+        $direction,
+        $payerMode,
+        $faultMode,
+        $payloadSize) -ForegroundColor DarkGray
+
+    try {
+        Start-HelpeeFlow -Context $Context
+        Start-HelperFlow -Context $Context
+        [void](Connect-HelperAndHelpee -Context $Context)
+
+        Invoke-FileTransferTunaHandoffFallbackCycle `
+            -Context $Context `
+            -ArtifactDir $artifactDir `
+            -AutopickPath $autopickPath `
+            -PayloadSizeBytes $payloadSize `
+            -Direction $direction `
+            -Seed $seed `
+            -TimeoutMs $cycleTimeoutMs `
+            -StartupTimeoutMs $startupTimeoutMs `
+            -ProgressTimeoutMs $progressTimeoutMs `
+            -PayerMode $payerMode `
+            -FaultMode $faultMode `
+            -WalletPassword $walletPassword
+    }
+    catch {
+        $failureSummary = [ordered]@{
+            event = 'filetransfer_tuna_gui_handoff_fallback_failure'
+            direction = $direction
+            payerMode = $payerMode
+            faultMode = $faultMode
+            payloadBytes = $payloadSize
+            completed = $false
+            integrityOk = $false
+            error = $_.Exception.Message
+            failedAtUtc = [DateTimeOffset]::UtcNow.ToString('O')
+        }
+
+        try {
+            $failureSummary | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $artifactDir 'filetransfer-tuna-gui-error.json') -Encoding UTF8
+        }
+        catch {}
+
+        throw
+    }
+    finally {
+        Copy-FileTransferLiveLogSlice -ArtifactDir $artifactDir -Bookmark $runBookmark
+    }
+}
+
 function Suspend-ProcessForRecoveryWindow {
     param(
         [Parameter(Mandatory = $true)]$Process,
@@ -4813,8 +5578,9 @@ try {
             'SCREENSHARE_STOP_PENDING_APPROVAL' { Invoke-Scenario -Name 'screenshare_stop_pending_approval' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioScreenShareStopWhileControlApprovalPending -Context $ctx } }
             'FILETRANSFER_NKN_SOAK' { Invoke-Scenario -Name 'filetransfer_nkn_soak' -TimeoutSec $TimeoutSeconds -Action { Run-ScenarioFileTransferNknSoak -Context $ctx } }
             'FILETRANSFER_NKN_MIXED_SOAK' { Invoke-Scenario -Name 'filetransfer_nkn_mixed_soak' -TimeoutSec $TimeoutSeconds -Action { Run-ScenarioFileTransferNknMixedSoak -Context $ctx } }
+            'FILETRANSFER_TUNA_HANDOFF_FALLBACK' { Invoke-Scenario -Name 'filetransfer_tuna_handoff_fallback' -TimeoutSec $TimeoutSeconds -Action { Run-ScenarioFileTransferTunaHandoffFallback -Context $ctx } }
             'STATUS_TEXT_GUARDRAILS' { Invoke-Scenario -Name 'status_text_guardrails' -TimeoutSec ([Math]::Min($TimeoutSeconds, 90)) -Action { Run-ScenarioStatusTextGuardrails -Context $ctx } }
-            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M,NKN_DIRECT_CONNECT,HEADER_CHAT_COHERENCE,END_SESSION_DISABLES_CHAT,SCREENSHARE_BUTTON_VISIBILITY,SCREENSHARE_VIEWER_TOGGLE,SCREENSHARE_RECOVERY_RECEIPT_DEVLOCAL,SCREENSHARE_NKN_SOAK,SCREENSHARE_CHAT_COEXISTENCE,FILETRANSFER_NKN_SOAK,FILETRANSFER_NKN_MIXED_SOAK,STATUS_TEXT_GUARDRAILS." }
+            default { throw "Unknown GUI smoke scenario '$scenario'. Use A,B,C,D,E,F,G,H,I,J,K,L,M,NKN_DIRECT_CONNECT,HEADER_CHAT_COHERENCE,END_SESSION_DISABLES_CHAT,SCREENSHARE_BUTTON_VISIBILITY,SCREENSHARE_VIEWER_TOGGLE,SCREENSHARE_RECOVERY_RECEIPT_DEVLOCAL,SCREENSHARE_NKN_SOAK,SCREENSHARE_CHAT_COEXISTENCE,FILETRANSFER_NKN_SOAK,FILETRANSFER_NKN_MIXED_SOAK,FILETRANSFER_TUNA_HANDOFF_FALLBACK,STATUS_TEXT_GUARDRAILS." }
         }
     }
 

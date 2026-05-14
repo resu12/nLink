@@ -213,6 +213,7 @@ public sealed record FileTransferPanelItemViewModel(
             FileTransferResultCodes.ReadFailed => "Couldn't read file",
             FileTransferResultCodes.TransportIncompatible => "Update nLink and retry",
             FileTransferResultCodes.PeerDisconnected => "Peer disconnected",
+            FileTransferResultCodes.ControlChannelStalled => "Connection stalled",
             FileTransferResultCodes.TransportDisconnected => "Connection lost",
             FileTransferResultCodes.TransportDetached => "Transfer stopped",
             _ => snapshot.StatusMessage,
@@ -234,7 +235,7 @@ public sealed record FileTransferPanelItemViewModel(
                 $"{sent} / {fileSizeText}");
         }
 
-        var transferred = FormatByteSize(snapshot.BytesTransferred);
+        var transferred = FormatByteSize(GetVisibleProgressBytes(snapshot));
         return string.Create(
             CultureInfo.InvariantCulture,
             $"{transferred} / {fileSizeText}");
@@ -251,9 +252,14 @@ public sealed record FileTransferPanelItemViewModel(
     }
 
     private static long GetVisibleProgressBytes(FileTransferTransferSnapshot snapshot)
-        => snapshot.Direction == FileTransferDirection.Outbound
-            ? Math.Max(0L, snapshot.BytesAcknowledgedByReceiver ?? snapshot.BytesTransferred)
-            : Math.Max(0L, snapshot.BytesTransferred);
+    {
+        if (snapshot.Direction == FileTransferDirection.Outbound)
+        {
+            return Math.Max(0L, snapshot.BytesAcknowledgedByReceiver ?? snapshot.BytesTransferred);
+        }
+
+        return Math.Max(0L, snapshot.BytesTransferred);
+    }
 
     private static string? BuildSavedLocationText(FileTransferTransferSnapshot snapshot)
     {

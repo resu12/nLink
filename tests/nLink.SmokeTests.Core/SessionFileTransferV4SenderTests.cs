@@ -340,6 +340,46 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
+    public async Task V4Sender_ControlReceiveStallExhausted_FailsFileTransferWithoutSessionDisconnect()
+    {
+        const string transferId = "transfer_v4_sender_control_stall_exhausted";
+        var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport("session_v4_sender_control_stall_exhausted");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_v4_sender_control_stall_exhausted");
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        using var receiver = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+        receiver.AttachTransport(receiverTransport);
+        using var destination = new NonDisposingMemoryStream();
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("v4-control-stall-exhausted.bin", payload.Length, transferId),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+        await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
+        await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
+        await WaitUntilAsync(
+            () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Sending &&
+                  senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(),
+            timeoutMs: 5000);
+
+        senderTransport.SetLocalDataSessionsUnavailableForTests("control_receive_stalled_max_restarts");
+
+        await WaitUntilAsync(() => sender.Snapshot.Outbound?.State == FileTransferTransferState.Failed, timeoutMs: 5000);
+
+        var outbound = sender.Snapshot.Outbound;
+        Assert.NotNull(outbound);
+        Assert.Equal(FileTransferResultCodes.ControlChannelStalled, outbound.ErrorCode);
+        Assert.Contains("control channel stalled", outbound.StatusMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(senderTransport.SentErrors, static error => error.ErrorCode == FileTransferResultCodes.ControlChannelStalled);
+        await WaitUntilAsync(
+            () => receiver.Snapshot.Inbound?.State == FileTransferTransferState.Failed &&
+                  receiver.Snapshot.Inbound?.ErrorCode == FileTransferResultCodes.ControlChannelStalled,
+            timeoutMs: 5000);
+    }
+
+    [Fact]
     public async Task V4Sender_WithScreenshare_FailsCleanlyWhenMixedDisabledByEnvironment()
     {
         const string transferId = "transfer_v4_sender_mixed_disabled";
