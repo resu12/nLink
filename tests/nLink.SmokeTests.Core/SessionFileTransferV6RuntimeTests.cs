@@ -646,10 +646,10 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
     }
 
     [Fact]
-    public async Task V6Sender_DoesNotResendNormalWindowAlreadyAwaitingFrontierAck()
+    public async Task V6Sender_ResendsNormalReceiverStateRangesAfterResendGate()
     {
-        const string transferId = "transfer_v6_sender_normal_dedupe";
-        const string sessionId = "session_v6_sender_normal_dedupe";
+        const string transferId = "transfer_v6_sender_normal_resend_gate";
+        const string sessionId = "session_v6_sender_normal_resend_gate";
         var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
@@ -721,25 +721,11 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         await Task.Delay(500);
 
         var batchesAfterNormalResendGate = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().ToList();
-        Assert.Equal(batchesAfterStateFrontierRepair.Count, batchesAfterNormalResendGate.Count);
-
-        await receiverSession.SendAsync(
-            new FileTransferFrontierRequestFrameV6
-            {
-                SessionId = sessionId,
-                TransferId = transferId,
-                TransportEpoch = 0,
-                RepairRequestId = "frontier:0:retry",
-                MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 0, ChunkCount = 1 }],
-                Priority = "frontier",
-            },
-            CancellationToken.None);
-
-        await WaitUntilAsync(
-            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count() > batchesAfterStateFrontierRepair.Count,
-            timeoutMs: 5000);
-        Assert.True(senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count(static batch =>
-            batch.StartChunkIndex == 0) >= 2);
+        Assert.True(batchesAfterNormalResendGate.Count > batchesAfterStateFrontierRepair.Count);
+        Assert.Contains(
+            batchesAfterNormalResendGate.Skip(batchesAfterStateFrontierRepair.Count),
+            static batch => batch.StartChunkIndex == 0 &&
+                            batch.Priority is null);
     }
 
     [Fact]

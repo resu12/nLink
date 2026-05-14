@@ -1168,21 +1168,21 @@ public sealed partial class SessionFileTransferService
         V6OutboundChunkRequestMetadata metadata,
         DateTimeOffset now)
     {
-        if (!metadata.Priority)
-        {
-            return true;
-        }
-
         if (!context.LastChunkSentUtc.TryGetValue(chunkIndex, out var lastSentUtc))
         {
             return false;
         }
 
-        var minimumIntervalMs = string.Equals(metadata.PriorityName, "frontier", StringComparison.OrdinalIgnoreCase)
-            ? metadata.TransportEpoch <= 0
-                ? V6RecoveredFrontierResendGateMs
-                : V6EpochFrontierResendGateMs
-            : RepairResendIntervalMs;
+        var minimumIntervalMs = V6NormalReceiverStateResendGateMs;
+        if (metadata.Priority)
+        {
+            minimumIntervalMs = string.Equals(metadata.PriorityName, "frontier", StringComparison.OrdinalIgnoreCase)
+                ? metadata.TransportEpoch <= 0
+                    ? V6RecoveredFrontierResendGateMs
+                    : V6EpochFrontierResendGateMs
+                : RepairResendIntervalMs;
+        }
+
         return now - lastSentUtc < TimeSpan.FromMilliseconds(minimumIntervalMs);
     }
 
