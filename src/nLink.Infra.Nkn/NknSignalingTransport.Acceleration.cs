@@ -1642,13 +1642,44 @@ public sealed partial class NknSignalingTransport
     internal static bool ShouldStartImmediateFileTransferFallbackProbe(string? reason)
     {
         var normalized = SanitizeLogToken(reason);
+        if (IsUserRequestedAccelerationStopReason(normalized))
+        {
+            return true;
+        }
+
         return normalized is
             "cap_reached" or
             "byte_cap_reached" or
             "duration_cap_reached" or
+            "sidecar_read_failed" or
+            "sidecar_write_failed" or
+            "sidecar_remote_closed" or
+            "sidecar_queue_overflow" or
+            "sidecar_status_timeout" or
+            "sidecar_invalid_status" or
+            "sidecar_status_parse_failed" or
+            "sidecar_local_ipc_eof" or
+            "sidecar_tuna_stream_eof" or
+            "sidecar_local_write_failed" or
+            "sidecar_tuna_write_failed" or
+            "sidecar_provider_timeout" or
+            "sidecar_listener_exited" or
+            "sidecar_dialer_exited" or
+            "sidecar_process_exited" or
+            "sidecar_unexpected_exit" or
             "remote_cap_reached" or
             "remote_byte_cap_reached" or
             "remote_duration_cap_reached" or
+            "remote_read_failed" or
+            "remote_write_failed" or
+            "remote_closed" or
+            "remote_sidecar_read_failed" or
+            "remote_sidecar_write_failed" or
+            "remote_sidecar_remote_closed" or
+            "remote_sidecar_local_ipc_eof" or
+            "remote_sidecar_tuna_stream_eof" or
+            "remote_sidecar_local_write_failed" or
+            "remote_sidecar_tuna_write_failed" or
             "sidecar_byte_cap_reached" or
             "sidecar_duration_cap_reached" or
             "sidecar_remote_byte_cap_reached" or

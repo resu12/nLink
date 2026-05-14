@@ -4844,10 +4844,20 @@ public sealed partial class NknSignalingTransport
             {
                 if (fileTransferDataSessionRemoteOpenSuppressed.Contains(frame.TransferId))
                 {
-                    LocalOperationalLog.Warn(
-                        "SessionSecurity",
-                        $"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; reason=data_session_resume_required");
-                    return;
+                    if (ShouldResumeSuppressedFileTransferDataSessionForV6RecoveryFrame(frame))
+                    {
+                        fileTransferDataSessionRemoteOpenSuppressed.Remove(frame.TransferId);
+                        LocalOperationalLog.Info(
+                            "SessionSecurity",
+                            $"event=filetransfer_data_session_resume_required_reopened_for_v6_recovery_frame; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; reason=v6_recovery_control_frame");
+                    }
+                    else
+                    {
+                        LocalOperationalLog.Warn(
+                            "SessionSecurity",
+                            $"event=filetransfer_data_frame_ignored; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; chunk_index={GetFileTransferDataFrameChunkIndex(frame)}; reason=data_session_resume_required");
+                        return;
+                    }
                 }
 
                 session = new TransportFileTransferDataSession(this, frame.SessionId, frame.TransferId);
@@ -6007,6 +6017,13 @@ public sealed partial class NknSignalingTransport
             FileTransferChunkBatchFrameV4 batch => $"{batch.StartChunkIndex}-{batch.StartChunkIndex + batch.DataSegments.Count - 1}",
             _ => "(none)",
         };
+
+    private static bool ShouldResumeSuppressedFileTransferDataSessionForV6RecoveryFrame(FileTransferDataFrame frame)
+        => frame.Type is FileTransferProtocol.ReceiverStateFrameTypeV6
+            or FileTransferProtocol.TransportEpochFrameTypeV6
+            or FileTransferProtocol.TransportProbeFrameTypeV6
+            or FileTransferProtocol.FrontierRequestFrameTypeV6
+            or FileTransferProtocol.RepairProofFrameTypeV6;
 
     private static bool ShouldUseBulkLane(FileTransferDataFrame frame)
         => frame is FileTransferChunkBatchFrameV4

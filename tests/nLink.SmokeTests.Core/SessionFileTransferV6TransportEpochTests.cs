@@ -1792,6 +1792,9 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                     request.TransferId == transferId &&
                     request.Reason == "sender_request_feedback_stalled"),
                 timeoutMs: 5000);
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_transport_receive_recovery_request_dispatched", StringComparison.Ordinal),
+                timeoutMs: 5000);
 
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_v6_sender_request_feedback_stalled_recovery_requested", logTail, StringComparison.Ordinal);

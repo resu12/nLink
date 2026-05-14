@@ -511,6 +511,20 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
     }
 
     [Theory]
+    [InlineData("byte_cap_reached", true)]
+    [InlineData("sidecar_remote_closed", true)]
+    [InlineData("sidecar_read_failed", true)]
+    [InlineData("remote_sidecar_remote_closed", true)]
+    [InlineData("header_switch_off", true)]
+    [InlineData("reset_session_tracking", false)]
+    [InlineData("dispose", false)]
+    [Trait("Category", "Smoke")]
+    public void TunaFallbackProof_ImmediateFileProbeClassifierIncludesSidecarDrop(
+        string reason,
+        bool expected)
+        => Assert.Equal(expected, NknSignalingTransport.ShouldStartImmediateFileTransferFallbackProbe(reason));
+
+    [Theory]
     [InlineData("session_security_state_not_eligible", true)]
     [InlineData("reset_session_tracking", true)]
     [InlineData("dispose", true)]
