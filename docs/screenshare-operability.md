@@ -30,7 +30,7 @@ For the runtime architecture and current H.264 media pipeline, see `docs/screens
 - For low-quality reports, read `quality-presentation-summary.txt` next; it records encode target, quality preset, sender mode, and helper surface scaling/interpolation without changing runtime behavior.
 - For low-FPS, cursor-tail, or catch-up reports, read `low-fps-catch-up-summary.txt` after the quality summary; it classifies whether reduced/catch-up behavior is external-delivery driven, helper recovery/visibility driven, helper apply cadence limited, sender capture/encode budget limited, sender policy hysteresis, or absent.
 - For external delivery/topology work, run live soaks with `-ExternalTopologyProfile` on `NknSoak`, then read `external-topology-summary.txt` and use `ExternalTopologyAudit` to compare named artifacts.
-- The promoted default keeps control/bulk NKN clients at 4 subclients and uses 8 media subclients; `MediaFanout8` remains as an explicit operator profile for confirmation runs.
+- The promoted default keeps control at 4 subclients, bulk at 2 subclients, and media at 8 subclients; `MediaFanout8` remains as an explicit operator profile for confirmation runs.
 - For support/debug capture, start with `Options -> Diagnostics -> Copy diagnostics`; the copied text includes a compact `Screenshare evidence` block when an analyzed artifact exists.
 - For hangs or freezes, use `Options -> Diagnostics -> Save Hang Report`; the report folder includes `screenshare-evidence.txt` with the same summary.
 - Attach a full `artifacts\soak\<timestamp>` directory only when the diagnostics evidence points to one or support asks for the raw artifact.

@@ -251,13 +251,14 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V4FrontierTailRetryChunks = V4MaxBatchSegmentsDefault;
     private const int V4FileOnlyFrontierTailRetryChunks = 12;
     private const int V6ReceiverRequestWindowChunks = 2048;
-    private const int V6RecoveredRegularNknReceiverRequestWindowChunks = 4096;
+    private const int V6RecoveredRegularNknReceiverRequestWindowChunks = 1024;
+    private const int V6RecoveredRegularNknFrontierStalledReceiverRequestWindowChunks = 64;
     private const int V6FrontierStalledReceiverRequestWindowChunks = 8;
     private const int V6FrontierRequestChunks = 1;
     private const int V6FrontierStalledPriorityBurstChunks = 8;
-    private const int V6RecoveredRegularNknFrontierPriorityBurstChunks = 64;
-    private const int V6NormalReceiverStateResendGateMs = 1500;
-    private const int V6RecoveredFrontierResendGateMs = 2000;
+    private const int V6RecoveredRegularNknFrontierPriorityBurstChunks = 12;
+    private const int V6NormalReceiverStateResendGateMs = 3500;
+    private const int V6RecoveredFrontierResendGateMs = 5000;
     private const int V6EpochFrontierResendGateMs = 4000;
     private const int V6TunaRedundantDataProbeDelayMs = 10000;
     private const int V6SenderRequestFeedbackStallRecoveryMs = 12000;
@@ -267,7 +268,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V6FileOnlySenderPipelineDepth = 24;
     private const int V6RegularNknRedundantSenderPipelineDepth = 2;
     private const int V6RegularNknRedundantNormalBatchLimit = 2;
-    private const int V6RegularNknFallbackSenderPipelineDepth = 16;
+    private const int V6RegularNknFallbackSenderPipelineDepth = 10;
     private const int V6EpochPriorityPipelineBypassDepth = 2;
     private const int V6SenderTransportSendTimeoutMs = 5000;
     private const int V6RegularNknRedundantTransportSendTimeoutMs = 15000;

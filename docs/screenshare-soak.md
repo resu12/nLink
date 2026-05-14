@@ -91,7 +91,7 @@ The retained Track B analyzer chain is kept as closeout evidence for the parked 
 
 `AnalyzeRetained` also writes `external-topology-summary.txt` when enough live topology evidence is present. This keeps NKN route variance, RPC selection, and media fanout evidence separate from sender/helper tuning.
 
-The current promoted NKN topology default keeps control/bulk clients at 4 subclients and uses 8 media subclients. The `MediaFanout8` operator profile remains available for explicit confirmation runs.
+The current promoted NKN topology default keeps control at 4 subclients, bulk at 2 subclients, and media at 8 subclients. The leaner bulk default avoids the poor file-transfer efficiency previously observed when large file data was spread over a wider round-robin bulk client set. The `MediaFanout8` operator profile remains available for explicit confirmation runs.
 
 Keep and use these analyzers together when validating the final local screenshare boundary:
 

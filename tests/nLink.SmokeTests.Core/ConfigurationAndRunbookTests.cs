@@ -145,7 +145,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("Node archive SHA-256", checklist, StringComparison.Ordinal);
         Assert.Contains("Unsigned public Windows artifacts are recorded as an accepted release exception", checklist, StringComparison.Ordinal);
 
-        Assert.Contains("V4-only", releaseNotes, StringComparison.Ordinal);
+        Assert.Contains("V6-only", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("explicit accept/decline", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("session envelope", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("source/session validation", releaseNotes, StringComparison.Ordinal);
@@ -153,7 +153,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
         Assert.Contains("Release exception: Windows artifacts for this release are unsigned", releaseNotes, StringComparison.Ordinal);
         Assert.Contains("High quality", releaseNotes, StringComparison.Ordinal);
 
-        Assert.Contains("V4-only", githubNotes, StringComparison.Ordinal);
+        Assert.Contains("V6-only", githubNotes, StringComparison.Ordinal);
         Assert.Contains("explicit accept/decline", githubNotes, StringComparison.Ordinal);
         Assert.Contains("session envelope", githubNotes, StringComparison.Ordinal);
         Assert.Contains("Release exception: Windows artifacts for this release are unsigned", githubNotes, StringComparison.Ordinal);
@@ -589,7 +589,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
             Assert.DoesNotContain("unsafe-ignored-identity.json", options.KeyPath, StringComparison.OrdinalIgnoreCase);
             Assert.NotEqual("unsafe-ignored-id", options.Identifier);
             Assert.False(options.PreflightRpcEnabled);
-            Assert.Equal(4, options.BulkNumSubClients);
+            Assert.Equal(2, options.BulkNumSubClients);
             Assert.True(options.ReceiveStallFileTransferFastRecoveryEnabled);
             Assert.Contains("NLINK_NKN_KEY_PATH:env:nkn_identity=suppressed", ReleaseOverridePolicy.GetSuppressedOverrideSummaries());
             Assert.Contains("NLINK_NKN_PREFLIGHT_RPC_ENABLED:env:nkn_tuning=suppressed", ReleaseOverridePolicy.GetSuppressedOverrideSummaries());

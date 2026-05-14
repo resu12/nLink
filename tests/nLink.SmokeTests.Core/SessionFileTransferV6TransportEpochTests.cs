@@ -188,11 +188,11 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         Assert.True(firstBatch.ChunkCount > 1);
         Assert.Equal("frontier", firstBatch.Priority);
         Assert.Equal(FileTransferV4RepairDeliveryMode.ControlBulkRedundant, firstBatch.RepairDeliveryMode);
-        Assert.DoesNotContain(
-            batches.Skip(1),
-            batch => batch.StartChunkIndex > 0 &&
-                     batch.Priority is null &&
-                     batch.TransportEpoch == probeFrame.TransportEpoch);
+        var normalBatches = batches
+            .Where(batch => batch.Priority is null &&
+                            batch.TransportEpoch == probeFrame.TransportEpoch)
+            .ToList();
+        Assert.All(normalBatches, batch => Assert.True(batch.StartChunkIndex >= 12));
     }
 
     [Fact]

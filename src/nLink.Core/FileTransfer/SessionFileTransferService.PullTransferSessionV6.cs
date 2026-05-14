@@ -3608,12 +3608,17 @@ public sealed partial class SessionFileTransferService
     private static int ResolveInboundV6RequestWindowChunksLocked(InboundTransferContext context)
     {
         var windowChunks = V6ReceiverRequestWindowChunks;
-        if (IsV6TransportEpochUnresolved(context.V6TransportEpoch) &&
-            IsInboundV6FrontierStalledLocked(context))
+        var recoveredRegularNkn = IsRecoveredInboundV6RegularNknEpoch(context);
+        var frontierStalled = IsInboundV6FrontierStalledLocked(context);
+        if (frontierStalled && IsV6TransportEpochUnresolved(context.V6TransportEpoch))
         {
             windowChunks = Math.Min(windowChunks, V6FrontierStalledReceiverRequestWindowChunks);
         }
-        else if (IsRecoveredInboundV6RegularNknEpoch(context))
+        else if (frontierStalled && recoveredRegularNkn)
+        {
+            windowChunks = Math.Min(windowChunks, V6RecoveredRegularNknFrontierStalledReceiverRequestWindowChunks);
+        }
+        else if (recoveredRegularNkn)
         {
             windowChunks = Math.Min(windowChunks, V6RecoveredRegularNknReceiverRequestWindowChunks);
         }

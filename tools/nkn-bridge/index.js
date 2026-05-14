@@ -40,6 +40,7 @@ const MIN_CONNECT_FALLBACK_DELAY_MS = 1000;
 const MAX_CONNECT_FALLBACK_DELAY_MS = DEFAULT_CONNECT_READY_TIMEOUT_MS;
 const DEFAULT_NUM_SUBCLIENTS = 4;
 const DEFAULT_MEDIA_NUM_SUBCLIENTS = 8;
+const DEFAULT_BULK_NUM_SUBCLIENTS = 2;
 const MIN_NUM_SUBCLIENTS = 1;
 const MAX_NUM_SUBCLIENTS = 16;
 const OWNER_PID_CHECK_INTERVAL_MS = 2000;
@@ -163,7 +164,7 @@ const state = {
   bulkClientIdentifier: '',
   controlNumSubClients: DEFAULT_NUM_SUBCLIENTS,
   mediaNumSubClients: DEFAULT_MEDIA_NUM_SUBCLIENTS,
-  bulkNumSubClients: DEFAULT_NUM_SUBCLIENTS,
+  bulkNumSubClients: DEFAULT_BULK_NUM_SUBCLIENTS,
   connectId: '',
   connectAttemptId: 0,
   preflightProgressEnabled: false,
@@ -1575,7 +1576,8 @@ function resolveSubClientTopology(command) {
   const controlCount = normalizeSubClientCount(command.numSubClients, DEFAULT_NUM_SUBCLIENTS);
   const mediaFallback = hasControlOverride ? controlCount : DEFAULT_MEDIA_NUM_SUBCLIENTS;
   const mediaCount = normalizeSubClientCount(command.mediaNumSubClients, mediaFallback);
-  const bulkCount = normalizeSubClientCount(command.bulkNumSubClients, controlCount);
+  const bulkFallback = hasControlOverride ? controlCount : DEFAULT_BULK_NUM_SUBCLIENTS;
+  const bulkCount = normalizeSubClientCount(command.bulkNumSubClients, bulkFallback);
   const bulkSendConcurrency = normalizeBulkSendConcurrency(command.bulkSendConcurrency, DEFAULT_BULK_SEND_CONCURRENCY);
   return {
     control: controlCount,
@@ -2538,7 +2540,7 @@ async function closeClient() {
   state.bulkClientIdentifier = '';
   state.controlNumSubClients = DEFAULT_NUM_SUBCLIENTS;
   state.mediaNumSubClients = DEFAULT_MEDIA_NUM_SUBCLIENTS;
-  state.bulkNumSubClients = DEFAULT_NUM_SUBCLIENTS;
+  state.bulkNumSubClients = DEFAULT_BULK_NUM_SUBCLIENTS;
   state.bulkSendConcurrency = DEFAULT_BULK_SEND_CONCURRENCY;
   state.bulkSendMode = getConfiguredBulkSendMode();
   state.bulkRoundRobinCursor = 0;

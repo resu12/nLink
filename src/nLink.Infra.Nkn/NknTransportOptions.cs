@@ -10,7 +10,7 @@ internal sealed class NknTransportOptions
 {
     private const int DefaultNumSubClients = 4;
     private const int DefaultMediaNumSubClients = 8;
-    private const int DefaultBulkNumSubClients = 4;
+    private const int DefaultBulkNumSubClients = 2;
     private const int DefaultBulkSendConcurrency = 4;
 
     private readonly struct ResolvedKeyPath
@@ -152,7 +152,7 @@ internal sealed class NknTransportOptions
             maxValue: 16);
         var parsedBulkNumSubClients = ParseInt(
             bulkNumSubClients,
-            defaultValue: parsedNumSubClients,
+            defaultValue: string.IsNullOrWhiteSpace(numSubClients) ? DefaultBulkNumSubClients : parsedNumSubClients,
             minValue: 1,
             maxValue: 16);
         var parsedBulkSendConcurrency = ParseInt(

@@ -2543,7 +2543,8 @@ function Unlock-TunaFromSessionHeader {
         [Parameter(Mandatory = $true)]$Process,
         [Parameter(Mandatory = $true)][System.Windows.Automation.AutomationElement]$Window,
         [Parameter(Mandatory = $true)][string]$Password,
-        [Parameter(Mandatory = $true)][string]$RoleLabel
+        [Parameter(Mandatory = $true)][string]$RoleLabel,
+        [bool]$WaitForRuntimeEvidence = $true
     )
 
     $bookmark = Get-AppLogBookmark
@@ -2564,8 +2565,16 @@ function Unlock-TunaFromSessionHeader {
     }
     Click-Element $accept
 
-    [void](Wait-AppLogContainsAfterBookmark -Bookmark $bookmark -Needle 'event=tuna_runtime_unlocked' -TimeoutMs 90000 -Description "$RoleLabel Tuna runtime unlocked")
-    Write-Host "[GUI Smoke][filetransfer_tuna] $RoleLabel Tuna unlock completed." -ForegroundColor Green
+    if ($WaitForRuntimeEvidence) {
+        [void](Wait-AppLogContainsAfterBookmark -Bookmark $bookmark -Needle 'event=tuna_runtime_unlocked' -TimeoutMs 90000 -Description "$RoleLabel Tuna runtime unlocked")
+        Write-Host "[GUI Smoke][filetransfer_tuna] $RoleLabel Tuna unlock completed." -ForegroundColor Green
+        return
+    }
+
+    [void](Wait-Until -TimeoutMs 15000 -PollMs 200 -OnTimeoutMessage "Timed out waiting for $RoleLabel Tuna wallet dialog to close after unlock submission." -Condition {
+        $null -eq (Get-WalletPasswordDialogForProcess -ProcessId $Process.Id)
+    })
+    Write-Host "[GUI Smoke][filetransfer_tuna] $RoleLabel Tuna unlock submitted without runtime-evidence wait." -ForegroundColor Green
 }
 
 function Get-TunaGuiPayerRole {
@@ -2589,7 +2598,8 @@ function Unlock-TunaPayers {
     }
 
     if ($PayerMode -eq 'helper' -or $PayerMode -eq 'both') {
-        Unlock-TunaFromSessionHeader -Process $Context.HelperProc -Window $Context.HelperWindow -Password $Password -RoleLabel 'helper'
+        $waitForHelperRuntimeEvidence = $PayerMode -eq 'helper'
+        Unlock-TunaFromSessionHeader -Process $Context.HelperProc -Window $Context.HelperWindow -Password $Password -RoleLabel 'helper' -WaitForRuntimeEvidence $waitForHelperRuntimeEvidence
     }
 }
 
@@ -2651,18 +2661,90 @@ function Invoke-TunaGuiPauseResumeProbe {
         return $false
     }
 
-    $pause = Wait-ControlEnabledStateByAutomationId -Window $SenderWindow -AutomationId 'Chat.FileTransfer.Pause' -IsEnabled $true -TimeoutMs 30000
+    $pause = Wait-TunaGuiPauseButtonOrTerminal -SenderWindow $SenderWindow -Bookmark $Bookmark -TimeoutMs 30000
+    if ($null -eq $pause) {
+        Write-Host '[GUI Smoke][filetransfer_tuna] Pause/resume lifecycle probe skipped; transfer terminalized before pause was available.' -ForegroundColor Yellow
+        return $false
+    }
+
     Click-Element $pause
     [void](Wait-AppLogContainsAllAfterBookmark -Bookmark $Bookmark -Needles @('event=filetransfer_lifecycle_priority_sent', 'kind=pause_control', 'paused=1') -TimeoutMs 30000 -Description 'pause control sent')
     [void](Wait-AppLogContainsAllAfterBookmark -Bookmark $Bookmark -Needles @('event=filetransfer_lifecycle_priority_received', 'kind=pause_control', 'paused=1') -TimeoutMs 30000 -Description 'pause control received')
 
-    $resume = Wait-ControlEnabledStateByAutomationId -Window $SenderWindow -AutomationId 'Chat.FileTransfer.Resume' -IsEnabled $true -TimeoutMs 30000
+    $resume = Wait-TunaGuiResumeButtonOrTerminal -SenderWindow $SenderWindow -Bookmark $Bookmark -TimeoutMs 30000
+    if ($null -eq $resume) {
+        Write-Host '[GUI Smoke][filetransfer_tuna] Pause/resume lifecycle probe stopped after pause; transfer terminalized before resume was available.' -ForegroundColor Yellow
+        return $false
+    }
+
     Start-Sleep -Milliseconds 1000
     Click-Element $resume
     [void](Wait-AppLogContainsAllAfterBookmark -Bookmark $Bookmark -Needles @('event=filetransfer_lifecycle_priority_sent', 'kind=pause_control', 'paused=0') -TimeoutMs 30000 -Description 'resume control sent')
     [void](Wait-AppLogContainsAllAfterBookmark -Bookmark $Bookmark -Needles @('event=filetransfer_lifecycle_priority_received', 'kind=pause_control', 'paused=0') -TimeoutMs 30000 -Description 'resume control received')
     Write-Host '[GUI Smoke][filetransfer_tuna] Pause/resume lifecycle probe completed.' -ForegroundColor Green
     return $true
+}
+
+function Test-TunaGuiTransferTerminalAfterBookmark {
+    param([Parameter(Mandatory = $true)][int]$Bookmark)
+
+    foreach ($line in @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)) {
+        if ($line.IndexOf('event=file_transfer_outbound_terminal', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('event=file_transfer_inbound_terminal', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $line.IndexOf('event=transfer_terminal', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Wait-TunaGuiPauseButtonOrTerminal {
+    param(
+        [Parameter(Mandatory = $true)]$SenderWindow,
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [Parameter(Mandatory = $true)][int]$TimeoutMs
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        if (Test-TunaGuiTransferTerminalAfterBookmark -Bookmark $Bookmark) {
+            return $null
+        }
+
+        $pause = Find-VisibleByAutomationId -Root $SenderWindow -AutomationId 'Chat.FileTransfer.Pause'
+        if ($null -ne $pause -and $pause.Current.IsEnabled) {
+            return $pause
+        }
+
+        Start-Sleep -Milliseconds 200
+    }
+
+    throw "Timed out waiting for Chat.FileTransfer.Pause to become enabled before transfer terminalized."
+}
+
+function Wait-TunaGuiResumeButtonOrTerminal {
+    param(
+        [Parameter(Mandatory = $true)]$SenderWindow,
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [Parameter(Mandatory = $true)][int]$TimeoutMs
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        if (Test-TunaGuiTransferTerminalAfterBookmark -Bookmark $Bookmark) {
+            return $null
+        }
+
+        $resume = Find-VisibleByAutomationId -Root $SenderWindow -AutomationId 'Chat.FileTransfer.Resume'
+        if ($null -ne $resume -and $resume.Current.IsEnabled) {
+            return $resume
+        }
+
+        Start-Sleep -Milliseconds 200
+    }
+
+    throw "Timed out waiting for Chat.FileTransfer.Resume to become enabled before transfer terminalized."
 }
 
 function Get-TunaGuiEvidenceSummary {

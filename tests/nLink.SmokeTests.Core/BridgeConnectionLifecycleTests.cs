@@ -1113,7 +1113,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             var defaults = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "default.json"), "topology-default");
             Assert.Equal(4, defaults.NumSubClients);
             Assert.Equal(8, defaults.MediaNumSubClients);
-            Assert.Equal(4, defaults.BulkNumSubClients);
+            Assert.Equal(2, defaults.BulkNumSubClients);
             Assert.Equal(4, defaults.BulkSendConcurrency);
             Assert.True(defaults.ReceiveStallRecoveryEnabled);
             Assert.True(defaults.ReceiveStallFileTransferFastRecoveryEnabled);
