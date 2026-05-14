@@ -1055,6 +1055,77 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
     }
 
     [Fact]
+    public async Task V6Sender_ReceiverStateFrontierPriorityDoesNotWalkNonContiguousGaps()
+    {
+        const string transferId = "transfer_v6_sender_state_frontier_noncontiguous";
+        const string sessionId = "session_v6_sender_state_frontier_noncontiguous";
+        const int chunkSizeBytes = 4096;
+        var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+
+        await sender.TryStartSendAsync(
+            new FileTransferSendDescriptor("v6-frontier-noncontiguous.bin", payload.Length, transferId, chunkSizeBytes),
+            _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
+            CancellationToken.None);
+        await WaitUntilAsync(() => senderTransport.SentOffers.TryPeek(out _), timeoutMs: 5000);
+        Assert.NotNull(await sender.PauseTransferAsync(transferId, "queue_noncontiguous_state_frontier", CancellationToken.None));
+
+        var offer = senderTransport.SentOffers.Single();
+        await receiverTransport.SendFileTransferAcceptAsync(
+            new FileTransferAcceptV1
+            {
+                SessionId = offer.SessionId,
+                TransferId = transferId,
+                AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+            },
+            CancellationToken.None);
+        await WaitUntilAsync(() => senderTransport.SentDataFrames.OfType<FileTransferManifestFrameV6>().Any(), timeoutMs: 5000);
+        var receiverSession = await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
+
+        await receiverSession.SendAsync(
+            new FileTransferReceiverStateFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                Epoch = 1,
+                ContiguousCommittedChunkIndex = 3,
+                DurableReceivedHighestChunkIndex = 32,
+                CreditUntilChunkIndexExclusive = 40,
+                MissingRanges =
+                [
+                    new FileTransferRangeV4 { StartChunkIndex = 3, ChunkCount = 1 },
+                    new FileTransferRangeV4 { StartChunkIndex = 10, ChunkCount = 1 },
+                    new FileTransferRangeV4 { StartChunkIndex = 18, ChunkCount = 3 },
+                ],
+                BytesCommitted = 3 * chunkSizeBytes,
+                Priority = "frontier",
+            },
+            CancellationToken.None);
+        await Task.Delay(300);
+        Assert.Empty(senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>());
+
+        Assert.NotNull(await sender.ResumeTransferAsync(transferId, "send_noncontiguous_state_frontier", CancellationToken.None));
+        await WaitUntilAsync(
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>()
+                .Any(static batch => batch.StartChunkIndex == 10),
+            timeoutMs: 5000);
+
+        var batches = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().ToList();
+        var firstBatch = batches.First();
+        Assert.Equal(3, firstBatch.StartChunkIndex);
+        Assert.Equal(1, firstBatch.ChunkCount);
+        Assert.Equal("frontier", firstBatch.Priority);
+        Assert.DoesNotContain(
+            batches,
+            static batch => string.Equals(batch.Priority, "frontier", StringComparison.Ordinal) &&
+                            batch.StartChunkIndex > 3);
+    }
+
+    [Fact]
     public async Task V6Sender_PrioritizesFrontierRequestBeforeNormalRanges()
     {
         const string transferId = "transfer_v6_sender_frontier_priority";

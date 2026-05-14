@@ -349,49 +349,39 @@ public sealed partial class SessionFileTransferService
             return [];
         }
 
-        var remaining = Math.Min(maxPriorityChunks, context.ChunkCount - frontierChunkIndex);
         var ranges = NormalizeV6RequestRanges(state.MissingRanges, context.ChunkCount);
-        var result = new List<FileTransferRangeV4>();
-        var frontierCovered = false;
         foreach (var range in ranges)
         {
-            if (remaining <= 0)
-            {
-                break;
-            }
-
             var rangeEndExclusive = range.StartChunkIndex + range.ChunkCount;
             if (rangeEndExclusive <= frontierChunkIndex)
             {
                 continue;
             }
 
-            if (!frontierCovered)
+            if (range.StartChunkIndex > frontierChunkIndex)
             {
-                if (range.StartChunkIndex > frontierChunkIndex)
-                {
-                    return [];
-                }
-
-                frontierCovered = true;
+                return [];
             }
 
-            var start = Math.Max(range.StartChunkIndex, frontierChunkIndex);
-            var count = Math.Min(rangeEndExclusive - start, remaining);
+            var count = Math.Min(
+                Math.Min(maxPriorityChunks, context.ChunkCount - frontierChunkIndex),
+                rangeEndExclusive - frontierChunkIndex);
             if (count <= 0)
             {
-                continue;
+                return [];
             }
 
-            result.Add(new FileTransferRangeV4
-            {
-                StartChunkIndex = start,
-                ChunkCount = count,
-            });
-            remaining -= count;
+            return
+            [
+                new FileTransferRangeV4
+                {
+                    StartChunkIndex = frontierChunkIndex,
+                    ChunkCount = count,
+                },
+            ];
         }
 
-        return frontierCovered ? result : [];
+        return [];
     }
 
     private static int ResolveOutboundV6StateFrontierPriorityChunksLocked(
