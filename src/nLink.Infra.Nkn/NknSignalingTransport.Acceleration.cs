@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
 using NLink.Core;
@@ -171,6 +172,47 @@ public sealed partial class NknSignalingTransport
         }
     }
 
+    public void RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request)
+    {
+        var sessionId = string.IsNullOrWhiteSpace(request.SessionId)
+            ? currentSessionSecurityState.SessionId?.Value
+            : request.SessionId.Trim();
+        var transferId = string.IsNullOrWhiteSpace(request.TransferId) ? "(none)" : request.TransferId.Trim();
+        var reason = string.IsNullOrWhiteSpace(request.Reason)
+            ? "core_filetransfer_receive_recovery"
+            : SanitizeLogToken(request.Reason);
+        var direction = request.Direction.ToString().ToLowerInvariant();
+
+        if (client is not RealNknClientAdapter realClient)
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=filetransfer_v6_bridge_receive_recovery_request_unsupported; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id={SanitizeLogToken(transferId)}; direction={direction}; reason={reason}");
+            return;
+        }
+
+        var accepted = realClient.RequestFileTransferReceiveStallRecovery(reason);
+        LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            $"event=filetransfer_v6_bridge_receive_recovery_requested; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id={SanitizeLogToken(transferId)}; direction={direction}; reason={reason}; accepted={(accepted ? 1 : 0)}");
+        if (!accepted)
+        {
+            return;
+        }
+
+        MarkFileTransferFallbackNknProofPending(
+            reason,
+            sessionId,
+            NknAccelerationLaneKind.File);
+        SetFileTransferDataSessionsAvailability(
+            isAvailable: false,
+            reason: reason,
+            requiresResumeRequest: true,
+            handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+            targetTransport: FileTransferTransportKind.RegularNkn);
+        ScheduleFileTransferFallbackNknProbeIfPending("core_receive_recovery_requested");
+    }
+
     internal bool IsAccelerationUserStoppedForCurrentSessionForTests => IsAccelerationUserStoppedForCurrentSession();
 
     internal void SetAccelerationAcceptedForTests(NknAccelerationLaneKind lanes, string? sessionId = null)
@@ -292,6 +334,12 @@ public sealed partial class NknSignalingTransport
                     snapshot.TargetTransport == FileTransferTransportKind.Tuna)
                 {
                     observedFileTransferV6NormalToTunaActivationRecoveredCount++;
+                }
+
+                if (snapshot.TargetTransport == FileTransferTransportKind.RegularNkn &&
+                    snapshot.HandoffKind is FileTransferTransportHandoffKind.TunaToNormalFallback or FileTransferTransportHandoffKind.RegularNknRecovery)
+                {
+                    lastRecoveredFileTransferV6RegularNknEpoch = snapshot;
                 }
             }
             else if (snapshot.State == V6TransportEpochState.WaitingForTargetTransport)
@@ -427,7 +475,8 @@ public sealed partial class NknSignalingTransport
         // Once Core has entered an unresolved proof/waiting state for the same epoch,
         // it is still the recovery authority. Only suppress new proof-pending noise
         // caused by secondary sidecar errors after a completed fallback.
-        return snapshot.State == V6TransportEpochState.TargetProofPending;
+        return snapshot.State == V6TransportEpochState.TargetProofPending &&
+               snapshot.HandoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback;
     }
 
     private bool TryGetUnresolvedFileTransferV6TransportEpochForCurrentSession(out FileTransferV6TransportEpochSnapshot snapshot)
@@ -456,6 +505,68 @@ public sealed partial class NknSignalingTransport
         return false;
     }
 
+    private bool ShouldSuppressFileTransferControlReceiveStallRecoveryBroadcast(
+        string reason,
+        out string suppressReason,
+        out long cooldownRemainingMs)
+    {
+        suppressReason = "none";
+        cooldownRemainingMs = 0;
+        if (!reason.StartsWith("control_receive_stalled", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var sessionId = currentSessionSecurityState.SessionId?.Value;
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        lock (fileTransferV6TransportEpochGate)
+        {
+            foreach (var candidate in unresolvedFileTransferV6TransportEpochs.Values)
+            {
+                if (string.Equals(candidate.SessionId, sessionId, StringComparison.Ordinal) &&
+                    candidate.TargetTransport == FileTransferTransportKind.RegularNkn &&
+                    candidate.HandoffKind is FileTransferTransportHandoffKind.TunaToNormalFallback or FileTransferTransportHandoffKind.RegularNknRecovery &&
+                    candidate.IsUnresolved)
+                {
+                    suppressReason = "regular_nkn_epoch_unresolved";
+                    return true;
+                }
+            }
+
+            if (lastRecoveredFileTransferV6RegularNknEpoch is { } recovered &&
+                string.Equals(recovered.SessionId, sessionId, StringComparison.Ordinal))
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_control_receive_stall_recovery_after_recovered_epoch_allowed; session_id={SanitizeLogToken(sessionId)}; reason={SanitizeLogToken(reason)}; recovered_transport_epoch={recovered.TransportEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKindForLog(recovered.HandoffKind)}");
+            }
+        }
+
+        var nowTick = Stopwatch.GetTimestamp();
+        var lastTick = Volatile.Read(ref fileTransferControlReceiveStallRecoveryBroadcastLastTick);
+        if (lastTick > 0)
+        {
+            var elapsed = Stopwatch.GetElapsedTime(lastTick, nowTick);
+            if (elapsed < FileTransferControlReceiveStallRecoveryBroadcastCooldown)
+            {
+                suppressReason = "cooldown";
+                cooldownRemainingMs = Math.Max(
+                    0,
+                    (long)(FileTransferControlReceiveStallRecoveryBroadcastCooldown - elapsed).TotalMilliseconds);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void MarkFileTransferControlReceiveStallRecoveryBroadcasted()
+        => Volatile.Write(ref fileTransferControlReceiveStallRecoveryBroadcastLastTick, Stopwatch.GetTimestamp());
+
     private void ClearUnresolvedFileTransferV6TransportEpochs(string reason)
     {
         int clearedCount;
@@ -463,6 +574,7 @@ public sealed partial class NknSignalingTransport
         {
             clearedCount = unresolvedFileTransferV6TransportEpochs.Count;
             unresolvedFileTransferV6TransportEpochs.Clear();
+            lastRecoveredFileTransferV6RegularNknEpoch = null;
         }
 
         if (clearedCount > 0)

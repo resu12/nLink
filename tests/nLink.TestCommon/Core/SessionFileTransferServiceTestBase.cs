@@ -166,7 +166,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         return builder.ToString();
     }
 
-    protected sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver
+    protected sealed class LoopbackFileTransferTransport : IFileTransferSignalingTransport, ISignalingTransport, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController
     {
         private readonly string sessionId;
         private readonly ConcurrentDictionary<string, LoopbackDataSession> dataSessions = new(StringComparer.Ordinal);
@@ -209,6 +209,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
         public ConcurrentQueue<FileTransferSessionOpenV2> SentSessionOpens { get; } = [];
         public ConcurrentQueue<FileTransferDataFrame> SentDataFrames { get; } = [];
         public ConcurrentQueue<FileTransferV6TransportEpochSnapshot> ObservedV6TransportEpochs { get; } = [];
+        public ConcurrentQueue<FileTransferReceiveRecoveryRequest> ReceiveRecoveryRequests { get; } = [];
 
         public event EventHandler<IncomingJoinRequestEventArgs>? IncomingJoinRequest;
         public event EventHandler<TransportSessionKeyReadyEventArgs>? SessionKeyReady;
@@ -236,6 +237,9 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
         public void ObserveFileTransferV6TransportEpoch(FileTransferV6TransportEpochSnapshot snapshot)
             => ObservedV6TransportEpochs.Enqueue(snapshot);
+
+        public void RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request)
+            => ReceiveRecoveryRequests.Enqueue(request);
 
         public Task SendChatMessageAsync(ReadOnlyMemory<byte> payload, CancellationToken ct)
         {
@@ -505,8 +509,9 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
             var target = peer ?? throw new InvalidOperationException("Loopback peer is not connected.");
             SentDataFrames.Enqueue(frame);
             var isTransportProbe = frame is FileTransferTransportProbeFrameV6;
+            var availabilityBypass = isTransportProbe || IsV6RecoveryFeedbackFrame(frame);
             if (!TryGetOrCreateDataSession(NormalizeSessionId(frame.SessionId), frame.TransferId, out var localSession) ||
-                (!localSession.IsAvailable && !isTransportProbe))
+                (!localSession.IsAvailable && !availabilityBypass))
             {
                 return;
             }
@@ -523,7 +528,7 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
 
             if (target.TryGetOrCreateDataSession(target.NormalizeSessionId(frame.SessionId), frame.TransferId, out var session))
             {
-                if (!session.IsAvailable)
+                if (!session.IsAvailable && !availabilityBypass)
                 {
                     return;
                 }
@@ -542,6 +547,12 @@ public abstract class SessionFileTransferServiceTestBase : CoreSmokeTestsBase
                 Interlocked.Decrement(ref activeDataSessionSends);
             }
         }
+
+        private static bool IsV6RecoveryFeedbackFrame(FileTransferDataFrame frame)
+            => frame is FileTransferReceiverStateFrameV6
+                or FileTransferFrontierRequestFrameV6
+                or FileTransferRepairProofFrameV6
+                or FileTransferTransportEpochFrameV6;
 
         protected sealed class LoopbackDataSession : IFileTransferDataSession
         {

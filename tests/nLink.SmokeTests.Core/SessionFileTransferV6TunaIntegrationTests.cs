@@ -165,7 +165,7 @@ public sealed class SessionFileTransferV6TunaIntegrationTests : SessionFileTrans
     }
 
     [Fact]
-    public async Task TunaFallback_RecoveredRegularNknEpochSuppressesDuplicateFallbackTriggers()
+    public async Task TunaFallback_RecoveredFallbackSuppressesDuplicateFallbackButAllowsRegularNknRecovery()
     {
         const string transferId = "transfer_v6_tuna_fallback_duplicate_suppressed";
         var logStart = GetOperationalLogLength();
@@ -206,22 +206,37 @@ public sealed class SessionFileTransferV6TunaIntegrationTests : SessionFileTrans
                 snapshot.State == V6TransportEpochState.Recovered &&
                 snapshot.TransportEpoch == probeFrame.TransportEpoch),
             timeoutMs: 5000);
+        var recoveredEpochCount = senderTransport.SentTransportEpochs
+            .Select(static epoch => epoch.TransportEpoch)
+            .Distinct()
+            .Count();
 
         senderTransport.RequestAllDataSessionHandoffs(
             "remote_queue_overflow",
             FileTransferTransportHandoffKind.TunaToNormalFallback,
             FileTransferTransportKind.RegularNkn);
+        await Task.Delay(250);
+        Assert.Equal(
+            recoveredEpochCount,
+            senderTransport.SentTransportEpochs.Select(static epoch => epoch.TransportEpoch).Distinct().Count());
+
         senderTransport.RequestAllDataSessionHandoffs(
             "bridge_receive_stall",
             FileTransferTransportHandoffKind.RegularNknRecovery,
             FileTransferTransportKind.RegularNkn);
-        await Task.Delay(250);
+        await WaitUntilAsync(
+            () => senderTransport.SentTransportEpochs
+                .Select(static epoch => epoch.TransportEpoch)
+                .Distinct()
+                .Count() > recoveredEpochCount,
+            timeoutMs: 5000);
 
-        Assert.Single(senderTransport.SentTransportEpochs.Select(static epoch => epoch.TransportEpoch).Distinct());
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_epoch_recovered_restart_suppressed", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_epoch_recovered_restart_allowed", logTail, StringComparison.Ordinal);
         Assert.Contains(
-            "event=filetransfer_v6_epoch_recovered_restart_suppressed",
-            ReadOperationalLogTail(logStart),
-            StringComparison.Ordinal);
+            senderTransport.SentTransportEpochs,
+            static epoch => string.Equals(epoch.HandoffKind, "regular_nkn_recovery", StringComparison.Ordinal));
     }
 
     [Theory]

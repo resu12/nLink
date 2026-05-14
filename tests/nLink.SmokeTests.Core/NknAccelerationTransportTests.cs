@@ -2573,6 +2573,84 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task FileTransferFallbackProof_AllowsRegularNknRecoveryAfterRecoveredFallback()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tuna.file.v6-proof-regular-recovery.address");
+            var helperClient = new FakeNknClient("helper.tuna.file.v6-proof-regular-recovery.address");
+            var fakeLane = new FakeNknAccelerationLane(isAvailable: true);
+            using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-tuna-file-v6-proof-regular-recovery-id", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-tuna-file-v6-proof-regular-recovery-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                fakeLane);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_tuna_file_v6_proof_regular_recovery";
+            var dataSession = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            var availabilityEvents = new ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
+            dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
+            helper.SetAccelerationAcceptedForTests(NknAccelerationLaneKind.File, sessionId);
+
+            fakeLane.SetAvailable(false, "byte_cap_reached");
+            await WaitUntilAsync(
+                () => availabilityEvents.Any(e =>
+                    !e.IsAvailable &&
+                    e.RequiresResumeRequest &&
+                    e.HandoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback),
+                TimeSpan.FromSeconds(2));
+
+            var observer = Assert.IsAssignableFrom<IFileTransferV6TransportEpochObserver>(helper);
+            observer.ObserveFileTransferV6TransportEpoch(
+                new FileTransferV6TransportEpochSnapshot(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    21,
+                    FileTransferTransportHandoffKind.TunaToNormalFallback,
+                    FileTransferTransportKind.Tuna,
+                    FileTransferTransportKind.RegularNkn,
+                    V6TransportEpochState.Recovered,
+                    "transport_probe_ack",
+                    IsUnresolved: false));
+
+            var recoveryLogStart = GetOperationalLogLength();
+            observer.ObserveFileTransferV6TransportEpoch(
+                new FileTransferV6TransportEpochSnapshot(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Inbound,
+                    22,
+                    FileTransferTransportHandoffKind.RegularNknRecovery,
+                    FileTransferTransportKind.RegularNkn,
+                    FileTransferTransportKind.RegularNkn,
+                    V6TransportEpochState.TargetProofPending,
+                    "all_channels_zero_receive_max_restarts",
+                    IsUnresolved: true));
+
+            var recoveryTail = ReadOperationalLogTail(recoveryLogStart);
+            Assert.Contains("event=filetransfer_v6_epoch_observed;", recoveryTail, StringComparison.Ordinal);
+            Assert.Contains("handoff_kind=regular_nkn_recovery", recoveryTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_v6_epoch_observation_ignored_final_fallback;", recoveryTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task FileTransferFallbackRecovered_SuppressesAcceleratedFileBulkUntilFreshActivation()
     {
         FakeNknClient.ResetNetwork();
@@ -2748,6 +2826,172 @@ public sealed class NknAccelerationTransportTests : CoreSmokeTestsBase
                      e.HandoffKind == FileTransferTransportHandoffKind.TunaToNormalFallback);
             var logTail = ReadOperationalLogTail(logStart);
             Assert.Contains("event=filetransfer_v6_availability_handoff_kind_preserved;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task FileTransferReceiveStallExhausted_WithActiveSessionBroadcastsRecoverableRegularNknEpoch()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tuna.file.receive-stall-exhausted.address");
+            var helperClient = new FakeNknClient("helper.tuna.file.receive-stall-exhausted.address");
+            var fakeLane = new FakeNknAccelerationLane(isAvailable: true);
+            using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-tuna-file-receive-stall-exhausted-id", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-tuna-file-receive-stall-exhausted-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                fakeLane);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_tuna_file_receive_stall_exhausted";
+            var dataSession = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            var availabilityEvents = new ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
+            dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
+
+            var logStart = GetOperationalLogLength();
+            InvokePrivateMethod(
+                helper,
+                "OnBridgeLifecycle",
+                helper,
+                new BridgeLifecycleEvent(
+                    BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted,
+                    StartMode: null,
+                    Pid: null,
+                    ReadyTimeMs: null,
+                    PingRttMs: null,
+                    UptimeMs: null,
+                    ExitCode: null,
+                    ExitReasonKind: null,
+                    ExitReasonText: "control_receive_stalled_max_restarts"));
+
+            await WaitUntilAsync(
+                () => availabilityEvents.Any(e =>
+                    e.IsAvailable &&
+                    e.RequiresResumeRequest &&
+                    e.Reason == "control_receive_stalled_max_restarts" &&
+                    e.HandoffKind == FileTransferTransportHandoffKind.RegularNknRecovery &&
+                    e.TargetTransport == FileTransferTransportKind.RegularNkn),
+                TimeSpan.FromSeconds(2));
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_control_receive_stall_recovery_broadcast;", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_control_receive_stall_terminal_broadcast;", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task FileTransferReceiveStallExhausted_AfterRecoveredRegularNknEpochUsesCooldown()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            var options = NknTransportOptions.Load();
+            var hostClient = new FakeNknClient("host.tuna.file.receive-stall-exhausted-recovered.address");
+            var helperClient = new FakeNknClient("helper.tuna.file.receive-stall-exhausted-recovered.address");
+            var fakeLane = new FakeNknAccelerationLane(isAvailable: true);
+            using var host = new NknSignalingTransport(hostClient, options, new NknIdentity("host-tuna-file-receive-stall-exhausted-recovered-id", hostClient.Address));
+            using var helper = new NknSignalingTransport(
+                helperClient,
+                options,
+                new NknIdentity("helper-tuna-file-receive-stall-exhausted-recovered-id", helperClient.Address),
+                NknTunaAccelerationOptions.Disabled,
+                fakeLane);
+
+            var sessionId = await ApproveNknSessionAsync(
+                host,
+                helper,
+                cts.Token,
+                InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_tuna_file_receive_stall_exhausted_recovered";
+            var dataSession = await helper.OpenFileTransferDataSessionAsync(sessionId, transferId, cts.Token);
+            var availabilityEvents = new ConcurrentQueue<FileTransferDataSessionAvailabilityChangedEventArgs>();
+            dataSession.AvailabilityChanged += (_, e) => availabilityEvents.Enqueue(e);
+
+            InvokePrivateMethod(
+                helper,
+                "OnBridgeLifecycle",
+                helper,
+                new BridgeLifecycleEvent(
+                    BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted,
+                    StartMode: null,
+                    Pid: null,
+                    ReadyTimeMs: null,
+                    PingRttMs: null,
+                    UptimeMs: null,
+                    ExitCode: null,
+                    ExitReasonKind: null,
+                    ExitReasonText: "control_receive_stalled_max_restarts"));
+
+            await WaitUntilAsync(
+                () => availabilityEvents.Any(e =>
+                    e.IsAvailable &&
+                    e.RequiresResumeRequest &&
+                    e.Reason == "control_receive_stalled_max_restarts" &&
+                    e.HandoffKind == FileTransferTransportHandoffKind.RegularNknRecovery &&
+                    e.TargetTransport == FileTransferTransportKind.RegularNkn),
+                TimeSpan.FromSeconds(2));
+
+            var observer = Assert.IsAssignableFrom<IFileTransferV6TransportEpochObserver>(helper);
+            observer.ObserveFileTransferV6TransportEpoch(
+                new FileTransferV6TransportEpochSnapshot(
+                    sessionId,
+                    transferId,
+                    FileTransferDirection.Outbound,
+                    21,
+                    FileTransferTransportHandoffKind.RegularNknRecovery,
+                    FileTransferTransportKind.RegularNkn,
+                    FileTransferTransportKind.RegularNkn,
+                    V6TransportEpochState.Recovered,
+                    "transport_probe_ack",
+                    IsUnresolved: false));
+
+            var eventCountBeforeRepeat = availabilityEvents.Count;
+            var logStart = GetOperationalLogLength();
+            InvokePrivateMethod(
+                helper,
+                "OnBridgeLifecycle",
+                helper,
+                new BridgeLifecycleEvent(
+                    BridgeLifecycleEventKind.ReceiveStallRecoveryExhausted,
+                    StartMode: null,
+                    Pid: null,
+                    ReadyTimeMs: null,
+                    PingRttMs: null,
+                    UptimeMs: null,
+                    ExitCode: null,
+                    ExitReasonKind: null,
+                    ExitReasonText: "control_receive_stalled_max_restarts"));
+
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_control_receive_stall_recovery_broadcast_suppressed;", StringComparison.Ordinal),
+                TimeSpan.FromSeconds(2));
+            Assert.Equal(eventCountBeforeRepeat, availabilityEvents.Count);
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_control_receive_stall_recovery_after_recovered_epoch_allowed", logTail, StringComparison.Ordinal);
+            Assert.Contains("suppress_reason=cooldown", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_control_receive_stall_terminal_broadcast;", logTail, StringComparison.Ordinal);
         }
         finally
         {

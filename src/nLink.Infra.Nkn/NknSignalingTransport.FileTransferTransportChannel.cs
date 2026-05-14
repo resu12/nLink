@@ -510,7 +510,7 @@ public sealed partial class NknSignalingTransport
 
             return new LifecycleCopySendResult(lane, true, null);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
             LocalOperationalLog.Warn(
                 "SessionSecurity",
@@ -949,6 +949,14 @@ public sealed partial class NknSignalingTransport
         foreach (var session in sessions)
         {
             session.SetAvailability(isAvailable, reason, requiresResumeRequest, effectiveHandoffKind, targetTransport);
+        }
+    }
+
+    private bool HasActiveFileTransferDataSessionsForRecovery()
+    {
+        lock (gate)
+        {
+            return fileTransferDataSessions.Any(static pair => !pair.Value.IsDisposed);
         }
     }
 

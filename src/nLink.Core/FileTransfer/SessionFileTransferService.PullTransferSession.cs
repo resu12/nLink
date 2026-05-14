@@ -294,14 +294,31 @@ public sealed partial class SessionFileTransferService
                 LocalOperationalLog.Info(
                     "FileTransferService",
                     $"event={(frontierStalled ? "filetransfer_v6_rebind_recovery_still_stalled" : "filetransfer_v6_rebind_recovery_pending")}; direction=inbound; transfer_id={transferId}; session_id={sessionId}; reason={FormatProtocolLogValue(reason)}; rebind_generation={generation}; retry_delay_ms={delayMs}; progress_observed={(progressObserved ? 1 : 0)}; stable_progress_samples={stableProgressSamples}; committed_chunk={nextChunkIndex}; highest_received_chunk={highestReceivedChunkIndex}; bytes_transferred={bytesTransferred}");
-                var sent = await SendInboundV4StateAsync(
-                    context,
-                    "transport_rebind_retry",
-                    terminalReady: false,
-                    requireMissingRange: false,
-                    forceMissingRange: true,
-                    forceSend: true).ConfigureAwait(false);
-                var repairRequestSent = await SendInboundV5RepairRequestAsync(context, "transport_rebind_retry").ConfigureAwait(false);
+                bool sent;
+                bool repairRequestSent;
+                if (context.NegotiatedDataProtocolVersion >= FileTransferProtocol.ProtocolVersionV6)
+                {
+                    sent = await SendInboundV6ReceiverStateAsync(
+                        context,
+                        "transport_rebind_retry",
+                        forceSend: true).ConfigureAwait(false);
+                    repairRequestSent = await SendInboundV6FrontierRequestAsync(
+                        context,
+                        "transport_rebind_retry",
+                        forceSend: true).ConfigureAwait(false);
+                }
+                else
+                {
+                    sent = await SendInboundV4StateAsync(
+                        context,
+                        "transport_rebind_retry",
+                        terminalReady: false,
+                        requireMissingRange: false,
+                        forceMissingRange: true,
+                        forceSend: true).ConfigureAwait(false);
+                    repairRequestSent = await SendInboundV5RepairRequestAsync(context, "transport_rebind_retry").ConfigureAwait(false);
+                }
+
                 LocalOperationalLog.Info(
                     "FileTransferService",
                     $"event=filetransfer_transport_rebind_state_forced; direction=inbound; transfer_id={transferId}; session_id={sessionId}; reason={FormatProtocolLogValue(reason)}; rebind_generation={generation}; retry_delay_ms={delayMs}; state_sent={(sent ? 1 : 0)}; repair_request_sent={(repairRequestSent ? 1 : 0)}; committed_chunk={nextChunkIndex}; highest_received_chunk={highestReceivedChunkIndex}");
@@ -1118,6 +1135,14 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (requestedKind == FileTransferTransportHandoffKind.RegularNknRecovery)
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v6_epoch_recovered_restart_allowed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; recovered_transport_epoch={lastRecoveredEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(lastRecoveredKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(requestedKind)}; target_transport={FormatFileTransferTransportKind(requestedTarget)}; reason={FormatProtocolLogValue(reason)}");
+            return false;
+        }
+
         LocalOperationalLog.Info(
             "FileTransferService",
             $"event=filetransfer_v6_epoch_recovered_restart_suppressed; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={sessionId}; recovered_transport_epoch={lastRecoveredEpoch}; recovered_handoff_kind={FormatFileTransferTransportHandoffKind(lastRecoveredKind)}; requested_handoff_kind={FormatFileTransferTransportHandoffKind(requestedKind)}; target_transport={FormatFileTransferTransportKind(requestedTarget)}; reason={FormatProtocolLogValue(reason)}");
@@ -1322,7 +1347,10 @@ public sealed partial class SessionFileTransferService
             "transport_disconnected" or
             "transport_recovered_unproven" or
             "transport_probe_unproven" or
-            "receive_stall_recovery" ||
+            "receive_stall_recovery" or
+            "sender_request_feedback_stalled" or
+            "peer_liveness_stale_receive_recovery" or
+            "core_filetransfer_request" ||
             normalized?.Contains("tuna", StringComparison.OrdinalIgnoreCase) == true ||
             normalized?.Contains("sidecar", StringComparison.OrdinalIgnoreCase) == true;
     }

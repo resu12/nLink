@@ -27,6 +27,17 @@ public interface IFileTransferProtocolCapabilities
     bool SupportsFileTransferV6Streaming { get; }
 }
 
+public sealed record FileTransferReceiveRecoveryRequest(
+    string SessionId,
+    string TransferId,
+    FileTransferDirection Direction,
+    string Reason);
+
+public interface IFileTransferReceiveRecoveryController
+{
+    void RequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request);
+}
+
 public interface IFileTransferSignalingTransport
 {
     event EventHandler<FileTransferOfferReceivedEventArgs>? FileTransferOfferReceived;

@@ -243,7 +243,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         const string transferId = "transfer_v6_receiver_full_window";
         const string sessionId = "session_v6_receiver_full_window";
         const int chunkSize = 4;
-        const int expectedRuntimeWindowChunks = 128;
+        const int expectedRuntimeWindowChunks = 2048;
         var fileSizeBytes = (FileTransferProtocol.MaxStateMissingChunksV6 + 16) * chunkSize;
         var sha256 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
         using var destination = new NonDisposingMemoryStream();
@@ -328,6 +328,76 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         Assert.Equal(epochState.ContiguousCommittedChunkIndex, frontierRequest.MissingRanges[0].StartChunkIndex);
         Assert.Equal(1, frontierRequest.MissingRanges[0].ChunkCount);
         Assert.NotNull(frontierRequest.RepairRequestId);
+    }
+
+    [Fact]
+    public async Task V6Receiver_ExactFrontierChunkWithoutBatchRepairIdStillSendsRepairProof()
+    {
+        const string transferId = "transfer_v6_receiver_infers_frontier_proof";
+        const string sessionId = "session_v6_receiver_infers_frontier_proof";
+        const int chunkSize = 4;
+        var logStart = GetOperationalLogLength();
+        var payload = Enumerable.Range(0, 16).Select(static index => (byte)(index + 1)).ToArray();
+        var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
+        using var destination = new NonDisposingMemoryStream();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.Connect(receiverTransport);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(receiverTransport);
+
+        var senderSession = await StartManualInboundV6ReceiverAsync(
+            senderTransport,
+            receiver,
+            transferId,
+            sessionId,
+            "v6-inferred-frontier-proof.bin",
+            payload.Length,
+            sha256,
+            (_, _) => Task.FromResult<Stream>(destination));
+        await senderSession.SendAsync(
+            CreateManifest(sessionId, transferId, "v6-inferred-frontier-proof.bin", payload.Length, chunkSize, sha256),
+            CancellationToken.None);
+        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any());
+
+        receiverTransport.RequestAllDataSessionHandoffs(
+            "receive_stall_recovery",
+            FileTransferTransportHandoffKind.RegularNknRecovery,
+            FileTransferTransportKind.RegularNkn);
+
+        await WaitUntilAsync(
+            () => receiverTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Any(frame =>
+                frame.TransportEpoch > 0 &&
+                !string.IsNullOrWhiteSpace(frame.RepairRequestId)),
+            timeoutMs: 5000);
+        var frontierRequest = receiverTransport.SentDataFrames
+            .OfType<FileTransferFrontierRequestFrameV6>()
+            .Last(frame => frame.TransportEpoch > 0);
+        var frontierChunk = frontierRequest.MissingRanges[0].StartChunkIndex;
+
+        await senderSession.SendAsync(
+            new FileTransferChunkBatchFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                TransportEpoch = frontierRequest.TransportEpoch,
+                StartChunkIndex = frontierChunk,
+                ChunkCount = 1,
+                DataSegments = [payload.Skip(frontierChunk * chunkSize).Take(chunkSize).ToArray()],
+                Priority = "frontier",
+                RecoveryMode = "frontier_repair_only",
+            },
+            CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => receiverTransport.SentRepairProofs.Any(proof =>
+                proof.TransportEpoch == frontierRequest.TransportEpoch &&
+                proof.RepairRequestId == frontierRequest.RepairRequestId &&
+                proof.CommittedChunkIndex > frontierChunk),
+            timeoutMs: 5000);
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_repair_proof_inferred", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_epoch_recovered; direction=inbound", logTail, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -428,7 +498,9 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         const string transferId = "transfer_v6_receiver_frontier_window";
         const string sessionId = "session_v6_receiver_frontier_window";
         const int chunkSize = 4;
-        var fileSizeBytes = 1024 * chunkSize;
+        const int expectedRuntimeWindowChunks = 2048;
+        const int farAheadChunkIndex = expectedRuntimeWindowChunks + 100;
+        var fileSizeBytes = (farAheadChunkIndex + 16) * chunkSize;
         var sha256 = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
         using var destination = new NonDisposingMemoryStream();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
@@ -475,8 +547,8 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         var requestedChunks = retryState.MissingRanges.Sum(static range => range.ChunkCount);
 
         Assert.True(requestedChunks > 1);
-        Assert.True(requestedChunks <= 32);
-        Assert.True(retryState.CreditUntilChunkIndexExclusive <= 32);
+        Assert.True(requestedChunks <= expectedRuntimeWindowChunks);
+        Assert.True(retryState.CreditUntilChunkIndexExclusive <= expectedRuntimeWindowChunks);
         Assert.Contains(retryState.MissingRanges, static range => range.StartChunkIndex == 0 && range.ChunkCount == 1);
         Assert.Contains(retryState.MissingRanges, static range => range.StartChunkIndex == 3);
 
@@ -485,13 +557,13 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
             {
                 SessionId = sessionId,
                 TransferId = transferId,
-                StartChunkIndex = 700,
+                StartChunkIndex = farAheadChunkIndex,
                 ChunkCount = 1,
                 DataSegments = [new byte[] { 9, 10, 11, 12 }],
             },
             CancellationToken.None);
         await Task.Delay(200);
-        Assert.True(destination.Length < 700 * chunkSize);
+        Assert.True(destination.Length < farAheadChunkIndex * chunkSize);
     }
 
     [Fact]
@@ -633,6 +705,23 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         Assert.Empty(stateRepairBatches);
 
         await Task.Delay(1700);
+        await receiverSession.SendAsync(
+            new FileTransferReceiverStateFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                Epoch = 3,
+                ContiguousCommittedChunkIndex = 0,
+                DurableReceivedHighestChunkIndex = -1,
+                CreditUntilChunkIndexExclusive = 12,
+                MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 0, ChunkCount = 12 }],
+                BytesCommitted = 0,
+            },
+            CancellationToken.None);
+        await Task.Delay(500);
+
+        var batchesAfterNormalResendGate = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().ToList();
+        Assert.Equal(batchesAfterStateFrontierRepair.Count, batchesAfterNormalResendGate.Count);
 
         await receiverSession.SendAsync(
             new FileTransferFrontierRequestFrameV6
@@ -955,10 +1044,14 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
 
         var batches = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Take(2).ToList();
         Assert.Equal(0, batches[0].StartChunkIndex);
-        Assert.Equal(1, batches[0].ChunkCount);
+        Assert.True(batches[0].ChunkCount > 1);
+        Assert.True(batches[0].ChunkCount <= FileTransferProtocol.MaxChunkBatchSegmentsV6);
         Assert.Equal("frontier", batches[0].Priority);
-        Assert.Equal(1, batches[1].StartChunkIndex);
-        Assert.Null(batches[1].Priority);
+        Assert.Equal(batches[0].StartChunkIndex + batches[0].ChunkCount, batches[1].StartChunkIndex);
+        Assert.Equal("frontier", batches[1].Priority);
+        Assert.DoesNotContain(
+            senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>(),
+            batch => batch.StartChunkIndex > 0 && batch.Priority is null);
     }
 
     [Fact]
@@ -966,6 +1059,7 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
     {
         const string transferId = "transfer_v6_sender_frontier_priority";
         const string sessionId = "session_v6_sender_frontier_priority";
+        var logStart = GetOperationalLogLength();
         var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
@@ -1016,7 +1110,9 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
                 Priority = "frontier",
             },
             CancellationToken.None);
-        await Task.Delay(300);
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains("repair_request_id=frontier-0", StringComparison.Ordinal),
+            timeoutMs: 5000);
         Assert.Empty(senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>());
 
         Assert.NotNull(await sender.ResumeTransferAsync(transferId, "send_requests", CancellationToken.None));
@@ -1027,6 +1123,11 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         Assert.Equal(1, firstBatch.ChunkCount);
         Assert.Equal("frontier", firstBatch.Priority);
         Assert.Equal("frontier-0", firstBatch.RepairRequestId);
+
+        await WaitUntilAsync(
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>()
+                .Any(batch => batch.StartChunkIndex == 5 && batch.Priority is null),
+            timeoutMs: 5000);
     }
 
     [Fact]

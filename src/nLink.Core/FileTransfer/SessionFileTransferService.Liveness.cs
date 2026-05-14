@@ -10,6 +10,45 @@ public sealed partial class SessionFileTransferService
     private static TimeSpan CurrentV6PeerLivenessTimeout
         => V6PeerLivenessTimeoutOverrideForTests ?? TimeSpan.FromMilliseconds(V6PeerLivenessTimeoutMs);
 
+    private static TimeSpan CurrentV6SenderRequestFeedbackStallRecoveryDelay
+        => V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests ?? TimeSpan.FromMilliseconds(V6SenderRequestFeedbackStallRecoveryMs);
+
+    private static TimeSpan CurrentV6SenderRequestFeedbackStallRecoveryCooldown
+        => TimeSpan.FromMilliseconds(V6SenderRequestFeedbackStallRecoveryCooldownMs);
+
+    private bool TryRequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request)
+    {
+        IFileTransferReceiveRecoveryController? controller;
+        lock (gate)
+        {
+            controller = transport as IFileTransferReceiveRecoveryController;
+        }
+
+        if (controller is null)
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v6_transport_receive_recovery_request_unsupported; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}");
+            return false;
+        }
+
+        try
+        {
+            controller.RequestFileTransferReceiveRecovery(request);
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LocalOperationalLog.Warn(
+                "FileTransferService",
+                $"event=filetransfer_v6_transport_receive_recovery_request_failed; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; error={FormatProtocolLogValue(ex.GetType().Name)}");
+            return false;
+        }
+    }
+
     private static TimeSpan ResolveV6PeerLivenessTimeout(V6TransportEpoch? epoch)
     {
         var timeout = CurrentV6PeerLivenessTimeout;
@@ -27,6 +66,33 @@ public sealed partial class SessionFileTransferService
         var timeout = CurrentV6PeerLivenessTimeout;
         var recoveryTimeout = ResolveV6TransportEpochProofTimeout() + CurrentV6HeartbeatInterval * 6;
         return recoveryTimeout > timeout ? recoveryTimeout : timeout;
+    }
+
+    private static DateTimeOffset? ResolveV6PeerLivenessDeadlineBaseUtc(
+        DateTimeOffset? lastPeerLivenessUtc,
+        V6TransportEpoch? epoch,
+        DateTimeOffset? epochLivenessDeferralUtc)
+    {
+        if (!IsV6TransportEpochUnresolved(epoch) ||
+            epoch is null)
+        {
+            return lastPeerLivenessUtc;
+        }
+
+        var baseUtc = lastPeerLivenessUtc;
+        if (baseUtc is null ||
+            epoch.StartedUtc > baseUtc.Value)
+        {
+            baseUtc = epoch.StartedUtc;
+        }
+
+        if (epochLivenessDeferralUtc is not null &&
+            epochLivenessDeferralUtc.Value > baseUtc.Value)
+        {
+            baseUtc = epochLivenessDeferralUtc.Value;
+        }
+
+        return baseUtc;
     }
 
     private static TimeSpan ResolveOutboundV6PeerLivenessTimeout(OutboundTransferContext context)
@@ -159,6 +225,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferHeartbeatV6? heartbeat = null;
                 var timedOut = false;
                 DateTimeOffset? lastPeerLivenessUtc = null;
+                DateTimeOffset? livenessDeadlineBaseUtc = null;
                 TimeSpan peerLivenessTimeout;
                 lock (gate)
                 {
@@ -169,8 +236,12 @@ public sealed partial class SessionFileTransferService
 
                     peerLivenessTimeout = ResolveOutboundV6PeerLivenessTimeout(context);
                     lastPeerLivenessUtc = context.V6LastPeerLivenessUtc;
-                    timedOut = lastPeerLivenessUtc is not null &&
-                        now - lastPeerLivenessUtc.Value >= peerLivenessTimeout;
+                    livenessDeadlineBaseUtc = ResolveV6PeerLivenessDeadlineBaseUtc(
+                        lastPeerLivenessUtc,
+                        context.V6TransportEpoch,
+                        context.V6EpochLivenessDeferralUtc);
+                    timedOut = livenessDeadlineBaseUtc is not null &&
+                        now - livenessDeadlineBaseUtc.Value >= peerLivenessTimeout;
                     if (!timedOut)
                     {
                         heartbeat = new FileTransferHeartbeatV6
@@ -218,6 +289,7 @@ public sealed partial class SessionFileTransferService
                 FileTransferHeartbeatV6? heartbeat = null;
                 var timedOut = false;
                 DateTimeOffset? lastPeerLivenessUtc = null;
+                DateTimeOffset? livenessDeadlineBaseUtc = null;
                 TimeSpan peerLivenessTimeout;
                 lock (gate)
                 {
@@ -228,8 +300,12 @@ public sealed partial class SessionFileTransferService
 
                     peerLivenessTimeout = ResolveInboundV6PeerLivenessTimeout(context);
                     lastPeerLivenessUtc = context.V6LastPeerLivenessUtc;
-                    timedOut = lastPeerLivenessUtc is not null &&
-                        now - lastPeerLivenessUtc.Value >= peerLivenessTimeout;
+                    livenessDeadlineBaseUtc = ResolveV6PeerLivenessDeadlineBaseUtc(
+                        lastPeerLivenessUtc,
+                        context.V6TransportEpoch,
+                        context.V6EpochLivenessDeferralUtc);
+                    timedOut = livenessDeadlineBaseUtc is not null &&
+                        now - livenessDeadlineBaseUtc.Value >= peerLivenessTimeout;
                     if (!timedOut)
                     {
                         heartbeat = new FileTransferHeartbeatV6
@@ -262,12 +338,33 @@ public sealed partial class SessionFileTransferService
 
     private async Task<bool> TerminalizeOutboundForPeerLivenessTimeoutAsync(OutboundTransferContext context, DateTimeOffset? lastPeerLivenessUtc, TimeSpan peerLivenessTimeout)
     {
+        if (TryDeferOutboundV6PeerLivenessTimeoutForUnresolvedRegularNknEpoch(
+                context,
+                lastPeerLivenessUtc,
+                peerLivenessTimeout,
+                out var outboundEpochToProbe))
+        {
+            if (outboundEpochToProbe is not null)
+            {
+                await AnnounceAndProbeOutboundV6TransportEpochAsync(outboundEpochToProbe).ConfigureAwait(false);
+                SignalOutboundV4SenderPump(outboundEpochToProbe);
+            }
+
+            return false;
+        }
+
         if (TryDeferOutboundV6PeerLivenessTimeoutForRecovery(
                 context,
                 lastPeerLivenessUtc,
                 peerLivenessTimeout,
                 out var outboundToProbe))
         {
+            TryRequestFileTransferReceiveRecovery(new FileTransferReceiveRecoveryRequest(
+                context.SessionId,
+                context.TransferId,
+                FileTransferDirection.Outbound,
+                "peer_liveness_stale_receive_recovery"));
+
             if (outboundToProbe is not null)
             {
                 await AnnounceAndProbeOutboundV6TransportEpochAsync(outboundToProbe).ConfigureAwait(false);
@@ -288,6 +385,48 @@ public sealed partial class SessionFileTransferService
             notifyPeer: true,
             cancelReason: null,
             ct: CancellationToken.None).ConfigureAwait(false);
+        return true;
+    }
+
+    private bool TryDeferOutboundV6PeerLivenessTimeoutForUnresolvedRegularNknEpoch(
+        OutboundTransferContext context,
+        DateTimeOffset? lastPeerLivenessUtc,
+        TimeSpan peerLivenessTimeout,
+        out OutboundTransferContext? outboundToProbe)
+    {
+        outboundToProbe = null;
+        DateTimeOffset now;
+        int deferralCount;
+        long transportEpoch;
+        string epochState;
+        string handoffKind;
+        lock (gate)
+        {
+            if (!ReferenceEquals(outboundTransfer, context) ||
+                context.IsTerminal ||
+                !IsNegotiableDataProtocolVersion(context.NegotiatedDataProtocolVersion) ||
+                !ShouldDeferV6PeerLivenessTimeoutForUnresolvedRegularNknEpoch(context.V6TransportEpoch))
+            {
+                return false;
+            }
+
+            now = DateTimeOffset.UtcNow;
+            context.V6EpochLivenessDeferralCount++;
+            context.V6EpochLivenessDeferralUtc = now;
+            context.PullTransportResumeRequestPending = true;
+            context.V4SenderPumpLastWakeReason = "peer_liveness_epoch_waiting";
+            context.StatusMessage = GetV6TransportEpochStatus(context.V6TransportEpoch!);
+
+            transportEpoch = context.V6TransportEpoch!.EpochId;
+            epochState = FormatV6TransportEpochState(context.V6TransportEpoch.State);
+            handoffKind = FormatFileTransferTransportHandoffKind(context.V6TransportEpoch.Kind);
+            deferralCount = context.V6EpochLivenessDeferralCount;
+            outboundToProbe = context;
+        }
+
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_v6_heartbeat_timeout_deferred_for_epoch_waiting; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; last_peer_liveness_utc={FormatProtocolLogValue(lastPeerLivenessUtc?.ToString("O"))}; timeout_ms={(long)peerLivenessTimeout.TotalMilliseconds}; transport_epoch={transportEpoch}; epoch_state={FormatProtocolLogValue(epochState)}; handoff_kind={FormatProtocolLogValue(handoffKind)}; target_transport=regular_nkn; deferral_count={deferralCount}");
         return true;
     }
 
@@ -329,6 +468,8 @@ public sealed partial class SessionFileTransferService
 
             context.V6PeerLivenessRecoveryDeferralCount++;
             context.V6PeerLivenessRecoveryDeferredUtc = now;
+            context.V6EpochLivenessDeferralCount++;
+            context.V6EpochLivenessDeferralUtc = now;
             context.PullTransportResumeRequestPending = true;
             context.PullTransportRebindGeneration++;
             context.PullTransportRebindStartedUtc = now;
@@ -359,6 +500,20 @@ public sealed partial class SessionFileTransferService
 
     private async Task TerminalizeInboundForPeerLivenessTimeoutAsync(InboundTransferContext context, DateTimeOffset? lastPeerLivenessUtc, TimeSpan peerLivenessTimeout)
     {
+        if (TryDeferInboundV6PeerLivenessTimeoutForUnresolvedRegularNknEpoch(
+                context,
+                lastPeerLivenessUtc,
+                peerLivenessTimeout,
+                out var inboundToProbe))
+        {
+            if (inboundToProbe is not null)
+            {
+                await AnnounceAndProbeInboundV6TransportEpochAsync(inboundToProbe).ConfigureAwait(false);
+            }
+
+            return;
+        }
+
         LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_v6_heartbeat_timeout; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; last_peer_liveness_utc={FormatProtocolLogValue(lastPeerLivenessUtc?.ToString("O"))}; timeout_ms={(long)peerLivenessTimeout.TotalMilliseconds}");
@@ -373,6 +528,57 @@ public sealed partial class SessionFileTransferService
             ct: CancellationToken.None).ConfigureAwait(false);
     }
 
+    private bool TryDeferInboundV6PeerLivenessTimeoutForUnresolvedRegularNknEpoch(
+        InboundTransferContext context,
+        DateTimeOffset? lastPeerLivenessUtc,
+        TimeSpan peerLivenessTimeout,
+        out InboundTransferContext? inboundToProbe)
+    {
+        inboundToProbe = null;
+        DateTimeOffset now;
+        int deferralCount;
+        long transportEpoch;
+        string epochState;
+        string handoffKind;
+        int committedChunkIndex;
+        int highestObservedChunkIndex;
+        lock (gate)
+        {
+            if (!ReferenceEquals(inboundTransfer, context) ||
+                context.IsTerminal ||
+                !IsNegotiableDataProtocolVersion(context.NegotiatedDataProtocolVersion) ||
+                !ShouldDeferV6PeerLivenessTimeoutForUnresolvedRegularNknEpoch(context.V6TransportEpoch))
+            {
+                return false;
+            }
+
+            now = DateTimeOffset.UtcNow;
+            context.V6EpochLivenessDeferralCount++;
+            context.V6EpochLivenessDeferralUtc = now;
+            context.PullTransportResumeRequestPending = true;
+            context.V6LastReceiverStateSentUtc = null;
+            context.V6LastFrontierRequestSentUtc = null;
+            context.StatusMessage = GetV6TransportEpochStatus(context.V6TransportEpoch!);
+
+            transportEpoch = context.V6TransportEpoch!.EpochId;
+            epochState = FormatV6TransportEpochState(context.V6TransportEpoch.State);
+            handoffKind = FormatFileTransferTransportHandoffKind(context.V6TransportEpoch.Kind);
+            deferralCount = context.V6EpochLivenessDeferralCount;
+            committedChunkIndex = context.NextChunkIndex;
+            highestObservedChunkIndex = context.PullHighestReceivedChunkIndex;
+            inboundToProbe = context;
+        }
+
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_v6_heartbeat_timeout_deferred_for_epoch_waiting; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; last_peer_liveness_utc={FormatProtocolLogValue(lastPeerLivenessUtc?.ToString("O"))}; timeout_ms={(long)peerLivenessTimeout.TotalMilliseconds}; transport_epoch={transportEpoch}; epoch_state={FormatProtocolLogValue(epochState)}; handoff_kind={FormatProtocolLogValue(handoffKind)}; target_transport=regular_nkn; committed_chunk={committedChunkIndex}; highest_observed_chunk={highestObservedChunkIndex}; deferral_count={deferralCount}");
+        return true;
+    }
+
+    private static bool ShouldDeferV6PeerLivenessTimeoutForUnresolvedRegularNknEpoch(V6TransportEpoch? epoch)
+        => IsV6TransportEpochUnresolved(epoch) &&
+           epoch is { TargetTransport: FileTransferTransportKind.RegularNkn };
+
     private void TouchOutboundV6PeerLiveness(OutboundTransferContext context, string reason)
     {
         lock (gate)
@@ -385,6 +591,8 @@ public sealed partial class SessionFileTransferService
             var now = DateTimeOffset.UtcNow;
             context.V6LastPeerLivenessUtc = now;
             context.PullV4LastPeerFrameReceivedUtc = now;
+            context.V6EpochLivenessDeferralCount = 0;
+            context.V6EpochLivenessDeferralUtc = null;
             context.V6PeerLivenessRecoveryDeferralCount = 0;
             context.V6PeerLivenessRecoveryDeferredUtc = null;
         }
@@ -410,6 +618,8 @@ public sealed partial class SessionFileTransferService
             var now = DateTimeOffset.UtcNow;
             context.V6LastPeerLivenessUtc = now;
             context.PullV4LastPeerFrameReceivedUtc = now;
+            context.V6EpochLivenessDeferralCount = 0;
+            context.V6EpochLivenessDeferralUtc = null;
         }
     }
 

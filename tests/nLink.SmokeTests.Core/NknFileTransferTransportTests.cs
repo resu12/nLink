@@ -1966,6 +1966,103 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
 
     [Trait("Category", "Smoke")]
     [Fact]
+    public async Task NknTransport_FileTransferPauseControl_UsesBulkDuplicateWhenControlLaneTimesOut()
+    {
+        FakeNknClient.ResetNetwork();
+        try
+        {
+            using CancellationTokenSource cts = new CancellationTokenSource(TimeSpan.FromSeconds(8.0));
+            NknTransportOptions options = NknTransportOptions.Load();
+            FakeNknClient hostClient = new FakeNknClient("host.filetransfer.pause-bulk.address");
+            FakeNknClient helperClient = new FakeNknClient("helper.filetransfer.pause-bulk.address");
+            NknIdentity hostIdentity = new NknIdentity("host-pause-bulk-id", hostClient.Address);
+            NknIdentity helperIdentity = new NknIdentity("helper-pause-bulk-id", helperClient.Address);
+            using NknSignalingTransport host = new NknSignalingTransport(hostClient, options, hostIdentity);
+            using NknSignalingTransport helper = new NknSignalingTransport(helperClient, options, helperIdentity);
+            string sessionId = await CoreSmokeTestsBase.ApproveNknSessionAsync(host, helper, cts.Token, InviteCapabilities.Chat | InviteCapabilities.FileTransfer);
+            const string transferId = "transfer_nkn_pause_bulk_duplicate";
+
+            TaskCompletionSource<FileTransferOfferV2> offerReceived = new TaskCompletionSource<FileTransferOfferV2>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferAcceptV1> acceptReceived = new TaskCompletionSource<FileTransferAcceptV1>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileTransferPauseControlV6> pauseReceived = new TaskCompletionSource<FileTransferPauseControlV6>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            host.FileTransferOfferReceived += delegate (object? _, FileTransferOfferReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    offerReceived.TrySetResult(e.Message);
+                }
+            };
+            helper.FileTransferAcceptReceived += delegate (object? _, FileTransferAcceptReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    acceptReceived.TrySetResult(e.Message);
+                }
+            };
+            host.FileTransferPauseControlReceived += delegate (object? _, FileTransferPauseControlReceivedEventArgs e)
+            {
+                if (string.Equals(e.Message.TransferId, transferId, StringComparison.Ordinal))
+                {
+                    pauseReceived.TrySetResult(e.Message);
+                }
+            };
+
+            await helper.SendFileTransferOfferAsync(
+                new FileTransferOfferV2
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    FileName = "pause-bulk.bin",
+                    FileSizeBytes = 4096L,
+                    PreferredDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                },
+                cts.Token);
+            await offerReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            await host.SendFileTransferAcceptAsync(
+                new FileTransferAcceptV1
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    AcceptedDataProtocolVersion = FileTransferProtocol.ProtocolVersionV6,
+                },
+                cts.Token);
+            await acceptReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+
+            helperClient.BeforeSendAsync = async (destination, _, token) =>
+            {
+                if (string.Equals(destination, hostClient.ConnectedAddress, StringComparison.Ordinal))
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                }
+            };
+
+            using CancellationTokenSource pauseCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+            await helper.SendFileTransferPauseControlAsync(
+                new FileTransferPauseControlV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    Epoch = 1,
+                    Paused = true,
+                    Reason = "user_pause",
+                    TransportEpoch = 2,
+                },
+                pauseCts.Token);
+
+            FileTransferPauseControlV6 pause = await pauseReceived.Task.WaitAsync(TimeSpan.FromSeconds(3.0), cts.Token);
+            Assert.True(pause.Paused);
+            Assert.Equal("user_pause", pause.Reason);
+            Assert.Equal(2, pause.TransportEpoch);
+        }
+        finally
+        {
+            FakeNknClient.ResetNetwork();
+        }
+    }
+
+    [Trait("Category", "Smoke")]
+    [Fact]
     public async Task NknTransport_V6ControlComplete_ClearsSameDirectionBusyGuard()
     {
         FakeNknClient.ResetNetwork();

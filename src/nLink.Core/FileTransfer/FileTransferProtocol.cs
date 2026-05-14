@@ -67,8 +67,8 @@ public static class FileTransferProtocol
     public const int MaxChunkBatchSegmentsV5 = MaxChunkBatchSegmentsV4;
     public const int MaxChunkBatchRawBytesV5 = MaxChunkBatchRawBytesV4;
     public const int MaxSerializedChunkBatchPayloadBytesV5 = MaxSerializedChunkBatchPayloadBytesV4;
-    public const int MaxStateMissingRangesV6 = MaxStateMissingRangesV5;
-    public const int MaxStateMissingChunksV6 = 4096;
+    public const int MaxStateMissingRangesV6 = 128;
+    public const int MaxStateMissingChunksV6 = 8192;
     public const int MaxChunkCountV6 = MaxChunkCountV5;
     public const int MaxChunkBatchSegmentsV6 = 8;
     public const int MaxChunkBatchRawBytesV6 = MaxChunkBatchRawBytesV5;

@@ -1432,6 +1432,9 @@ public sealed partial class SessionFileTransferService
     private void ApplyOutboundV4PauseControl(OutboundTransferContext context, FileTransferPauseControlFrameV4 pauseControl)
     {
         SessionFileTransferSnapshot? snapshot = null;
+        var receivedEventName = pauseControl is FileTransferPauseControlFrameV6
+            ? "filetransfer_v6_pause_control_received"
+            : "filetransfer_v4_pause_control_received";
         lock (gate)
         {
             if (!ReferenceEquals(outboundTransfer, context) || context.IsTerminal)
@@ -1443,7 +1446,7 @@ public sealed partial class SessionFileTransferService
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v4_pause_control_received; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=Outbound; epoch={pauseControl.Epoch}; previous_epoch={context.PeerV4LastPauseControlEpoch}; stale=1; applied=0; peer_paused={(pauseControl.Paused ? 1 : 0)}");
+                    $"event={receivedEventName}; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=Outbound; epoch={pauseControl.Epoch}; previous_epoch={context.PeerV4LastPauseControlEpoch}; stale=1; applied=0; peer_paused={(pauseControl.Paused ? 1 : 0)}");
                 return;
             }
 
@@ -1454,7 +1457,7 @@ public sealed partial class SessionFileTransferService
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v4_pause_control_received; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=Outbound; epoch={pauseControl.Epoch}; previous_epoch={context.PeerV4LastPauseControlEpoch}; duplicate=1; applied=0; peer_paused={(pauseControl.Paused ? 1 : 0)}");
+                    $"event={receivedEventName}; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=Outbound; epoch={pauseControl.Epoch}; previous_epoch={context.PeerV4LastPauseControlEpoch}; duplicate=1; applied=0; peer_paused={(pauseControl.Paused ? 1 : 0)}");
                 return;
             }
 
@@ -1485,7 +1488,7 @@ public sealed partial class SessionFileTransferService
             snapshot = CreateSnapshotLocked();
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v4_pause_control_received; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=Outbound; epoch={pauseControl.Epoch}; previous_epoch={previousEpoch}; stale=0; applied=1; peer_paused={(pauseControl.Paused ? 1 : 0)}; pause_reason={FormatProtocolLogValue(normalizedReason ?? "(none)")}");
+                $"event={receivedEventName}; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=Outbound; epoch={pauseControl.Epoch}; previous_epoch={previousEpoch}; stale=0; applied=1; peer_paused={(pauseControl.Paused ? 1 : 0)}; pause_reason={FormatProtocolLogValue(normalizedReason ?? "(none)")}");
         }
 
         if (snapshot is not null)
@@ -3415,6 +3418,9 @@ public sealed partial class SessionFileTransferService
     {
         SessionFileTransferSnapshot? snapshot = null;
         var shouldFlushPausedProgress = false;
+        var receivedEventName = pauseControl is FileTransferPauseControlFrameV6
+            ? "filetransfer_v6_pause_control_received"
+            : "filetransfer_v4_pause_control_received";
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
@@ -3426,7 +3432,7 @@ public sealed partial class SessionFileTransferService
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v4_pause_control_received; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=Inbound; epoch={pauseControl.Epoch}; previous_epoch={context.PeerV4LastPauseControlEpoch}; stale=1; applied=0; peer_paused={(pauseControl.Paused ? 1 : 0)}");
+                    $"event={receivedEventName}; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=Inbound; epoch={pauseControl.Epoch}; previous_epoch={context.PeerV4LastPauseControlEpoch}; stale=1; applied=0; peer_paused={(pauseControl.Paused ? 1 : 0)}");
                 return false;
             }
 
@@ -3437,7 +3443,7 @@ public sealed partial class SessionFileTransferService
             {
                 LocalOperationalLog.Info(
                     "FileTransferService",
-                    $"event=filetransfer_v4_pause_control_received; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=Inbound; epoch={pauseControl.Epoch}; previous_epoch={context.PeerV4LastPauseControlEpoch}; duplicate=1; applied=0; peer_paused={(pauseControl.Paused ? 1 : 0)}");
+                    $"event={receivedEventName}; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=Inbound; epoch={pauseControl.Epoch}; previous_epoch={context.PeerV4LastPauseControlEpoch}; duplicate=1; applied=0; peer_paused={(pauseControl.Paused ? 1 : 0)}");
                 return false;
             }
 
@@ -3457,7 +3463,7 @@ public sealed partial class SessionFileTransferService
             snapshot = CreateSnapshotLocked();
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v4_pause_control_received; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=Inbound; epoch={pauseControl.Epoch}; previous_epoch={previousEpoch}; stale=0; applied=1; peer_paused={(pauseControl.Paused ? 1 : 0)}; pause_reason={FormatProtocolLogValue(normalizedReason ?? "(none)")}");
+                $"event={receivedEventName}; transfer_id={context.TransferId}; session_id={context.SessionId}; direction=Inbound; epoch={pauseControl.Epoch}; previous_epoch={previousEpoch}; stale=0; applied=1; peer_paused={(pauseControl.Paused ? 1 : 0)}; pause_reason={FormatProtocolLogValue(normalizedReason ?? "(none)")}");
         }
 
         if (snapshot is not null)

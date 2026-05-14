@@ -15,7 +15,7 @@ using NLink.Core.SessionSecurity;
 namespace NLink.Infra.Nkn;
 
 #pragma warning disable CS0067
-public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IAuthoritativeConnectedAddressSource
+public sealed partial class NknSignalingTransport : ISignalingTransport, IAddressTargetSignalingTransport, IInviteTargetSignalingTransport, IAddressHostSignalingTransport, ILocalPeerAddressSignalingTransport, IHelpRequestSignalingTransport, ISessionSecuritySignalingTransport, ITransportAccelerationStatus, ITransportAccelerationControl, IRemoteControlCapabilityProvider, IRemoteControlSignalingTransport, IScreenShareSignalingTransport, IScreenShareCursorOverlayCapabilityProvider, IScreenShareTransportBackpressureProbe, IScreenShareTransportPolicyController, IFileTransferSignalingTransport, IFileTransferChunkBudgetProvider, IFileTransferProtocolCapabilities, IFileTransferTransportProfileProvider, IFileTransferV6TransportEpochObserver, IFileTransferReceiveRecoveryController, IAuthoritativeConnectedAddressSource
 {
     private readonly record struct FileTransferV6TransportEpochKey(
         string SessionId,
@@ -87,6 +87,7 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private static readonly TimeSpan ScreenShareLaneRecentDropWindow = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan FileTransferFallbackUnprovenProbeDelay = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan FileTransferCancelEchoMinInterval = TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan FileTransferControlReceiveStallRecoveryBroadcastCooldown = TimeSpan.FromSeconds(30);
 
     private readonly NknTransportOptions options;
     private readonly NknIdentity identity;
@@ -139,6 +140,8 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     private long observedFileTransferV6NormalToTunaActivationRecoveredCount;
     private long observedFileTransferV6TransportEpochWaitingCount;
     private long observedFileTransferV6TransportEpochTerminalCount;
+    private FileTransferV6TransportEpochSnapshot? lastRecoveredFileTransferV6RegularNknEpoch;
+    private long fileTransferControlReceiveStallRecoveryBroadcastLastTick;
     private readonly SortedDictionary<long, InboundFileTransferDispatchWork> pendingInboundFileTransferControlDispatch = new();
     private readonly NknLifecycleChannel lifecycleChannel;
     private readonly NknSecureControlChannel controlChannel;
@@ -2409,6 +2412,38 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             var reason = string.IsNullOrWhiteSpace(e.ExitReasonText)
                 ? "control_receive_stalled_max_restarts"
                 : SanitizeLogToken(e.ExitReasonText);
+            if (HasActiveFileTransferDataSessionsForRecovery())
+            {
+                if (ShouldSuppressFileTransferControlReceiveStallRecoveryBroadcast(
+                        reason,
+                        out var suppressReason,
+                        out var cooldownRemainingMs))
+                {
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        $"event=filetransfer_control_receive_stall_recovery_broadcast_suppressed; session_id={sessionId}; reason={reason}; suppress_reason={suppressReason}; cooldown_remaining_ms={cooldownRemainingMs}");
+                    return;
+                }
+
+                MarkFileTransferControlReceiveStallRecoveryBroadcasted();
+                LocalOperationalLog.Warn(
+                    "NKN.Tuna",
+                    $"event=filetransfer_control_receive_stall_recovery_broadcast; session_id={sessionId}; reason={reason}; action=regular_nkn_recovery_epoch");
+                MarkFileTransferFallbackNknProofPending(
+                    reason: reason,
+                    sessionId: currentSessionSecurityState.SessionId?.Value,
+                    lanes: NknAccelerationLaneKind.File);
+                SetFileTransferDataSessionsAvailability(
+                    isAvailable: true,
+                    reason: reason,
+                    requiresResumeRequest: true,
+                    handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+                    targetTransport: FileTransferTransportKind.RegularNkn);
+                ScheduleFileTransferFallbackNknProbeIfPending("receive_stall_recovery_exhausted");
+                BridgeLifecycle?.Invoke(this, e);
+                return;
+            }
+
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event=filetransfer_control_receive_stall_terminal_broadcast; session_id={sessionId}; reason={reason}");

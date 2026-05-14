@@ -73,14 +73,13 @@ const BULK_QUEUE_TRANSIENT_RETRY_DELAY_MS = 150;
 const DEFAULT_BULK_SEND_CONCURRENCY = 4;
 const MIN_BULK_SEND_CONCURRENCY = 1;
 const MAX_BULK_SEND_CONCURRENCY = 8;
-const DEFAULT_BULK_SEND_MODE = 'fanout';
+const DEFAULT_BULK_SEND_MODE = 'round_robin';
 const BULK_SEND_MODE_FANOUT = 'fanout';
 const BULK_SEND_MODE_ROUND_ROBIN = 'round_robin';
 const BULK_SEND_MODE_SINGLE = 'single';
 const BULK_SEND_MODE_REDUNDANT2 = 'redundant2';
 const DEFAULT_RPC_SERVERS = [
   'https://mainnet-rpc-node-0001.nkn.org/mainnet/api/wallet',
-  'https://seed.nkn.org:30003',
   'http://seed.nkn.org:30003'
 ];
 const SUPPORTED_CHANNELS = ['control', 'media', 'bulk'];
@@ -2157,14 +2156,36 @@ function decodeSeed(seedHex, seedBase64) {
 }
 
 function parseRpcCandidates(seedRpc) {
-  if (typeof seedRpc === 'string' && seedRpc.trim().length > 0) {
-    return seedRpc
+  const candidates = typeof seedRpc === 'string' && seedRpc.trim().length > 0
+    ? seedRpc
       .split(/[;,]/g)
       .map((x) => x.trim())
-      .filter((x) => x.length > 0);
+      .filter((x) => x.length > 0)
+    : [...DEFAULT_RPC_SERVERS];
+
+  const normalized = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const rpc = normalizeRpcCandidate(candidate);
+    const key = rpc.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    normalized.push(rpc);
   }
 
-  return [...DEFAULT_RPC_SERVERS];
+  return normalized;
+}
+
+function normalizeRpcCandidate(candidate) {
+  const rpc = typeof candidate === 'string' ? candidate.trim() : '';
+  if (/^https:\/\/seed\.nkn\.org:30003\/?$/i.test(rpc)) {
+    return 'http://seed.nkn.org:30003';
+  }
+
+  return rpc;
 }
 
 function rotateCandidates(candidates) {

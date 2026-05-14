@@ -340,12 +340,14 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
-    public async Task V4Sender_ControlReceiveStallExhausted_FailsFileTransferWithoutSessionDisconnect()
+    public async Task V4Sender_ControlReceiveStallExhausted_StartsV6RegularNknRecoveryWithoutSessionDisconnect()
     {
         const string transferId = "transfer_v4_sender_control_stall_exhausted";
-        var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
+        var logStart = GetOperationalLogLength();
+        var payload = Enumerable.Range(0, 5_000_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport("session_v4_sender_control_stall_exhausted");
         using var receiverTransport = new LoopbackFileTransferTransport("session_v4_sender_control_stall_exhausted");
+        senderTransport.DataSessionSendDelayMs = 5;
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         using var receiver = new SessionFileTransferService();
@@ -366,17 +368,21 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         senderTransport.SetLocalDataSessionsUnavailableForTests("control_receive_stalled_max_restarts");
 
-        await WaitUntilAsync(() => sender.Snapshot.Outbound?.State == FileTransferTransferState.Failed, timeoutMs: 5000);
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_control_channel_stalled_recovery; direction=outbound", StringComparison.Ordinal),
+            timeoutMs: 5000);
+        await WaitUntilAsync(
+            () => senderTransport.SentTransportEpochs.Any(static epoch =>
+                epoch.HandoffKind == "regular_nkn_recovery" &&
+                epoch.TargetTransport == "regular_nkn"),
+            timeoutMs: 5000);
 
         var outbound = sender.Snapshot.Outbound;
         Assert.NotNull(outbound);
-        Assert.Equal(FileTransferResultCodes.ControlChannelStalled, outbound.ErrorCode);
-        Assert.Contains("control channel stalled", outbound.StatusMessage, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains(senderTransport.SentErrors, static error => error.ErrorCode == FileTransferResultCodes.ControlChannelStalled);
-        await WaitUntilAsync(
-            () => receiver.Snapshot.Inbound?.State == FileTransferTransferState.Failed &&
-                  receiver.Snapshot.Inbound?.ErrorCode == FileTransferResultCodes.ControlChannelStalled,
-            timeoutMs: 5000);
+        Assert.NotEqual(FileTransferTransferState.Failed, outbound!.State);
+        Assert.NotEqual(FileTransferResultCodes.ControlChannelStalled, outbound.ErrorCode);
+        Assert.DoesNotContain(senderTransport.SentErrors, static error => error.ErrorCode == FileTransferResultCodes.ControlChannelStalled);
+        Assert.NotEqual(FileTransferTransferState.Failed, receiver.Snapshot.Inbound?.State);
     }
 
     [Fact]
