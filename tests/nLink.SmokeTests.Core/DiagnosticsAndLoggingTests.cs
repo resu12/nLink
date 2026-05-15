@@ -528,6 +528,45 @@ public void TunaStatusPresentationMapper_ActiveTransportPreservesLocalPayerSigna
     Assert.False(dialer.IsLocalPayer);
 }
 
+[Fact]
+public void TunaStatusPresentationMapper_ActiveFileFallbackShowsRegularNknPath()
+{
+    var payer = TunaStatusPresentationMapper.FromState(
+        transportActive: true,
+        transportReason: "paid_listener_active_file_regular_nkn_fallback",
+        runtimeStatus: "listener_ready",
+        sessionUnlockOn: true);
+    var dialer = TunaStatusPresentationMapper.FromState(
+        transportActive: true,
+        transportReason: "free_dialer_active_file_regular_nkn_fallback",
+        runtimeStatus: "peer_connected",
+        sessionUnlockOn: true);
+
+    Assert.Equal("Tuna is active for the session, but file transfer is using regular NKN. This computer is paying as the Tuna listener.", payer.Text);
+    Assert.True(payer.IsLocalPayer);
+    Assert.False(payer.IsConnecting);
+    Assert.Equal("Tuna is active for the session, but file transfer is using regular NKN.", dialer.Text);
+    Assert.False(dialer.IsLocalPayer);
+    Assert.False(dialer.IsConnecting);
+}
+
+[Fact]
+public async Task TunaSidecarClient_TrySendFalseLogsRejectReason()
+{
+    var logStart = LocalOperationalLog.GetRecentLogText().Length;
+    using var client = new NknTunaSidecarClient(NknAccelerationLaneKind.File, queueCapacity: 16);
+
+    var sent = await client.TrySendAsync(NknBridgeChannel.Bulk, [1, 2, 3], CancellationToken.None);
+
+    Assert.False(sent);
+    var logText = LocalOperationalLog.GetRecentLogText();
+    var tail = logStart <= logText.Length ? logText[logStart..] : logText;
+    Assert.Contains("event=tuna_sidecar_try_send_returned_false", tail, StringComparison.Ordinal);
+    Assert.Contains("reason=unavailable", tail, StringComparison.Ordinal);
+    Assert.Contains("channel=bulk", tail, StringComparison.Ordinal);
+    Assert.Contains("payload_bytes=3", tail, StringComparison.Ordinal);
+}
+
 [Theory]
 [InlineData("waiting_for_answer")]
 [InlineData("dialer_starting")]

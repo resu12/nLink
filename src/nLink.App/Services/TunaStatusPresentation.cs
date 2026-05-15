@@ -26,10 +26,25 @@ internal static class TunaStatusPresentationMapper
                     IsLocalPayer: true);
             }
 
+            if (activeToken == "paid_listener_active_file_regular_nkn_fallback")
+            {
+                return new TunaStatusPresentation(
+                    "Tuna is active for the session, but file transfer is using regular NKN. This computer is paying as the Tuna listener.",
+                    IsConnecting: false,
+                    IsLocalPayer: true);
+            }
+
             if (activeToken == "free_dialer_active")
             {
                 return new TunaStatusPresentation(
                     "Tuna is active and the other computer is paying.",
+                    IsConnecting: false);
+            }
+
+            if (activeToken == "free_dialer_active_file_regular_nkn_fallback")
+            {
+                return new TunaStatusPresentation(
+                    "Tuna is active for the session, but file transfer is using regular NKN.",
                     IsConnecting: false);
             }
 
@@ -62,6 +77,10 @@ internal static class TunaStatusPresentationMapper
                 => new TunaStatusPresentation("Tuna is active and the other computer is paying.", false),
             "paid_listener_active"
                 => new TunaStatusPresentation("Tuna is active. This computer is paying as the Tuna listener.", false, true),
+            "free_dialer_active_file_regular_nkn_fallback"
+                => new TunaStatusPresentation("Tuna is active for the session, but file transfer is using regular NKN.", false),
+            "paid_listener_active_file_regular_nkn_fallback"
+                => new TunaStatusPresentation("Tuna is active for the session, but file transfer is using regular NKN. This computer is paying as the Tuna listener.", false, true),
             "suppressed_by_peer_payer" or "payer_yield_to_helpee" or "listener_stopped_payer_switch_to_dialer" or "listener_stopped_payer_yield_to_helpee"
                 => new TunaStatusPresentation("The other computer was selected to pay for Tuna. This computer will dial for free.", true),
             "renegotiating_after_user_unlock"

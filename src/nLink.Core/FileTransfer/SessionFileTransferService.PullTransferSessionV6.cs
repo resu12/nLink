@@ -1225,6 +1225,7 @@ public sealed partial class SessionFileTransferService
         var suppressedNormalTailChunks = 0;
         var deferredNormalRefillChunks = 0;
         var bypassedNormalRefillChunks = 0;
+        var bypassedPriorityResendGateChunks = 0;
         foreach (var range in NormalizeV6RequestRanges(ranges, context.ChunkCount))
         {
             var endExclusive = range.StartChunkIndex + range.ChunkCount;
@@ -1265,11 +1266,20 @@ public sealed partial class SessionFileTransferService
                     continue;
                 }
 
-                if (context.SentAwaitingAck.ContainsKey(chunkIndex) &&
+                var chunkSentAwaitingAck = context.SentAwaitingAck.ContainsKey(chunkIndex);
+                var bypassPriorityResendGate = chunkSentAwaitingAck &&
+                    ShouldBypassOutboundV6ExplicitFrontierResendGateLocked(context, metadata);
+                if (chunkSentAwaitingAck &&
+                    !bypassPriorityResendGate &&
                     ShouldSuppressOutboundV6RequestedChunkResendLocked(context, chunkIndex, metadata, now))
                 {
                     context.PullResendSuppressedCountRecent++;
                     continue;
+                }
+
+                if (bypassPriorityResendGate)
+                {
+                    bypassedPriorityResendGateChunks++;
                 }
 
                 if (metadata.Priority)
@@ -1313,6 +1323,13 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v6_normal_refill_near_frontier_resend_bypassed; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; request_key={FormatProtocolLogValue(metadata.RequestKey)}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; bypass_end_exclusive={nearFrontierResendBypassEndExclusive}; bypassed_chunk_count={bypassedNormalRefillChunks}; pending_ahead_chunk_count={normalPendingAheadCount}; refill_low_watermark_chunks={normalRefillLowWatermark}; sent_awaiting_ack_count={context.SentAwaitingAck.Count(pair => pair.Key >= context.RemoteNextExpectedChunkIndex)}; in_flight_send_count={context.V6ChunkSendsInFlight.Count(pair => pair.Key >= context.RemoteNextExpectedChunkIndex)}");
+        }
+
+        if (bypassedPriorityResendGateChunks > 0)
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v6_frontier_resend_gate_bypassed; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; request_key={FormatProtocolLogValue(metadata.RequestKey)}; transport_epoch={metadata.TransportEpoch}; repair_request_id={FormatProtocolLogValue(metadata.RepairRequestId ?? "(none)")}; recovery_mode={FormatProtocolLogValue(metadata.RecoveryMode ?? "(none)")}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; bypassed_chunk_count={bypassedPriorityResendGateChunks}; sent_awaiting_ack_count={context.SentAwaitingAck.Count(pair => pair.Key >= context.RemoteNextExpectedChunkIndex)}; in_flight_send_count={context.V6ChunkSendsInFlight.Count(pair => pair.Key >= context.RemoteNextExpectedChunkIndex)}");
         }
     }
 
@@ -1499,6 +1516,40 @@ public sealed partial class SessionFileTransferService
             : RepairResendIntervalMs;
 
         return now - lastSentUtc < TimeSpan.FromMilliseconds(minimumIntervalMs);
+    }
+
+    private static bool ShouldBypassOutboundV6ExplicitFrontierResendGateLocked(
+        OutboundTransferContext context,
+        V6OutboundChunkRequestMetadata metadata)
+    {
+        if (!metadata.Priority ||
+            string.IsNullOrWhiteSpace(metadata.RepairRequestId) ||
+            !string.Equals(metadata.PriorityName, "frontier", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var recoveryMode = NormalizeReason(metadata.RecoveryMode);
+        if (metadata.TransportEpoch <= 0)
+        {
+            return string.IsNullOrWhiteSpace(recoveryMode) ||
+                   recoveryMode is "regular_nkn_frontier_stall" or "regular_nkn_frontier_stall_control_bulk";
+        }
+
+        if (context.V6TransportEpoch is { } epoch &&
+            epoch.EpochId == metadata.TransportEpoch &&
+            epoch.TargetTransport == FileTransferTransportKind.RegularNkn)
+        {
+            return true;
+        }
+
+        if (IsRecoveredOutboundV6RegularNknEpoch(context, metadata.TransportEpoch) ||
+            IsRecoveredOutboundV6RegularNknFrontierRepairEpoch(context, metadata.TransportEpoch))
+        {
+            return true;
+        }
+
+        return recoveryMode is "regular_nkn_frontier_stall" or "regular_nkn_frontier_stall_control_bulk";
     }
 
     private static bool ShouldBypassOutboundV6NormalRefillDeferralForNearFrontierResendLocked(

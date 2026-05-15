@@ -737,6 +737,8 @@ public sealed partial class NknSignalingTransport
                 "NKN.Tuna",
                 $"event=tuna_mixed_handoff_summary; session_id={state.SessionId}; fallback_epoch={state.Epoch}; reason={state.Reason}; completed_reason={SanitizeLogToken(reason)}; elapsed_ms={elapsedMs}; screen_state={FormatTunaFallbackLaneState(state.ScreenState)}; file_state={FormatTunaFallbackLaneState(state.FileState)}; screen_frames_applied={state.ScreenFramesApplied}; file_nkn_frames_sent={state.FileNknFramesSent}; file_nkn_frames_received={state.FileNknFramesReceived}; control_nkn_messages_sent={state.ControlNknMessagesSent}");
         }
+
+        NotifyTransportAccelerationStateChanged(reason);
     }
 
     private void MarkTunaFallbackAccelerationUsedAfterProof()
@@ -1328,6 +1330,7 @@ public sealed partial class NknSignalingTransport
             LogMixedFallbackLaneState(snapshot, lane == NknAccelerationLaneKind.Screen
                 ? "screen_" + FormatTunaFallbackLaneState(state)
                 : "file_" + FormatTunaFallbackLaneState(state));
+            NotifyTransportAccelerationStateChanged(reason);
         }
     }
 
@@ -3030,8 +3033,9 @@ public sealed partial class NknSignalingTransport
             MsgType.FileTransferDataFrame when channel == NknBridgeChannel.Bulk => NknAccelerationLaneKind.File,
             _ => NknAccelerationLaneKind.None,
         };
+        var laneClient = accelerationLane;
         if (lane == NknAccelerationLaneKind.None ||
-            accelerationLane is null)
+            laneClient is null)
         {
             return false;
         }
@@ -3061,7 +3065,7 @@ public sealed partial class NknSignalingTransport
 
         try
         {
-            var sent = await accelerationLane.TrySendAsync(channel, envelopeBytes, ct).ConfigureAwait(false);
+            var sent = await laneClient.TrySendAsync(channel, envelopeBytes, ct).ConfigureAwait(false);
             if (sent)
             {
                 if (!IsAccelerationNegotiatedAndHealthy())
@@ -3084,6 +3088,7 @@ public sealed partial class NknSignalingTransport
                 return true;
             }
 
+            LogAcceleratedEnvelopeTrySendRejected(messageType, channel, lane, envelopeBytes, laneClient.GetDiagnosticsSnapshot());
             if (TryCaptureAccelerationNegotiation(out var rejectedSessionId, out var rejectedLanes))
             {
                 StartTunaFallbackProofAndRebindIfNeeded("tuna_send_rejected", rejectedSessionId, rejectedLanes);
@@ -3101,6 +3106,33 @@ public sealed partial class NknSignalingTransport
         }
 
         return false;
+    }
+
+    private static void LogAcceleratedEnvelopeTrySendRejected(
+        MsgType messageType,
+        NknBridgeChannel channel,
+        NknAccelerationLaneKind lane,
+        byte[] envelopeBytes,
+        NknAccelerationLaneDiagnostics diagnostics)
+    {
+        LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            "event=tuna_accelerated_envelope_try_send_returned_false" +
+            $"; message_type={MapEnvelopeTypeForDiagnostics(messageType)}" +
+            $"; channel={MapBridgeChannel(channel)}" +
+            $"; lane={FormatAccelerationLanesForLog(lane)}" +
+            $"; payload_bytes={Math.Max(0, envelopeBytes?.Length ?? 0)}" +
+            $"; lane_available={(diagnostics.IsAvailable ? 1 : 0)}" +
+            $"; last_unavailable_reason={SanitizeLogToken(diagnostics.LastUnavailableReason)}" +
+            $"; terminal_sidecar_reason={SanitizeLogToken(diagnostics.TerminalSidecarReason)}" +
+            $"; send_rejected={diagnostics.SendRejected}" +
+            $"; queue_overflow={diagnostics.QueueOverflow}" +
+            $"; control_accepted={diagnostics.ControlFramesAccepted}" +
+            $"; control_written={diagnostics.ControlFramesWritten}" +
+            $"; media_accepted={diagnostics.MediaFramesAccepted}" +
+            $"; media_written={diagnostics.MediaFramesWritten}" +
+            $"; bulk_accepted={diagnostics.BulkFramesAccepted}" +
+            $"; bulk_written={diagnostics.BulkFramesWritten}");
     }
 
     private bool ShouldSuppressAcceleratedFileTransferBulkDuringRegularNknFallback(NknAccelerationLaneKind lane)
@@ -3335,9 +3367,36 @@ public sealed partial class NknSignalingTransport
     }
 
     private string GetActiveAccelerationStatusReason()
-        => accelerationLane is INknTunaAccelerationSession { IsLocalPaidListenerActive: true }
+    {
+        var isLocalPaidListener = accelerationLane is INknTunaAccelerationSession { IsLocalPaidListenerActive: true };
+        if (IsFileTransferUsingRegularNknFallbackForCurrentSession())
+        {
+            return isLocalPaidListener
+                ? "paid_listener_active_file_regular_nkn_fallback"
+                : "free_dialer_active_file_regular_nkn_fallback";
+        }
+
+        return isLocalPaidListener
             ? "paid_listener_active"
             : "free_dialer_active";
+    }
+
+    private bool IsFileTransferUsingRegularNknFallbackForCurrentSession()
+    {
+        var currentSessionId = currentSessionSecurityState.SessionId?.Value;
+        if (string.IsNullOrWhiteSpace(currentSessionId))
+        {
+            return false;
+        }
+
+        lock (accelerationGate)
+        {
+            return tunaFallbackProofState is { } state &&
+                   string.Equals(state.SessionId, currentSessionId, StringComparison.Ordinal) &&
+                   (state.Lanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
+                   state.FileState != TunaFallbackLaneState.None;
+        }
+    }
 
     private bool IsAccelerationUserStoppedForCurrentSession()
     {

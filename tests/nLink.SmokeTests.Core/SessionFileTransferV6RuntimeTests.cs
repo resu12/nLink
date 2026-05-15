@@ -1588,6 +1588,78 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
     }
 
     [Fact]
+    public async Task V6Sender_ExplicitRegularNknFrontierRequestBypassesRecentSentGate()
+    {
+        const string transferId = "transfer_v6_sender_regular_nkn_frontier_recent";
+        const string sessionId = "session_v6_sender_regular_nkn_frontier_recent";
+        const string repairRequestId = "frontier:normal-nkn:recent";
+        var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+
+        var receiverSession = await StartManualOutboundV6SenderAsync(
+            sender,
+            senderTransport,
+            receiverTransport,
+            transferId,
+            payload);
+
+        await receiverSession.SendAsync(
+            new FileTransferReceiverStateFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                Epoch = 1,
+                ContiguousCommittedChunkIndex = 0,
+                DurableReceivedHighestChunkIndex = -1,
+                CreditUntilChunkIndexExclusive = 12,
+                MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 0, ChunkCount = 12 }],
+                BytesCommitted = 0,
+            },
+            CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>()
+                .Where(static batch => batch.Priority is null)
+                .Sum(static batch => batch.ChunkCount) >= 12,
+            timeoutMs: 5000);
+        await Task.Delay(200);
+        var sentAfterInitialWindow = senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Count();
+
+        await receiverSession.SendAsync(
+            new FileTransferFrontierRequestFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                TransportEpoch = 0,
+                RepairRequestId = repairRequestId,
+                MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 0, ChunkCount = 12 }],
+                Priority = "frontier",
+                RecoveryMode = "regular_nkn_frontier_stall_control_bulk",
+            },
+            CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>()
+                .Skip(sentAfterInitialWindow)
+                .Any(batch => batch.RepairRequestId == repairRequestId),
+            timeoutMs: 5000);
+
+        var repairBatches = senderTransport.SentDataFrames
+            .OfType<FileTransferChunkBatchFrameV6>()
+            .Skip(sentAfterInitialWindow)
+            .Where(batch => batch.RepairRequestId == repairRequestId)
+            .ToList();
+        Assert.NotEmpty(repairBatches);
+        Assert.Contains(repairBatches, static batch =>
+            batch.StartChunkIndex == 0 &&
+            batch.Priority == "frontier");
+    }
+
+    [Fact]
     public async Task V6Sender_SuppressesEpochFrontierRetryUntilV6ResendGate()
     {
         const string transferId = "transfer_v6_sender_epoch_frontier_resend_gate";

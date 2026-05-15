@@ -386,12 +386,39 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
     public Task<bool> TrySendAsync(NknBridgeChannel lane, byte[] envelopeBytes, CancellationToken ct)
     {
         NknTunaSidecarClient? current;
+        NknAccelerationLaneDiagnostics diagnostics;
+        ClientRole role;
         lock (gate)
         {
             current = client;
+            diagnostics = current?.GetDiagnosticsSnapshot() ?? lastDiagnostics;
+            role = clientRole;
         }
 
-        return current is null ? Task.FromResult(false) : current.TrySendAsync(lane, envelopeBytes, ct);
+        if (current is null)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                "event=tuna_acceleration_lane_try_send_returned_false" +
+                "; reason=client_missing" +
+                $"; role={FormatClientRole(role)}" +
+                $"; channel={MapBridgeChannel(lane)}" +
+                $"; payload_bytes={Math.Max(0, envelopeBytes?.Length ?? 0)}" +
+                $"; last_available={FormatBool(diagnostics.IsAvailable)}" +
+                $"; last_unavailable_reason={SanitizeSidecarReason(diagnostics.LastUnavailableReason) ?? "none"}" +
+                $"; terminal_sidecar_reason={SanitizeSidecarReason(diagnostics.TerminalSidecarReason) ?? "none"}" +
+                $"; send_rejected={diagnostics.SendRejected}" +
+                $"; queue_overflow={diagnostics.QueueOverflow}" +
+                $"; bulk_accepted={diagnostics.BulkFramesAccepted}" +
+                $"; bulk_written={diagnostics.BulkFramesWritten}" +
+                $"; media_accepted={diagnostics.MediaFramesAccepted}" +
+                $"; media_written={diagnostics.MediaFramesWritten}" +
+                $"; control_accepted={diagnostics.ControlFramesAccepted}" +
+                $"; control_written={diagnostics.ControlFramesWritten}");
+            return Task.FromResult(false);
+        }
+
+        return current.TrySendAsync(lane, envelopeBytes, ct);
     }
 
     public Task StopAsync(string reason, CancellationToken ct)
@@ -707,6 +734,22 @@ internal sealed class NknTunaAccelerationLane : INknTunaAccelerationSession
 
     private static string FormatBool(bool value)
         => value ? "true" : "false";
+
+    private static string FormatClientRole(ClientRole role)
+        => role switch
+        {
+            ClientRole.Listener => "listener",
+            ClientRole.Dialer => "dialer",
+            _ => "none",
+        };
+
+    private static string MapBridgeChannel(NknBridgeChannel channel)
+        => channel switch
+        {
+            NknBridgeChannel.Media => "media",
+            NknBridgeChannel.Bulk => "bulk",
+            _ => "control",
+        };
 
     private static bool IsTerminalSidecarEvent(string eventName)
         => string.Equals(eventName, "tuna_bridge_terminal", StringComparison.Ordinal) ||

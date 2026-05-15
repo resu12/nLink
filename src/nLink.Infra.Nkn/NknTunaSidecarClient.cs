@@ -128,9 +128,31 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
 
     public async Task<bool> TrySendAsync(NknBridgeChannel lane, byte[] envelopeBytes, CancellationToken ct)
     {
-        if (!IsAvailable || ct.IsCancellationRequested || envelopeBytes is null || envelopeBytes.Length == 0)
+        if (envelopeBytes is null)
         {
-            Interlocked.Increment(ref sendRejected);
+            var rejected = Interlocked.Increment(ref sendRejected);
+            LogTrySendRejected(lane, 0, "null_payload", rejected);
+            return false;
+        }
+
+        if (envelopeBytes.Length == 0)
+        {
+            var rejected = Interlocked.Increment(ref sendRejected);
+            LogTrySendRejected(lane, 0, "empty_payload", rejected);
+            return false;
+        }
+
+        if (ct.IsCancellationRequested)
+        {
+            var rejected = Interlocked.Increment(ref sendRejected);
+            LogTrySendRejected(lane, envelopeBytes.Length, "canceled", rejected);
+            return false;
+        }
+
+        if (!IsAvailable)
+        {
+            var rejected = Interlocked.Increment(ref sendRejected);
+            LogTrySendRejected(lane, envelopeBytes.Length, "unavailable", rejected);
             return false;
         }
 
@@ -143,16 +165,18 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
 
         if (!await TryQueueFrameAsync(frame, GetQueueWriteTimeoutMs(sidecarLane), ct).ConfigureAwait(false))
         {
-            Interlocked.Increment(ref sendRejected);
+            var rejected = Interlocked.Increment(ref sendRejected);
             Interlocked.Increment(ref queueOverflow);
             if (sidecarLane == NknTunaSidecarLane.Media)
             {
+                LogTrySendRejected(lane, envelopeBytes.Length, "media_queue_timeout", rejected);
                 LocalOperationalLog.Warn(
                     "NKN.Tuna",
                     $"event=tuna_sidecar_queue_backpressure; channel={MapSidecarLane(sidecarLane)}; payload_bytes={envelopeBytes.Length}; reason=media_queue_timeout; action=nkn_frame_fallback");
                 return false;
             }
 
+            LogTrySendRejected(lane, envelopeBytes.Length, "queue_overflow", rejected);
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event=tuna_sidecar_queue_overflow; channel={MapSidecarLane(sidecarLane)}; payload_bytes={envelopeBytes.Length}; reason=queue_overflow");
@@ -163,6 +187,33 @@ internal sealed class NknTunaSidecarClient : INknAccelerationLane
 
         IncrementAccepted(sidecarLane);
         return true;
+    }
+
+    private void LogTrySendRejected(NknBridgeChannel lane, int payloadBytes, string reason, long rejectedCount)
+    {
+        if (!ShouldTraceFrame(rejectedCount))
+        {
+            return;
+        }
+
+        var sidecarLane = NknAccelerationLaneCodec.ToSidecarLane(lane);
+        LocalOperationalLog.Warn(
+            "NKN.Tuna",
+            "event=tuna_sidecar_try_send_returned_false" +
+            $"; reason={SanitizeLogToken(reason)}" +
+            $"; channel={MapSidecarLane(sidecarLane)}" +
+            $"; payload_bytes={Math.Max(0, payloadBytes)}" +
+            $"; available={FormatBool(IsAvailable)}" +
+            $"; send_rejected={rejectedCount}" +
+            $"; queue_overflow={Volatile.Read(ref queueOverflow)}" +
+            $"; last_unavailable_reason={SanitizeLogToken(Volatile.Read(ref lastUnavailableReason))}" +
+            $"; terminal_sidecar_reason={SanitizeLogToken(Volatile.Read(ref terminalSidecarReason))}" +
+            $"; control_accepted={Volatile.Read(ref controlFramesAccepted)}" +
+            $"; control_written={Volatile.Read(ref controlFramesWritten)}" +
+            $"; media_accepted={Volatile.Read(ref mediaFramesAccepted)}" +
+            $"; media_written={Volatile.Read(ref mediaFramesWritten)}" +
+            $"; bulk_accepted={Volatile.Read(ref bulkFramesAccepted)}" +
+            $"; bulk_written={Volatile.Read(ref bulkFramesWritten)}");
     }
 
     internal void MarkUnavailableFromSidecarEvent(string reason)
