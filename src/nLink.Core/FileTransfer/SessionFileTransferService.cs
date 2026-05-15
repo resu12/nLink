@@ -250,19 +250,28 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V4PostFallbackFrontierBackfillStep3AfterCommittedChunks = 8;
     private const int V4FrontierTailRetryChunks = V4MaxBatchSegmentsDefault;
     private const int V4FileOnlyFrontierTailRetryChunks = 12;
-    private const int V6ReceiverRequestWindowChunks = 2048;
-    private const int V6RecoveredRegularNknReceiverRequestWindowChunks = 1024;
-    private const int V6RecoveredRegularNknFrontierStalledReceiverRequestWindowChunks = 8;
-    private const int V6FrontierStalledReceiverRequestWindowChunks = 8;
-    private const int V6FrontierRequestChunks = 1;
-    private const int V6FrontierStalledPriorityBurstChunks = 8;
-    private const int V6RecoveredRegularNknFrontierPriorityBurstChunks = 12;
+    private const int V6ReceiverRequestWindowChunks = 768;
+    private const int V6RecoveredRegularNknReceiverRequestWindowChunks = 512;
+    private const int V6RecoveredRegularNknFrontierStalledReceiverRequestWindowChunks = 384;
+    private const int V6FrontierStalledReceiverRequestWindowChunks = 256;
+    private const int V6FrontierRequestChunks = 12;
+    private const int V6EpochFrontierRequestChunks = 1;
+    private const int V6SparseSeekableRollingAheadChunks = 2048;
+    private const int V6SparseSeekableRequestBudgetChunks = 1536;
+    private const int V6SparseSeekableFrontierStalledRollingAheadChunks = 256;
+    private const int V6SparseSeekableFrontierStalledRequestBudgetChunks = 256;
+    private const int V6RegularNknNormalSendAheadLimitChunks = 96;
+    private const int V6RegularNknNormalRefillLowWatermarkChunks = 48;
+    private const int V6TunaNormalSendAheadLimitChunks = 1536;
+    private const int V6FrontierStalledPriorityBurstChunks = 16;
+    private const int V6RecoveredRegularNknFrontierPriorityBurstChunks = 24;
     private const int V6NormalReceiverStateResendGateMs = 3500;
     private const int V6RecoveredFrontierResendGateMs = 1500;
     private const int V6EpochFrontierResendGateMs = 1500;
     private const int V6TunaRedundantDataProbeDelayMs = 10000;
     private const int V6SenderRequestFeedbackStallRecoveryMs = 12000;
     private const int V6SenderRequestFeedbackStallRecoveryCooldownMs = 15000;
+    private const int V6SenderRequestFeedbackStallRecoverySuppressedLogIntervalMs = 5000;
     private const int V6SenderFeedbackStaleNormalBacklogChunks = 256;
     private const long V6TunaRedundantDataMinimumBytesAfterProof = 10L * 1024L * 1024L;
     private const int V6FileOnlySenderPipelineDepth = 24;
@@ -272,10 +281,12 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V6EpochPriorityPipelineBypassDepth = 2;
     private const int V6SenderTransportSendTimeoutMs = 5000;
     private const int V6RegularNknRedundantTransportSendTimeoutMs = 15000;
-    private const int V6ReceiverStateRetryIntervalMs = 1500;
-    private const int V6FrontierRequestRetryIntervalMs = 2000;
-    private const int V6ReceiverStateProgressMinCommittedChunks = 32;
-    private const int V6ReceiverStateProgressMaxIntervalMs = 1000;
+    private const int V6ReceiverStateRetryIntervalMs = 750;
+    private const int V6FrontierRequestRetryIntervalMs = 500;
+    private const int V6FrontierRequestStallGraceMs = 750;
+    private const int V6RegularNknFrontierControlBulkEscalationMs = 2500;
+    private const int V6ReceiverStateProgressMinCommittedChunks = 16;
+    private const int V6ReceiverStateProgressMaxIntervalMs = 500;
     private const string V4MaxBatchSegmentsEnvironmentVariableName = "NLINK_FILETRANSFER_V4_MAX_BATCH_SEGMENTS";
     private const string V4MixedScreenShareEnvironmentVariableName = "NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE";
     private const string V4FileOnlyFastRepairEnvironmentVariableName = "NLINK_FILETRANSFER_V4_FILE_ONLY_FAST_REPAIR";
@@ -3608,6 +3619,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public DateTimeOffset? V6LastReceiveRecoveryRequestedUtc { get; set; }
 
+        public DateTimeOffset? V6LastFeedbackStallRecoverySuppressedUtc { get; set; }
+
         public bool PullV4ExpandedWindowActive { get; set; }
 
         public bool PullV4LimitedWindowActive { get; set; }
@@ -4313,6 +4326,12 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int V6LastFrontierRequestChunkIndex { get; set; } = -1;
 
         public string? V6LastFrontierRequestId { get; set; }
+
+        public DateTimeOffset? V6FrontierStallStartedUtc { get; set; }
+
+        public int V6FrontierStallChunkIndex { get; set; } = -1;
+
+        public DateTimeOffset? V6FrontierStallLastDeferredLogUtc { get; set; }
 
         public bool PullPostTunaRecoveryActive { get; set; }
 
