@@ -10,6 +10,7 @@ This workflow targets the current V6-only file-transfer protocol. V5, V4, null, 
 - Do not redesign screen sharing, wallet UX, payer policy, caps, sidecar startup, installer behavior, or Diagnostics/Options UI while tuning file-transfer soak.
 - All generated artifacts must stay under repo `artifacts/`. Manual scripts and runbooks must never delete or clean Downloads or other user data folders.
 - Run .NET tests serially on Windows to avoid DLL file locks; see `docs/build-test-lock-avoidance.md`.
+- Regular NKN promotion uses a `1.5 MB/s` app-goodput target. Prefer stability, terminal correctness, and payload efficiency over chasing higher burst speed on variable public NKN paths.
 
 ## Common Runs
 
@@ -42,6 +43,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\FileTransfer-Ops.ps1
 ```
 
 Run the three-cycle public NKN proof only after a shorter mixed proof is clean.
+
+## Regular NKN Regression Evidence
+
+Use the regular-NKN GUI soak when the installed app appears slow:
+
+```powershell
+.\tools\Run-FileTransferNknSoak.ps1 -Mode nkn-fast -ExePath ".\src\nLink.App\bin\Release\net8.0\nLink.exe" -PayloadSizes "128MB" -Cycles 1 -Direction helpee-to-helper -CycleTimeoutSeconds 240 -ProgressTimeoutSeconds 90 -TimeoutSeconds 360 -ExternalTopologyProfile Default -PayloadEfficiencyProfile Auto -FailOnGate
+```
+
+Read `filetransfer-live-nkn-summary.txt`, `transfer-terminal-summary.txt`, `throughput-summary.txt`, and `payload-efficiency-summary.txt` together. A clean terminal pass below `1.5 MB/s` is still a regression candidate when raw sent bytes, unsolicited chunks, or late sender frames show poor efficiency.
+
+Recent regular-NKN reference cells:
+
+- `artifacts/filetransfer-soak/20260515-172434/`: completed with clean terminals but regressed efficiency; `946,388 B/s`, raw sent `270,413,824` bytes for `128MB`, `v6_unsolicited_chunk_ignored_count=5086`, `post_completion_late_sender_frame=416`.
+- `artifacts/filetransfer-soak/20260515-173810/`: current fixed reference; completed with clean terminals, `1,626,888 B/s`, raw sent `144,926,720` bytes for `128MB`, `v6_unsolicited_chunk_ignored_count=574`, `post_completion_late_sender_frame=0`.
+
+The V6 regular-NKN near-frontier normal resend bypass is intentionally narrow. It should recover a non-advancing frontier without continuously refilling stale chunks while the receiver frontier is already moving.
 
 ## Phase 6 Paid Tuna Gate
 

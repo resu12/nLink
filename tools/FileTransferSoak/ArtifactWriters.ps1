@@ -1,5 +1,7 @@
 Set-StrictMode -Version Latest
 
+$script:FileTransferRegularNknTargetGoodputBytesPerSecond = 1500000D
+
 function Write-FileTransferArtifact {
     param(
         [Parameter(Mandatory = $true)][string]$ArtifactDir,
@@ -802,6 +804,35 @@ function New-FileTransferThroughputSummaryLines {
                 $frameType -eq 'filetransfer.state.v5' -or
                 $frameType -eq 'filetransfer.state.v4'
         })
+    $v6ControlHealthEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @(
+        'filetransfer_v6_receiver_state_sent',
+        'filetransfer_v6_receiver_state_received',
+        'filetransfer_v6_receiver_state_deferred',
+        'filetransfer_v6_receiver_state_coalesced',
+        'filetransfer_v6_receiver_request_window_sent',
+        'filetransfer_v6_frontier_request_sent',
+        'filetransfer_v6_frontier_request_failed',
+        'filetransfer_v6_frontier_request_deferred',
+        'filetransfer_v6_frontier_request_received',
+        'filetransfer_v6_frontier_request_coalesced',
+        'filetransfer_v6_frontier_request_duplicate_ignored',
+        'filetransfer_v6_frontier_request_preempted_normal_pipeline',
+        'filetransfer_v6_receiver_state_frontier_preempted_normal_pipeline',
+        'filetransfer_v6_normal_refill_deferred',
+        'filetransfer_v6_normal_send_ahead_limited',
+        'filetransfer_v6_regular_nkn_frontier_pressure_entered',
+        'filetransfer_v6_regular_nkn_frontier_pressure_cleared',
+        'filetransfer_v6_sender_waiting_for_requests',
+        'filetransfer_v6_unsolicited_chunk_ignored',
+        'filetransfer_v6_chunk_batch_sent',
+        'filetransfer_v6_chunk_batch_send_deferred_for_recovery',
+        'filetransfer_v6_chunk_batch_send_timeout',
+        'filetransfer_v6_chunk_batch_send_canceled_for_pipeline',
+        'filetransfer_v6_chunk_batch_send_late_completed',
+        'filetransfer_v6_chunk_batch_send_late_canceled',
+        'filetransfer_v6_chunk_batch_send_late_failed'
+    ))
+    $v6ChunkBatchSentEvents = @($v6ControlHealthEvents | Where-Object { $_.EventName -eq 'filetransfer_v6_chunk_batch_sent' })
     $ackDeliveryEvents = @(Get-FileTransferEventsForSummary -Summary $Summary -Names @('filetransfer_data_frame_dispatched') |
         Where-Object {
             $frameType = Get-FileTransferEventField -Event $_ -Name 'frame_type' -Default ''
@@ -902,6 +933,35 @@ function New-FileTransferThroughputSummaryLines {
         ("v4_repair_delivery_retry_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'retry')),
         ("v4_repair_delivery_credit_stall_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'credit_stall')),
         ("v4_repair_delivery_frontier_not_advanced_escalated_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairSentEvents -FieldName 'repair_delivery_escalation_reason' -Value 'frontier_not_advanced')),
+        ("v6_receiver_state_sent_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_receiver_state_sent')),
+        ("v6_receiver_state_received_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_receiver_state_received')),
+        ("v6_receiver_request_window_sent_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_receiver_request_window_sent')),
+        ("v6_receiver_state_deferred_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_receiver_state_deferred')),
+        ("v6_receiver_state_coalesced_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_receiver_state_coalesced')),
+        ("v6_frontier_request_sent_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_frontier_request_sent')),
+        ("v6_frontier_request_failed_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_frontier_request_failed')),
+        ("v6_frontier_request_deferred_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_frontier_request_deferred')),
+        ("v6_frontier_request_received_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_frontier_request_received')),
+        ("v6_frontier_request_coalesced_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_frontier_request_coalesced')),
+        ("v6_frontier_request_duplicate_ignored_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_frontier_request_duplicate_ignored')),
+        ("v6_frontier_request_preempted_normal_pipeline_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_frontier_request_preempted_normal_pipeline')),
+        ("v6_receiver_state_frontier_preempted_normal_pipeline_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_receiver_state_frontier_preempted_normal_pipeline')),
+        ("v6_normal_refill_deferred_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_normal_refill_deferred')),
+        ("v6_normal_send_ahead_limited_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_normal_send_ahead_limited')),
+        ("v6_regular_nkn_frontier_pressure_entered_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_regular_nkn_frontier_pressure_entered')),
+        ("v6_regular_nkn_frontier_pressure_cleared_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_regular_nkn_frontier_pressure_cleared')),
+        ("v6_sender_waiting_for_requests_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_sender_waiting_for_requests')),
+        ("v6_unsolicited_chunk_ignored_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_unsolicited_chunk_ignored')),
+        ("v6_chunk_batch_sent_count={0}" -f $v6ChunkBatchSentEvents.Count),
+        ("v6_normal_chunk_batch_sent_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v6ChunkBatchSentEvents -FieldName 'priority' -Value '0')),
+        ("v6_priority_chunk_batch_sent_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v6ChunkBatchSentEvents -FieldName 'priority' -Value '1')),
+        ("v6_regular_nkn_redundant_chunk_batch_sent_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v6ChunkBatchSentEvents -FieldName 'regular_nkn_redundant' -Value '1')),
+        ("v6_chunk_batch_send_deferred_for_recovery_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_chunk_batch_send_deferred_for_recovery')),
+        ("v6_chunk_batch_send_timeout_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_chunk_batch_send_timeout')),
+        ("v6_chunk_batch_send_canceled_for_pipeline_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_chunk_batch_send_canceled_for_pipeline')),
+        ("v6_chunk_batch_send_late_completed_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_chunk_batch_send_late_completed')),
+        ("v6_chunk_batch_send_late_canceled_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_chunk_batch_send_late_canceled')),
+        ("v6_chunk_batch_send_late_failed_count={0}" -f (Get-FileTransferEventCount -Events $v6ControlHealthEvents -Name 'filetransfer_v6_chunk_batch_send_late_failed')),
         ("v4_repair_batch_bulk_only_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairBatchEvents -FieldName 'repair_delivery_mode' -Value 'bulk_only')),
         ("v4_repair_batch_control_bulk_count={0}" -f (Get-FileTransferEventFieldValueCount -Events $v4RepairBatchEvents -FieldName 'repair_delivery_mode' -Value 'control_bulk_escalated')),
         ("v4_average_batch_chunk_count={0}" -f (Get-FileTransferAverageDoubleField -Events @($v4BatchEvents + $v4BudgetEvents) -FieldName 'batch_chunk_count')),
@@ -1012,7 +1072,7 @@ function New-FileTransferThroughputSummaryLines {
         ("first_repair_or_timeout_before_startup_exit_count={0}" -f $Summary.FirstRepairOrTimeoutBeforeStartupExitCount),
         '',
         'throughput_evidence:'
-    ) + (Get-FileTransferArtifactEvidenceLines -Events @($throughput + $senderThroughput + $senderPipeline + $senderFeed + $senderCacheEvents + $receiverFeedbackEvents + $receiverThroughput + $gapStalls + $sparseEvents + $bridgeBulkSummaries + $profileChanged + $reorderPolicy + $grantSummaries + $frontierGapRepairEvents | Sort-Object Sequence) -Limit 40)
+    ) + (Get-FileTransferArtifactEvidenceLines -Events @($throughput + $senderThroughput + $senderPipeline + $senderFeed + $senderCacheEvents + $receiverFeedbackEvents + $receiverThroughput + $gapStalls + $sparseEvents + $bridgeBulkSummaries + $profileChanged + $reorderPolicy + $grantSummaries + $frontierGapRepairEvents + $v6ControlHealthEvents | Sort-Object Sequence) -Limit 40)
 }
 
 function New-FileTransferProtocolShapeSummaryLines {
@@ -1778,7 +1838,7 @@ function Resolve-FileTransferThroughputLimiter {
         else {
             [double]$v4MaxBridgePayloadBps
         }
-        $v4TargetGoodputBytesPerSecond = 2D * 1024D * 1024D
+        $v4TargetGoodputBytesPerSecond = $script:FileTransferRegularNknTargetGoodputBytesPerSecond
         $v4BridgeFailures = @($BridgeBulkEvents | Where-Object {
             ($_.EventName -eq 'nkn_bridge_bulk_send_summary' -and
                 ((Get-FileTransferEventInt64Field -Event $_ -Name 'send_failures' -Default 0) -gt 0 -or
@@ -2056,7 +2116,7 @@ function Resolve-FileTransferThroughputLimiter {
         [System.Globalization.NumberStyles]::Float,
         [System.Globalization.CultureInfo]::InvariantCulture,
         [ref]$cycleGoodputAverage) | Out-Null
-    $targetGoodputBytesPerSecond = 2D * 1024D * 1024D
+    $targetGoodputBytesPerSecond = $script:FileTransferRegularNknTargetGoodputBytesPerSecond
     $observedGoodputBytesPerSecond = if ($cycleStats.Count -gt 0 -and $cycleGoodputAverage -gt 0D) {
         $cycleGoodputAverage
     }
@@ -2837,7 +2897,7 @@ function New-FileTransferV4PromotionDecisionLines {
 
     $payloadProfile = Get-FileTransferPromotionValue -Sources @($liveSummary, $localSummary, $payload) -Name 'payload_efficiency_profile' -Default '(unknown)'
     $limiter = Get-FileTransferPromotionValue -Sources @($decomposition) -Name 'likely_limiter' -Default 'inconclusive'
-    $targetGoodput = 2097152D
+    $targetGoodput = $script:FileTransferRegularNknTargetGoodputBytesPerSecond
     $currentAverageGoodput = ConvertTo-FileTransferPromotionDouble -Values $liveSummary -Name 'average_goodput_bytes_per_second'
     if ($currentAverageGoodput -le 0) {
         $currentAverageGoodput = ConvertTo-FileTransferPromotionDouble -Values $localSummary -Name 'average_goodput_bytes_per_second'

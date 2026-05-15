@@ -2292,6 +2292,41 @@ public sealed class NknFileTransferTransportTests : CoreSmokeTestsBase
             Assert.False(hostTransferStates.Contains("transfer_nkn_v4_repeat_1"));
             Assert.False(helperTransferStates.Contains("transfer_nkn_v4_repeat_1"));
 
+            CoreSmokeTestsBase.InvokeNknIncomingMessage(
+                helper,
+                hostClient,
+                new NknIncomingMessage(
+                    payload: EnvelopeCodec.Serialize(
+                        CoreSmokeTestsBase.BuildSecureFileTransferEnvelope(
+                            host,
+                            MsgType.FileTransferComplete,
+                            new FileTransferCompleteV1
+                            {
+                                SessionId = sessionId,
+                                TransferId = "transfer_nkn_v4_repeat_1",
+                                FileSizeBytes = 1024L,
+                                Sha256Base64 = Convert.ToBase64String(new byte[32]),
+                            },
+                            requestId: null,
+                            sequence: CoreSmokeTestsBase.GetNextFileTransferSecureSequence(host))),
+                    source: hostClient.ConnectedBulkAddress,
+                    isTopic: false,
+                    topic: null,
+                    channel: NknBridgeChannel.Bulk,
+                    bridgeIngressObservedUtcMs: 0L,
+                    bridgeMessageObservedUtcMs: 0L,
+                    binaryFrameDecodedUtcMs: 0L,
+                    socketDataEventEmittedUtcMs: 0L,
+                    wsReceiverWriteEnteredUtcMs: 0L,
+                    wsMessageEmittedUtcMs: 0L,
+                    sdkHandleMsgEnteredUtcMs: 0L,
+                    clientMessageDispatchUtcMs: 0L,
+                    multiClientMessageDispatchUtcMs: 0L));
+            await Task.Delay(100, cts.Token);
+            string duplicateCompleteLogTail = CoreSmokeTestsBase.ReadOperationalLogTail(logStartIndex);
+            Assert.Contains("event=filetransfer_message_ignored; message_type=file_transfer_complete; reason=unknown_transfer_id", duplicateCompleteLogTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_message_rejected; message_type=file_transfer_complete; reason=unknown_transfer_id", duplicateCompleteLogTail, StringComparison.Ordinal);
+
             await helper.SendFileTransferOfferAsync(
                 new FileTransferOfferV2
                 {

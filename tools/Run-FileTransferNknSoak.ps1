@@ -52,6 +52,7 @@ function Set-FileTransferExternalTopologyProfileEnvironment {
         "NLINK_NKN_MEDIA_NUM_SUBCLIENTS",
         "NLINK_NKN_BULK_NUM_SUBCLIENTS",
         "NLINK_NKN_BULK_SEND_CONCURRENCY",
+        "NLINK_NKN_BULK_SEND_MODE",
         "NLINK_BRIDGE_REUSE_MODE",
         "NLINK_SCREENSHARE_EXTERNAL_TOPOLOGY_PROFILE",
         "NLINK_FILETRANSFER_EXTERNAL_TOPOLOGY_PROFILE"
@@ -92,18 +93,21 @@ function Set-FileTransferExternalTopologyProfileEnvironment {
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_MEDIA_NUM_SUBCLIENTS" -Value "8"
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_NUM_SUBCLIENTS" -Value "1"
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_SEND_CONCURRENCY" -Value "4"
+            Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_SEND_MODE" -Value "single"
         }
         "BulkFanout8" {
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_NUM_SUBCLIENTS" -Value "4"
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_MEDIA_NUM_SUBCLIENTS" -Value "8"
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_NUM_SUBCLIENTS" -Value "8"
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_SEND_CONCURRENCY" -Value "6"
+            Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_SEND_MODE" -Value "round_robin"
         }
         "BulkFanout12" {
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_NUM_SUBCLIENTS" -Value "4"
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_MEDIA_NUM_SUBCLIENTS" -Value "8"
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_NUM_SUBCLIENTS" -Value "12"
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_SEND_CONCURRENCY" -Value "8"
+            Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_SEND_MODE" -Value "round_robin"
         }
         "DefaultKeepAlive" {
             Set-ProcessEnvironmentValue -Name "NLINK_BRIDGE_REUSE_MODE" -Value "KeepAlive"

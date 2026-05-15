@@ -1746,6 +1746,80 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_V6ControlHealth_IsTrackedInThroughputSummary()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_v6_control_health";
+        var lines = BuildCleanCompletedV4TransferFixture(transferId)
+            .Append(LogLine($"event=filetransfer_v6_receiver_state_sent; transfer_id={transferId}; session_id=sess_a; reason=periodic; epoch=2; contiguous_committed_chunk_index=10; durable_received_highest_chunk_index=12; requested_until_chunk_index_exclusive=18; missing_range_count=1; bytes_committed=215040; destination_mode=sparse; transfer_paused=0"))
+            .Append(LogLine($"event=filetransfer_v6_receiver_state_received; transfer_id={transferId}; session_id=sess_a; epoch=2; previous_remote_frontier_chunk_index=9; committed_frontier_chunk_index=10; diagnostic_credit_until_chunk_index_exclusive=18; missing_range_count=1; bytes_committed=215040; transfer_paused=0"))
+            .Append(LogLine($"event=filetransfer_v6_receiver_request_window_sent; transfer_id={transferId}; session_id=sess_a; reason=periodic; epoch=2; requested_chunk_count=8; requested_until_chunk_index_exclusive=18; missing_range_count=1; request_window_chunks=8; frontier_stalled=1; transport_epoch=1; recovery_mode=regular_nkn"))
+            .Append(LogLine($"event=filetransfer_v6_receiver_state_deferred; transfer_id={transferId}; session_id=sess_a; reason=frontier_stalled; next_chunk_index=10; highest_received_chunk_index=18"))
+            .Append(LogLine($"event=filetransfer_v6_receiver_state_coalesced; transfer_id={transferId}; session_id=sess_a; reason=frontier_stalled_tail_window; current_committed_chunk_index=10; highest_received_chunk_index=18; accept_window_end_chunk_index=22; tail_chunks_remaining=5; elapsed_since_state_ms=220"))
+            .Append(LogLine($"event=filetransfer_v6_frontier_request_sent; direction=inbound; transfer_id={transferId}; session_id=sess_a; reason=frontier_stalled; transport_epoch=1; repair_request_id=req-a; recovery_mode=regular_nkn; start_chunk_index=10; requested_chunk_count=1"))
+            .Append(LogLine($"event=filetransfer_v6_frontier_request_failed; direction=inbound; transfer_id={transferId}; session_id=sess_a; reason=frontier_stalled; error=TimeoutException"))
+            .Append(LogLine($"event=filetransfer_v6_frontier_request_deferred; direction=inbound; transfer_id={transferId}; session_id=sess_a; frontier_chunk_index=10; highest_received_chunk_index=18; elapsed_ms=300; stall_grace_ms=500; reason=frontier_gap; utc=2026-05-15T12:00:00.0000000Z"))
+            .Append(LogLine($"event=filetransfer_v6_frontier_request_received; direction=outbound; transfer_id={transferId}; session_id=sess_a; transport_epoch=1; repair_request_id=req-a; first_start_chunk_index=10; first_chunk_count=1; range_count=1"))
+            .Append(LogLine($"event=filetransfer_v6_frontier_request_coalesced; direction=inbound; transfer_id={transferId}; session_id=sess_a; previous_frontier_chunk_index=10; current_frontier_chunk_index=10; elapsed_ms=120; retry_interval_ms=500; reason=frontier_stalled"))
+            .Append(LogLine($"event=filetransfer_v6_frontier_request_duplicate_ignored; direction=outbound; transfer_id={transferId}; session_id=sess_a; transport_epoch=1; repair_request_id=req-a; first_start_chunk_index=10; first_chunk_count=1"))
+            .Append(LogLine($"event=filetransfer_v6_frontier_request_preempted_normal_pipeline; direction=outbound; transfer_id={transferId}; session_id=sess_a; transport_epoch=1; repair_request_id=req-a; normal_request_count=128; in_flight_send_count=6; requested_chunk_already_in_flight=0; sender_pipeline_generation=3"))
+            .Append(LogLine($"event=filetransfer_v6_receiver_state_frontier_preempted_normal_pipeline; direction=outbound; transfer_id={transferId}; session_id=sess_a; receiver_state_epoch=2; transport_epoch=1; normal_request_count=128; in_flight_send_count=6; requested_chunk_already_in_flight=0; sender_pipeline_generation=4; remote_frontier_chunk_index=10"))
+            .Append(LogLine($"event=filetransfer_v6_normal_refill_deferred; direction=outbound; transfer_id={transferId}; session_id=sess_a; request_key=normal-a; remote_frontier_chunk_index=10; pending_ahead_chunk_count=256; refill_low_watermark_chunks=64; deferred_chunk_count=128; sent_awaiting_ack_count=96; in_flight_send_count=4"))
+            .Append(LogLine($"event=filetransfer_v6_normal_send_ahead_limited; direction=outbound; transfer_id={transferId}; session_id=sess_a; request_key=normal-a; remote_frontier_chunk_index=10; send_ahead_end_exclusive=522; suppressed_chunk_count=24; sent_awaiting_ack_count=96; in_flight_send_count=4"))
+            .Append(LogLine($"event=filetransfer_v6_regular_nkn_frontier_pressure_entered; direction=outbound; transfer_id={transferId}; session_id=sess_a; receiver_state_epoch=2; remote_frontier_chunk_index=10; durable_received_highest_chunk_index=18; missing_range_count=2; pressure_until_chunk_index=522; send_ahead_limit_chunks=256; refill_low_watermark_chunks=128"))
+            .Append(LogLine($"event=filetransfer_v6_regular_nkn_frontier_pressure_cleared; direction=outbound; transfer_id={transferId}; session_id=sess_a; receiver_state_epoch=3; reason=receiver_state_progress; pressure_start_chunk_index=10; pressure_until_chunk_index=522; remote_frontier_chunk_index=522; active_ms=1200"))
+            .Append(LogLine($"event=filetransfer_v6_sender_waiting_for_requests; transfer_id={transferId}; session_id=sess_a; reason=no_receiver_requests; priority_request_count=0; normal_request_count=0"))
+            .Append(LogLine($"event=filetransfer_v6_unsolicited_chunk_ignored; transfer_id={transferId}; session_id=sess_a; mode=sparse_seekable; reason=outside_accept_window; chunk_index=60; committed_frontier_chunk_index=10; request_window_end_chunk_index=18; accept_window_end_chunk_index=22"))
+            .Append(LogLine($"event=filetransfer_v6_chunk_batch_sent; transfer_id={transferId}; session_id=sess_a; start_chunk_index=10; batch_chunk_count=1; raw_bytes=21504; request_key=req-a; priority=1; regular_nkn_redundant=0; repair_request_id=req-a"))
+            .Append(LogLine($"event=filetransfer_v6_chunk_batch_sent; transfer_id={transferId}; session_id=sess_a; start_chunk_index=18; batch_chunk_count=3; raw_bytes=64512; request_key=normal-a; priority=0; regular_nkn_redundant=1; repair_request_id=(none)"))
+            .Append(LogLine($"event=filetransfer_v6_chunk_batch_send_deferred_for_recovery; transfer_id={transferId}; session_id=sess_a; start_chunk_index=21; batch_chunk_count=3; raw_bytes=64512; request_key=normal-a; priority=0; transport_epoch=1; current_transport_epoch=2; epoch_state=waiting; handoff_kind=regular_nkn_recovery; target_transport=regular_nkn; pull_transport_paused=1; resume_request_pending=0; post_tuna_recovery_active=1; unresolved_epoch=1; requeued_chunk_count=3; error=InvalidOperationException; message=Bridge_disconnected"))
+            .Append(LogLine($"event=filetransfer_v6_chunk_batch_send_timeout; transfer_id={transferId}; session_id=sess_a; start_chunk_index=24; batch_chunk_count=3; raw_bytes=64512; request_key=normal-a; priority=0; transport_epoch=1; timeout_ms=1500; regular_nkn_redundant=1; repair_request_id=(none)"))
+            .Append(LogLine($"event=filetransfer_v6_chunk_batch_send_canceled_for_pipeline; transfer_id={transferId}; session_id=sess_a; start_chunk_index=27; batch_chunk_count=3; raw_bytes=64512; request_key=normal-a; priority=0; transport_epoch=1; sender_pipeline_generation=5; regular_nkn_redundant=1; repair_request_id=(none)"))
+            .Append(LogLine($"event=filetransfer_v6_chunk_batch_send_late_completed; transfer_id={transferId}; session_id=sess_a; start_chunk_index=24; batch_chunk_count=3; request_key=normal-a; priority=0; transport_epoch=1"))
+            .Append(LogLine($"event=filetransfer_v6_chunk_batch_send_late_canceled; transfer_id={transferId}; session_id=sess_a; start_chunk_index=27; batch_chunk_count=3; request_key=normal-a; priority=0; transport_epoch=1"))
+            .Append(LogLine($"event=filetransfer_v6_chunk_batch_send_late_failed; transfer_id={transferId}; session_id=sess_a; start_chunk_index=30; batch_chunk_count=3; request_key=normal-a; priority=0; transport_epoch=1; error=InvalidOperationException"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var throughput = ReadArtifactReport(result.ArtifactDir, "throughput-summary.txt");
+        Assert.Equal("1", throughput["v6_receiver_state_sent_count"]);
+        Assert.Equal("1", throughput["v6_receiver_state_received_count"]);
+        Assert.Equal("1", throughput["v6_receiver_request_window_sent_count"]);
+        Assert.Equal("1", throughput["v6_receiver_state_deferred_count"]);
+        Assert.Equal("1", throughput["v6_receiver_state_coalesced_count"]);
+        Assert.Equal("1", throughput["v6_frontier_request_sent_count"]);
+        Assert.Equal("1", throughput["v6_frontier_request_failed_count"]);
+        Assert.Equal("1", throughput["v6_frontier_request_deferred_count"]);
+        Assert.Equal("1", throughput["v6_frontier_request_received_count"]);
+        Assert.Equal("1", throughput["v6_frontier_request_coalesced_count"]);
+        Assert.Equal("1", throughput["v6_frontier_request_duplicate_ignored_count"]);
+        Assert.Equal("1", throughput["v6_frontier_request_preempted_normal_pipeline_count"]);
+        Assert.Equal("1", throughput["v6_receiver_state_frontier_preempted_normal_pipeline_count"]);
+        Assert.Equal("1", throughput["v6_normal_refill_deferred_count"]);
+        Assert.Equal("1", throughput["v6_normal_send_ahead_limited_count"]);
+        Assert.Equal("1", throughput["v6_regular_nkn_frontier_pressure_entered_count"]);
+        Assert.Equal("1", throughput["v6_regular_nkn_frontier_pressure_cleared_count"]);
+        Assert.Equal("1", throughput["v6_sender_waiting_for_requests_count"]);
+        Assert.Equal("1", throughput["v6_unsolicited_chunk_ignored_count"]);
+        Assert.Equal("2", throughput["v6_chunk_batch_sent_count"]);
+        Assert.Equal("1", throughput["v6_normal_chunk_batch_sent_count"]);
+        Assert.Equal("1", throughput["v6_priority_chunk_batch_sent_count"]);
+        Assert.Equal("1", throughput["v6_regular_nkn_redundant_chunk_batch_sent_count"]);
+        Assert.Equal("1", throughput["v6_chunk_batch_send_deferred_for_recovery_count"]);
+        Assert.Equal("1", throughput["v6_chunk_batch_send_timeout_count"]);
+        Assert.Equal("1", throughput["v6_chunk_batch_send_canceled_for_pipeline_count"]);
+        Assert.Equal("1", throughput["v6_chunk_batch_send_late_completed_count"]);
+        Assert.Equal("1", throughput["v6_chunk_batch_send_late_canceled_count"]);
+        Assert.Equal("1", throughput["v6_chunk_batch_send_late_failed_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_V4RepairBatchProfile_DoesNotOverrideRunPayloadProfile()
     {
         if (!OperatingSystem.IsWindows())
@@ -2341,6 +2415,55 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_RecoveredV6FeedbackAndBridgeFailuresDuringReceiveRecovery_ReturnExternalWarning()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_recovered_receive_recovery";
+        var lines = BuildCleanCompletedV4TransferFixture(transferId).ToList();
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.InsertRange(
+            firstTerminalIndex,
+            [
+                LogLine("event=nkn_bridge_receive_stall_detected; connect_key=test; reason=control_receive_stalled; consecutive_zero_receive_windows=6; active_file_transfer_sessions=1; active_file_transfer_runtime_sessions=1; frames_sent_since_last=15; control_messages_received_since_last=0; bulk_messages_received_since_last=3; total_messages_received_since_last=3; control_last_received_age_ms=23845; bulk_last_received_age_ms=63; sample_window_ms=2000"),
+                LogLine("event=nkn_bridge_receive_stall_recovery_started; connect_key=test; stall_reason=control_receive_stalled; attempt=2; max_restarts=4; consecutive_zero_receive_windows=6; frames_sent_since_last=15; control_last_received_age_ms=23845; bulk_last_received_age_ms=63"),
+                LogLine($"event=filetransfer_data_session_availability_observed; session_id=sess_a; transfer_id={transferId}; is_available=0; reason=receive_stall_recovery; requires_resume_request=1; handoff_kind=regular_nkn_recovery; target_transport=regular_nkn"),
+                LogLine($"event=filetransfer_v6_epoch_started; direction=inbound; transfer_id={transferId}; session_id=sess_a; transport_epoch=2; handoff_kind=regular_nkn_recovery; source_transport=regular_nkn; target_transport=regular_nkn; reason=receive_stall_recovery; state=target_proof_pending; starting_committed_chunk=10; starting_highest_observed_chunk=9"),
+                LogLine($"event=filetransfer_v6_receiver_state_deferred_for_recovery; transfer_id={transferId}; session_id=sess_a; reason=transport_epoch; transport_epoch=2; recovery_mode=frontier_repair_only; error=InvalidOperationException"),
+                LogLine($"event=filetransfer_v4_feedback_both_failed; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.receiver_state.v6; first_lane=control; second_lane=bulk; first_error=InvalidOperationException; second_error=InvalidOperationException"),
+                LogLine($"event=filetransfer_v4_feedback_both_failed; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.frontier_request.v6; first_lane=control; second_lane=bulk; first_error=InvalidOperationException; second_error=InvalidOperationException"),
+                LogLine("event=nkn_bridge_bulk_send_summary; frames_sent=1; frames_enqueued=4; payload_bytes_sent=458; payload_bytes_enqueued=1832; payload_bytes_per_second=229; payload_bytes_enqueued_per_second=916; send_failures=3; queue_clears=0; queue_depth=0; queued_bytes=0; oldest_queued_age_ms=0; in_flight=0; in_flight_bytes=0; configured_concurrency=2; effective_concurrency=2; in_flight_max=1; in_flight_bytes_max=458; worker_utilization_percent=24; worker_idle_slot_samples=50; worker_saturation_percent=0; sample_window_ms=2000"),
+                LogLine("event=nkn_bridge_receive_stall_recovery_receive_resumed; connect_key=test; recovery_count=1; resume_after_recovery_ms=1755; total_messages_received_since_last=13; total_bytes_received_since_last=6246; control_messages_received_since_last=13; media_messages_received_since_last=0; bulk_messages_received_since_last=0")
+            ]);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("WARN_EXTERNAL_TRANSPORT", verdict["verdict"]);
+        Assert.Equal("external-transport-health-summary.txt", verdict["next_artifact"]);
+        Assert.Equal("0", verdict["hard_failure_count"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal("0", stability["hard_failure_count"]);
+
+        var protocol = ReadArtifactReport(result.ArtifactDir, "protocol-shape-summary.txt");
+        Assert.Equal("2", protocol["v4_feedback_both_failed_count"]);
+
+        var bridge = ReadArtifactReport(result.ArtifactDir, "bridge-bulk-summary.txt");
+        Assert.Equal("3", bridge["bulk_send_failures"]);
+
+        var external = ReadArtifactReport(result.ArtifactDir, "external-transport-health-summary.txt");
+        Assert.Equal("1", external["receive_stall_detected_count"]);
+        Assert.Equal("1", external["receive_stall_recovery_started_count"]);
+        Assert.Equal("1", external["receive_stall_recovery_receive_resumed_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_ExternalTransportHealthIssue_ReturnsExternalWarning()
     {
         if (!OperatingSystem.IsWindows())
@@ -2750,6 +2873,7 @@ if (-not $result.RegressionFailed) {
             var longDecision = ReadArtifactReport(safeDir, "v4-promotion-decision.txt");
             Assert.Equal("hold_inconclusive", longDecision["decision"]);
             Assert.Equal("baseline_rerun_required", longDecision["reason"]);
+            Assert.Equal("1500000.000", longDecision["target_goodput_bytes_per_second"]);
             Assert.Equal("1", longDecision["current_long_proof_matrix_complete"]);
             Assert.Equal("2", longDecision["current_long_proof_16m_completed_count"]);
             Assert.Equal("2", longDecision["current_long_proof_64m_completed_count"]);
@@ -2817,7 +2941,7 @@ if (-not $result.RegressionFailed) {
                     "-TimeoutSeconds", "30",
                     "-ProgressTimeoutSeconds", "30"
                 ],
-                BuildFakeLiveNknEnvironment(fakeGoodputBytesPerSecond: 1_000_000));
+                BuildFakeLiveNknEnvironment(fakeGoodputBytesPerSecond: 1_400_000));
 
             Assert.True(
                 result.ExitCode == 0,
@@ -2832,6 +2956,7 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("iterate", promotion["promotion_status"]);
             Assert.Equal("goodput_target_not_met", promotion["reason"]);
             Assert.Equal("sender_pump_scheduling_feed_capacity", promotion["next_focus"]);
+            Assert.Equal("1500000.000", promotion["target_goodput_bytes_per_second"]);
             Assert.Equal("1", promotion["long_proof_matrix_complete"]);
             Assert.Equal("0", promotion["goodput_target_met"]);
         }

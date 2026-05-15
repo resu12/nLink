@@ -37,6 +37,12 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private const int ReceiveStallControlOnlyActiveFileTransferGraceWindows = 3;
     private const int ReceiveStallMaxRecoveriesPerSession = 4;
     private const int ReceiveStallMaxActiveFileTransferRecoveriesPerSession = 16;
+    private const int FileTransferBulkPolicyLowThroughputWindowsToPromote = 2;
+    private const int FileTransferBulkPolicyMinDemandFrames = 8;
+    private const int FileTransferBulkPolicyPromotedConcurrency = 4;
+    private const int FileTransferBulkPolicyMaxConcurrency = 8;
+    private const string FileTransferBulkPolicyModeSingle = "single";
+    private const string FileTransferBulkPolicyModeRoundRobin = "round_robin";
     private static readonly string[] RequiredBridgeChannels = ["control", "media", "bulk"];
     internal const string BridgeProtocolOutdatedBulkMissingCode = "bridge_protocol_outdated_bulk_missing";
     private static readonly RetryPolicyOptions UnexpectedExitRestartRetryOptions = new(
@@ -116,6 +122,13 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
     private int activeFileTransferDataSessions;
     private readonly ConcurrentDictionary<string, byte> activeFileTransferRuntimeTransfers = new(StringComparer.Ordinal);
     private long activeFileTransferRecoveryTombstoneExpiresTick;
+    private readonly object fileTransferBulkPolicyGate = new();
+    private string? fileTransferBulkPolicyBaselineMode;
+    private int fileTransferBulkPolicyBaselineConcurrency;
+    private int fileTransferBulkPolicyLowThroughputWindows;
+    private int fileTransferBulkPolicyAdaptiveActive;
+    private int fileTransferBulkPolicyChangeInFlight;
+    private long fileTransferBulkPolicyLastChangeTick;
     private bool suppressBridgeDisconnectDuringReceiveStallRecovery;
     private readonly object bulkQueueStateGate = new();
     private BridgeBulkQueueState bulkQueueState = new(
@@ -396,6 +409,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         Log(
             "event=filetransfer_active_runtime_unregistered; " +
             $"transfer_id={SanitizeLogToken(normalizedTransferId)}; active_file_transfer_runtime_sessions={activeFileTransferRuntimeTransfers.Count}; active_file_transfer_data_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}");
+        MaybeResetFileTransferBulkPolicyIfIdle("runtime_unregistered");
     }
 
     internal void ClearActiveFileTransferRuntimeTransfers(string reason)
@@ -416,6 +430,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         Log(
             "event=filetransfer_active_runtime_cleared; " +
             $"reason={SanitizeLogToken(reason)}; cleared_count={clearedCount}; active_file_transfer_data_sessions={Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions))}");
+        MaybeResetFileTransferBulkPolicyIfIdle("runtime_cleared");
     }
 
     internal bool RequestFileTransferReceiveStallRecovery(string reason)
@@ -521,6 +536,7 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
         }
 
         Log($"event=filetransfer_v4_receive_liveness_summary; reason=data_session_closed; transfer_id={SanitizeLogToken(transferId)}; active_file_transfer_sessions={activeCount}");
+        MaybeResetFileTransferBulkPolicyIfIdle("data_session_closed");
     }
 
     private int GetActiveFileTransferSessionCountForPingRecovery()
@@ -919,6 +935,28 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             timeoutOverride: CommandAckTimeout);
     }
 
+    private Task SetBulkSendPolicyAsync(string mode, int concurrency, string reason, CancellationToken ct)
+    {
+        ThrowIfDisposed();
+        if (!bridgeSupervisor.IsProcessRunning)
+        {
+            return Task.CompletedTask;
+        }
+
+        var normalizedMode = NormalizeFileTransferBulkSendMode(mode);
+        var normalizedConcurrency = Math.Clamp(concurrency, 1, FileTransferBulkPolicyMaxConcurrency);
+        return SendCommandAndWaitAckAsync(
+            "setBulkSendPolicy",
+            new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["mode"] = normalizedMode,
+                ["concurrency"] = normalizedConcurrency,
+                ["reason"] = SanitizeLogToken(reason),
+            },
+            ct,
+            timeoutOverride: CommandAckTimeout);
+    }
+
     private async Task SendCoreAsync(string destination, byte[] payload, NknBridgeChannel channel, CancellationToken ct)
     {
         ThrowIfDisposed();
@@ -1267,6 +1305,264 @@ internal sealed class RealNknClientAdapter : INknClient, IBridgeProcessRunner, I
             $"bulk_send_started_to_bulk_send_resolved_p95_ms={bulkSendStartedToBulkSendResolvedP95Ms}; " +
             $"bulk_send_started_to_bulk_send_resolved_max_ms={bulkSendStartedToBulkSendResolvedMaxMs}; " +
             $"send_p95_ms={sendP95Ms}; send_max_ms={sendMaxMs}; frames_sent={framesSent}; frames_enqueued={framesEnqueued}; payload_bytes_sent={payloadBytesSent}; payload_bytes_per_second={payloadBytesPerSecond}; payload_bytes_enqueued={payloadBytesEnqueued}; payload_bytes_enqueued_per_second={payloadBytesEnqueuedPerSecond}; inter_enqueue_gap_p95_ms={interEnqueueGapP95Ms}; inter_enqueue_gap_max_ms={interEnqueueGapMaxMs}; send_failures={sendFailures}; queue_clears={queueClears}; queue_depth={queueDepth}; queued_bytes={queuedBytes}; oldest_queued_age_ms={oldestQueuedAgeMs}; in_flight={inFlight}; in_flight_bytes={inFlightBytes}; configured_concurrency={configuredConcurrency}; effective_concurrency={effectiveConcurrency}; in_flight_max={inFlightMax}; in_flight_bytes_max={inFlightBytesMax}; worker_utilization_percent={workerUtilizationPercent}; worker_idle_slot_samples={workerIdleSlotSamples}; worker_saturation_percent={workerSaturationPercent}; drain_wake_count={drainWakeCount}; send_mode={sendMode}; send_mode_fanout_frames={sendModeFanoutFrames}; send_mode_round_robin_frames={sendModeRoundRobinFrames}; send_mode_single_frames={sendModeSingleFrames}; send_mode_redundant2_frames={sendModeRedundant2Frames}; send_mode_fallback_frames={sendModeFallbackFrames}; sample_window_ms={sampleWindowMs}");
+
+        EvaluateFileTransferBulkPolicy(
+            sendMode,
+            configuredConcurrency,
+            effectiveConcurrency,
+            framesEnqueued,
+            payloadBytesPerSecond,
+            payloadBytesEnqueuedPerSecond,
+            sendFailures,
+            queueClears);
+    }
+
+    private void EvaluateFileTransferBulkPolicy(
+        string sendMode,
+        long configuredConcurrency,
+        long effectiveConcurrency,
+        long framesEnqueued,
+        long payloadBytesPerSecond,
+        long payloadBytesEnqueuedPerSecond,
+        long sendFailures,
+        long queueClears)
+    {
+        if (!options.FileTransferAutoBulkAdaptationEnabled)
+        {
+            ResetFileTransferBulkPolicyWindowCount();
+            return;
+        }
+
+        var normalizedMode = NormalizeFileTransferBulkSendMode(sendMode);
+        var observedConcurrency = (int)Math.Clamp(
+            effectiveConcurrency > 0 ? effectiveConcurrency : configuredConcurrency > 0 ? configuredConcurrency : options.BulkSendConcurrency,
+            1,
+            FileTransferBulkPolicyMaxConcurrency);
+        CaptureFileTransferBulkPolicyBaseline(normalizedMode, observedConcurrency);
+
+        if (!IsFileTransferActive())
+        {
+            ResetFileTransferBulkPolicyWindowCount();
+            MaybeResetFileTransferBulkPolicyIfIdle("bulk_summary_idle");
+            return;
+        }
+
+        var targetBytesPerSecond = Math.Max(1, options.FileTransferBulkTargetBytesPerSecond);
+        var bridgeHadDemand =
+            framesEnqueued >= FileTransferBulkPolicyMinDemandFrames &&
+            payloadBytesEnqueuedPerSecond >= targetBytesPerSecond;
+        var bridgeBelowTarget = payloadBytesPerSecond < targetBytesPerSecond;
+        var transportDegraded = sendFailures > 0 || queueClears > 0;
+        if ((!bridgeHadDemand || !bridgeBelowTarget) && !transportDegraded)
+        {
+            ResetFileTransferBulkPolicyWindowCount();
+            return;
+        }
+
+        if (!string.Equals(normalizedMode, FileTransferBulkPolicyModeSingle, StringComparison.Ordinal))
+        {
+            ResetFileTransferBulkPolicyWindowCount();
+            return;
+        }
+
+        var lowWindowCount = transportDegraded
+            ? FileTransferBulkPolicyLowThroughputWindowsToPromote
+            : IncrementFileTransferBulkPolicyWindowCount();
+        if (lowWindowCount < FileTransferBulkPolicyLowThroughputWindowsToPromote)
+        {
+            return;
+        }
+
+        var promotedConcurrency = Math.Clamp(
+            Math.Max(Math.Max(options.BulkSendConcurrency, observedConcurrency), FileTransferBulkPolicyPromotedConcurrency),
+            1,
+            FileTransferBulkPolicyMaxConcurrency);
+        RequestFileTransferBulkPolicyChange(
+            FileTransferBulkPolicyModeRoundRobin,
+            promotedConcurrency,
+            transportDegraded ? "bridge_bulk_send_degraded" : "bridge_bulk_capacity_below_target",
+            adaptiveActiveAfterSuccess: true,
+            payloadBytesPerSecond,
+            payloadBytesEnqueuedPerSecond,
+            targetBytesPerSecond,
+            framesEnqueued,
+            sendFailures,
+            queueClears);
+    }
+
+    private bool IsFileTransferActive()
+        => Math.Max(0, Volatile.Read(ref activeFileTransferDataSessions)) > 0 ||
+           !activeFileTransferRuntimeTransfers.IsEmpty;
+
+    private void CaptureFileTransferBulkPolicyBaseline(string mode, int concurrency)
+    {
+        if (Volatile.Read(ref fileTransferBulkPolicyAdaptiveActive) != 0)
+        {
+            return;
+        }
+
+        lock (fileTransferBulkPolicyGate)
+        {
+            if (fileTransferBulkPolicyBaselineMode is not null)
+            {
+                return;
+            }
+
+            fileTransferBulkPolicyBaselineMode = mode;
+            fileTransferBulkPolicyBaselineConcurrency = Math.Clamp(concurrency, 1, FileTransferBulkPolicyMaxConcurrency);
+        }
+    }
+
+    private int IncrementFileTransferBulkPolicyWindowCount()
+    {
+        lock (fileTransferBulkPolicyGate)
+        {
+            fileTransferBulkPolicyLowThroughputWindows++;
+            return fileTransferBulkPolicyLowThroughputWindows;
+        }
+    }
+
+    private void ResetFileTransferBulkPolicyWindowCount()
+    {
+        lock (fileTransferBulkPolicyGate)
+        {
+            fileTransferBulkPolicyLowThroughputWindows = 0;
+        }
+    }
+
+    private void MaybeResetFileTransferBulkPolicyIfIdle(string reason)
+    {
+        if (IsFileTransferActive())
+        {
+            return;
+        }
+
+        ResetFileTransferBulkPolicyWindowCount();
+        if (Volatile.Read(ref fileTransferBulkPolicyAdaptiveActive) == 0)
+        {
+            return;
+        }
+
+        string resetMode;
+        int resetConcurrency;
+        lock (fileTransferBulkPolicyGate)
+        {
+            resetMode = fileTransferBulkPolicyBaselineMode ?? FileTransferBulkPolicyModeSingle;
+            resetConcurrency = fileTransferBulkPolicyBaselineConcurrency > 0
+                ? fileTransferBulkPolicyBaselineConcurrency
+                : Math.Clamp(options.BulkSendConcurrency, 1, FileTransferBulkPolicyMaxConcurrency);
+        }
+
+        RequestFileTransferBulkPolicyChange(
+            resetMode,
+            resetConcurrency,
+            reason,
+            adaptiveActiveAfterSuccess: false,
+            payloadBytesPerSecond: 0,
+            payloadBytesEnqueuedPerSecond: 0,
+            targetBytesPerSecond: Math.Max(1, options.FileTransferBulkTargetBytesPerSecond),
+            framesEnqueued: 0,
+            sendFailures: 0,
+            queueClears: 0,
+            ignoreCooldown: true);
+    }
+
+    private void RequestFileTransferBulkPolicyChange(
+        string mode,
+        int concurrency,
+        string reason,
+        bool adaptiveActiveAfterSuccess,
+        long payloadBytesPerSecond,
+        long payloadBytesEnqueuedPerSecond,
+        long targetBytesPerSecond,
+        long framesEnqueued,
+        long sendFailures,
+        long queueClears,
+        bool ignoreCooldown = false)
+    {
+        if (disposed || shuttingDown || !bridgeSupervisor.IsProcessRunning)
+        {
+            return;
+        }
+
+        if (Volatile.Read(ref fileTransferBulkPolicyChangeInFlight) != 0)
+        {
+            return;
+        }
+
+        if (adaptiveActiveAfterSuccess && Volatile.Read(ref fileTransferBulkPolicyAdaptiveActive) != 0)
+        {
+            return;
+        }
+
+        var nowTick = Stopwatch.GetTimestamp();
+        var lastChangeTick = Volatile.Read(ref fileTransferBulkPolicyLastChangeTick);
+        var cooldown = TimeSpan.FromMilliseconds(Math.Max(0, options.FileTransferBulkAdaptationCooldownMs));
+        if (!ignoreCooldown && lastChangeTick > 0 && Stopwatch.GetElapsedTime(lastChangeTick, nowTick) < cooldown)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref fileTransferBulkPolicyChangeInFlight, 1, 0) != 0)
+        {
+            return;
+        }
+
+        Volatile.Write(ref fileTransferBulkPolicyLastChangeTick, nowTick);
+        var normalizedMode = NormalizeFileTransferBulkSendMode(mode);
+        var normalizedConcurrency = Math.Clamp(concurrency, 1, FileTransferBulkPolicyMaxConcurrency);
+        Log(
+            "event=nkn_bridge_bulk_send_policy_adaptation_requested; " +
+            $"reason={SanitizeLogToken(reason)}; mode={normalizedMode}; concurrency={normalizedConcurrency}; " +
+            $"adaptive_active_after_success={(adaptiveActiveAfterSuccess ? 1 : 0)}; payload_bytes_per_second={payloadBytesPerSecond}; payload_bytes_enqueued_per_second={payloadBytesEnqueuedPerSecond}; " +
+            $"target_bytes_per_second={targetBytesPerSecond}; frames_enqueued={framesEnqueued}; send_failures={sendFailures}; queue_clears={queueClears}");
+
+        _ = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await SetBulkSendPolicyAsync(normalizedMode, normalizedConcurrency, reason, CancellationToken.None).ConfigureAwait(false);
+                    Volatile.Write(ref fileTransferBulkPolicyAdaptiveActive, adaptiveActiveAfterSuccess ? 1 : 0);
+                    if (!adaptiveActiveAfterSuccess)
+                    {
+                        ResetFileTransferBulkPolicyWindowCount();
+                    }
+
+                    Log(
+                        "event=nkn_bridge_bulk_send_policy_adaptation_applied; " +
+                        $"reason={SanitizeLogToken(reason)}; mode={normalizedMode}; concurrency={normalizedConcurrency}; adaptive_active={(adaptiveActiveAfterSuccess ? 1 : 0)}");
+                }
+                catch (Exception ex) when (ex is ObjectDisposedException or OperationCanceledException or InvalidOperationException or TimeoutException or IOException)
+                {
+                    Log(
+                        "event=nkn_bridge_bulk_send_policy_adaptation_failed; " +
+                        $"reason={SanitizeLogToken(reason)}; mode={normalizedMode}; concurrency={normalizedConcurrency}; error={SanitizeLogToken(ex.GetType().Name)}");
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref fileTransferBulkPolicyChangeInFlight, 0);
+                }
+            },
+            CancellationToken.None);
+    }
+
+    private static string NormalizeFileTransferBulkSendMode(string? mode)
+    {
+        if (string.IsNullOrWhiteSpace(mode))
+        {
+            return FileTransferBulkPolicyModeSingle;
+        }
+
+        var normalized = mode.Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            FileTransferBulkPolicyModeSingle => FileTransferBulkPolicyModeSingle,
+            FileTransferBulkPolicyModeRoundRobin => FileTransferBulkPolicyModeRoundRobin,
+            "redundant2" => "redundant2",
+            "fanout" => "fanout",
+            _ => FileTransferBulkPolicyModeSingle,
+        };
     }
 
     private void HandleBridgeTransportHealthSummary(JsonElement root)

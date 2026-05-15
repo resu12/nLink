@@ -140,6 +140,160 @@ function Test-FileTransferBenignPostCompletionLateSenderFrame {
     return $Event.Sequence -gt [int]$CompletedTerminalSequences[$transferId]
 }
 
+function Test-FileTransferCleanTerminalCompletion {
+    param([Parameter(Mandatory = $true)]$Summary)
+
+    return $Summary.InboundTerminalEvents.Count -gt 0 -and
+        $Summary.OutboundTerminalEvents.Count -gt 0 -and
+        (Test-FileTransferTerminalCompleted -TerminalEvents $Summary.TerminalEvents)
+}
+
+function Test-FileTransferEventNearRecoveryMarker {
+    param(
+        $Event,
+        [Parameter(Mandatory = $true)]$Summary,
+        [int]$SequenceWindow = 120
+    )
+
+    if ($null -eq $Event) {
+        return $false
+    }
+
+    $eventSequence = 0
+    if (-not [int]::TryParse([string]$Event.Sequence, [ref]$eventSequence)) {
+        return $false
+    }
+
+    foreach ($candidate in @($Summary.GlobalEvents + $Summary.TransferEvents)) {
+        if ($null -eq $candidate) {
+            continue
+        }
+
+        $candidateSequence = 0
+        if (-not [int]::TryParse([string]$candidate.Sequence, [ref]$candidateSequence)) {
+            continue
+        }
+
+        if ([Math]::Abs($candidateSequence - $eventSequence) -gt $SequenceWindow) {
+            continue
+        }
+
+        switch ($candidate.EventName) {
+            'nkn_bridge_receive_stall_detected' { return $true }
+            'nkn_bridge_receive_stall_recovery_started' { return $true }
+            'nkn_bridge_receive_stall_recovery_completed' { return $true }
+            'nkn_bridge_receive_stall_recovery_receive_resumed' { return $true }
+            'nkn_bridge_receive_stall_recovery_hard_restart' { return $true }
+            'nkn_bridge_control_receive_recovery_forced' { return $true }
+            'bridge_spawned' { return $true }
+            'bridge_ready' { return $true }
+            'filetransfer_post_tuna_recovery_started' { return $true }
+            'filetransfer_transport_paused' { return $true }
+            'filetransfer_transport_epoch_started_while_unavailable' { return $true }
+            'filetransfer_v6_receiver_state_deferred_for_recovery' { return $true }
+            'filetransfer_data_session_availability_observed' {
+                $isAvailable = Get-FileTransferEventInt64Field -Event $candidate -Name 'is_available' -Default 1
+                $requiresResume = Get-FileTransferEventInt64Field -Event $candidate -Name 'requires_resume_request' -Default 0
+                if ($isAvailable -eq 0 -or $requiresResume -gt 0) {
+                    return $true
+                }
+            }
+            'filetransfer_v6_epoch_started' {
+                $reason = Get-FileTransferEventField -Event $candidate -Name 'reason' -Default ''
+                $handoffKind = Get-FileTransferEventField -Event $candidate -Name 'handoff_kind' -Default ''
+                if ($reason -eq 'receive_stall_recovery' -or
+                    $reason -eq 'transport_recovered_unproven' -or
+                    $handoffKind -eq 'regular_nkn_recovery') {
+                    return $true
+                }
+            }
+            'filetransfer_v6_epoch_reused' {
+                $reason = Get-FileTransferEventField -Event $candidate -Name 'reason' -Default ''
+                $handoffKind = Get-FileTransferEventField -Event $candidate -Name 'handoff_kind' -Default ''
+                if ($reason -eq 'receive_stall_recovery' -or
+                    $reason -eq 'transport_recovered_unproven' -or
+                    $handoffKind -eq 'regular_nkn_recovery') {
+                    return $true
+                }
+            }
+        }
+    }
+
+    return $false
+}
+
+function Test-FileTransferRecoverableV6FeedbackFailure {
+    param(
+        $Event,
+        [Parameter(Mandatory = $true)]$Summary
+    )
+
+    if ($null -eq $Event -or $Event.EventName -ne 'filetransfer_v4_feedback_both_failed') {
+        return $false
+    }
+
+    if (-not (Test-FileTransferCleanTerminalCompletion -Summary $Summary)) {
+        return $false
+    }
+
+    $frameType = Get-FileTransferEventField -Event $Event -Name 'frame_type' -Default ''
+    if ($frameType -ne 'filetransfer.receiver_state.v6' -and
+        $frameType -ne 'filetransfer.frontier_request.v6') {
+        return $false
+    }
+
+    $firstError = Get-FileTransferEventField -Event $Event -Name 'first_error' -Default ''
+    $secondError = Get-FileTransferEventField -Event $Event -Name 'second_error' -Default ''
+    $errorText = "$firstError $secondError"
+    $recoverableError =
+        $errorText -like '*InvalidOperationException*' -or
+        $errorText -like '*bridge is not running*' -or
+        $errorText -like '*Not connected*' -or
+        $errorText -like '*client not ready*'
+    if (-not $recoverableError) {
+        return $false
+    }
+
+    return Test-FileTransferEventNearRecoveryMarker -Event $Event -Summary $Summary
+}
+
+function Test-FileTransferRecoverableBridgeBulkFailure {
+    param(
+        $Event,
+        [Parameter(Mandatory = $true)]$Summary
+    )
+
+    if ($null -eq $Event) {
+        return $false
+    }
+
+    if (-not (Test-FileTransferCleanTerminalCompletion -Summary $Summary)) {
+        return $false
+    }
+
+    if ($Event.EventName -eq 'nkn_bridge_bulk_queue_state') {
+        return $false
+    }
+
+    if ($Event.EventName -ne 'nkn_bridge_bulk_send_summary') {
+        return $false
+    }
+
+    $sendFailures = Get-FileTransferEventInt64Field -Event $Event -Name 'send_failures' -Default 0
+    $queueClears = Get-FileTransferEventInt64Field -Event $Event -Name 'queue_clears' -Default 0
+    if ($sendFailures -le 0 -or $queueClears -gt 0) {
+        return $false
+    }
+
+    $payloadBytesSent = Get-FileTransferEventInt64Field -Event $Event -Name 'payload_bytes_sent' -Default 0
+    $payloadBytesEnqueued = Get-FileTransferEventInt64Field -Event $Event -Name 'payload_bytes_enqueued' -Default 0
+    if ([Math]::Max($payloadBytesSent, $payloadBytesEnqueued) -gt 1048576) {
+        return $false
+    }
+
+    return Test-FileTransferEventNearRecoveryMarker -Event $Event -Summary $Summary -SequenceWindow 180
+}
+
 function Get-FileTransferHardFailureEvents {
     param([Parameter(Mandatory = $true)]$Summary)
 
@@ -150,6 +304,7 @@ function Get-FileTransferHardFailureEvents {
             Where-Object {
                 $null -ne $_ -and
                 -not (Test-FileTransferBenignPostCompletionLateSenderFrame -Event $_ -CompletedTerminalSequences $completedTerminalSequences) -and
+                -not (Test-FileTransferRecoverableV6FeedbackFailure -Event $_ -Summary $Summary) -and
                 ($_.EventName -eq 'filetransfer_transport_payload_rejected' -or
                 $_.EventName -eq 'filetransfer_data_frame_decode_failed' -or
                 $_.EventName -eq 'filetransfer_chunk_rejected' -or
@@ -193,11 +348,14 @@ function Get-FileTransferBridgeBulkFailureEvents {
     return @(
         $Summary.GlobalEvents |
             Where-Object {
-                ($_.EventName -eq 'nkn_bridge_bulk_send_summary' -and
-                    ((Get-FileTransferEventInt64Field -Event $_ -Name 'send_failures' -Default 0) -gt 0 -or
-                     (Get-FileTransferEventInt64Field -Event $_ -Name 'queue_clears' -Default 0) -gt 0)) -or
-                ($_.EventName -eq 'nkn_bridge_bulk_queue_state' -and
-                    (Get-FileTransferEventInt64Field -Event $_ -Name 'cleared_since_last' -Default 0) -gt 0)
+                -not (Test-FileTransferRecoverableBridgeBulkFailure -Event $_ -Summary $Summary) -and
+                (
+                    ($_.EventName -eq 'nkn_bridge_bulk_send_summary' -and
+                        ((Get-FileTransferEventInt64Field -Event $_ -Name 'send_failures' -Default 0) -gt 0 -or
+                         (Get-FileTransferEventInt64Field -Event $_ -Name 'queue_clears' -Default 0) -gt 0)) -or
+                    ($_.EventName -eq 'nkn_bridge_bulk_queue_state' -and
+                        (Get-FileTransferEventInt64Field -Event $_ -Name 'cleared_since_last' -Default 0) -gt 0)
+                )
             }
     )
 }

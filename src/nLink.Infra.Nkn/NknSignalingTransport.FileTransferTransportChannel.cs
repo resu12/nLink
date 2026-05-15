@@ -2518,6 +2518,9 @@ public sealed partial class NknSignalingTransport
                or MsgType.FileTransferPressureState
                or MsgType.FileTransferPauseControl
                or MsgType.FileTransferHeartbeat
+               or MsgType.FileTransferCancel
+               or MsgType.FileTransferError
+               or MsgType.FileTransferComplete
                or MsgType.FileTransferTransportEpoch
                or MsgType.FileTransferTransportProbe
                or MsgType.FileTransferRepairProof;

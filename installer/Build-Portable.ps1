@@ -461,11 +461,15 @@ $bridgeBundleAbs = Join-Path $repoRoot $BridgeBundleDir
 $releasesRootAbs = Join-Path $repoRoot $ReleasesRootDir
 $helperAliasAbs = Join-Path $repoRoot $HelperAliasOutDir
 $helpeeAliasAbs = Join-Path $repoRoot $HelpeeAliasOutDir
+$bridgeBundleScriptPath = Join-Path $PSScriptRoot "Build-BridgeBundle.ps1"
 $verifyPackageManifestPath = Join-Path $repoRoot "build\verify-package-manifest.ps1"
 $packageManifestPath = Join-Path $repoRoot ("installer\package-manifest.{0}.txt" -f $Runtime)
 
 New-Item -ItemType Directory -Force -Path $canonicalOutAbs | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $zipOutAbs) | Out-Null
+if (-not $SkipBridgeBundle -and -not (Test-Path $bridgeBundleScriptPath)) {
+    throw "Bridge bundle build script not found: $bridgeBundleScriptPath"
+}
 if (-not $LocalOnly) {
     New-Item -ItemType Directory -Force -Path $releasesRootAbs | Out-Null
 }
@@ -507,6 +511,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if (-not $SkipBridgeBundle) {
+    Write-Host "[nLink] Building bundled NKN bridge runtime..." -ForegroundColor Cyan
+    & $bridgeBundleScriptPath -Runtime $Runtime -OutDir $BridgeBundleDir
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
     Assert-BridgeBundleRuntime -BridgeDir $bridgeBundleAbs -ExpectedAppVersion $resolvedVersion
     Copy-BridgeBundleToPortable -BridgeDir $bridgeBundleAbs -PortableOutDir $canonicalOutAbs -Runtime $Runtime -ExpectedAppVersion $resolvedVersion
 }

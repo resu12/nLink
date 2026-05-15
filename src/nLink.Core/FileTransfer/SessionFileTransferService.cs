@@ -260,8 +260,12 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V6SparseSeekableRequestBudgetChunks = 1536;
     private const int V6SparseSeekableFrontierStalledRollingAheadChunks = 256;
     private const int V6SparseSeekableFrontierStalledRequestBudgetChunks = 256;
-    private const int V6RegularNknNormalSendAheadLimitChunks = 96;
-    private const int V6RegularNknNormalRefillLowWatermarkChunks = 48;
+    private const int V6RegularNknNormalSendAheadLimitChunks = 512;
+    private const int V6RegularNknNormalRefillLowWatermarkChunks = 384;
+    private const int V6RegularNknNearFrontierNormalResendBypassChunks = 24;
+    private const int V6RegularNknFrontierPressureNormalSendAheadLimitChunks = 256;
+    private const int V6RegularNknFrontierPressureNormalRefillLowWatermarkChunks = 128;
+    private const int V6RegularNknFrontierPressureReleaseAdvanceChunks = 512;
     private const int V6TunaNormalSendAheadLimitChunks = 1536;
     private const int V6FrontierStalledPriorityBurstChunks = 16;
     private const int V6RecoveredRegularNknFrontierPriorityBurstChunks = 24;
@@ -3673,6 +3677,12 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public string V6SenderPumpLastWakeReason { get; set; } = "startup";
 
+        public int V6RegularNknFrontierPressureStartChunkIndex { get; set; } = -1;
+
+        public int V6RegularNknFrontierPressureUntilChunkIndex { get; set; } = -1;
+
+        public DateTimeOffset? V6RegularNknFrontierPressureEnteredUtc { get; set; }
+
         public bool V6UseRegularNknRedundantData { get; set; }
 
         public long V6TunaRedundantDataEpochId { get; set; }
@@ -4051,7 +4061,9 @@ public sealed partial class SessionFileTransferService : IDisposable
         string? RepairRequestId,
         string? PriorityName,
         string? RecoveryMode,
-        bool ForceRegularNknBulk = false);
+        bool ForceRegularNknBulk = false,
+        bool RequiresExplicitFrontierRequest = false,
+        bool AllowNormalRefillBypass = false);
 
     private sealed class InboundTransferContext
     {

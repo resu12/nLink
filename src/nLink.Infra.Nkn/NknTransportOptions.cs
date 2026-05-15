@@ -11,7 +11,9 @@ internal sealed class NknTransportOptions
     private const int DefaultNumSubClients = 4;
     private const int DefaultMediaNumSubClients = 8;
     private const int DefaultBulkNumSubClients = 2;
-    private const int DefaultBulkSendConcurrency = 4;
+    private const int DefaultBulkSendConcurrency = 2;
+    private const int DefaultFileTransferBulkTargetBytesPerSecond = 1_500_000;
+    private const int DefaultFileTransferBulkAdaptationCooldownMs = 20_000;
 
     private readonly struct ResolvedKeyPath
     {
@@ -61,6 +63,12 @@ internal sealed class NknTransportOptions
     public int BulkNumSubClients { get; private set; }
 
     public int BulkSendConcurrency { get; private set; }
+
+    public bool FileTransferAutoBulkAdaptationEnabled { get; private set; }
+
+    public int FileTransferBulkTargetBytesPerSecond { get; private set; }
+
+    public int FileTransferBulkAdaptationCooldownMs { get; private set; }
 
     public bool ReceiveStallRecoveryEnabled { get; private set; }
 
@@ -127,6 +135,18 @@ internal sealed class NknTransportOptions
         var mediaNumSubClients = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_MEDIA_NUM_SUBCLIENTS", category: "nkn_topology");
         var bulkNumSubClients = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_BULK_NUM_SUBCLIENTS", category: "nkn_topology");
         var bulkSendConcurrency = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_BULK_SEND_CONCURRENCY", category: "nkn_topology");
+        var fileTransferAutoBulkAdaptation = FirstNonEmpty(
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION", category: "nkn_filetransfer_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION", appSettings.Get("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION"), category: "nkn_filetransfer_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:fileTransferAutoBulkAdaptation", appSettings.Get("nLink:nkn:fileTransferAutoBulkAdaptation"), category: "nkn_filetransfer_tuning"));
+        var fileTransferBulkTargetBytesPerSecond = FirstNonEmpty(
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS", category: "nkn_filetransfer_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS", appSettings.Get("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS"), category: "nkn_filetransfer_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:fileTransferBulkTargetBps", appSettings.Get("nLink:nkn:fileTransferBulkTargetBps"), category: "nkn_filetransfer_tuning"));
+        var fileTransferBulkAdaptationCooldownMs = FirstNonEmpty(
+            ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS", category: "nkn_filetransfer_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS", appSettings.Get("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS"), category: "nkn_filetransfer_tuning"),
+            ReleaseOverridePolicy.ApplyUnsafeAppSetting("nLink:nkn:fileTransferBulkAdaptationCooldownMs", appSettings.Get("nLink:nkn:fileTransferBulkAdaptationCooldownMs"), category: "nkn_filetransfer_tuning"));
         var receiveStallRecovery = FirstNonEmpty(
             ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", category: "nkn_recovery"),
             ReleaseOverridePolicy.ApplyUnsafeAppSetting("NLINK_NKN_RECEIVE_STALL_RECOVERY", appSettings.Get("NLINK_NKN_RECEIVE_STALL_RECOVERY"), category: "nkn_recovery"),
@@ -176,6 +196,17 @@ internal sealed class NknTransportOptions
             MediaNumSubClients = parsedMediaNumSubClients,
             BulkNumSubClients = parsedBulkNumSubClients,
             BulkSendConcurrency = parsedBulkSendConcurrency,
+            FileTransferAutoBulkAdaptationEnabled = ParseBool(fileTransferAutoBulkAdaptation, defaultValue: true),
+            FileTransferBulkTargetBytesPerSecond = ParseInt(
+                fileTransferBulkTargetBytesPerSecond,
+                defaultValue: DefaultFileTransferBulkTargetBytesPerSecond,
+                minValue: 256_000,
+                maxValue: 64_000_000),
+            FileTransferBulkAdaptationCooldownMs = ParseInt(
+                fileTransferBulkAdaptationCooldownMs,
+                defaultValue: DefaultFileTransferBulkAdaptationCooldownMs,
+                minValue: 5_000,
+                maxValue: 300_000),
             ReceiveStallRecoveryEnabled = ParseBool(receiveStallRecovery, defaultValue: true),
             ReceiveStallFileTransferFastRecoveryEnabled = ParseBool(receiveStallFileTransferFastRecovery, defaultValue: true),
             ReceiveStallControlOnlyRecoveryEnabled = ParseBool(receiveStallControlOnlyRecovery, defaultValue: false),

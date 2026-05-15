@@ -884,13 +884,13 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public void Bridge_Source_DefaultBulkSendMode_IsRoundRobin()
+    public void Bridge_Source_DefaultBulkSendMode_IsSingle()
     {
         var bridgePath = FindFileUpwards(Path.Combine("tools", "nkn-bridge", "index.js"));
         Assert.True(bridgePath is not null && File.Exists(bridgePath), "Bridge script not found.");
 
         var bridgeScript = File.ReadAllText(bridgePath);
-        Assert.Contains("const DEFAULT_BULK_SEND_MODE = 'round_robin';", bridgeScript, StringComparison.Ordinal);
+        Assert.Contains("const DEFAULT_BULK_SEND_MODE = 'single';", bridgeScript, StringComparison.Ordinal);
     }
 
     [Trait("Category", "LegacySmoke")]
@@ -1086,6 +1086,90 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         }
     }
 
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task RealNknClientAdapter_FileTransferBulkAdaptation_PromotesSinglePathWhenBridgeDemandExceedsSentCapacity()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-bulk-adaptation", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-bulk-adaptation.js");
+        WriteBridgeScriptWithManifest(bridgePath, BuildMockBridgeScriptWithCustomConnect(connectBehaviorJs: @"
+    emit({ event:'ok', id: msg.id ?? null, cmd:'connect' });
+    setTimeout(() => emit({ event:'ready', protocol:2, channels:['control','media','bulk'], address:'bulk-adaptation.addr', controlAddress:'bulk-adaptation.addr', mediaAddress:'bulk-adaptation-media.addr', bulkAddress:'bulk-adaptation-bulk.addr', connectId: msg.connectId ?? null }), 20);
+    return;
+    "));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevAutoBulkAdaptation = Environment.GetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION");
+        var prevBulkTargetBps = Environment.GetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS");
+        var prevBulkAdaptationCooldown = Environment.GetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS");
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION", "true");
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS", "1500000");
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS", "5000");
+            var options = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "id.json"), "mock-bulk-adaptation");
+            var identity = NknIdentityStore.LoadOrCreate(options);
+            using var adapter = new RealNknClientAdapter(identity, options);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+
+            var baselineLength = LocalOperationalLog.GetRecentLogText().Length;
+            adapter.RegisterActiveFileTransferDataSession("transfer-bulk-adaptation");
+            var lowCapacitySummary =
+                "{\"event\":\"bridge_bulk_send_summary\",\"frames_sent\":16,\"frames_enqueued\":24,\"payload_bytes_sent\":800000,\"payload_bytes_per_second\":800000,\"payload_bytes_enqueued\":3000000,\"payload_bytes_enqueued_per_second\":3000000,\"send_failures\":0,\"queue_clears\":0,\"queue_depth\":0,\"queued_bytes\":0,\"oldest_queued_age_ms\":0,\"in_flight\":0,\"in_flight_bytes\":0,\"configured_concurrency\":2,\"effective_concurrency\":2,\"send_mode\":\"single\",\"sample_window_ms\":2000}";
+            adapter.HandleStdoutJsonLineForTests(lowCapacitySummary);
+            adapter.HandleStdoutJsonLineForTests(lowCapacitySummary);
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var logText = GetRecentLogTextSince(baselineLength);
+                    return logText.Contains("event=nkn_bridge_bulk_send_policy_adaptation_applied", StringComparison.Ordinal) &&
+                           logText.Contains("mode=round_robin", StringComparison.Ordinal) &&
+                           logText.Contains("concurrency=4", StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(3));
+
+            adapter.UnregisterActiveFileTransferDataSession("transfer-bulk-adaptation");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION", prevAutoBulkAdaptation);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS", prevBulkTargetBps);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS", prevBulkAdaptationCooldown);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
     [Fact]
     public void NknTransportOptions_ParsesSubClientTopologyOverrides()
     {
@@ -1099,6 +1183,9 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var prevReceiveStallFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
         var prevControlOnlyStallRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
         var prevReceiveStallFallbackDelay = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS");
+        var prevAutoBulkAdaptation = Environment.GetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION");
+        var prevBulkTargetBps = Environment.GetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS");
+        var prevBulkAdaptationCooldown = Environment.GetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS");
 
         try
         {
@@ -1110,11 +1197,17 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
             Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", null);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS", null);
             var defaults = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "default.json"), "topology-default");
             Assert.Equal(4, defaults.NumSubClients);
             Assert.Equal(8, defaults.MediaNumSubClients);
             Assert.Equal(2, defaults.BulkNumSubClients);
-            Assert.Equal(4, defaults.BulkSendConcurrency);
+            Assert.Equal(2, defaults.BulkSendConcurrency);
+            Assert.True(defaults.FileTransferAutoBulkAdaptationEnabled);
+            Assert.Equal(1_500_000, defaults.FileTransferBulkTargetBytesPerSecond);
+            Assert.Equal(20_000, defaults.FileTransferBulkAdaptationCooldownMs);
             Assert.True(defaults.ReceiveStallRecoveryEnabled);
             Assert.True(defaults.ReceiveStallFileTransferFastRecoveryEnabled);
             Assert.False(defaults.ReceiveStallControlOnlyRecoveryEnabled);
@@ -1130,7 +1223,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Assert.Equal(6, inheritedMedia.NumSubClients);
             Assert.Equal(6, inheritedMedia.MediaNumSubClients);
             Assert.Equal(6, inheritedMedia.BulkNumSubClients);
-            Assert.Equal(4, inheritedMedia.BulkSendConcurrency);
+            Assert.Equal(2, inheritedMedia.BulkSendConcurrency);
             Assert.True(inheritedMedia.HasSubClientTopologyOverride);
 
             Environment.SetEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS", "0");
@@ -1141,11 +1234,17 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", "false");
             Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "true");
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS", "99");
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION", "false");
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS", "128000");
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS", "1");
             var clamped = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "clamped.json"), "topology-clamped");
             Assert.Equal(1, clamped.NumSubClients);
             Assert.Equal(16, clamped.MediaNumSubClients);
             Assert.Equal(16, clamped.BulkNumSubClients);
             Assert.Equal(8, clamped.BulkSendConcurrency);
+            Assert.False(clamped.FileTransferAutoBulkAdaptationEnabled);
+            Assert.Equal(256_000, clamped.FileTransferBulkTargetBytesPerSecond);
+            Assert.Equal(5_000, clamped.FileTransferBulkAdaptationCooldownMs);
             Assert.False(clamped.ReceiveStallRecoveryEnabled);
             Assert.False(clamped.ReceiveStallFileTransferFastRecoveryEnabled);
             Assert.True(clamped.ReceiveStallControlOnlyRecoveryEnabled);
@@ -1162,6 +1261,9 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevReceiveStallFastRecovery);
             Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyStallRecovery);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY_FALLBACK_DELAY_MS", prevReceiveStallFallbackDelay);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_AUTO_BULK_ADAPTATION", prevAutoBulkAdaptation);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_TARGET_BPS", prevBulkTargetBps);
+            Environment.SetEnvironmentVariable("NLINK_NKN_FILE_TRANSFER_BULK_ADAPTATION_COOLDOWN_MS", prevBulkAdaptationCooldown);
             try
             {
                 CleanupDirectoryIfExists(tempDir);

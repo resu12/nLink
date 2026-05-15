@@ -71,10 +71,10 @@ const BULK_QUEUE_SEVERE_BYTES = 12 * 1024 * 1024;
 const BULK_QUEUE_SEVERE_AGE_MS = 1000;
 const BULK_QUEUE_TRANSIENT_RETRY_MAX_ATTEMPTS = 4;
 const BULK_QUEUE_TRANSIENT_RETRY_DELAY_MS = 150;
-const DEFAULT_BULK_SEND_CONCURRENCY = 4;
+const DEFAULT_BULK_SEND_CONCURRENCY = 2;
 const MIN_BULK_SEND_CONCURRENCY = 1;
 const MAX_BULK_SEND_CONCURRENCY = 8;
-const DEFAULT_BULK_SEND_MODE = 'round_robin';
+const DEFAULT_BULK_SEND_MODE = 'single';
 const BULK_SEND_MODE_FANOUT = 'fanout';
 const BULK_SEND_MODE_ROUND_ROBIN = 'round_robin';
 const BULK_SEND_MODE_SINGLE = 'single';
@@ -1479,6 +1479,23 @@ function getBulkSendMode() {
   return normalizeBulkSendMode(state.bulkSendMode || getConfiguredBulkSendMode());
 }
 
+async function handleSetBulkSendPolicy(command) {
+  const previousMode = getBulkSendMode();
+  const previousConcurrency = getEffectiveBulkSendConcurrency();
+  const nextMode = normalizeBulkSendMode(command.mode || command.bulkSendMode || previousMode);
+  const nextConcurrency = normalizeBulkSendConcurrency(
+    command.concurrency ?? command.bulkSendConcurrency,
+    previousConcurrency);
+
+  state.bulkSendMode = nextMode;
+  state.bulkSendConcurrency = nextConcurrency;
+  state.bulkRoundRobinCursor = 0;
+  emitBulkQueueState(true);
+  logStderr(
+    `Bulk send policy updated ` +
+    `(mode=${nextMode}, concurrency=${nextConcurrency}, previous_mode=${previousMode}, previous_concurrency=${previousConcurrency})`);
+}
+
 function clearControlSendQueue(reason) {
   if (state.controlSendQueue.length > 0) {
     state.controlQueueClearedSinceLast += state.controlSendQueue.length;
@@ -2451,9 +2468,11 @@ function attachClientHandlers(client, channel) {
     }
   }
 
+  let messageHandlerRegistered = false;
   if (typeof client.onMessage === 'function') {
     try {
       client.onMessage(onMessage);
+      messageHandlerRegistered = true;
     } catch (error) {
       logStderr(`onMessage hook failed: ${safeErrorMessage(error)}`);
     }
@@ -2491,7 +2510,9 @@ function attachClientHandlers(client, channel) {
   if (typeof client.on === 'function') {
     try { client.on('connect', onReady); } catch {}
     try { client.on('ready', onReady); } catch {}
-    try { client.on('message', onMessage); } catch {}
+    if (!messageHandlerRegistered) {
+      try { client.on('message', onMessage); } catch {}
+    }
     try { client.on('disconnect', () => onDisconnected('Disconnected')); } catch {}
     try { client.on('close', () => onDisconnected('Closed')); } catch {}
     try { client.on('error', (e) => logStderr(`Client error: ${safeErrorMessage(e)}`)); } catch {}
@@ -3030,6 +3051,9 @@ async function dispatchCommand(message) {
       return true;
     case 'setScreenSharePolicy':
       await handleSetScreenSharePolicy(message);
+      return true;
+    case 'setBulkSendPolicy':
+      await handleSetBulkSendPolicy(message);
       return true;
     case 'hello':
       await handleHello(message);

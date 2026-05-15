@@ -59,12 +59,27 @@ File-transfer evidence is classified before any tuning is proposed:
 
 - Do not tune chunk size, pipeline depth, retries, or batching from a single live retained-log artifact.
 - Treat data integrity and terminal completion as higher priority than throughput.
+- Treat `1.5 MB/s` as the regular NKN app-goodput target; below-target runs are optimization evidence only when terminal correctness and artifact integrity are clean.
 - Separate repo-owned protocol failures from external NKN/bridge health churn.
 - For mixed screen-share reports, judge file transfer and media queue evidence together.
 - Prefer narrow fixes backed by artifacts over additive recovery logic.
 - Treat local soak modes as regression guards for core/runtime behavior, not proof of live NKN throughput.
 - Treat live NKN soak artifacts as operator evidence. They may vary with topology, so compare them only with matching safe/strong baseline artifact directories.
 - Pause/resume is active-session only. Restarting either app does not resume a partial transfer, and partial files must not be presented as resumable release artifacts.
+
+## Regular NKN V6 Efficiency Triage
+
+For slow installed-build reports, first distinguish a protocol stall from inefficient completion:
+
+- If both terminal summaries are `Completed` and SHA/integrity is clean, treat low goodput as a regular-NKN efficiency regression, not a session teardown bug.
+- Check `throughput-summary.txt` for raw bytes sent versus delivered payload. A raw-to-payload ratio near `1.0` is the target; ratios near `2.0` usually mean resend pressure or delayed duplicate delivery.
+- Check `v6_unsolicited_chunk_ignored_count`, `post_completion_late_sender_frame`, and `filetransfer_v6_normal_refill_near_frontier_resend_bypassed`. The near-frontier normal resend bypass is a rescue path for a non-advancing receiver frontier; it should be rare while the receiver frontier is advancing.
+- Check `transfer-terminal-summary.txt` before judging speed. Sender/receiver terminal divergence, missing terminal evidence, or non-empty error codes still outrank goodput analysis.
+
+Current regular-NKN reference artifacts:
+
+- `artifacts/filetransfer-soak/20260515-172434/`: completed, but slow and inefficient. App goodput was `946,388 B/s`, raw V6 sender bytes were `270,413,824` for a `134,217,728` byte payload, `v6_unsolicited_chunk_ignored_count=5086`, and `post_completion_late_sender_frame=416`.
+- `artifacts/filetransfer-soak/20260515-173810/`: current fixed reference. App goodput was `1,626,888 B/s`, raw V6 sender bytes were `144,926,720` for a `134,217,728` byte payload, `v6_unsolicited_chunk_ignored_count=574`, and `post_completion_late_sender_frame=0`.
 
 ## Support Capture
 
