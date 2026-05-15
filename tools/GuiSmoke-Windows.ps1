@@ -2269,6 +2269,8 @@ function Run-FileTransferNknSoakCore {
     Reset-ScenarioContext -Context $Context
 
     $artifactDir = Get-FileTransferSoakArtifactDir
+    $receivedRoot = Join-Path $artifactDir 'received'
+    New-Item -ItemType Directory -Force -Path $receivedRoot | Out-Null
     $autopickPath = [string]$env:NLINK_FILETRANSFER_SOAK_AUTOPICK_FILE
     if ([string]::IsNullOrWhiteSpace($autopickPath)) {
         $autopickPath = Join-Path $artifactDir 'filetransfer-live-autopick-payload.bin'
@@ -2286,8 +2288,11 @@ function Run-FileTransferNknSoakCore {
     $runBookmark = Get-AppLogBookmark
 
     $previousScaffold = $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD
+    $previousInboundRoot = $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT
     $shareButton = $null
     try {
+        $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT = $receivedRoot
+
         if ($Mixed) {
             $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD = '1'
         }
@@ -2333,6 +2338,13 @@ function Run-FileTransferNknSoakCore {
         }
         else {
             $env:NLINK_FEATURE_SCREENCAP_SCAFFOLD = $previousScaffold
+        }
+
+        if ($null -eq $previousInboundRoot) {
+            Remove-Item Env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT = $previousInboundRoot
         }
     }
 }
@@ -2651,6 +2663,51 @@ function Invoke-TunaGuiFallbackFault {
     Write-Host "[GUI Smoke][filetransfer_tuna] Triggered Tuna fallback by killing $target sidecar child process(es)." -ForegroundColor Yellow
 }
 
+function Wait-TunaGuiAcceleratedFilePayloadBeforeFault {
+    param(
+        [Parameter(Mandatory = $true)][int]$Bookmark,
+        [int]$TimeoutMs = 60000,
+        [long]$MinimumTotalPayloadBytes = 67108864,
+        [long]$MinimumFramePayloadBytes = 16384
+    )
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $processedLineCount = 0
+    $totalPayloadBytes = 0L
+    $lastFramePayloadBytes = -1L
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        $lines = @(Get-AppLogLinesAfterBookmark -Bookmark $Bookmark)
+        if ($lines.Count -lt $processedLineCount) {
+            $processedLineCount = 0
+        }
+
+        for ($lineIndex = $processedLineCount; $lineIndex -lt $lines.Count; $lineIndex++) {
+            $line = $lines[$lineIndex]
+            if ($line.IndexOf('event=tuna_accelerated_file_frame_sent', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+            if ($line.IndexOf('channel=bulk', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+
+            $fields = ConvertFrom-GuiSmokeSemicolonFields -Message $line
+            $payloadText = Get-GuiSmokeFieldValue -Fields $fields -Name 'payload_bytes' -Default '-1'
+            $payloadBytes = -1L
+            if ([long]::TryParse($payloadText, [ref]$payloadBytes)) {
+                $lastFramePayloadBytes = [Math]::Max($lastFramePayloadBytes, $payloadBytes)
+                if ($payloadBytes -ge $MinimumFramePayloadBytes) {
+                    $totalPayloadBytes += $payloadBytes
+                }
+
+                if ($totalPayloadBytes -ge $MinimumTotalPayloadBytes) {
+                    return $line
+                }
+            }
+        }
+        $processedLineCount = $lines.Count
+
+        Start-Sleep -Milliseconds 500
+    }
+
+    throw "Timed out waiting for Tuna accelerated bulk file payload before fallback fault; min_total_payload_bytes=$MinimumTotalPayloadBytes; total_payload_bytes=$totalPayloadBytes; min_frame_payload_bytes=$MinimumFramePayloadBytes; last_frame_payload_bytes=$lastFramePayloadBytes; timeout_s=$($TimeoutMs / 1000)."
+}
+
 function Invoke-TunaGuiPauseResumeProbe {
     param(
         [Parameter(Mandatory = $true)]$SenderWindow,
@@ -2914,6 +2971,9 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     }
 
     if ($FaultMode -ne 'none' -and -not $fallbackEpochStartedObserved) {
+        $minimumFaultPayloadBytes = [Math]::Min(67108864L, [Math]::Max(1048576L, [long]($PayloadSizeBytes / 2)))
+        $acceleratedPayloadLine = [string](Wait-TunaGuiAcceleratedFilePayloadBeforeFault -Bookmark $bookmark -MinimumTotalPayloadBytes $minimumFaultPayloadBytes)
+        $observedEvidenceLines.Add($acceleratedPayloadLine) | Out-Null
         Invoke-TunaGuiFallbackFault -Context $Context -FaultMode $FaultMode -PayerMode $PayerMode
         $fallbackStartedLine = [string](Wait-AppLogContainsAllAfterBookmark -Bookmark $bookmark -Needles @('event=filetransfer_v6_epoch_started', 'handoff_kind=tuna_to_normal_fallback') -TimeoutMs 90000 -Description 'V6 TunaToNormalFallback epoch started')
         $observedEvidenceLines.Add($fallbackStartedLine) | Out-Null
@@ -3111,6 +3171,8 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
     }
 
     $artifactDir = Get-FileTransferSoakArtifactDir
+    $receivedRoot = Join-Path $artifactDir 'received'
+    New-Item -ItemType Directory -Force -Path $receivedRoot | Out-Null
     $walletPath = Resolve-TunaGuiWalletPath
     $sidecarPath = Resolve-TunaGuiSidecarPath
     $stateRoot = Initialize-TunaGuiRuntimeState -ArtifactDir $artifactDir -WalletPath $walletPath -SidecarPath $sidecarPath
@@ -3150,7 +3212,10 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
         $faultMode,
         $payloadSize) -ForegroundColor DarkGray
 
+    $previousInboundRoot = $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT
     try {
+        $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT = $receivedRoot
+
         Start-HelpeeFlow -Context $Context
         Start-HelperFlow -Context $Context
         [void](Connect-HelperAndHelpee -Context $Context)
@@ -3191,6 +3256,12 @@ function Run-ScenarioFileTransferTunaHandoffFallback {
     }
     finally {
         Copy-FileTransferLiveLogSlice -ArtifactDir $artifactDir -Bookmark $runBookmark
+        if ($null -eq $previousInboundRoot) {
+            Remove-Item Env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:NLINK_FILE_TRANSFER_TEST_INBOUND_ROOT = $previousInboundRoot
+        }
     }
 }
 
