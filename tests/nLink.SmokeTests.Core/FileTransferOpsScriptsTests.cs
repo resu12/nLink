@@ -110,6 +110,8 @@ public sealed class FileTransferOpsScriptsTests
         "filetransfer-live-nkn-summary.json",
         "filetransfer-live-nkn-cycles.jsonl",
         "filetransfer-retained-log-slice.log",
+        "regular-nkn-passive-scout-summary.txt",
+        "regular-nkn-passive-scout-summary.json",
         "baseline-comparison.txt"
     ];
 
@@ -2814,6 +2816,11 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("0", summary["payload_rejected_count"]);
             Assert.Equal("0", summary["bridge_bulk_send_failure_count"]);
 
+            var passiveScout = ReadArtifactReport(artifactDir, "regular-nkn-passive-scout-summary.txt");
+            Assert.Equal("regular-nkn-passive-scout", passiveScout["artifact_kind"]);
+            Assert.Equal("not_enabled_or_no_samples", passiveScout["status"]);
+            Assert.Equal("0", passiveScout["sample_count"]);
+
             var protocolShape = File.ReadAllText(Path.Combine(artifactDir, "protocol-shape-summary.txt"));
             Assert.Contains("filetransfer.chunk_batch.v6", protocolShape, StringComparison.Ordinal);
             Assert.Contains("v6_sender_started_count=1", protocolShape, StringComparison.Ordinal);
@@ -2828,6 +2835,58 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("long_live_matrix_incomplete", promotion["reason"]);
             Assert.Equal("1", promotion["current_long_proof_completed_cycle_count"]);
             Assert.Equal("0", promotion["long_proof_matrix_complete"]);
+        }
+        finally
+        {
+            TryDeleteDirectory(tempRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RunFileTransferNknSoak_FakePassiveScoutWritesScoutSummary()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-filetransfer-live-passive-scout-fake", Guid.NewGuid().ToString("N"));
+        var artifactDir = Path.Combine(tempRoot, "nkn-fast");
+        Directory.CreateDirectory(tempRoot);
+
+        try
+        {
+            var environment = BuildFakeLiveNknEnvironment();
+            environment["NLINK_FILETRANSFER_NKN_SOAK_FAKE_PASSIVE_SCOUT"] = "1";
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferNknSoak.ps1"),
+                [
+                    "-Mode", "nkn-fast",
+                    "-ArtifactDir", artifactDir,
+                    "-PayloadSizes", "64KiB",
+                    "-Cycles", "1",
+                    "-TimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected fake passive scout live NKN soak to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            AssertRequiredLiveArtifacts(artifactDir);
+
+            var passiveScout = ReadArtifactReport(artifactDir, "regular-nkn-passive-scout-summary.txt");
+            Assert.Equal("observed", passiveScout["status"]);
+            Assert.Equal("1", passiveScout["sample_count"]);
+            Assert.Equal("degraded", passiveScout["worst_classification"]);
+            Assert.Equal("1", passiveScout["recommendation_count"]);
+            Assert.Equal("12000", passiveScout["max_committed_progress_gap_ms"]);
+            Assert.Equal("1", passiveScout["degraded_window_count"]);
+            Assert.Equal("1", passiveScout["high_frames_per_mib_window_count"]);
+            Assert.Equal("would_probe_round_robin", passiveScout["final_would_probe_recommendation"]);
+            Assert.Equal("Completed", passiveScout["terminal_state"]);
         }
         finally
         {

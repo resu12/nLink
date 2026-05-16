@@ -592,6 +592,14 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             "reason=regular_nkn_recovered_after_tuna_fallback",
             ReadOperationalLogTail(logStart),
             StringComparison.Ordinal);
+        Assert.Contains(
+            "event=filetransfer_v6_regular_nkn_degraded_profile_entered",
+            ReadOperationalLogTail(logStart),
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "reason=tuna_fallback_regular_nkn_recovery",
+            ReadOperationalLogTail(logStart),
+            StringComparison.Ordinal);
         Assert.DoesNotContain("reason=normal_batch_limit", ReadOperationalLogTail(logStart), StringComparison.Ordinal);
     }
 

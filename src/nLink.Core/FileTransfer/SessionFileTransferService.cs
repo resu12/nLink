@@ -266,8 +266,16 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V6RegularNknFrontierPressureNormalSendAheadLimitChunks = 256;
     private const int V6RegularNknFrontierPressureNormalRefillLowWatermarkChunks = 128;
     private const int V6RegularNknFrontierPressureReleaseAdvanceChunks = 512;
+    private const int V6RegularNknDegradedNormalSendAheadLimitChunks = 128;
+    private const int V6RegularNknDegradedNormalRefillLowWatermarkChunks = 64;
+    private const int V6RegularNknDegradedReleaseAdvanceChunks = 256;
+    private const int V6RegularNknDegradedNoProgressReceiverStateThreshold = 4;
+    private const int V6RegularNknDegradedNoProgressGraceMs = 3500;
     private const int V6TunaNormalSendAheadLimitChunks = 1536;
     private const int V6FrontierStalledPriorityBurstChunks = 16;
+    private const int V6RegularNknInferredFrontierRepairBurstChunks = 2;
+    private const int V6RegularNknInferredFrontierRepairStallMs = 3500;
+    private const int V6RegularNknInferredFrontierRepairCooldownMs = 10000;
     private const int V6RecoveredRegularNknFrontierPriorityBurstChunks = 24;
     private const int V6NormalReceiverStateResendGateMs = 3500;
     private const int V6RecoveredFrontierResendGateMs = 1500;
@@ -277,6 +285,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V6SenderRequestFeedbackStallRecoveryCooldownMs = 15000;
     private const int V6SenderRequestFeedbackStallRecoverySuppressedLogIntervalMs = 5000;
     private const int V6SenderFeedbackStaleNormalBacklogChunks = 256;
+    private const string V6RegularNknPassiveScoutEnvironmentVariableName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_PASSIVE_SCOUT";
     private const long V6TunaRedundantDataMinimumBytesAfterProof = 10L * 1024L * 1024L;
     private const int V6FileOnlySenderPipelineDepth = 24;
     private const int V6RegularNknRedundantSenderPipelineDepth = 2;
@@ -337,6 +346,11 @@ public sealed partial class SessionFileTransferService : IDisposable
     internal static long? V6TunaRedundantDataMinimumBytesAfterProofOverrideForTests { get; set; }
     internal static TimeSpan? V6SenderTransportSendTimeoutOverrideForTests { get; set; }
     internal static TimeSpan? V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests { get; set; }
+    internal static TimeSpan? V6RegularNknPassiveScoutSampleIntervalOverrideForTests { get; set; }
+    internal static TimeSpan? V6RegularNknPassiveScoutRecommendationIntervalOverrideForTests { get; set; }
+    internal static TimeSpan? V6RegularNknPassiveScoutWatchFeedbackStaleOverrideForTests { get; set; }
+    internal static TimeSpan? V6RegularNknPassiveScoutDegradedNoProgressOverrideForTests { get; set; }
+    internal static TimeSpan? V6RegularNknPassiveScoutStalledNoProgressOverrideForTests { get; set; }
 
     public SessionFileTransferService(Func<string>? transferIdFactory = null)
     {
@@ -3682,6 +3696,38 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int V6RegularNknFrontierPressureUntilChunkIndex { get; set; } = -1;
 
         public DateTimeOffset? V6RegularNknFrontierPressureEnteredUtc { get; set; }
+
+        public int V6RegularNknDegradedNoProgressReceiverStateCount { get; set; }
+
+        public int V6RegularNknDegradedObservedChunkIndex { get; set; } = -1;
+
+        public DateTimeOffset? V6RegularNknDegradedObservedUtc { get; set; }
+
+        public int V6RegularNknDegradedStartChunkIndex { get; set; } = -1;
+
+        public int V6RegularNknDegradedUntilChunkIndex { get; set; } = -1;
+
+        public DateTimeOffset? V6RegularNknDegradedEnteredUtc { get; set; }
+
+        public string? V6RegularNknDegradedReason { get; set; }
+
+        public int V6RegularNknInferredFrontierObservedChunkIndex { get; set; } = -1;
+
+        public DateTimeOffset? V6RegularNknInferredFrontierObservedUtc { get; set; }
+
+        public int V6LastInferredRegularNknFrontierRepairChunkIndex { get; set; } = -1;
+
+        public int V6LastInferredRegularNknFrontierRepairReceiverStateEpoch { get; set; } = -1;
+
+        public DateTimeOffset? V6LastInferredRegularNknFrontierRepairUtc { get; set; }
+
+        public string? V6LastInferredRegularNknFrontierRepairRequestId { get; set; }
+
+        public DateTimeOffset? V6LastInferredRegularNknFrontierRepairSuppressedLogUtc { get; set; }
+
+        public string? V6LastInferredRegularNknFrontierRepairSuppressedReason { get; set; }
+
+        public V6RegularNknPassiveScoutState V6RegularNknPassiveScout { get; } = new();
 
         public bool V6UseRegularNknRedundantData { get; set; }
 

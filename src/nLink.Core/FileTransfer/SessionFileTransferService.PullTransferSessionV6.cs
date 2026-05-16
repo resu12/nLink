@@ -51,6 +51,16 @@ public sealed partial class SessionFileTransferService
                 context.V6RequestedChunkMetadataByChunkIndex.Clear();
                 context.V6AppliedFrontierRequestIds.Clear();
                 context.V6CurrentNormalRequestKey = null;
+                ClearOutboundV6RegularNknDegradedProfileLocked(context);
+                context.V6RegularNknInferredFrontierObservedChunkIndex = -1;
+                context.V6RegularNknInferredFrontierObservedUtc = null;
+                context.V6LastInferredRegularNknFrontierRepairChunkIndex = -1;
+                context.V6LastInferredRegularNknFrontierRepairReceiverStateEpoch = -1;
+                context.V6LastInferredRegularNknFrontierRepairUtc = null;
+                context.V6LastInferredRegularNknFrontierRepairRequestId = null;
+                context.V6LastInferredRegularNknFrontierRepairSuppressedLogUtc = null;
+                context.V6LastInferredRegularNknFrontierRepairSuppressedReason = null;
+                ResetOutboundV6RegularNknPassiveScoutLocked(context);
                 context.V6UseRegularNknRedundantData = false;
                 context.V6TunaRedundantDataEpochId = 0;
                 context.V6TunaRedundantDataSatisfiedEpochId = 0;
@@ -61,6 +71,7 @@ public sealed partial class SessionFileTransferService
                 context.PullSentChunkCacheBytes = 0;
                 context.PullSenderFeedCreditWaitStartedUtc = null;
                 context.V4SenderCreditExhaustedSinceUtc = null;
+                MaybeStartOutboundV6RegularNknPassiveScoutLocked(context, DateTimeOffset.UtcNow, "sender_started");
             }
 
             LocalOperationalLog.Info(
@@ -245,6 +256,11 @@ public sealed partial class SessionFileTransferService
             context.PeerPaused = state.TransferPaused;
             context.PeerPauseReason = NormalizeReason(state.TransferPauseReason);
             context.PeerPausedSinceUtc = state.TransferPaused ? DateTimeOffset.UtcNow : null;
+            if (receiverAdvancedFrontier)
+            {
+                ClearOutboundV6RegularNknInferredFrontierObservationLocked(context);
+            }
+
             MaybeEnableOutboundV6RegularNknRedundantDataLocked(context, state.BytesCommitted);
             foreach (var chunkIndex in context.SentAwaitingAck.Keys.Where(chunkIndex => chunkIndex < context.RemoteNextExpectedChunkIndex).ToArray())
             {
@@ -258,8 +274,22 @@ public sealed partial class SessionFileTransferService
 
             PruneOutboundV6RequestedChunksBeforeLocked(context, context.RemoteNextExpectedChunkIndex);
             TrimSenderRepairCacheLocked(context, context.RemoteNextExpectedChunkIndex);
-            var stateFrontierPriorityRanges = BuildOutboundV6StateFrontierPriorityRangesLocked(context, state);
+            var stateProvesFrontierGap = OutboundV6ReceiverStateRequestsCurrentFrontierLocked(context, state);
+            if (!stateProvesFrontierGap)
+            {
+                ClearOutboundV6RegularNknInferredFrontierObservationLocked(context);
+            }
+
+            IReadOnlyList<FileTransferRangeV4> stateFrontierPriorityRanges = stateProvesFrontierGap
+                ? BuildOutboundV6StateFrontierPriorityRangesLocked(context, state)
+                : [];
             var stateRequestsFrontierGap = stateFrontierPriorityRanges.Count > 0;
+            UpdateOutboundV6RegularNknDegradedProfileLocked(
+                context,
+                state,
+                previousRemoteFrontier,
+                receiverAdvancedFrontier,
+                stateRequestsFrontierGap);
             if (stateRequestsFrontierGap)
             {
                 EnterOutboundV6RegularNknFrontierPressureLocked(context, state);
@@ -306,16 +336,25 @@ public sealed partial class SessionFileTransferService
                     context,
                     state,
                     context.RemoteNextExpectedChunkIndex);
+                var inferredRegularNknRepair = IsCurrentOutboundV6RegularNknInferredFrontierRepairLocked(
+                    context,
+                    state,
+                    context.RemoteNextExpectedChunkIndex);
+                var frontierRecoveryMode = inferredRegularNknRepair
+                    ? "regular_nkn_inferred_frontier_stall"
+                    : state.RecoveryMode;
                 QueueOutboundV6RequestedRangesLocked(
                     context,
                     stateFrontierPriorityRanges,
                     new V6OutboundChunkRequestMetadata(
-                        $"state-frontier:{state.Epoch}:{context.RemoteNextExpectedChunkIndex}",
+                        inferredRegularNknRepair
+                            ? $"state-frontier-inferred:{context.RemoteNextExpectedChunkIndex}"
+                            : $"state-frontier:{state.Epoch}:{context.RemoteNextExpectedChunkIndex}",
                         Priority: true,
                         state.TransportEpoch,
                         frontierRepairRequestId,
                         state.Priority ?? "frontier",
-                        state.RecoveryMode,
+                        frontierRecoveryMode,
                         forceRegularNknBulk),
                     obsoleteBeforeChunkIndex: context.RemoteNextExpectedChunkIndex);
             }
@@ -337,6 +376,8 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v6_receiver_state_received; transfer_id={context.TransferId}; session_id={context.SessionId}; epoch={state.Epoch}; previous_remote_frontier_chunk_index={previousRemoteFrontier}; committed_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; diagnostic_credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; missing_range_count={state.MissingRanges.Count}; bytes_committed={state.BytesCommitted}; transfer_paused={(state.TransferPaused ? 1 : 0)}");
+            ObserveOutboundV6RegularNknPassiveScoutReceiverStateLocked(context, state, DateTimeOffset.UtcNow);
+            MaybeSampleOutboundV6RegularNknPassiveScoutLocked(context, DateTimeOffset.UtcNow, "receiver_state");
         }
 
         if (snapshot is not null)
@@ -351,6 +392,7 @@ public sealed partial class SessionFileTransferService
         FileTransferReceiverStateFrameV6 state)
     {
         var frontierChunkIndex = context.RemoteNextExpectedChunkIndex;
+        var now = DateTimeOffset.UtcNow;
         if (frontierChunkIndex >= context.ChunkCount ||
             state.DurableReceivedHighestChunkIndex < frontierChunkIndex)
         {
@@ -358,11 +400,6 @@ public sealed partial class SessionFileTransferService
         }
 
         var maxPriorityChunks = ResolveOutboundV6StateFrontierPriorityChunksLocked(context, state);
-        if (maxPriorityChunks <= 0)
-        {
-            return [];
-        }
-
         var ranges = NormalizeV6RequestRanges(state.MissingRanges, context.ChunkCount);
         foreach (var range in ranges)
         {
@@ -378,8 +415,19 @@ public sealed partial class SessionFileTransferService
             }
 
             var count = Math.Min(
-                Math.Min(maxPriorityChunks, context.ChunkCount - frontierChunkIndex),
+                context.ChunkCount - frontierChunkIndex,
                 rangeEndExclusive - frontierChunkIndex);
+            if (maxPriorityChunks <= 0)
+            {
+                maxPriorityChunks = ResolveOutboundV6RegularNknInferredStateFrontierPriorityChunksLocked(
+                    context,
+                    state,
+                    frontierChunkIndex,
+                    count,
+                    now);
+            }
+
+            count = Math.Min(maxPriorityChunks, count);
             if (count <= 0)
             {
                 return [];
@@ -446,6 +494,146 @@ public sealed partial class SessionFileTransferService
         return 0;
     }
 
+    private static int ResolveOutboundV6RegularNknInferredStateFrontierPriorityChunksLocked(
+        OutboundTransferContext context,
+        FileTransferReceiverStateFrameV6 state,
+        int frontierChunkIndex,
+        int availableFrontierChunks,
+        DateTimeOffset now)
+    {
+        if (state.TransportEpoch > 0 ||
+            context.V6TransportEpoch is not null ||
+            IsOutboundV6TunaNormalSendAheadPathLocked(context))
+        {
+            return 0;
+        }
+
+        if (context.UserPaused || context.PeerPaused || state.TransferPaused)
+        {
+            LogOutboundV6RegularNknInferredStateFrontierRepairDeferredLocked(
+                context,
+                state,
+                frontierChunkIndex,
+                "paused",
+                0,
+                now);
+            return 0;
+        }
+
+        if (context.V6RegularNknInferredFrontierObservedChunkIndex != frontierChunkIndex ||
+            context.V6RegularNknInferredFrontierObservedUtc is null)
+        {
+            context.V6RegularNknInferredFrontierObservedChunkIndex = frontierChunkIndex;
+            context.V6RegularNknInferredFrontierObservedUtc = now;
+            LogOutboundV6RegularNknInferredStateFrontierRepairDeferredLocked(
+                context,
+                state,
+                frontierChunkIndex,
+                "stall_observation_started",
+                0,
+                now);
+            return 0;
+        }
+
+        var elapsedMs = (long)Math.Max(0, (now - context.V6RegularNknInferredFrontierObservedUtc.Value).TotalMilliseconds);
+        if (elapsedMs < V6RegularNknInferredFrontierRepairStallMs)
+        {
+            LogOutboundV6RegularNknInferredStateFrontierRepairDeferredLocked(
+                context,
+                state,
+                frontierChunkIndex,
+                "stall_grace",
+                elapsedMs,
+                now);
+            return 0;
+        }
+
+        if (context.V6ChunkSendsInFlight.ContainsKey(frontierChunkIndex) ||
+            context.V6PriorityRequestedChunks.Contains(frontierChunkIndex))
+        {
+            LogOutboundV6RegularNknInferredStateFrontierRepairDeferredLocked(
+                context,
+                state,
+                frontierChunkIndex,
+                "frontier_priority_pending",
+                elapsedMs,
+                now);
+            return 0;
+        }
+
+        if (context.V6LastInferredRegularNknFrontierRepairChunkIndex == frontierChunkIndex &&
+            context.V6LastInferredRegularNknFrontierRepairUtc is { } lastRepairUtc &&
+            now - lastRepairUtc < TimeSpan.FromMilliseconds(V6RegularNknInferredFrontierRepairCooldownMs))
+        {
+            LogOutboundV6RegularNknInferredStateFrontierRepairDeferredLocked(
+                context,
+                state,
+                frontierChunkIndex,
+                "cooldown",
+                elapsedMs,
+                now);
+            return 0;
+        }
+
+        var chunkCount = Math.Min(
+            Math.Min(V6RegularNknInferredFrontierRepairBurstChunks, availableFrontierChunks),
+            context.ChunkCount - frontierChunkIndex);
+        if (chunkCount <= 0)
+        {
+            return 0;
+        }
+
+        var repairRequestId = $"v6-inferred-frontier:{frontierChunkIndex}";
+        context.V6LastInferredRegularNknFrontierRepairChunkIndex = frontierChunkIndex;
+        context.V6LastInferredRegularNknFrontierRepairReceiverStateEpoch = state.Epoch;
+        context.V6LastInferredRegularNknFrontierRepairUtc = now;
+        context.V6LastInferredRegularNknFrontierRepairRequestId = repairRequestId;
+
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_v6_regular_nkn_state_frontier_repair_request_inferred; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={state.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequestId)}; receiver_state_epoch={state.Epoch}; frontier_chunk_index={frontierChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; missing_range_count={state.MissingRanges.Count}; inferred_chunk_count={chunkCount}; stall_elapsed_ms={elapsedMs}; stall_threshold_ms={V6RegularNknInferredFrontierRepairStallMs}; cooldown_ms={V6RegularNknInferredFrontierRepairCooldownMs}");
+
+        return chunkCount;
+    }
+
+    private static void LogOutboundV6RegularNknInferredStateFrontierRepairDeferredLocked(
+        OutboundTransferContext context,
+        FileTransferReceiverStateFrameV6 state,
+        int frontierChunkIndex,
+        string reason,
+        long elapsedMs,
+        DateTimeOffset now)
+    {
+        if (string.Equals(context.V6LastInferredRegularNknFrontierRepairSuppressedReason, reason, StringComparison.Ordinal) &&
+            context.V6LastInferredRegularNknFrontierRepairSuppressedLogUtc is { } lastLogUtc &&
+            now - lastLogUtc < TimeSpan.FromMilliseconds(V6SenderRequestFeedbackStallRecoverySuppressedLogIntervalMs))
+        {
+            return;
+        }
+
+        context.V6LastInferredRegularNknFrontierRepairSuppressedReason = reason;
+        context.V6LastInferredRegularNknFrontierRepairSuppressedLogUtc = now;
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_regular_nkn_state_frontier_repair_deferred; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; receiver_state_epoch={state.Epoch}; frontier_chunk_index={frontierChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; missing_range_count={state.MissingRanges.Count}; stall_elapsed_ms={elapsedMs}; stall_threshold_ms={V6RegularNknInferredFrontierRepairStallMs}; cooldown_ms={V6RegularNknInferredFrontierRepairCooldownMs}");
+    }
+
+    private static bool IsCurrentOutboundV6RegularNknInferredFrontierRepairLocked(
+        OutboundTransferContext context,
+        FileTransferReceiverStateFrameV6 state,
+        int frontierChunkIndex)
+        => context.V6LastInferredRegularNknFrontierRepairChunkIndex == frontierChunkIndex &&
+           context.V6LastInferredRegularNknFrontierRepairReceiverStateEpoch == state.Epoch &&
+           !string.IsNullOrWhiteSpace(context.V6LastInferredRegularNknFrontierRepairRequestId);
+
+    private static void ClearOutboundV6RegularNknInferredFrontierObservationLocked(OutboundTransferContext context)
+    {
+        context.V6RegularNknInferredFrontierObservedChunkIndex = -1;
+        context.V6RegularNknInferredFrontierObservedUtc = null;
+        context.V6LastInferredRegularNknFrontierRepairSuppressedLogUtc = null;
+        context.V6LastInferredRegularNknFrontierRepairSuppressedReason = null;
+    }
+
     private string? ResolveOutboundV6StateFrontierRepairRequestIdLocked(
         OutboundTransferContext context,
         FileTransferReceiverStateFrameV6 state,
@@ -462,6 +650,12 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v6_state_frontier_repair_request_inferred; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={state.TransportEpoch}; repair_request_id={FormatProtocolLogValue(repairRequestId)}; receiver_state_epoch={state.Epoch}; frontier_chunk_index={frontierChunkIndex}; recovery_mode={FormatProtocolLogValue(state.RecoveryMode ?? "(none)")}");
+        }
+        else if (string.IsNullOrWhiteSpace(repairRequestId) &&
+            state.TransportEpoch <= 0 &&
+            IsCurrentOutboundV6RegularNknInferredFrontierRepairLocked(context, state, frontierChunkIndex))
+        {
+            repairRequestId = context.V6LastInferredRegularNknFrontierRepairRequestId;
         }
 
         if (!string.IsNullOrWhiteSpace(repairRequestId) &&
@@ -965,6 +1159,8 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v6_frontier_request_received; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; first_start_chunk_index={first.StartChunkIndex}; first_chunk_count={first.ChunkCount}; range_count={request.MissingRanges.Count}");
+            ObserveOutboundV6RegularNknPassiveScoutFrontierRequestLocked(context, request, DateTimeOffset.UtcNow);
+            MaybeSampleOutboundV6RegularNknPassiveScoutLocked(context, DateTimeOffset.UtcNow, "frontier_request");
         }
 
         if (snapshot is not null)
@@ -1340,6 +1536,11 @@ public sealed partial class SessionFileTransferService
             return V6TunaNormalSendAheadLimitChunks;
         }
 
+        if (IsOutboundV6RegularNknDegradedProfileActiveLocked(context))
+        {
+            return V6RegularNknDegradedNormalSendAheadLimitChunks;
+        }
+
         if (IsOutboundV6RegularNknFrontierPressureActiveLocked(context))
         {
             return V6RegularNknFrontierPressureNormalSendAheadLimitChunks;
@@ -1353,6 +1554,11 @@ public sealed partial class SessionFileTransferService
         if (IsOutboundV6TunaNormalSendAheadPathLocked(context))
         {
             return V6TunaNormalSendAheadLimitChunks;
+        }
+
+        if (IsOutboundV6RegularNknDegradedProfileActiveLocked(context))
+        {
+            return V6RegularNknDegradedNormalRefillLowWatermarkChunks;
         }
 
         if (IsOutboundV6RegularNknFrontierPressureActiveLocked(context))
@@ -1382,6 +1588,173 @@ public sealed partial class SessionFileTransferService
 
     private static bool IsOutboundV6RegularNknFrontierPressureActiveLocked(OutboundTransferContext context)
         => context.V6RegularNknFrontierPressureUntilChunkIndex > context.RemoteNextExpectedChunkIndex;
+
+    private static bool IsOutboundV6RegularNknDegradedProfileActiveLocked(OutboundTransferContext context)
+        => context.V6RegularNknDegradedUntilChunkIndex > context.RemoteNextExpectedChunkIndex &&
+           !IsOutboundV6TunaNormalSendAheadPathLocked(context);
+
+    private static void UpdateOutboundV6RegularNknDegradedProfileLocked(
+        OutboundTransferContext context,
+        FileTransferReceiverStateFrameV6 state,
+        int previousRemoteFrontier,
+        bool receiverAdvancedFrontier,
+        bool stateRequestsFrontierGap)
+    {
+        if (IsOutboundV6TunaNormalSendAheadPathLocked(context))
+        {
+            MaybeClearOutboundV6RegularNknDegradedProfileLocked(context, state, "tuna_path_active");
+            return;
+        }
+
+        if (context.UserPaused || context.PeerPaused || state.TransferPaused)
+        {
+            MaybeClearOutboundV6RegularNknDegradedProfileLocked(context, state, "paused");
+            return;
+        }
+
+        if (receiverAdvancedFrontier)
+        {
+            MaybeClearOutboundV6RegularNknDegradedProfileLocked(context, state, "receiver_state_progress");
+            return;
+        }
+
+        if (state.MissingRanges.Count == 0)
+        {
+            MaybeClearOutboundV6RegularNknDegradedProfileLocked(context, state, "receiver_state_empty_window");
+            return;
+        }
+
+        if (IsV6TransportEpochUnresolved(context.V6TransportEpoch))
+        {
+            MaybeClearOutboundV6RegularNknDegradedProfileLocked(context, state, "transport_epoch_unresolved");
+            return;
+        }
+
+        var noProgressReceiverState =
+            state.ContiguousCommittedChunkIndex <= previousRemoteFrontier &&
+            context.RemoteNextExpectedChunkIndex <= previousRemoteFrontier;
+        if (!noProgressReceiverState)
+        {
+            context.V6RegularNknDegradedNoProgressReceiverStateCount = 0;
+            context.V6RegularNknDegradedObservedChunkIndex = -1;
+            context.V6RegularNknDegradedObservedUtc = null;
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (context.V6RegularNknDegradedObservedChunkIndex != context.RemoteNextExpectedChunkIndex ||
+            context.V6RegularNknDegradedObservedUtc is null)
+        {
+            context.V6RegularNknDegradedObservedChunkIndex = context.RemoteNextExpectedChunkIndex;
+            context.V6RegularNknDegradedObservedUtc = now;
+            context.V6RegularNknDegradedNoProgressReceiverStateCount = 0;
+        }
+
+        var recoveredFallbackEpoch = ResolveRecoveredOutboundV6RegularNknEpochId(context);
+        var recoveredFallbackRegularNkn = recoveredFallbackEpoch > 0 &&
+            (state.TransportEpoch <= 0 || state.TransportEpoch == recoveredFallbackEpoch);
+        var observedElapsedMs = context.V6RegularNknDegradedObservedUtc is { } observedUtc
+            ? (long)Math.Max(0, (now - observedUtc).TotalMilliseconds)
+            : 0;
+        context.V6RegularNknDegradedNoProgressReceiverStateCount = recoveredFallbackRegularNkn
+            ? Math.Max(
+                context.V6RegularNknDegradedNoProgressReceiverStateCount,
+                V6RegularNknDegradedNoProgressReceiverStateThreshold)
+            : Math.Min(
+                context.V6RegularNknDegradedNoProgressReceiverStateCount + 1,
+                V6RegularNknDegradedNoProgressReceiverStateThreshold);
+
+        var reason = recoveredFallbackRegularNkn
+            ? "tuna_fallback_regular_nkn_recovery"
+            : stateRequestsFrontierGap
+                ? "receiver_state_frontier_gap_no_progress"
+                : "receiver_state_no_progress";
+        var sustainedRegularNknStall = observedElapsedMs >= V6RegularNknDegradedNoProgressGraceMs;
+        if (!recoveredFallbackRegularNkn &&
+            (!sustainedRegularNknStall ||
+             context.V6RegularNknDegradedNoProgressReceiverStateCount < V6RegularNknDegradedNoProgressReceiverStateThreshold))
+        {
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_v6_regular_nkn_degraded_profile_observed; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; receiver_state_epoch={state.Epoch}; reason={FormatProtocolLogValue(reason)}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; previous_remote_frontier_chunk_index={previousRemoteFrontier}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; missing_range_count={state.MissingRanges.Count}; no_progress_receiver_state_count={context.V6RegularNknDegradedNoProgressReceiverStateCount}; threshold={V6RegularNknDegradedNoProgressReceiverStateThreshold}; observed_elapsed_ms={observedElapsedMs}; grace_ms={V6RegularNknDegradedNoProgressGraceMs}");
+            return;
+        }
+
+        EnterOutboundV6RegularNknDegradedProfileLocked(context, state, reason);
+    }
+
+    private static void EnterOutboundV6RegularNknDegradedProfileLocked(
+        OutboundTransferContext context,
+        FileTransferReceiverStateFrameV6 state,
+        string reason)
+    {
+        if (IsOutboundV6TunaNormalSendAheadPathLocked(context))
+        {
+            return;
+        }
+
+        var previousUntil = context.V6RegularNknDegradedUntilChunkIndex;
+        var previousReason = context.V6RegularNknDegradedReason;
+        var degradedStart = context.RemoteNextExpectedChunkIndex;
+        var degradedUntil = Math.Min(context.ChunkCount, degradedStart + V6RegularNknDegradedReleaseAdvanceChunks);
+        if (degradedUntil <= degradedStart)
+        {
+            degradedUntil = Math.Min(context.ChunkCount, degradedStart + V6RegularNknDegradedNormalSendAheadLimitChunks);
+        }
+
+        context.V6RegularNknDegradedStartChunkIndex = degradedStart;
+        context.V6RegularNknDegradedUntilChunkIndex = Math.Max(previousUntil, degradedUntil);
+        context.V6RegularNknDegradedEnteredUtc ??= DateTimeOffset.UtcNow;
+        context.V6RegularNknDegradedReason = reason;
+
+        if (previousUntil > degradedStart &&
+            previousUntil >= context.V6RegularNknDegradedUntilChunkIndex &&
+            string.Equals(previousReason, reason, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        ObserveOutboundV6RegularNknPassiveScoutDegradedProfileEnteredLocked(context, reason);
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_v6_regular_nkn_degraded_profile_entered; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; receiver_state_epoch={state.Epoch}; reason={FormatProtocolLogValue(reason)}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; missing_range_count={state.MissingRanges.Count}; no_progress_receiver_state_count={context.V6RegularNknDegradedNoProgressReceiverStateCount}; degraded_until_chunk_index={context.V6RegularNknDegradedUntilChunkIndex}; send_ahead_limit_chunks={V6RegularNknDegradedNormalSendAheadLimitChunks}; refill_low_watermark_chunks={V6RegularNknDegradedNormalRefillLowWatermarkChunks}");
+    }
+
+    private static void MaybeClearOutboundV6RegularNknDegradedProfileLocked(
+        OutboundTransferContext context,
+        FileTransferReceiverStateFrameV6 state,
+        string reason)
+    {
+        if (!IsOutboundV6RegularNknDegradedProfileActiveLocked(context))
+        {
+            ClearOutboundV6RegularNknDegradedProfileLocked(context);
+            return;
+        }
+
+        var degradedStart = context.V6RegularNknDegradedStartChunkIndex;
+        var degradedUntil = context.V6RegularNknDegradedUntilChunkIndex;
+        var degradedReason = context.V6RegularNknDegradedReason;
+        var enteredUtc = context.V6RegularNknDegradedEnteredUtc;
+        var activeMs = enteredUtc is { } entered
+            ? (long)Math.Max(0, (DateTimeOffset.UtcNow - entered).TotalMilliseconds)
+            : 0;
+
+        ClearOutboundV6RegularNknDegradedProfileLocked(context);
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_regular_nkn_degraded_profile_cleared; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; receiver_state_epoch={state.Epoch}; reason={FormatProtocolLogValue(reason)}; degraded_reason={FormatProtocolLogValue(degradedReason ?? "(none)")}; degraded_start_chunk_index={degradedStart}; degraded_until_chunk_index={degradedUntil}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; active_ms={activeMs}");
+    }
+
+    private static void ClearOutboundV6RegularNknDegradedProfileLocked(OutboundTransferContext context)
+    {
+        context.V6RegularNknDegradedNoProgressReceiverStateCount = 0;
+        context.V6RegularNknDegradedObservedChunkIndex = -1;
+        context.V6RegularNknDegradedObservedUtc = null;
+        context.V6RegularNknDegradedStartChunkIndex = -1;
+        context.V6RegularNknDegradedUntilChunkIndex = -1;
+        context.V6RegularNknDegradedEnteredUtc = null;
+        context.V6RegularNknDegradedReason = null;
+    }
 
     private static void EnterOutboundV6RegularNknFrontierPressureLocked(
         OutboundTransferContext context,
@@ -1761,6 +2134,8 @@ public sealed partial class SessionFileTransferService
                         : context.V6SenderPumpLastWakeReason;
                     waitForSignal = context.ResetAndGetV4SenderPumpSignalTask();
                 }
+
+                MaybeSampleOutboundV6RegularNknPassiveScoutLocked(context, DateTimeOffset.UtcNow, "sender_pump_wait");
             }
 
             if (feedbackStaleRecoveryRequest is not null)
@@ -2609,6 +2984,7 @@ public sealed partial class SessionFileTransferService
                     }
 
                     TrimRecentEvents(context.RecentPullChunkSentUtc, sentUtc);
+                    MaybeSampleOutboundV6RegularNknPassiveScoutLocked(context, sentUtc, "chunk_batch_sent");
                     snapshot = CreateSnapshotLocked();
                 }
             }

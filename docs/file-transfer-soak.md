@@ -54,6 +54,8 @@ Use the regular-NKN GUI soak when the installed app appears slow:
 
 Read `filetransfer-live-nkn-summary.txt`, `transfer-terminal-summary.txt`, `throughput-summary.txt`, and `payload-efficiency-summary.txt` together. A clean terminal pass below `1.5 MB/s` is still a regression candidate when raw sent bytes, unsolicited chunks, or late sender frames show poor efficiency.
 
+For Phase 1 path-adaptation evidence, enable the diagnostics-only passive scout with `NLINK_FILETRANSFER_V6_REGULAR_NKN_PASSIVE_SCOUT=1`. This does not create a second client, change NKN topology, switch paths, change Tuna behavior, or alter pacing. It only records `filetransfer_v6_regular_nkn_passive_scout_*` events and the soak runner writes `regular-nkn-passive-scout-summary.txt/json`. Read `status`, `worst_classification`, `final_would_probe_recommendation`, `max_committed_progress_gap_ms`, `degraded_window_count`, and `high_frames_per_mib_window_count` to decide whether Phase 2 should probe the same topology, round-robin mode, or a fresh bulk client.
+
 Recent regular-NKN reference cells:
 
 - `artifacts/filetransfer-soak/20260515-172434/`: completed with clean terminals but regressed efficiency; `946,388 B/s`, raw sent `270,413,824` bytes for `128MB`, `v6_unsolicited_chunk_ignored_count=5086`, `post_completion_late_sender_frame=416`.
@@ -123,27 +125,31 @@ Recent local GUI reference cells:
 - `artifacts/gui-smoke/tuna-filetransfer-20260513T201750Z/`: 128 MiB sidecar-kill fallback, completed, SHA match.
 - `artifacts/gui-smoke/tuna-filetransfer-20260513T202236Z/`: 512 MiB sidecar-kill fallback, completed, SHA match after regular-NKN receive-stall recovery.
 
-Provider readiness warnings are now split so a degraded startup can be distinguished from a persistent provider-path problem:
+Provider readiness warnings are now split so diagnostic degraded startup can be distinguished from a persistent provider-path problem:
 
-- `providerDegradedAccepted` means the listener started with the allowed 3 usable Tuna paths.
+- `providerDegradedAccepted` means the listener started with 3 usable Tuna paths under an explicit degraded-readiness diagnostic override.
 - `providerRecoveredAfterDegraded` means usable paths later reached the full 4-path target.
 - `providerStillDegradedAtEnd` means the cell ended before full 4-path readiness was observed, and the verdict reports `provider_paths_degraded`.
 - `providerQualityClass` is one of `full_ready`, `degraded_recovered`, `persistent_missing_path`, `timeout_before_degraded`, or `unknown`.
-- `provider-quality-report.json` is written beside `summary.json` and should be used to compare default, warmup, and strict provider-readiness runs.
+- `provider-quality-report.json` is written beside `summary.json` and should be used to compare default strict readiness against explicit degraded-readiness diagnostic runs.
 - `activation_cleanup_late_peer_close` is a clean-activation warning only: full bytes, SHA match, and terminal sender/receiver snapshots are accepted even if peer-close evidence arrives late or is absent.
 
 Provider-path A/B troubleshooting sequence:
 
 ```powershell
-# Default degraded behavior.
+# Strict runtime-equivalent behavior.
+$env:NLINK_TUNA_TEST_REQUIRE_PROVIDER_READY = "1"
+$env:NLINK_TUNA_TEST_PROVIDER_READY_ATTEMPTS = "3"
 $env:NLINK_TUNA_SOAK_CELL_FILTER = "phase6-tuna-file-helper-receiving-both-activation,phase6-tuna-file-helpee-receiving-both-activation,phase6-tuna-file-helpee-receiving-helper-cap"
 dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release --no-build --no-restore --filter "FullyQualifiedName~TunaSidecarPhase6_ShortPaidMatrix"
 
-# Warmup: wait up to 20 seconds for the fourth provider path before accepting degraded readiness.
+# Degraded diagnostic: wait up to 20 seconds for the fourth provider path before accepting degraded readiness.
+$env:NLINK_TUNA_TEST_REQUIRE_PROVIDER_READY = $null
+$env:NLINK_TUNA_TEST_PROVIDER_READY_ATTEMPTS = $null
 $env:NLINK_TUNA_TEST_DEGRADED_PROVIDER_GRACE_SECONDS = "20"
 dotnet test tests\nLink.OptInTests.BridgeManual\nLink.OptInTests.BridgeManual.csproj -c Release --no-build --no-restore --filter "FullyQualifiedName~TunaSidecarPhase6_ShortPaidMatrix"
 
-# Strict: require full 4-path readiness, with up to three attempts.
+# Strict retry: require full 4-path readiness, with up to three attempts.
 $env:NLINK_TUNA_TEST_DEGRADED_PROVIDER_GRACE_SECONDS = $null
 $env:NLINK_TUNA_TEST_REQUIRE_PROVIDER_READY = "1"
 $env:NLINK_TUNA_TEST_PROVIDER_READY_ATTEMPTS = "3"
@@ -155,7 +161,7 @@ Latest local Phase 6 reference run:
 - Artifact root: `artifacts/tuna-sidecar/phase6-short-20260512T151146Z/`
 - Verdict: `PASS`
 - Cells: `12/12`
-- Notes: all cells reported `provider_paths_degraded`; two activation cells used the allowed single retry. Treat this as a passed V6/Tuna gate with follow-up diagnostics, not as promotion evidence for enabling Tuna by default.
+- Notes: this historical run allowed degraded 3-path provider startup and all cells reported `provider_paths_degraded`; treat it as V6 protocol/fallback evidence only. Current runtime policy requires full provider readiness before Tuna is advertised as usable.
 
 The short matrix covers exactly 12 file-transfer cells: helper-receiving and helpee-receiving, each across helpee-only unlocked, helper-only unlocked, and both-unlocked payer modes, with one clean activation and one payer-specific fallback fault per payer. Helpee-only uses switch-off fallback, helper-only uses cap reached, and both-unlocked uses sidecar drop.
 
