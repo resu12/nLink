@@ -862,18 +862,9 @@ public sealed partial class SessionFileTransferService
     {
         OutboundTransferContext? outboundRecovered = null;
         InboundTransferContext? inboundRecovered = null;
-        var activeProbeHandled = false;
         lock (gate)
         {
             if (IsOutboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId) &&
-                outboundTransfer is { IsTerminal: false } outboundProbe &&
-                TryCompleteOutboundV6RegularNknActiveProbeAckLocked(outboundProbe, message, DateTimeOffset.UtcNow))
-            {
-                activeProbeHandled = true;
-            }
-
-            if (IsOutboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId) &&
-                !activeProbeHandled &&
                 outboundTransfer is { IsTerminal: false } outbound &&
                 TryRecoverOutboundV6TransportEpochFromProbeAckLocked(outbound, message))
             {

@@ -176,7 +176,7 @@ function Write-FileTransferSupportCaptureInstructions {
     Write-Host "4. Read filetransfer-operator-verdict.txt first."
     Write-Host "5. Attach the full artifact directory when support asks for raw retained analyzer output."
     Write-Host "6. Local soak artifacts also include filetransfer-impairment-summary.txt and mixed-screenshare-summary.txt."
-    Write-Host "7. Live NKN soak artifacts also include filetransfer-live-nkn-summary.txt, filetransfer-live-nkn-summary.json, filetransfer-live-nkn-cycles.jsonl, bridge-config-summary.txt, regular-nkn-passive-scout-summary.txt, regular-nkn-passive-scout-summary.json, regular-nkn-active-probe-summary.txt, regular-nkn-active-probe-summary.json, and baseline-comparison.txt."
+    Write-Host "7. Live NKN soak artifacts also include filetransfer-live-nkn-summary.txt, filetransfer-live-nkn-summary.json, filetransfer-live-nkn-cycles.jsonl, bridge-config-summary.txt, and baseline-comparison.txt."
     Write-Host "8. For V4 file-only runs, keep protocol-shape-summary.txt, payload-efficiency-summary.txt, bridge-config-summary.txt, bridge-bulk-summary.txt, throughput-decomposition-summary.txt, baseline-comparison.txt, and v4-promotion-decision.txt."
     Write-Host "9. For receive stalls, keep external-transport-health-summary.txt and throughput-decomposition-summary.txt."
     Write-Host "10. Optional receive-stall matrix: powershell -ExecutionPolicy Bypass -File .\tools\Run-FileTransferReceiveStallMatrix.ps1"

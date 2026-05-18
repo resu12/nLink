@@ -308,8 +308,6 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const string V6RegularNknCheckpointSyncRequestPrefix = "v6-regular-nkn-checkpoint-sync:";
     private const string V6RegularNknSparseRuntimeEnvironmentVariableName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
     private const string V6RegularNknSparseRuntimeLegacyFramesEnvironmentVariableName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME_LEGACY_FRAMES";
-    private const string V6RegularNknPassiveScoutEnvironmentVariableName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_PASSIVE_SCOUT";
-    private const string V6RegularNknActiveProbeEnvironmentVariableName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_ACTIVE_PROBE";
     private const long V6TunaRedundantDataMinimumBytesAfterProof = 10L * 1024L * 1024L;
     private const int V6FileOnlySenderPipelineDepth = 24;
     private const int V6RegularNknSenderPipelineDepth = 4;
@@ -383,15 +381,6 @@ public sealed partial class SessionFileTransferService : IDisposable
     internal static TimeSpan? V6RegularNknFrontierRequestProgressGraceOverrideForTests { get; set; }
     internal static TimeSpan? V6RegularNknInferredFrontierRepairStallOverrideForTests { get; set; }
     internal static TimeSpan? V6RegularNknInferredFrontierRepairCooldownOverrideForTests { get; set; }
-    internal static TimeSpan? V6RegularNknPassiveScoutSampleIntervalOverrideForTests { get; set; }
-    internal static TimeSpan? V6RegularNknPassiveScoutRecommendationIntervalOverrideForTests { get; set; }
-    internal static TimeSpan? V6RegularNknPassiveScoutWatchFeedbackStaleOverrideForTests { get; set; }
-    internal static TimeSpan? V6RegularNknPassiveScoutDegradedNoProgressOverrideForTests { get; set; }
-    internal static TimeSpan? V6RegularNknPassiveScoutStalledNoProgressOverrideForTests { get; set; }
-    internal static TimeSpan? V6RegularNknActiveProbeCooldownOverrideForTests { get; set; }
-    internal static TimeSpan? V6RegularNknActiveProbeTimeoutOverrideForTests { get; set; }
-    internal static int? V6RegularNknActiveProbeMinimumWatchSamplesOverrideForTests { get; set; }
-
     public SessionFileTransferService(Func<string>? transferIdFactory = null)
     {
         this.transferIdFactory = transferIdFactory ?? (() => Guid.NewGuid().ToString("N"));
@@ -3427,6 +3416,23 @@ public sealed partial class SessionFileTransferService : IDisposable
         => ShouldUseV6RegularNknSparseRuntime() &&
            IsFileTransferEnvFlagEnabled(V6RegularNknSparseRuntimeLegacyFramesEnvironmentVariableName);
 
+    private static bool IsFileTransferEnvFlagEnabled(string variableName)
+    {
+        var value = Environment.GetEnvironmentVariable(variableName);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        value = value.Trim();
+        return !string.Equals(value, "0", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(value, "false", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(value, "off", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(value, "no", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(value, "disable", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(value, "disabled", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static void LogV6RegularNknSparseRuntimeSelected(
         string transferId,
         string sessionId,
@@ -4181,10 +4187,6 @@ public sealed partial class SessionFileTransferService : IDisposable
         public DateTimeOffset? V6LastInferredRegularNknFrontierRepairSuppressedLogUtc { get; set; }
 
         public string? V6LastInferredRegularNknFrontierRepairSuppressedReason { get; set; }
-
-        public V6RegularNknPassiveScoutState V6RegularNknPassiveScout { get; } = new();
-
-        public V6RegularNknActiveProbeState V6RegularNknActiveProbe { get; } = new();
 
         public bool V6UseRegularNknRedundantData { get; set; }
 

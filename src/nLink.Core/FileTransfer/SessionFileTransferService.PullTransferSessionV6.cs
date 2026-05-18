@@ -60,8 +60,6 @@ public sealed partial class SessionFileTransferService
                 context.V6LastInferredRegularNknFrontierRepairRequestId = null;
                 context.V6LastInferredRegularNknFrontierRepairSuppressedLogUtc = null;
                 context.V6LastInferredRegularNknFrontierRepairSuppressedReason = null;
-                ResetOutboundV6RegularNknPassiveScoutLocked(context);
-                ResetOutboundV6RegularNknActiveProbeLocked(context);
                 context.V6UseRegularNknRedundantData = false;
                 context.V6TunaRedundantDataEpochId = 0;
                 context.V6TunaRedundantDataSatisfiedEpochId = 0;
@@ -72,7 +70,6 @@ public sealed partial class SessionFileTransferService
                 context.PullSentChunkCacheBytes = 0;
                 context.PullSenderFeedCreditWaitStartedUtc = null;
                 context.V4SenderCreditExhaustedSinceUtc = null;
-                MaybeStartOutboundV6RegularNknPassiveScoutLocked(context, DateTimeOffset.UtcNow, "sender_started");
             }
 
             LocalOperationalLog.Info(
@@ -391,8 +388,6 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v6_receiver_state_received; transfer_id={context.TransferId}; session_id={context.SessionId}; epoch={state.Epoch}; previous_remote_frontier_chunk_index={previousRemoteFrontier}; committed_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; diagnostic_credit_until_chunk_index_exclusive={state.CreditUntilChunkIndexExclusive}; missing_range_count={state.MissingRanges.Count}; bytes_committed={state.BytesCommitted}; transfer_paused={(state.TransferPaused ? 1 : 0)}");
-            ObserveOutboundV6RegularNknPassiveScoutReceiverStateLocked(context, state, DateTimeOffset.UtcNow);
-            MaybeSampleOutboundV6RegularNknPassiveScoutLocked(context, DateTimeOffset.UtcNow, "receiver_state");
         }
 
         if (snapshot is not null)
@@ -1270,8 +1265,6 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v6_frontier_request_received; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={request.TransportEpoch}; repair_request_id={FormatProtocolLogValue(request.RepairRequestId ?? "(none)")}; first_start_chunk_index={first.StartChunkIndex}; first_chunk_count={first.ChunkCount}; range_count={request.MissingRanges.Count}");
-            ObserveOutboundV6RegularNknPassiveScoutFrontierRequestLocked(context, request, DateTimeOffset.UtcNow);
-            MaybeSampleOutboundV6RegularNknPassiveScoutLocked(context, DateTimeOffset.UtcNow, "frontier_request");
         }
 
         if (snapshot is not null)
@@ -1836,7 +1829,6 @@ public sealed partial class SessionFileTransferService
             return;
         }
 
-        ObserveOutboundV6RegularNknPassiveScoutDegradedProfileEnteredLocked(context, reason);
         LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_v6_regular_nkn_degraded_profile_entered; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; receiver_state_epoch={state.Epoch}; reason={FormatProtocolLogValue(reason)}; remote_frontier_chunk_index={context.RemoteNextExpectedChunkIndex}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; missing_range_count={state.MissingRanges.Count}; no_progress_receiver_state_count={context.V6RegularNknDegradedNoProgressReceiverStateCount}; degraded_until_chunk_index={context.V6RegularNknDegradedUntilChunkIndex}; send_ahead_limit_chunks={V6RegularNknDegradedNormalSendAheadLimitChunks}; refill_low_watermark_chunks={V6RegularNknDegradedNormalRefillLowWatermarkChunks}");
@@ -2293,7 +2285,6 @@ public sealed partial class SessionFileTransferService
                     waitForSignal = context.ResetAndGetV4SenderPumpSignalTask();
                 }
 
-                MaybeSampleOutboundV6RegularNknPassiveScoutLocked(context, DateTimeOffset.UtcNow, "sender_pump_wait");
             }
 
             if (feedbackStaleRecoveryRequest is not null)
@@ -3256,7 +3247,6 @@ public sealed partial class SessionFileTransferService
                     }
 
                     TrimRecentEvents(context.RecentPullChunkSentUtc, sentUtc);
-                    MaybeSampleOutboundV6RegularNknPassiveScoutLocked(context, sentUtc, "chunk_batch_sent");
                     snapshot = CreateSnapshotLocked();
                 }
             }
