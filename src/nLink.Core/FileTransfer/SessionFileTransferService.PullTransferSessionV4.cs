@@ -11,57 +11,8 @@ namespace NLink.Core.FileTransfer;
 
 public sealed partial class SessionFileTransferService
 {
-    private bool ShouldAcceptV6SparseRuntimeDataFrame(OutboundTransferContext context, FileTransferDataFrame frame)
-    {
-        if (FileTransferProtocol.IsV6DataFrame(frame))
-        {
-            return true;
-        }
-
-        return FileTransferProtocol.IsV4DataFrame(frame) &&
-               ShouldUseV6RegularNknSparseRuntimeLegacyFramesForOutbound(context);
-    }
-
-    private bool ShouldAcceptV6SparseRuntimeDataFrame(InboundTransferContext context, FileTransferDataFrame frame)
-    {
-        if (FileTransferProtocol.IsV6DataFrame(frame))
-        {
-            return true;
-        }
-
-        return FileTransferProtocol.IsV4DataFrame(frame) &&
-               ShouldUseV6RegularNknSparseRuntimeLegacyFramesForInbound(context);
-    }
-
-    private bool ShouldUseV6RegularNknSparseRuntimeLegacyFramesForOutbound(OutboundTransferContext context)
-    {
-        if (!ShouldUseV6RegularNknSparseRuntimeLegacyFrames())
-        {
-            return false;
-        }
-
-        lock (gate)
-        {
-            return ReferenceEquals(outboundTransfer, context) &&
-                   !context.IsTerminal &&
-                   IsOutboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context);
-        }
-    }
-
-    private bool ShouldUseV6RegularNknSparseRuntimeLegacyFramesForInbound(InboundTransferContext context)
-    {
-        if (!ShouldUseV6RegularNknSparseRuntimeLegacyFrames())
-        {
-            return false;
-        }
-
-        lock (gate)
-        {
-            return ReferenceEquals(inboundTransfer, context) &&
-                   !context.IsTerminal &&
-                   IsInboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context);
-        }
-    }
+    private static bool ShouldAcceptV6SparseRuntimeDataFrame(FileTransferDataFrame frame)
+        => FileTransferProtocol.IsV6DataFrame(frame);
 
     private bool ShouldBoundOutboundV4TransportSendForV6RegularNknSparseRuntime(OutboundTransferContext context)
     {
@@ -83,22 +34,7 @@ public sealed partial class SessionFileTransferService
         TimeSpan.FromMilliseconds(V6RegularNknSparseRuntimeV4TransportSendTimeoutMs);
 
     private FileTransferManifestFrameV4 CreateOutboundV4ManifestFrame(OutboundTransferContext context)
-    {
-        if (ShouldUseV6RegularNknSparseRuntimeLegacyFramesForOutbound(context))
-        {
-            return new FileTransferManifestFrameV4
-            {
-                SessionId = context.SessionId,
-                TransferId = context.TransferId,
-                FileName = context.FileName,
-                FileSizeBytes = context.FileSizeBytes,
-                ChunkSizeBytes = context.ChunkSizeBytes,
-                ChunkCount = context.ChunkCount,
-                Sha256Base64 = context.Sha256Base64!,
-            };
-        }
-
-        return new FileTransferManifestFrameV6
+        => new FileTransferManifestFrameV6
         {
             SessionId = context.SessionId,
             TransferId = context.TransferId,
@@ -108,10 +44,6 @@ public sealed partial class SessionFileTransferService
             ChunkCount = context.ChunkCount,
             Sha256Base64 = context.Sha256Base64!,
         };
-    }
-
-    private Task RunOutboundV4SenderAsync(OutboundTransferContext context)
-        => RunOutboundSparseCreditSenderAsync(context, FileTransferSparseCreditRuntimeKind.V4Compatible);
 
     private async Task RunOutboundSparseCreditSenderAsync(
         OutboundTransferContext context,
@@ -317,7 +249,7 @@ public sealed partial class SessionFileTransferService
                     continue;
                 }
 
-                if (!ShouldAcceptV6SparseRuntimeDataFrame(context, frame))
+                if (!ShouldAcceptV6SparseRuntimeDataFrame(frame))
                 {
                     LogPullDataFrameIgnored(context.TransferId, context.SessionId, frame, "protocol_not_v6");
                     continue;
@@ -3335,7 +3267,6 @@ public sealed partial class SessionFileTransferService
         var expectedChunkIndex = startChunkIndex;
         var totalRawBytes = 0;
         var maxBatchSegments = ResolveV4MaxBatchSegments(repairSend);
-        var useLegacyV4Frame = ShouldUseV6RegularNknSparseRuntimeLegacyFramesForOutbound(context);
         List<byte[]> dataSegments = [];
         for (var index = startListIndex; index < chunkIndices.Count && dataSegments.Count < maxBatchSegments; index++)
         {
@@ -3348,7 +3279,7 @@ public sealed partial class SessionFileTransferService
             var chunkBytes = await LoadChunkBytesForSendAsync(context, stream, chunkIndex, buffer, repairSend).ConfigureAwait(false);
             var candidateRawBytes = totalRawBytes + chunkBytes.Length;
             if (candidateRawBytes > FileTransferProtocol.MaxChunkBatchRawBytesV4 ||
-                !CanSerializeChunkBatchV4(context.SessionId, context.TransferId, startChunkIndex, dataSegments, chunkBytes, useLegacyV4Frame))
+                !CanSerializeChunkBatchV4(context.SessionId, context.TransferId, startChunkIndex, dataSegments, chunkBytes))
             {
                 if (dataSegments.Count == 0)
                 {
@@ -3384,22 +3315,7 @@ public sealed partial class SessionFileTransferService
                       : "repair")
             : null;
 
-        FileTransferChunkBatchFrameV4 batch = useLegacyV4Frame
-            ? new FileTransferChunkBatchFrameV4
-            {
-                SessionId = context.SessionId,
-                TransferId = context.TransferId,
-                StartChunkIndex = startChunkIndex,
-                ChunkCount = dataSegments.Count,
-                DataSegments = dataSegments,
-                BatchProfile = repairSend
-                    ? ResolveV4RepairBatchProfileName(maxBatchSegments)
-                    : ResolveV4BatchProfileName(maxBatchSegments),
-                RepairDeliveryMode = repairSend
-                    ? repairDeliveryMode
-                    : FileTransferV4RepairDeliveryMode.BulkOnly,
-            }
-            : new FileTransferChunkBatchFrameV6
+        FileTransferChunkBatchFrameV4 batch = new FileTransferChunkBatchFrameV6
         {
             SessionId = context.SessionId,
             TransferId = context.TransferId,
@@ -3421,9 +3337,7 @@ public sealed partial class SessionFileTransferService
             RecoveryMode = v6RecoveryMode,
         };
 
-        _ = useLegacyV4Frame
-            ? FileTransferDataFrameCodec.SerializeLegacyV4(batch)
-            : FileTransferDataFrameCodec.Serialize(batch);
+        _ = FileTransferDataFrameCodec.Serialize(batch);
         return new PreparedV4TransportSend(batch, startChunkIndex, dataSegments.Count, totalRawBytes);
     }
 
@@ -3457,8 +3371,7 @@ public sealed partial class SessionFileTransferService
         string transferId,
         int startChunkIndex,
         IReadOnlyList<byte[]> existingSegments,
-        byte[] candidateSegment,
-        bool useLegacyV4Frame = false)
+        byte[] candidateSegment)
     {
         var candidateSegments = new byte[existingSegments.Count + 1][];
         for (var index = 0; index < existingSegments.Count; index++)
@@ -3469,26 +3382,15 @@ public sealed partial class SessionFileTransferService
         candidateSegments[^1] = candidateSegment;
         try
         {
-            FileTransferChunkBatchFrameV4 candidateBatch = useLegacyV4Frame
-                ? new FileTransferChunkBatchFrameV4
-                {
-                    SessionId = sessionId,
-                    TransferId = transferId,
-                    StartChunkIndex = startChunkIndex,
-                    ChunkCount = candidateSegments.Length,
-                    DataSegments = candidateSegments,
-                }
-                : new FileTransferChunkBatchFrameV6
-                {
-                    SessionId = sessionId,
-                    TransferId = transferId,
-                    StartChunkIndex = startChunkIndex,
-                    ChunkCount = candidateSegments.Length,
-                    DataSegments = candidateSegments,
-                };
-            _ = useLegacyV4Frame
-                ? FileTransferDataFrameCodec.SerializeLegacyV4(candidateBatch)
-                : FileTransferDataFrameCodec.Serialize(candidateBatch);
+            var candidateBatch = new FileTransferChunkBatchFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                StartChunkIndex = startChunkIndex,
+                ChunkCount = candidateSegments.Length,
+                DataSegments = candidateSegments,
+            };
+            _ = FileTransferDataFrameCodec.Serialize(candidateBatch);
             return true;
         }
         catch (InvalidOperationException)
@@ -3629,7 +3531,6 @@ public sealed partial class SessionFileTransferService
     private static int ResolveV4RepairRequestMaxChunksForSend(OutboundTransferContext context, FileTransferStateFrameV4 state)
         => state is FileTransferReceiverStateFrameV6 &&
            ShouldUseV6RegularNknSparseRuntime(context) &&
-           !ShouldUseV6RegularNknSparseRuntimeLegacyFrames() &&
            IsOutboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context)
             ? V6RegularNknSparseRuntimeRepairBurstMaxChunks
             : FileTransferProtocol.MaxStateMissingChunksV4;
@@ -4296,9 +4197,6 @@ public sealed partial class SessionFileTransferService
         };
     }
 
-    private Task RunInboundV4SparseReceiveLoopAsync(InboundTransferContext context, FileTransferSessionOpenV2 sessionOpen)
-        => RunInboundSparseCreditReceiveLoopAsync(context, sessionOpen, FileTransferSparseCreditRuntimeKind.V4Compatible);
-
     private async Task RunInboundSparseCreditReceiveLoopAsync(
         InboundTransferContext context,
         FileTransferSessionOpenV2 sessionOpen,
@@ -4366,7 +4264,7 @@ public sealed partial class SessionFileTransferService
                     continue;
                 }
 
-                if (!ShouldAcceptV6SparseRuntimeDataFrame(context, frame))
+                if (!ShouldAcceptV6SparseRuntimeDataFrame(frame))
                 {
                     LogInboundV4FrameIgnored(context, frame, "protocol_not_v6");
                     continue;
@@ -5917,7 +5815,6 @@ public sealed partial class SessionFileTransferService
     private async Task<bool> SendInboundV4CompleteAsync(InboundTransferContext context, string sessionId, string transferId, long fileSizeBytes, string sha256Base64, CancellationToken ct)
     {
         IFileTransferDataSession? dataSession;
-        bool useLegacyV4Frame;
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
@@ -5926,8 +5823,6 @@ public sealed partial class SessionFileTransferService
             }
 
             dataSession = context.DataSession;
-            useLegacyV4Frame = ShouldUseV6RegularNknSparseRuntimeLegacyFrames() &&
-                               IsInboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context);
         }
 
         if (dataSession is null)
@@ -5940,21 +5835,13 @@ public sealed partial class SessionFileTransferService
             LocalOperationalLog.Info(
                 "FileTransferService",
                 $"event=filetransfer_v4_complete_send_started; transfer_id={transferId}; session_id={sessionId}; file_size_bytes={fileSizeBytes}");
-            FileTransferCompleteFrameV4 completeFrame = useLegacyV4Frame
-                ? new FileTransferCompleteFrameV4
-                {
-                    SessionId = sessionId,
-                    TransferId = transferId,
-                    FileSizeBytes = fileSizeBytes,
-                    Sha256Base64 = sha256Base64,
-                }
-                : new FileTransferCompleteFrameV6
-                {
-                    SessionId = sessionId,
-                    TransferId = transferId,
-                    FileSizeBytes = fileSizeBytes,
-                    Sha256Base64 = sha256Base64,
-                };
+            FileTransferCompleteFrameV4 completeFrame = new FileTransferCompleteFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                FileSizeBytes = fileSizeBytes,
+                Sha256Base64 = sha256Base64,
+            };
             await dataSession.SendAsync(completeFrame, ct).ConfigureAwait(false);
             LocalOperationalLog.Info(
                 "FileTransferService",
@@ -5997,7 +5884,6 @@ public sealed partial class SessionFileTransferService
         IFileTransferDataSession? dataSession;
         string sessionId;
         string transferId;
-        bool useLegacyV4Frame;
         lock (gate)
         {
             if (!ReferenceEquals(inboundTransfer, context) || context.IsTerminal)
@@ -6008,8 +5894,6 @@ public sealed partial class SessionFileTransferService
             dataSession = context.DataSession;
             sessionId = context.SessionId;
             transferId = context.TransferId;
-            useLegacyV4Frame = ShouldUseV6RegularNknSparseRuntimeLegacyFrames() &&
-                               IsInboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context);
         }
 
         if (dataSession is null)
@@ -6019,21 +5903,13 @@ public sealed partial class SessionFileTransferService
 
         try
         {
-            FileTransferErrorFrameV4 errorFrame = useLegacyV4Frame
-                ? new FileTransferErrorFrameV4
-                {
-                    SessionId = sessionId,
-                    TransferId = transferId,
-                    ErrorCode = errorCode,
-                    Message = message,
-                }
-                : new FileTransferErrorFrameV6
-                {
-                    SessionId = sessionId,
-                    TransferId = transferId,
-                    ErrorCode = errorCode,
-                    Message = message,
-                };
+            FileTransferErrorFrameV4 errorFrame = new FileTransferErrorFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                ErrorCode = errorCode,
+                Message = message,
+            };
             await dataSession.SendAsync(errorFrame, context.LifetimeCts.Token).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -6052,26 +5928,6 @@ public sealed partial class SessionFileTransferService
     {
         context.V4StateEpoch++;
         var missingRanges = BuildInboundV4MissingRangesLocked(context, forceMissingRange);
-        if (ShouldUseV6RegularNknSparseRuntimeLegacyFrames() &&
-            IsInboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context))
-        {
-            return new FileTransferStateFrameV4
-            {
-                SessionId = context.SessionId,
-                TransferId = context.TransferId,
-                Epoch = context.V4StateEpoch,
-                ContiguousCommittedChunkIndex = context.NextChunkIndex,
-                DurableReceivedHighestChunkIndex = context.PullHighestReceivedChunkIndex,
-                CreditUntilChunkIndexExclusive = context.V4CreditUntilChunkIndexExclusive,
-                MissingRanges = missingRanges,
-                BytesCommitted = context.BytesTransferred,
-                ReceiverMemoryPressure = context.ReceiverBufferPressureActive,
-                ReceiverDiskPressure = false,
-                TerminalReady = terminalReady,
-                TransferPaused = context.UserPaused,
-                TransferPauseReason = context.UserPauseReason,
-            };
-        }
 
         var primaryRegularNknCheckpoint =
             context.RuntimeProfile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6 &&
@@ -6499,7 +6355,6 @@ public sealed partial class SessionFileTransferService
 
     private static bool ShouldUsePrimaryRegularNknBulkV6RepairProfileLocked(InboundTransferContext context)
         => ShouldUseV6RegularNknSparseRuntime(context) &&
-           !ShouldUseV6RegularNknSparseRuntimeLegacyFrames() &&
            IsInboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context);
 
     private static int ResolveV4RepairBurstMaxChunks(InboundTransferContext context)

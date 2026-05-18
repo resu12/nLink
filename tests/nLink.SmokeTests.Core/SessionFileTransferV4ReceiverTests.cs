@@ -336,28 +336,27 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
     }
 
     [Fact]
-    public async Task V6RegularNknSparseRuntimeFlag_UsesV4FileOnlyPrimaryRegularNknFrontierRepair()
+    public async Task PrimaryRegularNknBulkV6_UsesV4FileOnlyPrimaryRegularNknFrontierRepair()
     {
         const string transferId = "transfer_v6_sparse_runtime_file_only_frontier_repair";
         const string sessionId = "session_v6_sparse_runtime_file_only_frontier_repair";
-        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
         const int chunkSize = 4;
         const int chunkCount = 130;
         const int expectedFrontierRepairChunks = 12;
-        var previous = Environment.GetEnvironmentVariable(envName);
         var logStart = ReadOperationalLogText().Length;
         var payload = Enumerable.Range(0, chunkSize * chunkCount).Select(static value => (byte)(value % 251)).ToArray();
         var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
         using var destination = new NonDisposingMemoryStream();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
+        receiverTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
         senderTransport.Connect(receiverTransport);
         using var receiver = new SessionFileTransferService();
         receiver.AttachTransport(receiverTransport);
 
         try
         {
-            Environment.SetEnvironmentVariable(envName, "1");
 
             var senderSession = await StartInboundV4ReceiverAsync(
                 senderTransport,
@@ -406,31 +405,29 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         }
         finally
         {
-            Environment.SetEnvironmentVariable(envName, previous);
         }
     }
 
     [Fact]
-    public async Task V6RegularNknSparseRuntimeFlag_StateRefreshResendsSparseReceiverState()
+    public async Task PrimaryRegularNknBulkV6_StateRefreshResendsSparseReceiverState()
     {
         const string transferId = "transfer_v6_sparse_runtime_state_refresh_receiver";
         const string sessionId = "session_v6_sparse_runtime_state_refresh_receiver";
-        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
         const int chunkSize = 4;
-        var previous = Environment.GetEnvironmentVariable(envName);
         var logStart = ReadOperationalLogText().Length;
         var payload = Enumerable.Range(0, 16).Select(static value => (byte)(value % 251)).ToArray();
         var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
         using var destination = new NonDisposingMemoryStream();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
+        receiverTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
         senderTransport.Connect(receiverTransport);
         using var receiver = new SessionFileTransferService();
         receiver.AttachTransport(receiverTransport);
 
         try
         {
-            Environment.SetEnvironmentVariable(envName, "1");
 
             var senderSession = await StartInboundV4ReceiverAsync(
                 senderTransport,
@@ -490,7 +487,6 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         }
         finally
         {
-            Environment.SetEnvironmentVariable(envName, previous);
         }
     }
 
@@ -879,65 +875,6 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         Assert.Contains("state=awaiting_manifest", logTail, StringComparison.Ordinal);
         Assert.Contains("state=credit_granted", logTail, StringComparison.Ordinal);
         Assert.Contains($"credit_window_chunks={expectedWindowChunks}", logTail, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task DiagnosticV6RegularNknSparseRuntimeFlag_InitialCreditKeeps64MiBWindow()
-    {
-        const string transferId = "transfer_v6_sparse_diagnostic_receiver_credit_64m";
-        const string sessionId = "session_v6_sparse_diagnostic_receiver_credit_64m";
-        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
-        const int fileSizeBytes = 128 * 1024 * 1024;
-        const int expectedCreditBytes = 64 * 1024 * 1024;
-        const int expectedCreditQuantumBytes = 1024 * 1024;
-        const int chunkSizeBytes = 21 * 1024;
-        var expectedWindowChunks = checked((int)((expectedCreditBytes + chunkSizeBytes - 1L) / chunkSizeBytes));
-        var expectedQuantumChunks = checked((int)((expectedCreditQuantumBytes + chunkSizeBytes - 1L) / chunkSizeBytes));
-        var expectedCreditChunkCount = ((expectedWindowChunks + expectedQuantumChunks - 1) / expectedQuantumChunks) * expectedQuantumChunks;
-        var previous = Environment.GetEnvironmentVariable(envName);
-        var sha256 = Convert.ToBase64String(new byte[32]);
-        var logStart = ReadOperationalLogText().Length;
-        using var destination = new NonDisposingMemoryStream();
-        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
-        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
-        senderTransport.Connect(receiverTransport);
-        using var receiver = new SessionFileTransferService();
-        receiver.AttachTransport(receiverTransport);
-
-        try
-        {
-            Environment.SetEnvironmentVariable(envName, "1");
-
-            var senderSession = await StartInboundV4ReceiverAsync(
-                senderTransport,
-                receiver,
-                transferId,
-                sessionId,
-                "v6-sparse-diagnostic-credit-64m.bin",
-                fileSizeBytes,
-                sha256,
-                (_, _) => Task.FromResult<Stream>(destination)).ConfigureAwait(false);
-
-            await senderSession.SendAsync(
-                CreateManifest(sessionId, transferId, "v6-sparse-diagnostic-credit-64m.bin", fileSizeBytes, chunkSizeBytes, sha256),
-                CancellationToken.None);
-
-            await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0));
-
-            var initialState = receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>()
-                .First(frame => frame.CreditUntilChunkIndexExclusive > 0);
-            Assert.Equal(expectedCreditChunkCount, initialState.CreditUntilChunkIndexExclusive);
-            Assert.Equal(0, initialState.ContiguousCommittedChunkIndex);
-            Assert.Equal(-1, initialState.DurableReceivedHighestChunkIndex);
-            var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=filetransfer_v6_regular_nkn_sparse_runtime_selected", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_primary_regular_nkn_bulk_v6_selected", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_primary_regular_nkn_bulk_v6_state", logTail, StringComparison.Ordinal);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(envName, previous);
-        }
     }
 
     [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]

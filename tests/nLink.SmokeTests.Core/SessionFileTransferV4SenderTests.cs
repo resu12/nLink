@@ -64,7 +64,6 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_selected; direction=outbound", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_selected; direction=inbound", logTail, StringComparison.Ordinal);
         Assert.Contains("runtime_profile=PrimaryRegularNknBulkV6", logTail, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=filetransfer_v6_regular_nkn_sparse_runtime_selected", logTail, StringComparison.Ordinal);
         Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_state; direction=outbound", logTail, StringComparison.Ordinal);
         Assert.Contains("state=manifest_exchange", logTail, StringComparison.Ordinal);
         Assert.Contains("state=awaiting_receiver_state", logTail, StringComparison.Ordinal);
@@ -482,15 +481,15 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
-    public async Task V6RegularNknSparseRuntimeFlag_UsesSparseCreditEngineUnderV6Envelope()
+    public async Task PrimaryRegularNknBulkV6_UsesSparseCreditEngineUnderV6Envelope()
     {
         const string transferId = "transfer_v6_sparse_runtime_flag";
-        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
-        var previous = Environment.GetEnvironmentVariable(envName);
         var logStart = GetOperationalLogLength();
         var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_flag");
         using var receiverTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_flag");
+        senderTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
+        receiverTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         using var receiver = new SessionFileTransferService();
@@ -500,7 +499,6 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         try
         {
-            Environment.SetEnvironmentVariable(envName, "1");
             await sender.TryStartSendAsync(
                 new FileTransferSendDescriptor("v6-sparse-runtime.bin", payload.Length, transferId),
                 _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
@@ -518,29 +516,26 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             Assert.Contains(receiverTransport.SentDataFrames, static frame => frame is FileTransferReceiverStateFrameV6);
 
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=filetransfer_v6_regular_nkn_sparse_runtime_selected; direction=outbound", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_v6_regular_nkn_sparse_runtime_selected; direction=inbound", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_primary_regular_nkn_bulk_v6_selected", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_primary_regular_nkn_bulk_v6_state", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_selected; direction=outbound", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_selected; direction=inbound", logTail, StringComparison.Ordinal);
             Assert.Contains("event=filetransfer_v4_chunk_batch_sent;", logTail, StringComparison.Ordinal);
             Assert.Contains("event=filetransfer_v4_finalize_started;", logTail, StringComparison.Ordinal);
         }
         finally
         {
-            Environment.SetEnvironmentVariable(envName, previous);
         }
     }
 
     [Fact]
-    public async Task V6RegularNknSparseRuntimeFlag_RequestsV4FileOnlyFrontierRepairsUnderV6Envelope()
+    public async Task PrimaryRegularNknBulkV6_RequestsV4FileOnlyFrontierRepairsUnderV6Envelope()
     {
         const string transferId = "transfer_v6_sparse_runtime_file_only_repair";
-        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
         const int expectedFrontierRepairChunks = 12;
-        var previous = Environment.GetEnvironmentVariable(envName);
         var payload = Enumerable.Range(0, 20_000_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_file_only_repair");
         using var receiverTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_file_only_repair");
+        senderTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
+        receiverTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
             Task.FromResult(
                 frame is FileTransferChunkBatchFrameV6 { RepairRequestId: null } batch &&
@@ -554,7 +549,6 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         try
         {
-            Environment.SetEnvironmentVariable(envName, "1");
             await sender.TryStartSendAsync(
                 new FileTransferSendDescriptor("v6-sparse-runtime-file-only-repair.bin", payload.Length, transferId),
                 _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
@@ -578,366 +572,6 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         }
         finally
         {
-            Environment.SetEnvironmentVariable(envName, previous);
-        }
-    }
-
-    [Fact]
-    public async Task V6RegularNknSparseRuntimeLegacyFramesFlag_UsesV4DataFramesUnderV6Envelope()
-    {
-        const string transferId = "transfer_v6_sparse_runtime_legacy_frames";
-        const string sparseEnvName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
-        const string legacyEnvName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME_LEGACY_FRAMES";
-        var previousSparse = Environment.GetEnvironmentVariable(sparseEnvName);
-        var previousLegacy = Environment.GetEnvironmentVariable(legacyEnvName);
-        var payload = Enumerable.Range(0, 512_000).Select(static index => (byte)(index % 251)).ToArray();
-        using var senderTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_legacy_frames");
-        using var receiverTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_legacy_frames");
-        senderTransport.Connect(receiverTransport);
-        using var sender = new SessionFileTransferService();
-        using var receiver = new SessionFileTransferService();
-        sender.AttachTransport(senderTransport);
-        receiver.AttachTransport(receiverTransport);
-        using var destination = new NonDisposingMemoryStream();
-
-        try
-        {
-            Environment.SetEnvironmentVariable(sparseEnvName, "1");
-            Environment.SetEnvironmentVariable(legacyEnvName, "1");
-            await sender.TryStartSendAsync(
-                new FileTransferSendDescriptor("v6-sparse-runtime-legacy-frames.bin", payload.Length, transferId),
-                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
-                CancellationToken.None);
-            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
-            await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
-
-            await WaitUntilAsync(
-                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Completed &&
-                      receiver.Snapshot.Inbound?.State == FileTransferTransferState.Completed,
-                timeoutMs: 15000);
-
-            Assert.Equal(payload, destination.ToArray()[..payload.Length]);
-            var sessionOpen = Assert.Single(senderTransport.SentSessionOpens);
-            Assert.Equal(FileTransferProtocol.ProtocolVersionV6, sessionOpen.ProtocolVersion);
-            Assert.Contains(senderTransport.SentDataFrames, static frame => frame.GetType() == typeof(FileTransferManifestFrameV4));
-            Assert.Contains(senderTransport.SentDataFrames, static frame => frame.GetType() == typeof(FileTransferChunkBatchFrameV4));
-            Assert.Contains(receiverTransport.SentDataFrames, static frame => frame.GetType() == typeof(FileTransferStateFrameV4));
-            Assert.DoesNotContain(senderTransport.SentDataFrames, static frame => frame is FileTransferChunkBatchFrameV6);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(sparseEnvName, previousSparse);
-            Environment.SetEnvironmentVariable(legacyEnvName, previousLegacy);
-        }
-    }
-
-    [Fact]
-    public async Task V6RegularNknSparseRuntimeFlag_DefersPrimaryRegularNknPeerSilence()
-    {
-        const string transferId = "transfer_v6_sparse_runtime_peer_silence";
-        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
-        var previous = Environment.GetEnvironmentVariable(envName);
-        var previousTimeout = SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests;
-        var logStart = GetOperationalLogLength();
-        var payload = Enumerable.Range(0, 20_000_000).Select(static index => (byte)(index % 251)).ToArray();
-        var dropReceiverFeedback = 0;
-        using var senderTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_peer_silence");
-        using var receiverTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_peer_silence");
-        senderTransport.DataSessionSendDelayMs = 20;
-        receiverTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
-            Task.FromResult(Volatile.Read(ref dropReceiverFeedback) == 1 && FileTransferProtocol.IsV6DataFrame(frame));
-        senderTransport.Connect(receiverTransport);
-        using var sender = new SessionFileTransferService();
-        using var receiver = new SessionFileTransferService();
-        sender.AttachTransport(senderTransport);
-        receiver.AttachTransport(receiverTransport);
-        using var destination = new NonDisposingMemoryStream();
-
-        try
-        {
-            Environment.SetEnvironmentVariable(envName, "1");
-            SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = TimeSpan.FromMilliseconds(300);
-
-            await sender.TryStartSendAsync(
-                new FileTransferSendDescriptor("v6-sparse-runtime-peer-silence.bin", payload.Length, transferId),
-                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
-                CancellationToken.None);
-            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
-            await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
-            await WaitUntilAsync(
-                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Sending &&
-                      senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(),
-                timeoutMs: 5000);
-
-            Volatile.Write(ref dropReceiverFeedback, 1);
-            await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains(
-                    "event=filetransfer_v4_peer_feedback_timeout_deferred_for_v6_regular_nkn_sparse_runtime",
-                    StringComparison.Ordinal),
-                timeoutMs: 5000);
-
-            Assert.NotEqual(FileTransferTransferState.Failed, sender.Snapshot.Outbound?.State);
-            var logTail = ReadOperationalLogTail(logStart);
-            Assert.DoesNotContain("event=filetransfer_v4_peer_feedback_timeout; transfer_id=transfer_v6_sparse_runtime_peer_silence", logTail, StringComparison.Ordinal);
-        }
-        finally
-        {
-            SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = previousTimeout;
-            Environment.SetEnvironmentVariable(envName, previous);
-        }
-    }
-
-    [Fact]
-    public async Task V6RegularNknSparseRuntimeFlag_DefersReceiveRecoveryWhenFeedbackStallsWithUsableCredit()
-    {
-        const string transferId = "transfer_v6_sparse_runtime_feedback_recovery";
-        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
-        var previous = Environment.GetEnvironmentVariable(envName);
-        var previousV4Timeout = SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests;
-        var previousFeedbackDelay = SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests;
-        var previousStaleCreditDelay = SessionFileTransferService.V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelayOverrideForTests;
-        var logStart = GetOperationalLogLength();
-        var payload = Enumerable.Range(0, 20_000_000).Select(static index => (byte)(index % 251)).ToArray();
-        var dropReceiverFeedback = 0;
-        using var senderTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_feedback_recovery");
-        using var receiverTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_feedback_recovery");
-        senderTransport.DataSessionSendDelayMs = 100;
-        receiverTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
-            Task.FromResult(Volatile.Read(ref dropReceiverFeedback) == 1 && FileTransferProtocol.IsV6DataFrame(frame));
-        senderTransport.Connect(receiverTransport);
-        using var sender = new SessionFileTransferService();
-        using var receiver = new SessionFileTransferService();
-        sender.AttachTransport(senderTransport);
-        receiver.AttachTransport(receiverTransport);
-        using var destination = new NonDisposingMemoryStream();
-
-        try
-        {
-            Environment.SetEnvironmentVariable(envName, "1");
-            SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = TimeSpan.FromSeconds(2);
-            SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests = TimeSpan.FromMilliseconds(50);
-            SessionFileTransferService.V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelayOverrideForTests = TimeSpan.FromSeconds(30);
-
-            await sender.TryStartSendAsync(
-                new FileTransferSendDescriptor("v6-sparse-runtime-feedback-recovery.bin", payload.Length, transferId),
-                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
-                CancellationToken.None);
-            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
-            await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
-            await WaitUntilAsync(
-                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Sending &&
-                      senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(),
-                timeoutMs: 5000);
-
-            Volatile.Write(ref dropReceiverFeedback, 1);
-            var sawFeedbackDeferral = false;
-            await WaitUntilAsync(
-                () =>
-                {
-                    sawFeedbackDeferral = ReadOperationalLogTail(logStart).Contains(
-                        "event=filetransfer_v4_sparse_runtime_sender_feedback_stale_receive_recovery_deferred",
-                        StringComparison.Ordinal);
-                    return sawFeedbackDeferral;
-                },
-                timeoutMs: 5000);
-
-            Assert.NotEqual(FileTransferTransferState.Failed, sender.Snapshot.Outbound?.State);
-            var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=filetransfer_v4_sparse_runtime_sender_feedback_stale_receive_recovery_deferred", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain(
-                senderTransport.ReceiveRecoveryRequests,
-                request => request.Direction == FileTransferDirection.Outbound &&
-                           string.Equals(request.TransferId, transferId, StringComparison.Ordinal) &&
-                           string.Equals(request.Reason, "sender_request_feedback_stalled", StringComparison.Ordinal));
-            Assert.DoesNotContain("event=filetransfer_v4_sparse_runtime_sender_feedback_stale_receive_recovery_requested", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction=outbound", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain($"event=filetransfer_v4_peer_feedback_timeout; transfer_id={transferId}", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_v6_epoch_started; direction=outbound", logTail, StringComparison.Ordinal);
-        }
-        finally
-        {
-            SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = previousV4Timeout;
-            SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests = previousFeedbackDelay;
-            SessionFileTransferService.V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelayOverrideForTests = previousStaleCreditDelay;
-            Environment.SetEnvironmentVariable(envName, previous);
-        }
-    }
-
-    [Fact]
-    public async Task V6RegularNknSparseRuntimeFlag_UsesStateRefreshWhenUsableCreditTurnsStale()
-    {
-        const string transferId = "transfer_v6_sparse_runtime_stale_credit_quiet";
-        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
-        var previous = Environment.GetEnvironmentVariable(envName);
-        var previousV4Timeout = SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests;
-        var previousFeedbackDelay = SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests;
-        var previousStaleCreditDelay = SessionFileTransferService.V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelayOverrideForTests;
-        var logStart = GetOperationalLogLength();
-        var payload = Enumerable.Range(0, 20_000_000).Select(static index => (byte)(index % 251)).ToArray();
-        var dropReceiverFeedback = 0;
-        using var senderTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_stale_credit_quiet");
-        using var receiverTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_stale_credit_quiet");
-        senderTransport.DataSessionSendDelayMs = 100;
-        receiverTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
-            Task.FromResult(Volatile.Read(ref dropReceiverFeedback) == 1 && FileTransferProtocol.IsV6DataFrame(frame));
-        senderTransport.Connect(receiverTransport);
-        using var sender = new SessionFileTransferService();
-        using var receiver = new SessionFileTransferService();
-        sender.AttachTransport(senderTransport);
-        receiver.AttachTransport(receiverTransport);
-        using var destination = new NonDisposingMemoryStream();
-
-        try
-        {
-            Environment.SetEnvironmentVariable(envName, "1");
-            SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = TimeSpan.FromSeconds(5);
-            SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests = TimeSpan.FromMilliseconds(50);
-            SessionFileTransferService.V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelayOverrideForTests = TimeSpan.FromSeconds(30);
-
-            await sender.TryStartSendAsync(
-                new FileTransferSendDescriptor("v6-sparse-runtime-stale-credit-quiet.bin", payload.Length, transferId),
-                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
-                CancellationToken.None);
-            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
-            await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
-            await WaitUntilAsync(
-                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Sending &&
-                      senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(),
-                timeoutMs: 5000);
-
-            Volatile.Write(ref dropReceiverFeedback, 1);
-            var sawFeedbackDeferral = false;
-            await WaitUntilAsync(
-                () =>
-                {
-                    sawFeedbackDeferral = ReadOperationalLogTail(logStart).Contains(
-                        "event=filetransfer_v4_sparse_runtime_sender_feedback_stale_receive_recovery_deferred",
-                        StringComparison.Ordinal);
-                    return sawFeedbackDeferral;
-                },
-                timeoutMs: 5000);
-
-            SessionFileTransferService.V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelayOverrideForTests = TimeSpan.FromMilliseconds(150);
-            await WaitUntilAsync(
-                () => senderTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Any(static frame =>
-                    string.Equals(frame.RecoveryMode, "regular_nkn_state_refresh", StringComparison.Ordinal)),
-                timeoutMs: 10000);
-
-            Assert.NotEqual(FileTransferTransferState.Failed, sender.Snapshot.Outbound?.State);
-            var logTail = ReadOperationalLogTail(logStart);
-            Assert.True(sawFeedbackDeferral);
-            Assert.DoesNotContain("event=filetransfer_v4_sparse_runtime_sender_feedback_stale_receive_recovery_requested", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction=outbound", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_v6_regular_nkn_state_refresh_requested", logTail, StringComparison.Ordinal);
-            Assert.Contains("reason=feedback_stalled_with_credit", logTail, StringComparison.Ordinal);
-            var refresh = senderTransport.SentDataFrames
-                .OfType<FileTransferFrontierRequestFrameV6>()
-                .First(static frame => string.Equals(frame.RecoveryMode, "regular_nkn_state_refresh", StringComparison.Ordinal));
-            var refreshHint = Assert.Single(refresh.MissingRanges);
-            Assert.Equal(1, refreshHint.ChunkCount);
-            Assert.NotEmpty(FileTransferDataFrameCodec.Serialize(refresh));
-            Assert.DoesNotContain(
-                senderTransport.ReceiveRecoveryRequests,
-                request => request.Direction == FileTransferDirection.Outbound &&
-                           string.Equals(request.TransferId, transferId, StringComparison.Ordinal) &&
-                           string.Equals(request.Reason, "sender_request_feedback_stalled", StringComparison.Ordinal));
-            Assert.DoesNotContain($"event=filetransfer_v4_peer_feedback_timeout; transfer_id={transferId}", logTail, StringComparison.Ordinal);
-        }
-        finally
-        {
-            SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = previousV4Timeout;
-            SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests = previousFeedbackDelay;
-            SessionFileTransferService.V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelayOverrideForTests = previousStaleCreditDelay;
-            Environment.SetEnvironmentVariable(envName, previous);
-        }
-    }
-
-    [Fact]
-    public async Task V6RegularNknSparseRuntimeFlag_SendsStateRefreshWhenFeedbackStallsWithoutCredit()
-    {
-        const string transferId = "transfer_v6_sparse_runtime_state_refresh";
-        const string sessionId = "session_v6_sparse_runtime_state_refresh";
-        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
-        var previous = Environment.GetEnvironmentVariable(envName);
-        var previousV4Timeout = SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests;
-        var previousFeedbackDelay = SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests;
-        var previousRefreshCooldown = SessionFileTransferService.V6RegularNknSparseRuntimeStateRefreshCooldownOverrideForTests;
-        var logStart = GetOperationalLogLength();
-        var payload = Enumerable.Range(0, 20_000_000).Select(static index => (byte)(index % 251)).ToArray();
-        var dropReceiverFeedback = 0;
-        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
-        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
-        senderTransport.DataSessionSendDelayMs = 40;
-        receiverTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
-            Task.FromResult(Volatile.Read(ref dropReceiverFeedback) == 1 && FileTransferProtocol.IsV6DataFrame(frame));
-        senderTransport.Connect(receiverTransport);
-        using var sender = new SessionFileTransferService();
-        using var receiver = new SessionFileTransferService();
-        sender.AttachTransport(senderTransport);
-        receiver.AttachTransport(receiverTransport);
-        using var destination = new NonDisposingMemoryStream();
-
-        try
-        {
-            Environment.SetEnvironmentVariable(envName, "1");
-            SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = TimeSpan.FromSeconds(5);
-            SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests = TimeSpan.FromMilliseconds(50);
-            SessionFileTransferService.V6RegularNknSparseRuntimeStateRefreshCooldownOverrideForTests = TimeSpan.FromMilliseconds(100);
-
-            await sender.TryStartSendAsync(
-                new FileTransferSendDescriptor("v6-sparse-runtime-state-refresh.bin", payload.Length, transferId),
-                _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
-                CancellationToken.None);
-            await WaitUntilAsync(() => receiver.Snapshot.Inbound?.State == FileTransferTransferState.PendingDecision);
-            await receiver.AcceptIncomingTransferAsync(transferId, (_, _) => Task.FromResult<Stream>(destination), CancellationToken.None);
-            await WaitUntilAsync(
-                () => sender.Snapshot.Outbound?.State == FileTransferTransferState.Sending &&
-                      senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(),
-                timeoutMs: 5000);
-
-            senderTransport.ReceiveDeliveredDataFrame(
-                new FileTransferReceiverStateFrameV6
-                {
-                    SessionId = sessionId,
-                    TransferId = transferId,
-                    Epoch = 10_000,
-                    ContiguousCommittedChunkIndex = 0,
-                    DurableReceivedHighestChunkIndex = -1,
-                    CreditUntilChunkIndexExclusive = 0,
-                    MissingRanges = [],
-                    BytesCommitted = 0,
-                });
-            Volatile.Write(ref dropReceiverFeedback, 1);
-
-            await WaitUntilAsync(
-                () => senderTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Any(static frame =>
-                    string.Equals(frame.RecoveryMode, "regular_nkn_state_refresh", StringComparison.Ordinal)),
-                timeoutMs: 10000);
-
-            Assert.NotEqual(FileTransferTransferState.Failed, sender.Snapshot.Outbound?.State);
-            var refresh = senderTransport.SentDataFrames
-                .OfType<FileTransferFrontierRequestFrameV6>()
-                .First(frame => string.Equals(frame.RecoveryMode, "regular_nkn_state_refresh", StringComparison.Ordinal));
-            Assert.Equal("state_refresh", refresh.Priority);
-            Assert.StartsWith("v6-regular-nkn-state-refresh:", refresh.RepairRequestId, StringComparison.Ordinal);
-            var refreshHint = Assert.Single(refresh.MissingRanges);
-            Assert.Equal(1, refreshHint.ChunkCount);
-            Assert.NotEmpty(FileTransferDataFrameCodec.Serialize(refresh));
-            var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=filetransfer_v6_regular_nkn_state_refresh_requested", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain("event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction=outbound", logTail, StringComparison.Ordinal);
-            Assert.DoesNotContain(
-                senderTransport.ReceiveRecoveryRequests,
-                request => request.Direction == FileTransferDirection.Outbound &&
-                           string.Equals(request.TransferId, transferId, StringComparison.Ordinal) &&
-                           string.Equals(request.Reason, "sender_request_feedback_stalled", StringComparison.Ordinal));
-        }
-        finally
-        {
-            SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = previousV4Timeout;
-            SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests = previousFeedbackDelay;
-            SessionFileTransferService.V6RegularNknSparseRuntimeStateRefreshCooldownOverrideForTests = previousRefreshCooldown;
-            Environment.SetEnvironmentVariable(envName, previous);
         }
     }
 
@@ -1385,6 +1019,11 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             () => senderTransport.SentDataFrames.OfType<FileTransferFrontierRequestFrameV6>().Any(static frame =>
                 string.Equals(frame.RecoveryMode, "regular_nkn_checkpoint_sync", StringComparison.Ordinal)),
             timeoutMs: 10000);
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains(
+                "event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_request_sent; direction=outbound",
+                StringComparison.Ordinal),
+            timeoutMs: 5000);
 
         Assert.Equal(transportEpochCountBeforeRebind, senderTransport.SentTransportEpochs.Count + receiverTransport.SentTransportEpochs.Count);
         Assert.NotEqual(FileTransferTransferState.Failed, sender.Snapshot.Outbound?.State);
@@ -1396,11 +1035,9 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
     }
 
     [Fact]
-    public async Task V6RegularNknSparseRuntimeFlag_DefersOutboundV6PeerLivenessTerminal()
+    public async Task PrimaryRegularNknBulkV6_DefersOutboundV6PeerLivenessTerminal()
     {
         const string transferId = "transfer_v6_sparse_runtime_v6_liveness";
-        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
-        var previous = Environment.GetEnvironmentVariable(envName);
         var previousV4Timeout = SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests;
         var previousHeartbeatInterval = SessionFileTransferService.V6HeartbeatIntervalOverrideForTests;
         var previousPeerLivenessTimeout = SessionFileTransferService.V6PeerLivenessTimeoutOverrideForTests;
@@ -1409,6 +1046,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var dropReceiverFeedback = 0;
         using var senderTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_v6_liveness");
         using var receiverTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_v6_liveness");
+        senderTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
+        receiverTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
         senderTransport.DataSessionSendDelayMs = 20;
         receiverTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
             Task.FromResult(Volatile.Read(ref dropReceiverFeedback) == 1 && FileTransferProtocol.IsV6DataFrame(frame));
@@ -1423,7 +1062,6 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         try
         {
-            Environment.SetEnvironmentVariable(envName, "1");
             SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = TimeSpan.FromMilliseconds(150);
             SessionFileTransferService.V6HeartbeatIntervalOverrideForTests = TimeSpan.FromMilliseconds(50);
             SessionFileTransferService.V6PeerLivenessTimeoutOverrideForTests = TimeSpan.FromMilliseconds(150);
@@ -1455,16 +1093,13 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = previousV4Timeout;
             SessionFileTransferService.V6HeartbeatIntervalOverrideForTests = previousHeartbeatInterval;
             SessionFileTransferService.V6PeerLivenessTimeoutOverrideForTests = previousPeerLivenessTimeout;
-            Environment.SetEnvironmentVariable(envName, previous);
         }
     }
 
     [Fact]
-    public async Task V6RegularNknSparseRuntimeFlag_DefersInboundV6PeerLivenessTerminal()
+    public async Task PrimaryRegularNknBulkV6_DefersInboundV6PeerLivenessTerminal()
     {
         const string transferId = "transfer_v6_sparse_runtime_inbound_v6_liveness";
-        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
-        var previous = Environment.GetEnvironmentVariable(envName);
         var previousV4Timeout = SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests;
         var previousHeartbeatInterval = SessionFileTransferService.V6HeartbeatIntervalOverrideForTests;
         var previousPeerLivenessTimeout = SessionFileTransferService.V6PeerLivenessTimeoutOverrideForTests;
@@ -1473,6 +1108,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var dropSenderTraffic = 0;
         using var senderTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_inbound_v6_liveness");
         using var receiverTransport = new LoopbackFileTransferTransport("session_v6_sparse_runtime_inbound_v6_liveness");
+        senderTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
+        receiverTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
         senderTransport.DataSessionSendDelayMs = 20;
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = (_, frame, _) =>
             Task.FromResult(Volatile.Read(ref dropSenderTraffic) == 1 && FileTransferProtocol.IsV6DataFrame(frame));
@@ -1487,7 +1124,6 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         try
         {
-            Environment.SetEnvironmentVariable(envName, "1");
             SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = TimeSpan.FromMilliseconds(150);
             SessionFileTransferService.V6HeartbeatIntervalOverrideForTests = TimeSpan.FromMilliseconds(50);
             SessionFileTransferService.V6PeerLivenessTimeoutOverrideForTests = TimeSpan.FromMilliseconds(150);
@@ -1519,28 +1155,26 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
             SessionFileTransferService.V4PeerSilenceTimeoutOverrideForTests = previousV4Timeout;
             SessionFileTransferService.V6HeartbeatIntervalOverrideForTests = previousHeartbeatInterval;
             SessionFileTransferService.V6PeerLivenessTimeoutOverrideForTests = previousPeerLivenessTimeout;
-            Environment.SetEnvironmentVariable(envName, previous);
         }
     }
 
     [Fact]
-    public async Task V6RegularNknSparseRuntimeFlag_PausedTransportBlocksV4SenderPump()
+    public async Task PrimaryRegularNknBulkV6_PausedTransportBlocksV4SenderPump()
     {
         const string transferId = "transfer_v6_sparse_runtime_transport_pause";
         const string sessionId = "session_v6_sparse_runtime_transport_pause";
-        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
-        var previous = Environment.GetEnvironmentVariable(envName);
         var logStart = GetOperationalLogLength();
         var payload = Enumerable.Range(0, 2_000_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
+        receiverTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
         senderTransport.Connect(receiverTransport);
         using var sender = new SessionFileTransferService();
         sender.AttachTransport(senderTransport);
 
         try
         {
-            Environment.SetEnvironmentVariable(envName, "1");
             await sender.TryStartSendAsync(
                 new FileTransferSendDescriptor("v6-sparse-runtime-transport-pause.bin", payload.Length, transferId),
                 _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
@@ -1608,17 +1242,14 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         }
         finally
         {
-            Environment.SetEnvironmentVariable(envName, previous);
         }
     }
 
     [Fact]
-    public async Task V6RegularNknSparseRuntimeFlag_AbandonsPendingSendsAfterPausedTransportFailure()
+    public async Task PrimaryRegularNknBulkV6_AbandonsPendingSendsAfterPausedTransportFailure()
     {
         const string transferId = "transfer_v6_sparse_runtime_abandon_pending";
         const string sessionId = "session_v6_sparse_runtime_abandon_pending";
-        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
-        var previous = Environment.GetEnvironmentVariable(envName);
         var logStart = GetOperationalLogLength();
         var payload = Enumerable.Range(0, 4_000_000).Select(static index => (byte)(index % 251)).ToArray();
         var firstSendGate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1626,6 +1257,8 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         var chunkSendAttempts = 0;
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
+        receiverTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, ct) =>
         {
             if (frame is not FileTransferChunkBatchFrameV6)
@@ -1649,7 +1282,6 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         try
         {
-            Environment.SetEnvironmentVariable(envName, "1");
             await sender.TryStartSendAsync(
                 new FileTransferSendDescriptor("v6-sparse-runtime-abandon-pending.bin", payload.Length, transferId),
                 _ => Task.FromResult<Stream>(new MemoryStream(payload, writable: false)),
@@ -1701,22 +1333,21 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         {
             heldSendGate.TrySetResult(true);
             firstSendGate.TrySetResult(true);
-            Environment.SetEnvironmentVariable(envName, previous);
         }
     }
 
     [Fact]
-    public async Task V6RegularNknSparseRuntimeFlag_BoundsHungNormalTransportSends()
+    public async Task PrimaryRegularNknBulkV6_BoundsHungNormalTransportSends()
     {
         const string transferId = "transfer_v6_sparse_runtime_bound_normal_send";
         const string sessionId = "session_v6_sparse_runtime_bound_normal_send";
-        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
-        var previous = Environment.GetEnvironmentVariable(envName);
         var previousSendTimeout = SessionFileTransferService.V6RegularNknSparseRuntimeV4TransportSendTimeoutOverrideForTests;
         var logStart = GetOperationalLogLength();
         var payload = Enumerable.Range(0, 2_000_000).Select(static index => (byte)(index % 251)).ToArray();
         using var senderTransport = new LoopbackFileTransferTransport(sessionId);
         using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
+        receiverTransport.FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup;
         senderTransport.OutboundDataFrameDeliveryOverrideAsync = async (_, frame, ct) =>
         {
             if (frame is not FileTransferChunkBatchFrameV6)
@@ -1733,7 +1364,6 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
 
         try
         {
-            Environment.SetEnvironmentVariable(envName, "1");
             SessionFileTransferService.V6RegularNknSparseRuntimeV4TransportSendTimeoutOverrideForTests = TimeSpan.FromMilliseconds(100);
             await sender.TryStartSendAsync(
                 new FileTransferSendDescriptor("v6-sparse-runtime-bound-normal-send.bin", payload.Length, transferId),
@@ -1783,7 +1413,6 @@ public sealed class SessionFileTransferV4SenderTests : SessionFileTransferServic
         finally
         {
             SessionFileTransferService.V6RegularNknSparseRuntimeV4TransportSendTimeoutOverrideForTests = previousSendTimeout;
-            Environment.SetEnvironmentVariable(envName, previous);
         }
     }
 

@@ -306,8 +306,6 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const string V6RegularNknCheckpointSyncRecoveryMode = "regular_nkn_checkpoint_sync";
     private const string V6RegularNknCheckpointSyncPriority = "checkpoint_sync";
     private const string V6RegularNknCheckpointSyncRequestPrefix = "v6-regular-nkn-checkpoint-sync:";
-    private const string V6RegularNknSparseRuntimeEnvironmentVariableName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
-    private const string V6RegularNknSparseRuntimeLegacyFramesEnvironmentVariableName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME_LEGACY_FRAMES";
     private const long V6TunaRedundantDataMinimumBytesAfterProof = 10L * 1024L * 1024L;
     private const int V6FileOnlySenderPipelineDepth = 24;
     private const int V6RegularNknSenderPipelineDepth = 4;
@@ -1455,18 +1453,10 @@ public sealed partial class SessionFileTransferService : IDisposable
                 context.SessionId,
                 FileTransferDirection.Outbound,
                 runtimeSelection);
-            if (runtimeSelection.UsesRegularNknSparseEngine)
+            if (runtimeSelection.Profile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6)
             {
-                if (runtimeSelection.Profile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6)
-                {
-                    LogPrimaryRegularNknBulkV6Selected(context.TransferId, context.SessionId, FileTransferDirection.Outbound, runtimeSelection);
-                    await RunOutboundPrimaryRegularNknBulkV6Async(context).ConfigureAwait(false);
-                }
-                else if (runtimeSelection.Profile == FileTransferRuntimeProfile.DiagnosticV6RegularNknSparse)
-                {
-                    LogV6RegularNknSparseRuntimeSelected(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
-                    await RunOutboundV4SenderAsync(context).ConfigureAwait(false);
-                }
+                LogPrimaryRegularNknBulkV6Selected(context.TransferId, context.SessionId, FileTransferDirection.Outbound, runtimeSelection);
+                await RunOutboundPrimaryRegularNknBulkV6Async(context).ConfigureAwait(false);
             }
             else
             {
@@ -2031,18 +2021,10 @@ public sealed partial class SessionFileTransferService : IDisposable
                     context.SessionId,
                     FileTransferDirection.Inbound,
                     runtimeSelection);
-                if (runtimeSelection.UsesRegularNknSparseEngine)
+                if (runtimeSelection.Profile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6)
                 {
-                    if (runtimeSelection.Profile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6)
-                    {
-                        LogPrimaryRegularNknBulkV6Selected(context.TransferId, context.SessionId, FileTransferDirection.Inbound, runtimeSelection);
-                        _ = RunInboundPrimaryRegularNknBulkV6Async(context, message);
-                    }
-                    else if (runtimeSelection.Profile == FileTransferRuntimeProfile.DiagnosticV6RegularNknSparse)
-                    {
-                        LogV6RegularNknSparseRuntimeSelected(context.TransferId, context.SessionId, FileTransferDirection.Inbound);
-                        _ = RunInboundV4SparseReceiveLoopAsync(context, message);
-                    }
+                    LogPrimaryRegularNknBulkV6Selected(context.TransferId, context.SessionId, FileTransferDirection.Inbound, runtimeSelection);
+                    _ = RunInboundPrimaryRegularNknBulkV6Async(context, message);
                 }
                 else
                 {
@@ -3285,10 +3267,9 @@ public sealed partial class SessionFileTransferService : IDisposable
 
     private FileTransferRuntimeProfileSelection ResolveFileTransferRuntimeProfile(OutboundTransferContext context)
     {
-        var envOverride = IsV6RegularNknSparseRuntimeEnvEnabled();
         lock (gate)
         {
-            var selection = ResolveFileTransferRuntimeProfileLocked(context, envOverride);
+            var selection = ResolveFileTransferRuntimeProfileLocked(context);
             ApplyFileTransferRuntimeProfileSelectionLocked(context, selection);
             return selection;
         }
@@ -3296,18 +3277,16 @@ public sealed partial class SessionFileTransferService : IDisposable
 
     private FileTransferRuntimeProfileSelection ResolveFileTransferRuntimeProfile(InboundTransferContext context)
     {
-        var envOverride = IsV6RegularNknSparseRuntimeEnvEnabled();
         lock (gate)
         {
-            var selection = ResolveFileTransferRuntimeProfileLocked(context, envOverride);
+            var selection = ResolveFileTransferRuntimeProfileLocked(context);
             ApplyFileTransferRuntimeProfileSelectionLocked(context, selection);
             return selection;
         }
     }
 
     private FileTransferRuntimeProfileSelection ResolveFileTransferRuntimeProfileLocked(
-        OutboundTransferContext context,
-        bool envOverride)
+        OutboundTransferContext context)
     {
         if (!ReferenceEquals(outboundTransfer, context))
         {
@@ -3329,11 +3308,6 @@ public sealed partial class SessionFileTransferService : IDisposable
             return FileTransferRuntimeProfileSelection.Default("not_primary_regular_nkn");
         }
 
-        if (envOverride)
-        {
-            return FileTransferRuntimeProfileSelection.Diagnostic("env_override");
-        }
-
         if (IsPrimaryRegularNknBulkV6ProfileEnabled(transport))
         {
             return FileTransferRuntimeProfileSelection.PrimaryRegularNknBulkV6("conservative_regular_nkn");
@@ -3343,8 +3317,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     }
 
     private FileTransferRuntimeProfileSelection ResolveFileTransferRuntimeProfileLocked(
-        InboundTransferContext context,
-        bool envOverride)
+        InboundTransferContext context)
     {
         if (!ReferenceEquals(inboundTransfer, context))
         {
@@ -3364,11 +3337,6 @@ public sealed partial class SessionFileTransferService : IDisposable
         if (!IsInboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context))
         {
             return FileTransferRuntimeProfileSelection.Default("not_primary_regular_nkn");
-        }
-
-        if (envOverride)
-        {
-            return FileTransferRuntimeProfileSelection.Diagnostic("env_override");
         }
 
         if (IsPrimaryRegularNknBulkV6ProfileEnabled(transport))
@@ -3397,51 +3365,14 @@ public sealed partial class SessionFileTransferService : IDisposable
         context.V6RegularNknBulkSparseProfileActive = selection.UsesRegularNknSparseEngine;
     }
 
-    private static bool ShouldUseV6RegularNknSparseRuntime()
-        => IsV6RegularNknSparseRuntimeEnvEnabled();
-
     private static bool ShouldUseV6RegularNknSparseRuntime(OutboundTransferContext context)
-        => context.V6RegularNknBulkSparseProfileActive || ShouldUseV6RegularNknSparseRuntime();
+        => context.V6RegularNknBulkSparseProfileActive;
 
     private static bool ShouldUseV6RegularNknSparseRuntime(InboundTransferContext context)
-        => context.V6RegularNknBulkSparseProfileActive || ShouldUseV6RegularNknSparseRuntime();
+        => context.V6RegularNknBulkSparseProfileActive;
 
     private static bool IsPrimaryRegularNknBulkV6ProfileEnabled(IFileTransferSignalingTransport? currentTransport)
         => ResolveTransportProfileKind(currentTransport) == FileTransferTransportProfileKind.ConservativeNknStartup;
-
-    private static bool IsV6RegularNknSparseRuntimeEnvEnabled()
-        => IsFileTransferEnvFlagEnabled(V6RegularNknSparseRuntimeEnvironmentVariableName);
-
-    private static bool ShouldUseV6RegularNknSparseRuntimeLegacyFrames()
-        => ShouldUseV6RegularNknSparseRuntime() &&
-           IsFileTransferEnvFlagEnabled(V6RegularNknSparseRuntimeLegacyFramesEnvironmentVariableName);
-
-    private static bool IsFileTransferEnvFlagEnabled(string variableName)
-    {
-        var value = Environment.GetEnvironmentVariable(variableName);
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return false;
-        }
-
-        value = value.Trim();
-        return !string.Equals(value, "0", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "false", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "off", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "no", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "disable", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "disabled", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static void LogV6RegularNknSparseRuntimeSelected(
-        string transferId,
-        string sessionId,
-        FileTransferDirection direction)
-    {
-        LocalOperationalLog.Info(
-            "FileTransferService",
-            $"event=filetransfer_v6_regular_nkn_sparse_runtime_selected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; env={V6RegularNknSparseRuntimeEnvironmentVariableName}; protocol_version={FileTransferProtocol.ProtocolVersionV6}");
-    }
 
     private Task RunOutboundPrimaryRegularNknBulkV6Async(OutboundTransferContext context)
         => RunOutboundSparseCreditSenderAsync(context, FileTransferSparseCreditRuntimeKind.PrimaryRegularNknBulkV6);
@@ -3878,7 +3809,6 @@ public sealed partial class SessionFileTransferService : IDisposable
     {
         Default,
         PrimaryRegularNknBulkV6,
-        DiagnosticV6RegularNknSparse,
     }
 
     private enum FileTransferBridgeRecoveryPolicy
@@ -3886,12 +3816,10 @@ public sealed partial class SessionFileTransferService : IDisposable
         TunaStrictRecovery,
         PostTunaFallbackStrictRecovery,
         PrimaryRegularNknQuietRecovery,
-        DiagnosticSparseRuntimeRecovery,
     }
 
     private enum FileTransferSparseCreditRuntimeKind
     {
-        V4Compatible,
         PrimaryRegularNknBulkV6,
     }
 
@@ -3928,21 +3856,14 @@ public sealed partial class SessionFileTransferService : IDisposable
                 FileTransferBridgeRecoveryPolicy.PrimaryRegularNknQuietRecovery,
                 reason);
 
-        public static FileTransferRuntimeProfileSelection Diagnostic(string reason)
-            => new(
-                FileTransferRuntimeProfile.DiagnosticV6RegularNknSparse,
-                FileTransferBridgeRecoveryPolicy.DiagnosticSparseRuntimeRecovery,
-                reason);
-
         public bool UsesRegularNknSparseEngine =>
-            Profile is FileTransferRuntimeProfile.PrimaryRegularNknBulkV6 or FileTransferRuntimeProfile.DiagnosticV6RegularNknSparse;
+            Profile is FileTransferRuntimeProfile.PrimaryRegularNknBulkV6;
     }
 
     private static string FormatFileTransferRuntimeProfile(FileTransferRuntimeProfile profile)
         => profile switch
         {
             FileTransferRuntimeProfile.PrimaryRegularNknBulkV6 => "PrimaryRegularNknBulkV6",
-            FileTransferRuntimeProfile.DiagnosticV6RegularNknSparse => "DiagnosticV6RegularNknSparse",
             _ => "Default",
         };
 
@@ -3951,7 +3872,6 @@ public sealed partial class SessionFileTransferService : IDisposable
         {
             FileTransferBridgeRecoveryPolicy.PrimaryRegularNknQuietRecovery => "primary_regular_nkn_quiet",
             FileTransferBridgeRecoveryPolicy.PostTunaFallbackStrictRecovery => "post_tuna_fallback_strict",
-            FileTransferBridgeRecoveryPolicy.DiagnosticSparseRuntimeRecovery => "diagnostic_sparse_runtime",
             _ => "tuna_strict",
         };
 

@@ -2269,24 +2269,16 @@ public sealed partial class NknSignalingTransport
 
         if (!FileTransferDataFrameCodec.TryDeserialize(securePayload.Plaintext, out var frame) || frame is null)
         {
-            if (!ShouldUseV6RegularNknSparseRuntimeLegacyFrames() ||
-                !FileTransferDataFrameCodec.TryDeserializeLegacyV4(securePayload.Plaintext, out frame) ||
-                frame is null)
-            {
-                NknRuntimeDiagnostics.SetLastError("filetransfer_data_frame_payload_invalid");
-                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_data_frame_payload_invalid");
-                Log($"FileTransferDataFrame payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
-                LocalOperationalLog.Warn(
-                    "SessionSecurity",
-                    $"event=filetransfer_data_frame_decode_failed; transport=nkn; transfer_id=(unknown); session_id={securePayload.Metadata.SessionId.Value}; message_id={env.MessageId}");
-                return false;
-            }
+            NknRuntimeDiagnostics.SetLastError("filetransfer_data_frame_payload_invalid");
+            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_data_frame_payload_invalid");
+            Log($"FileTransferDataFrame payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+            LocalOperationalLog.Warn(
+                "SessionSecurity",
+                $"event=filetransfer_data_frame_decode_failed; transport=nkn; transfer_id=(unknown); session_id={securePayload.Metadata.SessionId.Value}; message_id={env.MessageId}");
+            return false;
         }
 
-        var acceptedLegacyV4Frame = ShouldUseV6RegularNknSparseRuntimeLegacyFrames() &&
-                                    FileTransferProtocol.IsV4DataFrame(frame);
-        if (!FileTransferProtocol.IsV6DataFrame(frame) &&
-            !acceptedLegacyV4Frame)
+        if (!FileTransferProtocol.IsV6DataFrame(frame))
         {
             NknRuntimeDiagnostics.SetLastError("file_transfer_data_frame_protocol_not_v6");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("file_transfer_data_frame_protocol_not_v6");
@@ -2295,13 +2287,6 @@ public sealed partial class NknSignalingTransport
                 $"event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=protocol_not_v6; session_id={frame.SessionId}; transfer_id={frame.TransferId}; source={source ?? "(none)"}; msg_id={env.MessageId}; frame_type={frame.Type}");
             Log($"FileTransfer message rejected (type=file_transfer_data_frame, msg_id={env.MessageId}, reason=protocol_not_v6, transfer_id={frame.TransferId})");
             return false;
-        }
-
-        if (acceptedLegacyV4Frame)
-        {
-            LocalOperationalLog.Info(
-                "SessionSecurity",
-                $"event=filetransfer_legacy_v4_data_frame_accepted_under_v6_sparse_runtime; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; source={source ?? "(none)"}; msg_id={env.MessageId}");
         }
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_data_frame", securePayload.Metadata, frame.TransferId, env.MessageId) ||
@@ -5248,31 +5233,7 @@ public sealed partial class NknSignalingTransport
     }
 
     private static byte[] SerializeFileTransferDataFrameForWire(FileTransferDataFrame frame)
-        => ShouldUseV6RegularNknSparseRuntimeLegacyFrames() &&
-           FileTransferProtocol.IsV4DataFrame(frame)
-            ? FileTransferDataFrameCodec.SerializeLegacyV4(frame)
-            : FileTransferDataFrameCodec.Serialize(frame);
-
-    private static bool ShouldUseV6RegularNknSparseRuntimeLegacyFrames()
-        => IsEnabledEnvironmentFlag("NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME") &&
-           IsEnabledEnvironmentFlag("NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME_LEGACY_FRAMES");
-
-    private static bool IsEnabledEnvironmentFlag(string variableName)
-    {
-        var value = Environment.GetEnvironmentVariable(variableName);
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return false;
-        }
-
-        value = value.Trim();
-        return !string.Equals(value, "0", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "false", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "off", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "no", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "disable", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "disabled", StringComparison.OrdinalIgnoreCase);
-    }
+        => FileTransferDataFrameCodec.Serialize(frame);
 
     private sealed class TransportFileTransferDataSession : IFileTransferDataSession
     {

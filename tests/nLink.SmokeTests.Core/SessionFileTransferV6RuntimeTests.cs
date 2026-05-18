@@ -85,7 +85,6 @@ public sealed class SessionFileTransferV6RuntimeTests : SessionFileTransferServi
         Assert.Contains("runtime_profile=Default", logTail, StringComparison.Ordinal);
         Assert.Contains("selection_reason=transport_profile_not_conservative", logTail, StringComparison.Ordinal);
         Assert.DoesNotContain("event=filetransfer_primary_regular_nkn_bulk_v6_selected", logTail, StringComparison.Ordinal);
-        Assert.DoesNotContain("event=filetransfer_v6_regular_nkn_sparse_runtime_selected", logTail, StringComparison.Ordinal);
     }
 
     [Fact]
