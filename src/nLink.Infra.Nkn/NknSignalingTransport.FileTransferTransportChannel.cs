@@ -227,7 +227,7 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        await SendFileTransferEnvelopeAsync(
+        await SendFileTransferRedundantLifecycleEnvelopeAsync(
                 MsgType.FileTransferTransportEpoch,
                 message.TransferId,
                 FileTransferPayloadCodec.Serialize(message),
@@ -247,7 +247,7 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        await SendFileTransferEnvelopeAsync(
+        await SendFileTransferRedundantLifecycleEnvelopeAsync(
                 MsgType.FileTransferTransportProbe,
                 message.TransferId,
                 FileTransferPayloadCodec.Serialize(message),
@@ -267,7 +267,7 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        await SendFileTransferEnvelopeAsync(
+        await SendFileTransferRedundantLifecycleEnvelopeAsync(
                 MsgType.FileTransferRepairProof,
                 message.TransferId,
                 FileTransferPayloadCodec.Serialize(message),
@@ -1370,6 +1370,9 @@ public sealed partial class NknSignalingTransport
             case MsgType.TransportAccelerationAnswer:
                 HandleTransportAccelerationAnswer(source, env);
                 break;
+            case MsgType.TransportAccelerationAnswerAck:
+                HandleTransportAccelerationAnswerAck(source, env);
+                break;
             case MsgType.TransportAccelerationDown:
                 HandleTransportAccelerationDown(source, env);
                 break;
@@ -2266,16 +2269,24 @@ public sealed partial class NknSignalingTransport
 
         if (!FileTransferDataFrameCodec.TryDeserialize(securePayload.Plaintext, out var frame) || frame is null)
         {
-            NknRuntimeDiagnostics.SetLastError("filetransfer_data_frame_payload_invalid");
-            NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_data_frame_payload_invalid");
-            Log($"FileTransferDataFrame payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
-            LocalOperationalLog.Warn(
-                "SessionSecurity",
-                $"event=filetransfer_data_frame_decode_failed; transport=nkn; transfer_id=(unknown); session_id={securePayload.Metadata.SessionId.Value}; message_id={env.MessageId}");
-            return false;
+            if (!ShouldUseV6RegularNknSparseRuntimeLegacyFrames() ||
+                !FileTransferDataFrameCodec.TryDeserializeLegacyV4(securePayload.Plaintext, out frame) ||
+                frame is null)
+            {
+                NknRuntimeDiagnostics.SetLastError("filetransfer_data_frame_payload_invalid");
+                NknRuntimeDiagnostics.SetLastEnvelopeDropReason("filetransfer_data_frame_payload_invalid");
+                Log($"FileTransferDataFrame payload invalid (msg_id={env.MessageId}, payload_len={env.Payload.Length})");
+                LocalOperationalLog.Warn(
+                    "SessionSecurity",
+                    $"event=filetransfer_data_frame_decode_failed; transport=nkn; transfer_id=(unknown); session_id={securePayload.Metadata.SessionId.Value}; message_id={env.MessageId}");
+                return false;
+            }
         }
 
-        if (!FileTransferProtocol.IsV6DataFrame(frame))
+        var acceptedLegacyV4Frame = ShouldUseV6RegularNknSparseRuntimeLegacyFrames() &&
+                                    FileTransferProtocol.IsV4DataFrame(frame);
+        if (!FileTransferProtocol.IsV6DataFrame(frame) &&
+            !acceptedLegacyV4Frame)
         {
             NknRuntimeDiagnostics.SetLastError("file_transfer_data_frame_protocol_not_v6");
             NknRuntimeDiagnostics.SetLastEnvelopeDropReason("file_transfer_data_frame_protocol_not_v6");
@@ -2284,6 +2295,13 @@ public sealed partial class NknSignalingTransport
                 $"event=filetransfer_message_rejected; message_type=file_transfer_data_frame; reason=protocol_not_v6; session_id={frame.SessionId}; transfer_id={frame.TransferId}; source={source ?? "(none)"}; msg_id={env.MessageId}; frame_type={frame.Type}");
             Log($"FileTransfer message rejected (type=file_transfer_data_frame, msg_id={env.MessageId}, reason=protocol_not_v6, transfer_id={frame.TransferId})");
             return false;
+        }
+
+        if (acceptedLegacyV4Frame)
+        {
+            LocalOperationalLog.Info(
+                "SessionSecurity",
+                $"event=filetransfer_legacy_v4_data_frame_accepted_under_v6_sparse_runtime; transport=nkn; transfer_id={frame.TransferId}; session_id={frame.SessionId}; frame_type={frame.Type}; source={source ?? "(none)"}; msg_id={env.MessageId}");
         }
 
         if (!TryValidateFileTransferSecureMetadata("file_transfer_data_frame", securePayload.Metadata, frame.TransferId, env.MessageId) ||
@@ -3227,7 +3245,12 @@ public sealed partial class NknSignalingTransport
     private static bool IsExpectedControlReplayDuplicate(MsgType messageType)
         => messageType is MsgType.ScreenSharePressureState or
             MsgType.ScreenShareCursorState or
-            MsgType.ControlDisplayInfo;
+            MsgType.ControlDisplayInfo or
+            MsgType.TransportAccelerationOffer or
+            MsgType.TransportAccelerationAnswer or
+            MsgType.TransportAccelerationAnswerAck or
+            MsgType.TransportAccelerationDown or
+            MsgType.TransportAccelerationPayerIntent;
 
     private bool TrySuppressExpectedControlReplayDuplicate(
         MsgType messageType,
@@ -4768,6 +4791,7 @@ public sealed partial class NknSignalingTransport
             MsgType.ScreenShareCursorState => "screenshare_cursor_state",
             MsgType.TransportAccelerationOffer => "transport_acceleration_offer",
             MsgType.TransportAccelerationAnswer => "transport_acceleration_answer",
+            MsgType.TransportAccelerationAnswerAck => "transport_acceleration_answer_ack",
             MsgType.TransportAccelerationDown => "transport_acceleration_down",
             MsgType.TransportAccelerationPayerIntent => "transport_acceleration_payer_intent",
             _ => throw new ArgumentOutOfRangeException(nameof(messageType), messageType, "Unsupported secure control message type."),
@@ -5223,6 +5247,33 @@ public sealed partial class NknSignalingTransport
         UnregisterActiveFileTransferDataSession(session.TransferId);
     }
 
+    private static byte[] SerializeFileTransferDataFrameForWire(FileTransferDataFrame frame)
+        => ShouldUseV6RegularNknSparseRuntimeLegacyFrames() &&
+           FileTransferProtocol.IsV4DataFrame(frame)
+            ? FileTransferDataFrameCodec.SerializeLegacyV4(frame)
+            : FileTransferDataFrameCodec.Serialize(frame);
+
+    private static bool ShouldUseV6RegularNknSparseRuntimeLegacyFrames()
+        => IsEnabledEnvironmentFlag("NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME") &&
+           IsEnabledEnvironmentFlag("NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME_LEGACY_FRAMES");
+
+    private static bool IsEnabledEnvironmentFlag(string variableName)
+    {
+        var value = Environment.GetEnvironmentVariable(variableName);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        value = value.Trim();
+        return !string.Equals(value, "0", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(value, "false", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(value, "off", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(value, "no", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(value, "disable", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(value, "disabled", StringComparison.OrdinalIgnoreCase);
+    }
+
     private sealed class TransportFileTransferDataSession : IFileTransferDataSession
     {
         private const long QueuedControlFrameEstimatedBytes = 1024L;
@@ -5321,7 +5372,7 @@ public sealed partial class NknSignalingTransport
                 return SendChunkBatchV4Async(v4Batch, ct);
             }
 
-            var serializedFrame = FileTransferDataFrameCodec.Serialize(frame);
+            var serializedFrame = SerializeFileTransferDataFrameForWire(frame);
             if (ShouldSendV4ReceiverFeedbackWithBulkRedundancy(frame))
             {
                 return SendDataFrameWithBulkRedundancyAsync(
@@ -5598,7 +5649,7 @@ public sealed partial class NknSignalingTransport
             var fitsTransportBudget = false;
             try
             {
-                serializedFrame = FileTransferDataFrameCodec.Serialize(batch);
+                serializedFrame = SerializeFileTransferDataFrameForWire(batch);
                 fitsTransportBudget = owner.TryMeasureFileTransferDataFrameTransportBudget(
                         TransferId,
                         MsgType.FileTransferDataFrame,

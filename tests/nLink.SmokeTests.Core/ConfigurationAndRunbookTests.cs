@@ -589,7 +589,7 @@ public sealed class ConfigurationAndRunbookTests : CoreSmokeTestsBase
             Assert.DoesNotContain("unsafe-ignored-identity.json", options.KeyPath, StringComparison.OrdinalIgnoreCase);
             Assert.NotEqual("unsafe-ignored-id", options.Identifier);
             Assert.False(options.PreflightRpcEnabled);
-            Assert.Equal(2, options.BulkNumSubClients);
+            Assert.Equal(4, options.BulkNumSubClients);
             Assert.True(options.ReceiveStallFileTransferFastRecoveryEnabled);
             Assert.Contains("NLINK_NKN_KEY_PATH:env:nkn_identity=suppressed", ReleaseOverridePolicy.GetSuppressedOverrideSummaries());
             Assert.Contains("NLINK_NKN_PREFLIGHT_RPC_ENABLED:env:nkn_tuning=suppressed", ReleaseOverridePolicy.GetSuppressedOverrideSummaries());

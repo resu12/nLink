@@ -210,6 +210,33 @@ internal sealed class TransportAccelerationAnswerPayload
     public long PayerDecisionId { get; set; }
 }
 
+internal sealed class TransportAccelerationAnswerAckPayload
+{
+    [JsonPropertyName("sessionId")]
+    public string SessionId { get; set; } = string.Empty;
+
+    [JsonPropertyName("accepted")]
+    public bool Accepted { get; set; }
+
+    [JsonPropertyName("supportedLanes")]
+    public string[] SupportedLanes { get; set; } = [];
+
+    [JsonPropertyName("sentAtUnixMs")]
+    public long SentAtUnixMs { get; set; }
+
+    [JsonPropertyName("expiresAtUnixMs")]
+    public long ExpiresAtUnixMs { get; set; }
+
+    [JsonPropertyName("nonce")]
+    public string Nonce { get; set; } = string.Empty;
+
+    [JsonPropertyName("sidecarProtocolVersion")]
+    public int SidecarProtocolVersion { get; set; }
+
+    [JsonPropertyName("payerDecisionId")]
+    public long PayerDecisionId { get; set; }
+}
+
 internal sealed class TransportAccelerationDownPayload
 {
     [JsonPropertyName("sessionId")]

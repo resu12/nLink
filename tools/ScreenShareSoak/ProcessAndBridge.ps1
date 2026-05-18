@@ -192,6 +192,37 @@ function Test-BridgeRuntimePresent {
            (Test-Path (Join-Path $bridgeDir 'bridge-manifest.json'))
 }
 
+function Resolve-NLinkRepoRootForPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$CandidatePath,
+        [Parameter(Mandatory = $true)][string]$FallbackRepoRoot
+    )
+
+    $current = [System.IO.Path]::GetFullPath($CandidatePath)
+    if (Test-Path -LiteralPath $current -PathType Leaf) {
+        $current = Split-Path -Parent $current
+    }
+
+    while (-not [string]::IsNullOrWhiteSpace($current)) {
+        $hasVersion = Test-Path -LiteralPath (Join-Path $current 'VERSION') -PathType Leaf
+        $hasBridgeBuilder = Test-Path -LiteralPath (Join-Path $current 'installer\Build-BridgeBundle.ps1') -PathType Leaf
+        $hasBridgeSource = Test-Path -LiteralPath (Join-Path $current 'tools\nkn-bridge\index.js') -PathType Leaf
+        if ($hasVersion -and $hasBridgeBuilder -and $hasBridgeSource) {
+            return $current
+        }
+
+        $parent = Split-Path -Parent $current
+        if ([string]::IsNullOrWhiteSpace($parent) -or
+            [string]::Equals($parent, $current, [System.StringComparison]::OrdinalIgnoreCase)) {
+            break
+        }
+
+        $current = $parent
+    }
+
+    return [System.IO.Path]::GetFullPath($FallbackRepoRoot)
+}
+
 function Ensure-NknBridgeRuntimeForExe {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -203,7 +234,8 @@ function Ensure-NknBridgeRuntimeForExe {
         throw "Could not resolve app directory for executable: $ResolvedExePath"
     }
 
-    $repoLocalBuild = Test-IsPathWithinRoot -RootPath $RepoRoot -CandidatePath $appDir
+    $buildRepoRoot = Resolve-NLinkRepoRootForPath -CandidatePath $appDir -FallbackRepoRoot $RepoRoot
+    $repoLocalBuild = Test-IsPathWithinRoot -RootPath $buildRepoRoot -CandidatePath $appDir
     if (-not $repoLocalBuild) {
         if (Test-BridgeRuntimePresent -AppDir $appDir) {
             return
@@ -212,9 +244,9 @@ function Ensure-NknBridgeRuntimeForExe {
         throw "Selected executable is missing bridge\\win-x64 (index.js, node.exe, bridge-manifest.json): $ResolvedExePath"
     }
 
-    $bridgeBundleDir = Join-Path $RepoRoot 'artifacts\bridge\win-x64'
-    $bridgeBundleScript = Join-Path $RepoRoot 'installer\Build-BridgeBundle.ps1'
-    $bridgeSourceScript = Join-Path $RepoRoot 'tools\nkn-bridge\index.js'
+    $bridgeBundleDir = Join-Path $buildRepoRoot 'artifacts\bridge\win-x64'
+    $bridgeBundleScript = Join-Path $buildRepoRoot 'installer\Build-BridgeBundle.ps1'
+    $bridgeSourceScript = Join-Path $buildRepoRoot 'tools\nkn-bridge\index.js'
     $artifactIndexPath = Join-Path $bridgeBundleDir 'index.js'
     $artifactNodePath = Join-Path $bridgeBundleDir 'node.exe'
     $artifactManifestPath = Join-Path $bridgeBundleDir 'bridge-manifest.json'
@@ -252,5 +284,5 @@ function Ensure-NknBridgeRuntimeForExe {
         throw "Failed to stage bridge runtime into $targetBridgeDir"
     }
 
-    Write-Host "Staged bridge runtime into repo-local soak target: $targetBridgeDir" -ForegroundColor DarkCyan
+    Write-Host "Staged bridge runtime into repo-local soak target: $targetBridgeDir (source root: $buildRepoRoot)" -ForegroundColor DarkCyan
 }

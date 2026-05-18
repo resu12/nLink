@@ -17,24 +17,35 @@ public sealed partial class NknSignalingTransport
     private const int AccelerationEarlyDropMaxRetryAttempts = 1;
     private static readonly TimeSpan AccelerationOfferLifetime = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan AccelerationOfferAnswerTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan AccelerationOfferReplayDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan AccelerationNegotiationRetryBaseDelay = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan HelperPaidOfferHelpeePriorityDelay = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan HelperPaidOfferHelpeeIntentGraceDelay = TimeSpan.FromMilliseconds(750);
     private static readonly TimeSpan AccelerationListenerReadyRetryDelay = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan AccelerationControlBulkBypassWait = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan AccelerationAnswerAckTimeout = TimeSpan.FromSeconds(35);
+    private static readonly TimeSpan AccelerationAnswerReplayDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan AccelerationAnswerAckReplayDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan FileTransferTunaActivationPauseMax = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan RemotePayerIntentFreshness = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan TunaFallbackProofLogWindow = TimeSpan.FromMinutes(1);
     private const long TunaFallbackProofLogEveryFrames = 5000;
+    private const int AccelerationOfferReplayAttempts = 12;
+    private const int AccelerationAnswerReplayAttempts = 3;
+    private const int AccelerationAnswerAckReplayAttempts = 3;
     private const int RemoteHelpeePayerIntentUnknown = 0;
     private const int RemoteHelpeePayerIntentWillListen = 1;
     private const int RemoteHelpeePayerIntentDialerOnly = 2;
     [ThreadStatic]
     private static bool handlingTunaAcceleratedInboundMessage;
     internal static TimeSpan? AccelerationOfferAnswerTimeoutOverrideForTests;
+    internal static TimeSpan? AccelerationOfferReplayDelayOverrideForTests;
     internal static TimeSpan? HelperPaidOfferHelpeePriorityDelayOverrideForTests;
     internal static TimeSpan? HelperPaidOfferHelpeeIntentGraceDelayOverrideForTests;
     private readonly object accelerationGate = new();
     private string? outboundAccelerationOfferNonce;
     private string? outboundAccelerationOfferTrigger;
+    private long outboundAccelerationOfferGeneration;
     private string? accelerationSessionId;
     private NknAccelerationLaneKind accelerationNegotiatedLanes;
     private int accelerationNegotiationScheduled;
@@ -47,6 +58,13 @@ public sealed partial class NknSignalingTransport
     private long accelerationPayerDecisionId;
     private long outboundAccelerationOfferPayerDecisionId;
     private long remoteAccelerationPayerDecisionId;
+    private long fileTransferTunaActivationPauseGeneration;
+    private string? fileTransferTunaActivationPauseSessionId;
+    private string? pendingAccelerationAnswerAckSessionId;
+    private string? pendingAccelerationAnswerAckNonce;
+    private NknAccelerationLaneKind pendingAccelerationAnswerAckLanes;
+    private long pendingAccelerationAnswerAckPayerDecisionId;
+    private long pendingAccelerationAnswerAckGeneration;
     private int transportAccelerationActivePublished;
     private string transportAccelerationStatusReason = "inactive";
     private string? accelerationUserStoppedSessionId;
@@ -200,17 +218,31 @@ public sealed partial class NknSignalingTransport
             return;
         }
 
-        MarkFileTransferFallbackNknProofPending(
-            reason,
-            sessionId,
-            NknAccelerationLaneKind.File);
+        if (ShouldUseFileTransferV6EpochForRegularNknRecovery(sessionId))
+        {
+            MarkFileTransferFallbackNknProofPending(
+                reason,
+                sessionId,
+                NknAccelerationLaneKind.File);
+            SetFileTransferDataSessionsAvailability(
+                isAvailable: false,
+                reason: reason,
+                requiresResumeRequest: true,
+                handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+                targetTransport: FileTransferTransportKind.RegularNkn);
+            ScheduleFileTransferFallbackNknProbeIfPending("core_receive_recovery_requested");
+            return;
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_regular_nkn_receive_recovery_no_epoch; session_id={SanitizeLogToken(sessionId ?? "none")}; transfer_id={SanitizeLogToken(transferId)}; direction={direction}; reason={reason}; trigger=core_receive_recovery_requested");
         SetFileTransferDataSessionsAvailability(
             isAvailable: false,
             reason: reason,
-            requiresResumeRequest: true,
-            handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+            requiresResumeRequest: false,
+            handoffKind: FileTransferTransportHandoffKind.None,
             targetTransport: FileTransferTransportKind.RegularNkn);
-        ScheduleFileTransferFallbackNknProbeIfPending("core_receive_recovery_requested");
     }
 
     internal bool IsAccelerationUserStoppedForCurrentSessionForTests => IsAccelerationUserStoppedForCurrentSession();
@@ -677,12 +709,156 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_activation_filetransfer_handoff_requested; session_id={SanitizeLogToken(sessionId)}; reason={normalizedReason}; lanes={FormatAccelerationLanesForLog(lanes)}");
+        ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
+            "tuna_activation_negotiated_transport_ready",
+            sessionId,
+            normalizedReason);
         RequestFileTransferDataSessionsHandoff(
             normalizedReason,
             FileTransferTransportHandoffKind.NormalToTunaActivation,
             FileTransferTransportKind.Tuna,
             sessionId);
     }
+
+    private void PauseFileTransferDataSessionsForTunaActivationNegotiation(
+        string reason,
+        string? sessionId,
+        string trigger)
+    {
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId)
+            ? currentSessionSecurityState.SessionId?.Value
+            : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            return;
+        }
+
+        long generation;
+        lock (accelerationGate)
+        {
+            if (string.Equals(fileTransferTunaActivationPauseSessionId, normalizedSessionId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            fileTransferTunaActivationPauseSessionId = normalizedSessionId;
+            generation = ++fileTransferTunaActivationPauseGeneration;
+        }
+
+        var normalizedReason = SanitizeLogToken(reason);
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_tuna_activation_negotiation_regular_nkn_paused; session_id={SanitizeLogToken(normalizedSessionId)}; reason={normalizedReason}; trigger={SanitizeLogToken(trigger)}; max_pause_ms={(long)FileTransferTunaActivationPauseMax.TotalMilliseconds}");
+        SetFileTransferDataSessionsAvailability(
+            isAvailable: false,
+            reason: "tuna_activation_negotiating",
+            requiresResumeRequest: false,
+            handoffKind: FileTransferTransportHandoffKind.None,
+            targetTransport: FileTransferTransportKind.RegularNkn);
+        ScheduleFileTransferTunaActivationPauseExpiry(normalizedSessionId, generation);
+    }
+
+    private void ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
+        string reason,
+        string? sessionId,
+        string trigger)
+    {
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId)
+            ? currentSessionSecurityState.SessionId?.Value
+            : sessionId.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedSessionId))
+        {
+            return;
+        }
+
+        lock (accelerationGate)
+        {
+            if (!string.Equals(fileTransferTunaActivationPauseSessionId, normalizedSessionId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            fileTransferTunaActivationPauseSessionId = null;
+            fileTransferTunaActivationPauseGeneration++;
+        }
+
+        var normalizedReason = SanitizeLogToken(reason);
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_tuna_activation_negotiation_regular_nkn_resumed; session_id={SanitizeLogToken(normalizedSessionId)}; reason={normalizedReason}; trigger={SanitizeLogToken(trigger)}");
+        SetFileTransferDataSessionsAvailability(
+            isAvailable: true,
+            reason: normalizedReason,
+            requiresResumeRequest: false,
+            handoffKind: FileTransferTransportHandoffKind.None,
+            targetTransport: FileTransferTransportKind.RegularNkn);
+    }
+
+    private bool ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause(
+        string trigger,
+        out string? sessionId)
+    {
+        sessionId = currentSessionSecurityState.SessionId?.Value;
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        lock (accelerationGate)
+        {
+            if (!string.Equals(fileTransferTunaActivationPauseSessionId, sessionId, StringComparison.Ordinal) ||
+                IsAccelerationNegotiatedAndHealthyUnsafe(sessionId))
+            {
+                return false;
+            }
+        }
+
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=filetransfer_tuna_activation_negotiation_transport_recovered_suppressed; session_id={SanitizeLogToken(sessionId)}; reason=tuna_activation_negotiating; trigger={SanitizeLogToken(trigger)}");
+        return true;
+    }
+
+    private void ScheduleFileTransferTunaActivationPauseExpiry(string sessionId, long generation)
+    {
+        _ = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await Task.Delay(FileTransferTunaActivationPauseMax, CancellationToken.None).ConfigureAwait(false);
+                    var shouldResume = false;
+                    lock (accelerationGate)
+                    {
+                        shouldResume =
+                            generation == fileTransferTunaActivationPauseGeneration &&
+                            string.Equals(fileTransferTunaActivationPauseSessionId, sessionId, StringComparison.Ordinal) &&
+                            !IsAccelerationNegotiatedAndHealthyUnsafe(sessionId);
+                    }
+
+                    if (shouldResume)
+                    {
+                        ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
+                            "tuna_activation_negotiation_pause_expired",
+                            sessionId,
+                            "pause_expiry");
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=filetransfer_tuna_activation_negotiation_pause_expiry_failed; session_id={SanitizeLogToken(sessionId)}; error={ex.GetType().Name}");
+                }
+            },
+            CancellationToken.None);
+    }
+
+    private bool IsAccelerationNegotiatedAndHealthyUnsafe(string? sessionId)
+        => accelerationLane?.IsAvailable == true &&
+           accelerationNegotiatedLanes != NknAccelerationLaneKind.None &&
+           !string.IsNullOrWhiteSpace(accelerationSessionId) &&
+           string.Equals(accelerationSessionId, sessionId, StringComparison.Ordinal);
 
     private void RebindScreenShareDataSessionsForTunaFallback(
         string reason,
@@ -920,6 +1096,16 @@ public sealed partial class NknSignalingTransport
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=filetransfer_fallback_nkn_proof_pending; session_id={SanitizeLogToken(normalizedSessionId ?? "none")}; reason={normalizedReason}; lanes={FormatAccelerationLanesForLog(lanes)}");
+    }
+
+    private bool ShouldUseFileTransferV6EpochForRegularNknRecovery(string? sessionId)
+    {
+        lock (accelerationGate)
+        {
+            return TryGetCurrentTunaFallbackProofStateUnsafe(sessionId, out var state) &&
+                   (state.Lanes & NknAccelerationLaneKind.File) == NknAccelerationLaneKind.File &&
+                   state.FileState != TunaFallbackLaneState.Recovered;
+        }
     }
 
     private bool IsFileTransferFallbackNknProofPending()
@@ -1822,6 +2008,12 @@ public sealed partial class NknSignalingTransport
                 {
                     await TrySendAccelerationOfferAsync(reason, payerDecisionId, CancellationToken.None).ConfigureAwait(false);
                 }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_negotiation_failed; reason={SanitizeLogToken(reason)}; error={ex.GetType().Name}");
+                }
                 finally
                 {
                     Interlocked.Exchange(ref accelerationNegotiationScheduled, 0);
@@ -1928,11 +2120,19 @@ public sealed partial class NknSignalingTransport
         }
 
         NotifyTransportAccelerationStateChanged("selected_payer_starting_listener");
+        PauseFileTransferDataSessionsForTunaActivationNegotiation(
+            "selected_payer_starting_listener",
+            sessionId,
+            reason);
         NotifyTransportAccelerationStateChanged("listener_starting");
         if (!await tunaSession.EnsureListenerSidecarConnectedAsync(remoteEndpoint, ct).ConfigureAwait(false) ||
             string.IsNullOrWhiteSpace(tunaSession.LocalTunaAddress))
         {
             NotifyTransportAccelerationStateChanged("listener_sidecar_unavailable");
+            ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
+                "listener_sidecar_unavailable",
+                sessionId,
+                "listener_sidecar_unavailable");
             ScheduleAccelerationNegotiationRetry("listener_sidecar_unavailable");
             return;
         }
@@ -1941,6 +2141,10 @@ public sealed partial class NknSignalingTransport
         if (IsStaleLocalPayerDecision(payerDecisionId))
         {
             NotifyTransportAccelerationStateChanged("suppressed_by_peer_payer");
+            ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
+                "stale_payer_decision",
+                sessionId,
+                "listener_ready_stale_payer_decision");
             try
             {
                 await tunaSession.StopAsync("stale_payer_decision", ct).ConfigureAwait(false);
@@ -1958,6 +2162,10 @@ public sealed partial class NknSignalingTransport
         if (IsAccelerationUserStoppedForCurrentSession())
         {
             NotifyTransportAccelerationStateChanged("user_stopped_tuna");
+            ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
+                "user_stopped_tuna",
+                sessionId,
+                "listener_ready_user_stopped");
             try
             {
                 await tunaSession.StopAsync("user_stopped_tuna", ct).ConfigureAwait(false);
@@ -1976,6 +2184,10 @@ public sealed partial class NknSignalingTransport
         if (offeredLanes == NknAccelerationLaneKind.None)
         {
             NotifyTransportAccelerationStateChanged("no_supported_lane");
+            ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
+                "no_supported_lane",
+                sessionId,
+                "listener_ready_no_supported_lane");
             ScheduleAccelerationNegotiationRetry("listener_sidecar_unavailable");
             return;
         }
@@ -2000,14 +2212,21 @@ public sealed partial class NknSignalingTransport
             nonce,
             JsonSerializer.SerializeToUtf8Bytes(offer));
         var envelope = CreateEnvelope(envelopeCode, MsgType.TransportAccelerationOffer, payload, replyTo: null);
+        long offerGeneration;
         lock (accelerationGate)
         {
             outboundAccelerationOfferNonce = nonce;
             outboundAccelerationOfferTrigger = SanitizeLogToken(reason);
             outboundAccelerationOfferPayerDecisionId = payerDecisionId;
+            offerGeneration = ++outboundAccelerationOfferGeneration;
         }
 
-        var queued = await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        var queued = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
+                remoteEndpoint,
+                envelope,
+                "offer",
+                ct)
+            .ConfigureAwait(false);
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_acceleration_offer_{(queued ? "queued" : "rejected")}; reason={SanitizeLogToken(reason)}; session_id={sessionId}; lanes={string.Join(",", offer.SupportedLanes)}; payer_decision_id={payerDecisionId}");
@@ -2019,7 +2238,52 @@ public sealed partial class NknSignalingTransport
         }
 
         NotifyTransportAccelerationStateChanged("waiting_for_answer");
+        ScheduleAccelerationOfferReplay(remoteEndpoint, envelope, sessionId, nonce, payerDecisionId, offerGeneration);
         ScheduleAccelerationOfferAnswerTimeout(nonce);
+    }
+
+    private void ScheduleAccelerationOfferReplay(
+        string target,
+        Envelope envelope,
+        string sessionId,
+        string nonce,
+        long payerDecisionId,
+        long generation)
+    {
+        _ = Task.Run(
+            async () =>
+            {
+                var delay = AccelerationOfferReplayDelayOverrideForTests ?? AccelerationOfferReplayDelay;
+                for (var attempt = 1; attempt <= AccelerationOfferReplayAttempts; attempt++)
+                {
+                    await Task.Delay(delay, CancellationToken.None).ConfigureAwait(false);
+                    if (!IsOutboundAccelerationOfferPending(nonce, payerDecisionId, generation))
+                    {
+                        return;
+                    }
+
+                    var queued = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
+                            target,
+                            envelope,
+                            "offer_replay",
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_offer_replay_{(queued ? "sent" : "rejected")}; attempt={attempt}; session_id={SanitizeLogToken(sessionId)}; payer_decision_id={payerDecisionId}; generation={generation}");
+                }
+            },
+            CancellationToken.None);
+    }
+
+    private bool IsOutboundAccelerationOfferPending(string nonce, long payerDecisionId, long generation)
+    {
+        lock (accelerationGate)
+        {
+            return outboundAccelerationOfferGeneration == generation &&
+                   outboundAccelerationOfferPayerDecisionId == payerDecisionId &&
+                   string.Equals(outboundAccelerationOfferNonce, nonce, StringComparison.Ordinal);
+        }
     }
 
     private async Task SendAccelerationPayerIntentAsync(
@@ -2053,7 +2317,12 @@ public sealed partial class NknSignalingTransport
             nonce,
             JsonSerializer.SerializeToUtf8Bytes(payloadModel));
         var envelope = CreateEnvelope(envelopeCode, MsgType.TransportAccelerationPayerIntent, payload, replyTo: null);
-        var queued = await QueueControlEnvelopeAsync(target, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        var queued = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
+                target,
+                envelope,
+                "payer_intent",
+                ct)
+            .ConfigureAwait(false);
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_acceleration_payer_intent_{(queued ? "queued" : "rejected")}; intent={intent}; role={SanitizeLogToken(localRole)}; trigger={SanitizeLogToken(trigger)}; lanes={FormatAccelerationLanesForLog(lanes)}; payer_decision_id={payerDecisionId}");
@@ -2107,6 +2376,9 @@ public sealed partial class NknSignalingTransport
 
     private void HandleTransportAccelerationOffer(string source, Envelope env)
     {
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_acceleration_offer_received_raw; msg_id={SanitizeLogToken(env.MessageId)}");
         if (!TryDecryptControlPayload(source, env, MsgType.TransportAccelerationOffer, out var securePayload))
         {
             return;
@@ -2157,6 +2429,7 @@ public sealed partial class NknSignalingTransport
                 accepted: false,
                 lanes: NknAccelerationLaneKind.None,
                 rejectReason: "user_stopped_tuna",
+                pendingAnswerAckGeneration: 0,
                 ct).ConfigureAwait(false);
             return;
         }
@@ -2173,6 +2446,7 @@ public sealed partial class NknSignalingTransport
                 accepted: false,
                 lanes: NknAccelerationLaneKind.None,
                 rejectReason: "helpee_payer_preferred",
+                pendingAnswerAckGeneration: 0,
                 ct).ConfigureAwait(false);
             return;
         }
@@ -2180,6 +2454,10 @@ public sealed partial class NknSignalingTransport
         var rejectReason = validation.Reason;
         if (validation.IsValid)
         {
+            PauseFileTransferDataSessionsForTunaActivationNegotiation(
+                "peer_offer_dialer_starting",
+                offer.SessionId,
+                offer.Trigger);
             NotifyTransportAccelerationStateChanged("dialer_starting");
         }
 
@@ -2198,27 +2476,144 @@ public sealed partial class NknSignalingTransport
             rejectReason = "sidecar_unavailable";
         }
 
+        if (!accepted)
+        {
+            ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
+                rejectReason ?? "sidecar_unavailable",
+                offer.SessionId,
+                "dialer_not_accepted");
+        }
+
         if (accepted)
         {
             NotifyTransportAccelerationStateChanged("dialer_ready");
-            lock (accelerationGate)
-            {
-                outboundAccelerationOfferNonce = null;
-                outboundAccelerationOfferTrigger = null;
-                outboundAccelerationOfferPayerDecisionId = 0;
-                accelerationSessionId = offer.SessionId.Trim();
-                accelerationNegotiatedLanes = validation.AcceptedLanes;
-            }
-
-            Interlocked.Exchange(ref accelerationNegotiationRetryAttempts, 0);
+            var answerAckGeneration = BeginPendingAccelerationAnswerAck(offer, validation.AcceptedLanes);
             LocalOperationalLog.Info(
                 "NKN.Tuna",
-                $"event=tuna_acceleration_negotiated; session_id={offer.SessionId}; lanes={string.Join(",", offer.SupportedLanes)}; payer_decision_id={offer.PayerDecisionId}");
-            RequestFileTransferTunaActivationHandoff(offer.SessionId, validation.AcceptedLanes, "tuna_activation_negotiated");
-            NotifyTransportAccelerationStateChanged(GetActiveAccelerationStatusReason());
+                $"event=tuna_acceleration_answer_ack_pending; session_id={SanitizeLogToken(offer.SessionId)}; lanes={FormatAccelerationLanesForLog(validation.AcceptedLanes)}; payer_decision_id={offer.PayerDecisionId}; generation={answerAckGeneration}");
+            ScheduleAccelerationAnswerAckTimeout(offer.SessionId, offer.Nonce, offer.PayerDecisionId, answerAckGeneration);
         }
 
-        await SendAccelerationAnswerAsync(offer, accepted, accepted ? validation.AcceptedLanes : NknAccelerationLaneKind.None, rejectReason, ct).ConfigureAwait(false);
+        await SendAccelerationAnswerAsync(
+                offer,
+                accepted,
+                accepted ? validation.AcceptedLanes : NknAccelerationLaneKind.None,
+                rejectReason,
+                accepted ? GetPendingAccelerationAnswerAckGeneration() : 0,
+                ct)
+            .ConfigureAwait(false);
+    }
+
+    private long BeginPendingAccelerationAnswerAck(
+        TransportAccelerationOfferPayload offer,
+        NknAccelerationLaneKind lanes)
+    {
+        var sessionId = string.IsNullOrWhiteSpace(offer.SessionId)
+            ? currentSessionSecurityState.SessionId?.Value ?? string.Empty
+            : offer.SessionId.Trim();
+        var nonce = string.IsNullOrWhiteSpace(offer.Nonce) ? string.Empty : offer.Nonce.Trim();
+        lock (accelerationGate)
+        {
+            outboundAccelerationOfferNonce = null;
+            outboundAccelerationOfferTrigger = null;
+            outboundAccelerationOfferPayerDecisionId = 0;
+            accelerationSessionId = null;
+            accelerationNegotiatedLanes = NknAccelerationLaneKind.None;
+            pendingAccelerationAnswerAckSessionId = sessionId;
+            pendingAccelerationAnswerAckNonce = nonce;
+            pendingAccelerationAnswerAckLanes = lanes;
+            pendingAccelerationAnswerAckPayerDecisionId = offer.PayerDecisionId;
+            return ++pendingAccelerationAnswerAckGeneration;
+        }
+    }
+
+    private long GetPendingAccelerationAnswerAckGeneration()
+    {
+        lock (accelerationGate)
+        {
+            return pendingAccelerationAnswerAckGeneration;
+        }
+    }
+
+    private bool IsPendingAccelerationAnswerAck(
+        string? sessionId,
+        string? nonce,
+        long payerDecisionId,
+        long generation)
+    {
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId) ? string.Empty : sessionId.Trim();
+        var normalizedNonce = string.IsNullOrWhiteSpace(nonce) ? string.Empty : nonce.Trim();
+        lock (accelerationGate)
+        {
+            return generation > 0 &&
+                   pendingAccelerationAnswerAckGeneration == generation &&
+                   string.Equals(pendingAccelerationAnswerAckSessionId, normalizedSessionId, StringComparison.Ordinal) &&
+                   string.Equals(pendingAccelerationAnswerAckNonce, normalizedNonce, StringComparison.Ordinal) &&
+                   pendingAccelerationAnswerAckPayerDecisionId == payerDecisionId;
+        }
+    }
+
+    private void ClearPendingAccelerationAnswerAckLocked()
+    {
+        pendingAccelerationAnswerAckSessionId = null;
+        pendingAccelerationAnswerAckNonce = null;
+        pendingAccelerationAnswerAckLanes = NknAccelerationLaneKind.None;
+        pendingAccelerationAnswerAckPayerDecisionId = 0;
+        pendingAccelerationAnswerAckGeneration++;
+    }
+
+    private void ScheduleAccelerationAnswerAckTimeout(
+        string sessionId,
+        string nonce,
+        long payerDecisionId,
+        long generation)
+    {
+        if (generation <= 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await Task.Delay(AccelerationAnswerAckTimeout, CancellationToken.None).ConfigureAwait(false);
+                    if (disposed ||
+                        !IsPendingAccelerationAnswerAck(sessionId, nonce, payerDecisionId, generation))
+                    {
+                        return;
+                    }
+
+                    lock (accelerationGate)
+                    {
+                        if (!IsPendingAccelerationAnswerAck(sessionId, nonce, payerDecisionId, generation))
+                        {
+                            return;
+                        }
+
+                        ClearPendingAccelerationAnswerAckLocked();
+                    }
+
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_answer_ack_timeout; session_id={SanitizeLogToken(sessionId)}; timeout_ms={(long)AccelerationAnswerAckTimeout.TotalMilliseconds}; payer_decision_id={payerDecisionId}; generation={generation}");
+                    ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
+                        "answer_ack_timeout",
+                        sessionId,
+                        "answer_ack_timeout");
+                    NotifyTransportAccelerationStateChanged("answer_ack_timeout");
+                    ScheduleAccelerationLaneStop("answer_ack_timeout");
+                    ScheduleAccelerationNegotiationRetry("answer_ack_timeout");
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_answer_ack_timeout_failed; error={ex.GetType().Name}");
+                }
+            },
+            CancellationToken.None);
     }
 
     private async Task SendAccelerationAnswerAsync(
@@ -2226,6 +2621,7 @@ public sealed partial class NknSignalingTransport
         bool accepted,
         NknAccelerationLaneKind lanes,
         string? rejectReason,
+        long pendingAnswerAckGeneration,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(remoteEndpoint) ||
@@ -2250,14 +2646,340 @@ public sealed partial class NknSignalingTransport
             offer.Nonce,
             JsonSerializer.SerializeToUtf8Bytes(answer));
         var envelope = CreateEnvelope(envelopeCode, MsgType.TransportAccelerationAnswer, payload, replyTo: null);
-        await QueueControlEnvelopeAsync(remoteEndpoint, envelope, ControlOutboundLane.High, ct).ConfigureAwait(false);
+        var queued = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
+                remoteEndpoint,
+                envelope,
+                "answer",
+                ct)
+            .ConfigureAwait(false);
         LocalOperationalLog.Info(
             "NKN.Tuna",
-            $"event=tuna_acceleration_answer_sent; accepted={(accepted ? 1 : 0)}; reason={SanitizeLogToken(rejectReason)}; lanes={string.Join(",", answer.SupportedLanes)}; payer_decision_id={answer.PayerDecisionId}");
+            $"event=tuna_acceleration_answer_{(queued ? "sent" : "rejected")}; accepted={(accepted ? 1 : 0)}; reason={SanitizeLogToken(rejectReason)}; lanes={string.Join(",", answer.SupportedLanes)}; payer_decision_id={answer.PayerDecisionId}");
+        if (accepted && queued && pendingAnswerAckGeneration > 0)
+        {
+            ScheduleAccelerationAnswerReplay(
+                remoteEndpoint,
+                envelope,
+                answer.SessionId,
+                answer.Nonce,
+                answer.PayerDecisionId,
+                pendingAnswerAckGeneration);
+        }
     }
+
+    private void ScheduleAccelerationAnswerReplay(
+        string target,
+        Envelope envelope,
+        string sessionId,
+        string nonce,
+        long payerDecisionId,
+        long generation)
+    {
+        if (generation <= 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(
+            async () =>
+            {
+                for (var attempt = 1; attempt <= AccelerationAnswerReplayAttempts; attempt++)
+                {
+                    try
+                    {
+                        await Task.Delay(AccelerationAnswerReplayDelay, CancellationToken.None).ConfigureAwait(false);
+                        if (disposed ||
+                            !IsPendingAccelerationAnswerAck(sessionId, nonce, payerDecisionId, generation))
+                        {
+                            return;
+                        }
+
+                        var queued = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
+                                target,
+                                envelope,
+                                "answer_replay",
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                        LocalOperationalLog.Info(
+                            "NKN.Tuna",
+                            $"event=tuna_acceleration_answer_replay_{(queued ? "sent" : "rejected")}; attempt={attempt}; session_id={SanitizeLogToken(sessionId)}; payer_decision_id={payerDecisionId}; generation={generation}");
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        LocalOperationalLog.Warn(
+                            "NKN.Tuna",
+                            $"event=tuna_acceleration_answer_replay_failed; attempt={attempt}; error={ex.GetType().Name}");
+                    }
+                }
+            },
+            CancellationToken.None);
+    }
+
+    private async Task SendAccelerationAnswerAckAsync(
+        TransportAccelerationAnswerPayload answer,
+        NknAccelerationLaneKind lanes,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(remoteEndpoint) ||
+            !TryGetCurrentEnvelopeCode(out var envelopeCode))
+        {
+            return;
+        }
+
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var ack = new TransportAccelerationAnswerAckPayload
+        {
+            SessionId = answer.SessionId,
+            Accepted = true,
+            SupportedLanes = NknAccelerationLaneCodec.ToNames(lanes),
+            SentAtUnixMs = nowMs,
+            ExpiresAtUnixMs = Math.Min(answer.ExpiresAtUnixMs, DateTimeOffset.UtcNow.Add(AccelerationOfferLifetime).ToUnixTimeMilliseconds()),
+            Nonce = answer.Nonce,
+            SidecarProtocolVersion = TunaSidecarProtocolVersion,
+            PayerDecisionId = answer.PayerDecisionId,
+        };
+        var payload = CreateSecureControlPayload(
+            MsgType.TransportAccelerationAnswerAck,
+            answer.Nonce,
+            JsonSerializer.SerializeToUtf8Bytes(ack));
+        var envelope = CreateEnvelope(envelopeCode, MsgType.TransportAccelerationAnswerAck, payload, replyTo: null);
+        var queued = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
+                remoteEndpoint,
+                envelope,
+                "answer_ack",
+                ct)
+            .ConfigureAwait(false);
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_acceleration_answer_ack_{(queued ? "sent" : "rejected")}; session_id={SanitizeLogToken(answer.SessionId)}; lanes={FormatAccelerationLanesForLog(lanes)}; payer_decision_id={answer.PayerDecisionId}");
+        if (queued)
+        {
+            ScheduleAccelerationAnswerAckReplay(remoteEndpoint, envelope, answer.SessionId, answer.PayerDecisionId);
+        }
+    }
+
+    private void ScheduleAccelerationAnswerAckReplay(
+        string target,
+        Envelope envelope,
+        string sessionId,
+        long payerDecisionId)
+    {
+        _ = Task.Run(
+            async () =>
+            {
+                for (var attempt = 1; attempt <= AccelerationAnswerAckReplayAttempts; attempt++)
+                {
+                    try
+                    {
+                        await Task.Delay(AccelerationAnswerAckReplayDelay, CancellationToken.None).ConfigureAwait(false);
+                        if (disposed || !IsAccelerationNegotiatedAndHealthy())
+                        {
+                            return;
+                        }
+
+                        var queued = await SendAccelerationControlEnvelopeWithBulkBypassAsync(
+                                target,
+                                envelope,
+                                "answer_ack_replay",
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                        LocalOperationalLog.Info(
+                            "NKN.Tuna",
+                            $"event=tuna_acceleration_answer_ack_replay_{(queued ? "sent" : "rejected")}; attempt={attempt}; session_id={SanitizeLogToken(sessionId)}; payer_decision_id={payerDecisionId}");
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        LocalOperationalLog.Warn(
+                            "NKN.Tuna",
+                            $"event=tuna_acceleration_answer_ack_replay_failed; attempt={attempt}; error={ex.GetType().Name}");
+                    }
+                }
+            },
+            CancellationToken.None);
+    }
+
+    private async Task<bool> SendAccelerationControlEnvelopeWithBulkBypassAsync(
+        string target,
+        Envelope envelope,
+        string purpose,
+        CancellationToken ct)
+    {
+        var bytes = EnvelopeCodec.Serialize(envelope);
+        var controlTask = QueueControlEnvelopeAsync(target, envelope, ControlOutboundLane.High, ct);
+        ObserveAccelerationControlSendTask(controlTask, purpose, "control_queue");
+
+        var priorityControlTask = SendAccelerationControlPriorityCopyAsync(target, envelope, bytes, purpose, ct);
+        ObserveAccelerationControlSendTask(priorityControlTask, purpose, "control_priority");
+
+        Task<bool>? bulkTask = null;
+        if (string.IsNullOrWhiteSpace(remoteBulkEndpoint))
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_control_bulk_bypass_unavailable; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; reason=missing_remote_bulk_endpoint");
+        }
+        else
+        {
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_control_bulk_bypass_started; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; delay_ms=0; mode=control_to_bulk_endpoint");
+            bulkTask = SendAccelerationControlBulkCopyAsync(remoteBulkEndpoint, envelope, bytes, purpose, ct);
+            ObserveAccelerationControlSendTask(bulkTask, purpose, "control_to_bulk_endpoint");
+        }
+
+        var attempts = new List<Task<bool>> { priorityControlTask, controlTask };
+        if (bulkTask is not null)
+        {
+            attempts.Add(bulkTask);
+        }
+
+        return await WaitForFirstSuccessfulAccelerationControlSendAsync(attempts, purpose).ConfigureAwait(false);
+    }
+
+    private static async Task<bool> WaitForFirstSuccessfulAccelerationControlSendAsync(
+        List<Task<bool>> attempts,
+        string purpose)
+    {
+        if (attempts.Count == 0)
+        {
+            return false;
+        }
+
+        var remaining = new List<Task<bool>>(attempts);
+        var timeoutTask = Task.Delay(AccelerationControlBulkBypassWait);
+        while (remaining.Count > 0)
+        {
+            var completed = await Task.WhenAny(remaining.Cast<Task>().Append(timeoutTask)).ConfigureAwait(false);
+            if (ReferenceEquals(completed, timeoutTask))
+            {
+                LocalOperationalLog.Warn(
+                    "NKN.Tuna",
+                    $"event=tuna_acceleration_control_send_wait_timeout; purpose={SanitizeLogToken(purpose)}; wait_ms={(long)AccelerationControlBulkBypassWait.TotalMilliseconds}; remaining={remaining.Count}");
+                return false;
+            }
+
+            var completedAttempt = (Task<bool>)completed;
+            remaining.Remove(completedAttempt);
+            try
+            {
+                if (await completedAttempt.ConfigureAwait(false))
+                {
+                    return true;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                LocalOperationalLog.Warn(
+                    "NKN.Tuna",
+                    $"event=tuna_acceleration_control_send_attempt_failed; purpose={SanitizeLogToken(purpose)}; error={ex.GetType().Name}");
+            }
+        }
+
+        return false;
+    }
+
+    private async Task<bool> SendAccelerationControlPriorityCopyAsync(
+        string destination,
+        Envelope envelope,
+        byte[] bytes,
+        string purpose,
+        CancellationToken ct)
+    {
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_acceleration_control_priority_started; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; lane=control_priority");
+        try
+        {
+            NknRuntimeDiagnostics.IncrementMessagesSent();
+            await client.SendAsync(destination, bytes, ct).ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_control_priority_sent; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; lane=control_priority");
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_control_priority_failed; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; error={ex.GetType().Name}");
+            return false;
+        }
+    }
+
+    private async Task<bool> SendAccelerationControlBulkCopyAsync(
+        string destination,
+        Envelope envelope,
+        byte[] bytes,
+        string purpose,
+        CancellationToken ct)
+    {
+        try
+        {
+            NknRuntimeDiagnostics.IncrementMessagesSent();
+            await client.SendAsync(destination, bytes, ct).ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_control_bulk_bypass_sent; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; lane=control_to_bulk_endpoint");
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_control_bulk_bypass_priority_failed; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; error={ex.GetType().Name}");
+        }
+
+        try
+        {
+            await SendBulkEnvelopeAsync(destination, envelope, bytes, ct, allowAcceleration: false).ConfigureAwait(false);
+            LocalOperationalLog.Info(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_control_bulk_bypass_sent; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; lane=bulk_queue_fallback");
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LocalOperationalLog.Warn(
+                "NKN.Tuna",
+                $"event=tuna_acceleration_control_bulk_bypass_failed; purpose={SanitizeLogToken(purpose)}; message_type={MapAccelerationControlMessageType(envelope.Type)}; error={ex.GetType().Name}");
+            return false;
+        }
+    }
+
+    private static void ObserveAccelerationControlSendTask(Task<bool> task, string purpose, string lane)
+    {
+        _ = task.ContinueWith(
+            completed =>
+            {
+                if (completed.IsFaulted)
+                {
+                    var ex = completed.Exception?.GetBaseException();
+                    LocalOperationalLog.Warn(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_control_send_late_failure; purpose={SanitizeLogToken(purpose)}; lane={SanitizeLogToken(lane)}; error={ex?.GetType().Name ?? "unknown"}");
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private static string MapAccelerationControlMessageType(MsgType messageType)
+        => messageType switch
+        {
+            MsgType.TransportAccelerationOffer => "transport_acceleration_offer",
+            MsgType.TransportAccelerationAnswer => "transport_acceleration_answer",
+            MsgType.TransportAccelerationAnswerAck => "transport_acceleration_answer_ack",
+            MsgType.TransportAccelerationDown => "transport_acceleration_down",
+            MsgType.TransportAccelerationPayerIntent => "transport_acceleration_payer_intent",
+            _ => SanitizeLogToken(messageType.ToString()),
+        };
 
     private void HandleTransportAccelerationAnswer(string source, Envelope env)
     {
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_acceleration_answer_received_raw; msg_id={SanitizeLogToken(env.MessageId)}");
         if (!TryDecryptControlPayload(source, env, MsgType.TransportAccelerationAnswer, out var securePayload))
         {
             return;
@@ -2348,11 +3070,109 @@ public sealed partial class NknSignalingTransport
             accelerationNegotiatedLanes = validation.AcceptedLanes;
         }
 
+        _ = Task.Run(
+            () => SendAccelerationAnswerAckAsync(answer, validation.AcceptedLanes, CancellationToken.None),
+            CancellationToken.None);
         Interlocked.Exchange(ref accelerationNegotiationRetryAttempts, 0);
         LocalOperationalLog.Info(
             "NKN.Tuna",
             $"event=tuna_acceleration_negotiated; session_id={answer.SessionId}; lanes={string.Join(",", answer.SupportedLanes)}; payer_decision_id={answer.PayerDecisionId}");
         RequestFileTransferTunaActivationHandoff(answer.SessionId, validation.AcceptedLanes, "tuna_activation_negotiated");
+        NotifyTransportAccelerationStateChanged(GetActiveAccelerationStatusReason());
+    }
+
+    private void HandleTransportAccelerationAnswerAck(string source, Envelope env)
+    {
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_acceleration_answer_ack_received_raw; msg_id={SanitizeLogToken(env.MessageId)}");
+        if (!TryDecryptControlPayload(source, env, MsgType.TransportAccelerationAnswerAck, out var securePayload))
+        {
+            return;
+        }
+
+        if (!TryDeserializeAccelerationPayload<TransportAccelerationAnswerAckPayload>(securePayload.Plaintext, out var ack) ||
+            ack is null)
+        {
+            RejectAccelerationEnvelope("transport_acceleration_answer_ack", "payload_invalid", env.MessageId);
+            return;
+        }
+
+        if (!TryValidateControlSecureMetadata("transport_acceleration_answer_ack", securePayload.Metadata, ack.Nonce, env.MessageId))
+        {
+            return;
+        }
+
+        var validation = ValidateAccelerationAnswerAck(source, ack);
+        if (validation.IsHardReject || !validation.IsValid || !ack.Accepted)
+        {
+            RejectAccelerationEnvelope(
+                "transport_acceleration_answer_ack",
+                validation.Reason ?? (ack.Accepted ? "invalid" : "not_accepted"),
+                env.MessageId);
+            return;
+        }
+
+        NknAccelerationLaneKind pendingLanes;
+        long pendingPayerDecisionId;
+        bool alreadyNegotiated;
+        lock (accelerationGate)
+        {
+            alreadyNegotiated =
+                accelerationLane?.IsAvailable == true &&
+                accelerationNegotiatedLanes != NknAccelerationLaneKind.None &&
+                string.Equals(accelerationSessionId, ack.SessionId.Trim(), StringComparison.Ordinal);
+            if (string.IsNullOrWhiteSpace(pendingAccelerationAnswerAckNonce))
+            {
+                if (alreadyNegotiated)
+                {
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_answer_ack_duplicate_ignored; session_id={SanitizeLogToken(ack.SessionId)}; payer_decision_id={ack.PayerDecisionId}");
+                    return;
+                }
+            }
+
+            if (!string.Equals(pendingAccelerationAnswerAckNonce, ack.Nonce.Trim(), StringComparison.Ordinal))
+            {
+                RejectAccelerationEnvelope("transport_acceleration_answer_ack", "nonce_mismatch", env.MessageId);
+                return;
+            }
+
+            if (!string.Equals(pendingAccelerationAnswerAckSessionId, ack.SessionId.Trim(), StringComparison.Ordinal))
+            {
+                RejectAccelerationEnvelope("transport_acceleration_answer_ack", "session_id_mismatch", env.MessageId);
+                return;
+            }
+
+            pendingLanes = pendingAccelerationAnswerAckLanes;
+            pendingPayerDecisionId = pendingAccelerationAnswerAckPayerDecisionId;
+            if (pendingPayerDecisionId > 0 && ack.PayerDecisionId != pendingPayerDecisionId)
+            {
+                RejectAccelerationEnvelope("transport_acceleration_answer_ack", "payer_decision_mismatch", env.MessageId);
+                return;
+            }
+
+            var acceptedLanes = validation.AcceptedLanes & pendingLanes;
+            if (acceptedLanes == NknAccelerationLaneKind.None)
+            {
+                RejectAccelerationEnvelope("transport_acceleration_answer_ack", "unsupported_lane", env.MessageId);
+                return;
+            }
+
+            accelerationSessionId = ack.SessionId.Trim();
+            accelerationNegotiatedLanes = acceptedLanes;
+            ClearPendingAccelerationAnswerAckLocked();
+        }
+
+        Interlocked.Exchange(ref accelerationNegotiationRetryAttempts, 0);
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_acceleration_answer_ack_received; session_id={SanitizeLogToken(ack.SessionId)}; lanes={FormatAccelerationLanesForLog(validation.AcceptedLanes & pendingLanes)}; payer_decision_id={ack.PayerDecisionId}");
+        LocalOperationalLog.Info(
+            "NKN.Tuna",
+            $"event=tuna_acceleration_negotiated; session_id={ack.SessionId}; lanes={string.Join(",", ack.SupportedLanes)}; payer_decision_id={ack.PayerDecisionId}; handshake=answer_ack");
+        RequestFileTransferTunaActivationHandoff(ack.SessionId, validation.AcceptedLanes & pendingLanes, "tuna_activation_answer_ack");
         NotifyTransportAccelerationStateChanged(GetActiveAccelerationStatusReason());
     }
 
@@ -2437,6 +3257,10 @@ public sealed partial class NknSignalingTransport
             LocalOperationalLog.Warn(
                 "NKN.Tuna",
                 $"event=tuna_acceleration_retry_exhausted; reason={SanitizeLogToken(reason)}; attempts={attempt - 1}");
+            ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
+                $"retry_exhausted_{SanitizeLogToken(reason)}",
+                currentSessionSecurityState.SessionId?.Value,
+                "retry_exhausted");
             return;
         }
 
@@ -2470,6 +3294,9 @@ public sealed partial class NknSignalingTransport
                         return;
                     }
 
+                    LocalOperationalLog.Info(
+                        "NKN.Tuna",
+                        $"event=tuna_acceleration_retry_fired; reason={SanitizeLogToken(reason)}; listener_ready_reuse={(useListenerReadyFastRetry ? 1 : 0)}");
                     ScheduleAccelerationNegotiationIfEligible(
                         string.Equals(SanitizeLogToken(reason), "peer_user_stopped_tuna", StringComparison.Ordinal)
                             ? "runtime_unlock"
@@ -2637,6 +3464,7 @@ public sealed partial class NknSignalingTransport
            string.Equals(reason, "listener_sidecar_unavailable", StringComparison.Ordinal) ||
            string.Equals(reason, "offer_queue_rejected", StringComparison.Ordinal) ||
            string.Equals(reason, "offer_answer_timeout", StringComparison.Ordinal) ||
+           string.Equals(reason, "answer_ack_timeout", StringComparison.Ordinal) ||
            string.Equals(reason, "session_not_eligible", StringComparison.Ordinal);
 
     private static bool ShouldRetryPeerUserStoppedAfterRuntimeUnlock(string? reason, string? trigger)
@@ -2907,6 +3735,52 @@ public sealed partial class NknSignalingTransport
         }
 
         var acceptedLanes = NknAccelerationLaneCodec.FromNames(answer.SupportedLanes) & capabilityLanes & ResolveConfiguredAccelerationLanes();
+        return acceptedLanes == NknAccelerationLaneKind.None
+            ? AccelerationValidationResult.SoftReject("unsupported_lane")
+            : AccelerationValidationResult.Valid(acceptedLanes);
+    }
+
+    private AccelerationValidationResult ValidateAccelerationAnswerAck(
+        string source,
+        TransportAccelerationAnswerAckPayload ack)
+    {
+        if (!TryGetAccelerationSessionCapabilityLanes(out var capabilityLanes))
+        {
+            return AccelerationValidationResult.HardReject("session_not_eligible");
+        }
+
+        var expectedSessionId = currentSessionSecurityState.SessionId?.Value;
+        if (string.IsNullOrWhiteSpace(ack.SessionId) ||
+            !string.Equals(ack.SessionId.Trim(), expectedSessionId, StringComparison.Ordinal))
+        {
+            return AccelerationValidationResult.HardReject("session_id_mismatch");
+        }
+
+        var expectedSource = ResolveExpectedRemotePeerAddressForCurrentSession();
+        if (!AddressMatchesForSessionPolicy(source, expectedSource))
+        {
+            return AccelerationValidationResult.HardReject("source_identity_mismatch");
+        }
+
+        if (!IsAccelerationNonceValid(ack.Nonce))
+        {
+            return AccelerationValidationResult.HardReject("nonce_invalid");
+        }
+
+        if (ack.SidecarProtocolVersion != TunaSidecarProtocolVersion)
+        {
+            return AccelerationValidationResult.HardReject("sidecar_app_protocol_mismatch");
+        }
+
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (nowMs >= ack.ExpiresAtUnixMs ||
+            ack.SentAtUnixMs <= 0 ||
+            nowMs - ack.SentAtUnixMs > AccelerationOfferLifetime.TotalMilliseconds)
+        {
+            return AccelerationValidationResult.HardReject("expired");
+        }
+
+        var acceptedLanes = NknAccelerationLaneCodec.FromNames(ack.SupportedLanes) & capabilityLanes & ResolveConfiguredAccelerationLanes();
         return acceptedLanes == NknAccelerationLaneKind.None
             ? AccelerationValidationResult.SoftReject("unsupported_lane")
             : AccelerationValidationResult.Valid(acceptedLanes);
@@ -3296,6 +4170,7 @@ public sealed partial class NknSignalingTransport
             outboundAccelerationOfferPayerDecisionId = 0;
             accelerationSessionId = null;
             accelerationNegotiatedLanes = NknAccelerationLaneKind.None;
+            ClearPendingAccelerationAnswerAckLocked();
             if (ShouldResetRemotePayerDecisionForResetReason(reason))
             {
                 remoteAccelerationPayerDecisionId = 0;
@@ -3311,6 +4186,13 @@ public sealed partial class NknSignalingTransport
         else if (ShouldCompleteTunaFallbackProofForResetReason(reason))
         {
             CompleteTunaFallbackProof(reason);
+        }
+        else
+        {
+            ResumeFileTransferDataSessionsAfterTunaActivationNegotiation(
+                $"reset_{SanitizeLogToken(reason)}",
+                currentSessionSecurityState.SessionId?.Value,
+                "reset_acceleration");
         }
 
         Interlocked.Exchange(ref accelerationNegotiationScheduled, 0);
@@ -3590,6 +4472,10 @@ public sealed partial class NknSignalingTransport
 
         AdvancePayerDecisionEpoch("yield_to_helpee_payer");
         NotifyTransportAccelerationStateChanged("suppressed_by_peer_payer");
+        PauseFileTransferDataSessionsForTunaActivationNegotiation(
+            "peer_payer_intent_will_listen",
+            currentSessionSecurityState.SessionId?.Value,
+            trigger);
         ScheduleAccelerationLaneStop("payer_yield_to_helpee");
         LocalOperationalLog.Info(
             "NKN.Tuna",

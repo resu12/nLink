@@ -52,4 +52,5 @@ internal enum MsgType
     FileTransferTransportEpoch = 47,
     FileTransferTransportProbe = 48,
     FileTransferRepairProof = 49,
+    TransportAccelerationAnswerAck = 50,
 }

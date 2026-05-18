@@ -682,7 +682,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             return;
         }
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo
@@ -811,7 +811,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         };
         process.StartInfo.ArgumentList.Add(bridgePath);
         process.StartInfo.Environment["NLINK_BRIDGE_FAKE_NKN_RUNTIME"] = "1";
-        process.StartInfo.Environment["NLINK_BRIDGE_FAKE_BULK_SEND_CLIENT_NOT_READY_COUNT"] = "1";
+        process.StartInfo.Environment["NLINK_BRIDGE_FAKE_BULK_SEND_CLIENT_NOT_READY_COUNT"] = "12";
         process.StartInfo.Environment["NLINK_NKN_BULK_SEND_MODE"] = "fanout";
 
         var stdoutLines = new ConcurrentQueue<string>();
@@ -856,9 +856,14 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
             await WaitUntilAsync(
                 () => TryGetMaxJsonLong(stdoutLines, "bridge_bulk_send_summary", "frames_sent") >= 1,
-                TimeSpan.FromSeconds(4));
+                TimeSpan.FromSeconds(15));
             Assert.Equal(0, TryGetMaxJsonLong(stdoutLines, "bridge_bulk_send_summary", "send_failures"));
-            Assert.Contains(stderrLines, line => line.Contains("Bulk queue transient send retry scheduled", StringComparison.Ordinal));
+            Assert.True(
+                stderrLines.Count(line => line.Contains("Bulk queue transient not-ready backoff scheduled", StringComparison.Ordinal)) >= 12,
+                "Expected bridge bulk transient backoff budget to cover a multi-second client-not-ready window.");
+            Assert.True(
+                TryGetMaxJsonLong(stdoutLines, "bulk_transient_not_ready", "attempt") >= 1,
+                "Expected transient client-not-ready failures to be reported separately from terminal send failures.");
 
             await writer.WriteJsonLineAsync("{\"cmd\":\"shutdown\",\"id\":\"shutdown\"}", cts.Token);
             await WaitUntilAsync(() => process.HasExited, TimeSpan.FromSeconds(2));
@@ -884,13 +889,25 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public void Bridge_Source_DefaultBulkSendMode_IsSingle()
+    public void Bridge_Source_DefaultBulkSendMode_IsLegacyFanoutPath()
     {
         var bridgePath = FindFileUpwards(Path.Combine("tools", "nkn-bridge", "index.js"));
         Assert.True(bridgePath is not null && File.Exists(bridgePath), "Bridge script not found.");
 
-        var bridgeScript = File.ReadAllText(bridgePath);
-        Assert.Contains("const DEFAULT_BULK_SEND_MODE = 'single';", bridgeScript, StringComparison.Ordinal);
+        AssertLegacyFanoutDefaults(File.ReadAllText(bridgePath), "source bridge");
+
+        var bundledBridgePath = FindFileUpwards(Path.Combine("artifacts", "bridge", "win-x64", "index.js"));
+        if (bundledBridgePath is not null && File.Exists(bundledBridgePath))
+        {
+            AssertLegacyFanoutDefaults(File.ReadAllText(bundledBridgePath), "bundled bridge artifact");
+        }
+
+        static void AssertLegacyFanoutDefaults(string bridgeScript, string label)
+        {
+            Assert.Contains("const DEFAULT_BULK_NUM_SUBCLIENTS = 4;", bridgeScript, StringComparison.Ordinal);
+            Assert.Contains("const DEFAULT_BULK_SEND_CONCURRENCY = 4;", bridgeScript, StringComparison.Ordinal);
+            Assert.Contains("const DEFAULT_BULK_SEND_MODE = 'fanout';", bridgeScript, StringComparison.Ordinal);
+        }
     }
 
     [Trait("Category", "LegacySmoke")]
@@ -1203,14 +1220,14 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             var defaults = LoadNknOptionsWithOverrides(Path.Combine(tempDir, "default.json"), "topology-default");
             Assert.Equal(4, defaults.NumSubClients);
             Assert.Equal(8, defaults.MediaNumSubClients);
-            Assert.Equal(2, defaults.BulkNumSubClients);
-            Assert.Equal(2, defaults.BulkSendConcurrency);
+            Assert.Equal(4, defaults.BulkNumSubClients);
+            Assert.Equal(4, defaults.BulkSendConcurrency);
             Assert.True(defaults.FileTransferAutoBulkAdaptationEnabled);
             Assert.Equal(1_500_000, defaults.FileTransferBulkTargetBytesPerSecond);
             Assert.Equal(20_000, defaults.FileTransferBulkAdaptationCooldownMs);
             Assert.True(defaults.ReceiveStallRecoveryEnabled);
             Assert.True(defaults.ReceiveStallFileTransferFastRecoveryEnabled);
-            Assert.False(defaults.ReceiveStallControlOnlyRecoveryEnabled);
+            Assert.True(defaults.ReceiveStallControlOnlyRecoveryEnabled);
             Assert.Equal(3000, defaults.ReceiveStallRecoveryFallbackDelayMs);
             Assert.False(defaults.HasSubClientTopologyOverride);
             Assert.False(defaults.ShouldSendSubClientTopology);
@@ -1223,7 +1240,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Assert.Equal(6, inheritedMedia.NumSubClients);
             Assert.Equal(6, inheritedMedia.MediaNumSubClients);
             Assert.Equal(6, inheritedMedia.BulkNumSubClients);
-            Assert.Equal(2, inheritedMedia.BulkSendConcurrency);
+            Assert.Equal(4, inheritedMedia.BulkSendConcurrency);
             Assert.True(inheritedMedia.HasSubClientTopologyOverride);
 
             Environment.SetEnvironmentVariable("NLINK_NKN_NUM_SUBCLIENTS", "0");
@@ -1430,7 +1447,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task Bridge_ReceiveStallRecovery_ReconnectsAfterFileTransferBulkReceiveStallWhenControlStale()
+    public async Task Bridge_ReceiveStallRecovery_SuppressesAutoReconnectAfterFileTransferBulkReceiveStallWhenControlStale()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1486,10 +1503,15 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             await adapter.ConnectAsync(cts.Token);
 
             await WaitUntilAsync(
-                () => File.Exists(countFile) && int.TryParse(File.ReadAllText(countFile).Trim(), out var count) && count >= 2,
+                () => LocalOperationalLog.GetRecentLogText().Contains("reason=filetransfer_protocol_repair_only", StringComparison.Ordinal),
                 TimeSpan.FromSeconds(5));
 
-            Assert.Contains("reason=bulk_receive_stalled", LocalOperationalLog.GetRecentLogText(), StringComparison.Ordinal);
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains("reason=bulk_receive_stalled", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_protocol_repair_only", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var count));
+            Assert.Equal(1, count);
 
             adapter.UnregisterActiveFileTransferDataSession("transfer-bulk-stale-control");
             await adapter.DisconnectAsync();
@@ -1512,7 +1534,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task Bridge_ReceiveStallRecovery_RecoversDuringActiveFileTransferRuntimeWhenFeedbackStalls()
+    public async Task Bridge_ReceiveStallRecovery_SuppressesAutoReconnectDuringActiveFileTransferRuntimeWhenFeedbackStalls()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1572,19 +1594,14 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
                 () =>
                 {
                     var text = LocalOperationalLog.GetRecentLogText();
-                    var reconnected =
-                        File.Exists(countFile) &&
-                        int.TryParse(File.ReadAllText(countFile).Trim(), out var currentCount) &&
-                        currentCount >= 2;
-                    return reconnected &&
-                           text.Contains("event=nkn_bridge_receive_stall_detected", StringComparison.Ordinal) &&
-                           text.Contains("event=nkn_bridge_receive_stall_recovery_started", StringComparison.Ordinal);
+                    return text.Contains("event=nkn_bridge_receive_stall_detected", StringComparison.Ordinal) &&
+                           text.Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_protocol_repair_only", StringComparison.Ordinal);
                 },
                 TimeSpan.FromSeconds(5));
 
             Assert.True(File.Exists(countFile));
             Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var count));
-            Assert.True(count >= 2, $"Expected bridge recovery reconnect while V6 runtime is active; observed {count} connect(s).");
+            Assert.Equal(1, count);
 
             adapter.UnregisterActiveFileTransferRuntime("transfer-v6-runtime-bulk-stale-control");
             adapter.UnregisterActiveFileTransferDataSession("transfer-v6-runtime-bulk-stale-control");
@@ -1608,7 +1625,104 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task Bridge_ReceiveStallRecovery_AcceptsBulkProofForActiveFileTransferAfterReconnect()
+    public async Task Bridge_ReceiveStallRecovery_ReconnectsAfterActiveFileTransferProtocolRepairGraceExpires()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var bundleDir = TryFindBridgeBundleDirectory();
+        if (bundleDir is null)
+        {
+            return;
+        }
+
+        var nodePath = Path.Combine(bundleDir, "node.exe");
+        if (!File.Exists(nodePath))
+        {
+            return;
+        }
+
+        var tempDir = Path.Combine(Path.GetTempPath(), "nlink-mock-bridge-v6-runtime-protocol-repair-exhausted", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var countFile = Path.Combine(tempDir, "connect-count.txt");
+        var bridgePath = Path.Combine(tempDir, "mock-bridge-v6-runtime-protocol-repair-exhausted.js");
+        WriteBridgeScriptWithManifest(
+            bridgePath,
+            BuildReceiveStallRecoveryMockBridgeScript(
+                countFile,
+                stallHealthSampleCount: 8));
+        var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
+        var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
+        var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
+            var keyPath = Path.Combine(tempDir, "identity.json");
+            WriteIdentityFile(keyPath, "v6-runtime-protocol-repair-exhausted");
+            var seedBackend = new FakeProtectedSeedBackend();
+            seedBackend.SaveSeed(keyPath, RandomNumberGenerator.GetBytes(32));
+            using var seedBackendOverride = NknSecretStore.OverrideBackendForTests(seedBackend);
+            var options = LoadNknOptionsWithOverrides(keyPath, "v6-runtime-protocol-repair-exhausted");
+            var identity = new NknIdentity("v6-runtime-protocol-repair-exhausted", "v6-runtime-protocol-repair-exhausted.fake");
+            using var adapter = new RealNknClientAdapter(identity, options);
+            adapter.RegisterActiveFileTransferDataSession("transfer-v6-runtime-protocol-repair-exhausted");
+            adapter.RegisterActiveFileTransferRuntime("transfer-v6-runtime-protocol-repair-exhausted");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await adapter.ConnectAsync(cts.Token);
+
+            await WaitUntilAsync(
+                () =>
+                {
+                    var text = LocalOperationalLog.GetRecentLogText();
+                    return text.Contains("event=nkn_bridge_receive_stall_recovery_protocol_repair_exhausted", StringComparison.Ordinal) &&
+                           text.Contains("event=nkn_bridge_receive_stall_recovery_started", StringComparison.Ordinal) &&
+                           File.Exists(countFile) &&
+                           int.TryParse(File.ReadAllText(countFile).Trim(), out var count) &&
+                           count >= 2;
+                },
+                TimeSpan.FromSeconds(5));
+
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_protocol_repair_only", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_protocol_repair_exhausted", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_started", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var connectCount));
+            Assert.True(connectCount >= 2);
+
+            adapter.UnregisterActiveFileTransferRuntime("transfer-v6-runtime-protocol-repair-exhausted");
+            adapter.UnregisterActiveFileTransferDataSession("transfer-v6-runtime-protocol-repair-exhausted");
+            await adapter.DisconnectAsync();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
+            try
+            {
+                CleanupDirectoryIfExists(tempDir);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Trait("Category", "LegacySmoke")]
+    [Fact]
+    public async Task Bridge_ReceiveStallRecovery_SuppressesAutoReconnectForActiveFileTransferBeforeBulkProof()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -1672,17 +1786,17 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             await adapter.ConnectAsync(cts.Token);
 
             await WaitUntilAsync(
-                () =>
-                {
-                    var text = LocalOperationalLog.GetRecentLogText();
-                    return text.Contains("event=nkn_bridge_receive_stall_recovery_filetransfer_bulk_proof_accepted", StringComparison.Ordinal) &&
-                           text.Contains("event=nkn_bridge_receive_stall_recovery_receive_resumed", StringComparison.Ordinal);
-                },
+                () => LocalOperationalLog.GetRecentLogText().Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_protocol_repair_only", StringComparison.Ordinal),
                 TimeSpan.FromSeconds(5));
 
             var logText = LocalOperationalLog.GetRecentLogText();
-            Assert.Contains("requires_control_proof=1", logText, StringComparison.Ordinal);
-            Assert.Contains("bulk_messages_received_since_last=12", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_receive_stall_detected", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_protocol_repair_only", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_filetransfer_bulk_proof_accepted", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_receive_resumed", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var count));
+            Assert.Equal(1, count);
 
             adapter.UnregisterActiveFileTransferRuntime("transfer-v6-bulk-proof-after-reconnect");
             adapter.UnregisterActiveFileTransferDataSession("transfer-v6-bulk-proof-after-reconnect");
@@ -1734,6 +1848,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
         var prevFastRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
 
         try
         {
@@ -1741,6 +1856,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
             var keyPath = Path.Combine(tempDir, "identity.json");
             WriteIdentityFile(keyPath, "all-zero-probe-window");
             var seedBackend = new FakeProtectedSeedBackend();
@@ -1771,6 +1887,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", prevFastRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
             try
             {
                 CleanupDirectoryIfExists(tempDir);
@@ -1810,6 +1927,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         var prevNodePath = Environment.GetEnvironmentVariable("NLINK_NKN_NODE_PATH");
         var prevBridgePath = Environment.GetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH");
         var prevRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY");
+        var prevControlOnlyRecovery = Environment.GetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY");
         var disconnectedCount = 0;
 
         try
@@ -1817,6 +1935,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", nodePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
             var keyPath = Path.Combine(tempDir, "identity.json");
             WriteIdentityFile(keyPath, "ping-timeout-filetransfer-active-only");
             var seedBackend = new FakeProtectedSeedBackend();
@@ -1855,6 +1974,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_NODE_PATH", prevNodePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", prevBridgePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", prevRecovery);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", prevControlOnlyRecovery);
             try
             {
                 CleanupDirectoryIfExists(tempDir);
@@ -1997,6 +2117,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             adapter.RegisterActiveFileTransferDataSession("transfer-ping-timeout-recovery");
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
             await adapter.ConnectAsync(cts.Token);
+            Assert.True(adapter.RequestFileTransferReceiveStallRecovery("test_ping_timeout_recovery"));
 
             await WaitUntilAsync(
                 () => File.Exists(countFile) &&
@@ -2083,6 +2204,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             adapter.RegisterActiveFileTransferDataSession("transfer-ping-timeout-tombstone");
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
             await adapter.ConnectAsync(cts.Token);
+            Assert.True(adapter.RequestFileTransferReceiveStallRecovery("test_ping_timeout_tombstone"));
 
             await WaitUntilAsync(
                 () => File.Exists(countFile) &&
@@ -2169,7 +2291,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
-            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
             var keyPath = Path.Combine(tempDir, "identity.json");
             WriteIdentityFile(keyPath, "control-degraded");
             var seedBackend = new FakeProtectedSeedBackend();
@@ -2220,7 +2342,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task Bridge_ReceiveStallRecovery_ControlOnlyOverrideReconnectsEvenWhenBulkReceiveActive()
+    public async Task Bridge_ReceiveStallRecovery_ControlOnlyOverrideDoesNotReconnectWhenBulkReceiveActive()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -2278,8 +2400,20 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             await adapter.ConnectAsync(cts.Token);
 
             await WaitUntilAsync(
-                () => File.Exists(countFile) && int.TryParse(File.ReadAllText(countFile).Trim(), out var count) && count >= 2,
+                () =>
+                {
+                    var text = LocalOperationalLog.GetRecentLogText();
+                    return text.Contains("event=nkn_bridge_control_receive_recovery_suppressed", StringComparison.Ordinal) &&
+                           text.Contains("reason=filetransfer_bulk_receive_active", StringComparison.Ordinal);
+                },
                 TimeSpan.FromSeconds(5));
+            var logText = LocalOperationalLog.GetRecentLogText();
+            Assert.Contains("event=nkn_bridge_control_receive_degraded", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_control_receive_recovery_suppressed", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=filetransfer_bulk_receive_active", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var count));
+            Assert.Equal(1, count);
 
             adapter.UnregisterActiveFileTransferDataSession("transfer-control-recovery");
             await adapter.DisconnectAsync();
@@ -2303,7 +2437,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task Bridge_ReceiveStallRecovery_ForcesControlOnlyReconnectWhenFileTransferControlStaleBeyondGrace()
+    public async Task Bridge_ReceiveStallRecovery_SuppressesControlOnlyReconnectWhenBulkReceiveFreshBeyondGrace()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -2331,8 +2465,8 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             BuildReceiveStallRecoveryMockBridgeScript(
                 countFile,
                 controlMessagesReceivedSinceLast: 0,
-                bulkMessagesReceivedSinceLast: 1,
-                totalMessagesReceivedSinceLast: 1,
+                bulkMessagesReceivedSinceLast: 0,
+                totalMessagesReceivedSinceLast: 0,
                 controlLastReceivedAgeMs: 35_000,
                 bulkLastReceivedAgeMs: 100,
                 stallHealthSampleCount: 6));
@@ -2348,7 +2482,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             Environment.SetEnvironmentVariable("NLINK_NKN_BRIDGE_PATH", bridgePath);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_RECOVERY", null);
             Environment.SetEnvironmentVariable("NLINK_NKN_RECEIVE_STALL_FILETRANSFER_FAST_RECOVERY", null);
-            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", null);
+            Environment.SetEnvironmentVariable("NLINK_NKN_CONTROL_ONLY_STALL_RECOVERY", "0");
             var keyPath = Path.Combine(tempDir, "identity.json");
             WriteIdentityFile(keyPath, "control-stale");
             var seedBackend = new FakeProtectedSeedBackend();
@@ -2362,12 +2496,21 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             await adapter.ConnectAsync(cts.Token);
 
             await WaitUntilAsync(
-                () => File.Exists(countFile) && int.TryParse(File.ReadAllText(countFile).Trim(), out var count) && count >= 2,
-                TimeSpan.FromSeconds(15));
+                () =>
+                {
+                    var text = LocalOperationalLog.GetRecentLogText();
+                    return text.Contains("event=nkn_bridge_control_receive_recovery_suppressed", StringComparison.Ordinal) &&
+                           text.Contains("reason=filetransfer_bulk_receive_fresh", StringComparison.Ordinal);
+                },
+                TimeSpan.FromSeconds(5));
 
             var logText = LocalOperationalLog.GetRecentLogText();
-            Assert.Contains("event=nkn_bridge_control_receive_recovery_forced", logText, StringComparison.Ordinal);
-            Assert.Contains("reason=filetransfer_control_stale_beyond_grace", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_control_receive_degraded", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_control_receive_recovery_suppressed", logText, StringComparison.Ordinal);
+            Assert.Contains("reason=filetransfer_bulk_receive_fresh", logText, StringComparison.Ordinal);
+            Assert.True(File.Exists(countFile));
+            Assert.True(int.TryParse(File.ReadAllText(countFile).Trim(), out var count));
+            Assert.Equal(1, count);
 
             adapter.UnregisterActiveFileTransferDataSession("transfer-control-stale");
             await adapter.DisconnectAsync();
@@ -2458,7 +2601,7 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
 
     [Trait("Category", "LegacySmoke")]
     [Fact]
-    public async Task Bridge_ReceiveStallRecovery_ActiveFileTransferWaitsForProofBeforeRetryingAfterBaseBudget()
+    public async Task Bridge_ReceiveStallRecovery_ActiveFileTransferSuppressesAutoRetryWhileProtocolRepairs()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -2505,16 +2648,14 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
             await adapter.ConnectAsync(cts.Token);
 
             await WaitUntilAsync(
-                () => File.Exists(countFile) &&
-                      int.TryParse(File.ReadAllText(countFile).Trim(), out var count) &&
-                      count >= 2 &&
-                      GetRecentLogTextSince(logBaseline).Contains("event=nkn_bridge_receive_stall_recovery_failed; reason=previous_recovery_unproven_cooldown", StringComparison.Ordinal),
+                () => GetRecentLogTextSince(logBaseline).Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_protocol_repair_only", StringComparison.Ordinal),
                 TimeSpan.FromSeconds(14));
 
             var logText = GetRecentLogTextSince(logBaseline);
-            Assert.Contains("event=nkn_bridge_receive_stall_recovery_failed; reason=previous_recovery_unproven_cooldown", logText, StringComparison.Ordinal);
+            Assert.Contains("event=nkn_bridge_receive_stall_recovery_suppressed; reason=filetransfer_protocol_repair_only", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=nkn_bridge_receive_stall_recovery_failed; reason=previous_recovery_unproven_cooldown", logText, StringComparison.Ordinal);
             var connectCount = int.Parse(File.ReadAllText(countFile).Trim());
-            Assert.InRange(connectCount, 2, 2);
+            Assert.Equal(1, connectCount);
 
             adapter.UnregisterActiveFileTransferDataSession("transfer-active-filetransfer-cooldown");
             await adapter.DisconnectAsync();
@@ -3188,6 +3329,90 @@ public sealed class BridgeConnectionLifecycleTests : SessionRuntimeConnectionTes
         shuttingDownField.SetValue(adapter, false);
         disposedField.SetValue(adapter, true);
         Assert.True((bool)(method.Invoke(adapter, ["[nkn-bridge] WebSocket error: WebSocket was closed before the connection was established"]) ?? false));
+    }
+
+    [Fact]
+    public void Bridge_PingTimeoutDuringActiveFileTransferWithRecentBridgeHealth_IsSuppressed()
+    {
+        var adapter = (RealNknClientAdapter)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(RealNknClientAdapter));
+        var activeSessionsField = typeof(RealNknClientAdapter).GetField("activeFileTransferDataSessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(activeSessionsField);
+        activeSessionsField!.SetValue(adapter, 1);
+
+        var suppressed = adapter.SuppressBridgePingTimeoutForActiveFileTransferForTests(
+            framesSentSinceLast: 12,
+            messagesReceivedSinceLast: 0,
+            controlLastReceivedAgeMs: 45_987,
+            bulkLastReceivedAgeMs: 42_460,
+            disconnectSignalCount: 0,
+            healthSummaryAge: TimeSpan.FromSeconds(1));
+
+        Assert.True(suppressed);
+        var logText = LocalOperationalLog.GetRecentLogText();
+        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppressed", logText, StringComparison.Ordinal);
+        Assert.Contains("reason=recent_bridge_health_summary", logText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Bridge_PingTimeoutDuringActiveFileTransferWithoutRecentBridgeHealth_IsNotSuppressed()
+    {
+        var adapter = (RealNknClientAdapter)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(RealNknClientAdapter));
+        var activeSessionsField = typeof(RealNknClientAdapter).GetField("activeFileTransferDataSessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(activeSessionsField);
+        activeSessionsField!.SetValue(adapter, 1);
+
+        var suppressed = adapter.SuppressBridgePingTimeoutForActiveFileTransferForTests(
+            framesSentSinceLast: 12,
+            messagesReceivedSinceLast: 0,
+            controlLastReceivedAgeMs: 45_987,
+            bulkLastReceivedAgeMs: 42_460,
+            disconnectSignalCount: 0,
+            healthSummaryAge: TimeSpan.FromSeconds(10));
+
+        Assert.False(suppressed);
+        var logText = LocalOperationalLog.GetRecentLogText();
+        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_not_suppressed", logText, StringComparison.Ordinal);
+        Assert.Contains("reason=stale_bridge_health_and_send", logText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Bridge_PingTimeoutDuringActiveFileTransferWithRecentBridgeSend_IsSuppressed()
+    {
+        var adapter = (RealNknClientAdapter)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(RealNknClientAdapter));
+        var activeSessionsField = typeof(RealNknClientAdapter).GetField("activeFileTransferDataSessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(activeSessionsField);
+        activeSessionsField!.SetValue(adapter, 1);
+
+        var suppressed = adapter.SuppressBridgePingTimeoutForActiveFileTransferAfterRecentSendForTests(
+            NknBridgeChannel.Bulk,
+            payloadBytes: 64_950,
+            serializedBytes: 65_050,
+            sendAge: TimeSpan.FromSeconds(1));
+
+        Assert.True(suppressed);
+        var logText = LocalOperationalLog.GetRecentLogText();
+        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_suppressed", logText, StringComparison.Ordinal);
+        Assert.Contains("reason=recent_bridge_send", logText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Bridge_PingTimeoutDuringActiveFileTransferWithStaleBridgeSend_IsNotSuppressed()
+    {
+        var adapter = (RealNknClientAdapter)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(RealNknClientAdapter));
+        var activeSessionsField = typeof(RealNknClientAdapter).GetField("activeFileTransferDataSessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(activeSessionsField);
+        activeSessionsField!.SetValue(adapter, 1);
+
+        var suppressed = adapter.SuppressBridgePingTimeoutForActiveFileTransferAfterRecentSendForTests(
+            NknBridgeChannel.Bulk,
+            payloadBytes: 64_950,
+            serializedBytes: 65_050,
+            sendAge: TimeSpan.FromSeconds(10));
+
+        Assert.False(suppressed);
+        var logText = LocalOperationalLog.GetRecentLogText();
+        Assert.Contains("event=nkn_bridge_ping_timeout_filetransfer_recovery_not_suppressed", logText, StringComparison.Ordinal);
+        Assert.Contains("reason=stale_bridge_health_and_send", logText, StringComparison.Ordinal);
     }
 
     [Trait("Category", "LegacySmoke")]

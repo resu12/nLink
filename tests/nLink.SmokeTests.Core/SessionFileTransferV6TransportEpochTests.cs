@@ -115,6 +115,90 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
+    public async Task PrimaryRegularNknBulkV6_TunaActivationAndFallbackUseV6EpochPath()
+    {
+        const string transferId = "transfer_v6_primary_bulk_tuna_epoch_guard";
+        const string sessionId = "session_v6_primary_bulk_tuna_epoch_guard";
+        var logStart = GetOperationalLogLength();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId)
+        {
+            FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup,
+        };
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId)
+        {
+            FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup,
+        };
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+
+        var receiverSession = await StartManualOutboundV6SenderAsync(
+            sender,
+            senderTransport,
+            receiverTransport,
+            transferId,
+            payloadSize: 1_000_000);
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains(
+                "event=filetransfer_primary_regular_nkn_bulk_v6_selected; direction=outbound",
+                StringComparison.Ordinal),
+            timeoutMs: 5000);
+
+        receiverTransport.NextDataFrameTransportKind = FileTransferTransportKind.Tuna;
+        senderTransport.RequestAllDataSessionHandoffs(
+            "normal_to_tuna_activation",
+            FileTransferTransportHandoffKind.NormalToTunaActivation,
+            FileTransferTransportKind.Tuna);
+        var tunaProbe = await ReceiveProbeAsync(receiverSession, "tuna");
+        Assert.Equal(FileTransferTransportKind.Tuna, tunaProbe.TransportKind);
+        var tunaProbeFrame = Assert.IsType<FileTransferTransportProbeFrameV6>(tunaProbe.Frame);
+        await receiverTransport.SendFileTransferTransportProbeAsync(
+            new FileTransferTransportProbeV6
+            {
+                SessionId = tunaProbeFrame.SessionId,
+                TransferId = tunaProbeFrame.TransferId,
+                TransportEpoch = tunaProbeFrame.TransportEpoch,
+                ProbeId = tunaProbeFrame.ProbeId,
+                TargetTransport = tunaProbeFrame.TargetTransport,
+            },
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains("target_transport=tuna", StringComparison.Ordinal) &&
+                  ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_epoch_recovered; direction=outbound", StringComparison.Ordinal),
+            timeoutMs: 5000);
+
+        senderTransport.RequestAllDataSessionHandoffs(
+            "tuna_to_normal_fallback",
+            FileTransferTransportHandoffKind.TunaToNormalFallback,
+            FileTransferTransportKind.RegularNkn);
+        var fallbackProbe = await ReceiveProbeAsync(receiverSession, "regular_nkn");
+        var fallbackProbeFrame = Assert.IsType<FileTransferTransportProbeFrameV6>(fallbackProbe.Frame);
+        await receiverTransport.SendFileTransferTransportProbeAsync(
+            new FileTransferTransportProbeV6
+            {
+                SessionId = fallbackProbeFrame.SessionId,
+                TransferId = fallbackProbeFrame.TransferId,
+                TransportEpoch = fallbackProbeFrame.TransportEpoch,
+                ProbeId = fallbackProbeFrame.ProbeId,
+                TargetTransport = fallbackProbeFrame.TargetTransport,
+            },
+            CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains("handoff_kind=tuna_to_normal_fallback", StringComparison.Ordinal) &&
+                  ReadOperationalLogTail(logStart).Contains("target_transport=regular_nkn", StringComparison.Ordinal),
+            timeoutMs: 5000);
+
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_v6_epoch_started; direction=outbound", logTail, StringComparison.Ordinal);
+        Assert.Contains("handoff_kind=normal_to_tuna_activation", logTail, StringComparison.Ordinal);
+        Assert.Contains("handoff_kind=tuna_to_normal_fallback", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_v6_transport_probe_sent; direction=outbound", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_primary_regular_nkn_bulk_v6_rebind_started; direction=outbound", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("recovery_mode=regular_nkn_checkpoint_sync", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task V6Epoch_RecoveredRegularNknRecoveryFrontierPriorityPreemptsNormalRequestWindowWithoutRedundantBulk()
     {
         const string transferId = "transfer_v6_epoch_recovered_frontier_keeps_normal";
@@ -758,6 +842,73 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
+    public async Task V6Epoch_RecoveredRegularNknRecoveryFrontierRepairUsesControlBulk()
+    {
+        const string transferId = "transfer_v6_epoch_regular_nkn_frontier_control_bulk";
+        const string repairRequestId = "repair:regular-nkn-recovered:frontier";
+        var logStart = GetOperationalLogLength();
+        using var senderTransport = new LoopbackFileTransferTransport("session_v6_epoch_regular_nkn_frontier_control_bulk");
+        using var receiverTransport = new LoopbackFileTransferTransport("session_v6_epoch_regular_nkn_frontier_control_bulk");
+        senderTransport.Connect(receiverTransport);
+        using var sender = new SessionFileTransferService();
+        sender.AttachTransport(senderTransport);
+
+        var receiverSession = await StartManualOutboundV6SenderAsync(sender, senderTransport, receiverTransport, transferId);
+        receiverTransport.NextDataFrameTransportKind = FileTransferTransportKind.RegularNkn;
+        senderTransport.RequestAllDataSessionHandoffs(
+            "receive_stall_recovery",
+            FileTransferTransportHandoffKind.RegularNknRecovery,
+            FileTransferTransportKind.RegularNkn);
+        await WaitUntilAsync(() => senderTransport.SentTransportEpochs.Any(), timeoutMs: 5000);
+
+        var probe = await ReceiveProbeAsync(receiverSession);
+        var probeFrame = Assert.IsType<FileTransferTransportProbeFrameV6>(probe.Frame);
+        await receiverTransport.SendFileTransferTransportProbeAsync(
+            new FileTransferTransportProbeV6
+            {
+                SessionId = probeFrame.SessionId,
+                TransferId = probeFrame.TransferId,
+                TransportEpoch = probeFrame.TransportEpoch,
+                ProbeId = probeFrame.ProbeId,
+                TargetTransport = probeFrame.TargetTransport,
+            },
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_epoch_recovered", StringComparison.Ordinal),
+            timeoutMs: 5000);
+
+        await receiverSession.SendAsync(
+            new FileTransferFrontierRequestFrameV6
+            {
+                SessionId = probeFrame.SessionId,
+                TransferId = transferId,
+                TransportEpoch = probeFrame.TransportEpoch,
+                RepairRequestId = repairRequestId,
+                MissingRanges = [new FileTransferRangeV4 { StartChunkIndex = 0, ChunkCount = 1 }],
+                Priority = "frontier",
+                RecoveryMode = "regular_nkn_frontier_stall_control_bulk",
+            },
+            CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(batch =>
+                batch.TransportEpoch == probeFrame.TransportEpoch &&
+                batch.StartChunkIndex == 0 &&
+                string.Equals(batch.Priority, "frontier", StringComparison.OrdinalIgnoreCase) &&
+                batch.RepairRequestId == repairRequestId),
+            timeoutMs: 5000);
+
+        var frontierBatch = senderTransport.SentDataFrames
+            .OfType<FileTransferChunkBatchFrameV6>()
+            .First(batch =>
+                batch.TransportEpoch == probeFrame.TransportEpoch &&
+                batch.StartChunkIndex == 0 &&
+                batch.RepairRequestId == repairRequestId);
+        Assert.True(frontierBatch.ForceRegularNknBulk);
+        Assert.Equal(FileTransferV4RepairDeliveryMode.ControlBulkRedundant, frontierBatch.RepairDeliveryMode);
+    }
+
+    [Fact]
     public async Task V6Epoch_RegularNknFallbackNormalTimeoutKeepsPrimaryFallbackAndFrontierProof()
     {
         var previousSendTimeout = SessionFileTransferService.V6SenderTransportSendTimeoutOverrideForTests;
@@ -924,7 +1075,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                     BytesCommitted = 0,
                 },
                 CancellationToken.None);
-            await WaitUntilAsync(() => senderTransport.MaxConcurrentDataSessionSends >= 8, timeoutMs: 5000);
+            await WaitUntilAsync(() => senderTransport.MaxConcurrentDataSessionSends >= 4, timeoutMs: 5000);
 
             receiverTransport.NextDataFrameTransportKind = FileTransferTransportKind.RegularNkn;
             senderTransport.RequestAllDataSessionHandoffs(
@@ -1748,7 +1899,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
-    public async Task V6Sender_RequestStarvationOnRegularNknRequestsReceiveRecoveryBeforeHeartbeatTimeout()
+    public async Task V6Sender_RequestStarvationOnPrimaryRegularNknRequestsBridgeRecoveryWithoutEpoch()
     {
         const string transferId = "transfer_v6_sender_starved_regular_nkn_recovery";
         var previousFeedbackDelay = SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests;
@@ -1793,8 +1944,16 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 timeoutMs: 5000);
 
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=filetransfer_v6_sender_request_feedback_stalled_recovery_requested", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_v6_epoch_started; direction=outbound", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v6_sender_feedback_stale_regular_nkn_receive_recovery_requested", logTail, StringComparison.Ordinal);
+            Assert.Contains("epoch_started=0", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction=outbound", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("reason=primary_regular_nkn_protocol_repair_only", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_v6_epoch_started; direction=outbound", logTail, StringComparison.Ordinal);
+            Assert.Contains(
+                senderTransport.ReceiveRecoveryRequests,
+                request => request.Direction == FileTransferDirection.Outbound &&
+                           request.TransferId == transferId &&
+                           request.Reason == "sender_request_feedback_stalled");
             Assert.DoesNotContain("event=filetransfer_v6_heartbeat_timeout; direction=outbound", logTail, StringComparison.Ordinal);
         }
         finally
@@ -1896,7 +2055,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
-    public async Task V6Sender_RequestStarvationAfterRegularNknRecoveryRequestsReceiveRecovery()
+    public async Task V6Sender_RequestStarvationAfterRegularNknRecoverySuppressesRepeatBridgeRecovery()
     {
         const string transferId = "transfer_v6_sender_starved_requests_receive_recovery";
         var previousFeedbackDelay = SessionFileTransferService.V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests;
@@ -1954,18 +2113,19 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 timeoutMs: 5000);
 
             await WaitUntilAsync(
-                () => senderTransport.ReceiveRecoveryRequests.Any(request =>
-                    request.Direction == FileTransferDirection.Outbound &&
-                    request.TransferId == transferId &&
-                    request.Reason == "sender_request_feedback_stalled"),
-                timeoutMs: 5000);
-            await WaitUntilAsync(
-                () => ReadOperationalLogTail(logStart).Contains("event=filetransfer_v6_transport_receive_recovery_request_dispatched", StringComparison.Ordinal),
+                () => ReadOperationalLogTail(logStart).Contains("reason=primary_regular_nkn_protocol_repair_only", StringComparison.Ordinal),
                 timeoutMs: 5000);
 
             var logTail = ReadOperationalLogTail(logStart);
-            Assert.Contains("event=filetransfer_v6_sender_request_feedback_stalled_recovery_requested", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_v6_transport_receive_recovery_request_dispatched", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v6_sender_feedback_stale_recovery_suppressed", logTail, StringComparison.Ordinal);
+            Assert.Contains("reason=primary_regular_nkn_protocol_repair_only", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_v6_sender_request_feedback_stalled_recovery_requested", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction=outbound", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
+                senderTransport.ReceiveRecoveryRequests,
+                request => request.Direction == FileTransferDirection.Outbound &&
+                           request.TransferId == transferId &&
+                           request.Reason == "sender_request_feedback_stalled");
         }
         finally
         {
@@ -1976,7 +2136,7 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
     }
 
     [Fact]
-    public async Task V6Heartbeat_RecentOutboundDataSilenceStartsRegularNknRecoveryBeforePeerDisconnect()
+    public async Task V6Heartbeat_RecentOutboundDataSilenceUsesRegularNknFeedbackRepairBeforePeerDisconnect()
     {
         const string transferId = "transfer_v6_liveness_data_silence_defers_to_recovery";
         var previousHeartbeatInterval = SessionFileTransferService.V6HeartbeatIntervalOverrideForTests;
@@ -2013,10 +2173,9 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
                 () => senderTransport.SentDataFrames.OfType<FileTransferChunkBatchFrameV6>().Any(static batch => batch.StartChunkIndex == 0),
                 timeoutMs: 5000);
 
+            const string deferredMarker = "event=filetransfer_v6_heartbeat_timeout_deferred_for_regular_nkn_feedback_repair; direction=outbound";
             await WaitUntilAsync(
-                () => senderTransport.SentTransportEpochs.Any(static epoch =>
-                    epoch.HandoffKind == "regular_nkn_recovery" &&
-                    epoch.TargetTransport == "regular_nkn"),
+                () => CountOccurrences(ReadOperationalLogTail(logStart), deferredMarker) >= 4,
                 timeoutMs: 5000);
 
             var outbound = sender.Snapshot.Outbound;
@@ -2024,23 +2183,21 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
             Assert.NotEqual(FileTransferTransferState.Failed, outbound!.State);
             Assert.Null(outbound.ErrorCode);
             var logTail = ReadOperationalLogTail(logStart);
-            const string deferredMarker = "event=filetransfer_v6_heartbeat_timeout_deferred_for_recovery; direction=outbound";
             var deferredIndex = logTail.IndexOf(deferredMarker, StringComparison.Ordinal);
             Assert.True(deferredIndex >= 0, $"Expected deferred heartbeat recovery marker in log tail: {logTail}");
-            Assert.Contains("handoff_kind=regular_nkn_recovery", logTail, StringComparison.Ordinal);
-            Assert.Contains("source_transport=regular_nkn", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_v6_recovery_waiting_for_receiver_requests; direction=outbound", logTail, StringComparison.Ordinal);
-            Assert.Contains("event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction=outbound", logTail, StringComparison.Ordinal);
-            Assert.Contains(
+            Assert.True(
+                CountOccurrences(logTail, deferredMarker) >= 4,
+                "Primary regular-NKN feedback repair should not terminalize after the old fixed three-deferral window.");
+            Assert.DoesNotContain("handoff_kind=regular_nkn_recovery", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_v6_recovery_waiting_for_receiver_requests; direction=outbound", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction=outbound", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain(
                 senderTransport.ReceiveRecoveryRequests,
                 request => request.Direction == FileTransferDirection.Outbound &&
                            request.TransferId == transferId &&
                            request.Reason == "peer_liveness_stale_receive_recovery");
             Assert.DoesNotContain("event=filetransfer_transport_rebind_safety_replay_started;", logTail, StringComparison.Ordinal);
-            var timeoutIndex = logTail.IndexOf("event=filetransfer_v6_heartbeat_timeout; direction=outbound", StringComparison.Ordinal);
-            Assert.True(
-                timeoutIndex < 0 || timeoutIndex > deferredIndex,
-                "The first outbound heartbeat timeout must be deferred into regular-NKN recovery before any terminal timeout is logged.");
+            Assert.DoesNotContain("event=filetransfer_v6_heartbeat_timeout; direction=outbound", logTail, StringComparison.Ordinal);
         }
         finally
         {
@@ -2110,13 +2267,16 @@ public sealed class SessionFileTransferV6TransportEpochTests : SessionFileTransf
         return await receiverTransport.OpenFileTransferDataSessionAsync(offer.SessionId, transferId, CancellationToken.None);
     }
 
-    private static async Task<FileTransferReceivedDataFrame> ReceiveProbeAsync(IFileTransferDataSession session)
+    private static async Task<FileTransferReceivedDataFrame> ReceiveProbeAsync(
+        IFileTransferDataSession session,
+        string? targetTransport = null)
     {
         using var cts = new CancellationTokenSource(5000);
         while (true)
         {
             var received = await session.ReceiveWithMetadataAsync(cts.Token);
-            if (received.Frame is FileTransferTransportProbeFrameV6)
+            if (received.Frame is FileTransferTransportProbeFrameV6 probe &&
+                (targetTransport is null || string.Equals(probe.TargetTransport, targetTransport, StringComparison.Ordinal)))
             {
                 return received;
             }

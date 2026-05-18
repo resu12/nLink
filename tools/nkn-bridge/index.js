@@ -40,7 +40,7 @@ const MIN_CONNECT_FALLBACK_DELAY_MS = 1000;
 const MAX_CONNECT_FALLBACK_DELAY_MS = DEFAULT_CONNECT_READY_TIMEOUT_MS;
 const DEFAULT_NUM_SUBCLIENTS = 4;
 const DEFAULT_MEDIA_NUM_SUBCLIENTS = 8;
-const DEFAULT_BULK_NUM_SUBCLIENTS = 2;
+const DEFAULT_BULK_NUM_SUBCLIENTS = 4;
 const MIN_NUM_SUBCLIENTS = 1;
 const MAX_NUM_SUBCLIENTS = 16;
 const OWNER_PID_CHECK_INTERVAL_MS = 2000;
@@ -69,12 +69,13 @@ const BULK_QUEUE_CONGESTED_AGE_MS = 250;
 const BULK_QUEUE_SEVERE_MESSAGES = 192;
 const BULK_QUEUE_SEVERE_BYTES = 12 * 1024 * 1024;
 const BULK_QUEUE_SEVERE_AGE_MS = 1000;
-const BULK_QUEUE_TRANSIENT_RETRY_MAX_ATTEMPTS = 4;
-const BULK_QUEUE_TRANSIENT_RETRY_DELAY_MS = 150;
-const DEFAULT_BULK_SEND_CONCURRENCY = 2;
+const BULK_QUEUE_TRANSIENT_RETRY_MAX_ATTEMPTS = 32;
+const BULK_QUEUE_TRANSIENT_BACKOFF_INITIAL_MS = 100;
+const BULK_QUEUE_TRANSIENT_BACKOFF_MAX_MS = 750;
+const DEFAULT_BULK_SEND_CONCURRENCY = 4;
 const MIN_BULK_SEND_CONCURRENCY = 1;
 const MAX_BULK_SEND_CONCURRENCY = 8;
-const DEFAULT_BULK_SEND_MODE = 'single';
+const DEFAULT_BULK_SEND_MODE = 'fanout';
 const BULK_SEND_MODE_FANOUT = 'fanout';
 const BULK_SEND_MODE_ROUND_ROBIN = 'round_robin';
 const BULK_SEND_MODE_SINGLE = 'single';
@@ -190,6 +191,9 @@ const state = {
   bulkSendMode: DEFAULT_BULK_SEND_MODE,
   bulkRoundRobinCursor: 0,
   bulkQueueClearedSinceLast: 0,
+  bulkTransientNotReadyUntilMs: 0,
+  bulkTransientNotReadyBackoffMs: 0,
+  bulkTransientNotReadyTimer: null,
   lastEmittedBulkQueueStateKey: '',
   lastEmittedBulkQueueStateAt: 0,
   controlSendQueue: [],
@@ -891,6 +895,8 @@ function createBridgeBulkSendSummaryWindow() {
     workerIdleSlotSamples: 0,
     workerSaturatedSampleCount: 0,
     drainWakeCount: 0,
+    transientNotReadyCount: 0,
+    transientNotReadyBackoffMaxMs: 0,
     sendModeFanoutFrames: 0,
     sendModeRoundRobinFrames: 0,
     sendModeSingleFrames: 0,
@@ -1051,6 +1057,8 @@ function emitBridgeControlSendSummary() {
     payload_bytes_sent: window.payloadBytesSent,
     payload_bytes_per_second: Math.round(window.payloadBytesSent / (BRIDGE_CONTROL_SEND_SAMPLE_WINDOW_MS / 1000)),
     send_failures: window.sendFailures,
+    transient_not_ready_count: window.transientNotReadyCount,
+    transient_not_ready_backoff_max_ms: window.transientNotReadyBackoffMaxMs,
     queue_clears: window.queueClears,
     queue_depth: state.controlSendQueue.length,
     queued_bytes: state.controlQueuedBytes,
@@ -1202,6 +1210,7 @@ function emitBridgeTransportHealthSummary() {
     media_subclients: state.mediaNumSubClients,
     bulk_subclients: state.bulkNumSubClients,
     bulk_send_concurrency: state.bulkSendConcurrency,
+    bulk_send_mode: getBulkSendMode(),
     control_messages_received_since_last: window.controlMessagesReceivedSinceLast,
     media_messages_received_since_last: window.mediaMessagesReceivedSinceLast,
     bulk_messages_received_since_last: window.bulkMessagesReceivedSinceLast,
@@ -1959,20 +1968,56 @@ function scheduleBulkSendRetry(item, error) {
   }
 
   item.transientRetryAttempt = nextAttempt;
+  state.bulkSendQueue.unshift(item);
+  state.bulkQueuedBytes += item.payload.length;
+  markBulkTransientNotReady(nextAttempt, error);
+  emitBulkQueueState(true);
+  return true;
+}
+
+function markBulkTransientNotReady(attempt, error) {
+  const previousBackoff = Math.max(0, Number(state.bulkTransientNotReadyBackoffMs) || 0);
+  const delayMs = previousBackoff > 0
+    ? Math.min(BULK_QUEUE_TRANSIENT_BACKOFF_MAX_MS, previousBackoff * 2)
+    : BULK_QUEUE_TRANSIENT_BACKOFF_INITIAL_MS;
+  const untilMs = Date.now() + delayMs;
+  state.bulkTransientNotReadyBackoffMs = delayMs;
+  state.bulkTransientNotReadyUntilMs = Math.max(state.bulkTransientNotReadyUntilMs, untilMs);
+  state.bridgeBulkSendSummaryWindow.transientNotReadyCount += 1;
+  state.bridgeBulkSendSummaryWindow.transientNotReadyBackoffMaxMs = Math.max(
+    state.bridgeBulkSendSummaryWindow.transientNotReadyBackoffMaxMs,
+    delayMs);
   logStderr(
-    `Bulk queue transient send retry scheduled ` +
-    `(attempt=${nextAttempt}, delay_ms=${BULK_QUEUE_TRANSIENT_RETRY_DELAY_MS}, reason=${safeErrorMessage(error)})`);
-  setTimeout(() => {
+    `Bulk queue transient not-ready backoff scheduled ` +
+    `(attempt=${attempt}, delay_ms=${delayMs}, reason=${safeErrorMessage(error)})`);
+  emitJson({
+    event: 'bulk_transient_not_ready',
+    attempt,
+    backoff_ms: delayMs,
+    queue_depth: state.bulkSendQueue.length,
+    in_flight: Math.max(0, state.bulkQueueInFlight)
+  });
+  scheduleBulkTransientNotReadyDrain();
+}
+
+function scheduleBulkTransientNotReadyDrain() {
+  if (state.bulkTransientNotReadyTimer || state.shuttingDown) {
+    return;
+  }
+
+  const delayMs = Math.max(1, state.bulkTransientNotReadyUntilMs - Date.now());
+  state.bulkTransientNotReadyTimer = setTimeout(() => {
+    state.bulkTransientNotReadyTimer = null;
     if (state.shuttingDown) {
       return;
     }
 
-    state.bulkSendQueue.unshift(item);
-    state.bulkQueuedBytes += item.payload.length;
     emitBulkQueueState(true);
     scheduleBulkQueueDrain();
-  }, BULK_QUEUE_TRANSIENT_RETRY_DELAY_MS);
-  return true;
+  }, delayMs);
+  if (state.bulkTransientNotReadyTimer && typeof state.bulkTransientNotReadyTimer.unref === 'function') {
+    state.bulkTransientNotReadyTimer.unref();
+  }
 }
 
 function recordBulkInFlightSnapshot() {
@@ -2012,6 +2057,8 @@ function buildBulkQueueState() {
     inFlightBytes: Math.max(0, state.bulkQueueInFlightBytes),
     configuredConcurrency: state.bulkSendConcurrency,
     effectiveConcurrency: getEffectiveBulkSendConcurrency(),
+    transientNotReady: state.bulkTransientNotReadyUntilMs > Date.now(),
+    transientNotReadyRemainingMs: Math.max(0, state.bulkTransientNotReadyUntilMs - Date.now()),
     congested,
     severe,
     clearedSinceLast: state.bulkQueueClearedSinceLast
@@ -2028,6 +2075,7 @@ function emitBulkQueueState(force = false) {
     snapshot.inFlightBytes,
     snapshot.configuredConcurrency,
     snapshot.effectiveConcurrency,
+    snapshot.transientNotReady ? 1 : 0,
     snapshot.congested ? 1 : 0,
     snapshot.severe ? 1 : 0,
     snapshot.clearedSinceLast
@@ -2055,6 +2103,12 @@ function clearBulkSendQueue(reason) {
 
   state.bulkSendQueue = [];
   state.bulkQueuedBytes = 0;
+  state.bulkTransientNotReadyUntilMs = 0;
+  state.bulkTransientNotReadyBackoffMs = 0;
+  if (state.bulkTransientNotReadyTimer) {
+    clearTimeout(state.bulkTransientNotReadyTimer);
+    state.bulkTransientNotReadyTimer = null;
+  }
   logStderr(`Bulk queue cleared (${reason})`);
   emitBulkQueueState(true);
 }
@@ -2094,6 +2148,12 @@ function scheduleBulkQueueDrain() {
   }
 
   state.bridgeBulkSendSummaryWindow.drainWakeCount += 1;
+  if (state.bulkTransientNotReadyUntilMs > Date.now()) {
+    scheduleBulkTransientNotReadyDrain();
+    emitBulkQueueState(true);
+    return;
+  }
+
   while (state.bulkSendQueue.length > 0 &&
       state.bulkQueueInFlight < getEffectiveBulkSendConcurrency() &&
       !state.shuttingDown) {
@@ -2130,6 +2190,8 @@ async function sendBulkQueueItem(item) {
     bulkSendStartedUtcMs - queueDequeuedUtcMs);
   try {
     await sendBulkPayload(item.destination, item.payload);
+    state.bulkTransientNotReadyUntilMs = 0;
+    state.bulkTransientNotReadyBackoffMs = 0;
     state.bridgeBulkSendSummaryWindow.framesSent += 1;
     state.bridgeBulkSendSummaryWindow.payloadBytesSent += item.payload.length;
     state.bridgeTransportHealthSummaryWindow.framesSentSinceLast += 1;

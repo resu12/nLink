@@ -56,6 +56,8 @@ Read `filetransfer-live-nkn-summary.txt`, `transfer-terminal-summary.txt`, `thro
 
 For Phase 1 path-adaptation evidence, enable the diagnostics-only passive scout with `NLINK_FILETRANSFER_V6_REGULAR_NKN_PASSIVE_SCOUT=1`. This does not create a second client, change NKN topology, switch paths, change Tuna behavior, or alter pacing. It only records `filetransfer_v6_regular_nkn_passive_scout_*` events and the soak runner writes `regular-nkn-passive-scout-summary.txt/json`. Read `status`, `worst_classification`, `final_would_probe_recommendation`, `max_committed_progress_gap_ms`, `degraded_window_count`, and `high_frames_per_mib_window_count` to decide whether Phase 2 should probe the same topology, round-robin mode, or a fresh bulk client.
 
+For Phase 2A dry-run probing, enable `NLINK_FILETRANSFER_V6_REGULAR_NKN_ACTIVE_PROBE=1`. This implicitly samples the passive scout, sends only tiny same-topology V6 transport probe frames over the existing regular-NKN data/control path, and never switches topology, creates alternate clients, changes Tuna behavior, or changes pacing. The default probe cadence is intentionally conservative: four consecutive watch-or-worse scout samples and a 30s cooldown. The soak runner writes `regular-nkn-active-probe-summary.txt/json`; read `probe_count`, `success_count`, `timeout_count`, `rtt_p50_ms`, `rtt_p95_ms`, `worst_scout_classification`, `worst_dry_run_recommendation`, `non_keep_dry_run_recommendation_count`, and `reliability_warning_overlap_count`. `final_dry_run_recommendation` is only the last probe decision, so matrices should prefer the worst/count fields when deciding whether a slow cell was detected. Recommendations such as `would_try_round_robin_probe` and `would_try_fresh_bulk_client_probe` are observational only.
+
 Recent regular-NKN reference cells:
 
 - `artifacts/filetransfer-soak/20260515-172434/`: completed with clean terminals but regressed efficiency; `946,388 B/s`, raw sent `270,413,824` bytes for `128MB`, `v6_unsolicited_chunk_ignored_count=5086`, `post_completion_late_sender_frame=416`.
@@ -176,6 +178,7 @@ Primary artifacts:
 - `protocol-shape-summary.txt`
 - `payload-efficiency-summary.txt`
 - `transport-budget-summary.txt`
+- `bridge-config-summary.txt`
 - `bridge-bulk-summary.txt`
 - `coexistence-summary.txt`
 - `stability-gates-summary.txt`

@@ -11,7 +11,7 @@ param(
     [int]$CycleTimeoutSeconds = 120,
     [int]$ProgressTimeoutSeconds = 120,
     [int]$TimeoutSeconds = 600,
-    [ValidateSet("Default", "PinnedMainnetRpc", "PinnedSeedHttps", "MediaFanout8", "MediaFanout12", "BulkSingle1", "BulkFanout8", "BulkFanout12", "DefaultKeepAlive")]
+    [ValidateSet("Default", "PinnedMainnetRpc", "PinnedSeedHttps", "MediaFanout8", "MediaFanout12", "BulkSingle1", "BulkFanout4Legacy", "BulkFanout8", "BulkFanout12", "DefaultKeepAlive")]
     [string]$ExternalTopologyProfile = "Default",
     [ValidateSet("Auto", "Current", "Packed3x20KiB", "Packed3x21KiB", "LargeSingle48KiB")]
     [string]$PayloadEfficiencyProfile = "Auto",
@@ -94,6 +94,13 @@ function Set-FileTransferExternalTopologyProfileEnvironment {
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_NUM_SUBCLIENTS" -Value "1"
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_SEND_CONCURRENCY" -Value "4"
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_SEND_MODE" -Value "single"
+        }
+        "BulkFanout4Legacy" {
+            Set-ProcessEnvironmentValue -Name "NLINK_NKN_NUM_SUBCLIENTS" -Value "4"
+            Set-ProcessEnvironmentValue -Name "NLINK_NKN_MEDIA_NUM_SUBCLIENTS" -Value "8"
+            Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_NUM_SUBCLIENTS" -Value "4"
+            Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_SEND_CONCURRENCY" -Value "4"
+            Set-ProcessEnvironmentValue -Name "NLINK_NKN_BULK_SEND_MODE" -Value "fanout"
         }
         "BulkFanout8" {
             Set-ProcessEnvironmentValue -Name "NLINK_NKN_NUM_SUBCLIENTS" -Value "4"
@@ -625,6 +632,11 @@ function Write-FileTransferLiveNknSummary {
             $_.EventName -eq 'nkn_bridge_bulk_queue_state' -and
             (Get-FileTransferEventInt64Field -Event $_ -Name 'severe' -Default 0) -gt 0
         }).Count
+    $bridgeConfig = Get-FileTransferBridgeConfigSnapshot -Summary $Analysis.Summary -ExternalTopologyProfile $ExternalTopologyProfile
+    if ($bridgeConfig.Status -eq 'unexpected_drift') {
+        $effectiveVerdict = 'INVALID_SETUP'
+        $effectiveGateStatus = 'fail'
+    }
     $mediaQueueDropCount = Get-FileTransferGlobalSumField -Summary $Analysis.Summary -EventName 'screenshare_bridge_media_send_summary' -FieldName 'queue_drops'
     $mediaSendFailureCount = Get-FileTransferGlobalSumField -Summary $Analysis.Summary -EventName 'screenshare_bridge_media_send_summary' -FieldName 'send_failures'
     $mediaSevereCount = @($Analysis.Summary.GlobalEvents | Where-Object {
@@ -643,6 +655,18 @@ function Write-FileTransferLiveNknSummary {
         gate_status = $effectiveGateStatus
         external_topology_profile = $ExternalTopologyProfile
         payload_efficiency_profile = $resolvedPayloadEfficiencyProfile
+        bridge_config_status = $bridgeConfig.Status
+        bridge_observed_topology = $bridgeConfig.ObservedTopology
+        bridge_expected_topology = $bridgeConfig.ExpectedTopology
+        bridge_observed_bulk_send_concurrency = $bridgeConfig.ObservedBulkSendConcurrency
+        bridge_expected_bulk_send_concurrency = $bridgeConfig.ExpectedBulkSendConcurrency
+        bridge_observed_bulk_send_mode = $bridgeConfig.ObservedBulkSendMode
+        bridge_expected_bulk_send_mode = $bridgeConfig.ExpectedBulkSendMode
+        bridge_bundle_path = $bridgeConfig.BridgeScriptPath
+        bridge_script_sha256 = $bridgeConfig.BridgeScriptSha256
+        bridge_manifest_status = $bridgeConfig.ManifestStatus
+        bridge_manifest_app_version = $bridgeConfig.ManifestAppVersion
+        bridge_node_version = $bridgeConfig.NodeVersion
         app_version = ($(try { (Get-Content -Path (Join-Path (Resolve-RepoRoot) 'VERSION') -TotalCount 1).Trim() } catch { '(unknown)' }))
         exe_path = $ResolvedExePath
         gui_harness_exit_code = $GuiHarnessExitCode
@@ -816,6 +840,199 @@ function Write-FileTransferRegularNknPassiveScoutSummary {
     $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'regular-nkn-passive-scout-summary.json') -Encoding UTF8
 }
 
+function Get-FileTransferRegularNknActiveProbePercentile {
+    param(
+        [double[]]$Values,
+        [double]$Percentile
+    )
+
+    if ($Values.Count -le 0) {
+        return -1
+    }
+
+    $ordered = @($Values | Sort-Object)
+    $index = [Math]::Ceiling($Percentile * $ordered.Count) - 1
+    $index = [Math]::Max(0, [Math]::Min($ordered.Count - 1, [int]$index))
+    return [int64]$ordered[$index]
+}
+
+function Get-FileTransferRegularNknActiveProbeRecommendationSeverity {
+    param([string]$Recommendation)
+
+    switch ($Recommendation) {
+        'would_pause_bulk_until_feedback' { return 4 }
+        'would_try_fresh_bulk_client_probe' { return 3 }
+        'would_try_round_robin_probe' { return 2 }
+        'keep_current_path' { return 1 }
+        default { return 0 }
+    }
+}
+
+function Write-FileTransferRegularNknActiveProbeSummary {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactDir,
+        [Parameter(Mandatory = $true)]$Analysis
+    )
+
+    $startedEvents = @($Analysis.Summary.TransferEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_v6_regular_nkn_active_probe_started'
+        })
+    $resultEvents = @($Analysis.Summary.TransferEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_v6_regular_nkn_active_probe_result'
+        })
+    $decisionEvents = @($Analysis.Summary.TransferEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_v6_regular_nkn_active_probe_dry_run_decision'
+        })
+    $summaryEvents = @($Analysis.Summary.TransferEvents | Where-Object {
+            $_.EventName -eq 'filetransfer_v6_regular_nkn_active_probe_summary'
+        })
+
+    $successCount = 0
+    $timeoutCount = 0
+    $sendFailedCount = 0
+    $rttValues = New-Object System.Collections.Generic.List[double]
+    $worstClassification = 'none'
+    $worstSeverity = 0
+    $worstRecommendation = 'none'
+    $worstRecommendationSeverity = 0
+    $nonKeepRecommendationCount = 0
+    $keepCurrentPathCount = 0
+    $wouldTryRoundRobinProbeCount = 0
+    $wouldTryFreshBulkClientProbeCount = 0
+    $wouldPauseBulkUntilFeedbackCount = 0
+    foreach ($event in $resultEvents) {
+        $outcome = Get-FileTransferEventField -Event $event -Name 'outcome' -Default ''
+        if ($outcome -eq 'ack') {
+            $successCount++
+            $rtt = Get-FileTransferEventInt64Field -Event $event -Name 'rtt_ms' -Default -1
+            if ($rtt -ge 0) {
+                $rttValues.Add([double]$rtt) | Out-Null
+            }
+        }
+        elseif ($outcome -eq 'timeout') {
+            $timeoutCount++
+        }
+        elseif ($outcome -eq 'send_failed') {
+            $sendFailedCount++
+        }
+
+        $classification = Get-FileTransferEventField -Event $event -Name 'scout_classification' -Default 'none'
+        $severity = Get-FileTransferPassiveScoutClassificationSeverity -Classification $classification
+        if ($severity -gt $worstSeverity) {
+            $worstSeverity = $severity
+            $worstClassification = $classification
+        }
+    }
+
+    foreach ($event in $decisionEvents) {
+        $recommendation = Get-FileTransferEventField -Event $event -Name 'dry_run_recommendation' -Default 'none'
+        switch ($recommendation) {
+            'keep_current_path' {
+                $keepCurrentPathCount++
+            }
+            'would_try_round_robin_probe' {
+                $wouldTryRoundRobinProbeCount++
+                $nonKeepRecommendationCount++
+            }
+            'would_try_fresh_bulk_client_probe' {
+                $wouldTryFreshBulkClientProbeCount++
+                $nonKeepRecommendationCount++
+            }
+            'would_pause_bulk_until_feedback' {
+                $wouldPauseBulkUntilFeedbackCount++
+                $nonKeepRecommendationCount++
+            }
+        }
+
+        $recommendationSeverity = Get-FileTransferRegularNknActiveProbeRecommendationSeverity -Recommendation $recommendation
+        if ($recommendationSeverity -gt $worstRecommendationSeverity) {
+            $worstRecommendationSeverity = $recommendationSeverity
+            $worstRecommendation = $recommendation
+        }
+    }
+
+    $lastSummary = if ($summaryEvents.Count -gt 0) { $summaryEvents[-1] } else { $null }
+    if ($lastSummary -ne $null) {
+        $successCount = [Math]::Max($successCount, [int](Get-FileTransferEventInt64Field -Event $lastSummary -Name 'success_count' -Default 0))
+        $timeoutCount = [Math]::Max($timeoutCount, [int](Get-FileTransferEventInt64Field -Event $lastSummary -Name 'timeout_count' -Default 0))
+        $sendFailedCount = [Math]::Max($sendFailedCount, [int](Get-FileTransferEventInt64Field -Event $lastSummary -Name 'send_failed_count' -Default 0))
+        $reportedWorst = Get-FileTransferEventField -Event $lastSummary -Name 'worst_scout_classification' -Default ''
+        if (-not [string]::IsNullOrWhiteSpace($reportedWorst) -and $reportedWorst -ne 'none') {
+            $worstClassification = $reportedWorst
+        }
+
+        $reportedWorstRecommendation = Get-FileTransferEventField -Event $lastSummary -Name 'worst_dry_run_recommendation' -Default ''
+        if (-not [string]::IsNullOrWhiteSpace($reportedWorstRecommendation)) {
+            $reportedWorstRecommendationSeverity = Get-FileTransferRegularNknActiveProbeRecommendationSeverity -Recommendation $reportedWorstRecommendation
+            if ($reportedWorstRecommendationSeverity -gt $worstRecommendationSeverity) {
+                $worstRecommendationSeverity = $reportedWorstRecommendationSeverity
+                $worstRecommendation = $reportedWorstRecommendation
+            }
+        }
+
+        $nonKeepRecommendationCount = [Math]::Max($nonKeepRecommendationCount, [int](Get-FileTransferEventInt64Field -Event $lastSummary -Name 'non_keep_dry_run_recommendation_count' -Default 0))
+        $keepCurrentPathCount = [Math]::Max($keepCurrentPathCount, [int](Get-FileTransferEventInt64Field -Event $lastSummary -Name 'keep_current_path_count' -Default 0))
+        $wouldTryRoundRobinProbeCount = [Math]::Max($wouldTryRoundRobinProbeCount, [int](Get-FileTransferEventInt64Field -Event $lastSummary -Name 'would_try_round_robin_probe_count' -Default 0))
+        $wouldTryFreshBulkClientProbeCount = [Math]::Max($wouldTryFreshBulkClientProbeCount, [int](Get-FileTransferEventInt64Field -Event $lastSummary -Name 'would_try_fresh_bulk_client_probe_count' -Default 0))
+        $wouldPauseBulkUntilFeedbackCount = [Math]::Max($wouldPauseBulkUntilFeedbackCount, [int](Get-FileTransferEventInt64Field -Event $lastSummary -Name 'would_pause_bulk_until_feedback_count' -Default 0))
+    }
+
+    $finalRecommendation = 'none'
+    if ($decisionEvents.Count -gt 0) {
+        $finalRecommendation = Get-FileTransferEventField -Event $decisionEvents[-1] -Name 'dry_run_recommendation' -Default 'none'
+    }
+    elseif ($lastSummary -ne $null) {
+        $finalRecommendation = Get-FileTransferEventField -Event $lastSummary -Name 'final_dry_run_recommendation' -Default 'none'
+    }
+
+    $reliabilityWarningCount =
+        (Get-FileTransferGlobalSumField -Summary $Analysis.Summary -EventName 'nkn_bridge_bulk_send_summary' -FieldName 'send_failures') +
+        (Get-FileTransferGlobalEventCountFromSummary -Summary $Analysis.Summary -EventName 'nkn_bridge_bulk_queue_waiting') +
+        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v6_chunk_batch_send_timeout') +
+        (Get-FileTransferEventCount -Events $Analysis.Summary.TransferEvents -Name 'filetransfer_v6_chunk_batch_send_deferred_for_recovery')
+
+    $summary = [ordered]@{
+        artifact_kind = 'regular-nkn-active-probe'
+        status = if ($startedEvents.Count -gt 0 -or $resultEvents.Count -gt 0) { 'observed' } else { 'not_enabled_or_no_probes' }
+        started_count = $startedEvents.Count
+        probe_count = [Math]::Max($startedEvents.Count, $resultEvents.Count)
+        success_count = $successCount
+        timeout_count = $timeoutCount
+        send_failed_count = $sendFailedCount
+        rtt_p50_ms = Get-FileTransferRegularNknActiveProbePercentile -Values $rttValues.ToArray() -Percentile 0.50
+        rtt_p95_ms = Get-FileTransferRegularNknActiveProbePercentile -Values $rttValues.ToArray() -Percentile 0.95
+        worst_scout_classification = $worstClassification
+        final_dry_run_recommendation = $finalRecommendation
+        worst_dry_run_recommendation = $worstRecommendation
+        non_keep_dry_run_recommendation_count = $nonKeepRecommendationCount
+        keep_current_path_count = $keepCurrentPathCount
+        would_try_round_robin_probe_count = $wouldTryRoundRobinProbeCount
+        would_try_fresh_bulk_client_probe_count = $wouldTryFreshBulkClientProbeCount
+        would_pause_bulk_until_feedback_count = $wouldPauseBulkUntilFeedbackCount
+        reliability_warning_overlap_count = $reliabilityWarningCount
+        terminal_summary_count = $summaryEvents.Count
+    }
+
+    if ($lastSummary -ne $null) {
+        $summary.terminal_state = Get-FileTransferEventField -Event $lastSummary -Name 'terminal_state' -Default ''
+        $summary.terminal_reason = Get-FileTransferEventField -Event $lastSummary -Name 'terminal_reason' -Default ''
+        $summary.last_outcome = Get-FileTransferEventField -Event $lastSummary -Name 'last_outcome' -Default 'none'
+    }
+    else {
+        $summary.terminal_state = ''
+        $summary.terminal_reason = ''
+        $summary.last_outcome = 'none'
+    }
+
+    $txtLines = New-Object System.Collections.Generic.List[string]
+    foreach ($key in $summary.Keys) {
+        $txtLines.Add(("{0}={1}" -f $key, $summary[$key])) | Out-Null
+    }
+
+    $txtLines | Set-Content -LiteralPath (Join-Path $ArtifactDir 'regular-nkn-active-probe-summary.txt') -Encoding UTF8
+    $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $ArtifactDir 'regular-nkn-active-probe-summary.json') -Encoding UTF8
+}
+
 function Test-FileTransferNknSoakFakeGuiMode {
     $value = [System.Environment]::GetEnvironmentVariable('NLINK_FILETRANSFER_NKN_SOAK_FAKE_GUI')
     return -not [string]::IsNullOrWhiteSpace($value) -and $value -match '^(1|true|yes|on)$'
@@ -828,6 +1045,11 @@ function Test-FileTransferNknSoakFakeProgressTimeout {
 
 function Test-FileTransferNknSoakFakePassiveScout {
     $value = [System.Environment]::GetEnvironmentVariable('NLINK_FILETRANSFER_NKN_SOAK_FAKE_PASSIVE_SCOUT')
+    return -not [string]::IsNullOrWhiteSpace($value) -and $value -match '^(1|true|yes|on)$'
+}
+
+function Test-FileTransferNknSoakFakeActiveProbe {
+    $value = [System.Environment]::GetEnvironmentVariable('NLINK_FILETRANSFER_NKN_SOAK_FAKE_ACTIVE_PROBE')
     return -not [string]::IsNullOrWhiteSpace($value) -and $value -match '^(1|true|yes|on)$'
 }
 
@@ -953,6 +1175,7 @@ function Write-FileTransferNknFakeArtifacts {
     }
     $goodputBytesPerSecond = Get-FileTransferNknFakeGoodputBytesPerSecond
     $emitPassiveScout = Test-FileTransferNknSoakFakePassiveScout
+    $emitActiveProbe = Test-FileTransferNknSoakFakeActiveProbe
     $baseTimestamp = [datetime]::UtcNow
     $logLines = New-Object System.Collections.Generic.List[string]
     $cycleLines = New-Object System.Collections.Generic.List[string]
@@ -960,6 +1183,8 @@ function Write-FileTransferNknFakeArtifacts {
 
     $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $baseTimestamp -Message (
                 'event=filetransfer_live_nkn_fake_soak_started; mode={0}; scenario={1}; seed={2}; direction={3}' -f $Mode, $Scenario, $Seed, $Direction))) | Out-Null
+    $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $baseTimestamp.AddMilliseconds(20) -Message 'event=bridge_bundle_loaded; bridge_script_path=fake-bridge\\win-x64\\index.js; bridge_manifest_path=fake-bridge\\win-x64\\bridge-manifest.json; manifest_status=ok; manifest_reason=ok; manifest_version=1; app_version=0.7.0; bridge_script_sha256=fake; manifest_bridge_script_sha256=fake; node_version=v24.13.1; owner_pid_watchdog=true; kill_on_close_job=true')) | Out-Null
+    $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $baseTimestamp.AddMilliseconds(40) -Message 'event=screenshare_bridge_transport_health_summary; selected_rpc=fake; selected_rpc_key=fake; selected_rpc_stage=initial; connect_id=fake; connect_key=fake; ready_emitted=1; client_ready_age_ms=100; disconnect_count_since_last=0; connect_failed_count_since_last=0; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1; frames_sent_since_last=0; latest_disconnect_reason=(none); sample_window_ms=2000; control_subclients=4; media_subclients=8; bulk_subclients=4; bulk_send_concurrency=4; bulk_send_mode=fanout; control_messages_received_since_last=0; media_messages_received_since_last=0; bulk_messages_received_since_last=0; total_messages_received_since_last=0; control_bytes_received_since_last=0; media_bytes_received_since_last=0; bulk_bytes_received_since_last=0; total_bytes_received_since_last=0; control_last_received_age_ms=-1; media_last_received_age_ms=-1; bulk_last_received_age_ms=-1')) | Out-Null
 
     if (Test-FileTransferNknSoakFakeProgressTimeout) {
         $transferId = 'fake-live-nkn-timeout'
@@ -1042,6 +1267,14 @@ function Write-FileTransferNknFakeArtifacts {
             $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(152) -Message (
                         'event=filetransfer_v6_regular_nkn_passive_scout_recommendation; direction=outbound; transfer_id={0}; session_id={1}; classification=degraded; recommendation=would_probe_round_robin; reason=high_frames_per_mib; sample_count=1; worst_classification=degraded; max_committed_progress_gap_ms=12000; degraded_profile_entry_count=1; frontier_request_received_count=0' -f $transferId, $sessionId))) | Out-Null
         }
+        if ($emitActiveProbe) {
+            $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(154) -Message (
+                        'event=filetransfer_v6_regular_nkn_active_probe_started; direction=outbound; transfer_id={0}; session_id={1}; dry_run=1; probe_id=v6-rnkn-probe-1; synthetic_transport_epoch=4000000001; target_transport=regular_nkn; scout_classification=watch; scout_recommendation=would_probe_round_robin; scout_reason=below_target_goodput; consecutive_watch_samples=4; receiver_feedback_age_ms=100; committed_progress_gap_ms=0; cooldown_ms=30000; timeout_ms=3000' -f $transferId, $sessionId))) | Out-Null
+            $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(220) -Message (
+                        'event=filetransfer_v6_regular_nkn_active_probe_result; direction=outbound; transfer_id={0}; session_id={1}; dry_run=1; probe_id=v6-rnkn-probe-1; synthetic_transport_epoch=4000000001; outcome=ack; rtt_ms=66; elapsed_ms=66; scout_classification=watch; scout_reason=below_target_goodput; receiver_feedback_age_ms=100; committed_progress_gap_ms=0; error=(none)' -f $transferId, $sessionId))) | Out-Null
+            $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(222) -Message (
+                        'event=filetransfer_v6_regular_nkn_active_probe_dry_run_decision; direction=outbound; transfer_id={0}; session_id={1}; dry_run=1; probe_id=v6-rnkn-probe-1; synthetic_transport_epoch=4000000001; outcome=ack; dry_run_recommendation=keep_current_path; rtt_ms=66; scout_classification=watch; scout_reason=below_target_goodput; success_count=1; timeout_count=0; send_failed_count=0; worst_dry_run_recommendation=keep_current_path; non_keep_dry_run_recommendation_count=0; keep_current_path_count=1; would_try_round_robin_probe_count=0; would_try_fresh_bulk_client_probe_count=0; would_pause_bulk_until_feedback_count=0' -f $transferId, $sessionId))) | Out-Null
+        }
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(160) -Message (
                     'event=file_transfer_inbound_terminal; role=helper; session_id={0}; transfer_id={1}; state=Completed; error_code=(none); chunks_transferred={2}/{2}; reason=Transfer complete; saved_path=(none)' -f $sessionId, $transferId, $chunkFrameCount))) | Out-Null
         $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(180) -Message (
@@ -1049,6 +1282,10 @@ function Write-FileTransferNknFakeArtifacts {
         if ($emitPassiveScout) {
             $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(190) -Message (
                         'event=filetransfer_v6_regular_nkn_passive_scout_summary; direction=outbound; transfer_id={0}; session_id={1}; terminal_state=Completed; terminal_reason=Transfer_complete; sample_count=1; worst_classification=degraded; recommendation_count=1; max_committed_progress_gap_ms=12000; degraded_window_count=1; high_frames_per_mib_window_count=1; final_recommendation=would_probe_round_robin; degraded_profile_entry_count=1; frontier_request_received_count=0; duration_ms=2000' -f $transferId, $sessionId))) | Out-Null
+        }
+        if ($emitActiveProbe) {
+            $logLines.Add((New-FileTransferNknFakeLogLine -TimestampUtc $timestamp.AddMilliseconds(224) -Message (
+                        'event=filetransfer_v6_regular_nkn_active_probe_summary; direction=outbound; transfer_id={0}; session_id={1}; terminal_state=Completed; terminal_reason=Transfer_complete; probe_count=1; success_count=1; timeout_count=0; send_failed_count=0; rtt_p50_ms=66; rtt_p95_ms=66; worst_scout_classification=watch; final_dry_run_recommendation=keep_current_path; worst_dry_run_recommendation=keep_current_path; non_keep_dry_run_recommendation_count=0; keep_current_path_count=1; would_try_round_robin_probe_count=0; would_try_fresh_bulk_client_probe_count=0; would_pause_bulk_until_feedback_count=0; last_outcome=ack; suppression_reason=(none); duration_ms=2000' -f $transferId, $sessionId))) | Out-Null
         }
 
         $durationMs = [Math]::Max(1, [int][Math]::Round(($payloadBytes / $goodputBytesPerSecond) * 1000.0))
@@ -1085,6 +1322,7 @@ function Clear-FileTransferNknRunArtifacts {
 
     foreach ($name in @(
             'baseline-comparison.txt',
+            'bridge-config-summary.txt',
             'bridge-bulk-summary.txt',
             'coexistence-summary.txt',
             'external-transport-health-summary.txt',
@@ -1099,6 +1337,8 @@ function Clear-FileTransferNknRunArtifacts {
             'payload-efficiency-summary.txt',
             'protocol-shape-summary.txt',
             'raw-log-slices.txt',
+            'regular-nkn-active-probe-summary.json',
+            'regular-nkn-active-probe-summary.txt',
             'regular-nkn-passive-scout-summary.json',
             'regular-nkn-passive-scout-summary.txt',
             'repair-reorder-summary.txt',
@@ -1262,6 +1502,10 @@ try {
         -ArtifactDir $resolvedArtifactDir `
         -Analysis $analysis
 
+    Write-FileTransferRegularNknActiveProbeSummary `
+        -ArtifactDir $resolvedArtifactDir `
+        -Analysis $analysis
+
     $baseline = Write-FileTransferBaselineComparison `
         -ArtifactDir $resolvedArtifactDir `
         -SafeBaselineArtifactDir $SafeBaselineArtifactDir `
@@ -1286,6 +1530,9 @@ try {
     $completedLiveCyclesForGate = @($liveCyclesForGate | Where-Object { $_.completed -eq $true -and $_.integrity_ok -eq $true })
     $observedFailedLiveCyclesForGate = @($liveCyclesForGate | Where-Object { $_.completed -ne $true -or $_.integrity_ok -ne $true })
     $liveMatrixIncompleteForGate = $effectiveLiveCycles -gt 0 -and $completedLiveCyclesForGate.Count -lt $effectiveLiveCycles
+    $liveSummaryForGate = Read-FileTransferPromotionKeyValueArtifact -Path (Join-Path $resolvedArtifactDir 'filetransfer-live-nkn-summary.txt')
+    $bridgeConfigUnexpectedDriftForGate = $liveSummaryForGate.ContainsKey('bridge_config_status') -and
+        [string]::Equals($liveSummaryForGate['bridge_config_status'], 'unexpected_drift', [System.StringComparison]::OrdinalIgnoreCase)
 
     if ($FailOnGate -and (
             $analysis.GateResult.Verdict -eq 'FAIL_PROTOCOL_OR_INTEGRITY' -or
@@ -1293,6 +1540,7 @@ try {
             $analysis.GateResult.Verdict -eq 'INCONCLUSIVE_PROGRESS_TIMEOUT' -or
             $analysis.GateResult.Verdict -eq 'INVALID_SETUP' -or
             $liveMatrixIncompleteForGate -or
+            $bridgeConfigUnexpectedDriftForGate -or
             $observedFailedLiveCyclesForGate.Count -gt 0 -or
             $baseline.RegressionFailed)) {
         exit 1

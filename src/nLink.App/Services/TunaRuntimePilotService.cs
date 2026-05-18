@@ -114,7 +114,7 @@ internal sealed class TunaRuntimePreferenceState
 
     public int MaxDurationSec { get; init; } = DefaultMaxDurationSec;
 
-    public bool AllowDegradedProviderReady { get; init; } = true;
+    public bool AllowDegradedProviderReady { get; init; } = false;
 
     public string LastRuntimeStatus { get; init; } = "off";
 
@@ -1336,7 +1336,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             return null;
         }
 
-        var allowDegradedProviderReady = EffectiveAllowDegradedProviderReady(currentPreferences);
+        var allowDegradedProviderReady = EffectiveAllowDegradedProviderReady();
         return new NknTunaListenerSidecarOptions
         {
             SidecarExePath = availability.SidecarPath,
@@ -1359,7 +1359,7 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
         };
     }
 
-    private static bool EffectiveAllowDegradedProviderReady(TunaRuntimePreferenceState preferences)
+    private static bool EffectiveAllowDegradedProviderReady()
     {
         if (IsEnabled(ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
                 TunaRuntimePreferenceState.RequireStrictProviderReadyEnvVar,
@@ -1368,10 +1368,9 @@ internal sealed class TunaRuntimePilotService : ITunaRuntimePilotService
             return false;
         }
 
-        return preferences.AllowDegradedProviderReady ||
-               IsEnabled(ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
-                   TunaRuntimePreferenceState.AllowDegradedProviderReadyEnvVar,
-                   category: "nkn_tuna_provider_readiness"));
+        return IsEnabled(ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
+            TunaRuntimePreferenceState.AllowDegradedProviderReadyEnvVar,
+            category: "nkn_tuna_provider_readiness"));
     }
 
     private static int EffectiveDegradedProviderGraceSeconds()

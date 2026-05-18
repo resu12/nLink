@@ -74,6 +74,15 @@ public static class FileTransferProtocol
     public const int MaxChunkBatchRawBytesV6 = MaxChunkBatchRawBytesV5;
     public const int MaxSerializedChunkBatchPayloadBytesV6 = MaxSerializedChunkBatchPayloadBytesV5;
 
+    public static bool IsV4DataFrame(FileTransferDataFrame? frame)
+        => frame is FileTransferManifestFrameV4 and not FileTransferManifestFrameV5 and not FileTransferManifestFrameV6
+            or FileTransferStateFrameV4 and not FileTransferStateFrameV5 and not FileTransferReceiverStateFrameV6
+            or FileTransferChunkBatchFrameV4 and not FileTransferChunkBatchFrameV5 and not FileTransferChunkBatchFrameV6
+            or FileTransferCompleteFrameV4 and not FileTransferCompleteFrameV5 and not FileTransferCompleteFrameV6
+            or FileTransferCancelFrameV4 and not FileTransferCancelFrameV5 and not FileTransferCancelFrameV6
+            or FileTransferErrorFrameV4 and not FileTransferErrorFrameV5 and not FileTransferErrorFrameV6
+            or FileTransferPauseControlFrameV4 and not FileTransferPauseControlFrameV5 and not FileTransferPauseControlFrameV6;
+
     public static bool IsV6DataFrame(FileTransferDataFrame? frame)
         => frame is FileTransferManifestFrameV6
             or FileTransferReceiverStateFrameV6

@@ -448,7 +448,7 @@ public void DiagnosticsPageViewModel_UsesOptionsLabels_AndHidesEmptyBugReport()
 [InlineData("listener_start_timeout", "Tuna listener startup timed out. Retrying if possible; regular NKN stays connected.", true)]
 [InlineData("provider_paths_retrying", "Looking for enough Tuna relay paths. Regular NKN stays connected while Tuna retries.", true)]
 [InlineData("provider_paths_ready", "Tuna relay paths are ready. Waiting for peer connection.", true)]
-[InlineData("provider_paths_degraded", "Tuna relay paths are limited but usable. Waiting for peer connection.", true)]
+[InlineData("provider_paths_degraded", "Tuna relay paths are degraded. Regular NKN is being used while Tuna retries.", true)]
 [InlineData("waiting_for_peer_dial", "Waiting for the other side to connect to Tuna.", true)]
 [InlineData("waiting_for_answer", "Negotiating Tuna acceleration.", true)]
 [InlineData("renegotiating_after_user_unlock", "Trying Tuna again for this session.", true)]
@@ -756,7 +756,7 @@ public void SessionHeaderTunaSwitch_OverridesCompactButtonMinimumWidth()
 }
 
 [Fact]
-public void TunaRuntimeProviderReadiness_DefaultsDegradedWithStrictOverride()
+public void TunaRuntimeProviderReadiness_DefaultsStrictWithDiagnosticDegradedOverride()
 {
     var servicePath = FindFileUpwards(Path.Combine("src", "nLink.App", "Services", "TunaRuntimePilotService.cs"));
     var source = File.ReadAllText(servicePath);
@@ -767,7 +767,8 @@ public void TunaRuntimeProviderReadiness_DefaultsDegradedWithStrictOverride()
     Assert.Contains("RequireProviderReady = !allowDegradedProviderReady", source, StringComparison.Ordinal);
     Assert.Contains("strict_provider_ready", source, StringComparison.Ordinal);
     Assert.Contains("degraded_provider_ready", source, StringComparison.Ordinal);
-    Assert.Contains("AllowDegradedProviderReady { get; init; } = true", source, StringComparison.Ordinal);
+    Assert.Contains("AllowDegradedProviderReady { get; init; } = false", source, StringComparison.Ordinal);
+    Assert.DoesNotContain("preferences.AllowDegradedProviderReady", source, StringComparison.Ordinal);
 }
 
 [Fact]

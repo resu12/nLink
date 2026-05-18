@@ -1700,6 +1700,7 @@ function Write-DeterministicFileTransferPayload {
 function Resolve-FileTransferLiveReceivedFilePath {
     param(
         [string]$LoggedPath = '',
+        [string]$ArtifactDir = '',
         [Parameter(Mandatory = $true)][string]$ExpectedFileName,
         [Parameter(Mandatory = $true)][long]$ExpectedSizeBytes,
         [Parameter(Mandatory = $true)][datetime]$NotBeforeUtc
@@ -1718,20 +1719,29 @@ function Resolve-FileTransferLiveReceivedFilePath {
         }
     }
 
-    $incomingRoot = Join-Path $env:LOCALAPPDATA 'nLink\transfers\incoming'
-    if (-not (Test-Path -LiteralPath $incomingRoot -PathType Container)) {
-        return ''
+    $candidateRoots = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($ArtifactDir)) {
+        $candidateRoots.Add((Join-Path $ArtifactDir 'received')) | Out-Null
     }
 
-    $minimumWriteUtc = $NotBeforeUtc.AddMilliseconds(-500)
-    $matches = @(
-        Get-ChildItem -LiteralPath $incomingRoot -Recurse -File -Filter $ExpectedFileName -ErrorAction SilentlyContinue |
-            Where-Object { $_.Length -eq $ExpectedSizeBytes -and $_.LastWriteTimeUtc -ge $minimumWriteUtc } |
-            Sort-Object LastWriteTimeUtc -Descending
-    )
+    $incomingRoot = Join-Path $env:LOCALAPPDATA 'nLink\transfers\incoming'
+    $candidateRoots.Add($incomingRoot) | Out-Null
 
-    if ($matches.Count -gt 0) {
-        return $matches[0].FullName
+    $minimumWriteUtc = $NotBeforeUtc.AddMilliseconds(-500)
+    foreach ($candidateRoot in $candidateRoots) {
+        if (-not (Test-Path -LiteralPath $candidateRoot -PathType Container)) {
+            continue
+        }
+
+        $matches = @(
+            Get-ChildItem -LiteralPath $candidateRoot -Recurse -File -Filter $ExpectedFileName -ErrorAction SilentlyContinue |
+                Where-Object { $_.Length -eq $ExpectedSizeBytes -and $_.LastWriteTimeUtc -ge $minimumWriteUtc } |
+                Sort-Object LastWriteTimeUtc -Descending
+        )
+
+        if ($matches.Count -gt 0) {
+            return $matches[0].FullName
+        }
     }
 
     return ''
@@ -1739,28 +1749,38 @@ function Resolve-FileTransferLiveReceivedFilePath {
 
 function Find-FileTransferLiveReceivedFileByHash {
     param(
+        [string]$ArtifactDir = '',
         [Parameter(Mandatory = $true)][string]$ExpectedFileName,
         [Parameter(Mandatory = $true)][long]$ExpectedSizeBytes,
         [Parameter(Mandatory = $true)][datetime]$NotBeforeUtc,
         [Parameter(Mandatory = $true)][string]$ExpectedHash
     )
 
-    $incomingRoot = Join-Path $env:LOCALAPPDATA 'nLink\transfers\incoming'
-    if (-not (Test-Path -LiteralPath $incomingRoot -PathType Container)) {
-        return ''
+    $candidateRoots = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($ArtifactDir)) {
+        $candidateRoots.Add((Join-Path $ArtifactDir 'received')) | Out-Null
     }
 
+    $incomingRoot = Join-Path $env:LOCALAPPDATA 'nLink\transfers\incoming'
+    $candidateRoots.Add($incomingRoot) | Out-Null
+
     $minimumWriteUtc = $NotBeforeUtc.AddMilliseconds(-500)
-    foreach ($candidate in @(Get-ChildItem -LiteralPath $incomingRoot -Recurse -File -Filter $ExpectedFileName -ErrorAction SilentlyContinue |
-            Where-Object { $_.Length -eq $ExpectedSizeBytes -and $_.LastWriteTimeUtc -ge $minimumWriteUtc } |
-            Sort-Object LastWriteTimeUtc -Descending)) {
-        try {
-            $hash = Get-FileSha256Hex -Path $candidate.FullName
-            if ($hash -eq $ExpectedHash) {
-                return $candidate.FullName
-            }
+    foreach ($candidateRoot in $candidateRoots) {
+        if (-not (Test-Path -LiteralPath $candidateRoot -PathType Container)) {
+            continue
         }
-        catch {
+
+        foreach ($candidate in @(Get-ChildItem -LiteralPath $candidateRoot -Recurse -File -Filter $ExpectedFileName -ErrorAction SilentlyContinue |
+                Where-Object { $_.Length -eq $ExpectedSizeBytes -and $_.LastWriteTimeUtc -ge $minimumWriteUtc } |
+                Sort-Object LastWriteTimeUtc -Descending)) {
+            try {
+                $hash = Get-FileSha256Hex -Path $candidate.FullName
+                if ($hash -eq $ExpectedHash) {
+                    return $candidate.FullName
+                }
+            }
+            catch {
+            }
         }
     }
 
@@ -1948,7 +1968,8 @@ function Wait-FileTransferTerminalPairAfterBookmark {
         [long]$ExpectedSizeBytes = 0,
         [string]$ExpectedInboundRole = '',
         [string]$ExpectedOutboundRole = '',
-        [datetime]$NotBeforeUtc = [datetime]::MinValue
+        [datetime]$NotBeforeUtc = [datetime]::MinValue,
+        [string]$ArtifactDir = ''
     )
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -2005,6 +2026,7 @@ function Wait-FileTransferTerminalPairAfterBookmark {
                     $savedPath = Get-GuiSmokeFieldValue -Fields $fields -Name 'saved_path' -Default '(none)'
                     $resolvedSavedPath = Resolve-FileTransferLiveReceivedFilePath `
                         -LoggedPath $savedPath `
+                        -ArtifactDir $ArtifactDir `
                         -ExpectedFileName $ExpectedFileName `
                         -ExpectedSizeBytes $ExpectedSizeBytes `
                         -NotBeforeUtc $NotBeforeUtc
@@ -2120,7 +2142,8 @@ function Invoke-FileTransferLiveCycle {
         -ExpectedSizeBytes $PayloadSizeBytes `
         -ExpectedInboundRole $expectedInboundRole `
         -ExpectedOutboundRole $expectedOutboundRole `
-        -NotBeforeUtc $cycleStartedUtc
+        -NotBeforeUtc $cycleStartedUtc `
+        -ArtifactDir $ArtifactDir
     $sw.Stop()
 
     $inbound = $terminal.Inbound
@@ -2130,6 +2153,7 @@ function Invoke-FileTransferLiveCycle {
     if ([string]::IsNullOrWhiteSpace($resolvedSavedPath)) {
         $resolvedSavedPath = Resolve-FileTransferLiveReceivedFilePath `
             -LoggedPath $savedPath `
+            -ArtifactDir $ArtifactDir `
             -ExpectedFileName ([System.IO.Path]::GetFileName($AutopickPath)) `
             -ExpectedSizeBytes $PayloadSizeBytes `
             -NotBeforeUtc $cycleStartedUtc
@@ -2151,6 +2175,7 @@ function Invoke-FileTransferLiveCycle {
     $harnessVerifierWarning = ''
     if ($completed -and -not $integrityOk) {
         $alternateMatchingPath = Find-FileTransferLiveReceivedFileByHash `
+            -ArtifactDir $ArtifactDir `
             -ExpectedFileName ([System.IO.Path]::GetFileName($AutopickPath)) `
             -ExpectedSizeBytes $PayloadSizeBytes `
             -NotBeforeUtc $cycleStartedUtc `
@@ -2428,6 +2453,7 @@ function Initialize-TunaGuiRuntimeState {
     }
     $walletState | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stateRoot 'tuna-wallet-link.json') -Encoding UTF8
 
+    $allowDegradedProviderReady = Test-GuiSmokeEnvEnabled -Name 'NLINK_TUNA_TEST_ALLOW_DEGRADED_PROVIDER_READY'
     $preferences = [ordered]@{
         enabled = $true
         fileLaneEnabled = $true
@@ -2435,7 +2461,7 @@ function Initialize-TunaGuiRuntimeState {
         maxPriceNknPerMb = '0.0002'
         maxTotalMiB = 2048
         maxDurationSec = 1800
-        allowDegradedProviderReady = $true
+        allowDegradedProviderReady = $allowDegradedProviderReady
         lastRuntimeStatus = 'locked'
     }
     $preferences | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stateRoot 'tuna-runtime-preferences.json') -Encoding UTF8
@@ -2448,7 +2474,11 @@ function Initialize-TunaGuiRuntimeState {
     $env:NLINK_TUNA_STATE_ROOT = $stateRoot
     $env:NLINK_NKN_TUNA_SIDECAR_EXE = $SidecarPath
     $env:NLINK_NKN_TUNA_LANES = 'file'
-    $env:NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY = '1'
+    if ($allowDegradedProviderReady) {
+        $env:NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY = '1'
+    } else {
+        Remove-Item Env:NLINK_NKN_TUNA_ALLOW_DEGRADED_PROVIDER_READY -ErrorAction SilentlyContinue
+    }
 
     if ([string]::IsNullOrWhiteSpace($env:NLINK_NKN_TUNA_DEGRADED_PROVIDER_GRACE_SECONDS) -and
         -not [string]::IsNullOrWhiteSpace($env:NLINK_TUNA_TEST_DEGRADED_PROVIDER_GRACE_SECONDS)) {
@@ -3009,7 +3039,8 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
         -ExpectedSizeBytes $PayloadSizeBytes `
         -ExpectedInboundRole $expectedInboundRole `
         -ExpectedOutboundRole $expectedOutboundRole `
-        -NotBeforeUtc $cycleStartedUtc
+        -NotBeforeUtc $cycleStartedUtc `
+        -ArtifactDir $ArtifactDir
     $sw.Stop()
 
     $inbound = $terminal.Inbound
@@ -3019,6 +3050,7 @@ function Invoke-FileTransferTunaHandoffFallbackCycle {
     if ([string]::IsNullOrWhiteSpace($resolvedSavedPath)) {
         $resolvedSavedPath = Resolve-FileTransferLiveReceivedFilePath `
             -LoggedPath $savedPath `
+            -ArtifactDir $ArtifactDir `
             -ExpectedFileName ([System.IO.Path]::GetFileName($AutopickPath)) `
             -ExpectedSizeBytes $PayloadSizeBytes `
             -NotBeforeUtc $cycleStartedUtc

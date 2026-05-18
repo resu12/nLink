@@ -13,22 +13,32 @@ public sealed partial class SessionFileTransferService
     private static TimeSpan CurrentV6SenderRequestFeedbackStallRecoveryDelay
         => V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests ?? TimeSpan.FromMilliseconds(V6SenderRequestFeedbackStallRecoveryMs);
 
+    private static TimeSpan CurrentV6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelay
+        => V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelayOverrideForTests ??
+           TimeSpan.FromMilliseconds(V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryMs);
+
+    private static TimeSpan CurrentV6RegularNknSparseRuntimeStateRefreshCooldown
+        => V6RegularNknSparseRuntimeStateRefreshCooldownOverrideForTests ??
+           TimeSpan.FromMilliseconds(V6RegularNknSparseRuntimeStateRefreshCooldownMs);
+
     private static TimeSpan CurrentV6SenderRequestFeedbackStallRecoveryCooldown
         => TimeSpan.FromMilliseconds(V6SenderRequestFeedbackStallRecoveryCooldownMs);
 
     private bool TryRequestFileTransferReceiveRecovery(FileTransferReceiveRecoveryRequest request)
     {
         IFileTransferReceiveRecoveryController? controller;
+        FileTransferBridgeRecoveryPolicy bridgeRecoveryPolicy;
         lock (gate)
         {
             controller = transport as IFileTransferReceiveRecoveryController;
+            bridgeRecoveryPolicy = ResolveReceiveRecoveryPolicyForRequestLocked(request);
         }
 
         if (controller is null)
         {
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v6_transport_receive_recovery_request_unsupported; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}");
+                $"event=filetransfer_v6_transport_receive_recovery_request_unsupported; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(bridgeRecoveryPolicy)}");
             return false;
         }
 
@@ -37,14 +47,14 @@ public sealed partial class SessionFileTransferService
             controller.RequestFileTransferReceiveRecovery(request);
             LocalOperationalLog.Info(
                 "FileTransferService",
-                $"event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}");
+                $"event=filetransfer_v6_transport_receive_recovery_request_dispatched; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(bridgeRecoveryPolicy)}");
             return true;
         }
         catch (Exception ex)
         {
             LocalOperationalLog.Warn(
                 "FileTransferService",
-                $"event=filetransfer_v6_transport_receive_recovery_request_failed; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; error={FormatProtocolLogValue(ex.GetType().Name)}");
+                $"event=filetransfer_v6_transport_receive_recovery_request_failed; direction={request.Direction.ToString().ToLowerInvariant()}; transfer_id={request.TransferId}; session_id={request.SessionId}; reason={FormatProtocolLogValue(request.Reason)}; error={FormatProtocolLogValue(ex.GetType().Name)}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(bridgeRecoveryPolicy)}");
             return false;
         }
     }
@@ -68,26 +78,37 @@ public sealed partial class SessionFileTransferService
         return recoveryTimeout > timeout ? recoveryTimeout : timeout;
     }
 
+    private static TimeSpan ResolveV6RegularNknPeerLivenessRepairGrace(TimeSpan peerLivenessTimeout)
+    {
+        if (peerLivenessTimeout <= TimeSpan.Zero)
+        {
+            return TimeSpan.Zero;
+        }
+
+        var ticks = peerLivenessTimeout.Ticks;
+        var graceTicks = ticks > TimeSpan.MaxValue.Ticks / V6RegularNknPeerLivenessRepairGraceMultiplier
+            ? TimeSpan.MaxValue.Ticks
+            : ticks * V6RegularNknPeerLivenessRepairGraceMultiplier;
+        return TimeSpan.FromTicks(graceTicks);
+    }
+
     private static DateTimeOffset? ResolveV6PeerLivenessDeadlineBaseUtc(
         DateTimeOffset? lastPeerLivenessUtc,
         V6TransportEpoch? epoch,
         DateTimeOffset? epochLivenessDeferralUtc)
     {
-        if (!IsV6TransportEpochUnresolved(epoch) ||
-            epoch is null)
-        {
-            return lastPeerLivenessUtc;
-        }
-
         var baseUtc = lastPeerLivenessUtc;
-        if (baseUtc is null ||
-            epoch.StartedUtc > baseUtc.Value)
+        if (IsV6TransportEpochUnresolved(epoch) &&
+            epoch is not null &&
+            (baseUtc is null ||
+             epoch.StartedUtc > baseUtc.Value))
         {
             baseUtc = epoch.StartedUtc;
         }
 
         if (epochLivenessDeferralUtc is not null &&
-            epochLivenessDeferralUtc.Value > baseUtc.Value)
+            (baseUtc is null ||
+             epochLivenessDeferralUtc.Value > baseUtc.Value))
         {
             baseUtc = epochLivenessDeferralUtc.Value;
         }
@@ -321,8 +342,13 @@ public sealed partial class SessionFileTransferService
 
                 if (timedOut)
                 {
-                    await TerminalizeInboundForPeerLivenessTimeoutAsync(context, lastPeerLivenessUtc, peerLivenessTimeout).ConfigureAwait(false);
-                    return;
+                    var terminalized = await TerminalizeInboundForPeerLivenessTimeoutAsync(context, lastPeerLivenessUtc, peerLivenessTimeout).ConfigureAwait(false);
+                    if (terminalized)
+                    {
+                        return;
+                    }
+
+                    continue;
                 }
 
                 if (heartbeat is not null)
@@ -353,6 +379,20 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (TryDeferOutboundV6PeerLivenessTimeoutForRegularNknFeedbackRepair(
+                context,
+                lastPeerLivenessUtc,
+                peerLivenessTimeout,
+                out var outboundToSignal))
+        {
+            if (outboundToSignal is not null)
+            {
+                SignalOutboundV4SenderPump(outboundToSignal);
+            }
+
+            return false;
+        }
+
         if (TryDeferOutboundV6PeerLivenessTimeoutForRecovery(
                 context,
                 lastPeerLivenessUtc,
@@ -374,6 +414,44 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        if (TryDeferOutboundV6PeerLivenessTimeoutForSparseRuntimePrimaryRegularNkn(
+                context,
+                lastPeerLivenessUtc,
+                peerLivenessTimeout,
+                out var sparseRuntimeOutboundToSignal))
+        {
+            var primaryRegularNknBulkV6 = false;
+            lock (gate)
+            {
+                primaryRegularNknBulkV6 =
+                    ReferenceEquals(outboundTransfer, context) &&
+                    !context.IsTerminal &&
+                    IsPrimaryRegularNknBulkV6ContextLocked(context);
+            }
+
+            if (primaryRegularNknBulkV6)
+            {
+                LocalOperationalLog.Warn(
+                    "FileTransferService",
+                    $"event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_recovery_deferred_bridge_recovery; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason=peer_liveness_stale; recovery_profile=regular_nkn_checkpoint_sync");
+            }
+            else
+            {
+                TryRequestFileTransferReceiveRecovery(new FileTransferReceiveRecoveryRequest(
+                    context.SessionId,
+                    context.TransferId,
+                    FileTransferDirection.Outbound,
+                    "v6_sparse_runtime_peer_liveness_recovery"));
+            }
+
+            if (sparseRuntimeOutboundToSignal is not null)
+            {
+                SignalOutboundV4SenderPump(sparseRuntimeOutboundToSignal);
+            }
+
+            return false;
+        }
+
         LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_v6_heartbeat_timeout; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; last_peer_liveness_utc={FormatProtocolLogValue(lastPeerLivenessUtc?.ToString("O"))}; timeout_ms={(long)peerLivenessTimeout.TotalMilliseconds}");
@@ -385,6 +463,78 @@ public sealed partial class SessionFileTransferService
             notifyPeer: true,
             cancelReason: null,
             ct: CancellationToken.None).ConfigureAwait(false);
+        return true;
+    }
+
+    private bool TryDeferOutboundV6PeerLivenessTimeoutForSparseRuntimePrimaryRegularNkn(
+        OutboundTransferContext context,
+        DateTimeOffset? lastPeerLivenessUtc,
+        TimeSpan peerLivenessTimeout,
+        out OutboundTransferContext? outboundToSignal)
+    {
+        outboundToSignal = null;
+        DateTimeOffset now;
+        int deferralCount;
+        int remoteFrontier;
+        int highestAcceptedChunk;
+        long bytesTransferred;
+        long bytesAcceptedForTransport;
+        long peerLivenessSilenceMs;
+        long repairGraceMs;
+        lock (gate)
+        {
+            if (!ReferenceEquals(outboundTransfer, context) ||
+                context.IsTerminal ||
+                !ShouldUseV6RegularNknSparseRuntime(context) ||
+                !IsNegotiableDataProtocolVersion(context.NegotiatedDataProtocolVersion) ||
+                context.UserPaused ||
+                context.PeerPaused ||
+                context.PullTransportPaused ||
+                IsV6TransportEpochUnresolved(context.V6TransportEpoch) ||
+                !IsOutboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context))
+            {
+                return false;
+            }
+
+            var hasUnacknowledgedOutboundData =
+                context.ChunksAcceptedForTransport > context.RemoteNextExpectedChunkIndex ||
+                context.BytesAcceptedForTransport > context.BytesTransferred ||
+                context.SentAwaitingAck.Count > 0 ||
+                context.V6ChunkSendsInFlight.Count > 0 ||
+                context.PullV4SenderPumpRepairRequests.Count > 0;
+            if (!hasUnacknowledgedOutboundData)
+            {
+                return false;
+            }
+
+            now = DateTimeOffset.UtcNow;
+            var repairGrace = ResolveV6RegularNknPeerLivenessRepairGrace(peerLivenessTimeout);
+            var peerLivenessSilence = lastPeerLivenessUtc is null
+                ? TimeSpan.Zero
+                : now - lastPeerLivenessUtc.Value;
+
+            context.V6PeerLivenessRecoveryDeferralCount++;
+            context.V6PeerLivenessRecoveryDeferredUtc = now;
+            context.V6EpochLivenessDeferralCount++;
+            context.V6EpochLivenessDeferralUtc = now;
+            context.PullTransportResumeRequestPending = true;
+                context.V4SenderPumpLastWakeReason = IsPrimaryRegularNknBulkV6ContextLocked(context)
+                    ? "primary_regular_nkn_bulk_v6_checkpoint_liveness_recovery"
+                    : "v6_sparse_runtime_peer_liveness_recovery";
+
+            deferralCount = context.V6PeerLivenessRecoveryDeferralCount;
+            remoteFrontier = context.RemoteNextExpectedChunkIndex;
+            highestAcceptedChunk = Math.Max(-1, context.ChunksAcceptedForTransport - 1);
+            bytesTransferred = context.BytesTransferred;
+            bytesAcceptedForTransport = context.BytesAcceptedForTransport;
+            peerLivenessSilenceMs = lastPeerLivenessUtc is null ? -1 : (long)Math.Max(0, peerLivenessSilence.TotalMilliseconds);
+            repairGraceMs = (long)Math.Max(0, repairGrace.TotalMilliseconds);
+            outboundToSignal = context;
+        }
+
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_v6_heartbeat_timeout_deferred_for_v6_regular_nkn_sparse_runtime; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; last_peer_liveness_utc={FormatProtocolLogValue(lastPeerLivenessUtc?.ToString("O"))}; timeout_ms={(long)peerLivenessTimeout.TotalMilliseconds}; peer_liveness_silence_ms={peerLivenessSilenceMs}; repair_grace_ms={repairGraceMs}; deferral_count={deferralCount}; remote_frontier_chunk_index={remoteFrontier}; highest_accepted_chunk_index={highestAcceptedChunk}; bytes_transferred={bytesTransferred}; bytes_accepted_for_transport={bytesAcceptedForTransport}");
         return true;
     }
 
@@ -427,6 +577,83 @@ public sealed partial class SessionFileTransferService
         LocalOperationalLog.Warn(
             "FileTransferService",
             $"event=filetransfer_v6_heartbeat_timeout_deferred_for_epoch_waiting; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; last_peer_liveness_utc={FormatProtocolLogValue(lastPeerLivenessUtc?.ToString("O"))}; timeout_ms={(long)peerLivenessTimeout.TotalMilliseconds}; transport_epoch={transportEpoch}; epoch_state={FormatProtocolLogValue(epochState)}; handoff_kind={FormatProtocolLogValue(handoffKind)}; target_transport=regular_nkn; deferral_count={deferralCount}");
+        return true;
+    }
+
+    private bool TryDeferOutboundV6PeerLivenessTimeoutForRegularNknFeedbackRepair(
+        OutboundTransferContext context,
+        DateTimeOffset? lastPeerLivenessUtc,
+        TimeSpan peerLivenessTimeout,
+        out OutboundTransferContext? outboundToSignal)
+    {
+        outboundToSignal = null;
+        DateTimeOffset now;
+        int recentChunkSends;
+        int deferralCount;
+        int remoteFrontier;
+        int highestAcceptedChunk;
+        int inFlightSendCount;
+        int priorityRequestCount;
+        int normalRequestCount;
+        long peerLivenessSilenceMs;
+        long repairGraceMs;
+        lock (gate)
+        {
+            if (!ReferenceEquals(outboundTransfer, context) ||
+                context.IsTerminal ||
+                !IsNegotiableDataProtocolVersion(context.NegotiatedDataProtocolVersion) ||
+                context.UserPaused ||
+                context.PeerPaused ||
+                context.PullTransportPaused ||
+                IsV6TransportEpochUnresolved(context.V6TransportEpoch) ||
+                !IsOutboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context))
+            {
+                return false;
+            }
+
+            now = DateTimeOffset.UtcNow;
+            var repairGrace = ResolveV6RegularNknPeerLivenessRepairGrace(peerLivenessTimeout);
+            var peerLivenessSilence = lastPeerLivenessUtc is null
+                ? TimeSpan.Zero
+                : now - lastPeerLivenessUtc.Value;
+            if (lastPeerLivenessUtc is not null &&
+                peerLivenessSilence >= repairGrace)
+            {
+                return false;
+            }
+
+            var activityWindow = ResolveV6FallbackRecoveryLivenessTimeout();
+            recentChunkSends = context.LastChunkSentUtc.Count(pair => now - pair.Value <= activityWindow);
+            var hasUnacknowledgedOutboundData =
+                context.ChunksAcceptedForTransport > context.RemoteNextExpectedChunkIndex ||
+                context.BytesAcceptedForTransport > context.BytesTransferred ||
+                context.SentAwaitingAck.Count > 0 ||
+                context.V6ChunkSendsInFlight.Count > 0;
+            if (recentChunkSends <= 0 && !hasUnacknowledgedOutboundData)
+            {
+                return false;
+            }
+
+            context.V6PeerLivenessRecoveryDeferralCount++;
+            context.V6PeerLivenessRecoveryDeferredUtc = now;
+            context.V6EpochLivenessDeferralCount++;
+            context.V6EpochLivenessDeferralUtc = now;
+            context.V4SenderPumpLastWakeReason = "regular_nkn_feedback_repair";
+
+            deferralCount = context.V6PeerLivenessRecoveryDeferralCount;
+            remoteFrontier = context.RemoteNextExpectedChunkIndex;
+            highestAcceptedChunk = Math.Max(-1, context.ChunksAcceptedForTransport - 1);
+            inFlightSendCount = context.V6ChunkSendsInFlight.Count(pair => pair.Key >= context.RemoteNextExpectedChunkIndex);
+            priorityRequestCount = context.V6PriorityRequestedChunks.Count;
+            normalRequestCount = context.V6NormalRequestedChunks.Count;
+            peerLivenessSilenceMs = lastPeerLivenessUtc is null ? -1 : (long)Math.Max(0, peerLivenessSilence.TotalMilliseconds);
+            repairGraceMs = (long)Math.Max(0, repairGrace.TotalMilliseconds);
+            outboundToSignal = context;
+        }
+
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_v6_heartbeat_timeout_deferred_for_regular_nkn_feedback_repair; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; last_peer_liveness_utc={FormatProtocolLogValue(lastPeerLivenessUtc?.ToString("O"))}; timeout_ms={(long)peerLivenessTimeout.TotalMilliseconds}; peer_liveness_silence_ms={peerLivenessSilenceMs}; repair_grace_ms={repairGraceMs}; recent_chunk_sends={recentChunkSends}; deferral_count={deferralCount}; remote_frontier_chunk_index={remoteFrontier}; highest_accepted_chunk_index={highestAcceptedChunk}; in_flight_send_count={inFlightSendCount}; priority_request_count={priorityRequestCount}; normal_request_count={normalRequestCount}");
         return true;
     }
 
@@ -498,7 +725,7 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
-    private async Task TerminalizeInboundForPeerLivenessTimeoutAsync(InboundTransferContext context, DateTimeOffset? lastPeerLivenessUtc, TimeSpan peerLivenessTimeout)
+    private async Task<bool> TerminalizeInboundForPeerLivenessTimeoutAsync(InboundTransferContext context, DateTimeOffset? lastPeerLivenessUtc, TimeSpan peerLivenessTimeout)
     {
         if (TryDeferInboundV6PeerLivenessTimeoutForUnresolvedRegularNknEpoch(
                 context,
@@ -511,7 +738,52 @@ public sealed partial class SessionFileTransferService
                 await AnnounceAndProbeInboundV6TransportEpochAsync(inboundToProbe).ConfigureAwait(false);
             }
 
-            return;
+            return false;
+        }
+
+        if (TryDeferInboundV6PeerLivenessTimeoutForSparseRuntimePrimaryRegularNkn(
+                context,
+                lastPeerLivenessUtc,
+                peerLivenessTimeout,
+                out var inboundToSignal))
+        {
+            if (inboundToSignal is not null)
+            {
+                var reason = "v6_sparse_runtime_peer_liveness_recovery";
+                lock (gate)
+                {
+                    if (ReferenceEquals(inboundTransfer, inboundToSignal) &&
+                        !inboundToSignal.IsTerminal &&
+                        IsPrimaryRegularNknBulkV6ContextLocked(inboundToSignal))
+                    {
+                        reason = V6RegularNknCheckpointSyncRecoveryMode;
+                    }
+                }
+
+                await SendInboundV4StateAsync(
+                        inboundToSignal,
+                        reason,
+                        terminalReady: false,
+                        forceSend: true)
+                    .ConfigureAwait(false);
+            }
+
+            return false;
+        }
+
+        if (TryDeferInboundV6PeerLivenessTimeoutForRegularNknFeedbackRepair(
+                context,
+                lastPeerLivenessUtc,
+                peerLivenessTimeout,
+                out var inboundToRefresh))
+        {
+            if (inboundToRefresh is not null)
+            {
+                await SendInboundV6ReceiverStateAsync(inboundToRefresh, "regular_nkn_peer_liveness_feedback_repair", forceSend: true).ConfigureAwait(false);
+                await SendInboundV6FrontierRequestAsync(inboundToRefresh, "regular_nkn_peer_liveness_feedback_repair", forceSend: true).ConfigureAwait(false);
+            }
+
+            return false;
         }
 
         LocalOperationalLog.Warn(
@@ -526,6 +798,67 @@ public sealed partial class SessionFileTransferService
             errorMessage: "Peer disconnected.",
             cancelReason: null,
             ct: CancellationToken.None).ConfigureAwait(false);
+        return true;
+    }
+
+    private bool TryDeferInboundV6PeerLivenessTimeoutForSparseRuntimePrimaryRegularNkn(
+        InboundTransferContext context,
+        DateTimeOffset? lastPeerLivenessUtc,
+        TimeSpan peerLivenessTimeout,
+        out InboundTransferContext? inboundToSignal)
+    {
+        inboundToSignal = null;
+        DateTimeOffset now;
+        int deferralCount;
+        int committedChunkIndex;
+        int highestObservedChunkIndex;
+        long bytesTransferred;
+        int sparsePendingWriteCount;
+        long peerLivenessSilenceMs;
+        long repairGraceMs;
+        lock (gate)
+        {
+            if (!ReferenceEquals(inboundTransfer, context) ||
+                context.IsTerminal ||
+                !ShouldUseV6RegularNknSparseRuntime(context) ||
+                !IsNegotiableDataProtocolVersion(context.NegotiatedDataProtocolVersion) ||
+                context.UserPaused ||
+                context.PeerPaused ||
+                context.PullTransportPaused ||
+                !context.PullSessionActive ||
+                !context.PullManifestReceived ||
+                context.NextChunkIndex >= context.ChunkCount ||
+                IsV6TransportEpochUnresolved(context.V6TransportEpoch) ||
+                !IsInboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context))
+            {
+                return false;
+            }
+
+            now = DateTimeOffset.UtcNow;
+            var repairGrace = ResolveV6RegularNknPeerLivenessRepairGrace(peerLivenessTimeout);
+            var peerLivenessSilence = lastPeerLivenessUtc is null
+                ? TimeSpan.Zero
+                : now - lastPeerLivenessUtc.Value;
+
+            context.V6EpochLivenessDeferralCount++;
+            context.V6EpochLivenessDeferralUtc = now;
+            context.V6LastReceiverStateSentUtc = null;
+            context.V6LastFrontierRequestSentUtc = null;
+
+            deferralCount = context.V6EpochLivenessDeferralCount;
+            committedChunkIndex = context.NextChunkIndex;
+            highestObservedChunkIndex = context.PullHighestReceivedChunkIndex;
+            bytesTransferred = context.BytesTransferred;
+            sparsePendingWriteCount = context.ReceiverSparseChunksPendingWrite.Count;
+            peerLivenessSilenceMs = lastPeerLivenessUtc is null ? -1 : (long)Math.Max(0, peerLivenessSilence.TotalMilliseconds);
+            repairGraceMs = (long)Math.Max(0, repairGrace.TotalMilliseconds);
+            inboundToSignal = context;
+        }
+
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_v6_heartbeat_timeout_deferred_for_v6_regular_nkn_sparse_runtime; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; last_peer_liveness_utc={FormatProtocolLogValue(lastPeerLivenessUtc?.ToString("O"))}; timeout_ms={(long)peerLivenessTimeout.TotalMilliseconds}; peer_liveness_silence_ms={peerLivenessSilenceMs}; repair_grace_ms={repairGraceMs}; deferral_count={deferralCount}; committed_chunk={committedChunkIndex}; highest_observed_chunk={highestObservedChunkIndex}; bytes_transferred={bytesTransferred}; sparse_pending_write_count={sparsePendingWriteCount}");
+        return true;
     }
 
     private bool TryDeferInboundV6PeerLivenessTimeoutForUnresolvedRegularNknEpoch(
@@ -575,9 +908,83 @@ public sealed partial class SessionFileTransferService
         return true;
     }
 
+    private bool TryDeferInboundV6PeerLivenessTimeoutForRegularNknFeedbackRepair(
+        InboundTransferContext context,
+        DateTimeOffset? lastPeerLivenessUtc,
+        TimeSpan peerLivenessTimeout,
+        out InboundTransferContext? inboundToRefresh)
+    {
+        inboundToRefresh = null;
+        DateTimeOffset now;
+        int deferralCount;
+        int committedChunkIndex;
+        int highestObservedChunkIndex;
+        long bytesTransferred;
+        long peerLivenessSilenceMs;
+        long repairGraceMs;
+        lock (gate)
+        {
+            if (!ReferenceEquals(inboundTransfer, context) ||
+                context.IsTerminal ||
+                !IsNegotiableDataProtocolVersion(context.NegotiatedDataProtocolVersion) ||
+                context.UserPaused ||
+                context.PeerPaused ||
+                context.PullTransportPaused ||
+                !context.PullSessionActive ||
+                !context.PullManifestReceived ||
+                context.NextChunkIndex >= context.ChunkCount ||
+                IsV6TransportEpochUnresolved(context.V6TransportEpoch) ||
+                !IsInboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context))
+            {
+                return false;
+            }
+
+            now = DateTimeOffset.UtcNow;
+            var repairGrace = ResolveV6RegularNknPeerLivenessRepairGrace(peerLivenessTimeout);
+            var peerLivenessSilence = lastPeerLivenessUtc is null
+                ? TimeSpan.Zero
+                : now - lastPeerLivenessUtc.Value;
+            if (lastPeerLivenessUtc is not null &&
+                peerLivenessSilence >= repairGrace)
+            {
+                return false;
+            }
+
+            context.V6EpochLivenessDeferralCount++;
+            context.V6EpochLivenessDeferralUtc = now;
+            context.V6LastReceiverStateSentUtc = null;
+            context.V6LastFrontierRequestSentUtc = null;
+
+            deferralCount = context.V6EpochLivenessDeferralCount;
+            committedChunkIndex = context.NextChunkIndex;
+            highestObservedChunkIndex = context.PullHighestReceivedChunkIndex;
+            bytesTransferred = context.BytesTransferred;
+            peerLivenessSilenceMs = lastPeerLivenessUtc is null ? -1 : (long)Math.Max(0, peerLivenessSilence.TotalMilliseconds);
+            repairGraceMs = (long)Math.Max(0, repairGrace.TotalMilliseconds);
+            inboundToRefresh = context;
+        }
+
+        LocalOperationalLog.Warn(
+            "FileTransferService",
+            $"event=filetransfer_v6_heartbeat_timeout_deferred_for_regular_nkn_feedback_repair; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; last_peer_liveness_utc={FormatProtocolLogValue(lastPeerLivenessUtc?.ToString("O"))}; timeout_ms={(long)peerLivenessTimeout.TotalMilliseconds}; peer_liveness_silence_ms={peerLivenessSilenceMs}; repair_grace_ms={repairGraceMs}; committed_chunk={committedChunkIndex}; highest_observed_chunk={highestObservedChunkIndex}; bytes_transferred={bytesTransferred}; deferral_count={deferralCount}");
+        return true;
+    }
+
     private static bool ShouldDeferV6PeerLivenessTimeoutForUnresolvedRegularNknEpoch(V6TransportEpoch? epoch)
         => IsV6TransportEpochUnresolved(epoch) &&
            epoch is { TargetTransport: FileTransferTransportKind.RegularNkn };
+
+    private static bool IsOutboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(OutboundTransferContext context)
+        => IsOutboundV6RegularNknPrimaryPathLocked(context) &&
+           !context.PullPostTunaRecoveryActive &&
+           context.LastRecoveredV6TransportTargetTransport != FileTransferTransportKind.Tuna &&
+           context.LastRecoveredV6TransportEpochKind != FileTransferTransportHandoffKind.TunaToNormalFallback;
+
+    private static bool IsInboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(InboundTransferContext context)
+        => context.V6TransportEpoch is not { TargetTransport: FileTransferTransportKind.Tuna } &&
+           !context.PullPostTunaRecoveryActive &&
+           context.LastRecoveredV6TransportTargetTransport != FileTransferTransportKind.Tuna &&
+           context.LastRecoveredV6TransportEpochKind != FileTransferTransportHandoffKind.TunaToNormalFallback;
 
     private void TouchOutboundV6PeerLiveness(OutboundTransferContext context, string reason)
     {

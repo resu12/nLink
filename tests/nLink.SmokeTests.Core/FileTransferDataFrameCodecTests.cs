@@ -194,6 +194,68 @@ public sealed class FileTransferDataFrameCodecTests
     }
 
     [Fact]
+    public void LegacyV4BinaryFrames_RequireExplicitCodecPath()
+    {
+        var hash = Convert.ToBase64String(new byte[FileTransferProtocol.Sha256LengthBytes]);
+        var manifest = new FileTransferManifestFrameV4
+        {
+            SessionId = " session_a ",
+            TransferId = " transfer_v4_manifest ",
+            FileName = " v4.bin ",
+            FileSizeBytes = 8192,
+            ChunkSizeBytes = 2048,
+            ChunkCount = 4,
+            Sha256Base64 = hash,
+        };
+        var state = new FileTransferStateFrameV4
+        {
+            SessionId = "session_a",
+            TransferId = "transfer_v4_state",
+            Epoch = 3,
+            ContiguousCommittedChunkIndex = 2,
+            DurableReceivedHighestChunkIndex = 5,
+            CreditUntilChunkIndexExclusive = 64,
+            MissingRanges =
+            [
+                new FileTransferRangeV4 { StartChunkIndex = 7, ChunkCount = 2 },
+            ],
+            BytesCommitted = 4096,
+        };
+        var batch = new FileTransferChunkBatchFrameV4
+        {
+            SessionId = "session_a",
+            TransferId = "transfer_v4_batch",
+            StartChunkIndex = 2,
+            ChunkCount = 2,
+            DataSegments =
+            [
+                new byte[] { 1, 2, 3 },
+                new byte[] { 4, 5, 6 },
+            ],
+        };
+
+        Assert.Throws<InvalidOperationException>(() => FileTransferDataFrameCodec.Serialize(manifest));
+
+        var manifestPayload = FileTransferDataFrameCodec.SerializeLegacyV4(manifest);
+        var statePayload = FileTransferDataFrameCodec.SerializeLegacyV4(state);
+        var batchPayload = FileTransferDataFrameCodec.SerializeLegacyV4(batch);
+
+        Assert.False(FileTransferDataFrameCodec.TryDeserialize(manifestPayload, out _));
+        Assert.True(FileTransferDataFrameCodec.TryDeserializeLegacyV4(manifestPayload, out var decodedManifestFrame));
+        Assert.True(FileTransferDataFrameCodec.TryDeserializeLegacyV4(statePayload, out var decodedStateFrame));
+        Assert.True(FileTransferDataFrameCodec.TryDeserializeLegacyV4(batchPayload, out var decodedBatchFrame));
+
+        var decodedManifest = Assert.IsType<FileTransferManifestFrameV4>(decodedManifestFrame);
+        var decodedState = Assert.IsType<FileTransferStateFrameV4>(decodedStateFrame);
+        var decodedBatch = Assert.IsType<FileTransferChunkBatchFrameV4>(decodedBatchFrame);
+        Assert.Equal(FileTransferProtocol.ManifestFrameTypeV4, decodedManifest.Type);
+        Assert.Equal("session_a", decodedManifest.SessionId);
+        Assert.Equal(64, decodedState.CreditUntilChunkIndexExclusive);
+        Assert.Equal(2, decodedBatch.DataSegments.Count);
+        Assert.Equal(new byte[] { 4, 5, 6 }, decodedBatch.DataSegments[1]);
+    }
+
+    [Fact]
     public void V6RecoveryFrames_RoundTrip()
     {
         var handoffPayload = FileTransferDataFrameCodec.Serialize(

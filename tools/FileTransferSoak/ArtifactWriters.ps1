@@ -1,6 +1,11 @@
 Set-StrictMode -Version Latest
 
 $script:FileTransferRegularNknTargetGoodputBytesPerSecond = 1500000D
+$script:FileTransferExpectedBridgeControlSubClients = 4
+$script:FileTransferExpectedBridgeMediaSubClients = 8
+$script:FileTransferExpectedBridgeBulkSubClients = 4
+$script:FileTransferExpectedBridgeBulkSendConcurrency = 4
+$script:FileTransferExpectedBridgeBulkSendMode = 'fanout'
 
 function Write-FileTransferArtifact {
     param(
@@ -53,6 +58,160 @@ function Get-FileTransferEventsForSummary {
     )
 
     return @($Summary.TransferEvents | Where-Object { $Names -contains $_.EventName })
+}
+
+function Get-FileTransferLatestEvent {
+    param(
+        [object[]]$Events,
+        [string]$Name
+    )
+
+    $matches = @($Events | Where-Object { $_.EventName -eq $Name } | Sort-Object Sequence)
+    if ($matches.Count -eq 0) {
+        return $null
+    }
+
+    return $matches[-1]
+}
+
+function Test-FileTransferDiagnosticBridgeTopologyProfile {
+    param([string]$ExternalTopologyProfile = '')
+
+    return -not [string]::IsNullOrWhiteSpace($ExternalTopologyProfile) -and
+        -not [string]::Equals($ExternalTopologyProfile, 'Default', [System.StringComparison]::OrdinalIgnoreCase) -and
+        -not [string]::Equals($ExternalTopologyProfile, 'DefaultKeepAlive', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-FileTransferBridgeConfigSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]$Summary,
+        [string]$ExternalTopologyProfile = ''
+    )
+
+    $allEvents = @($Summary.AllEvents)
+    $healthEvents = @($allEvents | Where-Object { $_.EventName -eq 'screenshare_bridge_transport_health_summary' })
+    $bundleEvents = @($allEvents | Where-Object { $_.EventName -eq 'bridge_bundle_loaded' })
+    $latestHealth = Get-FileTransferLatestEvent -Events $healthEvents -Name 'screenshare_bridge_transport_health_summary'
+    $latestBundle = Get-FileTransferLatestEvent -Events $bundleEvents -Name 'bridge_bundle_loaded'
+    $effectiveProfile = if ([string]::IsNullOrWhiteSpace($ExternalTopologyProfile)) {
+        [System.Environment]::GetEnvironmentVariable('NLINK_FILETRANSFER_EXTERNAL_TOPOLOGY_PROFILE')
+    }
+    else {
+        $ExternalTopologyProfile
+    }
+    if ([string]::IsNullOrWhiteSpace($effectiveProfile)) {
+        $effectiveProfile = 'Default'
+    }
+
+    $controlSubClients = -1L
+    $mediaSubClients = -1L
+    $bulkSubClients = -1L
+    $bulkSendConcurrency = -1L
+    $bulkSendMode = '(unknown)'
+    if ($null -ne $latestHealth) {
+        $controlSubClients = Get-FileTransferEventInt64Field -Event $latestHealth -Name 'control_subclients' -Default -1
+        if ($controlSubClients -lt 0) {
+            $controlSubClients = Get-FileTransferEventInt64Field -Event $latestHealth -Name 'csc' -Default -1
+        }
+
+        $mediaSubClients = Get-FileTransferEventInt64Field -Event $latestHealth -Name 'media_subclients' -Default -1
+        if ($mediaSubClients -lt 0) {
+            $mediaSubClients = Get-FileTransferEventInt64Field -Event $latestHealth -Name 'msc' -Default -1
+        }
+
+        $bulkSubClients = Get-FileTransferEventInt64Field -Event $latestHealth -Name 'bulk_subclients' -Default -1
+        if ($bulkSubClients -lt 0) {
+            $bulkSubClients = Get-FileTransferEventInt64Field -Event $latestHealth -Name 'bsc' -Default -1
+        }
+
+        $bulkSendConcurrency = Get-FileTransferEventInt64Field -Event $latestHealth -Name 'bulk_send_concurrency' -Default -1
+        if ($bulkSendConcurrency -lt 0) {
+            $bulkSendConcurrency = Get-FileTransferEventInt64Field -Event $latestHealth -Name 'bcc' -Default -1
+        }
+
+        $parsedMode = Get-FileTransferEventField -Event $latestHealth -Name 'bulk_send_mode' -Default ''
+        if ([string]::IsNullOrWhiteSpace($parsedMode)) {
+            $parsedMode = Get-FileTransferEventField -Event $latestHealth -Name 'bsm' -Default ''
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($parsedMode)) {
+            $bulkSendMode = $parsedMode.Trim().ToLowerInvariant()
+        }
+    }
+
+    $expectedTopology = ('{0}/{1}/{2}' -f $script:FileTransferExpectedBridgeControlSubClients, $script:FileTransferExpectedBridgeMediaSubClients, $script:FileTransferExpectedBridgeBulkSubClients)
+    $observedTopology = if ($controlSubClients -ge 0 -or $mediaSubClients -ge 0 -or $bulkSubClients -ge 0) {
+        ('{0}/{1}/{2}' -f $controlSubClients, $mediaSubClients, $bulkSubClients)
+    }
+    else {
+        '(unknown)'
+    }
+    $expectedMode = $script:FileTransferExpectedBridgeBulkSendMode
+    $modeMatches = [string]::Equals($bulkSendMode, '(unknown)', [System.StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($bulkSendMode, $expectedMode, [System.StringComparison]::OrdinalIgnoreCase)
+    $settingsMatchExpected =
+        $controlSubClients -eq $script:FileTransferExpectedBridgeControlSubClients -and
+        $mediaSubClients -eq $script:FileTransferExpectedBridgeMediaSubClients -and
+        $bulkSubClients -eq $script:FileTransferExpectedBridgeBulkSubClients -and
+        $bulkSendConcurrency -eq $script:FileTransferExpectedBridgeBulkSendConcurrency -and
+        $modeMatches
+    $diagnosticProfile = Test-FileTransferDiagnosticBridgeTopologyProfile -ExternalTopologyProfile $effectiveProfile
+    $status = if ($null -eq $latestHealth) {
+        'unknown'
+    }
+    elseif ($diagnosticProfile) {
+        'diagnostic_override'
+    }
+    elseif ($settingsMatchExpected) {
+        'expected'
+    }
+    else {
+        'unexpected_drift'
+    }
+
+    $overrideKeys = @(
+        'NLINK_NKN_NUM_SUBCLIENTS',
+        'NLINK_NKN_MEDIA_NUM_SUBCLIENTS',
+        'NLINK_NKN_BULK_NUM_SUBCLIENTS',
+        'NLINK_NKN_BULK_SEND_CONCURRENCY',
+        'NLINK_NKN_BULK_SEND_MODE',
+        'NLINK_FILETRANSFER_EXTERNAL_TOPOLOGY_PROFILE'
+    )
+    $overrideEvidence = @(
+        foreach ($key in $overrideKeys) {
+            $value = [System.Environment]::GetEnvironmentVariable($key)
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                ('{0}={1}' -f $key, $value)
+            }
+        }
+    )
+    $bridgeScriptPath = if ($null -ne $latestBundle) { Get-FileTransferEventField -Event $latestBundle -Name 'bridge_script_path' -Default '(unknown)' } else { '(unknown)' }
+    $bridgeScriptHash = if ($null -ne $latestBundle) { Get-FileTransferEventField -Event $latestBundle -Name 'bridge_script_sha256' -Default '(unknown)' } else { '(unknown)' }
+    $manifestStatus = if ($null -ne $latestBundle) { Get-FileTransferEventField -Event $latestBundle -Name 'manifest_status' -Default '(unknown)' } else { '(unknown)' }
+    $manifestAppVersion = if ($null -ne $latestBundle) { Get-FileTransferEventField -Event $latestBundle -Name 'app_version' -Default '(unknown)' } else { '(unknown)' }
+    $nodeVersion = if ($null -ne $latestBundle) { Get-FileTransferEventField -Event $latestBundle -Name 'node_version' -Default '(unknown)' } else { '(unknown)' }
+
+    return [pscustomobject]@{
+        Status = $status
+        ExternalTopologyProfile = $effectiveProfile
+        ExpectedTopology = $expectedTopology
+        ObservedTopology = $observedTopology
+        ExpectedBulkSendConcurrency = $script:FileTransferExpectedBridgeBulkSendConcurrency
+        ObservedBulkSendConcurrency = $bulkSendConcurrency
+        ExpectedBulkSendMode = $expectedMode
+        ObservedBulkSendMode = $bulkSendMode
+        SettingsMatchExpected = $settingsMatchExpected
+        DiagnosticProfile = $diagnosticProfile
+        HealthSummaryCount = $healthEvents.Count
+        BundleLoadedCount = $bundleEvents.Count
+        BridgeScriptPath = $bridgeScriptPath
+        BridgeScriptSha256 = $bridgeScriptHash
+        ManifestStatus = $manifestStatus
+        ManifestAppVersion = $manifestAppVersion
+        NodeVersion = $nodeVersion
+        OverrideEvidence = @($overrideEvidence)
+        EvidenceEvents = @($bundleEvents + $healthEvents | Sort-Object Sequence)
+    }
 }
 
 function Get-FileTransferSumField {
@@ -1601,6 +1760,42 @@ function New-FileTransferBridgeBulkSummaryLines {
     ) + (Get-FileTransferArtifactEvidenceLines -Events $events -Limit 40)
 }
 
+function New-FileTransferBridgeConfigSummaryLines {
+    param(
+        [Parameter(Mandatory = $true)]$Summary,
+        [string]$ExternalTopologyProfile = ''
+    )
+
+    $snapshot = Get-FileTransferBridgeConfigSnapshot -Summary $Summary -ExternalTopologyProfile $ExternalTopologyProfile
+    $overrideEvidence = if ($snapshot.OverrideEvidence.Count -gt 0) { $snapshot.OverrideEvidence } else { @('(none)') }
+
+    return @(
+        ("transfer_id={0}" -f $Summary.TransferId),
+        ("bridge_config_status={0}" -f $snapshot.Status),
+        ("external_topology_profile={0}" -f $snapshot.ExternalTopologyProfile),
+        ("expected_topology={0}" -f $snapshot.ExpectedTopology),
+        ("observed_topology={0}" -f $snapshot.ObservedTopology),
+        ("expected_bulk_send_concurrency={0}" -f $snapshot.ExpectedBulkSendConcurrency),
+        ("observed_bulk_send_concurrency={0}" -f $snapshot.ObservedBulkSendConcurrency),
+        ("expected_bulk_send_mode={0}" -f $snapshot.ExpectedBulkSendMode),
+        ("observed_bulk_send_mode={0}" -f $snapshot.ObservedBulkSendMode),
+        ("settings_match_expected={0}" -f ($(if ($snapshot.SettingsMatchExpected) { 1 } else { 0 }))),
+        ("diagnostic_profile={0}" -f ($(if ($snapshot.DiagnosticProfile) { 1 } else { 0 }))),
+        ("bridge_health_summary_count={0}" -f $snapshot.HealthSummaryCount),
+        ("bridge_bundle_loaded_count={0}" -f $snapshot.BundleLoadedCount),
+        ("bridge_script_path={0}" -f $snapshot.BridgeScriptPath),
+        ("bridge_script_sha256={0}" -f $snapshot.BridgeScriptSha256),
+        ("manifest_status={0}" -f $snapshot.ManifestStatus),
+        ("manifest_app_version={0}" -f $snapshot.ManifestAppVersion),
+        ("node_version={0}" -f $snapshot.NodeVersion),
+        '',
+        'bridge_override_evidence:'
+    ) + $overrideEvidence + @(
+        '',
+        'bridge_config_evidence:'
+    ) + (Get-FileTransferArtifactEvidenceLines -Events $snapshot.EvidenceEvents -Limit 40)
+}
+
 function New-FileTransferCoexistenceSummaryLines {
     param([Parameter(Mandatory = $true)]$Summary)
 
@@ -1715,8 +1910,9 @@ function New-FileTransferExternalTransportHealthSummaryLines {
         ("receive_stall_recovery_receive_resumed_count={0}" -f $receiveStallRecoveryReceiveResumedEvents.Count),
         ("control_receive_degraded_count={0}" -f $controlReceiveDegradedEvents.Count),
         ("control_receive_recovery_suppressed_count={0}" -f $controlReceiveRecoverySuppressedEvents.Count),
-        ("control_receive_recovery_suppressed_bulk_active_count={0}" -f (@($controlReceiveRecoverySuppressedEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'bulk_receive_active' }).Count)),
-        ("control_receive_recovery_suppressed_bulk_not_idle_count={0}" -f (@($controlReceiveRecoverySuppressedEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'bulk_not_idle' }).Count)),
+        ("control_receive_recovery_suppressed_bulk_active_count={0}" -f (@($controlReceiveRecoverySuppressedEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -in @('bulk_receive_active', 'filetransfer_bulk_receive_active') }).Count)),
+        ("control_receive_recovery_suppressed_bulk_fresh_count={0}" -f (@($controlReceiveRecoverySuppressedEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -eq 'filetransfer_bulk_receive_fresh' }).Count)),
+        ("control_receive_recovery_suppressed_bulk_not_idle_count={0}" -f (@($controlReceiveRecoverySuppressedEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'reason' -Default '') -in @('bulk_not_idle', 'filetransfer_bulk_not_idle') }).Count)),
         ("max_receive_stall_recovery_resume_after_ms={0}" -f (Get-FileTransferMaxField -Events $receiveStallRecoveryReceiveResumedEvents -FieldName 'resume_after_recovery_ms')),
         ("inbound_delivery_summary_count={0}" -f $inboundDeliveryEvents.Count),
         ("inbound_delivery_bulk_messages={0}" -f (Get-FileTransferSumField -Events (@($inboundDeliveryEvents | Where-Object { (Get-FileTransferEventField -Event $_ -Name 'channel' -Default '') -eq 'bulk' })) -FieldName 'messages')),
@@ -3231,6 +3427,7 @@ function Write-FileTransferDiagnosticsArtifacts {
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'protocol-shape-summary.txt' -Lines (New-FileTransferProtocolShapeSummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'repair-reorder-summary.txt' -Lines (New-FileTransferRepairReorderSummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'transport-budget-summary.txt' -Lines (New-FileTransferTransportBudgetSummaryLines -Summary $Summary) | Out-Null
+    Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'bridge-config-summary.txt' -Lines (New-FileTransferBridgeConfigSummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'bridge-bulk-summary.txt' -Lines (New-FileTransferBridgeBulkSummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'coexistence-summary.txt' -Lines (New-FileTransferCoexistenceSummaryLines -Summary $Summary) | Out-Null
     Write-FileTransferArtifact -ArtifactDir $ArtifactDir -FileName 'external-transport-health-summary.txt' -Lines (New-FileTransferExternalTransportHealthSummaryLines -Summary $Summary) | Out-Null

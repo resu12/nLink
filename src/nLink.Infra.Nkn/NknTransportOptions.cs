@@ -10,8 +10,8 @@ internal sealed class NknTransportOptions
 {
     private const int DefaultNumSubClients = 4;
     private const int DefaultMediaNumSubClients = 8;
-    private const int DefaultBulkNumSubClients = 2;
-    private const int DefaultBulkSendConcurrency = 2;
+    private const int DefaultBulkNumSubClients = 4;
+    private const int DefaultBulkSendConcurrency = 4;
     private const int DefaultFileTransferBulkTargetBytesPerSecond = 1_500_000;
     private const int DefaultFileTransferBulkAdaptationCooldownMs = 20_000;
 
@@ -209,7 +209,7 @@ internal sealed class NknTransportOptions
                 maxValue: 300_000),
             ReceiveStallRecoveryEnabled = ParseBool(receiveStallRecovery, defaultValue: true),
             ReceiveStallFileTransferFastRecoveryEnabled = ParseBool(receiveStallFileTransferFastRecovery, defaultValue: true),
-            ReceiveStallControlOnlyRecoveryEnabled = ParseBool(receiveStallControlOnlyRecovery, defaultValue: false),
+            ReceiveStallControlOnlyRecoveryEnabled = ParseBool(receiveStallControlOnlyRecovery, defaultValue: true),
             ReceiveStallRecoveryFallbackDelayMs = ParseInt(receiveStallRecoveryFallbackDelayMs, defaultValue: 3_000, minValue: 1_000, maxValue: 12_000),
             HasSubClientTopologyOverride = !string.IsNullOrWhiteSpace(numSubClients) ||
                                            !string.IsNullOrWhiteSpace(mediaNumSubClients) ||

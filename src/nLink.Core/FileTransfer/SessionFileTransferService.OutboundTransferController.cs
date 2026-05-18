@@ -80,6 +80,7 @@ public sealed partial class SessionFileTransferService
             }
 
             MaybeLogOutboundV6RegularNknPassiveScoutSummaryLocked(context, terminalState, context.StatusMessage);
+            MaybeLogOutboundV6RegularNknActiveProbeSummaryLocked(context, terminalState, context.StatusMessage);
             snapshot = CreateSnapshotLocked();
             shouldNotifyPeer = notifyPeer;
             sessionId = context.SessionId;

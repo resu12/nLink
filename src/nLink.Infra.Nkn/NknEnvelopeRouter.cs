@@ -52,6 +52,7 @@ internal sealed class NknEnvelopeRouter
             case MsgType.ScreenShareCursorState:
             case MsgType.TransportAccelerationOffer:
             case MsgType.TransportAccelerationAnswer:
+            case MsgType.TransportAccelerationAnswerAck:
             case MsgType.TransportAccelerationDown:
             case MsgType.TransportAccelerationPayerIntent:
                 controlChannel.Handle(inboundContext);

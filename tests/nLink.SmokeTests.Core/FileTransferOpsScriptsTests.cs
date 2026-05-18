@@ -26,6 +26,7 @@ public sealed class FileTransferOpsScriptsTests
     private static readonly string[] ExpectedExternalTopologyProfiles =
     [
         "BulkFanout12",
+        "BulkFanout4Legacy",
         "BulkFanout8",
         "BulkSingle1",
         "Default",
@@ -96,6 +97,7 @@ public sealed class FileTransferOpsScriptsTests
         "protocol-shape-summary.txt",
         "repair-reorder-summary.txt",
         "transport-budget-summary.txt",
+        "bridge-config-summary.txt",
         "bridge-bulk-summary.txt",
         "coexistence-summary.txt",
         "external-transport-health-summary.txt",
@@ -112,6 +114,8 @@ public sealed class FileTransferOpsScriptsTests
         "filetransfer-retained-log-slice.log",
         "regular-nkn-passive-scout-summary.txt",
         "regular-nkn-passive-scout-summary.json",
+        "regular-nkn-active-probe-summary.txt",
+        "regular-nkn-active-probe-summary.json",
         "baseline-comparison.txt"
     ];
 
@@ -240,6 +244,21 @@ public sealed class FileTransferOpsScriptsTests
         Assert.Contains("Get-FileTransferSoakStartupTimeoutMs", scriptText, StringComparison.Ordinal);
         Assert.Contains("Get-FileTransferSoakProgressTimeoutMs", scriptText, StringComparison.Ordinal);
         Assert.Contains("Get-FileTransferMixedScreenShareWarmupTimeoutMs", scriptText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GuiSmokeWindows_FileTransferIntegrityResolverSearchesArtifactReceivedDirectory()
+    {
+        var repoRoot = FindRepoRoot();
+        var scriptText = File.ReadAllText(Path.Combine(repoRoot, "tools", "GuiSmoke-Windows.ps1"));
+        var resolveBody = ExtractPowerShellFunctionBody(scriptText, "Resolve-FileTransferLiveReceivedFilePath", "Find-FileTransferLiveReceivedFileByHash");
+        var findBody = ExtractPowerShellFunctionBody(scriptText, "Find-FileTransferLiveReceivedFileByHash", "Append-FileTransferLiveHarnessDiagnostic");
+
+        Assert.Contains("[string]$ArtifactDir", resolveBody, StringComparison.Ordinal);
+        Assert.Contains("Join-Path $ArtifactDir 'received'", resolveBody, StringComparison.Ordinal);
+        Assert.Contains("[string]$ArtifactDir", findBody, StringComparison.Ordinal);
+        Assert.Contains("Join-Path $ArtifactDir 'received'", findBody, StringComparison.Ordinal);
+        Assert.Contains("-ArtifactDir $ArtifactDir", scriptText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -448,6 +467,92 @@ public sealed class FileTransferOpsScriptsTests
 
         var decomposition = ReadArtifactReport(result.ArtifactDir, "throughput-decomposition-summary.txt");
         Assert.Equal("inconclusive", decomposition["likely_limiter"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_BridgeConfigSummary_RecordsFrozenDefaults()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildCleanCompletedTransferFixture("transfer_bridge_defaults")
+            .Append(LogLine("event=bridge_bundle_loaded; bridge_script_path=C:\\nLink\\bridge\\win-x64\\index.js; bridge_manifest_path=C:\\nLink\\bridge\\win-x64\\bridge-manifest.json; manifest_status=ok; manifest_reason=ok; manifest_version=1; app_version=0.7.0; bridge_script_sha256=abc123; manifest_bridge_script_sha256=abc123; node_version=v24.13.1; owner_pid_watchdog=true; kill_on_close_job=true"))
+            .Append(LogLine("event=screenshare_bridge_transport_health_summary; selected_rpc=fake; selected_rpc_key=fake; selected_rpc_stage=initial; connect_id=fake; connect_key=fake; ready_emitted=1; client_ready_age_ms=100; disconnect_count_since_last=0; connect_failed_count_since_last=0; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1; frames_sent_since_last=0; latest_disconnect_reason=(none); sample_window_ms=2000; control_subclients=4; media_subclients=8; bulk_subclients=4; bulk_send_concurrency=4; bulk_send_mode=fanout; control_messages_received_since_last=0; media_messages_received_since_last=0; bulk_messages_received_since_last=0; total_messages_received_since_last=0; control_bytes_received_since_last=0; media_bytes_received_since_last=0; bulk_bytes_received_since_last=0; total_bytes_received_since_last=0; control_last_received_age_ms=-1; media_last_received_age_ms=-1; bulk_last_received_age_ms=-1"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var bridgeConfig = ReadArtifactReport(result.ArtifactDir, "bridge-config-summary.txt");
+        Assert.Equal("expected", bridgeConfig["bridge_config_status"]);
+        Assert.Equal("4/8/4", bridgeConfig["expected_topology"]);
+        Assert.Equal("4/8/4", bridgeConfig["observed_topology"]);
+        Assert.Equal("4", bridgeConfig["observed_bulk_send_concurrency"]);
+        Assert.Equal("fanout", bridgeConfig["observed_bulk_send_mode"]);
+        Assert.Equal("ok", bridgeConfig["manifest_status"]);
+        Assert.Equal("v24.13.1", bridgeConfig["node_version"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_BridgeConfigSummary_FlagsUnexpectedDefaultDrift()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildCleanCompletedTransferFixture("transfer_bridge_drift")
+            .Append(LogLine("event=screenshare_bridge_transport_health_summary; selected_rpc=fake; selected_rpc_key=fake; selected_rpc_stage=initial; connect_id=fake; connect_key=fake; ready_emitted=1; client_ready_age_ms=100; disconnect_count_since_last=0; connect_failed_count_since_last=0; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1; frames_sent_since_last=0; latest_disconnect_reason=(none); sample_window_ms=2000; control_subclients=4; media_subclients=8; bulk_subclients=8; bulk_send_concurrency=6; bulk_send_mode=round_robin; control_messages_received_since_last=0; media_messages_received_since_last=0; bulk_messages_received_since_last=0; total_messages_received_since_last=0; control_bytes_received_since_last=0; media_bytes_received_since_last=0; bulk_bytes_received_since_last=0; total_bytes_received_since_last=0; control_last_received_age_ms=-1; media_last_received_age_ms=-1; bulk_last_received_age_ms=-1"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var bridgeConfig = ReadArtifactReport(result.ArtifactDir, "bridge-config-summary.txt");
+        Assert.Equal("unexpected_drift", bridgeConfig["bridge_config_status"]);
+        Assert.Equal("4/8/4", bridgeConfig["expected_topology"]);
+        Assert.Equal("4/8/8", bridgeConfig["observed_topology"]);
+        Assert.Equal("6", bridgeConfig["observed_bulk_send_concurrency"]);
+        Assert.Equal("round_robin", bridgeConfig["observed_bulk_send_mode"]);
+        Assert.Equal("0", bridgeConfig["settings_match_expected"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_BridgeConfigSummary_ClassifiesDiagnosticOverrideSeparately()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var lines = BuildCleanCompletedTransferFixture("transfer_bridge_diagnostic_override")
+            .Append(LogLine("event=screenshare_bridge_transport_health_summary; selected_rpc=fake; selected_rpc_key=fake; selected_rpc_stage=initial; connect_id=fake; connect_key=fake; ready_emitted=1; client_ready_age_ms=100; disconnect_count_since_last=0; connect_failed_count_since_last=0; ws_error_count_since_last=0; rpc_fallback_attempt_count_since_last=0; control_ready=1; media_ready=1; bulk_ready=1; frames_sent_since_last=0; latest_disconnect_reason=(none); sample_window_ms=2000; control_subclients=4; media_subclients=8; bulk_subclients=8; bulk_send_concurrency=6; bulk_send_mode=round_robin; control_messages_received_since_last=0; media_messages_received_since_last=0; bulk_messages_received_since_last=0; total_messages_received_since_last=0; control_bytes_received_since_last=0; media_bytes_received_since_last=0; bulk_bytes_received_since_last=0; total_bytes_received_since_last=0; control_last_received_age_ms=-1; media_last_received_age_ms=-1; bulk_last_received_age_ms=-1"))
+            .ToArray();
+
+        var result = await RunAnalyzeFixtureAsync(
+            lines,
+            environment: new Dictionary<string, string>
+            {
+                ["NLINK_FILETRANSFER_EXTERNAL_TOPOLOGY_PROFILE"] = "BulkFanout8",
+            });
+
+        Assert.Equal(0, result.Script.ExitCode);
+        var bridgeConfig = ReadArtifactReport(result.ArtifactDir, "bridge-config-summary.txt");
+        Assert.Equal("diagnostic_override", bridgeConfig["bridge_config_status"]);
+        Assert.Equal("1", bridgeConfig["diagnostic_profile"]);
+        Assert.Equal("0", bridgeConfig["settings_match_expected"]);
+        Assert.Equal("BulkFanout8", bridgeConfig["external_topology_profile"]);
+        Assert.Equal("4/8/8", bridgeConfig["observed_topology"]);
+        Assert.Equal("6", bridgeConfig["observed_bulk_send_concurrency"]);
+        Assert.Equal("round_robin", bridgeConfig["observed_bulk_send_mode"]);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("INVALID_SETUP", verdict["verdict"]);
     }
 
     public static IEnumerable<object[]> ThroughputLimiterFixtures()
@@ -1954,6 +2059,73 @@ public sealed class FileTransferOpsScriptsTests
 
     [Fact]
     [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_PrimaryRegularNknQuietCheckpointFeedbackCanceledAfterCompletion_IsRecoverable()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_primary_quiet_checkpoint_feedback_canceled";
+        var lines = BuildCleanCompletedV4TransferFixture(transferId).ToList();
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.InsertRange(
+            firstTerminalIndex,
+            [
+                LogLine($"event=filetransfer_bridge_recovery_policy_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; runtime_profile=PrimaryRegularNknBulkV6; bridge_recovery_policy=primary_regular_nkn_quiet; selection_reason=conservative_regular_nkn"),
+                LogLine($"event=filetransfer_primary_regular_nkn_bulk_v6_selected; direction=outbound; transfer_id={transferId}; session_id=sess_a; protocol_version=6; runtime_profile=PrimaryRegularNknBulkV6; credit_profile=v4_sparse; frame_profile=v6; recovery_profile=regular_nkn_quiet; bridge_recovery_policy=primary_regular_nkn_quiet; activation=primary_regular_nkn"),
+                LogLine($"event=filetransfer_v4_feedback_both_failed; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.frontier_request.v6; first_lane=control; second_lane=bulk; first_error=OperationCanceledException; second_error=OperationCanceledException"),
+                LogLine($"event=filetransfer_primary_regular_nkn_frontier_feedback_failed_recoverable; direction=outbound; transfer_id={transferId}; session_id=sess_a; reason=checkpoint_sync_send_timeout; recovery_action=request_bridge_recovery; request_id=v6-regular-nkn-checkpoint-sync:7; frame_type=filetransfer.frontier_request.v6; recovery_mode=regular_nkn_checkpoint_sync; priority=checkpoint_sync; failure_count=2; bridge_recovery_policy=primary_regular_nkn_quiet"),
+                LogLine($"event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_request_send_timeout; direction=outbound; transfer_id={transferId}; session_id=sess_a; request_id=v6-regular-nkn-checkpoint-sync:7; timeout_ms=7500"),
+                LogLine($"event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_receive_recovery_requested; direction=outbound; transfer_id={transferId}; session_id=sess_a; reason=checkpoint_sync_send_timeout; request_id=v6-regular-nkn-checkpoint-sync:7; failure_count=2; bridge_recovery_policy=primary_regular_nkn_quiet"),
+                LogLine("event=nkn_bridge_receive_stall_recovery_started; connect_key=test; stall_reason=control_receive_stalled; attempt=1; max_restarts=4; consecutive_zero_receive_windows=2; frames_sent_since_last=6; control_last_received_age_ms=12000; bulk_last_received_age_ms=90"),
+                LogLine("event=nkn_bridge_receive_stall_recovery_completed; connect_key=test; recovery_count=1; elapsed_ms=1200; control_ready=1; bulk_ready=1"),
+            ]);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.NotEqual("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+
+        var stability = ReadArtifactReport(result.ArtifactDir, "stability-gates-summary.txt");
+        Assert.Equal("0", stability["hard_failure_count"]);
+
+        var protocol = ReadArtifactReport(result.ArtifactDir, "protocol-shape-summary.txt");
+        Assert.Equal("1", protocol["v4_feedback_both_failed_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task AnalyzeRetained_OperationCanceledFeedbackWithoutPrimaryQuietPolicy_ReturnsProtocolFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string transferId = "transfer_checkpoint_feedback_canceled_strict";
+        var lines = BuildCleanCompletedV4TransferFixture(transferId).ToList();
+        var firstTerminalIndex = lines.FindIndex(line => line.Contains("event=file_transfer_inbound_terminal", StringComparison.Ordinal));
+        Assert.True(firstTerminalIndex > 0);
+        lines.InsertRange(
+            firstTerminalIndex,
+            [
+                LogLine($"event=filetransfer_v4_feedback_both_failed; transport=nkn; transfer_id={transferId}; session_id=sess_a; frame_type=filetransfer.frontier_request.v6; first_lane=control; second_lane=bulk; first_error=OperationCanceledException; second_error=OperationCanceledException"),
+                LogLine($"event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_request_send_timeout; direction=outbound; transfer_id={transferId}; session_id=sess_a; request_id=v6-regular-nkn-checkpoint-sync:7; timeout_ms=7500"),
+            ]);
+
+        var result = await RunAnalyzeFixtureAsync(lines);
+
+        var verdict = ReadArtifactReport(result.ArtifactDir, "filetransfer-operator-verdict.txt");
+        Assert.Equal("FAIL_PROTOCOL_OR_INTEGRITY", verdict["verdict"]);
+
+        var protocol = ReadArtifactReport(result.ArtifactDir, "protocol-shape-summary.txt");
+        Assert.Equal("1", protocol["v4_feedback_both_failed_count"]);
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
     public async Task AnalyzeRetained_V4ReceiverFailure_ReturnsProtocolFailure()
     {
         if (!OperatingSystem.IsWindows())
@@ -2811,6 +2983,10 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("1", summary["cycles_completed"]);
             Assert.Equal("6", summary["data_protocol_version"]);
             Assert.Equal("v4_default_21k", summary["payload_efficiency_profile"]);
+            Assert.Equal("expected", summary["bridge_config_status"]);
+            Assert.Equal("4/8/4", summary["bridge_observed_topology"]);
+            Assert.Equal("4", summary["bridge_observed_bulk_send_concurrency"]);
+            Assert.Equal("fanout", summary["bridge_observed_bulk_send_mode"]);
             Assert.Equal("1.000000", summary["v4_batch_ratio"]);
             Assert.Equal("1", summary["v4_feedback_redundant_success_count"]);
             Assert.Equal("0", summary["payload_rejected_count"]);
@@ -2820,6 +2996,11 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("regular-nkn-passive-scout", passiveScout["artifact_kind"]);
             Assert.Equal("not_enabled_or_no_samples", passiveScout["status"]);
             Assert.Equal("0", passiveScout["sample_count"]);
+
+            var activeProbe = ReadArtifactReport(artifactDir, "regular-nkn-active-probe-summary.txt");
+            Assert.Equal("regular-nkn-active-probe", activeProbe["artifact_kind"]);
+            Assert.Equal("not_enabled_or_no_probes", activeProbe["status"]);
+            Assert.Equal("0", activeProbe["probe_count"]);
 
             var protocolShape = File.ReadAllText(Path.Combine(artifactDir, "protocol-shape-summary.txt"));
             Assert.Contains("filetransfer.chunk_batch.v6", protocolShape, StringComparison.Ordinal);
@@ -2887,6 +3068,64 @@ if (-not $result.RegressionFailed) {
             Assert.Equal("1", passiveScout["high_frames_per_mib_window_count"]);
             Assert.Equal("would_probe_round_robin", passiveScout["final_would_probe_recommendation"]);
             Assert.Equal("Completed", passiveScout["terminal_state"]);
+        }
+        finally
+        {
+            TryDeleteDirectory(tempRoot);
+        }
+    }
+
+    [Fact]
+    [Trait("Category", "Smoke")]
+    public async Task RunFileTransferNknSoak_FakeActiveProbeWritesProbeSummary()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repoRoot = FindRepoRoot();
+        var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-filetransfer-live-active-probe-fake", Guid.NewGuid().ToString("N"));
+        var artifactDir = Path.Combine(tempRoot, "nkn-fast");
+        Directory.CreateDirectory(tempRoot);
+
+        try
+        {
+            var environment = BuildFakeLiveNknEnvironment();
+            environment["NLINK_FILETRANSFER_NKN_SOAK_FAKE_ACTIVE_PROBE"] = "1";
+            var result = await RunPowerShellFileAsync(
+                repoRoot,
+                Path.Combine(repoRoot, "tools", "Run-FileTransferNknSoak.ps1"),
+                [
+                    "-Mode", "nkn-fast",
+                    "-ArtifactDir", artifactDir,
+                    "-PayloadSizes", "64KiB",
+                    "-Cycles", "1",
+                    "-TimeoutSeconds", "30"
+                ],
+                environment);
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Expected fake active probe live NKN soak to pass.{Environment.NewLine}STDOUT:{Environment.NewLine}{result.Stdout}{Environment.NewLine}STDERR:{Environment.NewLine}{result.Stderr}");
+            AssertRequiredLiveArtifacts(artifactDir);
+
+            var activeProbe = ReadArtifactReport(artifactDir, "regular-nkn-active-probe-summary.txt");
+            Assert.Equal("observed", activeProbe["status"]);
+            Assert.Equal("1", activeProbe["probe_count"]);
+            Assert.Equal("1", activeProbe["success_count"]);
+            Assert.Equal("0", activeProbe["timeout_count"]);
+            Assert.Equal("66", activeProbe["rtt_p50_ms"]);
+            Assert.Equal("66", activeProbe["rtt_p95_ms"]);
+            Assert.Equal("watch", activeProbe["worst_scout_classification"]);
+            Assert.Equal("keep_current_path", activeProbe["final_dry_run_recommendation"]);
+            Assert.Equal("keep_current_path", activeProbe["worst_dry_run_recommendation"]);
+            Assert.Equal("0", activeProbe["non_keep_dry_run_recommendation_count"]);
+            Assert.Equal("1", activeProbe["keep_current_path_count"]);
+            Assert.Equal("0", activeProbe["would_try_round_robin_probe_count"]);
+            Assert.Equal("0", activeProbe["would_try_fresh_bulk_client_probe_count"]);
+            Assert.Equal("0", activeProbe["would_pause_bulk_until_feedback_count"]);
+            Assert.Equal("Completed", activeProbe["terminal_state"]);
         }
         finally
         {
@@ -3280,7 +3519,8 @@ if (-not $result.RegressionFailed) {
 
     private static async Task<AnalyzeFixtureResult> RunAnalyzeFixtureAsync(
         IReadOnlyList<string> logLines,
-        IReadOnlyList<string>? extraArguments = null)
+        IReadOnlyList<string>? extraArguments = null,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         var repoRoot = FindRepoRoot();
         var tempRoot = Path.Combine(Path.GetTempPath(), "nlink-filetransfer-ops", Guid.NewGuid().ToString("N"));
@@ -3303,7 +3543,7 @@ if (-not $result.RegressionFailed) {
             args.AddRange(extraArguments);
         }
 
-        var script = await RunFileTransferOpsAsync(repoRoot, args);
+        var script = await RunFileTransferOpsAsync(repoRoot, args, environment);
         return new AnalyzeFixtureResult(tempRoot, artifactDir, script);
     }
 

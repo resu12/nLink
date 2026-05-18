@@ -837,6 +837,18 @@ public sealed partial class SessionFileTransferService
         }
 
         targetTransport = NormalizeV6TargetTransport(handoffKind, targetTransport);
+        if (targetTransport == FileTransferTransportKind.RegularNkn &&
+            IsPrimaryRegularNknBulkV6ContextLocked(context))
+        {
+            context.PullTransportResumeRequestPending = true;
+            context.V4SenderPumpLastWakeReason = "primary_regular_nkn_bulk_v6_rebind_waiting_for_available";
+            LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.Rebinding, reason);
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_primary_regular_nkn_bulk_v6_rebind_deferred_until_available; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; target_transport=regular_nkn; rebind_generation={context.PullTransportRebindGeneration}");
+            return false;
+        }
+
         if (context.V6TransportEpoch is { } current &&
             IsV6TransportEpochUnresolved(current) &&
             current.Kind == handoffKind &&
@@ -878,6 +890,17 @@ public sealed partial class SessionFileTransferService
         }
 
         targetTransport = NormalizeV6TargetTransport(handoffKind, targetTransport);
+        if (targetTransport == FileTransferTransportKind.RegularNkn &&
+            IsPrimaryRegularNknBulkV6ContextLocked(context))
+        {
+            context.PullTransportResumeRequestPending = true;
+            LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.Rebinding, reason);
+            LocalOperationalLog.Info(
+                "FileTransferService",
+                $"event=filetransfer_primary_regular_nkn_bulk_v6_rebind_deferred_until_available; direction=inbound; transfer_id={context.TransferId}; session_id={context.SessionId}; reason={FormatProtocolLogValue(reason)}; target_transport=regular_nkn; rebind_generation={context.PullTransportRebindGeneration}");
+            return false;
+        }
+
         if (context.V6TransportEpoch is { } current &&
             IsV6TransportEpochUnresolved(current) &&
             current.Kind == handoffKind &&
@@ -943,6 +966,20 @@ public sealed partial class SessionFileTransferService
             }
 
             targetTransport = NormalizeV6TargetTransport(handoffKind, targetTransport);
+            if (targetTransport == FileTransferTransportKind.RegularNkn &&
+                IsPrimaryRegularNknBulkV6ContextLocked(context))
+            {
+                context.PullTransportRebindGeneration++;
+                context.PullTransportRebindStartedUtc = DateTimeOffset.UtcNow;
+                context.PullTransportSafetyReplayRearmCount = 0;
+                context.PullTransportFrontierOnlyRepairActive = false;
+                context.PullTransportFrontierOnlyRepairStartChunkIndex = -1;
+                context.V6RegularNknLastCheckpointSyncRequestedUtc = null;
+                context.V4SenderPumpLastWakeReason = "primary_regular_nkn_bulk_v6_rebind";
+                LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.Rebinding, reason);
+                return true;
+            }
+
             if (ShouldSuppressRecoveredV6RegularNknEpochRestart(
                     FileTransferDirection.Outbound,
                     context.TransferId,
@@ -976,6 +1013,20 @@ public sealed partial class SessionFileTransferService
         if (requiresResumeRequest)
         {
             targetTransport = NormalizeV6TargetTransport(handoffKind, targetTransport);
+            if (targetTransport == FileTransferTransportKind.RegularNkn &&
+                IsPrimaryRegularNknBulkV6ContextLocked(context))
+            {
+                context.PullTransportRebindGeneration++;
+                context.PullTransportRebindStartedUtc = DateTimeOffset.UtcNow;
+                context.PullTransportSafetyReplayRearmCount = 0;
+                context.PullTransportFrontierOnlyRepairActive = false;
+                context.PullTransportFrontierOnlyRepairStartChunkIndex = -1;
+                context.V6RegularNknLastCheckpointSyncRequestedUtc = null;
+                context.V4SenderPumpLastWakeReason = "primary_regular_nkn_bulk_v6_rebind";
+                LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.Rebinding, reason);
+                return true;
+            }
+
             if (ShouldSuppressRecoveredV6RegularNknEpochRestart(
                     FileTransferDirection.Outbound,
                     context.TransferId,
@@ -1033,6 +1084,27 @@ public sealed partial class SessionFileTransferService
             }
 
             targetTransport = NormalizeV6TargetTransport(handoffKind, targetTransport);
+            if (targetTransport == FileTransferTransportKind.RegularNkn &&
+                IsPrimaryRegularNknBulkV6ContextLocked(context))
+            {
+                context.PullTransportRebindGeneration++;
+                context.PullTransportRebindStartedUtc = DateTimeOffset.UtcNow;
+                context.PullTransportRebindStartedBytesTransferred = context.BytesTransferred;
+                context.PullTransportRebindStartedNextChunkIndex = context.NextChunkIndex;
+                context.PullTransportRebindStartedHighestReceivedChunkIndex = context.PullHighestReceivedChunkIndex;
+                context.PullTransportRebindRecoveredLogged = false;
+                context.PullTransportRebindStableProgressSamples = 0;
+                context.PullTransportRebindLastObservedNextChunkIndex = context.NextChunkIndex;
+                context.PullTransportRebindLastObservedHighestReceivedChunkIndex = context.PullHighestReceivedChunkIndex;
+                context.PullTransportRebindLastFrontierRepairLoopLogUtc = null;
+                context.PullTransportRebindFrontierRepairCommittedChunks = 0;
+                context.PullTransportRebindFrontierRepairWindowChunks = V4PostFallbackEmergencyFrontierRepairChunks;
+                context.PullTransportRebindFrontierRepairLastCommittedChunkIndex = -1;
+                context.V6RegularNknLastCheckpointSyncRequestId = null;
+                LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.Rebinding, reason);
+                return true;
+            }
+
             if (ShouldSuppressRecoveredV6RegularNknEpochRestart(
                     FileTransferDirection.Inbound,
                     context.TransferId,
@@ -1080,6 +1152,27 @@ public sealed partial class SessionFileTransferService
         if (requiresResumeRequest)
         {
             targetTransport = NormalizeV6TargetTransport(handoffKind, targetTransport);
+            if (targetTransport == FileTransferTransportKind.RegularNkn &&
+                IsPrimaryRegularNknBulkV6ContextLocked(context))
+            {
+                context.PullTransportRebindGeneration++;
+                context.PullTransportRebindStartedUtc = DateTimeOffset.UtcNow;
+                context.PullTransportRebindStartedBytesTransferred = context.BytesTransferred;
+                context.PullTransportRebindStartedNextChunkIndex = context.NextChunkIndex;
+                context.PullTransportRebindStartedHighestReceivedChunkIndex = context.PullHighestReceivedChunkIndex;
+                context.PullTransportRebindRecoveredLogged = false;
+                context.PullTransportRebindStableProgressSamples = 0;
+                context.PullTransportRebindLastObservedNextChunkIndex = context.NextChunkIndex;
+                context.PullTransportRebindLastObservedHighestReceivedChunkIndex = context.PullHighestReceivedChunkIndex;
+                context.PullTransportRebindLastFrontierRepairLoopLogUtc = null;
+                context.PullTransportRebindFrontierRepairCommittedChunks = 0;
+                context.PullTransportRebindFrontierRepairWindowChunks = V4PostFallbackEmergencyFrontierRepairChunks;
+                context.PullTransportRebindFrontierRepairLastCommittedChunkIndex = -1;
+                context.V6RegularNknLastCheckpointSyncRequestId = null;
+                LogPrimaryRegularNknBulkV6State(context, PrimaryRegularNknBulkV6State.Rebinding, reason);
+                return true;
+            }
+
             if (ShouldSuppressRecoveredV6RegularNknEpochRestart(
                     FileTransferDirection.Inbound,
                     context.TransferId,
@@ -1446,7 +1539,9 @@ public sealed partial class SessionFileTransferService
 
     private static void LogPullBinaryFrameSent(string transferId, string sessionId, FileTransferDataFrame frame, int payloadBytes)
     {
-        var serializedPayloadBytes = FileTransferDataFrameCodec.Serialize(frame).Length;
+        var serializedPayloadBytes = FileTransferProtocol.IsV4DataFrame(frame)
+            ? FileTransferDataFrameCodec.SerializeLegacyV4(frame).Length
+            : FileTransferDataFrameCodec.Serialize(frame).Length;
         var rawChunkBytes = GetFrameRawChunkBytes(frame);
         var batchChunkCount = frame is FileTransferChunkBatchFrameV4 ? GetFrameChunkCount(frame) : 0;
         LocalOperationalLog.Info(

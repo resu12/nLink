@@ -4,7 +4,7 @@ File sharing is V6-only. Keep stabilization work focused on the current V6 recei
 
 ## Principles
 
-- Keep bridge default fanout.
+- Keep the bridge default stable on the observed V4/V6-parity topology: control/media/bulk `4/8/4`, bulk concurrency `4`, fanout mode. Use alternate bridge profiles only as explicit operator A/B diagnostics with live evidence.
 - Keep mixed screen-share transfer guarded by the legacy-named `NLINK_FILETRANSFER_V4_MIXED_SCREENSHARE=1` until that flag is renamed.
 - Keep file-only V6 behavior unchanged while tuning mixed transfer.
 - Do not add or rename wire frames during stabilization unless the change is part of the V6 transport-epoch recovery protocol.

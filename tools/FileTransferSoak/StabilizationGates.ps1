@@ -191,6 +191,11 @@ function Test-FileTransferEventNearRecoveryMarker {
             'filetransfer_transport_paused' { return $true }
             'filetransfer_transport_epoch_started_while_unavailable' { return $true }
             'filetransfer_v6_receiver_state_deferred_for_recovery' { return $true }
+            'filetransfer_primary_regular_nkn_frontier_feedback_failed_recoverable' { return $true }
+            'filetransfer_primary_regular_nkn_bulk_v6_checkpoint_request_send_timeout' { return $true }
+            'filetransfer_primary_regular_nkn_bulk_v6_checkpoint_request_send_failed' { return $true }
+            'filetransfer_primary_regular_nkn_bulk_v6_checkpoint_receive_recovery_requested' { return $true }
+            'filetransfer_primary_regular_nkn_bulk_v6_checkpoint_receive_recovery_suppressed' { return $true }
             'filetransfer_data_session_availability_observed' {
                 $isAvailable = Get-FileTransferEventInt64Field -Event $candidate -Name 'is_available' -Default 1
                 $requiresResume = Get-FileTransferEventInt64Field -Event $candidate -Name 'requires_resume_request' -Default 0
@@ -222,6 +227,42 @@ function Test-FileTransferEventNearRecoveryMarker {
     return $false
 }
 
+function Test-FileTransferSummaryUsesPrimaryRegularNknQuietBridgePolicy {
+    param(
+        [Parameter(Mandatory = $true)]$Summary,
+        [string]$TransferId = ''
+    )
+
+    foreach ($candidate in @($Summary.TransferEvents + $Summary.GlobalEvents)) {
+        if ($null -eq $candidate) {
+            continue
+        }
+
+        $candidateTransferId = [string]$candidate.TransferId
+        if (-not [string]::IsNullOrWhiteSpace($TransferId) -and
+            -not [string]::IsNullOrWhiteSpace($candidateTransferId) -and
+            $candidateTransferId -ne '(all)' -and
+            $candidateTransferId -ne $TransferId) {
+            continue
+        }
+
+        if ($candidate.EventName -ne 'filetransfer_bridge_recovery_policy_selected' -and
+            $candidate.EventName -ne 'filetransfer_primary_regular_nkn_bulk_v6_selected') {
+            continue
+        }
+
+        $policy = Get-FileTransferEventField -Event $candidate -Name 'bridge_recovery_policy' -Default ''
+        $runtimeProfile = Get-FileTransferEventField -Event $candidate -Name 'runtime_profile' -Default ''
+        $recoveryProfile = Get-FileTransferEventField -Event $candidate -Name 'recovery_profile' -Default ''
+        if ($policy -eq 'primary_regular_nkn_quiet' -or
+            ($runtimeProfile -eq 'PrimaryRegularNknBulkV6' -and $recoveryProfile -eq 'regular_nkn_quiet')) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 function Test-FileTransferRecoverableV6FeedbackFailure {
     param(
         $Event,
@@ -242,19 +283,26 @@ function Test-FileTransferRecoverableV6FeedbackFailure {
         return $false
     }
 
+    if (-not (Test-FileTransferEventNearRecoveryMarker -Event $Event -Summary $Summary)) {
+        return $false
+    }
+
     $firstError = Get-FileTransferEventField -Event $Event -Name 'first_error' -Default ''
     $secondError = Get-FileTransferEventField -Event $Event -Name 'second_error' -Default ''
     $errorText = "$firstError $secondError"
+    $transferId = [string]$Event.TransferId
+    if ($frameType -eq 'filetransfer.frontier_request.v6' -and
+        $errorText -like '*OperationCanceledException*' -and
+        (Test-FileTransferSummaryUsesPrimaryRegularNknQuietBridgePolicy -Summary $Summary -TransferId $transferId)) {
+        return $true
+    }
+
     $recoverableError =
         $errorText -like '*InvalidOperationException*' -or
         $errorText -like '*bridge is not running*' -or
         $errorText -like '*Not connected*' -or
         $errorText -like '*client not ready*'
-    if (-not $recoverableError) {
-        return $false
-    }
-
-    return Test-FileTransferEventNearRecoveryMarker -Event $Event -Summary $Summary
+    return $recoverableError
 }
 
 function Test-FileTransferRecoverableBridgeBulkFailure {

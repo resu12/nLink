@@ -1242,7 +1242,7 @@ public sealed class TunaWalletDiagnosticsTests
             Assert.Contains("tuna_runtime_flag: Advanced opt-in", copied, StringComparison.Ordinal);
             Assert.Contains("tuna_runtime_enabled: yes", copied, StringComparison.Ordinal);
             Assert.Contains("tuna_runtime_caps: max_price_nkn_per_mb=0.0002; max_total_mib=2048; max_duration_minutes=30", copied, StringComparison.Ordinal);
-            Assert.Contains("tuna_provider_readiness: degraded_allowed", copied, StringComparison.Ordinal);
+            Assert.Contains("tuna_provider_readiness: strict_4_paths", copied, StringComparison.Ordinal);
             Assert.Contains("tuna_startup_timing:", copied, StringComparison.Ordinal);
             Assert.Contains("tuna_spend_by_nlink: 0.01 NKN", copied, StringComparison.Ordinal);
             Assert.Contains("tuna_average_cost: 0.0001 NKN/MB", copied, StringComparison.Ordinal);

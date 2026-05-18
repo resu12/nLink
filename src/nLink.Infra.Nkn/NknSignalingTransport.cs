@@ -2349,16 +2349,33 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
     {
         if (e.Kind == BridgeLifecycleEventKind.ReceiveStallRecoveryStarted)
         {
-            MarkFileTransferFallbackNknProofPending(
-                reason: string.IsNullOrWhiteSpace(e.ExitReasonText) ? "receive_stall_recovery" : e.ExitReasonText,
-                sessionId: currentSessionSecurityState.SessionId?.Value,
-                lanes: NknAccelerationLaneKind.File);
-            SetFileTransferDataSessionsAvailability(
-                isAvailable: false,
-                reason: "receive_stall_recovery",
-                requiresResumeRequest: true,
-                handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
-                targetTransport: FileTransferTransportKind.RegularNkn);
+            var recoveryReason = string.IsNullOrWhiteSpace(e.ExitReasonText) ? "receive_stall_recovery" : e.ExitReasonText;
+            var sessionId = currentSessionSecurityState.SessionId?.Value;
+            if (ShouldUseFileTransferV6EpochForRegularNknRecovery(sessionId))
+            {
+                MarkFileTransferFallbackNknProofPending(
+                    reason: recoveryReason,
+                    sessionId: sessionId,
+                    lanes: NknAccelerationLaneKind.File);
+                SetFileTransferDataSessionsAvailability(
+                    isAvailable: false,
+                    reason: "receive_stall_recovery",
+                    requiresResumeRequest: true,
+                    handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
+                    targetTransport: FileTransferTransportKind.RegularNkn);
+            }
+            else
+            {
+                LocalOperationalLog.Info(
+                    "NKN.Tuna",
+                    $"event=filetransfer_regular_nkn_receive_recovery_no_epoch; session_id={SanitizeLogToken(sessionId ?? "none")}; reason={SanitizeLogToken(recoveryReason)}; trigger=bridge_receive_stall_recovery_started");
+                SetFileTransferDataSessionsAvailability(
+                    isAvailable: false,
+                    reason: "receive_stall_recovery",
+                    requiresResumeRequest: false,
+                    handoffKind: FileTransferTransportHandoffKind.None,
+                    targetTransport: FileTransferTransportKind.RegularNkn);
+            }
         }
 
         if (e.Kind == BridgeLifecycleEventKind.Ready)
@@ -2379,12 +2396,15 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
             }
             else
             {
-                SetFileTransferDataSessionsAvailability(
-                    isAvailable: true,
-                    reason: "transport_recovered",
-                    requiresResumeRequest: true,
-                    handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
-                    targetTransport: FileTransferTransportKind.RegularNkn);
+                if (!ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause("bridge_ready", out _))
+                {
+                    SetFileTransferDataSessionsAvailability(
+                        isAvailable: true,
+                        reason: "transport_recovered",
+                        requiresResumeRequest: false,
+                        handoffKind: FileTransferTransportHandoffKind.None,
+                        targetTransport: FileTransferTransportKind.RegularNkn);
+                }
             }
         }
 
@@ -2403,6 +2423,18 @@ public sealed partial class NknSignalingTransport : ISignalingTransport, IAddres
                     handoffKind: FileTransferTransportHandoffKind.RegularNknRecovery,
                     targetTransport: FileTransferTransportKind.RegularNkn);
                 ScheduleFileTransferFallbackNknProbeIfPending("receive_resumed_unproven");
+            }
+            else
+            {
+                if (!ShouldSuppressFileTransferTransportRecoveredForTunaActivationPause("receive_resumed", out _))
+                {
+                    SetFileTransferDataSessionsAvailability(
+                        isAvailable: true,
+                        reason: "transport_recovered",
+                        requiresResumeRequest: false,
+                        handoffKind: FileTransferTransportHandoffKind.None,
+                        targetTransport: FileTransferTransportKind.RegularNkn);
+                }
             }
         }
 

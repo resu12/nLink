@@ -946,10 +946,9 @@ public sealed class DiagnosticsPageViewModel : ViewModelBase, IDisposable
             return false;
         }
 
-        return CurrentTunaRuntimePreferences().AllowDegradedProviderReady ||
-               IsEnabled(ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
-                   TunaRuntimePreferenceState.AllowDegradedProviderReadyEnvVar,
-                   category: "nkn_tuna_provider_readiness"));
+        return IsEnabled(ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(
+            TunaRuntimePreferenceState.AllowDegradedProviderReadyEnvVar,
+            category: "nkn_tuna_provider_readiness"));
     }
 
     private static bool IsEnabled(string? value)

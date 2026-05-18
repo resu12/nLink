@@ -46,6 +46,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int LifecyclePrioritySendTimeoutMs = 1000;
     private const int V6HeartbeatIntervalMs = 5000;
     private const int V6PeerLivenessTimeoutMs = 20000;
+    private const int V6RegularNknPeerLivenessRepairGraceMultiplier = 6;
     private const int RepairBatchSize = 2;
     private const int DegradedRepairGrantChunks = 32;
     private const int DegradedRepairLowWatermarkChunks = 8;
@@ -217,14 +218,17 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int PullV4FixedFileOnlyWindowBytesMax = 64 * 1024 * 1024;
     private const int V4DefaultChunkSizeBytes = 21 * 1024;
     private const int V4FileOnlySparseCreditWindowBytes = 64 * 1024 * 1024;
+    private const int V6RegularNknBulkSparseCreditWindowBytes = V4FileOnlySparseCreditWindowBytes;
     private const int V4SenderPumpDepth = 8;
     private const int V4SenderPumpPendingBytes = 2 * 1024 * 1024;
     private const int V4RepairRepeatIntervalMs = 750;
     private const int V4FileOnlyFrontierRepairRepeatIntervalMs = 250;
+    private const int V6RegularNknSparseRuntimeFrontierRepairRepeatIntervalMs = V4FileOnlyFrontierRepairRepeatIntervalMs;
     private const int V4RepairRequestHistoryRetentionMs = 10000;
     private const int V4RepairRedundancyEscalationStallMs = 2000;
     private const int V4FileOnlyFirstRepairCreditStallEscalationMs = 1000;
     private const int V4RepairBurstMaxChunks = 64;
+    private const int V6RegularNknSparseRuntimeRepairBurstMaxChunks = V4RepairBurstMaxChunks;
     private const int V4RepairBatchSendAttempts = 1;
     private const int V4MaxBatchSegmentsDefault = 3;
     private const int V4MaxBatchSegmentsMin = 1;
@@ -250,7 +254,8 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V4PostFallbackFrontierBackfillStep3AfterCommittedChunks = 8;
     private const int V4FrontierTailRetryChunks = V4MaxBatchSegmentsDefault;
     private const int V4FileOnlyFrontierTailRetryChunks = 12;
-    private const int V6ReceiverRequestWindowChunks = 768;
+    private const int V6ReceiverRequestWindowChunks = 1536;
+    private const int V6RegularNknReceiverRequestWindowChunks = 512;
     private const int V6RecoveredRegularNknReceiverRequestWindowChunks = 512;
     private const int V6RecoveredRegularNknFrontierStalledReceiverRequestWindowChunks = 384;
     private const int V6FrontierStalledReceiverRequestWindowChunks = 256;
@@ -261,23 +266,30 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V6SparseSeekableFrontierStalledRollingAheadChunks = 256;
     private const int V6SparseSeekableFrontierStalledRequestBudgetChunks = 256;
     private const int V6RegularNknNormalSendAheadLimitChunks = 512;
-    private const int V6RegularNknNormalRefillLowWatermarkChunks = 384;
+    private const int V6RegularNknNormalRefillLowWatermarkChunks = 256;
     private const int V6RegularNknNearFrontierNormalResendBypassChunks = 24;
-    private const int V6RegularNknFrontierPressureNormalSendAheadLimitChunks = 256;
-    private const int V6RegularNknFrontierPressureNormalRefillLowWatermarkChunks = 128;
+    private const int V6RegularNknFrontierRepairBurstChunks = 12;
+    private const int V6RegularNknFrontierRepairScanHorizonChunks = 768;
+    private const int V6RegularNknFrontierPressureNormalSendAheadLimitChunks = 128;
+    private const int V6RegularNknFrontierPressureNormalRefillLowWatermarkChunks = 96;
     private const int V6RegularNknFrontierPressureReleaseAdvanceChunks = 512;
-    private const int V6RegularNknDegradedNormalSendAheadLimitChunks = 128;
-    private const int V6RegularNknDegradedNormalRefillLowWatermarkChunks = 64;
+    private const int V6RegularNknDegradedNormalSendAheadLimitChunks = 512;
+    private const int V6RegularNknDegradedNormalRefillLowWatermarkChunks = 384;
     private const int V6RegularNknDegradedReleaseAdvanceChunks = 256;
     private const int V6RegularNknDegradedNoProgressReceiverStateThreshold = 4;
     private const int V6RegularNknDegradedNoProgressGraceMs = 3500;
     private const int V6TunaNormalSendAheadLimitChunks = 1536;
     private const int V6FrontierStalledPriorityBurstChunks = 16;
-    private const int V6RegularNknInferredFrontierRepairBurstChunks = 2;
-    private const int V6RegularNknInferredFrontierRepairStallMs = 3500;
-    private const int V6RegularNknInferredFrontierRepairCooldownMs = 10000;
+    private const int V6RegularNknInferredFrontierRepairBurstChunks = 4;
+    private const int V6RegularNknInferredFrontierRepairStallMs = 5000;
+    private const int V6RegularNknInferredFrontierRepairCooldownMs = 5000;
     private const int V6RecoveredRegularNknFrontierPriorityBurstChunks = 24;
     private const int V6NormalReceiverStateResendGateMs = 3500;
+    // Regular NKN can acknowledge send success well before the peer receives a
+    // chunk. Keep normal-window resends behind the send timeout; explicit
+    // frontier repair still handles true holes quickly.
+    private const int V6RegularNknNormalReceiverStateResendGateMs = 16000;
+    private const int V6RegularNknFrontierStallObservationMs = 1000;
     private const int V6RecoveredFrontierResendGateMs = 1500;
     private const int V6EpochFrontierResendGateMs = 1500;
     private const int V6TunaRedundantDataProbeDelayMs = 10000;
@@ -285,19 +297,37 @@ public sealed partial class SessionFileTransferService : IDisposable
     private const int V6SenderRequestFeedbackStallRecoveryCooldownMs = 15000;
     private const int V6SenderRequestFeedbackStallRecoverySuppressedLogIntervalMs = 5000;
     private const int V6SenderFeedbackStaleNormalBacklogChunks = 256;
+    private const int V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryMs = 30000;
+    private const int V6RegularNknSparseRuntimeStateRefreshCooldownMs = 5000;
+    private const int V6RegularNknSparseRuntimeStateRefreshSendTimeoutMs = 7500;
+    private const int V6RegularNknCheckpointSyncFailuresBeforeBridgeRecovery = 2;
+    private const string V6RegularNknStateRefreshRecoveryMode = "regular_nkn_state_refresh";
+    private const string V6RegularNknStateRefreshPriority = "state_refresh";
+    private const string V6RegularNknCheckpointSyncRecoveryMode = "regular_nkn_checkpoint_sync";
+    private const string V6RegularNknCheckpointSyncPriority = "checkpoint_sync";
+    private const string V6RegularNknCheckpointSyncRequestPrefix = "v6-regular-nkn-checkpoint-sync:";
+    private const string V6RegularNknSparseRuntimeEnvironmentVariableName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
+    private const string V6RegularNknSparseRuntimeLegacyFramesEnvironmentVariableName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME_LEGACY_FRAMES";
     private const string V6RegularNknPassiveScoutEnvironmentVariableName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_PASSIVE_SCOUT";
+    private const string V6RegularNknActiveProbeEnvironmentVariableName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_ACTIVE_PROBE";
     private const long V6TunaRedundantDataMinimumBytesAfterProof = 10L * 1024L * 1024L;
     private const int V6FileOnlySenderPipelineDepth = 24;
+    private const int V6RegularNknSenderPipelineDepth = 4;
     private const int V6RegularNknRedundantSenderPipelineDepth = 2;
     private const int V6RegularNknRedundantNormalBatchLimit = 2;
     private const int V6RegularNknFallbackSenderPipelineDepth = 10;
     private const int V6EpochPriorityPipelineBypassDepth = 2;
     private const int V6SenderTransportSendTimeoutMs = 5000;
+    private const int V6RegularNknTransportSendTimeoutMs = 7500;
     private const int V6RegularNknRedundantTransportSendTimeoutMs = 15000;
+    private const int V6RegularNknSparseRuntimeV4TransportSendTimeoutMs = V6RegularNknTransportSendTimeoutMs;
     private const int V6ReceiverStateRetryIntervalMs = 750;
     private const int V6FrontierRequestRetryIntervalMs = 500;
+    private const int V6RegularNknFrontierRequestRetryIntervalMs = 750;
     private const int V6FrontierRequestStallGraceMs = 750;
-    private const int V6RegularNknFrontierControlBulkEscalationMs = 2500;
+    private const int V6RegularNknFrontierRequestStallGraceMs = 750;
+    private const int V6RegularNknFrontierRequestProgressGraceMs = 1000;
+    private const int V6RegularNknFrontierControlBulkEscalationMs = V6RegularNknFrontierRequestStallGraceMs;
     private const int V6ReceiverStateProgressMinCommittedChunks = 16;
     private const int V6ReceiverStateProgressMaxIntervalMs = 500;
     private const string V4MaxBatchSegmentsEnvironmentVariableName = "NLINK_FILETRANSFER_V4_MAX_BATCH_SEGMENTS";
@@ -346,11 +376,21 @@ public sealed partial class SessionFileTransferService : IDisposable
     internal static long? V6TunaRedundantDataMinimumBytesAfterProofOverrideForTests { get; set; }
     internal static TimeSpan? V6SenderTransportSendTimeoutOverrideForTests { get; set; }
     internal static TimeSpan? V6SenderRequestFeedbackStallRecoveryDelayOverrideForTests { get; set; }
+    internal static TimeSpan? V6RegularNknSparseRuntimeStaleCreditReceiveRecoveryDelayOverrideForTests { get; set; }
+    internal static TimeSpan? V6RegularNknSparseRuntimeStateRefreshCooldownOverrideForTests { get; set; }
+    internal static TimeSpan? V6RegularNknSparseRuntimeV4TransportSendTimeoutOverrideForTests { get; set; }
+    internal static TimeSpan? V6RegularNknNormalReceiverStateResendGateOverrideForTests { get; set; }
+    internal static TimeSpan? V6RegularNknFrontierRequestProgressGraceOverrideForTests { get; set; }
+    internal static TimeSpan? V6RegularNknInferredFrontierRepairStallOverrideForTests { get; set; }
+    internal static TimeSpan? V6RegularNknInferredFrontierRepairCooldownOverrideForTests { get; set; }
     internal static TimeSpan? V6RegularNknPassiveScoutSampleIntervalOverrideForTests { get; set; }
     internal static TimeSpan? V6RegularNknPassiveScoutRecommendationIntervalOverrideForTests { get; set; }
     internal static TimeSpan? V6RegularNknPassiveScoutWatchFeedbackStaleOverrideForTests { get; set; }
     internal static TimeSpan? V6RegularNknPassiveScoutDegradedNoProgressOverrideForTests { get; set; }
     internal static TimeSpan? V6RegularNknPassiveScoutStalledNoProgressOverrideForTests { get; set; }
+    internal static TimeSpan? V6RegularNknActiveProbeCooldownOverrideForTests { get; set; }
+    internal static TimeSpan? V6RegularNknActiveProbeTimeoutOverrideForTests { get; set; }
+    internal static int? V6RegularNknActiveProbeMinimumWatchSamplesOverrideForTests { get; set; }
 
     public SessionFileTransferService(Func<string>? transferIdFactory = null)
     {
@@ -1420,7 +1460,29 @@ public sealed partial class SessionFileTransferService : IDisposable
             }
 
             LogV4MixedScreenShareEnabled(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
-            await RunOutboundV6SenderAsync(context).ConfigureAwait(false);
+            var runtimeSelection = ResolveFileTransferRuntimeProfile(context);
+            LogFileTransferBridgeRecoveryPolicySelected(
+                context.TransferId,
+                context.SessionId,
+                FileTransferDirection.Outbound,
+                runtimeSelection);
+            if (runtimeSelection.UsesRegularNknSparseEngine)
+            {
+                if (runtimeSelection.Profile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6)
+                {
+                    LogPrimaryRegularNknBulkV6Selected(context.TransferId, context.SessionId, FileTransferDirection.Outbound, runtimeSelection);
+                    await RunOutboundPrimaryRegularNknBulkV6Async(context).ConfigureAwait(false);
+                }
+                else if (runtimeSelection.Profile == FileTransferRuntimeProfile.DiagnosticV6RegularNknSparse)
+                {
+                    LogV6RegularNknSparseRuntimeSelected(context.TransferId, context.SessionId, FileTransferDirection.Outbound);
+                    await RunOutboundV4SenderAsync(context).ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                await RunOutboundV6SenderAsync(context).ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException) when (context.LifetimeCts.IsCancellationRequested)
         {
@@ -1974,7 +2036,29 @@ public sealed partial class SessionFileTransferService : IDisposable
                     sessionId: message.SessionId,
                     reason: $"role={message.SessionRole}; protocol_version={message.ProtocolVersion}; chunk_size_bytes={message.ChunkSizeBytes}; pipeline_depth={message.InitialPipelineDepth}");
                 StartInboundV6HeartbeatLoop(context, "session_open_received");
-                _ = RunInboundV6ReceiverAsync(context, message);
+                var runtimeSelection = ResolveFileTransferRuntimeProfile(context);
+                LogFileTransferBridgeRecoveryPolicySelected(
+                    context.TransferId,
+                    context.SessionId,
+                    FileTransferDirection.Inbound,
+                    runtimeSelection);
+                if (runtimeSelection.UsesRegularNknSparseEngine)
+                {
+                    if (runtimeSelection.Profile == FileTransferRuntimeProfile.PrimaryRegularNknBulkV6)
+                    {
+                        LogPrimaryRegularNknBulkV6Selected(context.TransferId, context.SessionId, FileTransferDirection.Inbound, runtimeSelection);
+                        _ = RunInboundPrimaryRegularNknBulkV6Async(context, message);
+                    }
+                    else if (runtimeSelection.Profile == FileTransferRuntimeProfile.DiagnosticV6RegularNknSparse)
+                    {
+                        LogV6RegularNknSparseRuntimeSelected(context.TransferId, context.SessionId, FileTransferDirection.Inbound);
+                        _ = RunInboundV4SparseReceiveLoopAsync(context, message);
+                    }
+                }
+                else
+                {
+                    _ = RunInboundV6ReceiverAsync(context, message);
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -2146,10 +2230,48 @@ public sealed partial class SessionFileTransferService : IDisposable
             LogTransportResumed(FileTransferDirection.Outbound, outboundToResume.TransferId, outboundToResume.SessionId, effectiveReason, effectiveRequiresResumeRequest);
             if (effectiveRequiresResumeRequest)
             {
-                await AnnounceAndProbeOutboundV6TransportEpochAsync(outboundToResume).ConfigureAwait(false);
-                LocalOperationalLog.Info(
-                    "FileTransferService",
-                    $"event=filetransfer_transport_rebind_generation_started; direction=outbound; transfer_id={outboundToResume.TransferId}; session_id={outboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={outboundToResume.PullTransportRebindGeneration}; remote_committed_chunk={outboundToResume.RemoteNextExpectedChunkIndex}; highest_sent_chunk={Math.Max(-1, outboundToResume.ChunksAcceptedForTransport - 1)}");
+                IFileTransferDataSession? checkpointDataSession = null;
+                FileTransferFrontierRequestFrameV6? checkpointRequest = null;
+                var primaryRegularNknBulkV6Rebind = false;
+                lock (gate)
+                {
+                    primaryRegularNknBulkV6Rebind =
+                        ReferenceEquals(outboundTransfer, outboundToResume) &&
+                        !outboundToResume.IsTerminal &&
+                        IsPrimaryRegularNknBulkV6ContextLocked(outboundToResume);
+                    if (primaryRegularNknBulkV6Rebind)
+                    {
+                        checkpointDataSession = outboundToResume.DataSession;
+                        checkpointRequest = CreateOutboundPrimaryRegularNknBulkV6CheckpointSyncRequestLocked(
+                            outboundToResume,
+                            DateTimeOffset.UtcNow,
+                            TimeSpan.Zero,
+                            Math.Max(0, outboundToResume.ChunksAcceptedForTransport - outboundToResume.RemoteNextExpectedChunkIndex),
+                            Math.Max(0, Math.Min(outboundToResume.RemoteGrantedUntilExclusive, outboundToResume.ChunkCount) - outboundToResume.ChunksAcceptedForTransport),
+                            Math.Min(outboundToResume.RemoteGrantedUntilExclusive, outboundToResume.ChunkCount),
+                            Math.Max(0, outboundToResume.PullSenderPipelineCurrentInFlightFrames),
+                            "after_rebind");
+                    }
+                }
+
+                if (primaryRegularNknBulkV6Rebind && checkpointDataSession is not null && checkpointRequest is not null)
+                {
+                    LocalOperationalLog.Info(
+                        "FileTransferService",
+                        $"event=filetransfer_primary_regular_nkn_bulk_v6_rebind_started; direction=outbound; transfer_id={outboundToResume.TransferId}; session_id={outboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={outboundToResume.PullTransportRebindGeneration}; remote_committed_chunk={outboundToResume.RemoteNextExpectedChunkIndex}; highest_sent_chunk={Math.Max(-1, outboundToResume.ChunksAcceptedForTransport - 1)}");
+                    QueueOutboundPrimaryRegularNknBulkV6CheckpointSync(
+                        outboundToResume,
+                        checkpointDataSession,
+                        checkpointRequest);
+                }
+                else
+                {
+                    await AnnounceAndProbeOutboundV6TransportEpochAsync(outboundToResume).ConfigureAwait(false);
+                    LocalOperationalLog.Info(
+                        "FileTransferService",
+                        $"event=filetransfer_transport_rebind_generation_started; direction=outbound; transfer_id={outboundToResume.TransferId}; session_id={outboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={outboundToResume.PullTransportRebindGeneration}; remote_committed_chunk={outboundToResume.RemoteNextExpectedChunkIndex}; highest_sent_chunk={Math.Max(-1, outboundToResume.ChunksAcceptedForTransport - 1)}");
+                }
+
                 SignalOutboundV4SenderPump(outboundToResume);
             }
         }
@@ -2167,24 +2289,55 @@ public sealed partial class SessionFileTransferService : IDisposable
             LogTransportResumed(FileTransferDirection.Inbound, inboundToResume.TransferId, inboundToResume.SessionId, effectiveReason, effectiveRequiresResumeRequest);
             if (effectiveRequiresResumeRequest)
             {
-                await AnnounceAndProbeInboundV6TransportEpochAsync(inboundToResume).ConfigureAwait(false);
-                LocalOperationalLog.Info(
-                    "FileTransferService",
-                    $"event=filetransfer_transport_rebind_generation_started; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; committed_chunk={inboundToResume.NextChunkIndex}; highest_received_chunk={inboundToResume.PullHighestReceivedChunkIndex}; missing_range_count={(inboundToResume.NextChunkIndex <= inboundToResume.PullHighestReceivedChunkIndex ? 1 : 0)}");
-                try
+                var primaryRegularNknBulkV6Rebind = false;
+                lock (gate)
                 {
-                    var sent = await MaybeSendTransportRebindStateAsync(inboundToResume).ConfigureAwait(false);
+                    primaryRegularNknBulkV6Rebind =
+                        ReferenceEquals(inboundTransfer, inboundToResume) &&
+                        !inboundToResume.IsTerminal &&
+                        IsPrimaryRegularNknBulkV6ContextLocked(inboundToResume);
+                }
+
+                if (primaryRegularNknBulkV6Rebind)
+                {
+                    LocalOperationalLog.Info(
+                        "FileTransferService",
+                        $"event=filetransfer_primary_regular_nkn_bulk_v6_rebind_started; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; committed_chunk={inboundToResume.NextChunkIndex}; highest_received_chunk={inboundToResume.PullHighestReceivedChunkIndex}; missing_range_count={(inboundToResume.NextChunkIndex <= inboundToResume.PullHighestReceivedChunkIndex ? 1 : 0)}");
+                    var sent = await SendInboundV4StateAsync(
+                        inboundToResume,
+                        V6RegularNknCheckpointSyncRecoveryMode,
+                        terminalReady: false,
+                        forceSend: true).ConfigureAwait(false);
+                    if (sent)
+                    {
+                        LogPrimaryRegularNknBulkV6State(inboundToResume, PrimaryRegularNknBulkV6State.RebindConfirmed, effectiveReason);
+                    }
 
                     LocalOperationalLog.Info(
                         "FileTransferService",
-                        $"event=filetransfer_transport_rebind_state_forced; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; state_sent={(sent ? 1 : 0)}; committed_chunk={inboundToResume.NextChunkIndex}; highest_received_chunk={inboundToResume.PullHighestReceivedChunkIndex}");
-                    ScheduleInboundTransportRebindRetries(inboundToResume, effectiveReason, inboundToResume.PullTransportRebindGeneration);
+                        $"event=filetransfer_primary_regular_nkn_bulk_v6_rebind_checkpoint_confirmed; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; checkpoint_sent={(sent ? 1 : 0)}; committed_chunk={inboundToResume.NextChunkIndex}; highest_received_chunk={inboundToResume.PullHighestReceivedChunkIndex}");
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                else
                 {
-                    LocalOperationalLog.Warn(
+                    await AnnounceAndProbeInboundV6TransportEpochAsync(inboundToResume).ConfigureAwait(false);
+                    LocalOperationalLog.Info(
                         "FileTransferService",
-                        $"event=filetransfer_transport_rebind_failed; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; error={FormatProtocolLogValue(ex.Message)}");
+                        $"event=filetransfer_transport_rebind_generation_started; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; committed_chunk={inboundToResume.NextChunkIndex}; highest_received_chunk={inboundToResume.PullHighestReceivedChunkIndex}; missing_range_count={(inboundToResume.NextChunkIndex <= inboundToResume.PullHighestReceivedChunkIndex ? 1 : 0)}");
+                    try
+                    {
+                        var sent = await MaybeSendTransportRebindStateAsync(inboundToResume).ConfigureAwait(false);
+
+                        LocalOperationalLog.Info(
+                            "FileTransferService",
+                            $"event=filetransfer_transport_rebind_state_forced; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; state_sent={(sent ? 1 : 0)}; committed_chunk={inboundToResume.NextChunkIndex}; highest_received_chunk={inboundToResume.PullHighestReceivedChunkIndex}");
+                        ScheduleInboundTransportRebindRetries(inboundToResume, effectiveReason, inboundToResume.PullTransportRebindGeneration);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        LocalOperationalLog.Warn(
+                            "FileTransferService",
+                            $"event=filetransfer_transport_rebind_failed; direction=inbound; transfer_id={inboundToResume.TransferId}; session_id={inboundToResume.SessionId}; reason={FormatProtocolLogValue(effectiveReason)}; rebind_generation={inboundToResume.PullTransportRebindGeneration}; error={FormatProtocolLogValue(ex.Message)}");
+                    }
                 }
             }
         }
@@ -3141,6 +3294,202 @@ public sealed partial class SessionFileTransferService : IDisposable
     private static bool IsV6StreamingTransport(IFileTransferSignalingTransport? currentTransport)
         => currentTransport is IFileTransferProtocolCapabilities { SupportsFileTransferV6Streaming: true };
 
+    private FileTransferRuntimeProfileSelection ResolveFileTransferRuntimeProfile(OutboundTransferContext context)
+    {
+        var envOverride = IsV6RegularNknSparseRuntimeEnvEnabled();
+        lock (gate)
+        {
+            var selection = ResolveFileTransferRuntimeProfileLocked(context, envOverride);
+            ApplyFileTransferRuntimeProfileSelectionLocked(context, selection);
+            return selection;
+        }
+    }
+
+    private FileTransferRuntimeProfileSelection ResolveFileTransferRuntimeProfile(InboundTransferContext context)
+    {
+        var envOverride = IsV6RegularNknSparseRuntimeEnvEnabled();
+        lock (gate)
+        {
+            var selection = ResolveFileTransferRuntimeProfileLocked(context, envOverride);
+            ApplyFileTransferRuntimeProfileSelectionLocked(context, selection);
+            return selection;
+        }
+    }
+
+    private FileTransferRuntimeProfileSelection ResolveFileTransferRuntimeProfileLocked(
+        OutboundTransferContext context,
+        bool envOverride)
+    {
+        if (!ReferenceEquals(outboundTransfer, context))
+        {
+            return FileTransferRuntimeProfileSelection.Default("not_current_outbound");
+        }
+
+        if (context.IsTerminal)
+        {
+            return FileTransferRuntimeProfileSelection.Default("terminal");
+        }
+
+        if (context.NegotiatedDataProtocolVersion < FileTransferProtocol.ProtocolVersionV6)
+        {
+            return FileTransferRuntimeProfileSelection.Default("protocol_not_v6");
+        }
+
+        if (!IsOutboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context))
+        {
+            return FileTransferRuntimeProfileSelection.Default("not_primary_regular_nkn");
+        }
+
+        if (envOverride)
+        {
+            return FileTransferRuntimeProfileSelection.Diagnostic("env_override");
+        }
+
+        if (IsPrimaryRegularNknBulkV6ProfileEnabled(transport))
+        {
+            return FileTransferRuntimeProfileSelection.PrimaryRegularNknBulkV6("conservative_regular_nkn");
+        }
+
+        return FileTransferRuntimeProfileSelection.Default("transport_profile_not_conservative");
+    }
+
+    private FileTransferRuntimeProfileSelection ResolveFileTransferRuntimeProfileLocked(
+        InboundTransferContext context,
+        bool envOverride)
+    {
+        if (!ReferenceEquals(inboundTransfer, context))
+        {
+            return FileTransferRuntimeProfileSelection.Default("not_current_inbound");
+        }
+
+        if (context.IsTerminal)
+        {
+            return FileTransferRuntimeProfileSelection.Default("terminal");
+        }
+
+        if (context.NegotiatedDataProtocolVersion < FileTransferProtocol.ProtocolVersionV6)
+        {
+            return FileTransferRuntimeProfileSelection.Default("protocol_not_v6");
+        }
+
+        if (!IsInboundV6PrimaryRegularNknWithoutTunaRecoveryLocked(context))
+        {
+            return FileTransferRuntimeProfileSelection.Default("not_primary_regular_nkn");
+        }
+
+        if (envOverride)
+        {
+            return FileTransferRuntimeProfileSelection.Diagnostic("env_override");
+        }
+
+        if (IsPrimaryRegularNknBulkV6ProfileEnabled(transport))
+        {
+            return FileTransferRuntimeProfileSelection.PrimaryRegularNknBulkV6("conservative_regular_nkn");
+        }
+
+        return FileTransferRuntimeProfileSelection.Default("transport_profile_not_conservative");
+    }
+
+    private static void ApplyFileTransferRuntimeProfileSelectionLocked(
+        OutboundTransferContext context,
+        FileTransferRuntimeProfileSelection selection)
+    {
+        context.RuntimeProfile = selection.Profile;
+        context.BridgeRecoveryPolicy = selection.BridgeRecoveryPolicy;
+        context.V6RegularNknBulkSparseProfileActive = selection.UsesRegularNknSparseEngine;
+    }
+
+    private static void ApplyFileTransferRuntimeProfileSelectionLocked(
+        InboundTransferContext context,
+        FileTransferRuntimeProfileSelection selection)
+    {
+        context.RuntimeProfile = selection.Profile;
+        context.BridgeRecoveryPolicy = selection.BridgeRecoveryPolicy;
+        context.V6RegularNknBulkSparseProfileActive = selection.UsesRegularNknSparseEngine;
+    }
+
+    private static bool ShouldUseV6RegularNknSparseRuntime()
+        => IsV6RegularNknSparseRuntimeEnvEnabled();
+
+    private static bool ShouldUseV6RegularNknSparseRuntime(OutboundTransferContext context)
+        => context.V6RegularNknBulkSparseProfileActive || ShouldUseV6RegularNknSparseRuntime();
+
+    private static bool ShouldUseV6RegularNknSparseRuntime(InboundTransferContext context)
+        => context.V6RegularNknBulkSparseProfileActive || ShouldUseV6RegularNknSparseRuntime();
+
+    private static bool IsPrimaryRegularNknBulkV6ProfileEnabled(IFileTransferSignalingTransport? currentTransport)
+        => ResolveTransportProfileKind(currentTransport) == FileTransferTransportProfileKind.ConservativeNknStartup;
+
+    private static bool IsV6RegularNknSparseRuntimeEnvEnabled()
+        => IsFileTransferEnvFlagEnabled(V6RegularNknSparseRuntimeEnvironmentVariableName);
+
+    private static bool ShouldUseV6RegularNknSparseRuntimeLegacyFrames()
+        => ShouldUseV6RegularNknSparseRuntime() &&
+           IsFileTransferEnvFlagEnabled(V6RegularNknSparseRuntimeLegacyFramesEnvironmentVariableName);
+
+    private static void LogV6RegularNknSparseRuntimeSelected(
+        string transferId,
+        string sessionId,
+        FileTransferDirection direction)
+    {
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_regular_nkn_sparse_runtime_selected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; env={V6RegularNknSparseRuntimeEnvironmentVariableName}; protocol_version={FileTransferProtocol.ProtocolVersionV6}");
+    }
+
+    private Task RunOutboundPrimaryRegularNknBulkV6Async(OutboundTransferContext context)
+        => RunOutboundSparseCreditSenderAsync(context, FileTransferSparseCreditRuntimeKind.PrimaryRegularNknBulkV6);
+
+    private Task RunInboundPrimaryRegularNknBulkV6Async(
+        InboundTransferContext context,
+        FileTransferSessionOpenV2 sessionOpen)
+        => RunInboundSparseCreditReceiveLoopAsync(context, sessionOpen, FileTransferSparseCreditRuntimeKind.PrimaryRegularNknBulkV6);
+
+    private static void LogPrimaryRegularNknBulkV6Selected(
+        string transferId,
+        string sessionId,
+        FileTransferDirection direction,
+        FileTransferRuntimeProfileSelection selection)
+    {
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_primary_regular_nkn_bulk_v6_selected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; protocol_version={FileTransferProtocol.ProtocolVersionV6}; runtime_profile=PrimaryRegularNknBulkV6; credit_profile=v4_sparse; frame_profile=v6; recovery_profile=regular_nkn_quiet; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(selection.BridgeRecoveryPolicy)}; activation=primary_regular_nkn; selection_reason={selection.Reason}");
+    }
+
+    private static void LogFileTransferBridgeRecoveryPolicySelected(
+        string transferId,
+        string sessionId,
+        FileTransferDirection direction,
+        FileTransferRuntimeProfileSelection selection)
+    {
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_bridge_recovery_policy_selected; direction={direction.ToString().ToLowerInvariant()}; transfer_id={transferId}; session_id={FormatProtocolLogValue(sessionId)}; runtime_profile={FormatFileTransferRuntimeProfile(selection.Profile)}; bridge_recovery_policy={FormatFileTransferBridgeRecoveryPolicy(selection.BridgeRecoveryPolicy)}; selection_reason={FormatProtocolLogValue(selection.Reason)}");
+    }
+
+    private FileTransferBridgeRecoveryPolicy ResolveReceiveRecoveryPolicyForRequestLocked(FileTransferReceiveRecoveryRequest request)
+    {
+        if (request.Direction == FileTransferDirection.Outbound &&
+            outboundTransfer is { } outbound &&
+            ReferenceEquals(outboundTransfer, outbound) &&
+            string.Equals(outbound.TransferId, request.TransferId, StringComparison.Ordinal) &&
+            string.Equals(outbound.SessionId, request.SessionId, StringComparison.Ordinal))
+        {
+            return outbound.BridgeRecoveryPolicy;
+        }
+
+        if (request.Direction == FileTransferDirection.Inbound &&
+            inboundTransfer is { } inbound &&
+            ReferenceEquals(inboundTransfer, inbound) &&
+            string.Equals(inbound.TransferId, request.TransferId, StringComparison.Ordinal) &&
+            string.Equals(inbound.SessionId, request.SessionId, StringComparison.Ordinal))
+        {
+            return inbound.BridgeRecoveryPolicy;
+        }
+
+        return FileTransferBridgeRecoveryPolicy.TunaStrictRecovery;
+    }
+
     private static bool IsV4MixedScreenShareEnabled()
     {
         var value = ReleaseOverridePolicy.ReadUnsafeEnvironmentVariable(V4MixedScreenShareEnvironmentVariableName, category: "filetransfer_tuning");
@@ -3519,6 +3868,87 @@ public sealed partial class SessionFileTransferService : IDisposable
         }
     }
 
+    private enum FileTransferRuntimeProfile
+    {
+        Default,
+        PrimaryRegularNknBulkV6,
+        DiagnosticV6RegularNknSparse,
+    }
+
+    private enum FileTransferBridgeRecoveryPolicy
+    {
+        TunaStrictRecovery,
+        PostTunaFallbackStrictRecovery,
+        PrimaryRegularNknQuietRecovery,
+        DiagnosticSparseRuntimeRecovery,
+    }
+
+    private enum FileTransferSparseCreditRuntimeKind
+    {
+        V4Compatible,
+        PrimaryRegularNknBulkV6,
+    }
+
+    private enum PrimaryRegularNknBulkV6State
+    {
+        Opening,
+        ManifestExchange,
+        AwaitingManifest,
+        CreditGranted,
+        SendingBulk,
+        ReceivingBulk,
+        AwaitingReceiverState,
+        StateRefreshRequested,
+        CheckpointSyncRequested,
+        Rebinding,
+        RebindConfirmed,
+        Finalizing,
+        Completed,
+        Failed,
+        Cancelled,
+    }
+
+    private readonly record struct FileTransferRuntimeProfileSelection(
+        FileTransferRuntimeProfile Profile,
+        FileTransferBridgeRecoveryPolicy BridgeRecoveryPolicy,
+        string Reason)
+    {
+        public static FileTransferRuntimeProfileSelection Default(string reason)
+            => new(FileTransferRuntimeProfile.Default, FileTransferBridgeRecoveryPolicy.TunaStrictRecovery, reason);
+
+        public static FileTransferRuntimeProfileSelection PrimaryRegularNknBulkV6(string reason)
+            => new(
+                FileTransferRuntimeProfile.PrimaryRegularNknBulkV6,
+                FileTransferBridgeRecoveryPolicy.PrimaryRegularNknQuietRecovery,
+                reason);
+
+        public static FileTransferRuntimeProfileSelection Diagnostic(string reason)
+            => new(
+                FileTransferRuntimeProfile.DiagnosticV6RegularNknSparse,
+                FileTransferBridgeRecoveryPolicy.DiagnosticSparseRuntimeRecovery,
+                reason);
+
+        public bool UsesRegularNknSparseEngine =>
+            Profile is FileTransferRuntimeProfile.PrimaryRegularNknBulkV6 or FileTransferRuntimeProfile.DiagnosticV6RegularNknSparse;
+    }
+
+    private static string FormatFileTransferRuntimeProfile(FileTransferRuntimeProfile profile)
+        => profile switch
+        {
+            FileTransferRuntimeProfile.PrimaryRegularNknBulkV6 => "PrimaryRegularNknBulkV6",
+            FileTransferRuntimeProfile.DiagnosticV6RegularNknSparse => "DiagnosticV6RegularNknSparse",
+            _ => "Default",
+        };
+
+    private static string FormatFileTransferBridgeRecoveryPolicy(FileTransferBridgeRecoveryPolicy policy)
+        => policy switch
+        {
+            FileTransferBridgeRecoveryPolicy.PrimaryRegularNknQuietRecovery => "primary_regular_nkn_quiet",
+            FileTransferBridgeRecoveryPolicy.PostTunaFallbackStrictRecovery => "post_tuna_fallback_strict",
+            FileTransferBridgeRecoveryPolicy.DiagnosticSparseRuntimeRecovery => "diagnostic_sparse_runtime",
+            _ => "tuna_strict",
+        };
+
     private sealed class OutboundTransferContext
     {
         private TaskCompletionSource<bool> controlSignal = CreateSignal();
@@ -3550,6 +3980,13 @@ public sealed partial class SessionFileTransferService : IDisposable
         public string? Sha256Base64 { get; set; }
 
         public int NegotiatedDataProtocolVersion { get; set; } = FileTransferProtocol.ProtocolVersionV6;
+
+        public bool V6RegularNknBulkSparseProfileActive { get; set; }
+
+        public FileTransferRuntimeProfile RuntimeProfile { get; set; }
+
+        public FileTransferBridgeRecoveryPolicy BridgeRecoveryPolicy { get; set; } =
+            FileTransferBridgeRecoveryPolicy.TunaStrictRecovery;
 
         public long BytesTransferred { get; set; }
 
@@ -3621,6 +4058,10 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public DateTimeOffset? PullV4LastPeerFrameReceivedUtc { get; set; }
 
+        public DateTimeOffset? PullV4PeerSilenceDeferralUtc { get; set; }
+
+        public int PullV4PeerSilenceDeferralCount { get; set; }
+
         public bool V6HeartbeatLoopStarted { get; set; }
 
         public long V6HeartbeatSequence { get; set; }
@@ -3638,6 +4079,20 @@ public sealed partial class SessionFileTransferService : IDisposable
         public DateTimeOffset? V6LastReceiveRecoveryRequestedUtc { get; set; }
 
         public DateTimeOffset? V6LastFeedbackStallRecoverySuppressedUtc { get; set; }
+
+        public DateTimeOffset? V6RegularNknLastStateRefreshRequestedUtc { get; set; }
+
+        public long V6RegularNknStateRefreshSequence { get; set; }
+
+        public int V6RegularNknStateRefreshSendInFlight { get; set; }
+
+        public DateTimeOffset? V6RegularNknLastCheckpointSyncRequestedUtc { get; set; }
+
+        public long V6RegularNknCheckpointSyncSequence { get; set; }
+
+        public int V6RegularNknCheckpointSyncSendInFlight { get; set; }
+
+        public int V6RegularNknCheckpointSyncFailureCount { get; set; }
 
         public bool PullV4ExpandedWindowActive { get; set; }
 
@@ -3728,6 +4183,8 @@ public sealed partial class SessionFileTransferService : IDisposable
         public string? V6LastInferredRegularNknFrontierRepairSuppressedReason { get; set; }
 
         public V6RegularNknPassiveScoutState V6RegularNknPassiveScout { get; } = new();
+
+        public V6RegularNknActiveProbeState V6RegularNknActiveProbe { get; } = new();
 
         public bool V6UseRegularNknRedundantData { get; set; }
 
@@ -4139,6 +4596,13 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public int NegotiatedDataProtocolVersion { get; set; } = FileTransferProtocol.ProtocolVersionV6;
 
+        public bool V6RegularNknBulkSparseProfileActive { get; set; }
+
+        public FileTransferRuntimeProfile RuntimeProfile { get; set; }
+
+        public FileTransferBridgeRecoveryPolicy BridgeRecoveryPolicy { get; set; } =
+            FileTransferBridgeRecoveryPolicy.TunaStrictRecovery;
+
         public FileTransferTransferState State { get; set; } = FileTransferTransferState.PendingDecision;
 
         public long BytesTransferred { get; set; }
@@ -4311,6 +4775,8 @@ public sealed partial class SessionFileTransferService : IDisposable
 
         public DateTimeOffset? PullLastProgressUtc { get; set; }
 
+        public DateTimeOffset? PullLastCommittedProgressUtc { get; set; }
+
         public DateTimeOffset? PullDegradedSinceUtc { get; set; }
 
         public DateTimeOffset? PullRecoverySinceUtc { get; set; }
@@ -4384,6 +4850,10 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int V6LastFrontierRequestChunkIndex { get; set; } = -1;
 
         public string? V6LastFrontierRequestId { get; set; }
+
+        public long V6RegularNknCheckpointSequence { get; set; }
+
+        public string? V6RegularNknLastCheckpointSyncRequestId { get; set; }
 
         public DateTimeOffset? V6FrontierStallStartedUtc { get; set; }
 
@@ -4522,6 +4992,10 @@ public sealed partial class SessionFileTransferService : IDisposable
         public int PullV4LastRepairRequestHighestReceivedChunkIndex { get; set; } = -1;
 
         public DateTimeOffset? PullV4LastPeerFrameReceivedUtc { get; set; }
+
+        public DateTimeOffset? PullV4PeerSilenceDeferralUtc { get; set; }
+
+        public int PullV4PeerSilenceDeferralCount { get; set; }
 
         public bool V6HeartbeatLoopStarted { get; set; }
 
@@ -4750,6 +5224,7 @@ public sealed partial class SessionFileTransferService : IDisposable
     private sealed record PendingV4TransportSend(
         PreparedV4TransportSend Prepared,
         Task SendTask,
+        CancellationTokenSource? SendCts,
         DateTimeOffset ScheduledUtc,
         int SendAttempt,
         int SendAttemptCount);

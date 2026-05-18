@@ -862,9 +862,18 @@ public sealed partial class SessionFileTransferService
     {
         OutboundTransferContext? outboundRecovered = null;
         InboundTransferContext? inboundRecovered = null;
+        var activeProbeHandled = false;
         lock (gate)
         {
             if (IsOutboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId) &&
+                outboundTransfer is { IsTerminal: false } outboundProbe &&
+                TryCompleteOutboundV6RegularNknActiveProbeAckLocked(outboundProbe, message, DateTimeOffset.UtcNow))
+            {
+                activeProbeHandled = true;
+            }
+
+            if (IsOutboundLifecycleMessageMatchLocked(message.SessionId, message.TransferId) &&
+                !activeProbeHandled &&
                 outboundTransfer is { IsTerminal: false } outbound &&
                 TryRecoverOutboundV6TransportEpochFromProbeAckLocked(outbound, message))
             {
@@ -997,8 +1006,11 @@ public sealed partial class SessionFileTransferService
 
         var epochPrefix = $"v6-frontier:{epoch.EpochId}:";
         var stateEpochPrefix = $"v6-state-frontier:{epoch.EpochId}:";
+        var rebindSafetyReplayPrefix = $"transport_rebind_safety_replay:{epoch.EpochId}:";
         return repairRequestId.StartsWith(epochPrefix, StringComparison.Ordinal) ||
-               repairRequestId.StartsWith(stateEpochPrefix, StringComparison.Ordinal);
+               repairRequestId.StartsWith(stateEpochPrefix, StringComparison.Ordinal) ||
+               repairRequestId.StartsWith(rebindSafetyReplayPrefix, StringComparison.Ordinal) ||
+               repairRequestId.StartsWith(V6RegularNknCheckpointSyncRequestPrefix, StringComparison.Ordinal);
     }
 
     private void AdvanceOutboundV6RemoteFrontierFromRepairProofLocked(
@@ -1037,6 +1049,54 @@ public sealed partial class SessionFileTransferService
             $"event=filetransfer_v6_repair_proof_advanced_remote_frontier; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={message.TransportEpoch}; repair_request_id={FormatProtocolLogValue(message.RepairRequestId ?? "(none)")}; previous_remote_frontier_chunk_index={previousRemoteFrontier}; committed_chunk={context.RemoteNextExpectedChunkIndex}");
     }
 
+    private bool TryCompleteOutboundV6TransportEpochWhenPeerCaughtUpToAcceptedTailLocked(
+        OutboundTransferContext context,
+        FileTransferStateFrameV4 state)
+    {
+        if (state is not FileTransferReceiverStateFrameV6 v6State)
+        {
+            return false;
+        }
+
+        var epoch = context.V6TransportEpoch;
+        if (!IsV6TransportEpochUnresolved(epoch) ||
+            epoch!.Kind != FileTransferTransportHandoffKind.NormalToTunaActivation ||
+            epoch.TargetTransport != FileTransferTransportKind.Tuna ||
+            v6State.TransportEpoch != epoch.EpochId)
+        {
+            return false;
+        }
+
+        var remoteFrontier = Math.Clamp(context.RemoteNextExpectedChunkIndex, 0, context.ChunkCount);
+        var acceptedUntil = Math.Clamp(context.ChunksAcceptedForTransport, 0, context.ChunkCount);
+        if (acceptedUntil <= 0 ||
+            remoteFrontier < acceptedUntil ||
+            state.DurableReceivedHighestChunkIndex >= acceptedUntil)
+        {
+            return false;
+        }
+
+        foreach (var range in state.MissingRanges)
+        {
+            var start = Math.Clamp(range.StartChunkIndex, 0, context.ChunkCount);
+            var end = Math.Clamp(range.StartChunkIndex + range.ChunkCount, start, context.ChunkCount);
+            if (start < acceptedUntil && end > start)
+            {
+                return false;
+            }
+        }
+
+        if (!CompleteOutboundV6TransportEpochLocked(context, "frontier_caught_up_to_accepted_tail"))
+        {
+            return false;
+        }
+
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_epoch_tail_caught_up_to_accepted; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={epoch.EpochId}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.Kind)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; remote_next_expected_chunk_index={remoteFrontier}; chunks_accepted_for_transport={acceptedUntil}; durable_received_highest_chunk_index={state.DurableReceivedHighestChunkIndex}; missing_range_count={state.MissingRanges.Count}");
+        return true;
+    }
+
     private bool CompleteOutboundV6TransportEpochLocked(OutboundTransferContext context, string reason)
     {
         var epoch = context.V6TransportEpoch;
@@ -1045,6 +1105,10 @@ public sealed partial class SessionFileTransferService
             return false;
         }
 
+        var discardedV4RepairFrameCount = context.PullV4SenderPumpRepairQueue.Count;
+        var discardedV4RepairChunkCount = context.PullV4SenderPumpRepairQueue.Sum(static repair => repair.ChunkIndices.Count);
+        var discardedV6NormalRequestCount = context.V6NormalRequestedChunks.Count;
+        var discardedV6PriorityRequestCount = context.V6PriorityRequestedChunks.Count;
         TrySetV6TransportEpochStateLocked(
             epoch,
             context.TransferId,
@@ -1058,14 +1122,35 @@ public sealed partial class SessionFileTransferService
         context.LastRecoveredV6TransportTargetTransport = epoch.TargetTransport;
         context.V6TransportEpoch = null;
         context.V6PendingEpochRepairRequestIds.Clear();
+        context.PullV4SenderPumpRepairQueue.Clear();
+        context.PullV4SenderPumpRepairQueuedChunkIndices.Clear();
+        foreach (var repairState in context.PullV4SenderPumpRepairRequests.Values)
+        {
+            repairState.Queued = false;
+            repairState.InFlight = false;
+        }
+
+        context.V4SenderCreditExhaustedSinceUtc = null;
+        context.PullSenderFeedCreditWaitStartedUtc = null;
         context.PullTransportPaused = false;
         context.PullTransportPausedSinceUtc = null;
         context.PullTransportGraceDeadlineUtc = null;
         context.PullTransportPauseReason = null;
         context.PullTransportResumeRequestPending = false;
         context.PullTransportRebindGeneration = 0;
+        context.PullTransportLastSafetyReplayGeneration = 0;
+        context.PullTransportLastSafetyReplayFrontierChunkIndex = -1;
+        context.PullTransportLastSafetyReplayUtc = null;
+        context.PullTransportSafetyReplayRearmCount = 0;
+        context.PullTransportFrontierOnlyRepairActive = false;
+        context.PullTransportFrontierOnlyRepairStartChunkIndex = -1;
         context.V6SenderPumpLastWakeReason = "transport_epoch_recovered";
+        context.V4SenderPumpLastWakeReason = "transport_epoch_recovered";
         context.StatusMessage = GetOutboundResumeStatusMessage(context.State);
+        context.SignalV4SenderPump();
+        LocalOperationalLog.Info(
+            "FileTransferService",
+            $"event=filetransfer_v6_epoch_tail_unblocked; direction=outbound; transfer_id={context.TransferId}; session_id={context.SessionId}; transport_epoch={epoch!.EpochId}; handoff_kind={FormatFileTransferTransportHandoffKind(epoch.Kind)}; source_transport={FormatFileTransferTransportKind(epoch.SourceTransport)}; target_transport={FormatFileTransferTransportKind(epoch.TargetTransport)}; reason={FormatProtocolLogValue(reason)}; committed_chunk={context.RemoteNextExpectedChunkIndex}; highest_observed_chunk={Math.Max(-1, context.ChunksAcceptedForTransport - 1)}; chunks_accepted_for_transport={context.ChunksAcceptedForTransport}; remote_credit_until_chunk_index_exclusive={context.RemoteGrantedUntilExclusive}; discarded_v4_repair_frame_count={discardedV4RepairFrameCount}; discarded_v4_repair_chunk_count={discardedV4RepairChunkCount}; discarded_v6_normal_request_count={discardedV6NormalRequestCount}; discarded_v6_priority_request_count={discardedV6PriorityRequestCount}");
         return true;
     }
 

@@ -68,7 +68,7 @@ internal static class TunaStatusPresentationMapper
             "listener_start_timeout" => new TunaStatusPresentation("Tuna listener startup timed out. Retrying if possible; regular NKN stays connected.", true, true),
             "provider_paths_retrying" => new TunaStatusPresentation("Looking for enough Tuna relay paths. Regular NKN stays connected while Tuna retries.", true, true),
             "provider_paths_ready" => new TunaStatusPresentation("Tuna relay paths are ready. Waiting for peer connection.", true, true),
-            "provider_paths_degraded" => new TunaStatusPresentation("Tuna relay paths are limited but usable. Waiting for peer connection.", true, true),
+            "provider_paths_degraded" => new TunaStatusPresentation("Tuna relay paths are degraded. Regular NKN is being used while Tuna retries.", true, true),
             "listener_ready" or "waiting_for_peer_dial" or "peer_connected"
                 => new TunaStatusPresentation("Waiting for the other side to connect to Tuna.", true, true),
             "waiting_for_answer" or "dialer_starting" or "dialer_ready" or "negotiated"

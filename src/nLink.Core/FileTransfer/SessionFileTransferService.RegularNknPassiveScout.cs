@@ -29,19 +29,8 @@ public sealed partial class SessionFileTransferService
 
     private static bool IsV6RegularNknPassiveScoutEnabled()
     {
-        var value = Environment.GetEnvironmentVariable(V6RegularNknPassiveScoutEnvironmentVariableName);
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return false;
-        }
-
-        value = value.Trim();
-        return !string.Equals(value, "0", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "false", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "off", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "no", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "disable", StringComparison.OrdinalIgnoreCase) &&
-               !string.Equals(value, "disabled", StringComparison.OrdinalIgnoreCase);
+        return IsFileTransferEnvFlagEnabled(V6RegularNknPassiveScoutEnvironmentVariableName) ||
+               IsV6RegularNknActiveProbeEnabled();
     }
 
     private static void ResetOutboundV6RegularNknPassiveScoutLocked(OutboundTransferContext context)
@@ -129,7 +118,7 @@ public sealed partial class SessionFileTransferService
         scout.LastDegradedProfileReason = reason;
     }
 
-    private static void MaybeSampleOutboundV6RegularNknPassiveScoutLocked(
+    private void MaybeSampleOutboundV6RegularNknPassiveScoutLocked(
         OutboundTransferContext context,
         DateTimeOffset now,
         string trigger)
@@ -233,6 +222,15 @@ public sealed partial class SessionFileTransferService
                 recommendation,
                 reason);
         }
+
+        MaybeScheduleOutboundV6RegularNknActiveProbeLocked(
+            context,
+            now,
+            classification,
+            recommendation,
+            reason,
+            receiverFeedbackAgeMs,
+            committedProgressGapMs);
     }
 
     private static bool TryGetOutboundV6RegularNknPassiveScoutSuppressionReasonLocked(

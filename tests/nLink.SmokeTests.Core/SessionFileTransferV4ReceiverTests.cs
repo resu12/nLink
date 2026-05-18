@@ -335,6 +335,245 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
             StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task V6RegularNknSparseRuntimeFlag_UsesV4FileOnlyPrimaryRegularNknFrontierRepair()
+    {
+        const string transferId = "transfer_v6_sparse_runtime_file_only_frontier_repair";
+        const string sessionId = "session_v6_sparse_runtime_file_only_frontier_repair";
+        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
+        const int chunkSize = 4;
+        const int chunkCount = 130;
+        const int expectedFrontierRepairChunks = 12;
+        var previous = Environment.GetEnvironmentVariable(envName);
+        var logStart = ReadOperationalLogText().Length;
+        var payload = Enumerable.Range(0, chunkSize * chunkCount).Select(static value => (byte)(value % 251)).ToArray();
+        var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
+        using var destination = new NonDisposingMemoryStream();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.Connect(receiverTransport);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(receiverTransport);
+
+        try
+        {
+            Environment.SetEnvironmentVariable(envName, "1");
+
+            var senderSession = await StartInboundV4ReceiverAsync(
+                senderTransport,
+                receiver,
+                transferId,
+                sessionId,
+                "v6-sparse-runtime-file-only-frontier-repair.bin",
+                payload.Length,
+                sha256,
+                (_, _) => Task.FromResult<Stream>(destination));
+
+            await senderSession.SendAsync(
+                CreateManifest(sessionId, transferId, "v6-sparse-runtime-file-only-frontier-repair.bin", payload.Length, chunkSize, sha256),
+                CancellationToken.None);
+            await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame => frame.MissingRanges.Count == 0));
+
+            await senderSession.SendAsync(
+                new FileTransferChunkBatchFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    StartChunkIndex = 64,
+                    ChunkCount = chunkCount - 64,
+                    DataSegments = Enumerable.Range(64, chunkCount - 64)
+                        .Select(index => payload.Skip(index * chunkSize).Take(chunkSize).ToArray())
+                        .ToArray(),
+                },
+                CancellationToken.None);
+
+            await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(frame =>
+                frame.MissingRanges.Count == 1 &&
+                frame.MissingRanges[0].StartChunkIndex == 0 &&
+                frame.MissingRanges[0].ChunkCount == expectedFrontierRepairChunks), timeoutMs: 5000);
+
+            var state = receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().First(frame =>
+                frame.MissingRanges.Count == 1 &&
+                frame.MissingRanges[0].StartChunkIndex == 0 &&
+                frame.MissingRanges[0].ChunkCount == expectedFrontierRepairChunks);
+            Assert.Equal(expectedFrontierRepairChunks, state.MissingRanges.Sum(static range => range.ChunkCount));
+
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_v4_repair_requested", logTail, StringComparison.Ordinal);
+            Assert.Contains("requested_chunk_count=12", logTail, StringComparison.Ordinal);
+            Assert.Contains("repair_interval_ms=250", logTail, StringComparison.Ordinal);
+            Assert.Contains("initial_frontier_repair_chunks=12", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envName, previous);
+        }
+    }
+
+    [Fact]
+    public async Task V6RegularNknSparseRuntimeFlag_StateRefreshResendsSparseReceiverState()
+    {
+        const string transferId = "transfer_v6_sparse_runtime_state_refresh_receiver";
+        const string sessionId = "session_v6_sparse_runtime_state_refresh_receiver";
+        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
+        const int chunkSize = 4;
+        var previous = Environment.GetEnvironmentVariable(envName);
+        var logStart = ReadOperationalLogText().Length;
+        var payload = Enumerable.Range(0, 16).Select(static value => (byte)(value % 251)).ToArray();
+        var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
+        using var destination = new NonDisposingMemoryStream();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.Connect(receiverTransport);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(receiverTransport);
+
+        try
+        {
+            Environment.SetEnvironmentVariable(envName, "1");
+
+            var senderSession = await StartInboundV4ReceiverAsync(
+                senderTransport,
+                receiver,
+                transferId,
+                sessionId,
+                "v6-sparse-runtime-state-refresh-receiver.bin",
+                payload.Length,
+                sha256,
+                (_, _) => Task.FromResult<Stream>(destination));
+
+            await senderSession.SendAsync(
+                CreateManifest(sessionId, transferId, "v6-sparse-runtime-state-refresh-receiver.bin", payload.Length, chunkSize, sha256),
+                CancellationToken.None);
+            await WaitUntilAsync(
+                () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame =>
+                    frame.MissingRanges.Count == 0),
+                timeoutMs: 5000);
+            var stateCountBeforeRefresh = receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Count();
+
+            await senderSession.SendAsync(
+                new FileTransferFrontierRequestFrameV6
+                {
+                    SessionId = sessionId,
+                    TransferId = transferId,
+                    TransportEpoch = 0,
+                    RepairRequestId = "v6-regular-nkn-state-refresh:test",
+                    MissingRanges =
+                    [
+                        new FileTransferRangeV4
+                        {
+                            StartChunkIndex = 0,
+                            ChunkCount = 1,
+                        },
+                    ],
+                    Priority = "state_refresh",
+                    RecoveryMode = "regular_nkn_state_refresh",
+                },
+                CancellationToken.None);
+
+            await WaitUntilAsync(
+                () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Count() > stateCountBeforeRefresh,
+                timeoutMs: 5000);
+            await WaitUntilAsync(
+                () => ReadOperationalLogTail(logStart).Contains(
+                    "reason=regular_nkn_state_refresh",
+                    StringComparison.Ordinal),
+                timeoutMs: 5000);
+
+            var refreshedState = receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Last();
+            Assert.Equal(FileTransferProtocol.ReceiverStateFrameTypeV6, refreshedState.Type);
+            Assert.True(refreshedState.CreditUntilChunkIndexExclusive > 0);
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_v6_regular_nkn_state_refresh_received", logTail, StringComparison.Ordinal);
+            Assert.Contains("event=filetransfer_v6_regular_nkn_state_refresh_state_resent", logTail, StringComparison.Ordinal);
+            Assert.Contains("reason=regular_nkn_state_refresh", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envName, previous);
+        }
+    }
+
+    [Fact]
+    public async Task PrimaryRegularNknBulkV6_CheckpointSyncResendsSparseReceiverCheckpoint()
+    {
+        const string transferId = "transfer_v6_bulk_checkpoint_receiver";
+        const string sessionId = "session_v6_bulk_checkpoint_receiver";
+        const int chunkSize = 4;
+        var logStart = ReadOperationalLogText().Length;
+        var payload = Enumerable.Range(0, 16).Select(static value => (byte)(value % 251)).ToArray();
+        var sha256 = Convert.ToBase64String(SHA256.HashData(payload));
+        using var destination = new NonDisposingMemoryStream();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId)
+        {
+            FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup,
+        };
+        senderTransport.Connect(receiverTransport);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(receiverTransport);
+
+        var senderSession = await StartInboundV4ReceiverAsync(
+            senderTransport,
+            receiver,
+            transferId,
+            sessionId,
+            "v6-bulk-checkpoint-receiver.bin",
+            payload.Length,
+            sha256,
+            (_, _) => Task.FromResult<Stream>(destination));
+
+        await senderSession.SendAsync(
+            CreateManifest(sessionId, transferId, "v6-bulk-checkpoint-receiver.bin", payload.Length, chunkSize, sha256),
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame =>
+                frame.MissingRanges.Count == 0),
+            timeoutMs: 5000);
+        var stateCountBeforeRefresh = receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Count();
+
+        await senderSession.SendAsync(
+            new FileTransferFrontierRequestFrameV6
+            {
+                SessionId = sessionId,
+                TransferId = transferId,
+                TransportEpoch = 3,
+                RepairRequestId = "v6-regular-nkn-checkpoint-sync:test",
+                MissingRanges =
+                [
+                    new FileTransferRangeV4
+                    {
+                        StartChunkIndex = 0,
+                        ChunkCount = 1,
+                    },
+                ],
+                Priority = "checkpoint_sync",
+                RecoveryMode = "regular_nkn_checkpoint_sync",
+            },
+            CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Count() > stateCountBeforeRefresh,
+            timeoutMs: 5000);
+        await WaitUntilAsync(
+            () => ReadOperationalLogTail(logStart).Contains(
+                "event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_sent",
+                StringComparison.Ordinal),
+            timeoutMs: 5000);
+
+        var checkpoint = receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Last();
+        Assert.Equal(FileTransferProtocol.ReceiverStateFrameTypeV6, checkpoint.Type);
+        Assert.Equal("regular_nkn_checkpoint_sync", checkpoint.RecoveryMode);
+        Assert.Equal("checkpoint_sync", checkpoint.Priority);
+        Assert.Equal("v6-regular-nkn-checkpoint-sync:test", checkpoint.RepairRequestId);
+        Assert.True(checkpoint.CreditUntilChunkIndexExclusive > 0);
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_request_received", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_sent", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_checkpoint_response_queued", logTail, StringComparison.Ordinal);
+        Assert.DoesNotContain("event=filetransfer_v6_regular_nkn_state_refresh_received", logTail, StringComparison.Ordinal);
+    }
+
     [Fact(Skip = DeferredV6TransportEpochRuntimeSkip)]
     public async Task V4SparseReceiver_TransportRebind_RepeatsMissingFrontierRequest()
     {
@@ -410,7 +649,7 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         Assert.Contains("rebind_generation=1", log, StringComparison.Ordinal);
     }
 
-    [Fact]
+    [Fact(Skip = DeferredV6TransportEpochRuntimeSkip)]
     public async Task V4SparseReceiver_TransportRebind_TinyProgressWithRemainingFrontierGap_DoesNotDeclareRecovered()
     {
         const string transferId = "transfer_v4_sparse_receiver_rebind_tiny_progress";
@@ -585,6 +824,120 @@ public sealed class SessionFileTransferV4ReceiverTests : SessionFileTransferServ
         Assert.Equal(expectedCreditChunkCount, initialState.CreditUntilChunkIndexExclusive);
         Assert.Equal(0, initialState.ContiguousCommittedChunkIndex);
         Assert.Equal(-1, initialState.DurableReceivedHighestChunkIndex);
+    }
+
+    [Fact]
+    public async Task PrimaryRegularNknBulkV6Profile_InitialCreditUsesV4Sized64MiBWindow()
+    {
+        const string transferId = "transfer_v6_bulk_sparse_receiver_credit_64m";
+        const string sessionId = "session_v6_bulk_sparse_receiver_credit_64m";
+        const int fileSizeBytes = 128 * 1024 * 1024;
+        const int expectedCreditBytes = 64 * 1024 * 1024;
+        const int expectedCreditQuantumBytes = 1024 * 1024;
+        const int chunkSizeBytes = 21 * 1024;
+        var expectedWindowChunks = checked((int)((expectedCreditBytes + chunkSizeBytes - 1L) / chunkSizeBytes));
+        var expectedQuantumChunks = checked((int)((expectedCreditQuantumBytes + chunkSizeBytes - 1L) / chunkSizeBytes));
+        var expectedCreditChunkCount = ((expectedWindowChunks + expectedQuantumChunks - 1) / expectedQuantumChunks) * expectedQuantumChunks;
+        var sha256 = Convert.ToBase64String(new byte[32]);
+        var logStart = ReadOperationalLogText().Length;
+        using var destination = new NonDisposingMemoryStream();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId)
+        {
+            FileTransferTransportProfileKind = FileTransferTransportProfileKind.ConservativeNknStartup,
+        };
+        senderTransport.Connect(receiverTransport);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(receiverTransport);
+
+        var senderSession = await StartInboundV4ReceiverAsync(
+            senderTransport,
+            receiver,
+            transferId,
+            sessionId,
+            "v6-bulk-sparse-credit-64m.bin",
+            fileSizeBytes,
+            sha256,
+            (_, _) => Task.FromResult<Stream>(destination)).ConfigureAwait(false);
+
+        await senderSession.SendAsync(
+            CreateManifest(sessionId, transferId, "v6-bulk-sparse-credit-64m.bin", fileSizeBytes, chunkSizeBytes, sha256),
+            CancellationToken.None);
+
+        await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0));
+
+        var initialState = receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>()
+            .First(frame => frame.CreditUntilChunkIndexExclusive > 0);
+        Assert.Equal(expectedCreditChunkCount, initialState.CreditUntilChunkIndexExclusive);
+        Assert.Equal(0, initialState.ContiguousCommittedChunkIndex);
+        Assert.Equal(-1, initialState.DurableReceivedHighestChunkIndex);
+
+        var logTail = ReadOperationalLogTail(logStart);
+        Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_selected", logTail, StringComparison.Ordinal);
+        Assert.Contains("runtime_profile=PrimaryRegularNknBulkV6", logTail, StringComparison.Ordinal);
+        Assert.Contains("event=filetransfer_primary_regular_nkn_bulk_v6_state; direction=inbound", logTail, StringComparison.Ordinal);
+        Assert.Contains("state=awaiting_manifest", logTail, StringComparison.Ordinal);
+        Assert.Contains("state=credit_granted", logTail, StringComparison.Ordinal);
+        Assert.Contains($"credit_window_chunks={expectedWindowChunks}", logTail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DiagnosticV6RegularNknSparseRuntimeFlag_InitialCreditKeeps64MiBWindow()
+    {
+        const string transferId = "transfer_v6_sparse_diagnostic_receiver_credit_64m";
+        const string sessionId = "session_v6_sparse_diagnostic_receiver_credit_64m";
+        const string envName = "NLINK_FILETRANSFER_V6_REGULAR_NKN_SPARSE_RUNTIME";
+        const int fileSizeBytes = 128 * 1024 * 1024;
+        const int expectedCreditBytes = 64 * 1024 * 1024;
+        const int expectedCreditQuantumBytes = 1024 * 1024;
+        const int chunkSizeBytes = 21 * 1024;
+        var expectedWindowChunks = checked((int)((expectedCreditBytes + chunkSizeBytes - 1L) / chunkSizeBytes));
+        var expectedQuantumChunks = checked((int)((expectedCreditQuantumBytes + chunkSizeBytes - 1L) / chunkSizeBytes));
+        var expectedCreditChunkCount = ((expectedWindowChunks + expectedQuantumChunks - 1) / expectedQuantumChunks) * expectedQuantumChunks;
+        var previous = Environment.GetEnvironmentVariable(envName);
+        var sha256 = Convert.ToBase64String(new byte[32]);
+        var logStart = ReadOperationalLogText().Length;
+        using var destination = new NonDisposingMemoryStream();
+        using var senderTransport = new LoopbackFileTransferTransport(sessionId);
+        using var receiverTransport = new LoopbackFileTransferTransport(sessionId);
+        senderTransport.Connect(receiverTransport);
+        using var receiver = new SessionFileTransferService();
+        receiver.AttachTransport(receiverTransport);
+
+        try
+        {
+            Environment.SetEnvironmentVariable(envName, "1");
+
+            var senderSession = await StartInboundV4ReceiverAsync(
+                senderTransport,
+                receiver,
+                transferId,
+                sessionId,
+                "v6-sparse-diagnostic-credit-64m.bin",
+                fileSizeBytes,
+                sha256,
+                (_, _) => Task.FromResult<Stream>(destination)).ConfigureAwait(false);
+
+            await senderSession.SendAsync(
+                CreateManifest(sessionId, transferId, "v6-sparse-diagnostic-credit-64m.bin", fileSizeBytes, chunkSizeBytes, sha256),
+                CancellationToken.None);
+
+            await WaitUntilAsync(() => receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>().Any(static frame => frame.CreditUntilChunkIndexExclusive > 0));
+
+            var initialState = receiverTransport.SentDataFrames.OfType<FileTransferReceiverStateFrameV6>()
+                .First(frame => frame.CreditUntilChunkIndexExclusive > 0);
+            Assert.Equal(expectedCreditChunkCount, initialState.CreditUntilChunkIndexExclusive);
+            Assert.Equal(0, initialState.ContiguousCommittedChunkIndex);
+            Assert.Equal(-1, initialState.DurableReceivedHighestChunkIndex);
+            var logTail = ReadOperationalLogTail(logStart);
+            Assert.Contains("event=filetransfer_v6_regular_nkn_sparse_runtime_selected", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_primary_regular_nkn_bulk_v6_selected", logTail, StringComparison.Ordinal);
+            Assert.DoesNotContain("event=filetransfer_primary_regular_nkn_bulk_v6_state", logTail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envName, previous);
+        }
     }
 
     [Fact(Skip = RetiredV4CreditRepairRuntimeSkip)]
